@@ -1297,10 +1297,50 @@ trait DeclPlane {
         _keyexpr: &str,
     ) {
     }
+    /// Whether the plane keeps what it sent ([`remember`](Self::remember)), and so is advertised
+    /// into every mesh region, a region with no face included, to keep the record whole. A plane
+    /// that keeps nothing advertises into the regions with a face alone
+    /// ([`OnTables::advertised_regions`]).
+    const KEEPS_SENT: bool = false;
+}
+
+/// A plane whose fold outside a target is the fold of each holder's contribution over the holders
+/// outside it, and nothing else: then a change of one holder's contribution moves the fold by that
+/// holder's term alone, which [`OwnedSnapshot`] reads once instead of folding every holder again.
+trait FoldedPlane: DeclPlane {
+    /// What `holder` holds of the plane for the exact `keyexpr`, `None` for nothing.
+    fn contribution<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        holder: Holder,
+        keyexpr: &str,
+    ) -> Option<Self::Value>;
+    /// Two contributions as one. Associative and commutative, so a fold does not depend on the
+    /// order of its holders.
+    fn merge(a: Self::Value, b: Self::Value) -> Self::Value;
+}
+
+/// Two parts of a fold as one, either of which may hold nothing.
+fn fold_parts<V>(a: Option<V>, b: Option<V>, merge: impl FnOnce(V, V) -> V) -> Option<V> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(merge(a, b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 /// The subscriber plane.
 struct SubPlane;
+
+impl FoldedPlane for SubPlane {
+    fn contribution<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        holder: Holder,
+        keyexpr: &str,
+    ) -> Option<()> {
+        (fwd.sub_contributions(holder, keyexpr) > 0).then_some(())
+    }
+    fn merge((): (), (): ()) {}
+}
 
 impl DeclPlane for SubPlane {
     type Value = ();
@@ -1338,6 +1378,19 @@ impl DeclPlane for SubPlane {
 /// The queryable plane, the one whose value can change without its presence
 /// changing: a register can REPLACE an info, and a downgrade re-declares.
 struct QablPlane;
+
+impl FoldedPlane for QablPlane {
+    fn contribution<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        holder: Holder,
+        keyexpr: &str,
+    ) -> Option<QueryableInfo> {
+        fwd.qabl_contribution(holder, keyexpr)
+    }
+    fn merge(a: QueryableInfo, b: QueryableInfo) -> QueryableInfo {
+        QueryableInfo::merge(a, b)
+    }
+}
 
 impl DeclPlane for QablPlane {
     type Value = QueryableInfo;
@@ -1393,6 +1446,7 @@ impl DeclPlane for TokenPlane {
     fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
         build_undeclare_token_with_keyexpr(keyexpr)
     }
+    const KEEPS_SENT: bool = true;
     /// Advertised if it was sent (the record) or if the rule says it is held (the fold): a token
     /// a path advertised without a record is still withdrawn, and a token whose rule has since
     /// moved is withdrawn as well.
@@ -1449,6 +1503,21 @@ impl DeclPlane for TokenPlane {
 struct Snapshot<P: DeclPlane> {
     keyexpr: String,
     before: Vec<(Region, Option<P::Value>)>,
+}
+
+/// A [`Snapshot`] of a change that moves the contribution of one hat alone, the `owner`'s, as a
+/// face's declaration or withdrawal does, for a plane whose fold is of its holders'
+/// contributions ([`FoldedPlane`]). For each target it keeps the fold over the holders outside the
+/// target but the owner (`rest`), and the owner's contribution before the change: the fold before
+/// is the two together, and the fold after is the rest with the owner's contribution after. So the
+/// change reads one contribution after it, where [`OnTables::repropagate`] folds every holder
+/// again for every target, and that is the whole difference: the fold is associative and
+/// commutative, so it does not matter in which order its terms are taken.
+struct OwnedSnapshot<'k, P: DeclPlane> {
+    keyexpr: &'k str,
+    owner: Region,
+    owner_before: Option<P::Value>,
+    rest: Vec<(Region, Option<P::Value>)>,
 }
 
 /// The set of keyexprs one face holds on a plane, per face — the shape the
@@ -6733,7 +6802,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }) else {
             return;
         };
-        let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
+        let snapshot = self.snapshot_owned::<SubPlane>(declared.keyexpr(), region);
         let registered = self.register_subscriber(inbound, region, reliable, &declared, decl_id);
         self.remember_declared(DeclKind::Subscriber, inbound, region, decl_id, &declared);
         log::debug!(
@@ -6745,7 +6814,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             }
         );
         if registered {
-            self.repropagate(snapshot);
+            self.repropagate_owned(snapshot);
             self.push_future_subscription(declared.keyexpr(), inbound);
         }
     }
@@ -6826,9 +6895,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .mesh_ids_mut()
             .forget(DeclKind::Subscriber, inbound, decl_id);
-        let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
+        let snapshot = self.snapshot_owned::<SubPlane>(declared.keyexpr(), region);
         if self.unregister_subscriber(inbound, region, reliable, &declared, decl_id) {
-            self.repropagate(snapshot);
+            self.repropagate_owned(snapshot);
             self.undeclare_push_subs(declared.keyexpr());
         }
     }
@@ -6899,12 +6968,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }) else {
             return;
         };
-        let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
+        let snapshot = self.snapshot_owned::<QablPlane>(declared.keyexpr(), region);
         let registered =
             self.register_queryable(inbound, region, reliable, &declared, decl_id, info);
         self.remember_declared(DeclKind::Queryable, inbound, region, decl_id, &declared);
         if registered {
-            self.repropagate(snapshot);
+            self.repropagate_owned(snapshot);
             self.push_future_queryable(declared.keyexpr(), inbound);
         }
     }
@@ -6989,9 +7058,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .mesh_ids_mut()
             .forget(DeclKind::Queryable, inbound, decl_id);
-        let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
+        let snapshot = self.snapshot_owned::<QablPlane>(declared.keyexpr(), region);
         if self.unregister_queryable(inbound, region, reliable, &declared, decl_id) {
-            self.repropagate(snapshot);
+            self.repropagate_owned(snapshot);
             self.undeclare_push_qabls(declared.keyexpr());
         }
     }
@@ -9176,6 +9245,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .collect()
     }
 
+    /// The mesh regions a change of plane `P` is advertised into. An advertisement into a region
+    /// reaches the faces of the region and nothing else (a flood along its tree, the faces it
+    /// owns, or the faces that asked), and a face that joins a region later is told what is held
+    /// then, so a region with no face has nobody to tell and its fold is not computed. A plane
+    /// that keeps what it sent ([`DeclPlane::KEEPS_SENT`]) is advertised into every mesh region,
+    /// to keep its record whole.
+    fn advertised_regions<P: DeclPlane>(&self) -> impl Iterator<Item = Region> + '_ {
+        self.tables
+            .hats
+            .iter()
+            .filter_map(|(region, hat)| hat.mesh().map(|_| region))
+            .filter(move |region| {
+                P::KEEPS_SENT || self.tables.faces.of_tier(*region).next().is_some()
+            })
+    }
+
     /// The faces that are this node's gateways: the faces whose remote end is a gateway to it,
     /// which a stock router is to a peer (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
     /// `.filter(|f| f.remote_bound.is_south())`). A face with no graph link, a client leaf or a
@@ -9240,11 +9325,86 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         Snapshot {
             keyexpr: keyexpr.to_string(),
             before: self
-                .mesh_regions()
-                .into_iter()
+                .advertised_regions::<P>()
                 .map(|target| (target, P::fold_outside(self, target, keyexpr)))
                 .collect(),
         }
+    }
+
+    /// [`Self::snapshot`] of a change that moves the contribution of the hat of `owner` alone,
+    /// as a declaration or a withdrawal of one face does: see [`OwnedSnapshot`].
+    fn snapshot_owned<'k, P: FoldedPlane>(
+        &self,
+        keyexpr: &'k str,
+        owner: Region,
+    ) -> OwnedSnapshot<'k, P> {
+        let owner_holder = Holder::Hat(owner);
+        OwnedSnapshot {
+            keyexpr,
+            owner,
+            owner_before: P::contribution(self, owner_holder, keyexpr),
+            // The owner's own region is left out: its fold excludes the owner, so the change does
+            // not move it.
+            rest: self
+                .advertised_regions::<P>()
+                .filter(|target| *target != owner)
+                .map(|target| {
+                    let rest = self
+                        .holders()
+                        .filter(|holder| holder.region() != Some(target) && *holder != owner_holder)
+                        .filter_map(|holder| P::contribution(self, holder, keyexpr))
+                        .reduce(P::merge);
+                    (target, rest)
+                })
+                .collect(),
+        }
+    }
+
+    /// [`Self::repropagate`] after the change an [`OwnedSnapshot`] was taken for: the owner's
+    /// contribution is read once, and each target's fold is the rest kept before with it. Nothing
+    /// is sent when the owner's contribution did not move.
+    fn repropagate_owned<P: FoldedPlane>(&mut self, snapshot: OwnedSnapshot<'_, P>)
+    where
+        T: std::ops::DerefMut,
+    {
+        let OwnedSnapshot {
+            keyexpr,
+            owner,
+            owner_before,
+            rest,
+        } = snapshot;
+        let owner_after = P::contribution(self, Holder::Hat(owner), keyexpr);
+        if owner_after == owner_before {
+            return;
+        }
+        for (target, rest) in rest {
+            let before = fold_parts(rest, owner_before, P::merge);
+            let after = fold_parts(rest, owner_after, P::merge);
+            if after != before {
+                self.advertise_change::<P>(target, keyexpr, after);
+            }
+        }
+    }
+
+    /// Tell `target` that self now advertises `after` for `keyexpr`, `None` for a retraction: the
+    /// faces of a south region the peer hat serves are told what they asked for, and not by a
+    /// flood to every face of the region ([`Tables::serves_asking_peers`]).
+    fn advertise_change<P: DeclPlane>(
+        &mut self,
+        target: Region,
+        keyexpr: &str,
+        after: Option<P::Value>,
+    ) where
+        T: std::ops::DerefMut,
+    {
+        if P::ASKED_FOR && self.tables.serves_asking_peers(target) {
+            match after {
+                Some(value) => P::push_asked(self, target, keyexpr, value),
+                None => P::retract_asked(self, target, keyexpr),
+            }
+            return;
+        }
+        self.flood_advertisement::<P>(target, keyexpr, after);
     }
 
     /// R2876 (step 3e) — after a mutation, propagate self into every mesh
@@ -9270,16 +9430,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     {
         let keyexpr = snapshot.keyexpr.clone();
         for (target, after) in self.advertisement_changes(snapshot) {
-            // The faces of a south region the peer hat serves are told what they asked for, and
-            // not by a flood to every face of the region ([`Tables::serves_asking_peers`]).
-            if P::ASKED_FOR && self.tables.serves_asking_peers(target) {
-                match after {
-                    Some(value) => P::push_asked(self, target, &keyexpr, value),
-                    None => P::retract_asked(self, target, &keyexpr),
-                }
-                continue;
-            }
-            self.flood_advertisement::<P>(target, &keyexpr, after);
+            self.advertise_change::<P>(target, &keyexpr, after);
         }
     }
 
@@ -22205,6 +22356,96 @@ mod tests {
             1,
             "withdrawn when the (aliased) client sub is undeclared"
         );
+    }
+
+    /// Two clients declare and withdraw subscribers and queryables of random infos, in a random
+    /// order: the peer is told exactly when the full fold over every holder outside its region
+    /// moved. The router reads the declaring hat's contribution once after a change and folds it
+    /// into the rest it kept before ([`OwnedSnapshot`]); the full fold here is read before and
+    /// after each change, as the tables hold it.
+    #[test]
+    fn a_clients_random_changes_are_told_exactly_when_the_full_fold_moves() {
+        const KEYS: [&str; 2] = ["demo/a", "demo/b"];
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (one, _sink_one) = face(zid(0xAA), WIRE_CLIENT);
+        let (two, _sink_two) = face(zid(0xAC), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &one);
+        fwd.register(FaceId(2), &two);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        let target = fwd
+            .on_tables()
+            .tables
+            .faces
+            .get(&FaceId(1))
+            .map(|state| state.tier)
+            .expect("the peer's face");
+        // The fold outside the peer's region, a subscriber's as a default info.
+        let fold = |keyexpr: &str, queryable: bool| -> Option<QueryableInfo> {
+            let on = fwd.on_tables();
+            if queryable {
+                on.derived_cross_tier_qabl_info(target, keyexpr)
+            } else {
+                on.self_advertises_sub_into(target, keyexpr)
+                    .then_some(QueryableInfo::DEFAULT)
+            }
+        };
+        let mut draw = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            draw ^= draw << 13;
+            draw ^= draw >> 7;
+            draw ^= draw << 17;
+            draw
+        };
+        // Per face and id, the key it declares and whether it is a queryable's.
+        let mut held: HashMap<(u64, u64), (&str, bool)> = HashMap::new();
+        for step in 0..600 {
+            let face_id = if next() % 2 == 0 { 0 } else { 2 };
+            let id = 1 + next() % 4;
+            let (keyexpr, queryable, message) = match held.remove(&(face_id, id)) {
+                Some((keyexpr, true)) => (
+                    keyexpr,
+                    true,
+                    NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
+                ),
+                Some((keyexpr, false)) => (
+                    keyexpr,
+                    false,
+                    NetworkMessage::Declare(Box::new(build_undeclare_subscriber(id))),
+                ),
+                None => {
+                    let keyexpr = KEYS[(next() % 2) as usize];
+                    let queryable = next() % 2 == 0;
+                    held.insert((face_id, id), (keyexpr, queryable));
+                    let declare = if queryable {
+                        let info = QueryableInfo {
+                            complete: next() % 2 == 0,
+                            distance: (next() % 3) as u16,
+                        };
+                        build_declare_queryable_with_id_info(id, keyexpr, info)
+                    } else {
+                        build_declare_subscriber(id, 0, Some(keyexpr))
+                    };
+                    (
+                        keyexpr,
+                        queryable,
+                        NetworkMessage::Declare(Box::new(declare.expect("build declare"))),
+                    )
+                }
+            };
+            let before = fold(keyexpr, queryable);
+            sink_p.reset();
+            forward_one(&fwd, FaceId(face_id), message);
+            let after = fold(keyexpr, queryable);
+            assert_eq!(
+                sink_p.frame_count(),
+                usize::from(before != after),
+                "step {step}: face {face_id} id {id} on {keyexpr} (queryable {queryable}) moved \
+                 the fold from {before:?} to {after:?}"
+            );
+        }
     }
 
     #[test]
