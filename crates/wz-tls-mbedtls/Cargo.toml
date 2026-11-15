@@ -28,6 +28,24 @@ description = "The fixed-memory profile's secure channel: TLS 1.3 mutual authent
 build = "build.rs"
 links = "wz_tls_mbedtls"
 
+# The configurations this crate has. `alloc` and `session-slot` are the two exclusive forms of
+# `wz-runtime-coop`'s task pool, refused together by name in src/lib.rs, so there is no build of
+# every feature: there is the heap set and the slot set, each with the rest of the features.
+#
+# The slot set is clippied as a library alone (`clippy-targets`). Its test targets cannot be
+# built honestly on that profile: the dev-dependencies they dial and listen with (`wz-capi-coop`,
+# `wz-runtime-posix`) are heap crates, and a feature of this crate cannot reach a
+# dev-dependency's feature, so the slot selector unified into them makes a graph that has both
+# forms at once (`wz-session-mcu`'s dialer names the heap `SessionLinks` the slot profile does
+# not have). The heap set's tests are the ones those targets are written for, and run there.
+[package.metadata.wz-docs]
+feature-sets = [
+    # The heap form, the default: every target, the tests included.
+    { name = "heap", except = ["session-slot"] },
+    # The per-session slot form of an MCU image: the library alone (see above).
+    { name = "slot", except = ["alloc"], clippy-targets = ["--lib"] },
+]
+
 [dependencies]
 # The stream port the channel implements (`stream_link::StreamSocket`, `StreamDial`) and the
 # dial's error (`session_drive::LinkOpenError`).

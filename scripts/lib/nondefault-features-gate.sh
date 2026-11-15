@@ -72,15 +72,9 @@
 set -uo pipefail
 
 # Tier 2: checked LIB-ONLY, because some test target of theirs does not survive
-# every feature being on at once. Populated by measurement, never by guess.
-#
-# `wz-tls-mbedtls`, measured: `--all-features` turns its `session-slot` on, which
-# makes `wz-runtime-coop` the slot profile, while the dev-dependency its tests
-# dial with, `wz-runtime-posix`, keeps its own heap default and so names the
-# heap-only `IpLinks` the slot profile does not have (E0425 in posix's
-# `links.rs`). A feature cannot turn on a dev-dependency's feature, so no row of
-# its manifest can make the two agree; its library builds clean either way.
-lib_only="wz-tls-mbedtls"
+# every feature being on at once. Populated by measurement, never by guess. No
+# member is in it today.
+lib_only=""
 # Tier 3: no all-features check at all.
 #
 # `wz` is the facade crate and it has NO all-features build, because a vendored
@@ -107,7 +101,14 @@ lib_only="wz-tls-mbedtls"
 # would close it is the crate's OWN declared coherent combinations -- the
 # `preset-*` features are exactly that -- checked one per preset instead of all
 # at once. That is a different instrument and belongs to its own round.
-excluded="wz"
+#
+# `wz-tls-mbedtls` has no all-features build either, and by its own statement:
+# its two selectors, `alloc` and `session-slot`, are the two exclusive forms of
+# `wz-runtime-coop`'s task pool, and its library refuses the pair by name
+# (`compile_error!` in its src/lib.rs). Its configurations are the two feature
+# sets its manifest declares, which Layer C1bf clippies one by one (the heap set
+# with every target, the slot set its library alone, the manifest says why).
+excluded="wz wz-tls-mbedtls"
 
 cd "$(dirname "$0")/../../crates" || exit 1
 

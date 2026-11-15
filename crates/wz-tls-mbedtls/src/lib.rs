@@ -27,6 +27,21 @@
 //! build compiles `csrc/wz_tls.c` against the Mbed TLS the platform carries.
 #![no_std]
 
+// The two forms of `wz-runtime-coop`'s task pool are this crate's two selectors, and they are
+// exclusive: the slot form replaces the heap forms of the session and does not add to them. A
+// build with both is no configuration of this crate, so it is refused here by name, as the heap
+// crates refuse the slot profile (`wz_session_core::heap_session_profile!`). This crate is written
+// for both profiles, so it does not wrap its items in that macro; it refuses only the pair.
+#[cfg(all(feature = "alloc", feature = "session-slot"))]
+compile_error!(
+    "wz-tls-mbedtls: `alloc` and `session-slot` select the two forms of `wz-runtime-coop`'s task \
+     pool, the heap form and the per-session slot form of an MCU image. The two are exclusive: \
+     the slot form replaces the heap forms of the session and does not add to them. Turn on \
+     exactly one; `alloc` is the default, so a slot build turns the defaults off. A build with \
+     both reached here by `--all-features` or by feature unification; the configurations this \
+     crate has are the feature sets its manifest declares (`[package.metadata.wz-docs]`)."
+);
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
