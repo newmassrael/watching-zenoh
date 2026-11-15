@@ -184,8 +184,10 @@ macro_rules! arm {
             use $client::Wait as _;
             use $router::Wait as _;
 
-            /// The scenario with a router of `$router` and a client of `$client`.
-            pub fn measured() -> Measured {
+            /// The scenario with a router of `$router` and a client of `$client`, and with
+            /// `sample_queues` the queues of the router's link sampled while it runs
+            /// ([`QueueWatch`]).
+            pub fn run(sample_queues: bool) -> (Measured, Option<QueueSamples>) {
                 let port = free_port();
                 let router = $router::open(
                     $router::Config::from_json5(&format!(
@@ -236,14 +238,16 @@ macro_rules! arm {
                     }
                     answered
                 };
+                let watch = sample_queues.then(|| QueueWatch::start(port));
                 let measured = measure(
                     concat!(stringify!($router), "/", stringify!($client)),
                     churn,
                     ask,
                 );
+                let samples = watch.map(QueueWatch::finish);
                 drop(client);
                 drop(router);
-                measured
+                (measured, samples)
             }
         }
     };
@@ -294,21 +298,24 @@ fn held_against(control: &Measured, subject: &Measured) {
 #[test]
 fn a_clients_own_admin_gets_beside_its_declarations_end_as_upstreams_do() {
     up_zenoh::try_init_log_from_env();
-    let control = up_router_up_client::measured();
+    let (control, _) = up_router_up_client::run(false);
     println!("{}", control.line());
-    let subject = wz_router_wz_client::measured();
+    let (subject, _) = wz_router_wz_client::run(false);
     println!("{}", subject.line());
     held_against(&control, &subject);
 }
 
 /// Every pair of router and client, by the name [`ARMS_CHOSEN`] takes: the router's crate, then
 /// the client's.
-const ARMS: [(&str, fn() -> Measured); 4] = [
-    ("up/up", up_router_up_client::measured),
-    ("up/wz", up_router_wz_client::measured),
-    ("wz/up", wz_router_up_client::measured),
-    ("wz/wz", wz_router_wz_client::measured),
+const ARMS: [(&str, ArmRun); 4] = [
+    ("up/up", up_router_up_client::run),
+    ("up/wz", up_router_wz_client::run),
+    ("wz/up", wz_router_up_client::run),
+    ("wz/wz", wz_router_wz_client::run),
 ];
+
+/// One arm's run, with the queues of its router's link sampled or not.
+type ArmRun = fn(bool) -> (Measured, Option<QueueSamples>);
 
 /// The environment variable that names the arms a measurement runs, separated by commas
 /// (`wz/up` or `up/up,wz/up`), so that a profile holds one router's work alone. Unset or empty,
@@ -317,7 +324,7 @@ const ARMS_CHOSEN: &str = "WZ_ADMIN_GET_ARMS";
 
 /// The arms `chosen` names, in the order of [`ARMS`]; every arm for a list that names none.
 /// Panics on a name that is not an arm, so that a typo does not measure nothing.
-fn arms_named(chosen: Option<&str>) -> Vec<(&'static str, fn() -> Measured)> {
+fn arms_named(chosen: Option<&str>) -> Vec<(&'static str, ArmRun)> {
     let wanted: Vec<&str> = chosen
         .map(|list| {
             list.split(',')
@@ -345,8 +352,8 @@ fn arms_named(chosen: Option<&str>) -> Vec<(&'static str, fn() -> Measured)> {
             --ignored --nocapture, and WZ_ADMIN_GET_ARMS=wz/up for one arm"]
 fn the_admin_gets_beside_declarations_measured_for_each_router_and_client() {
     let chosen = std::env::var(ARMS_CHOSEN).ok();
-    for (_, measured) in arms_named(chosen.as_deref()) {
-        println!("{}", measured().line());
+    for (_, run) in arms_named(chosen.as_deref()) {
+        println!("{}", run(false).0.line());
     }
 }
 
@@ -529,24 +536,187 @@ fn percentile(values: &[Duration], q: usize) -> Duration {
     sorted.get(index).copied().unwrap_or_default()
 }
 
-/// The GETs of the arms with a wz router, each split at the router's two steps: whether the time
-/// of a GET is spent before the router takes it, at the router, or after it answered. An arm with
-/// an upstream router is skipped, as nothing records its steps here.
+/// How often the queues of the router's link are sampled.
+const QUEUE_SAMPLE: Duration = Duration::from_millis(100);
+
+/// What the router's link held, one value a sample, in bytes: what the kernel holds for the
+/// router to read, what it holds of the client's for the router, and the router socket's receive
+/// buffer where `ss` can say.
+#[derive(Debug, Default)]
+struct QueueSamples {
+    router_rx: Vec<u64>,
+    client_tx: Vec<u64>,
+    router_rcvbuf: Vec<u64>,
+}
+
+impl QueueSamples {
+    fn line(&self, arm: &str) -> String {
+        let figures = |values: &[u64]| {
+            format!(
+                "p50={} p99={} max={}",
+                percentile_of(values, 50),
+                percentile_of(values, 99),
+                values.iter().max().copied().unwrap_or_default()
+            )
+        };
+        format!(
+            "admin-get-queues: arm={arm} samples={} router_rx[{}] client_tx[{}] router_rcvbuf[{}]",
+            self.router_rx.len(),
+            figures(&self.router_rx),
+            figures(&self.client_tx),
+            if self.router_rcvbuf.is_empty() {
+                "unknown".to_owned()
+            } else {
+                figures(&self.router_rcvbuf)
+            },
+        )
+    }
+}
+
+/// The value at percentile `q` (0..=100) of `values`.
+fn percentile_of(values: &[u64], q: usize) -> u64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = (sorted.len() * q / 100).min(sorted.len().saturating_sub(1));
+    sorted.get(index).copied().unwrap_or_default()
+}
+
+/// A thread that samples the queues of the connections on a router's port every
+/// [`QUEUE_SAMPLE`], from its start to [`finish`](Self::finish).
+struct QueueWatch {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<QueueSamples>,
+}
+
+impl QueueWatch {
+    fn start(port: u16) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut samples = QueueSamples::default();
+                while !stop.load(Ordering::Relaxed) {
+                    let (router_rx, client_tx) = ["/proc/net/tcp", "/proc/net/tcp6"]
+                        .iter()
+                        .filter_map(|table| std::fs::read_to_string(table).ok())
+                        .map(|table| queues_in(&table, port))
+                        .fold((0, 0), |(rx, tx), (r, t)| (rx + r, tx + t));
+                    samples.router_rx.push(router_rx);
+                    samples.client_tx.push(client_tx);
+                    if let Some(rcvbuf) = router_rcvbuf(port) {
+                        samples.router_rcvbuf.push(rcvbuf);
+                    }
+                    std::thread::sleep(QUEUE_SAMPLE);
+                }
+                samples
+            })
+        };
+        Self { stop, thread }
+    }
+
+    fn finish(self) -> QueueSamples {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.join().expect("the queue watch ends")
+    }
+}
+
+/// The port of an address of `/proc/net/tcp` (`0100007F:88B8`).
+fn port_of(address: &str) -> Option<u16> {
+    u16::from_str_radix(address.rsplit_once(':')?.1, 16).ok()
+}
+
+/// From a table of `/proc/net/tcp`'s form, what the connections on `port` hold: the receive queues
+/// of the router's side (local port `port`, a remote port, not the listener) and the send queues of
+/// the client's side (remote port `port`), each summed.
+fn queues_in(table: &str, port: u16) -> (u64, u64) {
+    let (mut router_rx, mut client_tx) = (0, 0);
+    for row in table.lines().skip(1) {
+        let fields: Vec<&str> = row.split_whitespace().collect();
+        let (Some(local), Some(remote), Some(queues)) = (
+            fields.get(1).and_then(|a| port_of(a)),
+            fields.get(2).and_then(|a| port_of(a)),
+            fields.get(4).and_then(|q| q.split_once(':')),
+        ) else {
+            continue;
+        };
+        let (Ok(tx), Ok(rx)) = (
+            u64::from_str_radix(queues.0, 16),
+            u64::from_str_radix(queues.1, 16),
+        ) else {
+            continue;
+        };
+        if local == port && remote != 0 {
+            router_rx += rx;
+        }
+        if remote == port {
+            client_tx += tx;
+        }
+    }
+    (router_rx, client_tx)
+}
+
+/// The receive buffer of the router's side of the connection on `port`, as `ss` reports it (`rb`
+/// of its socket memory), or `None` where `ss` is not there or says nothing.
+fn router_rcvbuf(port: u16) -> Option<u64> {
+    let sport = format!(":{port}");
+    let out = std::process::Command::new("ss")
+        .args(["-tmnH", "state", "established", "sport", "=", &sport])
+        .output()
+        .ok()?;
+    rcvbuf_in(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `rb` of the first socket memory `ss -m` printed in `text`.
+fn rcvbuf_in(text: &str) -> Option<u64> {
+    text.split("skmem:(")
+        .nth(1)?
+        .split([',', ')'])
+        .find_map(|field| field.strip_prefix("rb"))?
+        .parse()
+        .ok()
+}
+
+/// The queues of the router's link are read off `/proc/net/tcp` by the port: the router's side
+/// and the client's, and never the listener; and the receive buffer off `ss -m`.
 #[test]
-#[ignore = "a measurement of where a GET's time goes at the wz router; run alone with --ignored \
-            --exact --nocapture, and WZ_ADMIN_GET_ARMS=wz/wz,wz/up"]
+fn the_queues_of_a_routers_link_are_read_by_its_port() {
+    // Port 0x88B8 is 35000: the listener, the router's side with 0x1A2B4 to read, the client's
+    // side with 0x100 to send, and a connection of another port.
+    let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:88B8 00000000:0000 0A 00000000:00000005 00:00000000 00000000  1000        0 1 1
+   1: 0100007F:88B8 0100007F:D2F0 01 00000000:0001A2B4 00:00000000 00000000  1000        0 2 1
+   2: 0100007F:D2F0 0100007F:88B8 01 00000100:00000000 00:00000000 00000000  1000        0 3 1
+   3: 0100007F:1F90 0100007F:D2F1 01 00000777:00000777 00:00000000 00000000  1000        0 4 1
+";
+    assert_eq!(queues_in(table, 35_000), (0x1_A2B4, 0x100));
+    assert_eq!(queues_in(table, 1), (0, 0), "a port nothing is on");
+    let ss = "0 0 127.0.0.1:35000 127.0.0.1:53999\n\t skmem:(r0,rb131072,t0,tb2626560,f0,w0)\n";
+    assert_eq!(rcvbuf_in(ss), Some(131_072));
+    assert_eq!(rcvbuf_in(""), None);
+}
+
+/// The GETs of every arm chosen, with the queues of the router's link sampled meanwhile
+/// ([`QueueWatch`]); and for an arm with a wz router, each GET split at the router's two steps:
+/// whether its time is spent before the router takes it, at the router, or after it answered. An
+/// upstream router tells no steps here, so its arm has the queues alone.
+#[test]
+#[ignore = "a measurement of where a GET's time goes at the router and in its link's queues; run \
+            alone with --ignored --exact --nocapture, and WZ_ADMIN_GET_ARMS=up/up,wz/up"]
 fn the_admin_gets_beside_declarations_timed_at_the_wz_router() {
     let steps = RouterSteps::install();
     let chosen = std::env::var(ARMS_CHOSEN).ok();
-    for (name, measured) in arms_named(chosen.as_deref()) {
+    for (name, run) in arms_named(chosen.as_deref()) {
+        steps.take();
+        let (measured, queues) = run(true);
+        let told = steps.take();
+        println!("{}", measured.line());
+        if let Some(queues) = queues {
+            println!("{}", queues.line(name));
+        }
         if !name.starts_with("wz/") {
-            println!("admin-get-router-stages: arm={name} skipped: its router tells no steps");
             continue;
         }
-        steps.take();
-        let measured = measured();
-        let stages = router_stages(&measured.windows, &steps.take());
-        println!("{}", measured.line());
+        let stages = router_stages(&measured.windows, &told);
         println!(
             "admin-get-router-stages: arm={name} gets={} matched={} to_router_p50_ms={} \
              to_router_p99_ms={} at_router_p50_us={} at_router_p99_us={} from_router_p50_ms={} \
