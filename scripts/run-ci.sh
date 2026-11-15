@@ -14146,7 +14146,10 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # feature on, or, for a crate that refuses a combination of its own features,
 # each consistent set it declares under `[package.metadata.wz-docs]`. Those are
 # the sets Layer C1bz documents, read through `scripts/lib/doc_feature_sets.py`,
-# so a crate states once what it can hold at once. The population is not a list
+# so a crate states once what it can hold at once. A set whose test targets
+# cannot be built on its own configuration narrows its targets in the same table
+# (`clippy-targets`, with the reason beside it; wz-tls-mbedtls's slot set is the
+# library alone). The population is not a list
 # of crates that show one shape of the defect (a `cfg`-gated `pub` field): such a
 # list goes red each time a crate grows the shape, and leaves out every break of
 # another shape (a type that changes with a feature, an item a feature removes).
@@ -14186,7 +14189,9 @@ layer_c1bf_cargo_clippy_all_features() {
         [[ -n "$crate" ]] || continue
         read -r -a args <<<"$args_line"
         started=$SECONDS
-        if ! (cd crates && cargo clippy -p "$crate" --all-targets "${args[@]}" \
+        # The plan line carries the targets before the features: `--all-targets`, or the
+        # selectors the set declares (`clippy-targets`).
+        if ! (cd crates && cargo clippy -p "$crate" "${args[@]}" \
             --quiet -- -D warnings); then
             failed+=("$crate ($label)")
         fi
@@ -14202,7 +14207,7 @@ layer_c1bf_cargo_clippy_all_features() {
         printf '    - %s\n' "${failed[@]}"
         return 1
     fi
-    _runci_lane_did C1bf "$ran" "configuration(s) of shard $shard of $shards clippied, all targets"
+    _runci_lane_did C1bf "$ran" "configuration(s) of shard $shard of $shards clippied, at the targets each declares"
 }
 # ─── Layer C1bn — the PASSIVE-DISSECTION feature set, RUN ────────────
 #

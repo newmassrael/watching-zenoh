@@ -6462,9 +6462,10 @@ jobs:
         run: bash scripts/run-ci.sh --layer C4d
 
   # ─────────────────────────────────────────────────────────────────
-  # Layer C1bf -- every workspace member clippied, all targets, in each of its largest feature
-  # configurations (every feature on, or each set a crate that refuses a combination declares
-  # under `[package.metadata.wz-docs]`); the lane's header in run-ci.sh says why every member.
+  # Layer C1bf -- every workspace member clippied, all targets unless a set declares fewer, in
+  # each of its largest feature configurations (every feature on, or each set a crate that
+  # refuses a combination declares under `[package.metadata.wz-docs]`); the lane's header in
+  # run-ci.sh says why every member.
   #
   # WHY A MATRIX. One `cargo clippy -p` per configuration, about a hundred, each its own feature
   # set and so its own set of checked dependencies. Layer C1bz documents the same configurations
