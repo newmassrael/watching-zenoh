@@ -92,3 +92,115 @@ pub(super) fn register_queryable(region: &Region, keyexpr: &str) -> Held {
 pub(super) fn register_queryable(_region: &Region, _keyexpr: &str) -> Held {
     Held {}
 }
+
+/// The node `zid` took query `rid` of face `src` to route: upstream's event at the same step
+/// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `"{}:{} Route query for res {}{}",`), with the
+/// face and the query id as fields, so that a reader can time a query through the node.
+#[cfg(feature = "tracing-spans")]
+pub(super) fn query_routed(zid: Zid, src: FaceId, rid: u64) {
+    tracing::debug!(zid = %zid, src = src.0, rid, "route query");
+}
+
+#[cfg(not(feature = "tracing-spans"))]
+#[inline(always)]
+pub(super) fn query_routed(_zid: Zid, _src: FaceId, _rid: u64) {}
+
+/// The node `zid` sent face `dst` the final of its query `rid`: upstream's events at the same
+/// step, for a query routed nowhere (`zenoh/src/net/routing/dispatcher/queries.rs` @
+/// `"{}:{} Send final reply (no matching queryables or not master)",`) and for one whose last
+/// branch ended (@ `"{}:{} Propagate final reply"`).
+#[cfg(feature = "tracing-spans")]
+pub(super) fn query_final(zid: Zid, dst: FaceId, rid: u64) {
+    tracing::debug!(zid = %zid, dst = dst.0, rid, "send final reply");
+}
+
+#[cfg(not(feature = "tracing-spans"))]
+#[inline(always)]
+pub(super) fn query_final(_zid: Zid, _dst: FaceId, _rid: u64) {}
+
+#[cfg(all(test, feature = "tracing-spans"))]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    /// One event as a reader records it: its message and its numeric fields, in order.
+    type Told = (String, Vec<(String, u64)>);
+
+    /// A subscriber that records every event and opens no span.
+    #[derive(Clone, Default)]
+    struct Recorded(Arc<Mutex<Vec<Told>>>);
+
+    #[derive(Default)]
+    struct Fields {
+        message: String,
+        numbers: Vec<(String, u64)>,
+    }
+
+    impl Visit for Fields {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.numbers.push((field.name().to_owned(), value));
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            }
+        }
+    }
+
+    impl Subscriber for Recorded {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.is_event()
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .expect("the record")
+                .push((fields.message, fields.numbers));
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// A query the node routes and the final it sends are told with the face and the query id,
+    /// which is what a reader matches the two by.
+    #[test]
+    fn a_query_routed_and_its_final_are_told_with_their_face_and_id() {
+        let recorded = Recorded::default();
+        let zid = Zid::from_slice(&[1, 2, 3, 4]);
+        tracing::subscriber::with_default(recorded.clone(), || {
+            query_routed(zid, FaceId(7), 41);
+            query_final(zid, FaceId(7), 41);
+        });
+        let told = recorded.0.lock().expect("the record").clone();
+        assert_eq!(
+            told,
+            [
+                (
+                    "route query".to_owned(),
+                    vec![("src".to_owned(), 7), ("rid".to_owned(), 41)]
+                ),
+                (
+                    "send final reply".to_owned(),
+                    vec![("dst".to_owned(), 7), ("rid".to_owned(), 41)]
+                ),
+            ]
+        );
+    }
+}

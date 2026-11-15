@@ -11353,6 +11353,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         request: &RequestOwned,
         group: Option<GroupMember>,
     ) {
+        routing_spans::query_routed(self.own_zid, inbound, request.rid);
         // transport-shm -- hold the chunk of every shared-memory slice the query's value carries
         // for as long as the Query is routed, FIRST and for the reason `route_push` gives. A
         // Query from a link that never negotiated shared memory is not routed at all.
@@ -11423,6 +11424,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 self.send_to_face(inbound, reliable, || {
                     NetworkMessage::ResponseFinal(final_msg.clone())
                 });
+                routing_spans::query_final(self.own_zid, inbound, request.rid);
                 return;
             }
         };
@@ -11595,6 +11597,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.send_to_face(inbound, reliable, || {
                 NetworkMessage::ResponseFinal(final_msg.clone())
             });
+            routing_spans::query_final(self.own_zid, inbound, request.rid);
         }
     }
 
@@ -12208,6 +12211,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.send_to_face(to.face, reliable, || {
             NetworkMessage::ResponseFinal(carrier.clone())
         });
+        routing_spans::query_final(self.own_zid, to.face, to.rid);
     }
 
     /// Reap pending query BRANCHES past their deadline (C5c) — the wz form of zenoh's
