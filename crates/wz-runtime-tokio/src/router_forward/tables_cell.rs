@@ -158,6 +158,28 @@ impl TablesCell {
         }
     }
 
+    /// What the cell's lock is doing now, for the report of a loop that stopped
+    /// ([`crate::liveness`]): who holds the lock and how long its oldest writer has waited under
+    /// `rwlock`, whether a writer drafts under `snapshot`. Read without taking a lock.
+    pub(crate) fn contention_text(&self) -> String {
+        match &self.form {
+            Form::Locked(lock) => format!(
+                "routing tables ({}): {}",
+                self.sharing().id(),
+                lock.contention()
+            ),
+            Form::Snapshot(snapshot) => format!(
+                "routing tables ({}): the writers' lock is {}",
+                self.sharing().id(),
+                if snapshot.writer.is_held() {
+                    "held"
+                } else {
+                    "free"
+                }
+            ),
+        }
+    }
+
     /// The value of the policy this cell was made with.
     pub(crate) fn sharing(&self) -> RoutingTableSharing {
         match self.form {

@@ -13537,6 +13537,14 @@ impl FaceForwarder for RouterForwarder {
         self.on_tables_mut().tick()
     }
 
+    /// The routing tables' lock: the face loop writes them (a face coming up, the tick) and
+    /// every face's thread reads them, so a loop stopped on them is told by who holds them and
+    /// how long the oldest writer has waited.
+    fn liveness_probe(&self) -> Option<crate::liveness::Probe> {
+        let tables = Arc::clone(&self.tables);
+        Some(Arc::new(move || tables.contention_text()))
+    }
+
     fn read_gate(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
         self.on_tables().gate_of(id)
     }

@@ -1398,6 +1398,11 @@ pub mod runtime_pool;
 /// heartbeat beacon and of the periodic jobs a C ABI starts on its engine.
 pub mod periodic;
 
+/// Whether the node's long-running loops still turn: each turns a heartbeat, and one watcher
+/// thread outside every runtime reports a loop that stopped, with its step, its owner's probe and
+/// the process's threads.
+pub mod liveness;
+
 /// R311il — the engine-free unicast session FSM (the
 /// `SessionFsmUnicastState` / `SessionFsmUnicastEvent` enums, the
 /// `SessionFsmUnicastActions` host trait, and `SessionFsmUnicastPolicy<A>`)

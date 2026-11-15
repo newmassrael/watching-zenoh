@@ -7533,6 +7533,9 @@ async fn run_router_hat_until(
         log::info!("wz-ap-demo router-hat: adminspace config WRITE at {write_key}");
     }
 
+    // The node's id as the host loop's heartbeat names it, read before `params` moves into the
+    // face loop below.
+    let host_zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid);
     let loop_fut = peer_loop_shared(
         FaceSources {
             // R2099 (item 512) — EVERY bound `listen/endpoints` member.
@@ -7667,7 +7670,22 @@ async fn run_router_hat_until(
     // R311y411 — ingest-witness latch, the router-hat twin of the peer loop's
     // `announced_ingest`. See its use below for why the router tier needs one.
     let mut announced_ingest = false;
+    // A loop of this process that is busy for half a lease is reported while the sessions it
+    // serves can still be told from the ones it has lost (`wz_runtime_tokio::liveness`). The
+    // face loop inside `loop_fut` turns its own heartbeat, step by step; this one is the host's:
+    // the application tick makes it pass at least every `APP_TICK_MS`, so a pass that does not
+    // come for the threshold is a stop of this loop (its tick, its connect watch, or the poll of
+    // the face loop).
+    wz::runtime_tokio::liveness::set_stall_after(Duration::from_millis(
+        host_cfg.guard().effective_lease_ms() / 2,
+    ));
+    let host_heartbeat = wz::runtime_tokio::liveness::Heartbeat::register(
+        format!("router-hat host loop {host_zid_hex}"),
+        &["a pass of the host loop"],
+        None,
+    );
     let summary = loop {
+        host_heartbeat.turn(0);
         tokio::select! {
             done = &mut loop_fut => break done,
             // R2159 (open-debt item 229) — the DIAL phase's budget elapsing; the

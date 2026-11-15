@@ -895,7 +895,9 @@ def selftest() -> int:
     expect("a checkout elsewhere is covered by its own tmpfs", "/srv/repo" in argv)
     expect("the environment is cleared", "--clearenv" in argv)
     try:
-        stage_root({"WZ_OFFLINE_BUILD_ROOT": str(ROOT / "target" / "x")})
+        # Any path under the checkout is refused; this one names no product
+        # directory, so the artifact-root lint has nothing to read into it.
+        stage_root({"WZ_OFFLINE_BUILD_ROOT": str(ROOT / "staged-inside-the-checkout")})
         refused = False
     except Unusable:
         refused = True
