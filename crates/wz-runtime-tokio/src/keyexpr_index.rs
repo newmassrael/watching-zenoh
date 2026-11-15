@@ -169,7 +169,9 @@ impl<M> KeyexprIndex<M> {
 }
 
 impl<M: Hash + Eq> KeyexprIndex<M> {
-    /// Whether `member` is stored under `keyexpr`.
+    /// Whether `member` is stored under `keyexpr`. The tests' view of the index: since an
+    /// insertion walks its path once and a removal reads through `holds_at`, no write asks it.
+    #[cfg(test)]
     pub(crate) fn contains(&self, keyexpr: &str, member: &M) -> bool {
         self.holds_at(keyexpr.split('/'), member)
     }
