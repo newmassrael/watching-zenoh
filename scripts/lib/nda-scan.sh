@@ -28,6 +28,13 @@
 # list is a verbatim extract of the protected vocabulary, and committing it
 # publishes exactly what it exists to keep out. Override with `WZ_NDA_TERMS`.
 #
+# A clone the landing queue made has no `.git/` list of its own: the queue's
+# integrator accounts receive their files from the fleet registry's
+# `hook_files`, which names paths in the account's home. So a clone without a
+# list reads `~/.config/watching-zenoh/nda-terms.txt` second. The repository's
+# list wins where both exist, because it is the one a person keeps; neither is
+# the same refusal as before, naming both places.
+#
 # WHY AN ABSENT LIST FAILS
 #
 # A gate that cannot read its input must not report green — the rule this repo
@@ -75,7 +82,14 @@ _wz_nda_terms_file() {
     # `.git/worktrees/<name>/`, which never holds this file, so every push from
     # a worktree failed here on a list it could not find rather than on a term.
     # The list is one per repository, and the common dir is where one lives.
-    printf '%s/wz-nda-terms.txt\n' "$(git rev-parse --git-common-dir)"
+    local in_repo in_home
+    in_repo="$(git rev-parse --git-common-dir)/wz-nda-terms.txt"
+    in_home="${HOME:-}/.config/watching-zenoh/nda-terms.txt"
+    if [[ ! -r "$in_repo" && -n "${HOME:-}" && -r "$in_home" ]]; then
+        printf '%s\n' "$in_home"
+        return 0
+    fi
+    printf '%s\n' "$in_repo"
 }
 
 # wz_nda_terms_readable — 0 when a term list exists to be read. The commit-msg
@@ -98,6 +112,9 @@ _wz_nda_prepare() {
         echo "  This gate stands between a public repo and the vocabulary of a" >&2
         echo "  client document that has already leaked here once. It refuses to" >&2
         echo "  report green on an input it could not read." >&2
+        echo "" >&2
+        echo "  Nor at ${HOME:-~}/.config/watching-zenoh/nda-terms.txt, where a landing queue's" >&2
+        echo "  integrator account receives it (the fleet registry's hook_files)." >&2
         echo "" >&2
         echo "  Create it (it lives in .git/ so it can never be pushed):" >&2
         echo "    one protected term per line; '#' comments; blank lines ignored;" >&2
