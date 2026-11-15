@@ -414,7 +414,7 @@ impl<V: Held> ClientStore<V> {
             if self.version.wrapping_sub(*at) >= behind {
                 break;
             }
-            visit(&**keyexpr);
+            visit(keyexpr);
         }
         true
     }

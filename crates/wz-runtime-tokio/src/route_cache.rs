@@ -262,7 +262,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
                                 .keys()
                                 .filter(|cached| {
                                     // The key as the map lends it, which outlives the buffer.
-                                    let cached: &RouteKey<S> = *cached;
+                                    let cached: &RouteKey<S> = cached;
                                     chunks.clear();
                                     chunks.extend(cached.keyexpr.split('/'));
                                     moved.iter().any(|changed| reaches(changed, &chunks))

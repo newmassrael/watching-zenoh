@@ -1452,9 +1452,9 @@ struct Snapshot<P: DeclPlane> {
 }
 
 /// The set of keyexprs one face holds on a plane, per face — the shape the
-/// adminspace view buckets by.
+/// adminspace view buckets by. The keys are the store's own shared copies.
 #[cfg(feature = "adminspace-introspection-handlers")]
-type FaceKeyexprs = HashMap<FaceId, HashSet<String>>;
+type FaceKeyexprs = HashMap<FaceId, HashSet<Arc<str>>>;
 
 /// The keyexprs every broker hat's store of one plane holds, merged into one
 /// face-keyed map, each keyexpr once however many ids name it. A face is owned
@@ -2225,7 +2225,7 @@ impl RouterDeclarationsView {
         tables: &Tables,
         routers: &[(Region, &LinkstatepeerInterest<A>)],
         peers: &[(Region, &LinkstatepeerInterest<B>)],
-        clients: &HashMap<FaceId, HashSet<String>>,
+        clients: &FaceKeyexprs,
     ) -> Vec<(String, wz_admin::adminspace::AdminSources)>
     where
         A: Clone,
@@ -2286,9 +2286,9 @@ impl RouterDeclarationsView {
                 zid_to_zenoh_hex(zid.as_slice())
             };
             for keyexpr in keys {
-                sourced_from_the_south.insert(keyexpr.clone());
+                sourced_from_the_south.insert(keyexpr.to_string());
                 by_key
-                    .entry(keyexpr.clone())
+                    .entry(keyexpr.to_string())
                     .or_insert_with(empty)
                     .clients
                     .push(hex.clone());

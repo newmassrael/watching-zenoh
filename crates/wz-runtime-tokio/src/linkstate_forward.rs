@@ -620,7 +620,7 @@ pub(crate) fn bring_client_routes<T: Clone, V: Held>(
         routes,
         client_inputs(store),
         |since, visit| store.changed_since(since, visit),
-        |changed, cached_chunks| keyexpr_intersects_target(changed, cached_chunks),
+        keyexpr_intersects_target,
     );
 }
 
