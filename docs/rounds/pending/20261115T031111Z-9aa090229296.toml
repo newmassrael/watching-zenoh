@@ -1,0 +1,17 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+main has one writer: land.sh submits a session's commits to the bx --land queue (bx RFC 0024), the queue's integrator files the round and judges with the repository's own pre-push hook, and gate 0p admits only an integrator clone to main. The NDA gate reads an integrator account's term list from ~/.config/watching-zenoh/nda-terms.txt when the clone has no .git list, so integrators on other machines can judge (fleet registry hook_files). Owner decisions 2026-11-14 (one writer, no --no-verify) and 2026-11-15 (install the second integrator now).
+'''
+changes = '''
+- scripts/land.sh submits HEAD with bx --land and waits; descriptor written from append-round args
+- .githooks/pre-push gate 0p admits only a clone with wz.land-integrator true to main
+- scripts/lib/nda-scan.sh reads ~/.config/watching-zenoh/nda-terms.txt second; the repository list wins; neither refuses naming both
+- nda_scan_selftest.py holds the three placements; round_descriptor, file-round, ledger-round, hook gates follow
+- CLAUDE.md, docs/agent-reference.md, docs/verdicts-in-the-fleet.md describe the one writer
+'''
+verification = '''
+Local, at the c2-land tip merged with origin/main: nda_scan_selftest OK (includes the home-list control and the refusal naming both places); hook_default_region_gate --selftest and run rc 0; round_fed_gate_reach --selftest and run rc 0; round_descriptor --selftest rc 0; run-ci --layer C0i rc 0; bash -n and shellcheck -S warning over land.sh, pre-push, file-round.sh, ledger-round.sh, nda-scan.sh rc 0. The integrator's hook run judges this item.
+'''
+carry = '''
+Install the queue on hkl002 and pc4 (fleet registry [[queue]] watching-zenoh, hook_files the term list), then drain and uninstall the workbench integrator. Owner step if doctor reports it: add watching-zenoh to the bx-land-newmassrael App's repository access.
+'''
