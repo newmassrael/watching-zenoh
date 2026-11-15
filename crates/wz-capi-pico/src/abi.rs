@@ -545,7 +545,7 @@ macro_rules! impl_boxed_element {
      $null:ident, $check:ident, $loan:ident, $loan_mut:ident,
      $mv:ident, $take:ident, $drop:ident, $take_from_loaned:ident) => {
         /// Owned element: this crate's boxed marshal handle in slot 0, inert
-        /// padding to pico's measured size ([`element_bytes`](crate::abi::element_bytes)).
+        /// padding to pico's measured size (`crate::abi::element_bytes`).
         #[repr(C)]
         pub struct $Owned {
             pub(crate) handle: *mut ::core::ffi::c_void,

@@ -10,7 +10,7 @@
 //! the address it is bound to.
 //!
 //! A socket's family is its address's: `socket(AF_INET6, ..)` for an IPv6 one, as zenoh-pico's
-//! POSIX link opens the family its locator resolved to. [`RawAddr`] is the one conversion between
+//! POSIX link opens the family its locator resolved to. `RawAddr` is the one conversion between
 //! `core::net`'s address and the kernel's `sockaddr_in` / `sockaddr_in6`, both ways, which every
 //! call that passes or reads an address here and in `stream` goes through. An IPv6 socket keeps
 //! the kernel's own `IPV6_V6ONLY` default, as upstream zenoh's listeners do.

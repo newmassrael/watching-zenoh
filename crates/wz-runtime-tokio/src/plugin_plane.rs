@@ -36,7 +36,8 @@
 //!   every change that still names it. Here a start the plane made is a
 //!   plugin the plane runs.
 //! * A request with no `__path__` is upstream's by-name lookup, which
-//!   `plugins_loading/enabled` switches ([`PluginsLoading`]). Switched off, the
+//!   `plugins_loading/enabled` switches
+//!   ([`PluginsLoading`](crate::plugin_plane::PluginsLoading)). Switched off, the
 //!   plugin is left unloaded with upstream's warning and fails nothing, as
 //!   upstream's empty loader leaves it. Switched on, it is searched for in
 //!   `plugins_loading/search_dirs` ([`crate::plugin_search_dirs`]), as a zenohd

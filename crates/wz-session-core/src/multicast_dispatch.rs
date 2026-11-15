@@ -1826,7 +1826,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
 
     /// How many JOINs the node's rule refused for what they advertise: another protocol version,
     /// resolution or batch size, or a QoS offer the rule refuses
-    /// ([`crate::multicast_join::judge_join`]).
+    /// (`crate::multicast_join::judge_join`; that module needs `storage-profile`).
     pub const fn incompatible_joins(&self) -> u32 {
         self.incompatible_joins
     }
@@ -1863,7 +1863,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// ## Why this is a SECOND call and not a `JoinBaseline` field
     ///
     /// [`JoinBaseline`] is built by
-    /// [`judge_join`](crate::multicast_join::judge_join) from the DECODED
+    /// `crate::multicast_join::judge_join` from the DECODED
     /// `Join`, and the SCXML Join codec has no extension awareness at all — the
     /// per-priority QoS advertisement rides `ingest_join_qos` as its own
     /// argument for that same reason (R311y227). The patch level follows the

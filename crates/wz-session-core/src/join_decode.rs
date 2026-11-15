@@ -16,10 +16,11 @@
 //! multicast session group, where JOIN is how a peer announces its zid, lease
 //! and initial sequence numbers, saw the announcement traffic as unnamed bytes.
 //!
-//! Every reader here starts from [`read_join`], which reads the header, the body
-//! and the extension chain as the document does. The S bit selects two OPTIONAL
+//! Every reader here starts from [`read_join`](crate::join_decode::read_join), which
+//! reads the header, the body and the extension chain as the document does. The S bit selects two OPTIONAL
 //! body fields and the T bit changes the lease's UNIT, adjacent bits with
-//! unrelated meanings; the document reads the first and [`decode_join`] projects
+//! unrelated meanings; the document reads the first and
+//! [`decode_join`](crate::join_decode::decode_join) projects
 //! the second, so neither is read twice, and where the body ends and the chain
 //! starts is never computed outside the document.
 
@@ -69,7 +70,7 @@ pub fn join_message_len(bytes: &[u8]) -> Option<usize> {
 /// `_lease = _lease * 1000`; the projection itself is [`crate::lease`], shared
 /// with the unicast OPEN), so consumers never see the wire unit. The caller
 /// validates the announcement (§3.2 rejection rules —
-/// [`judge_join`](crate::multicast_join::judge_join)) before feeding it to
+/// `crate::multicast_join::judge_join`) before feeding it to
 /// [`MulticastDispatcher::ingest_join`](crate::multicast_dispatch::MulticastDispatcher::ingest_join).
 pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
     let (view, _) = read_join(bytes)?;

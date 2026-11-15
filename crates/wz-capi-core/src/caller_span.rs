@@ -23,8 +23,10 @@
 //! This engine runs a session on a thread of its own, a face on a thread of its own or a local
 //! task of the drive thread, and the facade crate runs a close where blocking is allowed. A span
 //! is current per thread, so no such crossing carries it by itself: the span is taken where the
-//! crossing starts ([`CallerSpan::current`]) and entered again on the far side, around the
-//! thread's work ([`CallerSpan::in_scope`]) or around a task's every poll ([`CallerSpan::carry`]).
+//! crossing starts ([`CallerSpan::current`](crate::caller_span::CallerSpan::current)) and entered
+//! again on the far side, around the thread's work
+//! ([`CallerSpan::in_scope`](crate::caller_span::CallerSpan::in_scope)) or around a task's every
+//! poll ([`CallerSpan::carry`](crate::caller_span::CallerSpan::carry)).
 //! What runs inside then spawns on the runtime crate, whose spawns carry the span current at the
 //! spawn on from there.
 //!

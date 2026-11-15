@@ -1457,7 +1457,7 @@ pub fn write_fragment_head(
 
 /// Encode one `T_MID_FRAME` wire frame from its explicit fields: the Frame
 /// header (`R` from `reliable`, `Z` iff `ext_qos` is present, `VLE(sn)`, the
-/// optional `ext_qos`) as [`begin_frame`] writes it, then `payload` verbatim.
+/// optional `ext_qos`) as `begin_frame` writes it, then `payload` verbatim.
 ///
 /// The Frame twin of `build_fragment_wire`, with the same shape and for the
 /// same reason: a caller that has to SAY every field (the transport build door

@@ -832,7 +832,7 @@ impl DatagramSocket for ZephyrUdpSocket {
     }
 
     /// A family the image's stack was built without, read off `errno` by the board when `socket`
-    /// refused ([`open_socket`]), and an address the stack cannot name, stay refused: no retry
+    /// refused (`open_socket`), and an address the stack cannot name, stay refused: no retry
     /// opens either.
     fn refuses_address(error: &ZephyrNetError) -> bool {
         matches!(

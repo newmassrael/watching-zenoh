@@ -29,7 +29,8 @@
 //!
 //! One departure, and it is the plugin prefix: upstream's is `zenoh_plugin_`, the
 //! prefix of libraries built against ITS plugin ABI, which no wz host can load.
-//! wz's is [`PLUGIN_LIBRARY_PREFIX`], so a name finds the library a wz plugin
+//! wz's is [`PLUGIN_LIBRARY_PREFIX`](crate::plugin_search_dirs::PLUGIN_LIBRARY_PREFIX), so a
+//! name finds the library a wz plugin
 //! crate builds (`wz-plugin-example` builds `libwz_plugin_example.so`, found as
 //! `example`) and never an upstream one that would only fail the ABI gate.
 

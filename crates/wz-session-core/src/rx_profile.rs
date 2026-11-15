@@ -45,7 +45,8 @@
 //!
 //! A borrowed view can be built by hand: a default field is the empty slice, a
 //! test passes a literal, a builder encodes a message and decodes it back from a
-//! buffer of its own. The container's [`FromOrigin`] is told to decide, so
+//! buffer of its own. The container's
+//! [`FromOrigin`](sce_forge_runtime::codec::FromOrigin) is told to decide, so
 //! [`RxSharedBytes`](crate::rx_profile::RxSharedBytes) COPIES such a slice. The
 //! alternative, refusing it, would turn a message assembled outside a frame
 //! into a decode error for no reason the sender could act on; copying is what

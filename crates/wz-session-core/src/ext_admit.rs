@@ -48,7 +48,8 @@
 //! the whole message whatever the `M` bit says. The chain decode reads such an
 //! entry as a unit (`sources/codecs/ext_entry.scxml`, the default arm), because
 //! the analyzer must still show it; the refusal is
-//! [`ExtAdmission::ReservedEncoding`], one layer up, like the mandatory one.
+//! [`ExtAdmission::ReservedEncoding`](crate::ext_admit::ExtAdmission::ReservedEncoding), one
+//! layer up, like the mandatory one.
 //! zenoh-pico reads the same entry as a body-less one and accepts the message
 //! (`_z_msg_ext_unknown_body_decode`, its `default:` arm): the two presets
 //! disagree, and this rule follows zenoh 1.10.2.

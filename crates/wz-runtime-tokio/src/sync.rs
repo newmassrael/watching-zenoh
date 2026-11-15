@@ -109,7 +109,7 @@ impl<T> PlainMutex<T> {
     }
 
     /// [`Self::lock`] without waiting: `None` when the lock is held. Not waiting, it orders
-    /// nothing before it ([`lock_order`]); what is waited for while it is held is ordered after
+    /// nothing before it (`lock_order`); what is waited for while it is held is ordered after
     /// it.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn try_lock_guard(&self) -> Option<PlainGuard<'_, T>> {
