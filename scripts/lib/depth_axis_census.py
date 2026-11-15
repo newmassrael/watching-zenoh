@@ -2902,7 +2902,10 @@ PIN_NO_SYMBOL = 0
 # corrected (Rounds 4044 and 4049), gains three wz citations of files its pin table already holds, so
 # the table keeps its 55 pairs. READ off the census's own FAIL line, `wz citations: 62 against a pin
 # of 59`.
-PIN_WZ_CITATIONS = 62
+# 62 -> 64, one atom. `session-close-ingress`'s access-control clause names the three files its
+# measurement read by their crate paths, where it named a switchboard and a bare observer file; the
+# observer pair are the two its later correction already cites, so the review table keeps its pairs.
+PIN_WZ_CITATIONS = 64
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2984,7 +2987,9 @@ PIN_WZ_CITATIONS = 62
 # carrying ONE ambiguous citation (R2697 also counted one when it arrived the
 # first time). READ off the census's own FAIL line, `ambiguous citations: 1
 # against a pin of 0`.
-PIN_AMBIGUOUS = 1
+# 1 -> 0. That one was the bare observer file of `session-close-ingress`'s access-control clause,
+# which two crates carry; the clause now names both by path (see PIN_WZ_CITATIONS).
+PIN_AMBIGUOUS = 0
 # A citation no tracked file answers and the anchor gate's grammar does not
 # grade either: a bare upstream basename, a path under an undeclared root-less
 # segment, a zenoh-pico or zenoh-c source path. No oracle in this tree judges
