@@ -891,11 +891,15 @@ mod tests {
 
     // ----- ASK side (A8c-2b) -----
 
+    /// A reply's Put encoding, when it states one: the id, and the schema's bytes when it has
+    /// one.
+    type PutEncoding<'a> = Option<(u32, Option<&'a [u8]>)>;
+
     fn reply_view<'a>(
         keyexpr: &'a str,
         payload: &'a [u8],
         attachment: Option<&'a [u8]>,
-        put_encoding: Option<(u32, Option<&'a [u8]>)>,
+        put_encoding: PutEncoding<'a>,
     ) -> BorrowedReply<'a> {
         BorrowedReply {
             rid: 1,
@@ -1119,16 +1123,15 @@ mod tests {
         let mut dest = StorageState::new(MemoryStorage::new()).unwrap();
         for response in &responses {
             let attachment = encode_alignment_reply(&response.reply);
-            let (payload, put_encoding): (&[u8], Option<(u32, Option<&[u8]>)>) =
-                match &response.value {
-                    Some(v) => (
-                        &v.payload,
-                        v.encoding
-                            .as_ref()
-                            .map(|e| (e.packed_id, e.schema.as_deref())),
-                    ),
-                    None => (&[], None),
-                };
+            let (payload, put_encoding): (&[u8], PutEncoding<'_>) = match &response.value {
+                Some(v) => (
+                    &v.payload,
+                    v.encoding
+                        .as_ref()
+                        .map(|e| (e.packed_id, e.schema.as_deref())),
+                ),
+                None => (&[], None),
+            };
             let view = reply_view(&ke, payload, Some(&attachment), put_encoding);
             let (reply, value) = decode_reply(&view).expect("the reply decodes");
             let followup = dest.process_alignment_reply(&config, reply, value);

@@ -277,6 +277,10 @@ fn schema_bytes<const MAX: usize>(schema: &[u8]) -> Result<Bounded<&[u8], MAX>, 
     crate::codec_owned::sent(schema)
 }
 
+/// An Err's own encoding, when it names one: the id, and the schema's bytes when it has one.
+#[cfg(feature = "query-reply-err")]
+type ErrEncoding<'a> = Option<(u32, Option<&'a [u8]>)>;
+
 /// A staged reply, ready to encode: the description it borrows and the two extension
 /// bodies it makes. `encode` builds the codec's `Response` over both for the length of
 /// one call, so nothing the record holds outlives the slot it is written into.
@@ -800,7 +804,7 @@ impl<'a> ResponseWriter<'a> {
     fn write_err<S: SceSink>(
         &self,
         sink: &mut S,
-        encoding: Option<(u32, Option<&[u8]>)>,
+        encoding: ErrEncoding<'_>,
         payload: &[u8],
     ) -> Result<(), CodecError>
     where
@@ -1122,8 +1126,7 @@ mod tests {
     #[cfg(feature = "query-reply-err")]
     #[test]
     fn an_err_is_written_as_the_owned_path_writes_it() {
-        let encodings: [Option<(u32, Option<&[u8]>)>; 3] =
-            [None, Some((5, None)), Some((5, Some(&b"s"[..])))];
+        let encodings: [ErrEncoding<'_>; 3] = [None, Some((5, None)), Some((5, Some(&b"s"[..])))];
         let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
         let mut compared = 0usize;
         for encoding in encodings {
@@ -1223,7 +1226,7 @@ mod tests {
     #[test]
     fn an_err_is_written_directly_and_as_the_codec_writes_it() {
         let big = [0x5Au8; 1000];
-        let encodings: [Option<(u32, Option<&[u8]>)>; 3] =
+        let encodings: [ErrEncoding<'_>; 3] =
             [None, Some((5, None)), Some((70_000, Some(&b"v=1"[..])))];
         let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
         let mut taken = 0usize;

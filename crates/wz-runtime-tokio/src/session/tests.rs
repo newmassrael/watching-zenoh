@@ -4297,7 +4297,9 @@ fn declare_adminspace_with_config_answers_a_client_under_its_own_role() {
         .declare_adminspace_with_config("0.9.9", Vec::new(), config)
         .expect("adminspace-core ON in this build");
 
-    let get = |key: &str, into: &Arc<Mutex<Vec<(String, Vec<u8>)>>>| {
+    /// What a get was answered with: each reply's keyexpr and payload.
+    type Answers = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+    let get = |key: &str, into: &Answers| {
         let r = into.clone();
         session
             .query(
@@ -4426,7 +4428,9 @@ fn the_admin_queryable_is_declared_incomplete() {
 fn a_peer_session_answers_its_north_region_and_a_client_session_none() {
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
-    let ask = |session: &TokioSession, key: &str, into: &Arc<Mutex<Vec<(String, Vec<u8>)>>>| {
+    /// What a get was answered with: each reply's keyexpr and payload.
+    type Answers = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+    let ask = |session: &TokioSession, key: &str, into: &Answers| {
         let r = into.clone();
         session
             .query(
