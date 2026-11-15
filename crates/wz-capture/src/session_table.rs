@@ -71,6 +71,7 @@ use wz_session_core::scouting_message::ScoutingFrame;
 
 use crate::link::{FlowKey, Integrity, LinkKind};
 use crate::tcp::StreamAnomalies;
+use crate::tls::KeySource;
 use crate::zenoh_evidence::{Observation, ZenohEvidence};
 use crate::{Dissection, FlowDissection, Framing};
 
@@ -737,13 +738,15 @@ impl LinkIngest {
 /// WHY a cell of a row or of a flow object is `null`: the closed set of
 /// reasons, one word each.
 ///
-/// Five, and each one is something the code can distinguish rather than a word a
-/// consumer might like to read:
+/// Each one is something the code can distinguish rather than a word a consumer
+/// might like to read:
 ///
 /// * `not_in_capture` -- the message that would state the value is not among
 ///   the bytes this reader was given (a capture that began after the handshake);
 /// * `encrypted` -- the flow is an encrypted transport this reader holds no keys
 ///   for, so what would state the value is unreadable;
+/// * `no_matching_key` -- the flow is encrypted, key material reached the
+///   decryption pass, and none of it named the flow's connection;
 /// * `no_clock` -- no packet of the flow carried a timestamp;
 /// * `mixed` -- the evidence does not agree on one value: the row groups several
 ///   flows and they disagree, or one flow's own Inits do (both directions sent an
@@ -751,7 +754,14 @@ impl LinkIngest {
 /// * `no_sequence` -- the link numbers no bytes on the wire, so a segment cannot
 ///   be seen to repeat or to arrive early: a datagram link (UDP, raweth), the
 ///   serial line, and AF_VSOCK, whose stream this reader numbers itself as it
-///   arrives.
+///   arrives;
+/// * `not_encrypted` -- the flow is not TLS or QUIC, so there is nothing for a
+///   decryption pass to open or to have opened with;
+/// * `not_yet_known` -- a decryption verdict is still pending: keys reached the
+///   pass and it has not judged the flow, or it accepted the flow's keys and
+///   nothing has opened yet, or the flow belongs to a feed that has not ended;
+/// * `not_opened` -- the pass did not open the flow, so no secret opened it
+///   from anywhere.
 ///
 /// An `evicted` reason is deliberately absent. A flow the table's ceiling evicts
 /// has no row at all, so no cell can say it; the loss is stated once for the
@@ -774,6 +784,12 @@ pub enum Unstated {
     /// The flow is encrypted, key material was handed to the decryption pass,
     /// and none of it named this flow's connection.
     NoMatchingKey,
+    /// The flow is not TLS or QUIC: there is nothing to decrypt.
+    NotEncrypted,
+    /// The decryption verdict is still pending.
+    NotYetKnown,
+    /// The decryption pass did not open the flow.
+    NotOpened,
 }
 
 impl Unstated {
@@ -786,12 +802,15 @@ impl Unstated {
             Unstated::Mixed => "mixed",
             Unstated::NoSequence => "no_sequence",
             Unstated::NoMatchingKey => "no_matching_key",
+            Unstated::NotEncrypted => "not_encrypted",
+            Unstated::NotYetKnown => "not_yet_known",
+            Unstated::NotOpened => "not_opened",
         }
     }
 
     /// Every reason, from an exhaustive match so the array cannot fall behind
     /// the enum.
-    pub fn all() -> [Unstated; 6] {
+    pub fn all() -> [Unstated; 9] {
         let one = |u: Unstated| match u {
             Unstated::NotInCapture => Unstated::NotInCapture,
             Unstated::Encrypted => Unstated::Encrypted,
@@ -799,6 +818,9 @@ impl Unstated {
             Unstated::Mixed => Unstated::Mixed,
             Unstated::NoSequence => Unstated::NoSequence,
             Unstated::NoMatchingKey => Unstated::NoMatchingKey,
+            Unstated::NotEncrypted => Unstated::NotEncrypted,
+            Unstated::NotYetKnown => Unstated::NotYetKnown,
+            Unstated::NotOpened => Unstated::NotOpened,
         };
         [
             one(Unstated::NotInCapture),
@@ -807,6 +829,9 @@ impl Unstated {
             one(Unstated::Mixed),
             one(Unstated::NoSequence),
             one(Unstated::NoMatchingKey),
+            one(Unstated::NotEncrypted),
+            one(Unstated::NotYetKnown),
+            one(Unstated::NotOpened),
         ]
     }
 
@@ -839,12 +864,18 @@ pub enum Cell {
     Frames,
     /// `stream_anomalies`, a cell of a flow object.
     StreamAnomalies,
+    /// `decryption`, a cell of a flow object: what the decryption pass made of
+    /// the flow ([`DecryptionOutcome`]).
+    Decryption,
+    /// `key_source`, a cell of a flow object: where the secrets that opened
+    /// the flow came from ([`KeySource`]).
+    KeySource,
 }
 
 impl Cell {
     /// Every cell, from an exhaustive match so the array cannot fall behind the
     /// enum: a cell added later fails to compile here.
-    pub fn all() -> [Cell; 8] {
+    pub fn all() -> [Cell; 10] {
         let one = |c: Cell| match c {
             Cell::Initiator => Cell::Initiator,
             Cell::Acceptor => Cell::Acceptor,
@@ -854,6 +885,8 @@ impl Cell {
             Cell::LastSeen => Cell::LastSeen,
             Cell::Frames => Cell::Frames,
             Cell::StreamAnomalies => Cell::StreamAnomalies,
+            Cell::Decryption => Cell::Decryption,
+            Cell::KeySource => Cell::KeySource,
         };
         [
             one(Cell::Initiator),
@@ -864,6 +897,8 @@ impl Cell {
             one(Cell::LastSeen),
             one(Cell::Frames),
             one(Cell::StreamAnomalies),
+            one(Cell::Decryption),
+            one(Cell::KeySource),
         ]
     }
 
@@ -878,16 +913,20 @@ impl Cell {
             Cell::LastSeen => "last_seen_ts_ns",
             Cell::Frames => "frames",
             Cell::StreamAnomalies => "stream_anomalies",
+            Cell::Decryption => "decryption",
+            Cell::KeySource => "key_source",
         }
     }
 
     /// Whether the cell sits on each flow object of a row rather than on the
     /// row. A cell of the flow has no row-level twin when its value is a
     /// statement about one direction of one flow: the rows of a session over
-    /// several links have no one `low` end to orient a sum by.
+    /// several links have no one `low` end to orient a sum by. The two
+    /// decryption cells are the flow's for the same reason: a pass opens a
+    /// connection, and one session's links may be opened differently.
     pub const fn on_flow(self) -> bool {
         match self {
-            Cell::StreamAnomalies => true,
+            Cell::StreamAnomalies | Cell::Decryption | Cell::KeySource => true,
             Cell::Initiator
             | Cell::Acceptor
             | Cell::Link
@@ -927,6 +966,239 @@ impl Cell {
             Cell::Phase | Cell::Frames => &[Unstated::Encrypted, Unstated::NoMatchingKey],
             Cell::FirstSeen | Cell::LastSeen => &[Unstated::NoClock],
             Cell::StreamAnomalies => &[Unstated::NoSequence],
+            Cell::Decryption => &[Unstated::NotEncrypted, Unstated::NotYetKnown],
+            Cell::KeySource => &[
+                Unstated::NotEncrypted,
+                Unstated::NotOpened,
+                Unstated::NotYetKnown,
+            ],
+        }
+    }
+}
+
+/// What the decryption pass made of one TLS or QUIC flow: the finer verdict
+/// behind a flow's `encrypted` cell, the closed set.
+///
+/// `encrypted` says whether the session was recovered; this says what became
+/// of the keys, and each word sends a reader to a different remedy:
+///
+/// * `opened` -- the pass opened the flow: a TLS record opened under keys the
+///   opener accepted, or a QUIC stream or datagram was recovered;
+/// * `no_keys` -- no key material reached the pass at all: bring a key log;
+/// * `no_matching_key` -- key material reached the pass and none of it names
+///   this connection: bring the key log of THIS connection;
+/// * `keys_refused` -- the connection's keys were found and a record or packet
+///   did not open under them (most often a key change the log does not cover);
+/// * `key_for_one_direction` -- the connection's keys were found and cover one
+///   of its two directions: bring the other peer's key log;
+/// * `handshake_not_seen` -- the capture holds no handshake to match a key by:
+///   capture from the connection's start;
+/// * `not_supported` -- the flow uses a protocol this pass does not open: a TLS
+///   suite outside [`crate::tls::OPENABLE_SUITES`], or a QUIC version the
+///   opener has no key schedule for. Decided before keys are asked about;
+/// * `record_not_held` -- a TLS record the pass had to open was no longer held.
+///
+/// A verdict wz cannot give yet is not one of these: it is the unstated reason
+/// `not_yet_known`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecryptionOutcome {
+    /// The pass opened the flow.
+    Opened,
+    /// No key material reached the pass.
+    NoKeys,
+    /// Key material reached the pass and none named this connection.
+    NoMatchingKey,
+    /// The connection's keys did not open a record or a packet.
+    KeysRefused,
+    /// The connection's keys cover one of its two directions.
+    KeyForOneDirection,
+    /// No handshake in the capture to match a key by.
+    HandshakeNotSeen,
+    /// A protocol this pass does not open.
+    NotSupported,
+    /// A record the pass had to open was no longer held.
+    RecordNotHeld,
+}
+
+impl DecryptionOutcome {
+    /// The word this outcome is written as.
+    pub const fn name(self) -> &'static str {
+        match self {
+            DecryptionOutcome::Opened => "opened",
+            DecryptionOutcome::NoKeys => "no_keys",
+            DecryptionOutcome::NoMatchingKey => "no_matching_key",
+            DecryptionOutcome::KeysRefused => "keys_refused",
+            DecryptionOutcome::KeyForOneDirection => "key_for_one_direction",
+            DecryptionOutcome::HandshakeNotSeen => "handshake_not_seen",
+            DecryptionOutcome::NotSupported => "not_supported",
+            DecryptionOutcome::RecordNotHeld => "record_not_held",
+        }
+    }
+
+    /// Every outcome, from an exhaustive match so the array cannot fall behind
+    /// the enum.
+    pub fn all() -> [DecryptionOutcome; 8] {
+        let one = |o: DecryptionOutcome| match o {
+            DecryptionOutcome::Opened => DecryptionOutcome::Opened,
+            DecryptionOutcome::NoKeys => DecryptionOutcome::NoKeys,
+            DecryptionOutcome::NoMatchingKey => DecryptionOutcome::NoMatchingKey,
+            DecryptionOutcome::KeysRefused => DecryptionOutcome::KeysRefused,
+            DecryptionOutcome::KeyForOneDirection => DecryptionOutcome::KeyForOneDirection,
+            DecryptionOutcome::HandshakeNotSeen => DecryptionOutcome::HandshakeNotSeen,
+            DecryptionOutcome::NotSupported => DecryptionOutcome::NotSupported,
+            DecryptionOutcome::RecordNotHeld => DecryptionOutcome::RecordNotHeld,
+        };
+        [
+            one(DecryptionOutcome::Opened),
+            one(DecryptionOutcome::NoKeys),
+            one(DecryptionOutcome::NoMatchingKey),
+            one(DecryptionOutcome::KeysRefused),
+            one(DecryptionOutcome::KeyForOneDirection),
+            one(DecryptionOutcome::HandshakeNotSeen),
+            one(DecryptionOutcome::NotSupported),
+            one(DecryptionOutcome::RecordNotHeld),
+        ]
+    }
+
+    /// Every word, sorted.
+    pub fn names() -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = Self::all().iter().map(|o| o.name()).collect();
+        words.sort_unstable();
+        words
+    }
+
+    /// A TLS flow's outcome, by the first rule that holds:
+    ///
+    /// 1. a ServerHello that negotiated a suite outside
+    ///    [`crate::tls::OPENABLE_SUITES`] is `not_supported`, whatever the keys;
+    /// 2. a flow no pass has judged is pending where key material reached a
+    ///    pass, and `no_keys` where none did;
+    /// 3. a refusal is the outcome its reason names;
+    /// 4. a flow whose keys were accepted is `opened` once a record opened in
+    ///    either direction, and pending until then.
+    ///
+    /// The refusal read is the flow's first, as the report's one-word summary
+    /// is.
+    pub(crate) fn of_tls(
+        state: &crate::tls::TlsFlowState,
+        keys_reached: bool,
+    ) -> Stated<DecryptionOutcome> {
+        use crate::tls::NotDecrypted;
+        if state
+            .suite
+            .is_some_and(|suite| !crate::tls::OPENABLE_SUITES.contains(&suite))
+        {
+            return Ok(DecryptionOutcome::NotSupported);
+        }
+        match state.outcome {
+            None if keys_reached => Err(Unstated::NotYetKnown),
+            None => Ok(DecryptionOutcome::NoKeys),
+            Some(Some(reason)) => Ok(match reason {
+                NotDecrypted::NoKeysSupplied => DecryptionOutcome::NoKeys,
+                NotDecrypted::NoSessionIdentity => DecryptionOutcome::HandshakeNotSeen,
+                NotDecrypted::NoKeyForSession => DecryptionOutcome::NoMatchingKey,
+                NotDecrypted::RecordRefusedKeys { .. } => DecryptionOutcome::KeysRefused,
+                NotDecrypted::NoKeyForDirection { .. } => DecryptionOutcome::KeyForOneDirection,
+                NotDecrypted::RecordNotHeld { .. } => DecryptionOutcome::RecordNotHeld,
+            }),
+            Some(None) if state.opened.iter().any(|&n| n > 0) => Ok(DecryptionOutcome::Opened),
+            Some(None) => Err(Unstated::NotYetKnown),
+        }
+    }
+
+    /// A QUIC flow's outcome, by the first rule that holds:
+    ///
+    /// 1. a version the opener does not open is `not_supported`;
+    /// 2. a stream or a datagram recovered is `opened` (the test `encrypted`
+    ///    reads `decrypted_quic` by);
+    /// 3. a flow whose identity is unknown (no ClientHello read, none adopted)
+    ///    is pending while its feed has not ended, and `handshake_not_seen`
+    ///    once it has;
+    /// 4. no key material at all is `no_keys`;
+    /// 5. keys that were not installed are `no_matching_key`;
+    /// 6. a packet refused under the key log's keys is `keys_refused`;
+    /// 7. one direction refused for want of a key while the other opened past
+    ///    its Initial space is `key_for_one_direction`;
+    /// 8. anything else is pending.
+    ///
+    /// A flow no pass has said anything about is `opened` where something was
+    /// recovered (a caller fed it), and otherwise read as rule 2 of
+    /// [`Self::of_tls`] reads an unjudged TLS flow.
+    pub(crate) fn of_quic(
+        finding: Option<&crate::quic::QuicKeyFinding>,
+        recovered: bool,
+        keys_reached: bool,
+    ) -> Stated<DecryptionOutcome> {
+        let Some(found) = finding else {
+            return if recovered {
+                Ok(DecryptionOutcome::Opened)
+            } else if keys_reached {
+                Err(Unstated::NotYetKnown)
+            } else {
+                Ok(DecryptionOutcome::NoKeys)
+            };
+        };
+        if found.version_refused {
+            return Ok(DecryptionOutcome::NotSupported);
+        }
+        if recovered {
+            return Ok(DecryptionOutcome::Opened);
+        }
+        if !found.identity {
+            return if found.pending {
+                Err(Unstated::NotYetKnown)
+            } else {
+                Ok(DecryptionOutcome::HandshakeNotSeen)
+            };
+        }
+        if !keys_reached {
+            return Ok(DecryptionOutcome::NoKeys);
+        }
+        if !found.keys_installed {
+            return Ok(DecryptionOutcome::NoMatchingKey);
+        }
+        if found.refused_under_keys.iter().any(|&r| r) {
+            return Ok(DecryptionOutcome::KeysRefused);
+        }
+        let one_way =
+            |keyless: usize| found.no_keys[keyless] && found.opened_past_initial[1 - keyless];
+        if one_way(0) || one_way(1) {
+            return Ok(DecryptionOutcome::KeyForOneDirection);
+        }
+        Err(Unstated::NotYetKnown)
+    }
+}
+
+/// A flow's two decryption cells, decided together so that a source is never
+/// stated for a flow the pass did not open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Opening {
+    decryption: Stated<DecryptionOutcome>,
+    key_source: Stated<KeySource>,
+}
+
+impl Opening {
+    /// The cells of a flow that is not TLS or QUIC.
+    fn not_encrypted() -> Self {
+        Self {
+            decryption: Err(Unstated::NotEncrypted),
+            key_source: Err(Unstated::NotEncrypted),
+        }
+    }
+
+    /// The cells of an encrypted flow the pass made `decryption` of, with the
+    /// source its opener named. The source is stated only where the flow
+    /// opened; an opened flow whose source no pass recorded (a caller fed it
+    /// without a pass) is pending rather than guessed.
+    fn of(decryption: Stated<DecryptionOutcome>, source: Option<KeySource>) -> Self {
+        let key_source = match decryption {
+            Ok(DecryptionOutcome::Opened) => source.ok_or(Unstated::NotYetKnown),
+            Ok(_) => Err(Unstated::NotOpened),
+            Err(reason) => Err(reason),
+        };
+        Self {
+            decryption,
+            key_source,
         }
     }
 }
@@ -1113,6 +1385,12 @@ pub struct Link {
     pub kind: LinkKind,
     /// Whether the session is in the clear.
     pub encryption: Encryption,
+    /// What the decryption pass made of the flow, or why that is not stated
+    /// (`not_encrypted`, `not_yet_known`).
+    pub decryption: Stated<DecryptionOutcome>,
+    /// Where the secrets that opened the flow came from, or why that is not
+    /// stated (`not_encrypted`, `not_opened`, `not_yet_known`).
+    pub key_source: Stated<KeySource>,
     /// The session phase, or why it is not stated.
     pub phase: Stated<SessionPhase>,
     /// Messages ever produced for the flow, or why they are not stated.
@@ -1304,25 +1582,36 @@ fn furthest(phases: impl Iterator<Item = SessionPhase>) -> SessionPhase {
 fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
     let mut links = Vec::new();
     let mut excluded = Excluded::default();
+    let keys_reached = d.decryption_keys_reached();
+    let clear = Opening::not_encrypted();
 
     for f in d.flows() {
         let frames = f.frames.produced();
-        let (encryption, unread) = match f.framing() {
+        let (encryption, unread, opening) = match f.framing() {
             Framing::Encrypted(state) => {
+                let opening = Opening::of(
+                    DecryptionOutcome::of_tls(state, keys_reached),
+                    state.key_source,
+                );
                 // The report's own finding: a decryption pass ran and left
                 // nothing undecrypted. `None` there is `Some(None)` here.
                 if matches!(state.outcome, Some(None)) {
-                    (Encryption::DecryptedTls, Unstated::Encrypted)
+                    (Encryption::DecryptedTls, Unstated::Encrypted, opening)
                 } else {
-                    (Encryption::EncryptedUnreadable, unread_reason(state))
+                    (
+                        Encryption::EncryptedUnreadable,
+                        unread_reason(state),
+                        opening,
+                    )
                 }
             }
-            _ if f.ingest.understood() => (Encryption::Clear, Unstated::Encrypted),
-            _ => (Encryption::Unknown, Unstated::Encrypted),
+            _ if f.ingest.understood() => (Encryption::Clear, Unstated::Encrypted, clear),
+            _ => (Encryption::Unknown, Unstated::Encrypted, clear),
         };
         links.push(link_of(
             f.flow,
             encryption,
+            opening,
             unread,
             f.session.context().phase,
             frames,
@@ -1349,16 +1638,22 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             continue;
         }
         let recovered_quic = !f.quic_streams.is_empty() || f.quic_datagrams.produced() > 0;
-        let encryption = if f.quic.is_some() {
-            if recovered_quic {
+        let (encryption, opening) = if f.quic.is_some() {
+            let finding = f.quic_key_finding();
+            let opening = Opening::of(
+                DecryptionOutcome::of_quic(finding.as_ref(), recovered_quic, keys_reached),
+                finding.and_then(|found| found.key_source),
+            );
+            let encryption = if recovered_quic {
                 Encryption::DecryptedQuic
             } else {
                 Encryption::EncryptedUnreadable
-            }
+            };
+            (encryption, opening)
         } else if f.ingest.understood() {
-            Encryption::Clear
+            (Encryption::Clear, clear)
         } else {
-            Encryption::Unknown
+            (Encryption::Unknown, clear)
         };
         let phase = furthest(
             core::iter::once(f.session.context().phase)
@@ -1367,9 +1662,9 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
         links.push(link_of(
             f.flow,
             encryption,
-            // A QUIC flow's outcome stays with the caller's pass, which hands
-            // the dissection only what it recovered; nothing here says whether
-            // keys were tried, so an unread QUIC flow gives the plain reason.
+            opening,
+            // The role cells of an unread QUIC flow keep the plain reason; its
+            // finer finding is the flow's `decryption` cell.
             Unstated::Encrypted,
             phase,
             frames,
@@ -1390,6 +1685,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
         links.push(link_of(
             FlowKey::serial_line(),
             encryption,
+            clear,
             Unstated::Encrypted,
             d.serial_session.context().phase,
             frames,
@@ -1468,9 +1764,8 @@ impl SessionObservations {
 /// the findings that are not a key that failed to match: a flow with no
 /// ClientHello to match a key by, a direction no key covered, a record that did
 /// not open under keys that matched, and a record the stream no longer held.
-/// Those finer reasons are the report's (`no_session_identity`,
-/// `no_key_for_direction`, `record_refused_keys`, `record_not_held`) and do not
-/// reach this document.
+/// Those finer findings are the flow's `decryption` cell
+/// ([`DecryptionOutcome::of_tls`]); the role cells keep the coarse reason.
 fn unread_reason(state: &crate::tls::TlsFlowState) -> Unstated {
     match state.outcome {
         Some(Some(crate::tls::NotDecrypted::NoKeyForSession)) => Unstated::NoMatchingKey,
@@ -1485,11 +1780,13 @@ fn unread_reason(state: &crate::tls::TlsFlowState) -> Unstated {
 /// transport under any encryption, so an unreadable TLS flow states them.
 ///
 /// `unread` is the reason the cells of an unreadable flow give
-/// ([`unread_reason`]); it is not read for a flow that is readable.
+/// ([`unread_reason`]); it is not read for a flow that is readable. `opening`
+/// is the flow's two decryption cells, which every flow states or names.
 #[allow(clippy::too_many_arguments)]
 fn link_of(
     flow: FlowKey,
     encryption: Encryption,
+    opening: Opening,
     unread: Unstated,
     phase: SessionPhase,
     frames: u64,
@@ -1532,6 +1829,8 @@ fn link_of(
         flow,
         kind: flow.link(),
         encryption,
+        decryption: opening.decryption,
+        key_source: opening.key_source,
         phase: if unreadable { Err(unread) } else { Ok(phase) },
         frames: if unreadable { Err(unread) } else { Ok(frames) },
         bytes,

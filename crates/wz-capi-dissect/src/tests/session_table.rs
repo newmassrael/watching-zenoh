@@ -165,7 +165,7 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
     let b = wz_session_core::zid_hex::zid_to_zenoh_hex(&ZID_B);
     assert!(
         doc.starts_with(&format!(
-            "{{\"document\":{{\"name\":\"session_table\",\"revision\":12}},\"ok\":true,\
+            "{{\"document\":{{\"name\":\"session_table\",\"revision\":13}},\"ok\":true,\
              \"sessions\":[{{\"initiator\":\"{a}\",\"acceptor\":\"{b}\",\"link\":\"udp\",\
              \"phase\":\"init_complete\",\"encrypted\":\"clear\","
         )),
@@ -206,12 +206,19 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
         "an instant on a real clock is a string: {doc}"
     );
     // A UDP flow numbers no bytes, so it states no stream anomalies and its
-    // own `unstated` says why.
+    // own `unstated` says why; it is clear, so it names its two decryption
+    // cells `not_encrypted` before that.
     assert!(
         doc.contains(
             "\"stream_anomalies\":null,\
-             \"unstated\":[{\"cell\":\"stream_anomalies\",\"reason\":\"no_sequence\"}]}]"
+             \"unstated\":[{\"cell\":\"decryption\",\"reason\":\"not_encrypted\"},\
+             {\"cell\":\"key_source\",\"reason\":\"not_encrypted\"},\
+             {\"cell\":\"stream_anomalies\",\"reason\":\"no_sequence\"}]}]"
         ),
+        "{doc}"
+    );
+    assert!(
+        doc.contains("\"encrypted\":\"clear\",\"decryption\":null,\"key_source\":null,"),
         "{doc}"
     );
 }
@@ -227,7 +234,8 @@ fn a_tcp_flow_crosses_the_boundary_with_its_anomalies_per_direction() {
             "\"stream_anomalies\":{\
              \"low_to_high\":{\"retransmits\":1,\"out_of_order\":0,\"partial_overlaps\":0},\
              \"high_to_low\":{\"retransmits\":0,\"out_of_order\":1,\"partial_overlaps\":0}},\
-             \"unstated\":[]}]"
+             \"unstated\":[{\"cell\":\"decryption\",\"reason\":\"not_encrypted\"},\
+             {\"cell\":\"key_source\",\"reason\":\"not_encrypted\"}]}]"
         ),
         "{doc}"
     );
@@ -445,7 +453,7 @@ fn a_bad_container_is_a_refusal_and_a_callers_bug_is_a_code() {
         let doc = call_pcap(bytes, WZ_DISSECT_LIMITS_NONE).expect("a refusal is answered");
         assert!(
             doc.starts_with(&format!(
-                "{{\"document\":{{\"name\":\"session_table\",\"revision\":12}},\"ok\":false,\
+                "{{\"document\":{{\"name\":\"session_table\",\"revision\":13}},\"ok\":false,\
                  \"refusal\":\"{word}\",\"message\":"
             )),
             "{doc}"

@@ -445,6 +445,45 @@ pub struct QuicDecryption {
     pub framing: QuicStreamFeed,
 }
 
+/// What a decryption pass found about ONE QUIC flow's keys, kept on the flow
+/// ([`crate::DatagramDissection::quic_key_finding`]) for the session table's
+/// `decryption` and `key_source` cells.
+///
+/// The TLS pass leaves its finding on the flow it opened because the flow is
+/// where its records are; a QUIC pass opens packets this crate never kept, so
+/// what it learned reaches the flow only through
+/// [`crate::Dissection::set_quic_key_finding`]. Facts and not a verdict: the
+/// verdict also needs what the dissection itself recovered and whether any key
+/// material reached a pass, and is decided in one place, the session table.
+///
+/// Flags rather than counts, because the table asks only whether a thing
+/// happened, and the flow carries this for as long as it is held.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct QuicKeyFinding {
+    /// A long header declared a version the opener does not open, and none
+    /// declared one it does. A Version Negotiation packet (version 0) does
+    /// not count: it answers a version, it does not choose one.
+    pub version_refused: bool,
+    /// The connection's identity is known: its ClientHello was read, or it
+    /// was adopted from a key log holding exactly one connection.
+    pub identity: bool,
+    /// The key log held this connection's secrets and they were installed.
+    pub keys_installed: bool,
+    /// Per direction, `[A, B]`: a packet of a space whose keys came from the
+    /// key log did not open under them.
+    pub refused_under_keys: [bool; 2],
+    /// Per direction: a packet was refused for want of a key for its space.
+    pub no_keys: [bool; 2],
+    /// Per direction: a packet of a space past the Initial one opened.
+    pub opened_past_initial: [bool; 2],
+    /// Where the secrets the opener installed came from, once it installed
+    /// any.
+    pub key_source: Option<crate::tls::KeySource>,
+    /// The finding may still move: the flow belongs to a feed that has not
+    /// ended, and later packets may carry what this one lacks.
+    pub pending: bool,
+}
+
 /// R311y718 (§1.2a) — what [`crate::Dissection::feed_quic_stream`] did with one
 /// offer of recovered stream bytes.
 ///

@@ -421,6 +421,226 @@ fn the_live_door_refuses_a_null_handle_count_or_key_bytes() {
     );
 }
 
+// ── what the pass made of a flow, and where its keys came from ──────────────
+
+/// The first flow's two decryption cells as the document writes them: from
+/// `"decryption":` up to the `,"bytes":` that follows them. A row carries no
+/// such cell, so the first one in a document is its first flow's.
+fn opening(doc: &str) -> &str {
+    let at = doc
+        .find("\"decryption\":")
+        .unwrap_or_else(|| panic!("no decryption cell in {doc}"));
+    let end = doc[at..]
+        .find(",\"bytes\":")
+        .unwrap_or_else(|| panic!("the cells are not followed by bytes in {doc}"))
+        + at;
+    &doc[at..end]
+}
+
+/// A key log for the capture's connection that carries only the SERVER's
+/// application secret: with the capture's own client secret, the connection's
+/// secrets come by both routes.
+fn server_key_log() -> String {
+    format!(
+        "SERVER_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&RANDOM),
+        hex(&secret())
+    )
+}
+
+/// A TLS ServerHello negotiating `suite`: no session id, no extensions.
+fn server_hello(suite: u16) -> Vec<u8> {
+    let mut body = vec![0x03u8, 0x03];
+    body.extend_from_slice(&[0x11; 32]);
+    body.push(0);
+    body.extend_from_slice(&suite.to_be_bytes());
+    body.push(0);
+    let mut handshake = vec![0x02u8, 0x00, 0x00, body.len() as u8];
+    handshake.extend_from_slice(&body);
+    let mut record = vec![0x16u8, 0x03, 0x03];
+    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+    record.extend_from_slice(&handshake);
+    record
+}
+
+/// A pcapng of one TLS flow in both directions: the client's ClientHello and
+/// three sealed KeepAlives, then the server's `reply`.
+fn two_way_tls_capture(reply: &[u8]) -> Vec<u8> {
+    let mut enc = sealer();
+    let mut stream = client_hello();
+    for n in 0..3u64 {
+        stream.extend_from_slice(&sealed_keep_alive(&mut enc, n));
+    }
+    let client = tcp_packet(1000, &stream);
+    let server = tcp_packet_reverse(5000, reply);
+    wz_capture::pcapng::write(
+        &[(LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &client), (0, 1_000_100, &server)],
+    )
+}
+
+/// A pcapng of a TLS flow joined after its ClientHello: three sealed
+/// KeepAlives and nothing before them.
+fn midsession_tls_capture() -> Vec<u8> {
+    let mut enc = sealer();
+    let mut stream = Vec::new();
+    for n in 0..3u64 {
+        stream.extend_from_slice(&sealed_keep_alive(&mut enc, n));
+    }
+    let packet = tcp_packet(1000, &stream);
+    wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 1_000_000, &packet)])
+}
+
+/// THE KEYED DOOR SAYS WHAT THE PASS MADE OF A TLS FLOW AND WHERE ITS KEYS CAME
+/// FROM: the key log handed in, the capture's own block, both, none at all,
+/// and another connection's.
+#[test]
+fn the_session_table_says_what_the_pass_made_of_a_tls_flow_and_where_its_keys_came_from() {
+    let none = WZ_DISSECT_LIMITS_NONE;
+    let keys = key_log();
+    let bare = tls_capture(None);
+
+    let handed = call_session_table_keyed(&bare, none, Some(keys.as_bytes())).expect("reads");
+    assert_eq!(
+        opening(&handed),
+        "\"decryption\":\"opened\",\"key_source\":\"key_log\"",
+        "{handed}"
+    );
+
+    let carried = session_table::call_pcap(&tls_capture(Some(&keys)), none).expect("reads");
+    assert_eq!(
+        opening(&carried),
+        "\"decryption\":\"opened\",\"key_source\":\"capture\"",
+        "{carried}"
+    );
+
+    let server = server_key_log();
+    let both = call_session_table_keyed(&tls_capture(Some(&keys)), none, Some(server.as_bytes()))
+        .expect("reads");
+    assert_eq!(
+        opening(&both),
+        "\"decryption\":\"opened\",\"key_source\":\"both\"",
+        "{both}"
+    );
+
+    let without = call_session_table_keyed(&bare, none, None).expect("reads");
+    assert_eq!(
+        opening(&without),
+        "\"decryption\":\"no_keys\",\"key_source\":null",
+        "{without}"
+    );
+    assert!(
+        without.contains("{\"cell\":\"key_source\",\"reason\":\"not_opened\"}"),
+        "{without}"
+    );
+
+    let other = other_key_log();
+    let unmatched = call_session_table_keyed(&bare, none, Some(other.as_bytes())).expect("reads");
+    assert_eq!(
+        opening(&unmatched),
+        "\"decryption\":\"no_matching_key\",\"key_source\":null",
+        "{unmatched}"
+    );
+}
+
+/// A HALF KEY LOG: the client's secret opens the client's records, and the
+/// server's records have no key, so the flow reads `key_for_one_direction`.
+#[test]
+fn a_half_key_log_reads_key_for_one_direction() {
+    let mut reply = vec![0x17u8, 0x03, 0x03, 0x00, 0x20];
+    reply.extend_from_slice(&[0xab; 0x20]);
+    let file = two_way_tls_capture(&reply);
+    let keys = key_log();
+    let doc = call_session_table_keyed(&file, WZ_DISSECT_LIMITS_NONE, Some(keys.as_bytes()))
+        .expect("reads");
+    assert_eq!(
+        opening(&doc),
+        "\"decryption\":\"key_for_one_direction\",\"key_source\":null",
+        "{doc}"
+    );
+}
+
+/// A CAPTURE JOINED AFTER THE CLIENTHELLO has no random to match a key by, so
+/// the right key log reads `handshake_not_seen`, and no key at all `no_keys`.
+#[test]
+fn a_capture_joined_after_its_clienthello_reads_handshake_not_seen() {
+    let file = midsession_tls_capture();
+    let keys = key_log();
+    let doc = call_session_table_keyed(&file, WZ_DISSECT_LIMITS_NONE, Some(keys.as_bytes()))
+        .expect("reads");
+    assert!(
+        doc.contains("\"encrypted\":\"encrypted_unreadable\""),
+        "the fixture must be read as TLS by its record chain: {doc}"
+    );
+    assert_eq!(
+        opening(&doc),
+        "\"decryption\":\"handshake_not_seen\",\"key_source\":null",
+        "{doc}"
+    );
+    let bare = call_session_table_keyed(&file, WZ_DISSECT_LIMITS_NONE, None).expect("reads");
+    assert_eq!(
+        opening(&bare),
+        "\"decryption\":\"no_keys\",\"key_source\":null",
+        "{bare}"
+    );
+}
+
+/// A SERVERHELLO THAT NEGOTIATED A TLS 1.2 SUITE reads `not_supported`, with
+/// the key log and without it: the suite is decided before the keys.
+#[test]
+fn a_tls_flow_of_a_suite_this_pass_does_not_open_reads_not_supported() {
+    let file = two_way_tls_capture(&server_hello(0xC02F));
+    let keys = key_log();
+    for keylog in [None, Some(keys.as_bytes())] {
+        let doc = call_session_table_keyed(&file, WZ_DISSECT_LIMITS_NONE, keylog).expect("reads");
+        assert_eq!(
+            opening(&doc),
+            "\"decryption\":\"not_supported\",\"key_source\":null",
+            "{doc}"
+        );
+    }
+    // The control: the suite this capture's records are sealed under.
+    let file = two_way_tls_capture(&server_hello(0x1302));
+    let doc = call_session_table_keyed(&file, WZ_DISSECT_LIMITS_NONE, Some(keys.as_bytes()))
+        .expect("reads");
+    assert_eq!(
+        opening(&doc),
+        "\"decryption\":\"opened\",\"key_source\":\"key_log\"",
+        "{doc}"
+    );
+}
+
+/// A HANDLE SAYS `no_keys` UNTIL IT IS HANDED KEYS, `no_matching_key` for
+/// another connection's, and `opened` from the key log once the right ones
+/// arrive.
+#[test]
+fn a_handle_says_no_keys_then_opened_from_the_key_log_it_was_handed() {
+    let mut feed = LiveFeed::new();
+    feed.push_records(2);
+    let before = feed.document(wz_dissect_live_session_table);
+    assert_eq!(
+        opening(&before),
+        "\"decryption\":\"no_keys\",\"key_source\":null",
+        "{before}"
+    );
+
+    feed.add_keylog(other_key_log().as_bytes());
+    let other = feed.document(wz_dissect_live_session_table);
+    assert_eq!(
+        opening(&other),
+        "\"decryption\":\"no_matching_key\",\"key_source\":null",
+        "{other}"
+    );
+
+    feed.add_keylog(key_log().as_bytes());
+    let after = feed.document(wz_dissect_live_session_table);
+    assert_eq!(
+        opening(&after),
+        "\"decryption\":\"opened\",\"key_source\":\"key_log\"",
+        "{after}"
+    );
+}
+
 /// NO DOOR WRITES A BYTE OF A KEY. A key log whose secret is recognisable is
 /// handed to every door that takes one, well formed and malformed, and carried
 /// in a capture's own Decryption Secrets Block; every string any door hands
@@ -834,5 +1054,65 @@ fn a_replayed_quic_capture_reads_with_the_keys_it_carries_through_both_replay_do
     assert!(
         table.contains("\"encrypted\":\"encrypted_unreadable\""),
         "{table}"
+    );
+}
+
+/// A QUIC FLOW SAYS WHAT THE PASS MADE OF IT: `opened` from the key log at the
+/// keyed door, `no_keys` with none (its ClientHello was read, so the handshake
+/// was seen), and a handle pushed the same packets says `no_keys` and then,
+/// handed the key log, `opened` from it, as the keyed door does.
+#[test]
+fn a_quic_flow_says_what_the_pass_made_of_it_at_the_door_and_on_a_handle() {
+    let none = WZ_DISSECT_LIMITS_NONE;
+    let keys = quic_key_log();
+    let file = quic_capture(None);
+
+    let keyed = call_session_table_keyed(&file, none, Some(keys.as_bytes())).expect("reads");
+    assert_eq!(
+        opening(&keyed),
+        "\"decryption\":\"opened\",\"key_source\":\"key_log\"",
+        "{keyed}"
+    );
+    let bare = call_session_table_keyed(&file, none, None).expect("reads");
+    assert_eq!(
+        opening(&bare),
+        "\"decryption\":\"no_keys\",\"key_source\":null",
+        "{bare}"
+    );
+
+    let handle = open_live(none).expect("the preset opens");
+    push_quic(handle);
+    let before = document_of(handle, wz_dissect_live_session_table);
+    assert_eq!(hand_keys(handle, &keys), 1);
+    let after = document_of(handle, wz_dissect_live_session_table);
+    unsafe { wz_dissect_live_close(handle) };
+    assert_eq!(opening(&before), opening(&bare), "{before}");
+    assert_eq!(opening(&after), opening(&keyed), "{after}");
+}
+
+/// A REPLAYED CAPTURE has ended, so its flows' cells are the ones the file
+/// door writes for the same bytes: the QUIC flow opened from the capture's
+/// own block, and the TLS flow likewise.
+#[test]
+fn a_replayed_capture_states_the_decryption_cells_the_file_door_states() {
+    for file in [
+        quic_capture(Some(&quic_key_log())),
+        quic_capture(None),
+        tls_capture(Some(&key_log())),
+        tls_capture(None),
+    ] {
+        let from_file = session_table::call_pcap(&file, WZ_DISSECT_LIMITS_NONE).expect("reads");
+        let handle = replay(&file, WZ_DISSECT_LIMITS_NONE).expect("replays");
+        let from_handle = document_of(handle, wz_dissect_live_session_table);
+        unsafe { wz_dissect_live_close(handle) };
+        assert_eq!(opening(&from_handle), opening(&from_file), "{from_file}");
+    }
+    let carried =
+        session_table::call_pcap(&quic_capture(Some(&quic_key_log())), WZ_DISSECT_LIMITS_NONE)
+            .expect("reads");
+    assert_eq!(
+        opening(&carried),
+        "\"decryption\":\"opened\",\"key_source\":\"capture\"",
+        "{carried}"
     );
 }

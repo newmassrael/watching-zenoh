@@ -30,12 +30,14 @@ use wz_session_core::wire_const;
 
 use crate::datagram_tests::{fill_ipv4_checksum, fill_tcp_checksum, udp_packet, udp_packet_v6};
 use crate::link::LINKTYPE_ETHERNET;
+use crate::quic::QuicKeyFinding;
 use crate::session_table::{
-    session_table, AnnouncedVersion, Cell, DirectedAnomalies, Encryption, SessionRow, Unstated,
-    Why, ZenohVerdict,
+    session_table, AnnouncedVersion, Cell, DecryptionOutcome, DirectedAnomalies, Encryption,
+    SessionRow, Unstated, Why, ZenohVerdict,
 };
 use crate::session_table_json::{refusal_json, session_table_json, Refusal};
 use crate::tcp::StreamAnomalies;
+use crate::tls::{KeySource, NotDecrypted};
 use crate::{Dissection, DissectionLimits};
 
 /// What a door that reads a container under a ceiling writes: the table, or the
@@ -357,7 +359,7 @@ fn tls_flow(records: &[Vec<u8>]) -> Packets {
 }
 
 /// The opener a test needs: a record is `content_type || plaintext`, so opening
-/// one is a slice.
+/// one is a slice. Its secrets came from a key log a caller handed in.
 struct SliceOpener;
 
 impl crate::tls::RecordOpener for SliceOpener {
@@ -365,8 +367,8 @@ impl crate::tls::RecordOpener for SliceOpener {
         &mut self,
         _client_random: Option<&[u8; 32]>,
         _client_direction: Option<Direction>,
-    ) -> Result<(), crate::tls::NotDecrypted> {
-        Ok(())
+    ) -> Result<KeySource, crate::tls::NotDecrypted> {
+        Ok(KeySource::KeyLog)
     }
 
     fn open(
@@ -976,14 +978,25 @@ fn a_udp_flow_states_no_anomalies_and_says_why_beside_a_tcp_flow_that_does() {
         count("stream_anomalies/high_to_low/partial_overlaps"),
         number(1)
     );
-    assert!(array(tcp, "unstated").is_empty(), "{doc}");
+    // Both flows are clear, so each names its two decryption cells
+    // `not_encrypted`; that is all the TCP flow names.
+    let named = |flow: &Json5Value| -> Vec<(String, String)> {
+        array(flow, "unstated")
+            .iter()
+            .map(|u| (text(u, "cell").to_string(), text(u, "reason").to_string()))
+            .collect()
+    };
+    let clear = [
+        ("decryption".to_string(), "not_encrypted".to_string()),
+        ("key_source".to_string(), "not_encrypted".to_string()),
+    ];
+    assert_eq!(named(tcp), clear.to_vec(), "{doc}");
 
     let udp = of_link("udp").unwrap_or_else(|| panic!("a udp flow: {doc}"));
     assert!(is_null(udp, "stream_anomalies"), "{doc}");
-    let unstated = array(udp, "unstated");
-    assert_eq!(unstated.len(), 1, "{doc}");
-    assert_eq!(text(&unstated[0], "cell"), "stream_anomalies");
-    assert_eq!(text(&unstated[0], "reason"), "no_sequence");
+    let mut want = clear.to_vec();
+    want.push(("stream_anomalies".to_string(), "no_sequence".to_string()));
+    assert_eq!(named(udp), want, "{doc}");
 }
 
 /// AN AF_VSOCK FLOW STATES NO ANOMALIES, and its share of the health counters is
@@ -1250,9 +1263,18 @@ fn keys_that_name_another_connection_read_no_matching_key() {
     assert_eq!(row.acceptor, Err(Unstated::NoMatchingKey));
     assert_eq!(row.phase, Err(Unstated::NoMatchingKey));
     assert_eq!(row.frames, Err(Unstated::NoMatchingKey));
+    assert_eq!(
+        row.links[0].decryption,
+        Ok(DecryptionOutcome::NoMatchingKey)
+    );
+    assert_eq!(row.links[0].key_source, Err(Unstated::NotOpened));
     let doc = session_table_json(&d);
     assert!(
         doc.contains("{\"cell\":\"phase\",\"reason\":\"no_matching_key\"}"),
+        "{doc}"
+    );
+    assert!(
+        doc.contains("\"decryption\":\"no_matching_key\",\"key_source\":null,"),
         "{doc}"
     );
 
@@ -1388,6 +1410,438 @@ fn a_quic_flow_is_unreadable_until_a_caller_recovers_its_streams() {
         row.bytes,
         quic_initial().len() as u64,
         "the bytes of the flow are the UDP payload"
+    );
+}
+
+// ── what the decryption pass made of a flow ────────────────────────────────
+
+/// An opener that names `0` as where its secrets came from and opens a record
+/// as [`SliceOpener`] does.
+struct Sourced(KeySource);
+
+impl crate::tls::RecordOpener for Sourced {
+    fn begin_flow(
+        &mut self,
+        _client_random: Option<&[u8; 32]>,
+        _client_direction: Option<Direction>,
+    ) -> Result<KeySource, NotDecrypted> {
+        Ok(self.0)
+    }
+
+    fn open(
+        &mut self,
+        direction: Direction,
+        record: &crate::tls::EncryptedRecord,
+        bytes: &[u8],
+    ) -> Option<crate::tls::OpenedRecord> {
+        crate::tls::RecordOpener::open(&mut SliceOpener, direction, record, bytes)
+    }
+
+    fn has_keys(&self, _direction: Direction) -> bool {
+        true
+    }
+}
+
+/// An opener that declines every flow with one reason.
+struct Declining(NotDecrypted);
+
+impl crate::tls::RecordOpener for Declining {
+    fn begin_flow(
+        &mut self,
+        _client_random: Option<&[u8; 32]>,
+        _client_direction: Option<Direction>,
+    ) -> Result<KeySource, NotDecrypted> {
+        Err(self.0)
+    }
+
+    fn open(
+        &mut self,
+        _direction: Direction,
+        _record: &crate::tls::EncryptedRecord,
+        _bytes: &[u8],
+    ) -> Option<crate::tls::OpenedRecord> {
+        None
+    }
+
+    fn has_keys(&self, _direction: Direction) -> bool {
+        false
+    }
+}
+
+/// An opener that accepts every flow and opens no record of it.
+struct Refusing;
+
+impl crate::tls::RecordOpener for Refusing {
+    fn begin_flow(
+        &mut self,
+        _client_random: Option<&[u8; 32]>,
+        _client_direction: Option<Direction>,
+    ) -> Result<KeySource, NotDecrypted> {
+        Ok(KeySource::KeyLog)
+    }
+
+    fn open(
+        &mut self,
+        _direction: Direction,
+        _record: &crate::tls::EncryptedRecord,
+        _bytes: &[u8],
+    ) -> Option<crate::tls::OpenedRecord> {
+        None
+    }
+
+    fn has_keys(&self, _direction: Direction) -> bool {
+        true
+    }
+}
+
+/// The one link of a one-row table.
+fn only_link(d: &Dissection) -> crate::session_table::Link {
+    let table = session_table(d);
+    let row = only(&table);
+    assert_eq!(row.links.len(), 1, "one flow was expected: {table:?}");
+    row.links[0].clone()
+}
+
+/// The TLS flow `decrypted_tls` opens, before any pass.
+fn tls_session_flow() -> Dissection {
+    let client = |wire: &[u8]| protected(&stream_unit(wire));
+    tls_flow(&[client(&init(&ZID_A, false)), client(&keepalive())]).dissect()
+}
+
+/// A CLEAR FLOW HAS NOTHING TO DECRYPT: both cells are null and named
+/// `not_encrypted`, on a stream flow and on a datagram flow alike.
+#[test]
+fn a_clear_flow_states_no_decryption_and_names_it_not_encrypted() {
+    for d in [
+        tcp_session(true, 2).0.dissect(),
+        udp_session(true, 2).0.dissect(),
+    ] {
+        let link = only_link(&d);
+        assert_eq!(link.encryption, Encryption::Clear);
+        assert_eq!(link.decryption, Err(Unstated::NotEncrypted));
+        assert_eq!(link.key_source, Err(Unstated::NotEncrypted));
+        let doc = session_table_json(&d);
+        assert!(
+            doc.contains(
+                "\"encrypted\":\"clear\",\"decryption\":null,\"key_source\":null,\"bytes\":"
+            ),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(
+                "{\"cell\":\"decryption\",\"reason\":\"not_encrypted\"},\
+                 {\"cell\":\"key_source\",\"reason\":\"not_encrypted\"}"
+            ),
+            "{doc}"
+        );
+    }
+}
+
+/// NO KEY MATERIAL AT ALL: a TLS flow no pass reached reads `no_keys`, and
+/// has no source because nothing opened it.
+#[test]
+fn a_tls_flow_no_key_reached_reads_no_keys_and_has_no_source() {
+    let d = tls_session_flow();
+    assert!(!d.decryption_keys_reached());
+    let link = only_link(&d);
+    assert_eq!(link.encryption, Encryption::EncryptedUnreadable);
+    assert_eq!(link.decryption, Ok(DecryptionOutcome::NoKeys));
+    assert_eq!(link.key_source, Err(Unstated::NotOpened));
+    let doc = session_table_json(&d);
+    assert!(
+        doc.contains("\"decryption\":\"no_keys\",\"key_source\":null,"),
+        "{doc}"
+    );
+    assert!(
+        doc.contains("{\"cell\":\"key_source\",\"reason\":\"not_opened\"}"),
+        "{doc}"
+    );
+}
+
+/// KEYS REACHED A PASS AND NONE JUDGED THIS FLOW: pending, not `no_keys`. The
+/// flag is what tells the two apart; the outcome alone is `None` in both.
+#[test]
+fn a_tls_flow_no_pass_judged_is_pending_once_keys_reached_a_pass() {
+    let mut d = tls_session_flow();
+    d.note_decryption_keys();
+    assert!(d.decryption_keys_reached());
+    let link = only_link(&d);
+    assert_eq!(link.decryption, Err(Unstated::NotYetKnown));
+    assert_eq!(link.key_source, Err(Unstated::NotYetKnown));
+}
+
+/// AN OPENED FLOW NAMES WHERE ITS SECRETS CAME FROM: the source is the one the
+/// opener answered `begin_flow` with, each of the three.
+#[test]
+fn a_flow_the_pass_opened_states_the_source_its_opener_named() {
+    for source in KeySource::all() {
+        let mut d = tls_session_flow();
+        d.decrypt_with(&mut Sourced(source));
+        let link = only_link(&d);
+        assert_eq!(link.encryption, Encryption::DecryptedTls);
+        assert_eq!(link.decryption, Ok(DecryptionOutcome::Opened), "{source:?}");
+        assert_eq!(link.key_source, Ok(source));
+        let doc = session_table_json(&d);
+        assert!(
+            doc.contains(&alloc::format!(
+                "\"encrypted\":\"decrypted_tls\",\"decryption\":\"opened\",\
+                 \"key_source\":\"{}\",\"bytes\":",
+                source.name()
+            )),
+            "{doc}"
+        );
+    }
+}
+
+/// EVERY REFUSAL READS THE WORD OF ITS REMEDY. The flow's first refusal is
+/// what is read, whatever produced it; a source is never stated for a flow
+/// that did not open.
+#[test]
+fn every_tls_refusal_reads_the_decryption_word_of_its_remedy() {
+    let cases = [
+        (NotDecrypted::NoKeysSupplied, DecryptionOutcome::NoKeys),
+        (
+            NotDecrypted::NoSessionIdentity,
+            DecryptionOutcome::HandshakeNotSeen,
+        ),
+        (
+            NotDecrypted::NoKeyForSession,
+            DecryptionOutcome::NoMatchingKey,
+        ),
+        (
+            NotDecrypted::RecordRefusedKeys {
+                direction: Direction::A,
+                index: 0,
+            },
+            DecryptionOutcome::KeysRefused,
+        ),
+        (
+            NotDecrypted::NoKeyForDirection {
+                direction: Direction::B,
+            },
+            DecryptionOutcome::KeyForOneDirection,
+        ),
+        (
+            NotDecrypted::RecordNotHeld {
+                direction: Direction::A,
+                index: 3,
+            },
+            DecryptionOutcome::RecordNotHeld,
+        ),
+    ];
+    for (reason, want) in cases {
+        let mut d = tls_session_flow();
+        d.decrypt_with(&mut Declining(reason));
+        let link = only_link(&d);
+        assert_eq!(link.decryption, Ok(want), "{reason:?}");
+        assert_eq!(link.key_source, Err(Unstated::NotOpened), "{reason:?}");
+    }
+
+    // The same words reached the way a pass reaches them: keys accepted and
+    // the first record refused.
+    let mut d = tls_session_flow();
+    d.decrypt_with(&mut Refusing);
+    let link = only_link(&d);
+    assert_eq!(link.decryption, Ok(DecryptionOutcome::KeysRefused));
+    assert_eq!(link.key_source, Err(Unstated::NotOpened));
+}
+
+/// A SUITE THE PASS DOES NOT OPEN is `not_supported`, decided before keys: the
+/// same flow reads it with no key at all and with keys that would open it.
+#[test]
+fn a_suite_the_pass_cannot_open_reads_not_supported_before_any_key() {
+    let d = unsupported_suite();
+    assert_eq!(
+        d.encrypted_flows()[0].negotiated_suite,
+        Some(0xC02F),
+        "the fixture's ServerHello must be read, or this proves nothing"
+    );
+    let link = only_link(&d);
+    assert_eq!(link.decryption, Ok(DecryptionOutcome::NotSupported));
+    assert_eq!(link.key_source, Err(Unstated::NotOpened));
+
+    let mut keyed = unsupported_suite();
+    keyed.note_decryption_keys();
+    keyed.decrypt_with(&mut SliceOpener);
+    assert_eq!(
+        only_link(&keyed).decryption,
+        Ok(DecryptionOutcome::NotSupported)
+    );
+
+    // The control: a suite the pass opens leaves the verdict to the keys.
+    let supported = tls_flow(&[
+        server_hello(0x1301),
+        tls_record(crate::tls::CT_APPLICATION_DATA, &[1; 30]),
+    ])
+    .dissect();
+    assert_eq!(
+        only_link(&supported).decryption,
+        Ok(DecryptionOutcome::NoKeys)
+    );
+}
+
+/// KEYS ACCEPTED AND NOTHING OPENED YET: `encrypted` already reads
+/// `decrypted_tls`, and `decryption` says the verdict is still pending.
+#[test]
+fn accepted_keys_that_opened_nothing_yet_read_not_yet_known() {
+    let d = accepted_and_nothing_opened();
+    let link = only_link(&d);
+    assert_eq!(link.encryption, Encryption::DecryptedTls);
+    assert_eq!(link.decryption, Err(Unstated::NotYetKnown));
+    assert_eq!(link.key_source, Err(Unstated::NotYetKnown));
+    let doc = session_table_json(&d);
+    assert!(
+        doc.contains(
+            "{\"cell\":\"decryption\",\"reason\":\"not_yet_known\"},\
+             {\"cell\":\"key_source\",\"reason\":\"not_yet_known\"}"
+        ),
+        "{doc}"
+    );
+}
+
+/// A FLOW PUT BACK IN FRONT OF A PASS forgets the source it was accepted with,
+/// with the rest of its finding: the next pass names its own.
+#[test]
+fn a_reopened_flow_forgets_the_source_it_was_accepted_with() {
+    let mut d = tls_session_flow();
+    d.decrypt_with(&mut Refusing);
+    let source = |d: &Dissection| match d.flows()[0].framing() {
+        crate::Framing::Encrypted(state) => state.key_source,
+        _ => panic!("the fixture is a TLS flow"),
+    };
+    assert_eq!(
+        source(&d),
+        Some(KeySource::KeyLog),
+        "accepted, then refused"
+    );
+    assert_eq!(d.reopen_unopened(), 1);
+    assert_eq!(source(&d), None);
+    assert_eq!(only_link(&d).decryption, Ok(DecryptionOutcome::NoKeys));
+}
+
+/// EVERY QUIC RULE, in order: each finding reads the word its rule gives, and
+/// the rules before it are what make it the first that holds.
+#[test]
+fn every_quic_finding_reads_the_decryption_word_of_its_rule() {
+    let installed = quic_keys_installed();
+    let unread = |finding: Option<QuicKeyFinding>, keys: bool| {
+        let mut d = quic_flow();
+        let flow = d.datagram_flows()[0].flow;
+        if keys {
+            d.note_decryption_keys();
+        }
+        if let Some(found) = finding {
+            d.set_quic_key_finding(&flow, found);
+        }
+        let link = only_link(&d);
+        assert_eq!(link.encryption, Encryption::EncryptedUnreadable);
+        (link.decryption, link.key_source)
+    };
+    let no_identity = QuicKeyFinding::default();
+    let cases: [(
+        &str,
+        Option<QuicKeyFinding>,
+        bool,
+        crate::session_table::Stated<DecryptionOutcome>,
+    ); 10] = [
+        (
+            "no pass, no key",
+            None,
+            false,
+            Ok(DecryptionOutcome::NoKeys),
+        ),
+        ("no pass, keys", None, true, Err(Unstated::NotYetKnown)),
+        (
+            "a version it does not open",
+            Some(QuicKeyFinding {
+                version_refused: true,
+                ..installed
+            }),
+            true,
+            Ok(DecryptionOutcome::NotSupported),
+        ),
+        (
+            "no identity, the feed goes on",
+            Some(QuicKeyFinding {
+                pending: true,
+                ..no_identity
+            }),
+            true,
+            Err(Unstated::NotYetKnown),
+        ),
+        (
+            "no identity, ended",
+            Some(no_identity),
+            true,
+            Ok(DecryptionOutcome::HandshakeNotSeen),
+        ),
+        (
+            "an identity and no key",
+            Some(QuicKeyFinding {
+                identity: true,
+                ..no_identity
+            }),
+            false,
+            Ok(DecryptionOutcome::NoKeys),
+        ),
+        (
+            "keys for other connections",
+            Some(QuicKeyFinding {
+                identity: true,
+                ..no_identity
+            }),
+            true,
+            Ok(DecryptionOutcome::NoMatchingKey),
+        ),
+        (
+            "a packet refused its keys",
+            Some(QuicKeyFinding {
+                refused_under_keys: [false, true],
+                ..installed
+            }),
+            true,
+            Ok(DecryptionOutcome::KeysRefused),
+        ),
+        (
+            "one direction's keys",
+            Some(QuicKeyFinding {
+                no_keys: [false, true],
+                opened_past_initial: [true, false],
+                ..installed
+            }),
+            true,
+            Ok(DecryptionOutcome::KeyForOneDirection),
+        ),
+        (
+            "installed and nothing yet",
+            Some(installed),
+            true,
+            Err(Unstated::NotYetKnown),
+        ),
+    ];
+    for (name, finding, keys, want) in cases {
+        let (decryption, key_source) = unread(finding, keys);
+        assert_eq!(decryption, want, "{name}");
+        let want_source: crate::session_table::Stated<KeySource> = match want {
+            Ok(_) => Err(Unstated::NotOpened),
+            Err(reason) => Err(reason),
+        };
+        assert_eq!(key_source, want_source, "{name}");
+    }
+
+    // RECOVERED is `opened`, with the source the opener installed.
+    let d = decrypted_quic();
+    let link = only_link(&d);
+    assert_eq!(link.encryption, Encryption::DecryptedQuic);
+    assert_eq!(link.decryption, Ok(DecryptionOutcome::Opened));
+    assert_eq!(link.key_source, Ok(KeySource::Capture));
+    let doc = session_table_json(&d);
+    assert!(
+        doc.contains(
+            "\"encrypted\":\"decrypted_quic\",\"decryption\":\"opened\",\
+             \"key_source\":\"capture\",\"bytes\":"
+        ),
+        "{doc}"
     );
 }
 
@@ -1923,7 +2377,48 @@ fn every_fixture_document() -> Vec<(String, String)> {
     ));
     docs.push(("no clock".to_string(), session_table_json(&no_clock())));
     docs.push(("mixed".to_string(), session_table_json(&mixed_roles())));
+    docs.push((
+        "tls accepted, nothing opened".to_string(),
+        session_table_json(&accepted_and_nothing_opened()),
+    ));
+    docs.push((
+        "tls of an unsupported suite".to_string(),
+        session_table_json(&unsupported_suite()),
+    ));
     docs
+}
+
+/// A TLS flow that holds no protected record (a ClientHello and a
+/// ChangeCipherSpec, which is not protected), passed with keys the opener
+/// accepts: the keys are accepted and no record has opened.
+fn accepted_and_nothing_opened() -> Dissection {
+    let mut d = tls_flow(&[tls_record(crate::tls::CT_CHANGE_CIPHER_SPEC, &[1])]).dissect();
+    d.decrypt_with(&mut SliceOpener);
+    d
+}
+
+/// A TLS ServerHello negotiating `suite`, well formed enough for
+/// [`crate::tls::server_hello_suite`]: no session id, no extensions.
+fn server_hello(suite: u16) -> Vec<u8> {
+    let mut body = vec![0x03u8, 0x03];
+    body.extend_from_slice(&[0x11; 32]);
+    body.push(0);
+    body.extend_from_slice(&suite.to_be_bytes());
+    body.push(0);
+    let mut handshake = vec![0x02u8, 0x00, 0x00, body.len() as u8];
+    handshake.extend_from_slice(&body);
+    tls_record(0x16, &handshake)
+}
+
+/// A TLS flow whose ServerHello negotiated a TLS 1.2 suite
+/// (`TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`), then one protected record. No
+/// key reached it: the suite decides first.
+fn unsupported_suite() -> Dissection {
+    tls_flow(&[
+        server_hello(0xC02F),
+        tls_record(crate::tls::CT_APPLICATION_DATA, &[1; 30]),
+    ])
+    .dissect()
 }
 
 fn decrypted_tls() -> Dissection {
@@ -1943,7 +2438,7 @@ impl crate::tls::RecordOpener for OtherConnectionsKeys {
         &mut self,
         _client_random: Option<&[u8; 32]>,
         _client_direction: Option<Direction>,
-    ) -> Result<(), crate::tls::NotDecrypted> {
+    ) -> Result<KeySource, crate::tls::NotDecrypted> {
         Err(crate::tls::NotDecrypted::NoKeyForSession)
     }
 
@@ -1971,9 +2466,23 @@ fn no_matching_key() -> Dissection {
     d
 }
 
+/// The finding a QUIC pass leaves on a flow whose ClientHello it read and
+/// whose secrets, all from the capture's own Decryption Secrets Blocks, it
+/// installed.
+fn quic_keys_installed() -> QuicKeyFinding {
+    QuicKeyFinding {
+        identity: true,
+        keys_installed: true,
+        key_source: Some(KeySource::Capture),
+        ..QuicKeyFinding::default()
+    }
+}
+
 fn decrypted_quic() -> Dissection {
     let mut d = quic_flow();
     let flow = d.datagram_flows()[0].flow;
+    d.note_decryption_keys();
+    d.set_quic_key_finding(&flow, quic_keys_installed());
     d.feed_quic_stream(
         flow,
         Direction::A,
@@ -2376,7 +2885,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":31679,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":12}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":13}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
@@ -2390,14 +2899,16 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     assert!(doc.starts_with(&want), "{doc}");
     assert!(
         doc.contains(&alloc::format!(
-            "\"link\":\"tcp\"}},\"encrypted\":\"clear\",\"bytes\":64,{flow},\
+            "\"link\":\"tcp\"}},\"encrypted\":\"clear\",\
+             \"decryption\":null,\"key_source\":null,\"bytes\":64,{flow},\
              \"unit_readings\":{{\"explained\":{{\"units\":10,\"bytes\":44}},\
              \"residual\":{{\"units\":0,\"bytes\":0}},\
              \"undecoded\":{{\"units\":0,\"bytes\":0}}}},\
              \"stream_anomalies\":{{\
              \"low_to_high\":{{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}},\
              \"high_to_low\":{{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}}}},\
-             \"unstated\":[]}}]}}],\
+             \"unstated\":[{{\"cell\":\"decryption\",\"reason\":\"not_encrypted\"}},\
+             {{\"cell\":\"key_source\",\"reason\":\"not_encrypted\"}}]}}]}}],\
              \"excluded\":\
              [{{\"why\":\"multicast_group\",\"count\":0}},{{\"why\":\"scouting_only\",\"count\":0}}],\
              \"dropped_by_limits\":{{"

@@ -29,9 +29,18 @@
 //!   `undecoded`, each `{"units":N,"bytes":B}`, partitioning the row's units.
 //!   The same counts weigh in `zenoh_evidence` as the `unit_reading` check;
 //! * `flows` -- the flows the row is made of, each with the flow object every
-//!   other document carries and its own `encrypted`, `bytes`, the three zenoh
-//!   keys, `unit_readings`, `stream_anomalies` and `unstated`, for a consumer
-//!   that joins.
+//!   other document carries and its own `encrypted`, `decryption`,
+//!   `key_source`, `bytes`, the three zenoh keys, `unit_readings`,
+//!   `stream_anomalies` and `unstated`, for a consumer that joins.
+//!
+//! # Decryption
+//!
+//! A flow's `decryption` is what the decryption pass made of it
+//! ([`crate::session_table::DecryptionOutcome`]) and its `key_source` where the
+//! secrets that opened it came from ([`crate::tls::KeySource`]). A flow that is
+//! not TLS or QUIC states neither, with the reason `not_encrypted`; a verdict
+//! still pending is `not_yet_known`; a flow the pass did not open has no
+//! source, `not_opened`.
 //!
 //! # Stream anomalies
 //!
@@ -217,12 +226,27 @@ fn push_link(link: &Link, out: &mut String) {
     let mut unstated: Vec<(Cell, Unstated)> = Vec::new();
     out.push_str("{\"flow\":");
     crate::census_json::push_flow(&link.flow, out);
-    let _ = write!(
+    let _ = write!(out, ",\"encrypted\":\"{}\",", link.encryption.name());
+    push_cell(
         out,
-        ",\"encrypted\":\"{}\",\"bytes\":{}",
-        link.encryption.name(),
-        link.bytes,
+        &mut unstated,
+        Cell::Decryption,
+        &link.decryption,
+        |outcome, o| {
+            let _ = write!(o, "\"{}\"", outcome.name());
+        },
     );
+    out.push(',');
+    push_cell(
+        out,
+        &mut unstated,
+        Cell::KeySource,
+        &link.key_source,
+        |source, o| {
+            let _ = write!(o, "\"{}\"", source.name());
+        },
+    );
+    let _ = write!(out, ",\"bytes\":{}", link.bytes);
     crate::fields_json::push_zenoh(link.versions, &link.evidence, out);
     crate::fields_json::push_unit_readings(link.readings, out);
     out.push(',');
