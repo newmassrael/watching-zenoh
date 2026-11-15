@@ -6463,7 +6463,11 @@ layer_c1v_cargo_test_ws() {
     # 14 -> 16: the face loop's two heartbeat tests (`wz_runtime_tokio::liveness`), the idle loop
     # that rests and the loop stopped in its tick; ungated, so C1y moves by the same +2. Read off
     # what the build host PRINTED (`16 passed; 702 filtered out`).
-    _runci_guarded_test C1v 16 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # 16 -> 18: the two reserved-face id tests of the face counter
+    # (`the_reserved_faces_are_a_closed_band_apart_from_every_minted_id`,
+    # `the_counter_refuses_to_mint_a_reserved_id`); ungated, so C1y moves by the same +2. Read
+    # off what the build host PRINTED (`18 passed; 723 filtered out`).
+    _runci_guarded_test C1v 18 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -10376,7 +10380,9 @@ layer_c1y_cargo_test_routing_peer() {
     # (hosted run 41192748568 printed `22 passed`; the build host read 22 at 925109f3ee).
     # 22 -> 24: the C1v twin's same +2, the face loop's heartbeat tests. Read off what the build
     # host PRINTED (`24 passed; 797 filtered out`).
-    _runci_guarded_test "C1y accept_loop" 24 \
+    # 24 -> 26: the C1v twin's same +2, the face counter's reserved-face id tests. Read off what
+    # the build host PRINTED (`26 passed; 824 filtered out`).
+    _runci_guarded_test "C1y accept_loop" 26 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
