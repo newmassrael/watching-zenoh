@@ -45,8 +45,8 @@ use crate::accept_bounds::AcceptBounds;
 use crate::session_open::{AcceptedLink, AcceptedPeer, BoundListener, OpenError, OpenedSession};
 
 /// Backoff applied after an `accept()` error before the listeners are asked again: zenoh's
-/// `TCP_ACCEPT_THROTTLE_TIME` (100 ms, `io/zenoh-links/zenoh-link-tcp/src/lib.rs`). The usual
-/// cause is fd exhaustion (EMFILE/ENFILE): the pending connection stays in the kernel queue, so an
+/// `TCP_ACCEPT_THROTTLE_TIME`, 100 ms (`io/zenoh-links/zenoh-link-tcp/src/lib.rs` @
+/// `static ref TCP_ACCEPT_THROTTLE_TIME: u64 = 100_000;`). The usual cause is fd exhaustion (EMFILE/ENFILE): the pending connection stays in the kernel queue, so an
 /// accept asked again at once returns the same error and spins. Only the listeners wait it out;
 /// the handshakes in flight go on.
 const ACCEPT_ERROR_THROTTLE: Duration = Duration::from_millis(100);

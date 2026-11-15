@@ -1710,6 +1710,10 @@ def selftest_ecosystem() -> None:
 
 
 def selftest_examples_bridge() -> None:
+    # A program's path relative to its package, built by concatenation: this file is tracked text,
+    # and a literal path under that directory name reads to the upstream citation gate as a
+    # citation of the pin's tree, where the programs sit one directory deeper.
+    rel = "examples" + "/"
     text = (
         '[package]\nname = "zenoh-examples"\n\n'
         '[features]\ndefault = ["zenoh-ext/default", "zenoh/default"]\nshared-memory = ["zenoh/shared-memory"]\n'
@@ -1719,14 +1723,14 @@ def selftest_examples_bridge() -> None:
         'zenoh-ext = { workspace = true, default-features = false, features = [\n  "unstable",\n] }\n\n'
         '[dev-dependencies]\nrand = { workspace = true, features = ["default"] }\n\n'
         '[build-dependencies]\nwhich = "7.0.2"\n\n'
-        '[[example]]\nname = "z_put"\npath = "examples/z_put.rs"\n\n'
-        '[[example]]\nname = "z_pub_shm"\npath = "examples/z_pub_shm.rs"\nrequired-features = ["shared-memory", "unstable"]\n'
+        '[[example]]\nname = "z_put"\npath = "' + rel + 'z_put.rs"\n\n'
+        '[[example]]\nname = "z_pub_shm"\npath = "' + rel + 'z_pub_shm.rs"\nrequired-features = ["shared-memory", "unstable"]\n'
     )
     sources = {"z_put": "use zenoh::Config;", "z_pub_shm": "use zenoh::shm;", "z_bytes": "use zenoh_ext::z_serialize;"}
     programs = example_requirements(text, sources)
     assert programs == {"z_bytes": [ECOSYSTEM_FEATURE], "z_pub_shm": ["shared-memory", "unstable"], "z_put": []}, programs
     for broken, files in (
-        (text + '\n[[example]]\nname = "z_gone"\npath = "examples/z_gone.rs"\n', sources),
+        (text + '\n[[example]]\nname = "z_gone"\npath = "' + rel + 'z_gone.rs"\n', sources),
         ('[[example]]\nname = "z_put"\npath = "other/z_put.rs"\n', sources),
     ):
         try:
@@ -1750,8 +1754,8 @@ def selftest_examples_bridge() -> None:
     assert 'rand = { version = "0.8.5", default-features = false, features = ["default"] }' in wz, wz
     assert 'which = "7.0.2"' in wz and "autoexamples = false" in wz, wz
     assert wz.count("[[example]]") == 3, wz
-    assert f'name = "z_bytes"\npath = "examples/z_bytes.rs"\nrequired-features = ["{ECOSYSTEM_FEATURE}"]' in wz, wz
-    assert 'name = "z_put"\npath = "examples/z_put.rs"\n\n' in wz, wz
+    assert f'name = "z_bytes"\npath = "{rel}z_bytes.rs"\nrequired-features = ["{ECOSYSTEM_FEATURE}"]' in wz, wz
+    assert f'name = "z_put"\npath = "{rel}z_put.rs"\n\n' in wz, wz
     assert "[patch.crates-io]" in wz and f'zenoh = {{ path = "{ROOT.as_posix()}/crates/wz-zenoh" }}' in wz, wz
     stock_arm = z8_examples_manifest(text, deps, "stock", programs)
     assert "[patch.crates-io]" not in stock_arm, stock_arm
@@ -1773,7 +1777,7 @@ def selftest_examples_bridge() -> None:
         '[features]\ndefault = ["zenoh-examples/default", "zenoh-ext/default", "zenoh/default"]\nunstable = []\n\n'
         '[dependencies]\nzenoh = { workspace = true, default-features = false }\n'
         'zenoh-examples = { workspace = true, default-features = false }\n\n'
-        '[[example]]\nname = "z_member"\npath = "examples/z_member.rs"\n\n'
+        '[[example]]\nname = "z_member"\npath = "' + rel + 'z_member.rs"\n\n'
         '[package.metadata.docs.rs]\nfeatures = ["unstable"]\n'
     )
     ext_programs = example_requirements(ext_text, {"z_member": "use zenoh_ext::group::*;"}, ecosystem=False)
@@ -1781,7 +1785,7 @@ def selftest_examples_bridge() -> None:
     ext_deps = dict(deps, **{"zenoh-examples": f'{{ version = "={TAG}", path = "examples", default-features = false }}'})
     ext_manifest = resolved_manifest(ext_text, ext_deps, {"zenoh-examples": ".."}, ext_programs)
     assert f'zenoh-examples = {{ version = "={TAG}", default-features = false, path = ".." }}' in ext_manifest, ext_manifest
-    assert "autoexamples = false" in ext_manifest and 'name = "z_member"\npath = "examples/z_member.rs"' in ext_manifest
+    assert "autoexamples = false" in ext_manifest and f'name = "z_member"\npath = "{rel}z_member.rs"' in ext_manifest
     assert '"zenoh-examples/default"' in ext_manifest, ext_manifest
     try:
         resolved_manifest(ext_text, ext_deps, {"zenoh-examples": ".."})

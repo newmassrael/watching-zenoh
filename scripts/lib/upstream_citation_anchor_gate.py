@@ -708,7 +708,7 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "routing": 2,
     "runtime": 1,
     "storages_mgt": 25,
-    "unicast": 77,
+    "unicast": 76,
     "universal": 7,
     "zenoh-backend-traits": 8,
     "zenoh-codec": 40,
@@ -823,7 +823,10 @@ def rootless_undeclared_budget() -> int:
 # Item 751 -- 502 -> 500, the same two line-form removals as ROOTLESS_LINE_BUDGET.
 # 484 -> 483, the citation of the TLS link's utility file in the base64 dependency's manifest
 # comment, which left `wz-runtime-tokio` when the PEM readers moved to `wz-tls-pem`.
-ROOTLESS_TOTAL_BUDGET = 483
+# 483 -> 482, the `unicast` row 77 -> 76 with it: the config reader's note on the acceptor's
+# handshake sizes, a line-form citation at an old release, left with the rewrite that offers the
+# frame SN width the file names (ef13546679).
+ROOTLESS_TOTAL_BUDGET = 482
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
