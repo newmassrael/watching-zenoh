@@ -143,8 +143,8 @@ impl<M> KeyexprIndex<M> {
         self.len
     }
 
-    /// Whether the index holds no member.
-    #[cfg(test)]
+    /// Whether the index holds no member: one read, which is how a store that holds no future
+    /// interest answers a declaration without walking anything.
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
