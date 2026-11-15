@@ -59,8 +59,6 @@ wz-capi-pico	wz-capi-pico/src/matching.rs	1	error: unresolved link to `wz_capi_c
 wz-capi-pico	wz-capi-pico/src/pubsub.rs	1	error: unresolved link to `crate::advanced::ze_advanced_publisher_options_t`: no item named `advanced` in module `wz_capi_pico`
 wz-capi-pico	wz-capi-pico/src/query.rs	1	error: unresolved link to `crate::pubsub::z_sample_source_info`: no item named `z_sample_source_info` in module `pubsub`
 wz-capi-pico	wz-capi-pico/src/session.rs	1	error: unresolved link to `SessionState`: no item named `SessionState` in scope
-wz-capi-pico	wz-capi-pico/src/string_array.rs	1	error: unresolved link to `crate::scout`: no item named `scout` in module `wz_capi_pico`
-wz-capi-pico	wz-capi-pico/src/whatami.rs	1	error: unresolved link to `crate::scout`: no item named `scout` in module `wz_capi_pico`
 wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::cancel`: no item named `CancellationToken` in scope
 wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::is_cancelled`: no item named `CancellationToken` in scope
 wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::register`: no item named `CancellationToken` in scope
@@ -158,7 +156,6 @@ wz-runtime-tokio	wz-runtime-tokio/src/declare.rs	1	error: unresolved link to `Li
 wz-runtime-tokio	wz-runtime-tokio/src/declare.rs	1	error: unresolved link to `RemoteQueryableRegistry`: no item named `RemoteQueryableRegistry` in scope
 wz-runtime-tokio	wz-runtime-tokio/src/declare.rs	1	error: unresolved link to `RemoteSubscriberRegistry`: no item named `RemoteSubscriberRegistry` in scope
 wz-runtime-tokio	wz-runtime-tokio/src/dynamic_volume.rs	1	error: unresolved link to `crate::filesystem_storage::FilesystemVolume`: no item named `filesystem_storage` in module `wz_runtime_tokio`
-wz-runtime-tokio	wz-runtime-tokio/src/frame_arena.rs	1	error: unresolved link to `crate::zenoh_config`: no item named `zenoh_config` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/future_interest.rs	1	error: unresolved link to `crate::router_forward`: no item named `router_forward` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/group.rs	1	error[E0432]: unresolved import `crate::session_glue`: could not find `session_glue` in the crate root
 wz-runtime-tokio	wz-runtime-tokio/src/group.rs	1	error[E0432]: unresolved imports `crate::session::QueryOptions`, `crate::session::Queryable`, `crate::session::QueryableError`, `crate::session::QueryableOptions`, `crate::session::SubscribeError`, `crate::session::Unicast`: no `QueryOptions` in `session`, no `Queryable` in `session`, no `QueryableError` in `session`, no `QueryableOptions` in `session`, no `SubscribeError` in `session`, no `Unicast` in `session`
@@ -401,7 +398,6 @@ wz-session-core	wz-session-core/src/inbound.rs	1	error: unresolved link to `Self
 wz-session-core	wz-session-core/src/inbound.rs	1	error: unresolved link to `crate::drive`: no item named `drive` in module `wz_session_core`
 wz-session-core	wz-session-core/src/inbound.rs	2	error: unresolved link to `inbound_to_fsm_event`: no item named `inbound_to_fsm_event` in scope
 wz-session-core	wz-session-core/src/join_decode.rs	1	error: unresolved link to `crate::multicast_dispatch::MulticastDispatcher::ingest_join`: no item named `multicast_dispatch` in module `wz_session_core`
-wz-session-core	wz-session-core/src/join_decode.rs	1	error: unresolved link to `crate::multicast_join::validate_join`: no item named `multicast_join` in module `wz_session_core`
 wz-session-core	wz-session-core/src/keyexpr_match.rs	1	error: unresolved link to `crate::keyexpr_prefix::NonWildKeyExpr::new`: no item named `keyexpr_prefix` in module `wz_session_core`
 wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_patterns`: no item named `keyexpr_includes_patterns` in scope
 wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_target`: no item named `keyexpr_includes_target` in scope
@@ -430,12 +426,10 @@ wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved li
 wz-session-core	wz-session-core/src/multicast_dispatch.rs	2	error: unresolved link to `Self::set_namespace`: the struct `MulticastDispatcher` has no field or associated item named `set_namespace`
 wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::drive::report_outcome_reassembling`: no item named `drive` in module `wz_session_core`
 wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::multicast_join::decode_join_patch`: no item named `multicast_join` in module `wz_session_core`
-wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::multicast_join::validate_join`: no item named `multicast_join` in module `wz_session_core`
 wz-session-core	wz-session-core/src/multicast_dispatch.rs	3	error: unresolved link to `crate::multicast_rx`: no item named `multicast_rx` in module `wz_session_core`
 wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::reassembly_dispatch::ReassemblyConfig`: no item named `reassembly_dispatch` in module `wz_session_core`
 wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::reassembly_dispatch`: no item named `reassembly_dispatch` in module `wz_session_core`
 wz-session-core	wz-session-core/src/multicast_dispatch.rs	2	error: unresolved link to `multicast_chain_key`: no item named `multicast_chain_key` in scope
-wz-session-core	wz-session-core/src/multicast_join.rs	1	error: unresolved link to `decode_join_qos`: no item named `decode_join_qos` in scope
 wz-session-core	wz-session-core/src/multicast_params.rs	1	error: unresolved link to `crate::multicast_dispatch::MulticastConfig::lease_ms`: no item named `multicast_dispatch` in module `wz_session_core`
 wz-session-core	wz-session-core/src/multicast_reply_sink.rs	1	error: unresolved link to `crate::multicast_rx`: no item named `multicast_rx` in module `wz_session_core`
 wz-session-core	wz-session-core/src/multicast_rx.rs	1	error: unresolved link to `dispatch_multicast_inbound_reassembling`: no item named `dispatch_multicast_inbound_reassembling` in scope
