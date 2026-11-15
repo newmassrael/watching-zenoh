@@ -6,3 +6,9 @@ commit = "b46bfec64f52bc4c02eb174705ec018a82debcda"
 base = "af087dd4efde4f7835a02ae3e3cf9f7d99e7b349"
 machine = "mf977c53d872e"
 at = 1794712295
+
+[return]
+reason = "derive-failed"
+detail = "an action of file-round failed (status 1); the account says which"
+report = "mf977c53d872e:0000000002-3a0e10408080/attempt-1.log"
+at = 1794712508
