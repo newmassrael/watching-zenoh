@@ -3193,6 +3193,7 @@ impl<H> Hosted<H> {
 
     /// Run `f` over the handler, waiting for a call on another thread to finish; `None`, without
     /// running `f`, when this thread is already inside the handler.
+    #[cfg_attr(debug_assertions, track_caller)]
     fn call<R>(&self, f: impl FnOnce(&mut H) -> R) -> Option<R> {
         /// Takes the handler off the list of those this thread is inside of, however `f` ends.
         struct Leave;
@@ -3565,6 +3566,7 @@ impl RouterForwarder {
     /// The forwarder with its tables held for reading, until the result is dropped. Any number of
     /// readers hold them at once; a thread that already holds them for reading may take them
     /// again, and sees the same tables (see [`TablesCell::read`]).
+    #[cfg_attr(debug_assertions, track_caller)]
     fn on_tables(&self) -> OnTables<'_, TablesRead<'_>> {
         OnTables {
             fwd: self,
@@ -3579,6 +3581,7 @@ impl RouterForwarder {
     /// long as the faces route. Only where the thread holds no guard of the tables, which is the
     /// top of [`Self::forward_frame`]: a face's drive calls it with nothing held. Under the
     /// `snapshot` value no reader keeps a writer out, and this is [`Self::on_tables`].
+    #[cfg_attr(debug_assertions, track_caller)]
     fn on_tables_for_a_frame(&self) -> OnTables<'_, TablesRead<'_>> {
         OnTables {
             fwd: self,
@@ -3593,6 +3596,7 @@ impl RouterForwarder {
     /// the methods that write take `&mut self` and call the readers through it. Under the
     /// `snapshot` value "alone" is among the writers only: the readers route by the version
     /// published before, and the write is published when the result is dropped.
+    #[cfg_attr(debug_assertions, track_caller)]
     fn on_tables_mut(&self) -> OnTables<'_, WrittenTables<'_>> {
         let began = Instant::now();
         let guard = self.tables.write();
@@ -10527,7 +10531,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             };
             // Inside a route that opened a span for them the deliveries are handed over when its
             // tables are released ([`local_publish::owe_delivery`]); anywhere else, here.
-            if local_publish::owe_delivery(handler, || Sample::from_view(view)) {
+            let owed = local_publish::owe_delivery(handler, || Sample::from_view(view));
+            // Every route that can reach a hosted subscriber opens a span, so a delivery made
+            // here would run the program's callback under the routing tables, which it may
+            // write: the deadlock the span exists to prevent. A debug build stops at it.
+            debug_assert!(
+                owed,
+                "a hosted subscriber is delivered to under the routing tables: the route that \
+                 reached it opened no delivery span (local_publish::DeliveryScope)"
+            );
+            if owed {
                 continue;
             }
             if handler.call(|h| h(view)).is_none() {
@@ -11066,7 +11079,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 inbound,
                 reliable,
             });
-            if let Err(job) = local_publish::owe_query(job) {
+            let owed = local_publish::owe_query(job);
+            // As for a hosted subscriber (`deliver_to_hosted_subscribers`): no route that reaches
+            // a hosted queryable comes here without a span, and a call made here would run the
+            // program's callback under the routing tables.
+            debug_assert!(
+                owed.is_ok(),
+                "a hosted queryable is called under the routing tables: the route that reached \
+                 it opened no delivery span (local_publish::DeliveryScope)"
+            );
+            if let Err(job) = owed {
                 self.fwd.run_query_job(*job);
             }
         }

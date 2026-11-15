@@ -60,52 +60,197 @@ pub type Mutex<T> = std::sync::Mutex<T>;
 ///
 /// `parking_lot`'s, which tokio already links: a guard is one compare-and-swap to take and one to
 /// release, and nothing else on the uncontended path.
-pub struct PlainMutex<T>(parking_lot::Mutex<T>);
+pub struct PlainMutex<T> {
+    lock: parking_lot::Mutex<T>,
+    made: Made,
+}
 
 impl<T> PlainMutex<T> {
     /// A lock over `value`.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub const fn new(value: T) -> Self {
-        Self(parking_lot::const_mutex(value))
+        Self {
+            lock: parking_lot::const_mutex(value),
+            made: Made::here(),
+        }
     }
 
     /// Run `f` over the value, waiting for the lock.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn with<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
-        f(&mut *self.0.lock())
+        f(&mut *self.guard())
     }
 
     /// The guard, waiting for the lock, for a caller that holds the value across several
     /// statements and has no use for the error arm of [`Self::lock`].
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn guard(&self) -> PlainGuard<'_, T> {
-        self.0.lock()
+        self.made.wait(Wait::Exclusive);
+        let guard = self.lock.lock();
+        PlainGuard {
+            guard,
+            _holds: self.made.taken(Held::Exclusive),
+        }
     }
 
     /// Run `f` over the value if the lock is free; `None` when it is held.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn try_with<U>(&self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
-        self.0.try_lock().map(|mut guard| f(&mut *guard))
+        self.try_lock_guard().map(|mut guard| f(&mut *guard))
     }
 
     /// The guard, waiting for the lock, in the shape `std::sync::Mutex::lock` answers so that a
     /// caller that holds the state of a session across several statements (and wrote
     /// `.lock().unwrap()`, or matched the poisoned arm to recover) reads the same. The error arm
     /// is never taken: it is a type with no value, so `Result` is the guard and costs nothing.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn lock(&self) -> Result<PlainGuard<'_, T>, NeverPoisoned<PlainGuard<'_, T>>> {
-        Ok(self.0.lock())
+        Ok(self.guard())
     }
 
-    /// [`Self::lock`] without waiting: `None` when the lock is held.
+    /// [`Self::lock`] without waiting: `None` when the lock is held. Not waiting, it orders
+    /// nothing before it ([`lock_order`]); what is waited for while it is held is ordered after
+    /// it.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn try_lock_guard(&self) -> Option<PlainGuard<'_, T>> {
-        self.0.try_lock()
+        let guard = self.lock.try_lock()?;
+        Some(PlainGuard {
+            guard,
+            _holds: self.made.taken(Held::Exclusive),
+        })
     }
 
     /// Whether some thread holds the lock now. A reading for a report, never for a decision: the
     /// answer can be stale by the time it is read.
     pub fn is_held(&self) -> bool {
-        self.0.is_locked()
+        self.lock.is_locked()
     }
 }
 
 /// What [`PlainMutex::lock`] holds the lock with.
-pub type PlainGuard<'a, T> = parking_lot::MutexGuard<'a, T>;
+pub struct PlainGuard<'a, T> {
+    guard: parking_lot::MutexGuard<'a, T>,
+    _holds: Holds,
+}
+
+impl<T> core::ops::Deref for PlainGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> core::ops::DerefMut for PlainGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+/// What a lock is held as while its guard lives ([`lock_order`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Held {
+    /// A mutex, a cell, or a reader-writer lock taken to write.
+    Exclusive,
+    /// A reader-writer lock taken to read.
+    Shared,
+}
+
+/// How a thread waits for a lock ([`lock_order`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Wait {
+    /// For every holder: a mutex, a cell, a write.
+    Exclusive,
+    /// A read that queues behind a writer that waits
+    /// ([`PlainRwLock::read_behind_a_writer_waiting`]).
+    Shared,
+    /// A read that waits only for a writer that holds the lock ([`PlainRwLock::read`]).
+    Recursive,
+}
+
+/// Where a lock was made, its class for the lock-order checker of a debug build, and which lock
+/// it is: a number the checker gives it the first time it is taken, which moves with the lock
+/// (an address would not) and is never given to another. Nothing in a release build.
+struct Made {
+    #[cfg(debug_assertions)]
+    at: &'static core::panic::Location<'static>,
+    #[cfg(debug_assertions)]
+    id: core::sync::atomic::AtomicU64,
+}
+
+/// A held lock's entry in its thread's list of held locks, carried by the guard: the checker's
+/// token in a debug build, nothing in a release build.
+struct Holds {
+    /// Read by nothing: what it does, it does when it is dropped with the guard.
+    #[cfg(debug_assertions)]
+    _token: lock_order::Token,
+}
+
+#[cfg(debug_assertions)]
+impl Made {
+    #[track_caller]
+    const fn here() -> Self {
+        Self {
+            at: core::panic::Location::caller(),
+            id: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// This lock's number, given on first use.
+    fn id(&self) -> u64 {
+        use core::sync::atomic::Ordering::Relaxed;
+        match self.id.load(Relaxed) {
+            0 => {
+                let new = lock_order::next_id();
+                match self.id.compare_exchange(0, new, Relaxed, Relaxed) {
+                    Ok(_) => new,
+                    Err(given) => given,
+                }
+            }
+            given => given,
+        }
+    }
+
+    #[track_caller]
+    fn wait(&self, wait: Wait) {
+        lock_order::before_wait(self.at, self.id(), wait, core::panic::Location::caller());
+    }
+
+    #[track_caller]
+    fn taken(&self, held: Held) -> Holds {
+        Holds {
+            _token: lock_order::acquired(self.at, self.id(), held, core::panic::Location::caller()),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for Made {
+    /// The lock is gone: what the checker keeps about this one lock goes with it.
+    fn drop(&mut self) {
+        let id = *self.id.get_mut();
+        if id != 0 {
+            lock_order::forget(id);
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+impl Made {
+    const fn here() -> Self {
+        Self {}
+    }
+
+    #[inline(always)]
+    fn wait(&self, _wait: Wait) {}
+
+    #[inline(always)]
+    fn taken(&self, _held: Held) -> Holds {
+        Holds {}
+    }
+}
+
+#[cfg(debug_assertions)]
+mod lock_order;
 
 /// The error of a lock that is never poisoned: it cannot be made, so a `match` on it has the one
 /// arm that is ever taken. It carries the guard type only so that `into_inner`, which a caller
@@ -132,6 +277,7 @@ impl<G> core::fmt::Display for NeverPoisoned<G> {
 }
 
 impl<T: Default> Default for PlainMutex<T> {
+    #[cfg_attr(debug_assertions, track_caller)]
     fn default() -> Self {
         Self::new(T::default())
     }
@@ -163,40 +309,46 @@ pub type RwLock<T> = std::sync::RwLock<T>;
 /// the query timeout, whether multicast is governed), not for a count: a count is a `Counter` or
 /// a `Gauge` (`counter.rs`), whose updates are one atomic instruction and do not lose a
 /// concurrent addition.
-pub struct PlainCell<T: Copy>(parking_lot::Mutex<T>);
+pub struct PlainCell<T: Copy>(PlainMutex<T>);
 
 impl<T: Copy> PlainCell<T> {
     /// A cell holding `value`.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub const fn new(value: T) -> Self {
-        Self(parking_lot::const_mutex(value))
+        Self(PlainMutex::new(value))
     }
 
     /// The value now.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn get(&self) -> T {
-        *self.0.lock()
+        *self.0.guard()
     }
 
     /// Replace the value.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn set(&self, value: T) {
-        *self.0.lock() = value;
+        *self.0.guard() = value;
     }
 
     /// Replace the value, answering the one it had: a flag that is read and cleared in one step.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn replace(&self, value: T) -> T {
-        core::mem::replace(&mut *self.0.lock(), value)
+        core::mem::replace(&mut *self.0.guard(), value)
     }
 
     /// Replace the value with what `f` makes of it, under the one lock, and answer the new value:
     /// a read and a write that no other thread's write can come between, for a value that is a
     /// successor of the last (a version, a generation).
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn update(&self, f: impl FnOnce(T) -> T) -> T {
-        let mut value = self.0.lock();
+        let mut value = self.0.guard();
         *value = f(*value);
         *value
     }
 }
 
 impl<T: Copy + Default> Default for PlainCell<T> {
+    #[cfg_attr(debug_assertions, track_caller)]
     fn default() -> Self {
         Self::new(T::default())
     }
@@ -226,6 +378,7 @@ pub struct PlainRwLock<T> {
     oldest_writer_since: core::sync::atomic::AtomicU64,
     /// When each writer that waits now began to wait (the slow path of [`Self::write`] only).
     waiting: parking_lot::Mutex<Vec<u64>>,
+    made: Made,
 }
 
 /// Nanoseconds since the first time a writer of any [`PlainRwLock`] had to wait, never 0: the
@@ -240,11 +393,13 @@ fn wait_clock() -> u64 {
 
 impl<T> PlainRwLock<T> {
     /// A lock over `value`.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub const fn new(value: T) -> Self {
         Self {
             lock: parking_lot::const_rwlock(value),
             oldest_writer_since: core::sync::atomic::AtomicU64::new(0),
             waiting: parking_lot::const_mutex(Vec::new()),
+            made: Made::here(),
         }
     }
 
@@ -256,8 +411,14 @@ impl<T> PlainRwLock<T> {
     /// waiting for the first guard, so the pair cannot deadlock. The price is that a steady stream
     /// of readers can keep a writer waiting for as long as the stream lasts, which is what
     /// [`Self::read_behind_a_writer_waiting`] is for.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn read(&self) -> PlainReadGuard<'_, T> {
-        self.lock.read_recursive()
+        self.made.wait(Wait::Recursive);
+        let guard = self.lock.read_recursive();
+        PlainReadGuard {
+            guard,
+            _holds: self.made.taken(Held::Shared),
+        }
     }
 
     /// The value for reading, as [`Self::read`] takes it, unless a writer has waited `longer_than`
@@ -278,36 +439,53 @@ impl<T> PlainRwLock<T> {
     /// already under way.
     ///
     /// It must not be taken by a thread that already holds a guard of this lock: a writer waiting
-    /// for that guard would be ahead of this one, and the two would wait on each other.
+    /// for that guard would be ahead of this one, and the two would wait on each other. The
+    /// lock-order checker holds it to that, and orders it as the read that queues, whichever form
+    /// one call happens to take: what can deadlock is what it may do.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn read_behind_a_writer_waiting(
         &self,
         longer_than: std::time::Duration,
     ) -> PlainReadGuard<'_, T> {
+        self.made.wait(Wait::Shared);
         let since = self
             .oldest_writer_since
             .load(core::sync::atomic::Ordering::Relaxed);
         let bound = u64::try_from(longer_than.as_nanos()).unwrap_or(u64::MAX);
-        if since != 0 && wait_clock().saturating_sub(since) >= bound {
+        let guard = if since != 0 && wait_clock().saturating_sub(since) >= bound {
             self.lock.read()
         } else {
             self.lock.read_recursive()
+        };
+        PlainReadGuard {
+            guard,
+            _holds: self.made.taken(Held::Shared),
         }
     }
 
-    /// The value for writing, waiting for every reader and writer to finish.
+    /// The value for writing, waiting for every reader and writer to finish. Ordered as a wait
+    /// even when the lock happens to be free: what can deadlock is what it may do.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn write(&self) -> PlainWriteGuard<'_, T> {
-        if let Some(guard) = self.lock.try_write() {
-            return guard;
-        }
-        let stamp = wait_clock();
-        self.note_waiting(|waiting| waiting.push(stamp));
-        let guard = self.lock.write();
-        self.note_waiting(|waiting| {
-            if let Some(at) = waiting.iter().position(|&s| s == stamp) {
-                waiting.swap_remove(at);
+        self.made.wait(Wait::Exclusive);
+        let guard = match self.lock.try_write() {
+            Some(guard) => guard,
+            None => {
+                let stamp = wait_clock();
+                self.note_waiting(|waiting| waiting.push(stamp));
+                let guard = self.lock.write();
+                self.note_waiting(|waiting| {
+                    if let Some(at) = waiting.iter().position(|&s| s == stamp) {
+                        waiting.swap_remove(at);
+                    }
+                });
+                guard
             }
-        });
-        guard
+        };
+        PlainWriteGuard {
+            guard,
+            _holds: self.made.taken(Held::Exclusive),
+        }
     }
 
     /// Change the writers that wait, and publish when the one that has waited longest began to.
@@ -393,12 +571,39 @@ impl core::fmt::Display for LockContention {
 }
 
 /// What [`PlainRwLock::read`] holds the lock with.
-pub type PlainReadGuard<'a, T> = parking_lot::RwLockReadGuard<'a, T>;
+pub struct PlainReadGuard<'a, T> {
+    guard: parking_lot::RwLockReadGuard<'a, T>,
+    _holds: Holds,
+}
+
+impl<T> core::ops::Deref for PlainReadGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
 
 /// What [`PlainRwLock::write`] holds the lock with.
-pub type PlainWriteGuard<'a, T> = parking_lot::RwLockWriteGuard<'a, T>;
+pub struct PlainWriteGuard<'a, T> {
+    guard: parking_lot::RwLockWriteGuard<'a, T>,
+    _holds: Holds,
+}
+
+impl<T> core::ops::Deref for PlainWriteGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> core::ops::DerefMut for PlainWriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
 
 impl<T: Default> Default for PlainRwLock<T> {
+    #[cfg_attr(debug_assertions, track_caller)]
     fn default() -> Self {
         Self::new(T::default())
     }
