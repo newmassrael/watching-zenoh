@@ -153,6 +153,10 @@ impl<M> KeyexprIndex<M> {
     /// some whose keyexpr does not: the caller refines each with the exact matcher (see the module
     /// documentation).
     pub(crate) fn intersecting(&self, keyexpr: &str) -> Vec<&M> {
+        // An empty index answers without splitting the query or walking a node.
+        if self.len == 0 {
+            return Vec::new();
+        }
         self.walk(keyexpr).found
     }
 
@@ -458,6 +462,18 @@ mod tests {
         }
         let found: BTreeSet<u32> = index.intersecting("a/**").into_iter().copied().collect();
         assert_eq!(found, (0..1_000).collect());
+    }
+
+    /// An empty index answers a query with nothing, before anything is stored and after the last
+    /// member left.
+    #[test]
+    fn an_empty_index_answers_nothing() {
+        let mut index: KeyexprIndex<u32> = KeyexprIndex::new();
+        assert!(index.intersecting("**").is_empty());
+        assert!(index.insert("a/b", 1));
+        assert_eq!(index.intersecting("**"), [&1]);
+        assert!(index.remove("a/b", &1));
+        assert!(index.intersecting("**").is_empty());
     }
 
     /// An insertion of a member already held adds nothing and says so; a removal of one not held,

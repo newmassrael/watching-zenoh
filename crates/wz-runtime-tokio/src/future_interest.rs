@@ -327,6 +327,10 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// The faces holding an interest whose target may intersect `keyexpr`, each once, in order:
     /// the index's candidates, which the caller refines with the exact matcher.
     fn faces_asking_about(&self, keyexpr: &str) -> Vec<FaceId> {
+        // Every declaration and withdrawal asks, and most nodes hold no future interest.
+        if self.by_target.is_empty() {
+            return Vec::new();
+        }
         let mut faces: Vec<FaceId> = self
             .by_target
             .intersecting(keyexpr)
@@ -341,6 +345,9 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// The `(face, reply keyexpr)` pushes whose reply keyexpr may intersect `keyexpr`, in order:
     /// the index's candidates, which the caller refines with the exact matcher.
     fn pushes_about(&self, keyexpr: &str) -> Vec<(FaceId, String)> {
+        if self.by_reply.is_empty() {
+            return Vec::new();
+        }
         let mut pushes: Vec<(FaceId, String)> = self
             .by_reply
             .intersecting(keyexpr)
@@ -875,6 +882,26 @@ mod tests {
 
     fn face(n: u64) -> FaceId {
         FaceId(n)
+    }
+
+    /// A store with no interest pushes nothing for a declaration and forgets nothing for a
+    /// withdrawal, before any interest and after the last one ended.
+    #[test]
+    fn a_store_with_no_interest_pushes_and_forgets_nothing() {
+        let mut store = FutureQablStore::default();
+        let info = |_: &str, _: FaceId, _: bool| QueryableInfo::DEFAULT;
+        assert!(store.pushes_for_new("demo/a", None, info).is_empty());
+        assert!(store
+            .forgets_for_withdrawn("demo/a", |_, _| false)
+            .is_empty());
+        store.store_interest(face(1), 7, "demo/**".to_owned(), false);
+        let pushed = store.pushes_for_new("demo/a", None, info);
+        assert_eq!(pushed.len(), 1, "the interest is pushed to: {pushed:?}");
+        assert!(store.remove_interest(face(1), 7));
+        assert!(store.pushes_for_new("demo/b", None, info).is_empty());
+        assert!(store
+            .forgets_for_withdrawn("demo/a", |_, _| false)
+            .is_empty());
     }
 
     // ── SUBSCRIBER plane (V = ()): the R311y146 presence-only behavior, unchanged
