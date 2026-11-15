@@ -1078,9 +1078,22 @@ fn now_or_never<F: core::future::Future>(future: F) -> Option<F::Output> {
     }
 }
 
-/// Wait for the armed steady-state timer, or never when there is none. The
-/// `select!` precondition keeps the `None` case from ever being polled; this stays
-/// total for the same reason [`wait_revised`] does.
+/// Whether the drive loop arms a new wake for `deadline_ms`, the wake armed for `armed_ms` (if any)
+/// standing otherwise. A `handshake` deadline is armed exactly. A `lazy` caller's wake stands until
+/// its revision source drops it. Any other caller recomputes its deadline every iteration, and its
+/// wake stands while it is armed no later than that deadline (it may wake early, and the wake looks
+/// before it acts); a deadline that moved earlier is armed anew.
+fn wake_rearms(armed_ms: Option<u64>, deadline_ms: u64, handshake: bool, lazy: bool) -> bool {
+    match armed_ms {
+        None => true,
+        Some(armed_ms) if handshake => armed_ms != deadline_ms,
+        Some(armed_ms) => !lazy && deadline_ms < armed_ms,
+    }
+}
+
+/// Wait for the armed timer, or never when there is none. The loop arms one before
+/// every `select!` that waits on it, so the `None` case is not reached there; this
+/// stays total for the same reason [`wait_revised`] does.
 async fn wait_armed<S: core::future::Future<Output = ()>>(
     slot: &mut Option<(u64, core::pin::Pin<Box<S>>)>,
 ) {
@@ -1383,7 +1396,10 @@ where
     // request/reply round trip is a measurable share of the thread's work.
     //
     // A caller WITHOUT a revision source gives no signal when its deadline moves
-    // earlier, so it keeps the recompute-every-iteration shape exactly.
+    // earlier, so its deadline is recomputed every iteration; the timer is kept
+    // all the same while it is armed no later than that deadline, and replaced
+    // when the deadline moves earlier. A handshake phase arms it for its own
+    // deadline, exactly.
     let mut steady_timer: Option<(u64, core::pin::Pin<Box<_>>)> = None;
     // An outcome taken off the link by a deadline wake, to be delivered first (see
     // [`take_what_is_waiting`]).
@@ -1466,9 +1482,16 @@ where
         match deadline {
             Some((deadline_ms, kind)) => {
                 let remaining_ms = deadline_ms.saturating_sub(loop_now_ms);
-                // Arm the steady timer once and keep it (see `steady_timer`).
+                // One timer, kept across iterations (see `steady_timer`). A caller with a revision
+                // source keeps it until the source says the deadline moved. A caller without one
+                // recomputes the deadline every iteration, and the timer stays while it is armed
+                // no later than that deadline: it may wake early, and the wake looks before it
+                // acts. A handshake deadline is armed exactly. Without this a timer entry was
+                // registered and cancelled for every frame, as `select!` builds even a disabled
+                // branch's future.
                 let lazy = kind.is_none() && deadline_revised.is_some();
-                if lazy && steady_timer.is_none() {
+                let armed_ms = steady_timer.as_ref().map(|(armed_ms, _)| *armed_ms);
+                if wake_rearms(armed_ms, deadline_ms, kind.is_some(), lazy) {
                     steady_timer = Some((deadline_ms, Box::pin(clock.sleep(remaining_ms))));
                 }
                 tokio::select! {
@@ -1569,71 +1592,57 @@ where
                         .await;
                         turn.after_event(units).await;
                     }
-                    // The armed steady-state timer fired. It was armed for the
-                    // deadline of some earlier iteration, so the real one may be
-                    // further out: look before acting, and when it is, arm again
-                    // and run no check and raise no event (the early wake is not
-                    // a deadline).
-                    _ = wait_armed(&mut steady_timer), if lazy => {
+                    // The armed timer fired.
+                    _ = wait_armed(&mut steady_timer) => {
                         steady_timer = None;
-                        #[cfg(feature = "transport-keepalive")]
-                        let ka_dl = keepalive_wake_deadline(actions);
-                        #[cfg(not(feature = "transport-keepalive"))]
-                        let ka_dl: Option<u64> = None;
-                        let real_deadline = [
-                            lease_wake_deadline(actions),
-                            ka_dl,
-                            next_extra_deadline(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .min();
-                        if real_deadline.is_some_and(|d| d > clock.now_monotonic_ms()) {
-                            continue;
-                        }
-                        take_what_is_waiting(&mut held, driver, actions, engine);
-                        #[cfg(feature = "transport-keepalive")]
-                        {
-                            let ka_outcome = crate::emission_cost::check_keepalive_timed(
-                                actions,
-                                clock.now_monotonic_ms(),
-                            );
-                            on_event(IterationEvent::KeepAlive(ka_outcome));
-                        }
-                        let lease_outcome =
-                            check_lease_deadline(actions, engine, clock.now_monotonic_ms());
-                        on_event(IterationEvent::Lease(lease_outcome));
-                    }
-                    _ = clock.sleep(remaining_ms), if !lazy => match kind {
-                        // Established lease / keepalive deadline. Both
-                        // checks are deadline-self-guarded, so whichever
-                        // armed the earlier wake fires and the other
-                        // reports its within-window verdict truthfully
-                        // (R311kx — the keepalive emit runs first: it is
-                        // wire-side only and must not be starved by an
-                        // Expired transition tearing the session down in
-                        // the same wake).
-                        None => {
-                            take_what_is_waiting(&mut held, driver, actions, engine);
-                            #[cfg(feature = "transport-keepalive")]
-                            {
-                                let ka_outcome = crate::emission_cost::check_keepalive_timed(
-                                    actions,
-                                    clock.now_monotonic_ms(),
-                                );
-                                on_event(IterationEvent::KeepAlive(ka_outcome));
+                        match kind {
+                            // Established lease / keepalive deadline. It was armed for the
+                            // deadline of some earlier iteration, so the real one may be
+                            // further out: look before acting, and when it is, arm again and
+                            // run no check (the early wake is not a deadline). Both checks are
+                            // deadline-self-guarded, so whichever armed the earlier wake fires
+                            // and the other reports its within-window verdict truthfully
+                            // (R311kx — the keepalive emit runs first: it is wire-side only
+                            // and must not be starved by an Expired transition tearing the
+                            // session down in the same wake).
+                            None => {
+                                #[cfg(feature = "transport-keepalive")]
+                                let ka_dl = keepalive_wake_deadline(actions);
+                                #[cfg(not(feature = "transport-keepalive"))]
+                                let ka_dl: Option<u64> = None;
+                                let real_deadline = [
+                                    lease_wake_deadline(actions),
+                                    ka_dl,
+                                    next_extra_deadline(),
+                                ]
+                                .into_iter()
+                                .flatten()
+                                .min();
+                                if real_deadline.is_some_and(|d| d > clock.now_monotonic_ms()) {
+                                    continue;
+                                }
+                                take_what_is_waiting(&mut held, driver, actions, engine);
+                                #[cfg(feature = "transport-keepalive")]
+                                {
+                                    let ka_outcome = crate::emission_cost::check_keepalive_timed(
+                                        actions,
+                                        clock.now_monotonic_ms(),
+                                    );
+                                    on_event(IterationEvent::KeepAlive(ka_outcome));
+                                }
+                                let lease_outcome =
+                                    check_lease_deadline(actions, engine, clock.now_monotonic_ms());
+                                on_event(IterationEvent::Lease(lease_outcome));
                             }
-                            let lease_outcome =
-                                check_lease_deadline(actions, engine, clock.now_monotonic_ms());
-                            on_event(IterationEvent::Lease(lease_outcome));
-                        }
-                        // Handshake timeout: raise the FSM event the arming
-                        // state declared (`*.timeout -> Closing` / accept ->
-                        // Closed). Each of the 5 events has a handler in its
-                        // arming state, so the raise always advances out of
-                        // that state — the loop cannot hot-spin re-raising.
-                        Some(event) => {
-                            engine.process_event(event);
+                            // Handshake timeout: raise the FSM event the arming
+                            // state declared (`*.timeout -> Closing` / accept ->
+                            // Closed). Each of the 5 events has a handler in its
+                            // arming state, so the raise always advances out of
+                            // that state — the loop cannot hot-spin re-raising.
+                            // The timer was armed for exactly this deadline.
+                            Some(event) => {
+                                engine.process_event(event);
+                            }
                         }
                     }
                 }
@@ -2946,6 +2955,46 @@ mod tests {
         assert_eq!(driver.frame_count(), 0, "nothing was drained");
         actions.flush_staged();
         assert_eq!(driver.frame_count(), 1, "one frame carries all three");
+    }
+
+    /// The drive loop keeps one wake across its iterations: a new one is armed for no wake, for an
+    /// earlier deadline of a caller that recomputes it, and for a handshake deadline that is not
+    /// the one armed, and for nothing else.
+    #[test]
+    fn a_wake_is_armed_anew_only_for_an_earlier_or_another_handshake_deadline() {
+        assert!(wake_rearms(None, 100, false, false), "nothing armed");
+        assert!(
+            wake_rearms(None, 100, true, false),
+            "nothing armed, handshake"
+        );
+        assert!(
+            !wake_rearms(Some(100), 100, false, false),
+            "the same deadline: the wake stands"
+        );
+        assert!(
+            !wake_rearms(Some(100), 250, false, false),
+            "the lease moved later: the wake stands, and wakes early to look"
+        );
+        assert!(
+            wake_rearms(Some(100), 40, false, false),
+            "the deadline moved earlier"
+        );
+        assert!(
+            !wake_rearms(Some(100), 40, false, true),
+            "a lazy caller's wake stands until its revision source drops it"
+        );
+        assert!(
+            !wake_rearms(Some(100), 100, true, false),
+            "the handshake deadline armed"
+        );
+        assert!(
+            wake_rearms(Some(100), 250, true, false),
+            "another handshake deadline, later"
+        );
+        assert!(
+            wake_rearms(Some(100), 40, true, false),
+            "another handshake deadline, earlier"
+        );
     }
 
     #[cfg(feature = "declare-keyexpr")]
