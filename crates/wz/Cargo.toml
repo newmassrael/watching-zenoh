@@ -186,7 +186,7 @@ sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", optional =
 [features]
 default = []
 
-# ----- domain: access (6 atomic) -----
+# ----- domain: access (8 atomic) -----
 # acl / downsampling / quota forward to the wz-runtime-tokio interceptor knobs.
 # extauth-usrpwd forwards the §5.16 usrpwd auth method (HMAC-SHA3-256). The `?`
 # forward is a no-op until a runtime is selected, like every other facade
@@ -203,8 +203,7 @@ access-extauth-usrpwd = ["session-extauth", "wz-runtime-tokio?/access-extauth-us
 access-quota = ["wz-runtime-tokio?/access-quota"]
 # The QoS overwrite (`qos/network`): the interceptor that rewrites the QoS of a message instead of
 # admitting or dropping it, and the config reader's reader of the key, which a build without it
-# refuses by name. Not in `domain-access`: the store has no atom of that name yet, and the census
-# refuses a bundle member the store does not carry.
+# refuses by name.
 access-qos-overwrite = ["wz-runtime-tokio?/access-qos-overwrite"]
 
 # ----- domain: attachment (2 atomic) -----
@@ -1335,6 +1334,7 @@ domain-access = [
     "access-extauth-jwt",
     "access-extauth-pubkey",
     "access-extauth-usrpwd",
+    "access-qos-overwrite",
     "access-quota",
 ]
 # R3335 -- the seven atom namespaces that had no bundle (adminspace, api,
