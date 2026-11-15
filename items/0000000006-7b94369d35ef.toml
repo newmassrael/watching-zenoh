@@ -6,3 +6,9 @@ commit = "befe6e986491d9d9c5f497ec4c2426408bf22ae4"
 base = "eb14784d202367e9a34fab9f1a33c2f15c4c55ea"
 machine = "mf977c53d872e"
 at = 1794737097
+
+[return]
+reason = "derive-failed"
+detail = "the derived commit was refused (its message or a commit hook): see the attempt's account"
+report = "m6a944ec3ba29:0000000006-7b94369d35ef/attempt-1.log"
+at = 1794738583
