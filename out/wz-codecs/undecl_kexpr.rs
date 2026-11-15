@@ -658,20 +658,29 @@ impl<S: UndeclKexprStorage> UndeclKexprOwned<S> {
     }
 }
 
+/// What the origin projection of `UndeclKexpr` asks of a storage profile
+/// beside UndeclKexprStorage: that it is an origin profile, and
+/// that each byte string and text of `UndeclKexpr` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait UndeclKexprOrigin: UndeclKexprStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin {}
+
+impl<S: UndeclKexprStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin> UndeclKexprOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> UndeclKexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: UndeclKexprLentStorage {
     /// Project this borrowed view into an owned [`UndeclKexprOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: UndeclKexprStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<UndeclKexprOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: UndeclKexprOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<UndeclKexprOwned<S>, CodecError> {
         Ok(UndeclKexprOwned {
             header: self.header,
             id: self.id,

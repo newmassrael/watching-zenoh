@@ -153,7 +153,7 @@ pub type SupervisionConfiguration = ::sce_rust_runtime::helpers::hierarchy::Boun
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
-pub const SUPERVISION_TABLES: ::sce_rust_runtime::DocumentTables = {
+pub const SUPERVISION_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
         DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
         TransitionRow,
@@ -426,7 +426,7 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     // histories and events by the numbers the tables know them by. Each of the
     // three lists is in the order of those numbers, so it is the inverse of the
     // enum's discriminant.
-    const TABLES: &'static ::sce_rust_runtime::DocumentTables = &SUPERVISION_TABLES;
+    const TABLES: &'static ::sce_rust_runtime::DocumentTables<'static> = &SUPERVISION_TABLES;
     const STATES: &'static [Self::State] = &[
         SupervisionState::Disarmed,
         SupervisionState::Armed,
@@ -474,10 +474,18 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(4) }, 1, 5, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(4) }, { ::sce_rust_runtime::record_words(4, 0) }, 0>;
     type Configuration = SupervisionConfiguration;
+    // docs/adr/0096: what refuses this machine's start. One with a script
+    // engine is refused when its script session cannot be established; one
+    // without cannot be refused that way, so its host starts it with
+    // `engine.initialize().unwrap_or_else(|never| match never {})`.
+    type StartFailure = ::core::convert::Infallible;
 
     // W3C SCXML feature flags
     const HAS_PARALLEL_STATES: bool = false;
     const NEEDS_SCRIPT_ENGINE: bool = false;
+    // Exactly when there is a script engine: the datamodel's initialization is
+    // where the script session is established (docs/adr/0096), so a machine
+    // with a session to establish always has it run at its start.
     const NEEDS_DATA_MODEL_INIT: bool = false;
     // The same fact the generate manifest publishes as `needs_event_scheduler`.
     // A `build.rs` consumer never sees that manifest — `compile_scxml` returns

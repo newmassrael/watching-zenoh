@@ -741,24 +741,33 @@ impl<S: HelloStorage> HelloOwned<S> {
     }
 }
 
+/// What the origin projection of `Hello` asks of a storage profile
+/// beside HelloStorage: that it is an origin profile, and
+/// that each byte string and text of `Hello` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait HelloOrigin: HelloStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<HelloZidField> + super::locator::LocatorOrigin {}
+
+impl<S: HelloStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<HelloZidField> + super::locator::LocatorOrigin> HelloOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> HelloIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: HelloLentStorage {
     /// Project this borrowed view into an owned [`HelloOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: HelloStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<HelloOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: HelloOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<HelloOwned<S>, CodecError> {
         Ok(HelloOwned {
             version: self.version,
             cbyte: self.cbyte,
-            zid: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<HelloZidField>(origin, self.zid.into_inner()))?,
+            zid: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginBytes<HelloZidField>>::bytes_from(origin, self.zid.into_inner()))?,
             num_locators: self.num_locators,
             locators: self.locators.map(|_v| ::sce_forge_runtime::codec::try_collect_bounded(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })

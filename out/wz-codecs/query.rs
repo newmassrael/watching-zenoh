@@ -832,25 +832,34 @@ impl<S: QueryStorage> QueryOwned<S> {
     }
 }
 
+/// What the origin projection of `Query` asks of a storage profile
+/// beside QueryStorage: that it is an origin profile, and
+/// that each byte string and text of `Query` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait QueryOrigin: QueryStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<QueryParametersField> + super::query_ext_entry::QueryExtEntryOrigin {}
+
+impl<S: QueryStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<QueryParametersField> + super::query_ext_entry::QueryExtEntryOrigin> QueryOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> QueryIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryLentStorage {
     /// Project this borrowed view into an owned [`QueryOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: QueryStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: QueryOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryOwned<S>, CodecError> {
         Ok(QueryOwned {
             header: self.header,
             consolidation: self.consolidation,
             parameters_len: self.parameters_len,
-            parameters: self.parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<QueryParametersField>(origin, _v.into_inner()))).transpose()?,
+            parameters: self.parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginBytes<QueryParametersField>>::bytes_from(origin, _v.into_inner()))).transpose()?,
             extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_lawful(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }

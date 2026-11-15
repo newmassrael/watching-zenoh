@@ -1045,25 +1045,34 @@ impl<S: MsgPutStorage> MsgPutOwned<S> {
     }
 }
 
+/// What the origin projection of `MsgPut` asks of a storage profile
+/// beside MsgPutStorage: that it is an origin profile, and
+/// that each byte string and text of `MsgPut` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait MsgPutOrigin: MsgPutStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<MsgPutPayloadField> + super::timestamp::TimestampOrigin + super::encoding::EncodingOrigin + super::ext_entry::ExtEntryOrigin + super::zbuf_slice::ZbufSliceOrigin {}
+
+impl<S: MsgPutStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<MsgPutPayloadField> + super::timestamp::TimestampOrigin + super::encoding::EncodingOrigin + super::ext_entry::ExtEntryOrigin + super::zbuf_slice::ZbufSliceOrigin> MsgPutOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> MsgPutIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: MsgPutLentStorage {
     /// Project this borrowed view into an owned [`MsgPutOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: MsgPutStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<MsgPutOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: MsgPutOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<MsgPutOwned<S>, CodecError> {
         Ok(MsgPutOwned {
             header: self.header,
             timestamp: self.timestamp.map(|_v| _v.try_into_owned_in_origin::<S>(origin)).transpose()?,
             encoding: self.encoding.map(|_v| _v.try_into_owned_in_origin::<S>(origin)).transpose()?,
-            extensions_has_0x12: match self.extensions_has_0x12 { MsgPutExtensionsHas0x12::Has0x12 { extensions, slices } => MsgPutExtensionsHas0x12::Has0x12 { extensions: { let (_r, _p) = extensions.into_parts(); ::sce_forge_runtime::codec::Placed::from_list(::sce_forge_runtime::storage::try_collect_list(_r, |_e| _e.try_into_owned_in_origin::<S>(origin))?, _p).expect("the projection keeps each entry's identifier") }, slices: ::sce_forge_runtime::codec::try_collect_bounded(slices, |_e| _e.try_into_owned_in_origin::<S>(origin))? }, MsgPutExtensionsHas0x12::NotHas0x12 { extensions, payload } => MsgPutExtensionsHas0x12::NotHas0x12 { extensions: match extensions { Some(_l) => Some(::sce_forge_runtime::codec::Chain::from_list(::sce_forge_runtime::storage::try_collect_list(_l.into_inner(), |_e| _e.try_into_owned_in_origin::<S>(origin))?).expect("the projection keeps each entry's identifier")), None => None }, payload: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<MsgPutPayloadField>(origin, payload.into_inner()))? }, },
+            extensions_has_0x12: match self.extensions_has_0x12 { MsgPutExtensionsHas0x12::Has0x12 { extensions, slices } => MsgPutExtensionsHas0x12::Has0x12 { extensions: { let (_r, _p) = extensions.into_parts(); ::sce_forge_runtime::codec::Placed::from_list(::sce_forge_runtime::storage::try_collect_list(_r, |_e| _e.try_into_owned_in_origin::<S>(origin))?, _p).expect("the projection keeps each entry's identifier") }, slices: ::sce_forge_runtime::codec::try_collect_bounded(slices, |_e| _e.try_into_owned_in_origin::<S>(origin))? }, MsgPutExtensionsHas0x12::NotHas0x12 { extensions, payload } => MsgPutExtensionsHas0x12::NotHas0x12 { extensions: match extensions { Some(_l) => Some(::sce_forge_runtime::codec::Chain::from_list(::sce_forge_runtime::storage::try_collect_list(_l.into_inner(), |_e| _e.try_into_owned_in_origin::<S>(origin))?).expect("the projection keeps each entry's identifier")), None => None }, payload: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginBytes<MsgPutPayloadField>>::bytes_from(origin, payload.into_inner()))? }, },
             payload_len: self.payload_len,
             slice_count: self.slice_count,
         })

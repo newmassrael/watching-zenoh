@@ -479,24 +479,33 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalOwned<S> {
     }
 }
 
+/// What the origin projection of `WireexprNonlocal` asks of a storage profile
+/// beside WireexprNonlocalStorage: that it is an origin profile, and
+/// that each byte string and text of `WireexprNonlocal` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait WireexprNonlocalOrigin: WireexprNonlocalStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginStr<WireexprNonlocalSuffixField> {}
+
+impl<S: WireexprNonlocalStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginStr<WireexprNonlocalSuffixField>> WireexprNonlocalOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> WireexprNonlocalIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprNonlocalLentStorage {
     /// Project this borrowed view into an owned [`WireexprNonlocalOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: WireexprNonlocalStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprNonlocalOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: WireexprNonlocalOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprNonlocalOwned<S>, CodecError> {
         Ok(WireexprNonlocalOwned {
             id: self.id,
             suffix_len: self.suffix_len,
-            suffix: self.suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<WireexprNonlocalSuffixField>(origin, _v.into_inner()))).transpose()?,
+            suffix: self.suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStr<WireexprNonlocalSuffixField>>::str_from(origin, _v.into_inner()))).transpose()?,
         })
     }
 }

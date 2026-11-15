@@ -1272,11 +1272,48 @@ impl<S: RequestStorage> RequestOwned<S> {
     }
 }
 
+#[cfg(feature = "request-put-del")]
+#[allow(dead_code)]
+pub trait RequestGatedChild2Origin: super::msg_put::MsgPutOrigin {}
+
+#[cfg(feature = "request-put-del")]
+impl<S: super::msg_put::MsgPutOrigin> RequestGatedChild2Origin for S {}
+
+#[cfg(not(feature = "request-put-del"))]
+#[allow(dead_code)]
+pub trait RequestGatedChild2Origin {}
+
+#[cfg(not(feature = "request-put-del"))]
+impl<S> RequestGatedChild2Origin for S {}
+
+#[cfg(feature = "request-put-del")]
+#[allow(dead_code)]
+pub trait RequestGatedChild3Origin: super::msg_del::MsgDelOrigin {}
+
+#[cfg(feature = "request-put-del")]
+impl<S: super::msg_del::MsgDelOrigin> RequestGatedChild3Origin for S {}
+
+#[cfg(not(feature = "request-put-del"))]
+#[allow(dead_code)]
+pub trait RequestGatedChild3Origin {}
+
+#[cfg(not(feature = "request-put-del"))]
+impl<S> RequestGatedChild3Origin for S {}
+
+/// What the origin projection of `Request` asks of a storage profile
+/// beside RequestStorage: that it is an origin profile, and
+/// that each byte string and text of `Request` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait RequestOrigin: RequestStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr::WireexprOrigin + super::ext_entry::ExtEntryOrigin + RequestGatedChild2Origin + RequestGatedChild3Origin + super::query::QueryOrigin {}
+
+impl<S: RequestStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr::WireexprOrigin + super::ext_entry::ExtEntryOrigin + RequestGatedChild2Origin + RequestGatedChild3Origin + super::query::QueryOrigin> RequestOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> RequestVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: RequestLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: RequestStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<RequestOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: RequestOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<RequestOwnedVariant<S>, CodecError> {
         Ok(match self {
             #[cfg(feature = "request-put-del")]
             Self::CodecZenohMsgPut(_b) => RequestOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in_origin::<S>(origin)?),
@@ -1291,17 +1328,17 @@ impl<'a, D> RequestVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: R
 #[allow(dead_code)]
 impl<'a, D> RequestIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: RequestLentStorage {
     /// Project this borrowed view into an owned [`RequestOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: RequestStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<RequestOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: RequestOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<RequestOwned<S>, CodecError> {
         Ok(RequestOwned {
             header: self.header,
             rid: self.rid,

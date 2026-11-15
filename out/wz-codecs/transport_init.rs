@@ -694,20 +694,29 @@ impl<S: TransportInitStorage> TransportInitOwned<S> {
     }
 }
 
+/// What the origin projection of `TransportInit` asks of a storage profile
+/// beside TransportInitStorage: that it is an origin profile, and
+/// that each byte string and text of `TransportInit` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait TransportInitOrigin: TransportInitStorage + ::sce_forge_runtime::codec::OriginStorage + super::init_body::InitBodyOrigin + super::ext_entry::ExtEntryOrigin {}
+
+impl<S: TransportInitStorage + ::sce_forge_runtime::codec::OriginStorage + super::init_body::InitBodyOrigin + super::ext_entry::ExtEntryOrigin> TransportInitOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> TransportInitIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: TransportInitLentStorage {
     /// Project this borrowed view into an owned [`TransportInitOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: TransportInitStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<TransportInitOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: TransportInitOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<TransportInitOwned<S>, CodecError> {
         Ok(TransportInitOwned {
             header: self.header,
             body: self.body.try_into_owned_in_origin::<S>(origin)?,
