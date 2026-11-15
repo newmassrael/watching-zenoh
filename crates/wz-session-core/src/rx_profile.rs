@@ -281,8 +281,10 @@ mod tests {
 
     /// The size of a received `PushOwned` with the encoding's schema held as
     /// text, as the AP host build measures it. The router clones one per face
-    /// it forwards to, so the schema's container must not move it.
-    const PUSH_OWNED_BYTES_AT_TEXT_SCHEMA: usize = 0;
+    /// it forwards to, so the schema's container must not move it. Measured on
+    /// x86_64 at SCE 9ae6a6b682, where the hot path's allocation budget passed
+    /// unchanged: the layout the text schema had.
+    const PUSH_OWNED_BYTES_AT_TEXT_SCHEMA: usize = 312;
 
     /// The wire of a literal Push carrying `payload`, laid in a larger storage
     /// at a non-zero offset so a range that were mistaken for the whole storage
