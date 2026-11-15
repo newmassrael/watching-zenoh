@@ -35,12 +35,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use zenoh_config::qos::{PublisherQoSConfList, PublisherQoSConfig};
+use zenoh_config::qos::PublisherQoSConfig;
 #[cfg(feature = "unstable")]
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
-use zenoh_keyexpr::keyexpr_tree::{IKeyExprTree, IKeyExprTreeNode, KeBoxTree};
 #[cfg(any(feature = "unstable", feature = "internal"))]
 use zenoh_protocol::core::Locator;
 #[cfg(feature = "unstable")]
@@ -237,6 +236,14 @@ pub(crate) struct QueryableDeclaration<'a> {
     /// What records on the timestamp stack of a query it receives and of the replies it sends.
     #[cfg(feature = "unstable")]
     pub(crate) timestamps: Arc<TimestampSource>,
+    /// What copies a large reply into shared memory for a peer that could read it, when the
+    /// configuration asks for the optimisation. Held for as long as the queryable is.
+    #[cfg(all(
+        feature = "unstable",
+        feature = "shared-memory",
+        feature = "engine-tokio"
+    ))]
+    pub(crate) shm_promoter: Option<Arc<crate::api::shm::transport::Promoter>>,
 }
 
 /// What a get asks of the engine, in the types of this crate: the key as the wire names it, the
@@ -289,6 +296,14 @@ pub(crate) struct QueryRequest<'a> {
     /// Held until the callback can be called no more: the wait of a querier's undeclaration on its
     /// callbacks ends then.
     pub(crate) querier_notifier: Option<SyncGroupNotifier>,
+    /// What copies a large value into shared memory for a peer that could read it, when the
+    /// configuration asks for the optimisation.
+    #[cfg(all(
+        feature = "unstable",
+        feature = "shared-memory",
+        feature = "engine-tokio"
+    ))]
+    pub(crate) shm_promoter: Option<&'a crate::api::shm::transport::Promoter>,
 }
 
 /// What a liveliness query asks of the engine, in the types of this crate: the key as the wire
@@ -412,16 +427,16 @@ struct RouterEngine {
 #[derive(Default)]
 struct RouterKeys {
     /// The last id given: ids start at 1, and 0 is the scope of a key that is not declared.
-    last: u64,
+    last: ExprId,
     /// `id -> (key, holders)`.
-    held: std::collections::HashMap<u64, (String, usize)>,
+    held: std::collections::HashMap<ExprId, (String, usize)>,
 }
 
 #[cfg(feature = "engine-tokio")]
 impl RouterKeys {
     /// Hold `keyexpr` as declared: the id it already has, with one holder more, or a new one.
-    /// `None` when the wire could not name the id (sixteen bits).
-    fn acquire(&mut self, keyexpr: &str) -> Option<u64> {
+    /// `None` when the wire's id space (an `ExprId`) is spent.
+    fn acquire(&mut self, keyexpr: &str) -> Option<ExprId> {
         if let Some((id, held)) = self
             .held
             .iter_mut()
@@ -431,17 +446,14 @@ impl RouterKeys {
             *held += 1;
             return Some(id);
         }
-        let id = self
-            .last
-            .checked_add(1)
-            .filter(|id| *id <= u64::from(u16::MAX))?;
+        let id = self.last.checked_add(1)?;
         self.last = id;
         self.held.insert(id, (keyexpr.to_owned(), 1));
         Some(id)
     }
 
     /// Let go of one holder of `id`; the declaration ends with the last.
-    fn release(&mut self, id: u64) {
+    fn release(&mut self, id: ExprId) {
         if let Some((_, held)) = self.held.get_mut(&id) {
             *held -= 1;
             if *held == 0 {
@@ -697,7 +709,6 @@ impl Engine {
         } else {
             None
         };
-        let node = node_role.is_some();
         // Decision D6: a key the configuration states with a value other than its default, that
         // upstream acts on and this engine does not, is refused by its name, and not left to do
         // nothing.
@@ -731,23 +742,24 @@ impl Engine {
             // Each face of the session has a thread of its own, so a callback that blocks
             // holds up its link and no other.
             face_drive: tokio_engine::FaceDrive::PerFace,
-            // A router carries no shared memory; any other session, a peer that forwards
-            // included, reads a received descriptor with this crate's reader and offers shared
-            // memory as its configuration says (`transport/shared_memory/enabled`).
+            // Every session, a router and a peer that forwards included, reads a received
+            // descriptor with this crate's reader and offers shared memory as its configuration
+            // says (`transport/shared_memory/enabled`): upstream's transport manager makes its
+            // shared-memory context from that section whatever the mode
+            // (`io/zenoh-transport/src/manager.rs` @
+            // `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`).
             #[cfg(feature = "shared-memory")]
-            shm_clients: if router {
-                tokio_engine::no_shm_clients()
-            } else {
-                Some(wz_capi_core::faces::ShmReader::Host(
-                    crate::api::shm::transport::resolver_factory(shm_clients),
-                ))
-            },
+            shm_clients: Some(wz_capi_core::faces::ShmReader::Host(
+                crate::api::shm::transport::resolver_factory(shm_clients),
+            )),
             #[cfg(not(feature = "shared-memory"))]
             shm_clients: tokio_engine::no_shm_clients(),
-            offer_shm: cfg!(feature = "shared-memory") && !router,
+            offer_shm: cfg!(feature = "shared-memory"),
             // The multicast groups of a session that holds a shared-memory context are
-            // shared-memory ones, and what a member of one sends it reads through that reader.
-            groups_report_shm: cfg!(feature = "shared-memory") && !node,
+            // shared-memory ones, a node's as well, and what a member of one sends it reads
+            // through that reader (`io/zenoh-transport/src/multicast/rx.rs` @
+            // `if let Some(shm_context) = &self.shm_context {`).
+            groups_report_shm: cfg!(feature = "shared-memory"),
         });
         if let Some(role) = node_role {
             if let Some(ask) = arguments.router_refusal() {
@@ -776,6 +788,39 @@ impl Engine {
         }
     }
 
+    /// What the session applies itself above its links, as the open compiled it from the
+    /// configuration: the one value the C ABI reads as well.
+    fn session_defaults(&self) -> &wz_capi_core::session_defaults::SessionDefaults {
+        match self {
+            Engine::Tokio(state) => state.session_defaults(),
+            Engine::Router(router) => router.node.session_defaults(),
+        }
+    }
+
+    /// The quality of service `qos/publication` sets for a publication on `key_expr`: the
+    /// settings of the first rule whose key expression includes it, or none set. When several
+    /// include it, the others are said, as upstream's session says them.
+    fn publisher_qos_overwrite(&self, key_expr: &str) -> PublisherQoSConfig {
+        let Some(found) = self.session_defaults().publication_qos.find(key_expr) else {
+            return PublisherQoSConfig::default();
+        };
+        if !found.also_including.is_empty() {
+            tracing::warn!(
+                "Publisher declared on `{}` which is included by multiple key_exprs in qos config ({}). Using qos config for `{}`",
+                key_expr,
+                found.also_including.join(", "),
+                found.key_expr,
+            );
+        }
+        tokio_engine::publisher_qos_of(&found.defaults)
+    }
+
+    /// Which large payloads the session copies into its provider, as the open compiled it.
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    fn shm_promotion(&self) -> wz_capi_core::session_defaults::ShmPromotion {
+        self.session_defaults().shm_promotion
+    }
+
     /// Close the session and wait for its drive to stop: every callback has returned when this
     /// does. Closing a closed session does nothing.
     fn close(&self) {
@@ -785,7 +830,7 @@ impl Engine {
         }
     }
 
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<u64> {
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr.to_owned()),
             // A node declares no key expression to its peers and names none by an id on the wire,
@@ -798,7 +843,7 @@ impl Engine {
         }
     }
 
-    fn release_keyexpr(&self, mapping_id: u64) {
+    fn release_keyexpr(&self, mapping_id: ExprId) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().release_keyexpr(mapping_id),
             Engine::Router(router) => router
@@ -885,8 +930,14 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn node_clock(&self) -> Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync> {
         match self {
-            // Owed: the router's clock is not read off the node yet.
-            Engine::Router(_) => Box::new(|| None),
+            Engine::Router(router) => {
+                let hlc = router.node.node_hlc();
+                Box::new(move || {
+                    hlc.clock_stamp()
+                        .as_ref()
+                        .and_then(tokio_engine::timestamp_from)
+                })
+            }
             Engine::Tokio(state) => {
                 let shared = state.shared.clone();
                 Box::new(move || {
@@ -900,10 +951,27 @@ impl Engine {
         }
     }
 
-    /// The next timestamp off the node's clock, or `None` for a node that holds none.
+    /// The node's clock, as a session lends it ([`Session::hlc`]), or `None` for a node that
+    /// holds none.
+    #[cfg(feature = "internal")]
+    fn node_hlc(&self) -> Option<NodeHlc> {
+        match self {
+            Engine::Router(router) => NodeHlc::over(router.node.node_hlc()),
+            Engine::Tokio(state) => NodeHlc::over(state.shared.node_hlc().clone()),
+        }
+    }
+
+    /// The next timestamp off the node's clock, or `None` for a node that holds none: a read of the
+    /// clock, to which no stamping policy applies (upstream's `Session::new_timestamp` reads its
+    /// runtime's clock whatever it is).
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
         match self {
-            Engine::Router(_) => None,
+            Engine::Router(router) => router
+                .node
+                .node_hlc()
+                .clock_stamp()
+                .as_ref()
+                .and_then(tokio_engine::timestamp_from),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -1028,7 +1096,7 @@ impl Engine {
 
     /// The key expression declarations the engine holds, `(id, key)` in declaration order.
     #[cfg(test)]
-    fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().keyexpr_declarations(),
             Engine::Router(_) => Vec::new(),
@@ -1048,54 +1116,14 @@ impl Engine {
             Engine::Tokio(state) => {
                 let options = tokio_engine::publish_options(publication);
                 let wire = tokio_engine::wire_key(publication);
-                // A large put that the configuration asks to be optimised, and that a peer could
-                // read from shared memory, is sent to the peers as a copy in the provider; a
-                // subscriber of the session itself is given the bytes it was put with, as
-                // upstream's, which promotes at the link and not before it.
-                #[cfg(all(feature = "unstable", feature = "shared-memory"))]
-                if publication.kind == SampleKind::Put {
-                    let engine = state.shared.as_engine();
-                    if let Some(handle) = publication.shm_promoter.and_then(|promoter| {
-                        promoter.promote(&publication.payload, || engine.has_shm_peer())
-                    }) {
-                        let mut delivered = Ok(0);
-                        if options.allowed_destination.allows_remote() {
-                            let remote = options
-                                .clone()
-                                .with_locality(wz_capi_core::runtime::locality::Locality::Remote);
-                            delivered = engine.publish_shm_on_wire_all(
-                                publication.key,
-                                &wire,
-                                handle,
-                                &remote,
-                            );
-                        }
-                        if delivered.is_ok() && options.allowed_destination.allows_local() {
-                            let local = options.with_locality(
-                                wz_capi_core::runtime::locality::Locality::SessionLocal,
-                            );
-                            delivered = engine.publish_on_wire_all(
-                                publication.key,
-                                &wire,
-                                &publication.payload.to_bytes(),
-                                &local,
-                            );
-                        }
-                        return delivered
-                            .map(|_delivered| ())
-                            .map_err(|refusal| tokio_engine::publish_error(refusal, publication));
-                    }
-                }
                 // A put whose payload is a buffer of shared memory is sent as the buffer: its
                 // descriptor to a peer that negotiated shared memory, its bytes to any other.
                 #[cfg(feature = "shared-memory")]
                 if publication.kind == SampleKind::Put {
-                    if let Some(handle) =
-                        crate::api::shm::transport::send_handle_of(&publication.payload)
-                    {
-                        return state
-                            .shared
-                            .as_engine()
+                    let engine = state.shared.as_engine();
+                    let shared = tokio_engine::put_buffer(publication, || engine.has_shm_peer());
+                    if let Some(handle) = shared {
+                        return engine
                             .publish_shm_on_wire_all(publication.key, &wire, handle, &options)
                             .map(|_delivered| ())
                             .map_err(|refusal| tokio_engine::publish_error(refusal, publication));
@@ -1281,9 +1309,21 @@ impl Engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    shm_promoter,
                     ..
                 } = queryable;
                 RouterEngine::refuse_links(links)?;
+                // The node is held weakly: the queryable lives in it.
+                #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                let promotion = shm_promoter.map(|promoter| {
+                    let forwarder = Arc::downgrade(&router.node.shared_forwarder());
+                    tokio_engine::ReplyPromotion::new(promoter, move || {
+                        forwarder
+                            .upgrade()
+                            .is_some_and(|forwarder| forwarder.has_shm_peer())
+                    })
+                });
                 let sink = tokio_engine::queryable_sink(
                     callback,
                     notifier,
@@ -1291,6 +1331,8 @@ impl Engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    promotion,
                 );
                 let handler = sink(router.node.query_holder());
                 Ok(router.node.forwarder().host_queryable_from(
@@ -1315,8 +1357,18 @@ impl Engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    shm_promoter,
                 } = queryable;
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
+                // The registry is held weakly: the queryable lives in it.
+                #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                let promotion = shm_promoter.map(|promoter| {
+                    let engine = Arc::downgrade(&state.shared.as_engine());
+                    tokio_engine::ReplyPromotion::new(promoter, move || {
+                        engine.upgrade().is_some_and(|engine| engine.has_shm_peer())
+                    })
+                });
                 // The registry's own door, not the port's: the port has no operation that takes
                 // a set of links, and for no restriction the two declare the same.
                 Ok(state.shared.declare_port_queryable_on_links(
@@ -1333,6 +1385,8 @@ impl Engine {
                         eid,
                         #[cfg(feature = "unstable")]
                         timestamps,
+                        #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                        promotion,
                     ),
                 ))
             }
@@ -1684,15 +1738,19 @@ impl Engine {
         match *self {}
     }
 
+    fn publisher_qos_overwrite(&self, _key_expr: &str) -> PublisherQoSConfig {
+        match *self {}
+    }
+
     fn close(&self) {
         match *self {}
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<u64> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<ExprId> {
         match *self {}
     }
 
-    fn release_keyexpr(&self, _mapping_id: u64) {
+    fn release_keyexpr(&self, _mapping_id: ExprId) {
         match *self {}
     }
 
@@ -1710,6 +1768,11 @@ impl Engine {
     }
 
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
+        match *self {}
+    }
+
+    #[cfg(feature = "internal")]
+    fn node_hlc(&self) -> Option<NodeHlc> {
         match *self {}
     }
 
@@ -1841,6 +1904,7 @@ impl Engine {
 /// plan is made from, and the words an open that cannot be carried out is refused in.
 #[cfg(feature = "engine-tokio")]
 mod tokio_engine {
+    pub(super) use wz_capi_core::drive::{FaceDrive, NodeRole};
     use wz_capi_core::runtime::declare::{LivelinessSample, LivelinessSampleKind};
     #[cfg(feature = "unstable")]
     use wz_capi_core::runtime::sample::SourceInfo as EngineSourceInfo;
@@ -1849,13 +1913,14 @@ mod tokio_engine {
     use wz_capi_core::runtime::Reliability as EngineReliability;
     use wz_capi_core::{
         drive::OpenError,
-        open_plan::{key_state, KeyState, OpenRefusal},
+        open_plan::{key_state, KeyState, OpenRefusal, SessionReach},
         runtime::session_glue::WhatAmI as EngineWhatAmI,
+        runtime::zenoh_config::SESSION_HONOURED_KEYS,
+        session_defaults::PromotedMessages,
     };
-    pub(super) use wz_capi_core::{
-        drive::{FaceDrive, NodeRole},
-        faces::no_shm_clients,
-    };
+    // A build with shared memory gives every session a reader.
+    #[cfg(not(feature = "shared-memory"))]
+    pub(super) use wz_capi_core::faces::no_shm_clients;
     use wz_capi_core::{
         faces::{FanoutError, SubscriberSink, WireKey},
         runtime::{
@@ -2199,21 +2264,42 @@ mod tokio_engine {
         Ok(())
     }
 
-    /// Decision D6: refuse, by name, the keys of `document` that `ignored` says the engine does not
-    /// act on, that upstream acts on, and whose value is not the default's.
+    /// What a session of this crate applies itself of the keys only a session applies: the QoS
+    /// `qos/publication` gives its publications, always; shared memory in a build with it, whose
+    /// open makes the subsystem when asked; and, with the provider of the session as well
+    /// (`unstable`), the copy of a large put, query value and reply (`api::shm::transport::Promoter`).
+    pub(super) const SESSION_REACH: SessionReach = SessionReach {
+        publication_qos: true,
+        shared_memory: cfg!(feature = "shared-memory"),
+        promotion: if cfg!(all(feature = "shared-memory", feature = "unstable")) {
+            PromotedMessages::ALL
+        } else {
+            PromotedMessages::NONE
+        },
+    };
+
+    /// Decision D6: refuse, by name, the keys of `document` the engine does not act on for this
+    /// crate's session, that upstream acts on, and whose value is not the default's.
     ///
-    /// `ignored` lists every leaf the document carries that the engine does not act on, and the
-    /// document is the whole configuration, so most of them hold the default. A key that upstream
-    /// itself does nothing with ([`KeyState::Inert`]) is accepted whatever its value, and a key no
-    /// list knows ([`None`]) is refused as the unmapped ones are.
+    /// They are the keys `ignored` lists, every leaf the document carries that the engine does not
+    /// act on, and the keys only a session applies that this crate's session does not
+    /// ([`SESSION_REACH`]); the document is the whole configuration, so most of them hold the
+    /// default. A key that upstream itself does nothing with ([`KeyState::Inert`]) is accepted
+    /// whatever its value, and a key no list knows ([`None`]) is refused as the unmapped ones are.
     pub(super) fn refuse_unmapped(ignored: &[String], document: &serde_json::Value) -> ZResult<()> {
         // The default in the shape the document has, nulls left out, or a key whose default is
         // `null` would differ from the document that states nothing.
         let default = rendered(&zenoh_config::Config::default())?;
         let unmapped: Vec<String> = ignored
             .iter()
-            .filter(|key| key_state(key) != Some(KeyState::Inert))
-            .filter(|key| !acted_on_by_the_session(key))
+            .map(String::as_str)
+            .chain(SESSION_HONOURED_KEYS.iter().copied())
+            .filter(|key| {
+                !matches!(
+                    key_state(key, SESSION_REACH),
+                    Some(KeyState::Inert | KeyState::Mapped)
+                )
+            })
             .filter(|key| !inert_in_this_build(key))
             .filter(|key| {
                 let pointer = format!("/{key}");
@@ -2242,23 +2328,6 @@ mod tokio_engine {
     fn inert_in_this_build(key: &str) -> bool {
         !cfg!(feature = "plugins")
             && (key.starts_with("plugins/") || key.starts_with("plugins_loading/"))
-    }
-
-    /// Whether a key the engine does not act on is one this crate acts on itself, so that the
-    /// engine's ignoring it is no reason to refuse it. `transport/shared_memory/mode`, which the
-    /// session reads as it opens (`api::shm::init_if_asked`) in a build with shared memory, and
-    /// `qos/publication`, the per-key defaults of the publications, which the session holds as
-    /// a tree of keys and applies to every publisher and put it builds
-    /// ([`Session::get_publisher_qos_overwrite`]).
-    fn acted_on_by_the_session(key: &str) -> bool {
-        key == "qos/publication"
-            || (cfg!(feature = "shared-memory") && key == "transport/shared_memory/mode")
-            // The implicit optimisation of large messages, which `api::shm::transport::Promoter`
-            // carries out for a put (the lists of `query` and `reply` are not promoted yet, and a
-            // list that names them is read and not acted on for those).
-            || (cfg!(all(feature = "shared-memory", feature = "unstable"))
-                && (key == "transport/shared_memory/transport_optimization/message_size_threshold"
-                    || key == "transport/shared_memory/transport_optimization/messages"))
     }
 
     /// An open the plan refuses, in the words upstream refuses it in where it does, and by the key
@@ -2365,10 +2434,12 @@ mod tokio_engine {
         if encoding == zenoh_protocol::core::Encoding::default() {
             return None;
         }
+        // The schema's bytes as they are: zenoh holds a schema as bytes, and one
+        // that is not UTF-8 crosses into the engine and onto the wire unchanged.
         let schema = encoding
             .schema
             .as_ref()
-            .map(|schema| String::from_utf8_lossy(schema.as_slice()).into_owned());
+            .map(|schema| schema.as_slice().to_vec());
         Some(EncodingHint {
             packed_id: (u32::from(encoding.id) << 1) | u32::from(schema.is_some()),
             schema,
@@ -2382,13 +2453,13 @@ mod tokio_engine {
 
     /// The encoding the parts of a hint say, as a view of a reply borrows them: the packed id and
     /// the schema; none is the default one.
-    fn encoding_of_parts(parts: Option<(u32, Option<&str>)>) -> Encoding {
+    fn encoding_of_parts(parts: Option<(u32, Option<&[u8]>)>) -> Encoding {
         parts
             .and_then(|(packed_id, schema)| {
                 let id = u16::try_from(packed_id >> 1).ok()?;
                 let schema = schema
                     .filter(|_| packed_id & 1 == 1)
-                    .map(|schema| zenoh_buffers::ZSlice::from(schema.as_bytes().to_vec()));
+                    .map(|schema| zenoh_buffers::ZSlice::from(schema.to_vec()));
                 Some(zenoh_protocol::core::Encoding { id, schema })
             })
             .map(Encoding::from)
@@ -2442,6 +2513,55 @@ mod tokio_engine {
             .with_express(qos.express())
     }
 
+    /// What the configuration gives a publication (the engine's one reading of `qos/publication`,
+    /// `wz_capi_core::session_defaults::PublicationDefaults`), in the form this crate's builders
+    /// write over what the application states (`PublisherBuilder::apply_qos_overwrites`).
+    pub(super) fn publisher_qos_of(
+        defaults: &wz_capi_core::session_defaults::PublicationDefaults,
+    ) -> zenoh_config::qos::PublisherQoSConfig {
+        use zenoh_config::qos::{CongestionControlConf, PriorityConf};
+        zenoh_config::qos::PublisherQoSConfig {
+            congestion_control: defaults.congestion_control.and_then(|congestion| {
+                match congestion {
+                    EngineCongestion::Drop => Some(CongestionControlConf::Drop),
+                    EngineCongestion::Block => Some(CongestionControlConf::Block),
+                    #[cfg(feature = "unstable")]
+                    EngineCongestion::BlockFirst => Some(CongestionControlConf::BlockFirst),
+                    // Without `unstable` the configuration of this crate cannot state it.
+                    #[cfg(not(feature = "unstable"))]
+                    EngineCongestion::BlockFirst => None,
+                }
+            }),
+            priority: defaults.priority.and_then(|priority| match priority {
+                // The configuration names no control band.
+                EnginePriority::Control => None,
+                EnginePriority::RealTime => Some(PriorityConf::RealTime),
+                EnginePriority::InteractiveHigh => Some(PriorityConf::InteractiveHigh),
+                EnginePriority::InteractiveLow => Some(PriorityConf::InteractiveLow),
+                EnginePriority::DataHigh => Some(PriorityConf::DataHigh),
+                EnginePriority::Data => Some(PriorityConf::Data),
+                EnginePriority::DataLow => Some(PriorityConf::DataLow),
+                EnginePriority::Background => Some(PriorityConf::Background),
+            }),
+            express: defaults.express,
+            #[cfg(feature = "unstable")]
+            reliability: defaults.reliability.map(|reliability| match reliability {
+                EngineReliability::BestEffort => zenoh_config::qos::ReliabilityConf::BestEffort,
+                EngineReliability::Reliable => zenoh_config::qos::ReliabilityConf::Reliable,
+            }),
+            #[cfg(feature = "unstable")]
+            allowed_destination: defaults.allowed_destination.map(
+                |destination| match destination {
+                    EngineLocality::Any => zenoh_config::qos::PublisherLocalityConf::Any,
+                    EngineLocality::SessionLocal => {
+                        zenoh_config::qos::PublisherLocalityConf::SessionLocal
+                    }
+                    EngineLocality::Remote => zenoh_config::qos::PublisherLocalityConf::Remote,
+                },
+            ),
+        }
+    }
+
     /// The engine's source information for `info`.
     #[cfg(feature = "unstable")]
     fn source_info_hint_of(info: &SourceInfo) -> EngineSourceInfo {
@@ -2475,7 +2595,7 @@ mod tokio_engine {
         if scope == 0 {
             WireKey::literal()
         } else {
-            WireKey::aliased(u64::from(scope), suffix)
+            WireKey::aliased(scope, suffix)
         }
     }
 
@@ -2488,7 +2608,7 @@ mod tokio_engine {
         destination: Locality,
     ) -> Option<InterestForm> {
         (destination != Locality::SessionLocal).then(|| InterestForm {
-            mapping_id: u64::from(scope),
+            mapping_id: scope,
             suffix,
             aggregate: false,
         })
@@ -2529,49 +2649,12 @@ mod tokio_engine {
         // to a face that negotiated shared memory, its bytes to any other.
         #[cfg(feature = "shared-memory")]
         if publication.kind == SampleKind::Put {
-            if let Some(handle) = crate::api::shm::transport::send_handle_of(&publication.payload) {
+            if let Some(handle) = put_buffer(publication, || node.has_shm_peer()) {
                 return node
                     .publish_shm(publication.key, handle, &options)
                     .map_err(|error| {
                         zerror!("the node could not publish on {}: {error}", publication.key).into()
                     });
-            }
-            // A large put the configuration asks to be optimised, and that a face could read
-            // from shared memory, is sent to the faces as a copy in the provider; a subscriber
-            // of the session itself is given the bytes it was put with.
-            #[cfg(feature = "unstable")]
-            if let Some(handle) = publication
-                .shm_promoter
-                .and_then(|promoter| promoter.promote(&publication.payload, || node.has_shm_peer()))
-            {
-                use wz_capi_core::runtime::locality::Locality as EngineLocality;
-                let mut published = Ok(());
-                if options.allowed_destination.allows_remote() {
-                    published = node
-                        .publish_shm(
-                            publication.key,
-                            handle,
-                            &options.clone().with_locality(EngineLocality::Remote),
-                        )
-                        .map_err(|error| {
-                            zerror!("the node could not publish on {}: {error}", publication.key)
-                        });
-                }
-                if published.is_ok() && options.allowed_destination.allows_local() {
-                    published = forwarder
-                        .publish_with(
-                            publication.key,
-                            &payload,
-                            &options.with_locality(EngineLocality::SessionLocal),
-                        )
-                        .map_err(|error| {
-                            zerror!(
-                                "the node could not publish on {}: {error:?}",
-                                publication.key
-                            )
-                        });
-                }
-                return published.map_err(Into::into);
             }
         }
         let published = forwarder.publish_with(publication.key, &payload, &options);
@@ -2636,6 +2719,106 @@ mod tokio_engine {
             return shared;
         }
         ZBytes::from(view.payload().to_vec())
+    }
+
+    /// The value of a Put reply the engine hands up, as [`payload_of_view`] reads a sample's: the
+    /// buffer of shared memory it is when the reader of this crate made it, the bytes otherwise.
+    fn payload_of_reply(view: &dyn ReplyView) -> ZBytes {
+        #[cfg(feature = "shared-memory")]
+        if let Some(shared) = view
+            .payload_shared()
+            .and_then(crate::api::shm::transport::payload_of)
+        {
+            return shared;
+        }
+        ZBytes::from(view.payload().to_vec())
+    }
+
+    /// The buffer of shared memory a message whose payload is `payload` is sent from: the payload
+    /// itself when it is one, and otherwise, when the configuration asks for the implicit
+    /// optimisation of the message (`promotion`: the promoter and the kind of the message), a copy
+    /// in the provider of a large payload that some peer could read (`peer_shares_memory`, asked
+    /// only then). `None` is a message sent as its bytes.
+    #[cfg(feature = "shared-memory")]
+    pub(super) fn shm_buffer_of(
+        payload: &ZBytes,
+        #[cfg(feature = "unstable")] promotion: Option<(
+            &crate::api::shm::transport::Promoter,
+            zenoh_config::DataMessage,
+        )>,
+        peer_shares_memory: impl FnOnce() -> bool,
+    ) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        if let Some(handle) = crate::api::shm::transport::send_handle_of(payload) {
+            return Some(handle);
+        }
+        #[cfg(feature = "unstable")]
+        if let Some((promoter, message)) = promotion {
+            return promoter.promote(message, payload, peer_shares_memory);
+        }
+        #[cfg(not(feature = "unstable"))]
+        let _ = peer_shares_memory;
+        None
+    }
+
+    /// [`shm_buffer_of`] for a put of `publication`.
+    #[cfg(feature = "shared-memory")]
+    pub(super) fn put_buffer(
+        publication: &Publication<'_>,
+        peer_shares_memory: impl FnOnce() -> bool,
+    ) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        shm_buffer_of(
+            &publication.payload,
+            #[cfg(feature = "unstable")]
+            publication
+                .shm_promoter
+                .map(|promoter| (promoter, zenoh_config::DataMessage::Put)),
+            peer_shares_memory,
+        )
+    }
+
+    /// The implicit optimisation of the replies of a queryable: the promoter the configuration
+    /// asks for, and whether some peer of the engine could read a reply in shared memory, asked
+    /// as each reply is made. The engine is held weakly, because the queryable lives in it.
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    #[derive(Clone)]
+    pub(super) struct ReplyPromotion {
+        promoter: Arc<crate::api::shm::transport::Promoter>,
+        peer_shares_memory: Arc<dyn Fn() -> bool + Send + Sync>,
+    }
+
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    impl ReplyPromotion {
+        pub(super) fn new(
+            promoter: Arc<crate::api::shm::transport::Promoter>,
+            peer_shares_memory: impl Fn() -> bool + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                promoter,
+                peer_shares_memory: Arc::new(peer_shares_memory),
+            }
+        }
+    }
+
+    /// [`shm_buffer_of`] for a reply whose payload is `payload`, promoted as `promotion` says.
+    #[cfg(feature = "shared-memory")]
+    fn reply_buffer(
+        payload: &ZBytes,
+        #[cfg(feature = "unstable")] promotion: Option<&ReplyPromotion>,
+    ) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        #[cfg(feature = "unstable")]
+        if let Some(promotion) = promotion {
+            return shm_buffer_of(
+                payload,
+                Some((&*promotion.promoter, zenoh_config::DataMessage::Reply)),
+                &*promotion.peer_shares_memory,
+            );
+        }
+        shm_buffer_of(
+            payload,
+            #[cfg(feature = "unstable")]
+            None,
+            || false,
+        )
     }
 
     /// The value of a query the engine hands up, as [`payload_of_view`] reads a sample's: the
@@ -2758,6 +2941,9 @@ mod tokio_engine {
         zid: ZenohId,
         eid: Id,
         #[cfg(feature = "unstable")] timestamps: Arc<TimestampSource>,
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))] promotion: Option<
+            ReplyPromotion,
+        >,
     ) -> QueryableSink {
         struct Delivery {
             ordered: Arc<Ordered<Query>>,
@@ -2765,6 +2951,8 @@ mod tokio_engine {
             eid: Id,
             #[cfg(feature = "unstable")]
             timestamps: Arc<TimestampSource>,
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            promotion: Option<ReplyPromotion>,
         }
         let delivery = Arc::new(Delivery {
             ordered: Ordered::new(callback, notifier),
@@ -2772,6 +2960,8 @@ mod tokio_engine {
             eid,
             #[cfg(feature = "unstable")]
             timestamps,
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            promotion,
         });
         Arc::new(move |holder: Arc<dyn QueryHolder>| {
             let delivery = Arc::clone(&delivery);
@@ -2784,6 +2974,8 @@ mod tokio_engine {
                     delivery.eid,
                     #[cfg(feature = "unstable")]
                     &delivery.timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    delivery.promotion.clone(),
                 ) {
                     Ok(query) => delivery.ordered.deliver(query),
                     Err(error) => tracing::error!("a query could not be delivered: {error}"),
@@ -2792,14 +2984,21 @@ mod tokio_engine {
         })
     }
 
-    /// The query the engine's view of a request is, answered through `held`.
+    /// The query the engine's view of a request is, answered through `held`, its large replies
+    /// copied into shared memory as `promotion` says.
     fn query_of(
         view: &dyn QueryView,
         held: Box<dyn HeldQuery>,
         zid: ZenohId,
         eid: Id,
         #[cfg(feature = "unstable")] timestamps: &Arc<TimestampSource>,
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))] promotion: Option<
+            ReplyPromotion,
+        >,
     ) -> ZResult<Query> {
+        // A reply to a query of the session itself crosses no link, and nothing is copied for it.
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+        let promotion = promotion.filter(|_| !view.is_local());
         let key_expr = KeyExpr::try_from(view.keyexpr().to_owned())?;
         let parameters = Parameters::from(
             view.parameters()
@@ -2851,6 +3050,8 @@ mod tokio_engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     reply_stack.as_ref(),
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    promotion.as_ref(),
                 );
             });
             outcome
@@ -2872,13 +3073,16 @@ mod tokio_engine {
     }
 
     /// Write what `answer` says into the engine's responder of a query, as the queryable `eid` of
-    /// the session `zid`.
+    /// the session `zid`, a large reply copied into shared memory as `promotion` says.
     fn write_answer(
         out: &mut dyn ReplyOut,
         answer: &Answer,
         zid: ZenohId,
         eid: Id,
         #[cfg(feature = "unstable")] stack: Option<&TsStack>,
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))] promotion: Option<
+            &ReplyPromotion,
+        >,
     ) -> ZResult<()> {
         let zid = zenoh_protocol::core::ZenohIdProto::from(zid);
         out.with_responder(&zid.to_le_bytes()[..zid.size()], eid);
@@ -2906,12 +3110,28 @@ mod tokio_engine {
                 #[cfg(not(feature = "unstable"))]
                 let source_info = None;
                 let attachment = sample.attachment.as_ref().map(|bytes| bytes.to_bytes());
+                // A reply whose payload is a buffer of shared memory is staged as the buffer, as
+                // a put of one is published: its descriptor goes to a querier whose link
+                // negotiated shared memory, its bytes to any other, and a getter of this session
+                // is handed the buffer. A large one the configuration asks to be optimised is
+                // staged as a copy in the provider.
+                #[cfg(feature = "shared-memory")]
+                let shared = match sample.kind {
+                    SampleKind::Put => reply_buffer(
+                        &sample.payload,
+                        #[cfg(feature = "unstable")]
+                        promotion,
+                    ),
+                    SampleKind::Delete => None,
+                };
                 let meta = ReplyMeta::new()
                     .with_encoding(hint.as_ref())
                     .with_timestamp(timestamp.as_ref())
                     .with_source_info(source_info.as_ref())
                     .with_attachment(attachment.as_deref())
                     .with_qos(Some(qos_level_of(sample.qos)));
+                #[cfg(feature = "shared-memory")]
+                let meta = meta.with_shared(shared.as_ref());
                 let key = sample.key_expr.as_str();
                 match sample.kind {
                     SampleKind::Put => out.reply_keyed_meta(key, &sample.payload.to_bytes(), meta),
@@ -2938,7 +3158,11 @@ mod tokio_engine {
             callback,
             fan,
             consolidation,
-        } = asked_of(request)?;
+        } = asked_of(
+            request,
+            #[cfg(feature = "shared-memory")]
+            || engine.has_shm_peer(),
+        )?;
         let mut leg = leg_minter(callback, fan.clone(), consolidation);
         // A value that is a buffer of shared memory is asked with as the buffer, as a put of one
         // is published.
@@ -2977,7 +3201,11 @@ mod tokio_engine {
             fan,
             consolidation,
             ..
-        } = asked_of(request)?;
+        } = asked_of(
+            request,
+            #[cfg(feature = "shared-memory")]
+            || node.has_shm_peer(),
+        )?;
         // The node records its own routing on the stack of each face it hands the query to, as
         // upstream's dispatcher does, so the stack that leaves is the one the send started.
         #[cfg(feature = "unstable")]
@@ -3045,8 +3273,13 @@ mod tokio_engine {
         }
     }
 
-    /// Read the query `request` says into what an engine is asked.
-    fn asked_of(request: QueryRequest<'_>) -> ZResult<Asked<'_>> {
+    /// Read the query `request` says into what an engine is asked. `peer_shares_memory` says
+    /// whether some peer of the engine could read a value in shared memory, which decides
+    /// whether a large value is copied into the provider for the links.
+    fn asked_of(
+        request: QueryRequest<'_>,
+        #[cfg(feature = "shared-memory")] peer_shares_memory: impl FnOnce() -> bool,
+    ) -> ZResult<Asked<'_>> {
         let QueryRequest {
             key,
             scope,
@@ -3074,6 +3307,12 @@ mod tokio_engine {
             cancellation_token,
             fan,
             querier_notifier,
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
+            shm_promoter,
         } = request;
         // What must know when the query is over is told by its callback, when it is dropped: the
         // token the query was made with, and the querier whose undeclaration may wait on it.
@@ -3144,10 +3383,18 @@ mod tokio_engine {
                     *stack = engine_stack_of(&arrived);
                 }));
         }
+        // A value that is a buffer of shared memory goes as the buffer, and a large one the
+        // configuration asks to be optimised goes from a copy in the provider, whose bytes a
+        // queryable of the session itself is handed.
         #[cfg(feature = "shared-memory")]
-        let shm_value = value
-            .as_ref()
-            .and_then(|(payload, _)| crate::api::shm::transport::send_handle_of(payload));
+        let shm_value = value.as_ref().and_then(|(payload, _)| {
+            shm_buffer_of(
+                payload,
+                #[cfg(feature = "unstable")]
+                shm_promoter.map(|promoter| (promoter, zenoh_config::DataMessage::Query)),
+                peer_shares_memory,
+            )
+        });
         Ok(Asked {
             key,
             wire,
@@ -3345,6 +3592,29 @@ mod tokio_engine {
                 sources.retain(|(source, _)| *source != leg);
                 !sources.is_empty()
             });
+        }
+    }
+
+    #[cfg(test)]
+    mod encoding_tests {
+        use super::*;
+
+        /// A schema that is not UTF-8 crosses from this API into the engine and
+        /// back as its bytes, and the API shows it as zenoh 1.10.2 does
+        /// (`zenoh/src/api/encoding.rs` @ `std::str::from_utf8(schema).unwrap_or("unknown(non-utf8)")`).
+        #[test]
+        fn a_schema_that_is_not_utf8_crosses_into_the_engine_and_back_as_its_bytes() {
+            let raw = vec![0xFFu8, 0xFE, b'x'];
+            let api = Encoding::from(zenoh_protocol::core::Encoding {
+                id: 4,
+                schema: Some(zenoh_buffers::ZSlice::from(raw.clone())),
+            });
+            let hint = encoding_hint_of(&api).expect("not the default encoding");
+            assert_eq!(hint.schema.as_deref(), Some(raw.as_slice()));
+            let back = encoding_from(Some(&hint));
+            assert_eq!(back.to_string(), "text/plain;unknown(non-utf8)");
+            let wire: zenoh_protocol::core::Encoding = back.into();
+            assert_eq!(wire.schema.map(|s| s.as_slice().to_vec()), Some(raw));
         }
     }
 
@@ -3687,7 +3957,7 @@ mod tokio_engine {
             }
             kind => Ok(Sample {
                 key_expr: KeyExpr::try_from(view.keyexpr().to_owned())?,
-                payload: ZBytes::from(view.payload().to_vec()),
+                payload: payload_of_reply(view),
                 kind: match kind {
                     ReplyKind::Del => SampleKind::Delete,
                     _ => SampleKind::Put,
@@ -3968,9 +4238,6 @@ pub(crate) struct SessionInner {
     callbacks_drop_sync_group: SyncGroup,
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
-    /// The quality of service the configuration (`qos/publication`) sets for the publications on
-    /// the keys it names, which a publisher or a put takes in place of what its builder says.
-    publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
     /// The configuration the session was opened with, as the application reads it
     /// ([`Session::config`]), and as the runtime admin space reads and writes it, which every
     /// build on the engine hosts ([`WeakSession::config_notifier`]).
@@ -3980,12 +4247,16 @@ pub(crate) struct SessionInner {
     /// session was opened with one, and the clock of a node that holds none.
     #[cfg(feature = "unstable")]
     timestamps: Arc<TimestampSource>,
+    /// The node's clock as the session lends it ([`Session::hlc`]), `None` for a node that holds
+    /// none.
+    #[cfg(feature = "internal")]
+    hlc: Option<NodeHlc>,
     /// The provider of shared memory the configuration asks the session to have, made when it is
     /// first asked for ([`Session::get_shm_provider`]); `None` when it asks for none.
     #[cfg(all(feature = "unstable", feature = "shared-memory"))]
     shm_provider: Option<Arc<crate::api::shm::LazyShmProvider>>,
-    /// What copies a large put into the provider for a peer that could read it, when the
-    /// configuration asks for the optimisation (`transport_optimization`).
+    /// What copies a large put, query value or reply into the provider for a peer that could read
+    /// it, when the configuration asks for the optimisation (`transport_optimization`).
     #[cfg(all(
         feature = "unstable",
         feature = "shared-memory",
@@ -3994,8 +4265,8 @@ pub(crate) struct SessionInner {
     shm_promoter: Option<Arc<crate::api::shm::transport::Promoter>>,
     /// The clients of shared memory segments the application opened the session with
     /// ([`OpenBuilder::with_shm_clients`](crate::session::OpenBuilder::with_shm_clients)). The
-    /// session negotiates no shared memory with its peers yet, so no segment is read through them:
-    /// they are kept for the transport that will (slice Z7).
+    /// engine's reader of received descriptors was made over them as the session opened
+    /// (`api::shm::transport::resolver_factory`); the session keeps them for as long as it lives.
     #[cfg(feature = "shared-memory")]
     #[allow(dead_code)]
     shm_clients: Option<Arc<zenoh_shm::api::client_storage::ShmClientStorage>>,
@@ -4596,6 +4867,12 @@ impl SessionInner {
             eid,
             #[cfg(feature = "unstable")]
             timestamps: Arc::clone(&self.timestamps),
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
+            shm_promoter: self.shm_promoter.clone(),
         })?;
         self.queryables().push((eid, engine_id));
         // A close that ran between the check and the record has not seen this queryable.
@@ -4843,6 +5120,12 @@ impl SessionInner {
             cancellation_token,
             fan,
             querier_notifier,
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
+            shm_promoter: self.shm_promoter.as_deref(),
         })
     }
 }
@@ -4906,8 +5189,21 @@ pub struct Session(Arc<SessionInner>);
 impl Session {
     /// A reference to the session that does not keep it open: what the entities of a session hold,
     /// and what a close is run through.
+    #[cfg(not(feature = "internal"))]
     pub(crate) fn downgrade(&self) -> WeakSession {
-        WeakSession(self.0.clone())
+        WeakSession {
+            inner: std::mem::ManuallyDrop::new(Session(self.0.clone())),
+        }
+    }
+
+    /// A reference to the session that does not keep it open: what the entities of a session hold,
+    /// and what a close is run through. Public with `internal`, as upstream's is, for the crates
+    /// that hold a session's entities beside it (`zenoh-ext`).
+    #[zenoh_macros::internal]
+    pub fn downgrade(&self) -> WeakSession {
+        WeakSession {
+            inner: std::mem::ManuallyDrop::new(Session(self.0.clone())),
+        }
     }
 
     /// A group for the callback of one entity of the session ([`WeakSession::callback_group`]).
@@ -4951,6 +5247,8 @@ impl Session {
     /// share is the node, the identity, the configuration and the clocks.
     pub(crate) fn on(core: RuntimeCore, owns_engine: bool) -> Session {
         let id = u32::try_from(core.engine.next_entity_id()).unwrap_or(u32::MAX);
+        #[cfg(feature = "internal")]
+        let hlc = core.engine.node_hlc();
         Session(Arc::new(SessionInner {
             strong_counter: AtomicUsize::new(1),
             engine: core.engine,
@@ -4960,11 +5258,12 @@ impl Session {
             zid: core.zid,
             callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout: core.queries_default_timeout,
-            publisher_qos_tree: core.publisher_qos_tree,
             #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: core.config,
             #[cfg(feature = "unstable")]
             timestamps: core.timestamps,
+            #[cfg(feature = "internal")]
+            hlc,
             #[cfg(all(
                 feature = "unstable",
                 feature = "shared-memory",
@@ -4998,7 +5297,6 @@ pub(crate) struct RuntimeCore {
     engine: Arc<Engine>,
     zid: ZenohId,
     queries_default_timeout: Duration,
-    publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
     #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     #[cfg(feature = "unstable")]
@@ -5086,18 +5384,22 @@ impl RuntimeCore {
         // The clock of the node stamps what it intercepts, whichever session the message is of.
         #[cfg(feature = "unstable")]
         engine.install_interception_source(&timestamps);
+        // The copy of a large message decides by what the engine's open compiled, the decision the
+        // C ABI takes as well, and copies into this crate's provider.
+        #[cfg(all(
+            feature = "unstable",
+            feature = "shared-memory",
+            feature = "engine-tokio"
+        ))]
+        let shm_promoter = crate::api::shm::transport::Promoter::new(
+            engine.shm_promotion(),
+            shm_provider.as_ref(),
+        )
+        .map(Arc::new);
         Ok(RuntimeCore {
             engine: Arc::new(engine),
             zid,
             queries_default_timeout,
-            publisher_qos_tree: Arc::new(
-                config
-                    .0
-                    .get_json("qos/publication")
-                    .ok()
-                    .and_then(|json| serde_json::from_str::<PublisherQoSConfList>(&json).ok())
-                    .map_or_else(KeBoxTree::new, Into::into),
-            ),
             #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
@@ -5107,11 +5409,7 @@ impl RuntimeCore {
                 feature = "shared-memory",
                 feature = "engine-tokio"
             ))]
-            shm_promoter: crate::api::shm::transport::Promoter::new(
-                &expanded,
-                shm_provider.as_ref(),
-            )
-            .map(Arc::new),
+            shm_promoter,
             #[cfg(all(feature = "unstable", feature = "shared-memory"))]
             shm_provider,
             #[cfg(feature = "shared-memory")]
@@ -5137,14 +5435,141 @@ impl Drop for Session {
     }
 }
 
+/// The clock of the node a session is on, as the session lends it ([`Session::hlc`]): the node's
+/// own, the one every session and entity of the node stamps with, with the public methods of
+/// upstream's `uhlc::HLC` under the same signatures and with the same meaning.
+///
+/// It is not a `uhlc::HLC` because the node's clock is not one. The engine keeps `uhlc`'s
+/// arithmetic in one atomic word, held to `uhlc` by a differential test over random clock traces
+/// (`wz-node-time`), because a `uhlc::HLC` holds its last stamp behind a lock and takes its
+/// physical clock as a `fn` with no state; a `uhlc::HLC` beside the node's clock, with the same
+/// identity and a last stamp of its own, would be the second clock of one identity that breaks the
+/// uniqueness of the stamps both make. `Default`, which makes a clock of its own, has no
+/// counterpart: this clock is the node's, and a session lends it.
+#[zenoh_macros::internal]
+pub struct NodeHlc {
+    clock: Box<dyn EngineClock>,
+    id: uhlc::ID,
+    delta: uhlc::NTP64,
+}
+
+/// What the lent clock asks of the engine's: a stamp and an absorption, as time words.
+#[cfg(feature = "internal")]
+trait EngineClock: Send + Sync {
+    fn stamp_word(&self) -> u64;
+    fn absorb(&self, remote: u64) -> bool;
+}
+
+#[cfg(all(feature = "internal", feature = "engine-tokio"))]
+impl EngineClock for wz_capi_core::runtime::node_clock::NodeHlc {
+    fn stamp_word(&self) -> u64 {
+        // The lent clock is made only over a node that holds a clock (`NodeHlc::over`), and the
+        // node holds it for its life.
+        self.next_word().unwrap_or_default()
+    }
+
+    fn absorb(&self, remote: u64) -> bool {
+        self.absorb_word(remote).unwrap_or(false)
+    }
+}
+
+#[cfg(feature = "internal")]
+impl NodeHlc {
+    /// The lent clock over the engine's, or `None` for a node that holds none, as upstream's runtime
+    /// holds `None` for a role that does not timestamp.
+    #[cfg(feature = "engine-tokio")]
+    fn over(clock: wz_capi_core::runtime::node_clock::NodeHlc) -> Option<Self> {
+        let id = uhlc::ID::try_from(clock.stamp_zid()?).ok()?;
+        let delta = uhlc::NTP64(clock.max_delta_word()?);
+        Some(Self {
+            clock: Box::new(clock),
+            id,
+            delta,
+        })
+    }
+
+    /// Generate a new timestamp, unique in the system and above every timestamp this clock made
+    /// and every one it was updated with: `uhlc::HLC::new_timestamp`.
+    pub fn new_timestamp(&self) -> uhlc::Timestamp {
+        uhlc::Timestamp::new(uhlc::NTP64(self.clock.stamp_word()), self.id)
+    }
+
+    /// The identity of the clock, which is the node's: `uhlc::HLC::get_id`.
+    pub fn get_id(&self) -> &uhlc::ID {
+        &self.id
+    }
+
+    /// How far ahead of the clock a timestamp it is updated with may be: `uhlc::HLC::get_delta`.
+    pub fn get_delta(&self) -> &uhlc::NTP64 {
+        &self.delta
+    }
+
+    /// Update the clock with a timestamp another clock made, so that its next timestamp is above
+    /// it; refused with the reason, and the clock unchanged, when the timestamp is more than
+    /// [`get_delta`](Self::get_delta) ahead of the clock: `uhlc::HLC::update_with_timestamp`.
+    pub fn update_with_timestamp(&self, timestamp: &uhlc::Timestamp) -> Result<(), String> {
+        if self.clock.absorb(timestamp.get_time().as_u64()) {
+            return Ok(());
+        }
+        let reason = format!(
+            "incoming timestamp from {} exceeding delta {}ms is rejected: {:#}",
+            timestamp.get_id(),
+            self.delta.to_duration().as_millis(),
+            timestamp.get_time(),
+        );
+        tracing::warn!("{reason}");
+        Err(reason)
+    }
+}
+
+#[cfg(feature = "internal")]
+impl fmt::Debug for NodeHlc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeHlc")
+            .field("id", &self.id)
+            .field("delta", &self.delta)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A reference to the session that does not keep it open.
 ///
 /// It is not a `Weak` of the `Arc`: the entities of a session hold it, so a session that closed
 /// itself when its handles were counted by the `Arc` would never close while one of them lived.
 /// The handles count themselves (`SessionInner::strong_counter`, private) and the last one to be dropped
 /// closes the session, whatever references remain.
-#[derive(Debug, Clone)]
-pub struct WeakSession(Arc<SessionInner>);
+///
+/// It holds a [`Session`] that is never dropped as one, so that it dereferences to the session as
+/// upstream's does (the same `ManuallyDrop` and the same drop of the `Arc` alone): a crate that holds a session's entities beside it calls the
+/// session's methods through it. The fields of the session are reached through that dereference
+/// too, which is how `self.0` below is the session's `Arc`.
+#[derive(Debug)]
+pub struct WeakSession {
+    inner: std::mem::ManuallyDrop<Session>,
+}
+
+impl Clone for WeakSession {
+    fn clone(&self) -> Self {
+        self.inner.downgrade()
+    }
+}
+
+impl Drop for WeakSession {
+    fn drop(&mut self) {
+        // SAFETY: the `Session` is never dropped as one, so its `Drop`, which counts the handles
+        // and closes the session at the last, does not run for a reference that is no handle. Its
+        // one field is the `Arc`, dropped here in place once, and `inner` is not used after.
+        unsafe { std::ptr::drop_in_place(&mut self.inner.0 as *mut Arc<SessionInner>) };
+    }
+}
+
+impl std::ops::Deref for WeakSession {
+    type Target = Session;
+
+    fn deref(&self) -> &Session {
+        &self.inner
+    }
+}
 
 impl WeakSession {
     /// The id the session stands on.
@@ -5690,6 +6115,16 @@ impl Session {
                 Timestamp::new(now, self.zid().into())
             }
         }
+    }
+
+    /// The clock of the node this session is on, the one its timestamps come from, or `None` when
+    /// the node's role does not timestamp (`timestamping/enabled`): upstream's `Session::hlc`.
+    /// The clock is lent as a [`NodeHlc`], which has every public method of `uhlc::HLC`; it is not
+    /// that type because the node's clock is not one (see [`NodeHlc`]). A router node lends the
+    /// clock its data plane stamps with, which timestamps by default, as upstream's router does.
+    #[zenoh_macros::internal]
+    pub fn hlc(&self) -> Option<&NodeHlc> {
+        self.0.hlc.as_ref()
     }
 
     /// Returns the [`EntityGlobalId`] of this Session.
@@ -6262,36 +6697,14 @@ impl Session {
         self.0.queries_default_timeout
     }
 
-    /// The quality of service `qos/publication` sets for a publication on `key_expr`: the entry
-    /// of the first key the configuration names that includes it, or none set. When several
-    /// include it, one is used and the others are said.
+    /// The quality of service `qos/publication` sets for a publication on `key_expr`, from the
+    /// rules the engine's open compiled for the session, which the C ABI applies as well: the
+    /// settings of the first rule written whose key expression includes it, or none set.
     pub(crate) fn get_publisher_qos_overwrite(
         &self,
         key_expr: &zenoh_keyexpr::keyexpr,
     ) -> PublisherQoSConfig {
-        let mut nodes_including = self
-            .0
-            .publisher_qos_tree
-            .nodes_including(key_expr)
-            .filter(|n| n.weight().is_some())
-            .peekable();
-        if let Some(node) = nodes_including.next() {
-            if nodes_including.peek().is_some() {
-                let others: Vec<String> =
-                    nodes_including.map(|n| n.keyexpr().to_string()).collect();
-                tracing::warn!(
-                    "Publisher declared on `{}` which is included by multiple key_exprs in qos config ({}). Using qos config for `{}`",
-                    key_expr,
-                    others.join(", "),
-                    node.keyexpr(),
-                );
-            }
-            return node
-                .weight()
-                .expect("first node weight should not be None")
-                .clone();
-        }
-        PublisherQoSConfig::default()
+        self.0.engine.publisher_qos_overwrite(key_expr.as_str())
     }
 
     /// Hand a query to the engine, with its replies going to `callback`.
@@ -6408,26 +6821,16 @@ impl WireAnchor for SessionInner {
         }
         // The engine holds a declaration once and counts the holders, so a prefix that is already
         // declared is held again and a forced declaration is the same call.
-        let Some(id) = self.engine.acquire_keyexpr(prefix) else {
-            return Ok(None);
-        };
-        // The wire names a declaration by sixteen bits where the engine counts in sixty-four. An id
-        // that does not fit cannot be named, so the hold just taken is let go and the key is used
+        // `None` once the engine's id space, the wire's `ExprId`, is spent: the key is then used
         // whole, as one that is not worth a declaration is.
-        match ExprId::try_from(id) {
-            Ok(expr_id) => Ok(Some(expr_id)),
-            Err(_) => {
-                self.engine.release_keyexpr(id);
-                Ok(None)
-            }
-        }
+        Ok(self.engine.acquire_keyexpr(prefix))
     }
 
     fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        self.engine.release_keyexpr(u64::from(expr_id));
+        self.engine.release_keyexpr(expr_id);
         Ok(())
     }
 }
@@ -6453,38 +6856,49 @@ impl Closee for WeakSession {
         let session = self.0.clone();
         // A close joins the engine's threads, so it is run where blocking is allowed and not on the
         // executor of the caller, which may be the very thread a callback is about to be run on.
-        let _ = ZRuntime::Net
-            .spawn_blocking(move || {
-                // Before the engine closes, so that the faces that go down with the session tell
-                // the listeners of their events of nothing.
-                // The listeners of faces are let go of before the engine closes: the faces that
-                // go down with it, those the session dialled at least, would tell them, where
-                // upstream's close lets go of them before its transports are closed.
-                #[cfg(feature = "unstable")]
-                session.release_connectivity_listeners();
-                if session.owns_engine {
-                    session.engine.close();
-                } else {
-                    // The node goes on, and the session is closed without it: what it declared is
-                    // let go of just below, and nothing is declared on it afresh.
-                    session.closed.store(true, Ordering::Release);
-                }
-                // A closed session takes nothing more, and lets go of the callbacks it was to
-                // call: the channel of a subscriber ends with its session, as upstream's does.
-                session.release_subscriptions();
-                session.release_publishers();
-                session.release_queryables();
-                session.release_queriers();
-                session.release_queries();
-                session.release_matching_listeners();
-                session.release_tokens();
-                // After the callbacks were let go of, so that none is called afresh: the wait ends
-                // when the last one that was being called has returned and been dropped.
-                if close_args.wait_callbacks {
-                    session.callbacks_drop_sync_group.wait();
-                }
-            })
-            .await;
+        let close = move || {
+            // Before the engine closes, so that the faces that go down with the session tell
+            // the listeners of their events of nothing.
+            // The listeners of faces are let go of before the engine closes: the faces that
+            // go down with it, those the session dialled at least, would tell them, where
+            // upstream's close lets go of them before its transports are closed.
+            #[cfg(feature = "unstable")]
+            session.release_connectivity_listeners();
+            if session.owns_engine {
+                // Upstream's record of the close of a session that owns its node
+                // (`zenoh/src/api/session.rs` @ `info!(zid = %self.zid(), "close session");`).
+                tracing::info!(zid = %session.zid, "close session");
+                session.engine.close();
+            } else {
+                // The node goes on, and the session is closed without it: what it declared is
+                // let go of just below, and nothing is declared on it afresh.
+                session.closed.store(true, Ordering::Release);
+            }
+            // A closed session takes nothing more, and lets go of the callbacks it was to
+            // call: the channel of a subscriber ends with its session, as upstream's does.
+            session.release_subscriptions();
+            session.release_publishers();
+            session.release_queryables();
+            session.release_queriers();
+            session.release_queries();
+            session.release_matching_listeners();
+            session.release_tokens();
+            // After the callbacks were let go of, so that none is called afresh: the wait ends
+            // when the last one that was being called has returned and been dropped.
+            if close_args.wait_callbacks {
+                session.callbacks_drop_sync_group.wait();
+            }
+        };
+        // Upstream closes inside the caller's future, which its close builder hands to the
+        // runtime with the caller's span carried (`zenoh/src/api/builders/close.rs` @
+        // `ZRuntime::Net.block_in_place(self.into_future())`): the thread the close is moved to
+        // here enters that span again, so the engine's close happens in it as upstream's does.
+        #[cfg(feature = "engine-tokio")]
+        let close = {
+            let caller = wz_capi_core::caller_span::CallerSpan::current();
+            move || caller.in_scope(close)
+        };
+        let _ = ZRuntime::Net.spawn_blocking(close).await;
     }
 }
 
@@ -6636,6 +7050,99 @@ mod tests {
         assert!(weak.0.is_closed(), "the last handle closed it");
     }
 
+    #[cfg(feature = "internal")]
+    #[test]
+    fn the_clock_a_session_lends_is_the_one_its_timestamps_come_from() {
+        let stamping = Config::from_json5(
+            r#"{ id: "a1b2d2", mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 scouting: { multicast: { enabled: false } }, timestamping: { enabled: true } }"#,
+        )
+        .expect("a configuration zenoh reads");
+        let session = open(stamping).wait().expect("opens");
+        let hlc = session
+            .hlc()
+            .expect("a node that timestamps lends its clock");
+        // One clock: the session's stamps and the lent clock's interleave strictly.
+        let before = session.new_timestamp();
+        let lent = hlc.new_timestamp();
+        let after = session.new_timestamp();
+        assert!(before < lent && lent < after, "{before} {lent} {after}");
+        assert_eq!(hlc.get_id(), before.get_id());
+        assert_eq!(lent.get_id(), before.get_id());
+        let other = uhlc::ID::try_from(&[7u8][..]).expect("an id");
+        // A remote stamp within the bound is taken, and the next stamp is above it.
+        let near = uhlc::Timestamp::new(*after.get_time() + 1_000_000u64, other);
+        assert!(hlc.update_with_timestamp(&near).is_ok());
+        assert!(hlc.new_timestamp() > near);
+        // One past the bound is refused, and moves nothing.
+        let far = uhlc::Timestamp::new(*after.get_time() + hlc.get_delta().as_u64() * 4, other);
+        assert!(hlc.update_with_timestamp(&far).is_err());
+        assert!(hlc.new_timestamp() < far);
+        assert!(session.new_timestamp() < far);
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_node_whose_role_does_not_timestamp_lends_no_clock() {
+        let session = open(peer("a1b2d3")).wait().expect("opens");
+        assert!(session.hlc().is_none());
+    }
+
+    /// A router timestamps by default, as upstream's does, and its session lends the clock its data
+    /// plane stamps with: the one `Session::new_timestamp` reads too.
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_router_lends_the_clock_of_its_data_plane() {
+        let router = open(
+            Config::from_json5(
+                r#"{ id: "a1b2d4", mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { multicast: { enabled: false } } }"#,
+            )
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("a router opens");
+        let hlc = router.hlc().expect("a router timestamps by default");
+        let before = router.new_timestamp();
+        let lent = hlc.new_timestamp();
+        let after = router.new_timestamp();
+        assert!(before < lent && lent < after, "{before} {lent} {after}");
+        assert_eq!(hlc.get_id(), before.get_id());
+        assert_eq!(after.get_id(), before.get_id());
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_router_told_not_to_timestamp_lends_no_clock() {
+        let router = open(
+            Config::from_json5(
+                r#"{ id: "a1b2d5", mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { multicast: { enabled: false } }, timestamping: { enabled: false } }"#,
+            )
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("a router opens");
+        assert!(router.hlc().is_none());
+    }
+
+    #[test]
+    fn a_weak_reference_dereferences_to_its_session_and_is_no_handle_of_it() {
+        let session = open(peer("a1b2d1")).wait().expect("opens");
+        let weak = session.downgrade();
+        let copy = weak.clone();
+        assert_eq!(*copy, session);
+        assert_eq!(weak, session);
+        drop(weak);
+        drop(copy);
+        // A reference that is dropped is no handle that was released: the session stays open.
+        assert!(!session.is_closed());
+        let weak = session.downgrade();
+        drop(session);
+        // The session's own method, reached through the dereference, sees the close.
+        assert!(weak.is_closed(), "the last handle closed it");
+    }
+
     #[test]
     fn the_anchor_of_a_session_declares_and_undeclares_a_prefix_until_it_is_closed() {
         let session = open(peer("a1b2c9")).wait().expect("opens");
@@ -6692,20 +7199,100 @@ mod tests {
             .cloned()
             .collect();
         assert!(keys.len() > 100, "{} keys", keys.len());
+        let state = |key: &str| key_state(key, tokio_engine::SESSION_REACH);
         let stateless: Vec<&String> = keys
             .iter()
-            .filter(|key| key_state(key).is_none() && !is_section_of_keys_with_a_state(key))
+            .filter(|key| state(key.as_str()).is_none() && !is_section_of_keys_with_a_state(key))
             .collect();
         assert!(stateless.is_empty(), "keys with no state: {stateless:#?}");
         let count = |wanted| {
             keys.iter()
-                .filter(|key| key_state(key) == Some(wanted))
+                .filter(|key| state(key.as_str()) == Some(wanted))
                 .count()
         };
         // The three states are all in use: a table whose refused state is empty refuses nothing.
         assert!(count(KeyState::Mapped) > 0);
         assert!(count(KeyState::Inert) > 0);
         assert!(count(KeyState::Unmapped) > 0);
+    }
+
+    /// `qos/publication` on this crate: every case the surfaces of the key are held to (the C ABI
+    /// runs the same ones), through a publisher declared with nothing of its own, on the registry
+    /// of faces and on a node. A setting the case leaves unset is the builder's own.
+    #[test]
+    fn a_publisher_is_given_what_its_key_is_configured_with() {
+        use wz_capi_core::runtime::qos::{CongestionControl as Wire, Priority as Band};
+        use wz_capi_core::session_defaults::PUBLICATION_QOS_CASES;
+
+        let band = |band: Band| band as u8;
+        let congestion = |wire: Wire| match wire {
+            Wire::Drop => CongestionControl::Drop,
+            Wire::Block => CongestionControl::Block,
+            #[cfg(feature = "unstable")]
+            Wire::BlockFirst => CongestionControl::BlockFirst,
+            #[cfg(not(feature = "unstable"))]
+            Wire::BlockFirst => unreachable!("no case states it"),
+        };
+        for on_a_node in [false, true] {
+            for case in PUBLICATION_QOS_CASES {
+                if case.unstable && !cfg!(feature = "unstable") {
+                    continue;
+                }
+                let label = format!("node={on_a_node}: {} on {}", case.rules, case.key);
+                let config = peer_with("qos/publication", case.rules);
+                let session = if on_a_node {
+                    with_the_node(|| open(config).wait())
+                } else {
+                    open(config).wait()
+                }
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+                let publisher = session
+                    .declare_publisher(case.key)
+                    .wait()
+                    .unwrap_or_else(|error| panic!("{label}: {error}"));
+                let expected = &case.expected;
+                assert_eq!(
+                    publisher.priority as u8,
+                    expected.priority.map_or(Priority::DEFAULT as u8, band),
+                    "{label}"
+                );
+                assert_eq!(
+                    publisher.congestion_control,
+                    expected
+                        .congestion_control
+                        .map_or(CongestionControl::DEFAULT, congestion),
+                    "{label}"
+                );
+                assert_eq!(
+                    publisher.is_express,
+                    expected.express.unwrap_or(false),
+                    "{label}"
+                );
+                #[cfg(feature = "unstable")]
+                {
+                    use wz_capi_core::runtime::{locality::Locality as Reach, Reliability as Kind};
+                    assert_eq!(
+                        publisher.reliability,
+                        match expected.reliability {
+                            Some(Kind::BestEffort) => Reliability::BestEffort,
+                            Some(Kind::Reliable) | None => Reliability::Reliable,
+                        },
+                        "{label}"
+                    );
+                    assert_eq!(
+                        publisher.destination,
+                        match expected.allowed_destination {
+                            Some(Reach::SessionLocal) => Locality::SessionLocal,
+                            Some(Reach::Remote) => Locality::Remote,
+                            Some(Reach::Any) | None => Locality::Any,
+                        },
+                        "{label}"
+                    );
+                }
+                drop(publisher);
+                session.close().wait().expect("closes");
+            }
+        }
     }
 
     /// A configuration with `key` set to the json5 `value` and a peer that listens on the loopback.
@@ -6717,23 +7304,23 @@ mod tests {
 
     #[test]
     fn a_key_the_engine_does_not_act_on_is_refused_by_its_name_unless_it_is_the_default() {
-        // `transport/unicast/open_timeout` is upstream's (10 s by default) and this engine's
-        // handshake does not read it: stating another value asks for what will not happen. (The
-        // key is one the engine does not act on; the example moves to the next one when the
-        // engine comes to act on this one, as it did for `accept_timeout`.)
-        let error = open(peer_with("transport/unicast/open_timeout", "1234"))
+        // `transport/link/tx/threads` is upstream's and this engine does not read it: stating
+        // another value asks for what will not happen. (The key is one the engine does not act
+        // on; the example moves to the next one when the engine comes to act on this one, as it
+        // did for `accept_timeout` and `open_timeout`.)
+        let error = open(peer_with("transport/link/tx/threads", "1234"))
             .wait()
             .expect_err("an unmapped key with a value of its own");
         let text = error.to_string();
         assert!(
-            text.contains("`transport/unicast/open_timeout` = 1234"),
+            text.contains("`transport/link/tx/threads` = 1234"),
             "{text}"
         );
         // CONTROL: the same key at its default is no instruction, and the session opens.
         let default = Config::default()
-            .get_json("transport/unicast/open_timeout")
+            .get_json("transport/link/tx/threads")
             .expect("a default");
-        open(peer_with("transport/unicast/open_timeout", &default))
+        open(peer_with("transport/link/tx/threads", &default))
             .wait()
             .expect("the default of an unmapped key opens");
     }
@@ -7182,6 +7769,337 @@ mod tests {
                 );
             }
         }
+
+        /// A reply whose payload is a buffer of shared memory reaches the getter of the other
+        /// session as one, made by a queryable of the registry of faces for another registry and
+        /// for a router node, and by a queryable a router node hosts for a registry: the replier
+        /// stages the reply as the buffer and sends its descriptor over the link that negotiated
+        /// shared memory (a node through the pass that holds the chunk, as for a publication),
+        /// and the getter reads it with this crate's reader (a node reads it as it routes the
+        /// reply to its own get).
+        #[test]
+        fn a_reply_whose_payload_is_a_buffer_of_shared_memory_reaches_the_getter_as_one() {
+            const BODY: &[u8] = b"a reply in shared memory";
+            let [listening, dialling, node, answering] =
+                linked_pairs(["a1b3a0", "a1b3a1", "a1b3a2", "a1b3a3"]);
+
+            for (who, asker, answerer, key) in [
+                ("a registry", &listening, &dialling, "demo/shm/reply/a"),
+                ("a node", &node, &answering, "demo/shm/reply/b"),
+                (
+                    "a registry of a node",
+                    &answering,
+                    &node,
+                    "demo/shm/reply/c",
+                ),
+            ] {
+                let provider = answerer
+                    .get_shm_provider()
+                    .wait()
+                    .expect("a session with shared memory has a provider");
+                let _queryable = answerer
+                    .declare_queryable(key)
+                    .callback(move |query| {
+                        let mut buffer = provider.alloc(BODY.len()).wait().expect("a buffer");
+                        buffer.copy_from_slice(BODY);
+                        // A reply that is refused is seen as a get that is never answered.
+                        let _ = query.reply(key, ZBytes::from(buffer)).wait();
+                    })
+                    .wait()
+                    .expect("declares");
+                // The queryable's declaration reaches the asker over the link; until it has, a
+                // get has no queryable to go to and ends with no reply, so it is asked again.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let reply = loop {
+                    let replies = asker.get(key).wait().expect("asks");
+                    match replies.recv_timeout(Duration::from_millis(500)) {
+                        Ok(Some(reply)) => break reply,
+                        _ if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        _ => panic!("{who}'s get was never answered"),
+                    }
+                };
+                let sample = reply.result().expect("a sample, not an error");
+                assert_eq!(
+                    (
+                        sample.payload().to_bytes().into_owned(),
+                        sample.payload().as_shm().is_some()
+                    ),
+                    (BODY.to_vec(), true),
+                    "{who}'s get was not handed the reply as shared memory"
+                );
+            }
+        }
+
+        /// Two pairs of peers linked over loopback with shared memory enabled, the rest of the
+        /// configuration the default: two registries of faces, the first listening and the second
+        /// dialling it, and a router node listening with a registry dialling it, opened with the
+        /// four `ids` in that order.
+        fn linked_pairs(ids: [&str; 4]) -> [Session; 4] {
+            let on = |id: &str, listen: &str, connect: &str, node: bool| {
+                let opened = || {
+                    open(
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "peer",
+                                  listen: {{ endpoints: [{listen}] }},
+                                  connect: {{ endpoints: [{connect}] }},
+                                  scouting: {{ multicast: {{ enabled: false }} }},
+                                  transport: {{ shared_memory: {{ enabled: true }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads"),
+                    )
+                    .wait()
+                    .expect("opens")
+                };
+                if node {
+                    with_the_node(opened)
+                } else {
+                    opened()
+                }
+            };
+            let endpoint = |port: u16| format!(r#""tcp/127.0.0.1:{port}""#);
+            let (first, second) = (unautoselected_port(), unautoselected_port());
+            let listening = on(ids[0], &endpoint(first), "", false);
+            let dialling = on(ids[1], "", &endpoint(first), false);
+            let node = on(ids[2], &endpoint(second), "", true);
+            let answering = on(ids[3], "", &endpoint(second), false);
+            for (who, session) in [("the first dialler", &dialling), ("the second", &answering)] {
+                assert_eq!(connected(session, 1).1.len(), 1, "{who} is linked");
+            }
+            assert!(matches!(&*node.0.engine, Engine::Router(_)), "a node");
+            for session in [&listening, &dialling, &answering] {
+                assert!(matches!(&*session.0.engine, Engine::Tokio(_)), "a registry");
+            }
+            [listening, dialling, node, answering]
+        }
+
+        /// A payload as a receiver tells it: its bytes, and whether it is shared memory.
+        fn seen(payload: &ZBytes) -> (Vec<u8>, bool) {
+            (payload.to_bytes().into_owned(), payload.as_shm().is_some())
+        }
+
+        /// Ask `asker` for `key` until a reply comes, and that reply's payload as it is seen.
+        fn first_reply(asker: &Session, key: &str, who: &str) -> (Vec<u8>, bool) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let replies = asker.get(key).wait().expect("asks");
+                match replies.recv_timeout(Duration::from_millis(500)) {
+                    Ok(Some(reply)) => {
+                        return seen(reply.result().expect("a sample, not an error").payload())
+                    }
+                    _ if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    _ => panic!("{who} was never answered"),
+                }
+            }
+        }
+
+        /// `act` again every 100 ms until each of `remote` and `own` has been told something, and
+        /// the first thing each was told.
+        fn until_both_are_told(
+            mut act: impl FnMut(),
+            remote: &std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
+            own: &std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
+            who: &str,
+        ) -> ((Vec<u8>, bool), (Vec<u8>, bool)) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (mut got_remote, mut got_own): (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>) =
+                (None, None);
+            loop {
+                if let (Some(told_remote), Some(told_own)) = (&got_remote, &got_own) {
+                    return (told_remote.clone(), told_own.clone());
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{who}: the other session was told {got_remote:?} and the session itself \
+                     {got_own:?}"
+                );
+                act();
+                std::thread::sleep(Duration::from_millis(100));
+                got_remote = got_remote.or_else(|| remote.try_recv().ok());
+                got_own = got_own.or_else(|| own.try_recv().ok());
+            }
+        }
+
+        /// A large put, a large value of a get and a large reply, which the default configuration
+        /// asks to be optimised (all three, from 3072 bytes), reach the other session as shared
+        /// memory, sent by the registry of faces and by a router node: the sender copies each
+        /// into its provider and sends the descriptor over the link that negotiated shared memory.
+        /// A subscriber, a queryable and a getter of the sending session itself are handed the
+        /// bytes, as upstream's, which copies at the link, hands them.
+        #[test]
+        fn a_large_message_the_configuration_optimises_crosses_the_link_in_shared_memory() {
+            let big: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+            let [listening, dialling, node, answering] =
+                linked_pairs(["a1b3a4", "a1b3a5", "a1b3a6", "a1b3a7"]);
+            // The copy is made once the provider is, and the provider is made on the first ask:
+            // each is asked for until it is there, without taking the receiver of its making.
+            for session in [&listening, &dialling, &node, &answering] {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !matches!(session.get_shm_provider(), ShmProviderState::Ready(_)) {
+                    assert!(Instant::now() < deadline, "the provider was never made");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+
+            for (who, sender, other, tag) in [
+                ("the registry", &dialling, &listening, "a"),
+                ("the node", &node, &answering, "b"),
+            ] {
+                use std::sync::{mpsc::channel, Mutex};
+
+                let key = format!("demo/shm/large/{tag}/put");
+                let (to_remote, remote) = channel();
+                let (to_own, own) = channel();
+                let mut subscribers = Vec::new();
+                for (session, to) in [(other, Mutex::new(to_remote)), (sender, Mutex::new(to_own))]
+                {
+                    subscribers.push(
+                        session
+                            .declare_subscriber(key.as_str())
+                            .callback(move |sample| {
+                                let _ = to.lock().unwrap().send(seen(sample.payload()));
+                            })
+                            .wait()
+                            .expect("declares"),
+                    );
+                }
+                let (remote, own) = until_both_are_told(
+                    || sender.put(key.as_str(), big.clone()).wait().expect("puts"),
+                    &remote,
+                    &own,
+                    who,
+                );
+                assert_eq!(remote, (big.clone(), true), "{who}'s large put");
+                assert_eq!(own, (big.clone(), false), "{who}'s own subscriber");
+
+                let key = format!("demo/shm/large/{tag}/value");
+                let (to_remote, remote) = channel();
+                let (to_own, own) = channel();
+                let mut queryables = Vec::new();
+                for (session, to) in [(other, Mutex::new(to_remote)), (sender, Mutex::new(to_own))]
+                {
+                    queryables.push(
+                        session
+                            .declare_queryable(key.as_str())
+                            .callback(move |query| {
+                                let value = query.payload().map_or((Vec::new(), false), seen);
+                                let _ = to.lock().unwrap().send(value);
+                            })
+                            .wait()
+                            .expect("declares"),
+                    );
+                }
+                let (remote, own) = until_both_are_told(
+                    || {
+                        let _replies = sender
+                            .get(key.as_str())
+                            .payload(big.clone())
+                            .wait()
+                            .expect("asks");
+                    },
+                    &remote,
+                    &own,
+                    who,
+                );
+                assert_eq!(remote, (big.clone(), true), "{who}'s large value");
+                assert_eq!(own, (big.clone(), false), "{who}'s own queryable");
+
+                let key = format!("demo/shm/large/{tag}/reply");
+                let (replied, reply_key) = (big.clone(), key.clone());
+                let _queryable = sender
+                    .declare_queryable(key.as_str())
+                    .callback(move |query| {
+                        // A reply that is refused is seen as a get that is never answered.
+                        let _ = query.reply(reply_key.as_str(), replied.clone()).wait();
+                    })
+                    .wait()
+                    .expect("declares");
+                assert_eq!(
+                    first_reply(other, &key, &format!("the getter of {who}'s large reply")),
+                    (big.clone(), true),
+                    "{who}'s large reply"
+                );
+                assert_eq!(
+                    first_reply(sender, &key, &format!("{who}'s own getter")),
+                    (big.clone(), false),
+                    "{who}'s own getter"
+                );
+            }
+        }
+
+        /// A session in router mode carries shared memory as its configuration says, as a peer
+        /// does: a put of a buffer of shared memory crosses the link to and from a registry that
+        /// dials it as one, and with the router's shared memory disabled the link negotiates none
+        /// and each side is handed the bytes.
+        #[test]
+        fn a_session_in_router_mode_carries_shared_memory_as_its_configuration_says() {
+            const BODY: &[u8] = b"a put through a router";
+            let provider =
+                zenoh_shm::api::provider::shm_provider::ShmProviderBuilder::default_backend(
+                    1usize << 16,
+                )
+                .wait()
+                .expect("a provider");
+            for (enabled, ids) in [(true, ["a1b3a8", "a1b3a9"]), (false, ["a1b3aa", "a1b3ab"])] {
+                let open_as = |id: &str, mode: &str, listen: &str, connect: &str, shm: bool| {
+                    open(
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "{mode}",
+                                  listen: {{ endpoints: [{listen}] }},
+                                  connect: {{ endpoints: [{connect}] }},
+                                  scouting: {{ multicast: {{ enabled: false }} }},
+                                  transport: {{ shared_memory: {{ enabled: {shm} }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads"),
+                    )
+                    .wait()
+                    .expect("opens")
+                };
+                let endpoint = format!(r#""tcp/127.0.0.1:{}""#, unautoselected_port());
+                let router = open_as(ids[0], "router", &endpoint, "", enabled);
+                let peer = open_as(ids[1], "peer", "", &endpoint, true);
+                assert!(matches!(&*router.0.engine, Engine::Router(_)), "a node");
+                assert_eq!(connected(&peer, 1).0.len(), 1, "the peer sees the router");
+
+                for (who, from, to, key) in [
+                    ("to the router", &peer, &router, "demo/shm/router/in"),
+                    ("from the router", &router, &peer, "demo/shm/router/out"),
+                ] {
+                    let (sender, told) = std::sync::mpsc::channel();
+                    let sender = std::sync::Mutex::new(sender);
+                    let _subscriber = to
+                        .declare_subscriber(key)
+                        .callback(move |sample| {
+                            let _ = sender.lock().unwrap().send(seen(sample.payload()));
+                        })
+                        .wait()
+                        .expect("declares");
+                    // The subscription reaches the sender over the link; until it has, a put has
+                    // nobody to go to, so it is put again.
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let handed = loop {
+                        let mut buffer = provider.alloc(BODY.len()).wait().expect("a buffer");
+                        buffer.copy_from_slice(BODY);
+                        from.put(key, ZBytes::from(buffer)).wait().expect("puts");
+                        match told.recv_timeout(Duration::from_millis(100)) {
+                            Ok(handed) => break handed,
+                            Err(_) => assert!(
+                                Instant::now() < deadline,
+                                "{who}: nothing was handed over (shared memory {enabled})"
+                            ),
+                        }
+                    };
+                    assert_eq!(
+                        handed,
+                        (BODY.to_vec(), enabled),
+                        "{who}, the router's shared memory {enabled}"
+                    );
+                }
+            }
+        }
     }
 
     /// The ids a session sees as routers and as peers, once it sees `expected` of them or after
@@ -7253,7 +8171,7 @@ mod tests {
     #[test]
     fn a_node_that_has_no_id_left_for_the_wire_declares_nothing() {
         let mut keys = RouterKeys {
-            last: u64::from(u16::MAX),
+            last: ExprId::MAX,
             ..RouterKeys::default()
         };
         assert_eq!(keys.acquire("demo/a"), None);
@@ -7324,6 +8242,218 @@ mod tests {
         // A closed session is connected to no one.
         dialler.close().wait().expect("closes");
         assert_eq!(dialler.info().peers_zid().wait().count(), 0);
+    }
+
+    /// One thing the engine recorded for a node of the span test: an upstream `demux` span it
+    /// opened or the `close session` event, the node's `zid`, and the names of the spans it was
+    /// opened or emitted in, innermost first.
+    struct Seen {
+        what: &'static str,
+        zid: String,
+        within: Vec<&'static str>,
+    }
+
+    type Recorded = std::sync::Arc<std::sync::Mutex<Vec<Seen>>>;
+
+    /// The ids of the nodes the span test opens start with this; the recorder keeps what those
+    /// nodes record alone, so the other tests of the process, which open spans of their own once a
+    /// subscriber is installed, neither grow it nor read into it.
+    const SPAN_TEST_IDS: &str = "5ba7c";
+
+    /// What `close session` is recorded as.
+    const CLOSE_SESSION: &str = "close session";
+
+    /// Records the `demux` spans and the `close session` events of the span test's nodes.
+    struct Recorder(Recorded);
+
+    impl Recorder {
+        fn keep(&self, what: &'static str, fields: Fields, within: Vec<&'static str>) {
+            if fields.zid.starts_with(SPAN_TEST_IDS) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Seen {
+                        what,
+                        zid: fields.zid,
+                        within,
+                    });
+            }
+        }
+    }
+
+    impl<S> tracing_subscriber::layer::Layer<S> for Recorder
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if attrs.metadata().name() != "demux" {
+                return;
+            }
+            let mut fields = Fields::default();
+            attrs.record(&mut fields);
+            let within = ctx
+                .span(id)
+                .map(|span| span.scope().skip(1).map(|outer| outer.name()).collect())
+                .unwrap_or_default();
+            self.keep("demux", fields, within);
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            if fields.message != CLOSE_SESSION {
+                return;
+            }
+            let within = ctx
+                .event_scope(event)
+                .map(|scope| scope.map(|span| span.name()).collect())
+                .unwrap_or_default();
+            self.keep(CLOSE_SESSION, fields, within);
+        }
+    }
+
+    /// The `zid` and the message of a span or an event, as they print.
+    #[derive(Default)]
+    struct Fields {
+        zid: String,
+        message: String,
+    }
+
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "zid" => self.zid = format!("{value:?}"),
+                "message" => self.message = format!("{value:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// The recorder, installed for the process the first time it is asked for: the spans are
+    /// opened on the engine's threads, which a subscriber set on the test's own thread would not
+    /// reach. A process whose global subscriber is someone else's cannot answer.
+    fn installed_recorder() -> Recorded {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        static RECORDED: std::sync::OnceLock<Recorded> = std::sync::OnceLock::new();
+        RECORDED
+            .get_or_init(|| {
+                let recorded = Recorded::default();
+                tracing::subscriber::set_global_default(
+                    tracing_subscriber::registry().with(Recorder(recorded.clone())),
+                )
+                .expect("no other global subscriber in this test binary");
+                recorded
+            })
+            .clone()
+    }
+
+    /// For each thing `what` the node `zid` recorded, whether a span named `span` was among those
+    /// it was recorded in.
+    fn recorded_within(recorded: &Recorded, what: &str, zid: &str, span: &str) -> Vec<bool> {
+        recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|seen| seen.what == what && seen.zid == zid)
+            .map(|seen| seen.within.contains(&span))
+            .collect()
+    }
+
+    /// `tracing-instrument` carries the span an open is called in onto everything the session
+    /// then does on the network: the threads of its drive and its faces, and the tasks those
+    /// spawn. A peer opened inside `opener` dials a peer that holds a subscriber, and is told of
+    /// it on the face it dialled, where the engine opens upstream's `demux` span for the node.
+    /// With the feature on every such span of the dialler is a descendant of `opener`; without
+    /// it, which is the same test in a build without the feature, none is, because the face runs
+    /// on a thread the opener's span was never entered on. The listener is opened outside the
+    /// span, so the spans of its node say nothing either way, and the two are told apart by id.
+    /// The dialler is then closed inside `closer`, and upstream's `close session` event, which
+    /// the close emits on the thread the facade moves it to, is inside `closer` exactly when the
+    /// feature is on.
+    #[test]
+    fn the_faces_of_a_session_opened_in_a_span_run_in_it_exactly_when_the_feature_is_on() {
+        let recorded = installed_recorder();
+        let port = unautoselected_port();
+        let listener = open(
+            Config::from_json5(&format!(
+                r#"{{ id: "5ba7c1", mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                      scouting: {{ multicast: {{ enabled: false }} }} }}"#
+            ))
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("opens");
+        let _subscriber = listener
+            .declare_subscriber("caller/span")
+            .callback(|_| {})
+            .wait()
+            .expect("declares");
+        let opener = tracing::info_span!("opener");
+        assert!(opener.id().is_some(), "the recorder gives spans ids");
+        let dialler = {
+            let _inside = opener.enter();
+            open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "5ba7c2", mode: "peer", listen: {{ endpoints: [] }},
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens")
+        };
+        let zid = dialler.zid().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let of_dialler: Vec<bool> = loop {
+            let of = recorded_within(&recorded, "demux", &zid, "opener");
+            if !of.is_empty() || std::time::Instant::now() > deadline {
+                break of;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let nodes: Vec<String> = recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|seen| seen.zid.clone())
+            .collect();
+        assert!(
+            !of_dialler.is_empty(),
+            "the dialler's node opened no `demux` span; nodes seen: {nodes:?}"
+        );
+        let carried = cfg!(feature = "tracing-instrument");
+        assert!(
+            of_dialler.iter().all(|inside| *inside == carried),
+            "each span of the dialler descends from the span it was opened in exactly when the \
+             feature is on ({carried}): {of_dialler:?}"
+        );
+        // The close is the other end: the facade runs it on a thread where blocking is allowed,
+        // and upstream's record of it is emitted there, inside the span the close was called in
+        // exactly when the feature is on.
+        let closer = tracing::info_span!("closer");
+        {
+            let _inside = closer.enter();
+            dialler.close().wait().expect("closes");
+        }
+        let closes = recorded_within(&recorded, CLOSE_SESSION, &zid, "closer");
+        assert_eq!(
+            closes,
+            [carried],
+            "the one close of the dialler is recorded inside the span its close was called in \
+             exactly when the feature is on ({carried})"
+        );
+        listener.close().wait().expect("closes");
     }
 
     /// The keys the engine of `session` holds a declaration of.
@@ -7457,6 +8587,46 @@ mod tests {
         );
     }
 
+    /// `aggregation/*` opens on the registry of faces, which declares under the aggregates, and a
+    /// session that runs as a node, which does not carry them, is refused by the keys' names: a
+    /// router always, a peer that fits the node when the node is wanted. The CONTROL is the same
+    /// peer stating no aggregate, which opens as the node.
+    #[test]
+    fn an_aggregate_opens_on_the_registry_and_is_refused_by_a_node() {
+        let aggregated = || peer_with("aggregation/subscribers", r#"["demo/**"]"#);
+        let session = open(aggregated())
+            .wait()
+            .expect("the registry of faces declares under an aggregate");
+        drop(session);
+        let refused = |text: String| {
+            assert!(
+                text.contains("`aggregation/subscribers` or `aggregation/publishers`"),
+                "{text}"
+            );
+        };
+        refused(
+            with_the_node(|| open(aggregated()).wait())
+                .expect_err("a peer node given an aggregate")
+                .to_string(),
+        );
+        let control = with_the_node(|| open(peer("a1b2cb")).wait());
+        assert!(control.is_ok(), "CONTROL: the node opens with no aggregate");
+        let mut router = Config::from_json5(
+            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("a configuration zenoh reads");
+        router
+            .insert_json5("aggregation/publishers", r#"["demo/**"]"#)
+            .expect("a key zenoh reads");
+        refused(
+            open(router)
+                .wait()
+                .expect_err("a router given an aggregate")
+                .to_string(),
+        );
+    }
+
     #[test]
     fn an_endpoint_group_with_a_strategy_is_refused_by_its_key() {
         let config = Config::from_json5(
@@ -7532,7 +8702,7 @@ mod tests {
         let stated: zenoh_protocol::core::Encoding =
             Encoding::APPLICATION_JSON.with_schema("v1").into();
         assert_eq!(encoding.packed_id, (u32::from(stated.id) << 1) | 1);
-        assert_eq!(encoding.schema.as_deref(), Some("v1"));
+        assert_eq!(encoding.schema.as_deref(), Some(&b"v1"[..]));
         let stamp = options.timestamp.expect("the time that was stated");
         assert_eq!(stamp.time, 0x1234_5678_9abc_def0);
         assert_eq!(

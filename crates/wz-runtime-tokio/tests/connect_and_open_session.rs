@@ -30,7 +30,8 @@ use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, DriverLoopOutcome,
 };
 use wz_runtime_tokio::session_open::{
-    connect_and_open_session, DialConfig, OpenError, DEFAULT_OPEN_TICK_MS,
+    connect_and_open_session, dial_locator, initiate_and_open_session, open_within, DialConfig,
+    OpenError, DEFAULT_OPEN_TICK_MS, OPEN_TIMEOUT,
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
@@ -53,7 +54,7 @@ async fn connect_and_open_reaches_established_against_wz_acceptor() {
         params.zid = vec![0x02; 4]; // distinct zid from the initiator
         let actions = new_session_actions(outbound, params, TokioTime::new());
         let mut engine = new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::InboundStart);
 
         let mut iter = 0usize;
@@ -153,6 +154,57 @@ async fn silent_peer_surfaces_handshake_timeout() {
         Err(other) => panic!("expected HandshakeTimeout, got {other:?}"),
         Ok(_) => panic!("silent peer must not reach Established"),
     }
+    acceptor.abort();
+}
+
+/// `transport/unicast/open_timeout`, read off the clock: one open of an endpoint, its dial and
+/// its handshake, ends at the open's bound. Against a peer that accepts the connection and never
+/// answers the InitSyn, an open bounded at 300 ms gives up then, naming the bound, well before
+/// the handshake's own 2 s window would end it (`silent_peer_surfaces_handshake_timeout` above
+/// is that window). A dial config states upstream's ten seconds until a node states another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_that_does_not_complete_ends_at_the_open_bound() {
+    assert_eq!(DialConfig::default().open_timeout, OPEN_TIMEOUT);
+    assert_eq!(OPEN_TIMEOUT, std::time::Duration::from_secs(10));
+    let bound = std::time::Duration::from_millis(300);
+    let config = DialConfig::default().with_open_timeout(bound);
+    assert_eq!(config.open_timeout, bound);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let acceptor = tokio::spawn(async move {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        drop(stream);
+    });
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+
+    let started = std::time::Instant::now();
+    let result = open_within(config.open_timeout, async {
+        let dialed = dial_locator(locator, &config)
+            .await
+            .map_err(OpenError::Dial)?;
+        initiate_and_open_session(
+            dialed,
+            fixture_session_init_params(),
+            TokioTime::new(),
+            None,
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+    })
+    .await;
+    let spent = started.elapsed();
+
+    match result {
+        Err(OpenError::OpenTimeout(stated)) => assert_eq!(stated, bound),
+        Err(other) => panic!("expected the open's bound to end it, got {other:?}"),
+        Ok(_) => panic!("a silent peer must not reach Established"),
+    }
+    assert!(
+        spent >= bound && spent < std::time::Duration::from_secs(2),
+        "the open ended after {spent:?}: at its bound, before the handshake's window"
+    );
     acceptor.abort();
 }
 

@@ -103,7 +103,7 @@ impl wz_session_core::query_sink::QuerySink for NoopQuerySink {
 struct NoopReplySink;
 impl wz_session_core::reply_sink::ReplySink for NoopReplySink {
     fn on_reply(&mut self, _reply: &dyn wz_session_core::reply_sink::ReplyView) {}
-    fn on_final(&mut self, _rid: u64) {}
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {}
 }
 
 struct NoopDeclSink;
@@ -525,7 +525,7 @@ mod peer_tables {
             );
             assert_eq!(peer.resolve_inbound_mapping(1).as_deref(), Some("peer/1"));
             assert_eq!(
-                peer.resolve_inbound_mapping(caps::MAX_PEER_KEYEXPR_ALIASES as u64 + 1),
+                peer.resolve_inbound_mapping(caps::MAX_PEER_KEYEXPR_ALIASES as u16 + 1),
                 None,
                 "the refused alias is not recorded"
             );

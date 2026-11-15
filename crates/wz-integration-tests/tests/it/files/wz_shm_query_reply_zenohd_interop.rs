@@ -105,7 +105,7 @@ enum GetterValue {
 }
 
 /// The id the aliased leg declares its keyexpr under.
-const QUERY_MAPPING_ID: u64 = 7;
+const QUERY_MAPPING_ID: u16 = 7;
 
 /// The key `z_queryable_shm` declares its queryable on.
 const QUERYABLE_KEY: &str = "demo/example/zenoh-rs-queryable";

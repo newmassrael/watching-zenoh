@@ -142,7 +142,7 @@ pub trait QueryView {
     }
     /// Request id from the outer `Request.rid` envelope (correlation key
     /// for the matching reply chain).
-    fn rid(&self) -> u64;
+    fn rid(&self) -> crate::wire_id::RequestId;
     /// R311li — `true` when the query originated in-process (the
     /// requester is this same session's `query` loopback branch), so a
     /// reply must route back into the local reply registry rather than
@@ -245,7 +245,7 @@ impl QueryView for ProvenQuery<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.inner.encoding()
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.inner.rid()
     }
     fn is_local(&self) -> bool {
@@ -558,7 +558,7 @@ pub trait ReplyOut {
     ) -> Result<(), ReplyError> {
         let hint = crate::sample::EncodingHint {
             packed_id,
-            schema: schema.map(alloc::string::String::from),
+            schema: schema.map(|s| s.as_bytes().to_vec()),
         };
         self.reply_keyed_encoded(keyexpr, payload, Some(&hint))
     }
@@ -792,8 +792,9 @@ pub trait ReplyOut {
         self.reply_del();
         Ok(())
     }
-    /// Emit an Err-form reply carrying an optional encoding id + schema.
-    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]);
+    /// Emit an Err-form reply carrying an optional encoding id + schema, the schema as
+    /// the bytes the wire carries.
+    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&[u8]>, payload: &[u8]);
     /// Attach a responder identity (`zid` + entity id) to every
     /// subsequent [`Self::reply`] / [`Self::reply_del`] /
     /// [`Self::reply_err`] call.
@@ -853,7 +854,7 @@ pub struct BorrowedQuery<'a> {
     #[cfg(feature = "alloc")]
     pub encoding: Option<&'a crate::sample::EncodingHint>,
     /// Request id (correlation key).
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// R311li — in-process loopback origin marker (see
     /// [`QueryView::is_local`]). `false` for wire dispatch.
     pub is_local: bool,
@@ -885,7 +886,7 @@ impl QueryView for BorrowedQuery<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.encoding
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn is_local(&self) -> bool {
@@ -946,7 +947,7 @@ impl QueryView for SharedQuery<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.base.encoding()
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.base.rid()
     }
     fn is_local(&self) -> bool {
@@ -1043,7 +1044,7 @@ mod tests {
         fn reply_del(&mut self) {
             self.dels += 1;
         }
-        fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, payload: &[u8]) {
+        fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&[u8]>, payload: &[u8]) {
             self.errs += 1;
             self.last_len = payload.len();
         }
@@ -1075,7 +1076,7 @@ mod tests {
     struct EchoQuerySink {
         calls: u32,
         last_key_len: usize,
-        last_rid: u64,
+        last_rid: crate::wire_id::RequestId,
         last_param_len: Option<usize>,
     }
 
@@ -1122,7 +1123,7 @@ mod tests {
     /// link proved, and the proof changes nothing else the sink reads of the query.
     #[test]
     fn a_query_is_asked_by_nobody_unless_the_links_key_proved_a_zid() {
-        type Seen = Option<(Option<[u8; 16]>, u64, usize)>;
+        type Seen = Option<(Option<[u8; 16]>, crate::wire_id::RequestId, usize)>;
         struct Who([Seen; 2], usize);
         impl QuerySink for Who {
             fn handle(&mut self, query: &dyn QueryView, _out: &mut dyn ReplyOut) {
@@ -1182,7 +1183,7 @@ mod tests {
         assert_eq!(out.responder(), Some((&b"node-7"[..], 3)));
 
         out.reply_del();
-        out.reply_err(Some(1), Some("text/plain"), b"boom");
+        out.reply_err(Some(1), Some(&b"text/plain"[..]), b"boom");
         assert_eq!(out.dels, 1);
         assert_eq!(out.errs, 1);
         assert_eq!(out.last_len, 4);

@@ -1859,7 +1859,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// would dwarf the read parallelism gain at the expected
     /// access pattern.
     #[cfg(feature = "alloc")]
-    pub outbound_mappings: R::Mutex<HashMap<u64, String>>,
+    pub outbound_mappings: R::Mutex<HashMap<crate::wire_id::ExprId, String>>,
     /// The egress admission of a REPLY: the §5.16 verdict the session that owns this bundle
     /// installs when it holds an egress policy, asked of every `Response` before it is sent.
     ///
@@ -1963,7 +1963,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// starting value, so the choice is cosmetic. `Relaxed` ordering
     /// is sufficient — id uniqueness is the only invariant and
     /// `fetch_add` is atomic under every ordering.
-    pub next_outbound_request_id: AtomicU64,
+    pub next_outbound_request_id: AtomicU32,
     /// The earliest moment the application layer needs the drive loop awake for, in this
     /// session's clock (`u64::MAX`: none). The layer owns deadlines the transport does not know
     /// (a pending query's), and a loop whose link sleeps while the session is idle must wake no
@@ -2669,20 +2669,20 @@ enum LentDeclaration<'a> {
     #[cfg(feature = "declare-subscriber")]
     Subscriber {
         id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&'a str>,
     },
     #[cfg(feature = "declare-queryable")]
     Queryable {
         id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&'a str>,
         complete: bool,
     },
     #[cfg(feature = "declare-token")]
     Token {
         id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&'a str>,
     },
 }
@@ -3058,7 +3058,7 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // ask it at all, so a peer naming our id was answered `None` and dropped.
 impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
-    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+    fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.resolve_outbound_mapping(id)
     }
 
@@ -3068,7 +3068,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     #[cfg(feature = "alloc")]
     fn append_own_mapping(
         &self,
-        id: u64,
+        id: crate::wire_id::ExprId,
         out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         R::with_mutex_mut(&self.outbound_mappings, |table| {
@@ -3082,7 +3082,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     #[cfg(not(feature = "alloc"))]
     fn append_own_mapping(
         &self,
-        _id: u64,
+        _id: crate::wire_id::ExprId,
         _out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         None
@@ -3149,7 +3149,11 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         }
     }
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
+    fn send_response_final(
+        &self,
+        request_id: crate::wire_id::RequestId,
+        qos: crate::sample::QosLevel,
+    ) {
         self.send_response_final(request_id, qos);
     }
 
@@ -3681,7 +3685,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
-                outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
+                outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
                 #[cfg(all(feature = "alloc", feature = "codec-response"))]
                 egress_reply_gate: R::new_mutex(None::<ReplyEgressGate>),
                 #[cfg(all(feature = "alloc", feature = "codec-response"))]
@@ -3699,7 +3703,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 namespace_ingress: R::new_mutex(None::<NamespaceIngress>),
                 #[cfg(feature = "alloc")]
                 plain_put_lane: core::sync::atomic::AtomicBool::new(false),
-                next_outbound_request_id: AtomicU64::new(0),
+                next_outbound_request_id: AtomicU32::new(0),
                 app_wake_deadline_ms: AtomicU64::new(u64::MAX),
                 // From 1: the id 0 is a router's (`alloc_next_token_id`).
                 next_outbound_token_id: AtomicU64::new(1),
@@ -4022,8 +4026,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `pub(super) fn observe_payload(`).
     /// A control message has no payload class and a class with no kind (an
     /// undecoded body, [`crate::stats::NetworkStatsClass::undecoded`]) no
-    /// label, so neither is observed. No per-key filter is configured here, so
-    /// the per-key family gets its series and no keys.
+    /// label, so neither is observed. The per-key family counts it under the
+    /// `stats/filters` keys its class matched ([`Self::stats_keys_of`]).
     #[cfg(feature = "transport-stats")]
     pub(crate) fn observe_payload(
         &self,
@@ -4036,16 +4040,56 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         let shm = class.medium == crate::stats::StatMedium::Shm;
         R::with_mutex_mut(&self.metrics, |metrics| {
-            metrics.observe_network_message_payload(
-                direction,
-                payload.space,
-                priority,
-                kind,
-                shm,
-                payload.pl_bytes as u64,
-                [],
-            )
+            metrics.observe_payload_class(direction, priority, kind, shm, &payload)
         });
+    }
+
+    /// `stats/filters`: count this session's payloads under `filters` from here on, as upstream
+    /// counts every face's under the filters of its node
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `config.stats.filters().iter().map(|f| &*f.key),`).
+    /// A host sets it before the session carries data. A build without `transport-stats` counts
+    /// nothing, so it refuses a list that names a key rather than dropping it.
+    #[cfg(feature = "alloc")]
+    pub fn set_stats_key_filters(
+        &self,
+        filters: crate::stats_registry::StatsKeyFilters,
+    ) -> Result<(), crate::stats_registry::StatsKeyFiltersError> {
+        #[cfg(feature = "transport-stats")]
+        {
+            R::with_mutex_mut(&self.metrics, |metrics| metrics.set_key_filters(filters));
+            Ok(())
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            if filters.is_empty() {
+                Ok(())
+            } else {
+                Err(crate::stats_registry::StatsKeyFiltersError::NotInBuild)
+            }
+        }
+    }
+
+    /// `class` matched against this session's `stats/filters`: `keyexpr` is the key expression
+    /// the message addresses, asked only for a payload class of a session that holds a filter,
+    /// and never while the metrics are held, since resolving an alias takes the mapping table.
+    #[cfg(feature = "transport-stats")]
+    pub(crate) fn stats_keys_of(
+        &self,
+        class: crate::stats::NetworkStatsClass,
+        keyexpr: impl FnOnce() -> Option<alloc::string::String>,
+    ) -> crate::stats::NetworkStatsClass {
+        if class.payload.is_none()
+            || R::with_mutex_mut(&self.metrics, |metrics| metrics.key_filters().is_empty())
+        {
+            return class;
+        }
+        let Some(keyexpr) = keyexpr() else {
+            return class;
+        };
+        let keys = R::with_mutex_mut(&self.metrics, |metrics| {
+            metrics.key_filters().matching(&keyexpr)
+        });
+        class.with_keys(keys)
     }
 
     /// R2825 — count one network message on the link that carries it
@@ -5454,57 +5498,50 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         echo_inbound_cookie: bool,
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
+        use crate::handshake_encode::{encode_open_head_into, open_head_len};
         let initial_sn = self.open_initial_sn().unwrap_or(self.params.initial_sn);
-        // The staged chain is taken out of its slot for the encode and put back
-        // after it (a move of the vector's handle, which allocates nothing), so
-        // the encode holds ONE session mutex at a time: the cookie's, when it
-        // echoes one, and not the chain's as well. Session mutex scopes stay
+        // The Open is written in two steps, each under ONE session mutex: the
+        // header and the body under the cookie's, when it echoes one, then the
+        // staged chain under the chain's, where it lies. Session mutex scopes stay
         // disjoint by discipline, and the non-reentrant per-profile mutexes are
-        // why. The slot is empty only for the span of the encode, which no other
-        // reader of a handshake chain runs inside of (the send is the chain's
-        // only consumer, and the drive loop is one task on this profile).
-        let chain = R::with_mutex_mut(self.ext_chain_slot(role), core::mem::take);
+        // why. Taken out of its slot instead, so that one encoder could be handed
+        // both, the chain was a copy of the whole bounded chain in this frame on
+        // the fixed profile, under the socket send of the handshake's answer.
+        // The chain counted here is the one written below: the send is the
+        // chain's only consumer, and the drive loop is one task on this profile.
+        let (has_ext, chain_len) = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            (!chain.is_empty(), crate::ext_chain::ext_chain_len(chain))
+        });
         // The message's own length, so the link lends a slot that holds this
         // OpenSyn / OpenAck. An Open body has no size constant to ask for instead:
         // its cookie's length is a `usize`.
-        let want = if echo_inbound_cookie {
+        let head_len = if echo_inbound_cookie {
             R::with_mutex_mut(&self.inbound_cookie, |cookie| {
-                crate::handshake_encode::open_frame_len(
-                    &self.params,
-                    initial_sn,
-                    is_ack,
-                    cookie.as_deref(),
-                    &chain,
-                )
+                open_head_len(&self.params, initial_sn, is_ack, cookie.as_deref())
             })
         } else {
-            crate::handshake_encode::open_frame_len(&self.params, initial_sn, is_ack, None, &chain)
+            open_head_len(&self.params, initial_sn, is_ack, None)
         };
-        let sent = self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+        let want = head_len + chain_len;
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
             if echo_inbound_cookie {
                 R::with_mutex_mut(&self.inbound_cookie, |cookie| {
-                    crate::handshake_encode::encode_open_into(
+                    encode_open_head_into(
                         buf,
                         &self.params,
                         initial_sn,
                         is_ack,
                         cookie.as_deref(),
-                        &chain,
+                        has_ext,
                     )
-                })
+                })?;
             } else {
-                crate::handshake_encode::encode_open_into(
-                    buf,
-                    &self.params,
-                    initial_sn,
-                    is_ack,
-                    None,
-                    &chain,
-                )
+                encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
             }
-        });
-        R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = chain);
-        sent
+            R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+                crate::ext_chain::encode_ext_chain_into(buf, chain)
+            })
+        })
     }
 
     /// Fixed-memory step S4 — the lend-only Close: the header (the S flag derived
@@ -11197,7 +11234,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
-            crate::network_message::push_stats_class(_push, |id| self.resolve_outbound_mapping(id))
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::push_stats_class(_push, resolve);
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_wireexpr(&_push.keyexpr, &resolve)
+            })
         }
         #[cfg(not(feature = "transport-stats"))]
         {
@@ -11214,8 +11255,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
-            crate::network_message::request_stats_class(_request, |id| {
-                self.resolve_outbound_mapping(id)
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::request_stats_class(_request, resolve);
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_wireexpr(&_request.keyexpr, &resolve)
             })
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -11233,8 +11276,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
-            crate::network_message::response_stats_class(_response, |id| {
-                self.resolve_outbound_mapping(id)
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::response_stats_class(_response, resolve);
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_wireexpr(&_response.keyexpr, &resolve)
             })
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -12254,13 +12299,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// `Relaxed` ordering is sufficient — uniqueness is the only
     /// invariant the caller depends on and `fetch_add` is atomic
-    /// under every ordering. The wire `req_id_res` resolution window
-    /// (`params.req_id_res = 0..=3` → 8/16/32/64-bit) is not enforced
-    /// here either; production code with long-running sessions
-    /// emitting more than `1 << req_bits` queries needs an explicit
-    /// modulo (same carry as
-    /// [`Self::next_outbound_frame_sn`]).
-    pub fn alloc_next_request_id(&self) -> u64 {
+    /// under every ordering. The counter is a `RequestId` and wraps,
+    /// as upstream's is and does
+    /// (`zenoh/src/api/session.rs` @ `let qid = state.qid_counter.fetch_add(1, Ordering::SeqCst);`).
+    pub fn alloc_next_request_id(&self) -> crate::wire_id::RequestId {
         self.next_outbound_request_id
             .fetch_add(1, Ordering::Relaxed)
     }
@@ -12432,7 +12474,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn send_plain_put_qos(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
@@ -12451,10 +12493,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::sample::QosLevel::DEFAULT
         };
         #[cfg(feature = "transport-stats")]
-        let class =
-            crate::network_message::plain_put_stats_class(mapping_id, suffix, value.len(), |id| {
-                self.resolve_outbound_mapping(id)
-            });
+        let class = {
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::plain_put_stats_class(
+                mapping_id,
+                suffix,
+                value.len(),
+                resolve,
+            );
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_key(mapping_id, suffix, &resolve)
+            })
+        };
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
         // The Put's own size, from the same writer run into a sink that keeps nothing: a Push
@@ -12521,11 +12571,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "codec-push", feature = "tx-lend-only"))]
         {
             #[cfg(feature = "transport-stats")]
-            let class = crate::network_message::plain_put_stats_class(
-                0,
-                Some(keyexpr_suffix),
-                value.len(),
-                |_| None,
+            let class = self.stats_keys_of(
+                crate::network_message::plain_put_stats_class(
+                    0,
+                    Some(keyexpr_suffix),
+                    value.len(),
+                    |_| None,
+                ),
+                || Some(alloc::string::String::from(keyexpr_suffix)),
             );
             #[cfg(not(feature = "transport-stats"))]
             let class = crate::stats::NetworkStatsClass::unread();
@@ -12592,7 +12645,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `send_close_with_reason` precedent.
     pub fn send_declare_keyexpr(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: &str,
     ) -> Result<(), SendDeclareError> {
         #[cfg(feature = "declare-keyexpr")]
@@ -12642,7 +12695,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// not add another.
     pub fn resend_declare_keyexpr(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: &str,
     ) -> Result<(), SendDeclareError> {
         #[cfg(feature = "declare-keyexpr")]
@@ -12661,24 +12714,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// share, so a declaration the second sends is byte for byte what the first
     /// did.
     #[cfg(feature = "declare-keyexpr")]
-    fn emit_declare_keyexpr(&self, mapping_id: u64, suffix: &str) -> Result<(), SendDeclareError> {
+    fn emit_declare_keyexpr(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: &str,
+    ) -> Result<(), SendDeclareError> {
         // R300 — pre-emit gate. Both checks run BEFORE any wire
         // bytes leave or any mapping-table side effect; on Err
         // the session-link state is unchanged.
         if mapping_id == 0 {
             return Err(SendDeclareError::ReservedMappingIdZero);
         }
-        // R311y342 — the id space's OTHER end. The lower bound has been
-        // gated since R300; the upper bound never was, so wz could emit an
-        // alias id that neither upstream can hold: zenoh types
-        // `DeclareKeyExpr.id` as `ExprId = u16` and zenoh-pico's
-        // `_z_decl_kexpr_t` holds `uint16_t _id`, while our codec carries a
-        // VLE u64 (deliberate — the shared wireexpr shape). Measured, not
-        // argued: before this gate, `send_declare_keyexpr(65_536, ..)`
-        // returned Ok and put the frame on the wire.
-        if mapping_id > u64::from(u16::MAX) {
-            return Err(SendDeclareError::MappingIdTooWideForWire(mapping_id));
-        }
+        // The upper end of the id space is the type: a mapping id is an
+        // `ExprId`, as zenoh's `DeclareKeyExpr.id` is and zenoh-pico's
+        // `uint16_t _id` is, so no id a caller can name is too wide for the wire.
         check_outbound_keyexpr_pico_safe(suffix)?;
         let declare = build_declare_kexpr(mapping_id, suffix)?;
         // §5.21 routing-namespace — bake the namespace into the wire alias
@@ -12710,7 +12759,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the per-instance tail.
     pub fn send_push_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
         reliable: bool,
@@ -12783,7 +12832,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// keyexpr before firing the subscriber callback.
     pub fn send_push_del_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         reliable: bool,
     ) -> Result<(), SendWireError> {
@@ -12834,7 +12883,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn send_push_with_meta_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
         reliable: bool,
@@ -12885,7 +12934,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn send_push_del_with_meta_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         reliable: bool,
         meta: &PushMetadata,
@@ -12931,7 +12980,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_subscriber(
         &self,
         subscriber_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
         // With no allocator the declaration is written from the caller's own text
@@ -13002,7 +13051,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_queryable(
         &self,
         queryable_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         complete: bool,
     ) -> Result<(), SendDeclareError> {
@@ -13084,7 +13133,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_token(
         &self,
         token_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
         // See `send_declare_subscriber`: with no allocator the declaration is written from the
@@ -13134,7 +13183,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_token(
         &self,
         token_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
         // R300 — same gate shape as `send_declare_subscriber`. The full path
@@ -13169,7 +13218,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_subscriber(
         &self,
         subscriber_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
         let reconstructed =
@@ -13191,7 +13240,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn declare_keyexpr_recorded<E>(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: &str,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
@@ -13224,7 +13273,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn declare_token_recorded<E>(
         &self,
         token_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
@@ -13254,7 +13303,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn declare_subscriber_recorded<E>(
         &self,
         subscriber_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
@@ -13294,7 +13343,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_queryable(
         &self,
         queryable_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         complete: bool,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
@@ -13321,7 +13370,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn declare_queryable_recorded<E>(
         &self,
         queryable_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         complete: bool,
         emit: impl FnOnce() -> Result<(), E>,
@@ -13422,21 +13471,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// no-op when either feature is off (() return — no error channel,
     /// the outbound_mappings table prune is also gated so a feature-off
     /// build never populated the table to begin with).
-    pub fn send_undeclare_kexpr(&self, mapping_id: u64) {
+    pub fn send_undeclare_kexpr(&self, mapping_id: crate::wire_id::ExprId) {
         #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
         {
-            // R311y342 — the DECLARE twin's u16 wire bound, applied to the
-            // retraction half. zenoh's `UndeclareKeyExpr { id: ExprId }` and
-            // pico's `_z_undecl_kexpr_t { uint16_t _id }` are as narrow as
-            // their declare counterparts, and this surface emits WITHOUT
-            // consulting the mapping table (its doc's "removing an absent id
-            // is a no-op" idempotence), so the gated twin does not bound it.
-            // Dropped silently rather than reported because this signature has
-            // no error channel by contract — the same reason a transport-down
-            // reject drops the emit here.
-            if mapping_id > u64::from(u16::MAX) {
-                return;
-            }
+            // The id is an `ExprId`, as zenoh's `UndeclareKeyExpr { id }` and
+            // pico's `uint16_t _id` are, so every id this takes fits the wire.
             let declare = build_undeclare_kexpr(mapping_id);
             // A4 — drop the matching replay entry (pico `_z_prune_declaration` undeclare-filter
             // on `_id`) and send the retraction, as one step: a retraction of an entry a paced
@@ -13472,7 +13511,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_session_t._local_resources`, queried via
     /// `_z_get_resource_by_id` on the publish path.
     #[cfg(feature = "alloc")]
-    pub fn resolve_outbound_mapping(&self, mapping_id: u64) -> Option<String> {
+    pub fn resolve_outbound_mapping(&self, mapping_id: crate::wire_id::ExprId) -> Option<String> {
         R::with_mutex_mut(&self.outbound_mappings, |table| {
             table.get(&mapping_id).cloned()
         })
@@ -13586,7 +13625,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn reconstruct_outbound_keyexpr(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
     ) -> Result<String, SendDeclareError> {
         match (mapping_id, suffix) {
@@ -13620,7 +13659,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     ))]
     fn check_outbound_declared_keyexpr(
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
         match (mapping_id, suffix) {
@@ -13657,7 +13696,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_undeclare_subscriber_naming(
         &self,
         subscriber_id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: &str,
     ) {
         #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
@@ -13708,7 +13747,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_undeclare_queryable_naming(
         &self,
         queryable_id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: &str,
     ) {
         #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
@@ -13761,7 +13800,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::send_undeclare_subscriber_naming`]. zenoh-pico's token
     /// retraction always names it (`vendor/zenoh-pico/src/net/liveliness.c` @
     /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
-    pub fn send_undeclare_token_naming(&self, token_id: u64, mapping_id: u64, suffix: &str) {
+    pub fn send_undeclare_token_naming(
+        &self,
+        token_id: u64,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: &str,
+    ) {
         #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
         // Named by its id alone past the key's bound, as the subscriber retraction is.
         self.retract_token(
@@ -13872,7 +13916,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         interest_id: u64,
         history: bool,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
         #[cfg(feature = "declare-interest")]
@@ -13911,7 +13955,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         interest_id: u64,
         history: bool,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
@@ -13956,7 +14000,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_interest_liveliness_get(
         &self,
         interest_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
         #[cfg(feature = "declare-interest")]
@@ -13992,7 +14036,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn declare_get_interest_recorded<E>(
         &self,
         interest_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
@@ -14051,7 +14095,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         interest_id: u64,
         current: bool,
         future: bool,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
         // Signature-stable per R311g1; the BODY carries the `alloc` gate that
@@ -14095,7 +14139,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         interest_id: u64,
         current: bool,
         future: bool,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
         // Same `alloc`-in-the-body shape as the subscriber wrapper above.
@@ -14161,7 +14205,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         current: bool,
         future: bool,
         aggregate: bool,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
         #[cfg(feature = "declare-interest")]
@@ -14220,7 +14264,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         current: bool,
         future: bool,
         aggregate: bool,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
@@ -14323,8 +14367,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// contract).
     pub fn send_request_query(
         &self,
-        rid: u64,
-        keyexpr_mapping_id: u64,
+        rid: crate::wire_id::RequestId,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
         #[cfg(all(feature = "codec-request", feature = "alloc"))]
@@ -14448,8 +14492,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn send_request_query_with_meta(
         &self,
-        rid: u64,
-        keyexpr_mapping_id: u64,
+        rid: crate::wire_id::RequestId,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         meta: &QueryMetadata,
     ) -> Result<(), SendWireError> {
@@ -14495,7 +14539,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// channel; this no-op cannot be elevated to a typed Err
     /// without growing a public error enum for an action that
     /// has historically been a fire-and-forget primitive.
-    pub fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
+    pub fn send_response_final(
+        &self,
+        request_id: crate::wire_id::RequestId,
+        qos: crate::sample::QosLevel,
+    ) {
         // With no allocator the terminator is written from its two numbers through the
         // borrowed writer of `lent_control`, routed as `dispatch_response_final` routes
         // it: on the band its own `ext_qos` names, as control plane.
@@ -14908,7 +14956,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// no cache and this is `Some(emit())`.
     pub fn retract_keyexpr_recorded<Out>(
         &self,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         emit: impl FnOnce() -> Out,
     ) -> Option<Out> {
         #[cfg(feature = "session-reconnect")]

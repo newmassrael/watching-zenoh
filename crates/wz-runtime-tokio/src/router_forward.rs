@@ -378,7 +378,7 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::driver_loop::MulticastPeerId;
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::extbound::multicast_region_and_bound_of;
-use wz_session_core::extbound::{sends_initial_interest_final, Bound, Region, INITIAL_INTEREST_ID};
+use wz_session_core::extbound::{Bound, Region, INITIAL_INTEREST_ID};
 use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
@@ -398,6 +398,7 @@ use wz_session_core::wireexpr_resolve::{
 
 use crate::accept_loop::{
     DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
+    ReservedFace,
 };
 use crate::client_store;
 #[cfg(feature = "routing-token-tables")]
@@ -455,6 +456,8 @@ use wz_session_core::wire::{PushOwned, RequestOwned, ResponseOwned};
 
 #[cfg(feature = "routing-interest-pending-gc")]
 mod brokered_interest;
+#[cfg(test)]
+mod client_hat_tests;
 mod declaration_ids;
 mod egress;
 #[cfg(test)]
@@ -514,9 +517,10 @@ const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 /// The pin makes it a face like any other, with a client's mode and no wire
 /// (`zenoh/src/net/routing/gateway.rs` @ `.local(true)`); here it is only the
 /// name a message from the node itself is routed under, so that no other face
-/// is mistaken for its sender. It is never registered in `faces`, and no
-/// transport face is given this id, which counts up from zero.
-const LOCAL_FACE: FaceId = FaceId(u64::MAX);
+/// is mistaken for its sender. It is never registered in `faces`; its id is a
+/// reserved one, which no transport face is given and no other reserved face
+/// shares.
+const LOCAL_FACE: FaceId = ReservedFace::Local.id();
 
 /// How a data message leaves this node: the reliability of the frame that carries
 /// it, the band that frame is sent in, and whether it is sent express. The three
@@ -552,15 +556,31 @@ fn mcast_ingress_region() -> Region {
         .unwrap_or_else(|| unreachable!("the pin places a peer on a router's group"))
 }
 
-/// Whether a face in `region` is a leaf, meaning its hat keeps no link-state
-/// net. That is the pin's client and broker hats. Read off the ported hat
-/// table ([`hat_kind`]) so the leaf set and the hats the pin builds cannot
-/// disagree.
+/// Whether a face in `region` is a leaf: a client the node holds south of it,
+/// which routes no topology and is kept with its declarations by id. That is
+/// the pin's broker hat. Read off the ported hat table ([`hat_kind`]) so the
+/// leaf set and the hats the pin builds cannot disagree.
+///
+/// The pin's CLIENT hat is not a leaf hat, though it keeps no net either: it is
+/// the north hat of a client node, and its one face is the node the client is
+/// attached to, which the client sends everything its south holds
+/// ([`is_client_hat`]).
 fn is_leaf(region: Region, node_mode: WhatAmI) -> bool {
-    matches!(
-        hat_kind(&region, node_mode),
-        HatKind::Broker | HatKind::Client
-    )
+    matches!(hat_kind(&region, node_mode), HatKind::Broker)
+}
+
+/// Whether `region` is served by the pin's CLIENT hat: the north region of a
+/// node whose mode is Client (`zenoh/src/net/routing/hat/client/mod.rs` @
+/// `debug_assert!(region.bound().is_north());`).
+///
+/// It is held in a [`MeshHat`], as the router and peer hats are, and differs
+/// from them by the rules that ask this: its graph holds its one north link and
+/// is never exchanged ([`Tables::exchanges_topology`]), a second north remote is
+/// refused, and it routes as the north peer hat does, by its faces
+/// ([`Tables::face_based`]), sending north what its south holds and what its
+/// south asks (`docs/peer-region-hats.md`, section 15).
+fn is_client_hat(region: Region, node_mode: WhatAmI) -> bool {
+    matches!(hat_kind(&region, node_mode), HatKind::Client)
 }
 
 /// R2888 (open-debt item 751, step 8a) — whether `region` is served by the
@@ -632,22 +652,45 @@ struct MeshHat {
     /// derived.
     #[cfg(feature = "routing-token-tables")]
     tokens: Arc<LinkstatepeerInterest<()>>,
+    /// Whether a write that moves what a memo is read from first gives its draft a memo of its own,
+    /// so that the writer keeps what it routes through its draft (the tables' `keeps_draft_routes`).
+    keeps_draft_routes: bool,
 }
 
 impl MeshHat {
     /// The region's graph, for writing: copied first if another version of the tables shares it.
+    /// Both memos are read from it.
     fn net_mut(&mut self) -> &mut LinkstateNetwork {
+        self.open_draft_data_routes();
+        self.open_draft_query_routes();
         Arc::make_mut(&mut self.net)
     }
 
     /// The region's subscriber interest, for writing (see [`net_mut`](Self::net_mut)).
     fn subs_mut(&mut self) -> &mut LinkstatepeerInterest<()> {
+        self.open_draft_data_routes();
         Arc::make_mut(&mut self.subs)
     }
 
     /// The region's queryable interest, for writing (see [`net_mut`](Self::net_mut)).
     fn qabls_mut(&mut self) -> &mut LinkstatepeerInterest<QueryableInfo> {
+        self.open_draft_query_routes();
         Arc::make_mut(&mut self.qabls)
+    }
+
+    /// Before a write moves what the data routes are read from, where this hat keeps what its
+    /// writer routes ([`RouteCache::open_draft`](crate::route_cache::RouteCache::open_draft)).
+    fn open_draft_data_routes(&mut self) {
+        if self.keeps_draft_routes {
+            DataRoutes::open_draft(&mut self.data_routes);
+        }
+    }
+
+    /// [`open_draft_data_routes`](Self::open_draft_data_routes) for the query routes.
+    fn open_draft_query_routes(&mut self) {
+        if self.keeps_draft_routes {
+            QueryRoutes::open_draft(&mut self.query_routes);
+        }
     }
 
     /// The region's token interest, for writing (see [`net_mut`](Self::net_mut)).
@@ -672,7 +715,9 @@ impl MeshHat {
     /// the net of its south peer region and not in the router mesh, as the pin
     /// seeds each hat's net from that hat's region
     /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.region().bound(),`).
-    fn new(region: Region, self_zid: Zid, node_mode: WhatAmI) -> Self {
+    ///
+    /// `keeps_draft_routes` as the tables' field of that name says.
+    fn new(region: Region, self_zid: Zid, node_mode: WhatAmI, keeps_draft_routes: bool) -> Self {
         // R2893 (751 rule 8d) — the pin builds the south peer region's net with
         // `full_linkstate` off (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::South => {`);
         // a host that runs wz's link-state peer mode turns it back on
@@ -693,12 +738,19 @@ impl MeshHat {
         // carries every node, self included with its locators, where a `Network` of this mode
         // sends the direct neighbours by zid alone and so never tells the router the peer's
         // locators (`zenoh/src/net/protocol/gossip.rs` @ `// Send all nodes linkstate on new link`).
-        let mut net = if is_peer_hat(region, node_mode) && region.bound().is_north() {
+        //
+        // The CLIENT hat keeps no net in the pin (`zenoh/src/net/routing/hat/client/mod.rs` @
+        // `"graph {}".to_string()`). Its graph here is the one the north peer hat keeps, of the
+        // node's own links alone: what the gateway rule reads the face's bound from, and what a
+        // declaration of the remote is routed back along. It is never sent nor fed
+        // ([`Tables::exchanges_topology`]), so its shape decides no message.
+        let face_hat = is_peer_hat(region, node_mode) || is_client_hat(region, node_mode);
+        let mut net = if face_hat && region.bound().is_north() {
             LinkstateNetwork::new(self_zid, node_mode)
         } else {
             LinkstateNetwork::new_in_region(self_zid, node_mode, region.bound().is_south())
         };
-        net.set_full_linkstate(!is_peer_hat(region, node_mode));
+        net.set_full_linkstate(!face_hat);
         Self {
             net: Arc::new(net),
             trees_dirty: false,
@@ -708,6 +760,7 @@ impl MeshHat {
             query_routes: Arc::new(QueryRoutes::new()),
             #[cfg(feature = "routing-token-tables")]
             tokens: Arc::new(LinkstatepeerInterest::new()),
+            keeps_draft_routes,
         }
     }
 }
@@ -943,23 +996,32 @@ struct BrokerHat {
     /// `dump_interest_subs` folding `subs`.
     #[cfg(feature = "routing-token-tables")]
     tokens: Arc<ClientTokens>,
+    /// Whether a write that moves a store first gives its draft a memo of its own, as a mesh hat's
+    /// field of that name says.
+    keeps_draft_routes: bool,
 }
 
 impl BrokerHat {
-    fn new() -> Self {
+    /// The client legs' memos are indexed: their writer leaves out only the routes a changed key
+    /// reaches, and finds those by the index (`docs/router-table-snapshots.md`, section 6.9).
+    fn new(keeps_draft_routes: bool) -> Self {
         Self {
             subs: Arc::new(ClientSubStore::new()),
-            client_routes: Arc::new(ClientRoutes::new()),
+            client_routes: Arc::new(ClientRoutes::indexed()),
             qabls: Arc::new(ClientQablStore::new()),
-            client_query_routes: Arc::new(ClientQueryRoutes::new()),
+            client_query_routes: Arc::new(ClientQueryRoutes::indexed()),
             #[cfg(feature = "routing-token-tables")]
             tokens: Arc::new(ClientTokenStore::new()),
+            keeps_draft_routes,
         }
     }
 
     /// The client faces' subscriptions, for writing: copied first if another version of the
     /// tables shares them.
     fn subs_mut(&mut self) -> &mut ClientSubs {
+        if self.keeps_draft_routes {
+            ClientRoutes::open_draft(&mut self.client_routes);
+        }
         Arc::make_mut(&mut self.subs)
     }
 
@@ -972,6 +1034,9 @@ impl BrokerHat {
 
     /// The client faces' queryables, for writing (see [`subs_mut`](Self::subs_mut)).
     fn qabls_mut(&mut self) -> &mut ClientQabls {
+        if self.keeps_draft_routes {
+            ClientQueryRoutes::open_draft(&mut self.client_query_routes);
+        }
         Arc::make_mut(&mut self.qabls)
     }
 
@@ -1020,11 +1085,30 @@ enum Hat {
 }
 
 impl Hat {
-    fn for_region(region: Region, self_zid: Zid, node_mode: WhatAmI) -> Self {
+    fn for_region(
+        region: Region,
+        self_zid: Zid,
+        node_mode: WhatAmI,
+        keeps_draft_routes: bool,
+    ) -> Self {
         if is_leaf(region, node_mode) {
-            Hat::Broker(BrokerHat::new())
+            Hat::Broker(BrokerHat::new(keeps_draft_routes))
         } else {
-            Hat::Mesh(MeshHat::new(region, self_zid, node_mode))
+            Hat::Mesh(MeshHat::new(
+                region,
+                self_zid,
+                node_mode,
+                keeps_draft_routes,
+            ))
+        }
+    }
+
+    /// Set this hat's `keeps_draft_routes`, as the tables' field of that name says.
+    #[cfg(test)]
+    fn keep_draft_routes(&mut self, on: bool) {
+        match self {
+            Hat::Mesh(hat) => hat.keeps_draft_routes = on,
+            Hat::Broker(hat) => hat.keeps_draft_routes = on,
         }
     }
 
@@ -1068,6 +1152,37 @@ impl<T: std::ops::Deref<Target = Tables>> GatewayView<Zid> for OnTables<'_, T> {
 
     fn gateways(&self, region: Region) -> Option<Vec<Zid>> {
         Some(self.tables.hats.get(&region)?.mesh()?.net.gateways())
+    }
+}
+
+/// What a decision at a region boundary (`OnTables::crosses`) is about,
+/// as its trace line names it: a data message by the timestamp it carries, which
+/// is the identity upstream's tests judge a duplicate by (`unique_timestamps`).
+#[derive(Clone, Copy)]
+enum Crossing<'a> {
+    /// A data `Push`.
+    Push(&'a PushOwned),
+    /// A liveliness token's advertisement, by key. Only the token tables advertise one.
+    #[cfg(feature = "routing-token-tables")]
+    Token(&'a str),
+    /// A query.
+    Query,
+}
+
+impl core::fmt::Display for Crossing<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Crossing::Push(push) => write!(
+                f,
+                "push ts={}",
+                crate::TimestampText(
+                    wz_session_core::push_build::read_push_timestamp(push).as_ref()
+                )
+            ),
+            #[cfg(feature = "routing-token-tables")]
+            Crossing::Token(keyexpr) => write!(f, "token key={keyexpr}"),
+            Crossing::Query => f.write_str("query"),
+        }
     }
 }
 
@@ -1824,6 +1939,12 @@ struct RouterFaceState {
 #[cfg(feature = "router-multicast-faces")]
 struct McastGroup {
     tx: crate::multicast_pipeline::MulticastTxProducer,
+    /// Whether the node's session holds shared memory for this group: a group negotiates
+    /// nothing, so this is the node's configuration alone, as upstream's member with a
+    /// shared-memory context maps both ways (`io/zenoh-transport/src/multicast/tx.rs` @
+    /// `&TxHandoffStorage::new_disabled(),`).
+    #[cfg(feature = "transport-shm")]
+    reads_shm: bool,
 }
 
 /// Where a Put that is about to be put on the multicast group came from: what
@@ -1848,23 +1969,21 @@ struct GroupEgressSource<'a> {
 /// The synthetic FaceId for the single multicast INGRESS face (the deferred
 /// `mcast_faces` plane's first slice, I1). A group ingress is folded under ONE
 /// face rather than zenoh's per-peer `mcast_faces` (per-peer is the deferred I3
-/// milestone). Drawn from the TOP of the u64 range so it can never alias a
-/// unicast FaceId, which the accept loop assigns densely from 0
-/// (`accept_loop.rs` `next_id`). It is deliberately NOT inserted into
+/// milestone). A reserved id, so it can never alias a unicast FaceId, which the
+/// accept loop mints below the reserved band ([`FaceId::mint`]), nor the node's
+/// own [`LOCAL_FACE`]: a group member's message is a remote one. It is
+/// deliberately NOT inserted into
 /// [`faces`](RouterForwarder#structfield.faces): a mcast ingress has no send seam
 /// and no graph link, which is upstream's shape too -- `new_peer_multicast`
 /// builds its per-peer face with `DummyPrimitives`, whose every send_* is an
 /// empty body, and never inserts it into the faces table either.
 ///
-/// R2734 — UNGATED, where it used to carry `#[cfg(router-multicast-faces)]`.
-/// The CONSTANT is now feature-independent so that
-/// [`classify_inbound`] is too: a gated sentinel would make
-/// [`InboundFace::SourceOnly`] unconstructible without the feature, and every
-/// one of the twelve matches on that enum would need a `#[cfg]` arm. That is
-/// the feature-skew argument `driver_loop::IterationEvent` already makes for
-/// its multicast variants -- the variant stays ungated and only the PRODUCER
-/// is gated. Defining one `u64` costs nothing; skewing twelve matches does.
-const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
+/// Gated with its producers, the group ingress paths. [`classify_inbound`] does
+/// not name it: it asks [`FaceId::is_reserved`], so
+/// [`InboundFace::SourceOnly`] stays constructible in every build and no match
+/// on that enum needs a `#[cfg]` arm.
+#[cfg(feature = "router-multicast-faces")]
+const MCAST_INGRESS_FACE: FaceId = ReservedFace::McastIngress.id();
 
 /// R2734 — the face a message ARRIVED on, classified for routing.
 ///
@@ -1912,9 +2031,10 @@ enum InboundFace<'a> {
 /// A free function over the borrowed map rather than a `&self` method, so it
 /// drops into the existing scoped-borrow blocks without a second borrow.
 fn classify_inbound(faces: &FaceTable, inbound: FaceId) -> InboundFace<'_> {
-    // The node's own face asks with no routing identity of its own and no alias table, as a group
-    // peer does: its keys are literal.
-    if inbound == MCAST_INGRESS_FACE || inbound == LOCAL_FACE {
+    // Every reserved face sources with no routing identity of its own and no alias table, the
+    // node's own face as a group peer does: its keys are literal, and nothing is sent back to it
+    // over a link.
+    if inbound.is_reserved() {
         return InboundFace::SourceOnly;
     }
     match faces.get(&inbound) {
@@ -2485,18 +2605,21 @@ pub(crate) struct Tables {
     /// The mode this node runs as, which decides what each region's hat is
     /// ([`hat_kind`]) and so which regions are leaves, which are peers' and
     /// which are routers'. It is fixed at construction: the hats are built from
-    /// it. Every constructor passes [`WhatAmI::Router`] until a peer node is
-    /// built on this forwarder (`docs/peer-region-hats.md`, step 2).
+    /// it. A router, a peer and a client node each pass their own mode, and the
+    /// north hat follows it: the router hat, the peer hat or the client hat
+    /// (`docs/peer-region-hats.md`, sections 3 and 15).
     node_mode: WhatAmI,
     /// How this router's south is partitioned into subregions, and so which
     /// regions [`hats`](Self#structfield.hats) holds and which one each face lands in
     /// ([`RouterForwarder::with_south_partition`]). `Auto` is the pin's preset
     /// and every router's default.
     partition: SouthPartition,
-    /// Whether this node is a CLIENT of its north ([`RouterForwarder::as_client_of_north`]): the
-    /// router it is attached to sends it a declaration only in answer to an interest of its own,
-    /// so the interest of a face south of it is brokered north as a client's is.
-    north_is_client: bool,
+    /// Whether the writer keeps what it routes through its own draft: a write that moves what a
+    /// route memo is read from first gives its draft a memo of its own, published with the draft
+    /// (`docs/router-table-snapshots.md`, section 6.9). Every hat is built with it. Off: it waits
+    /// for the measurement of how often a writer routes through its draft, which a test build turns
+    /// it on for (`RouterForwarder::with_draft_route_memos`).
+    keeps_draft_routes: bool,
     /// Held faces keyed by id, each carrying its send seam, its tier, and (once
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
@@ -2652,9 +2775,19 @@ pub enum LocalFaceEvent {
     TokenDown { id: u64, keyexpr: Option<String> },
     /// A reply to a query the face asked, carrying the request id the face gave it.
     Reply(Box<ResponseOwned>),
+    /// A reply to a query the face asked whose value went through shared memory, read already by
+    /// the node's session: `payload` is the buffer the session reads the value as, holding a
+    /// reference of its own. The face takes the value from here and not from the reply, whose
+    /// value names a chunk the node has read.
+    ReplyRead {
+        response: Box<ResponseOwned>,
+        payload: wz_session_core::link::RxBytes,
+    },
     /// The end of the replies to the query the face asked under `request_id`: every queryable
     /// has ended, the query timed out, or nothing was left to ask.
-    ReplyFinal { request_id: u64 },
+    ReplyFinal {
+        request_id: wz_session_core::wire_id::RequestId,
+    },
     /// The router's tables were written, so what the face watches ([`MatchPlane`]) may have
     /// changed. Sent once until the face has looked ([`RouterForwarder::tables_looked_at`]), and
     /// only while the face watches anything ([`RouterForwarder::watch_matching`]): it carries no
@@ -3147,7 +3280,7 @@ thread_local! {
 /// the branch open. The handler's own call is the first hold, so the branch does not end before
 /// the replies the handler wrote have gone out.
 pub struct HeldRecord {
-    qid: u64,
+    qid: wz_session_core::wire_id::RequestId,
     /// The key of the query as the queryable was handed it (see [`HostedQueryable::namespaced`]).
     keyexpr: String,
     /// Whether the replies are put under the namespace of the node's own session.
@@ -3413,6 +3546,31 @@ impl Tables {
         }
     }
 
+    /// The routes asked of every route memo of these tables, and of the memos they were brought
+    /// from, at inputs no version's memo was brought to, and how many of those were computed: how
+    /// often a writer routed through its own draft (`docs/router-table-snapshots.md`, section 6.9).
+    /// Read by the instruments and the tests.
+    #[cfg(test)]
+    fn routes_asked_off_version(&self) -> (usize, usize) {
+        let memos = self
+            .mesh_hats()
+            .flat_map(|hat| {
+                [
+                    hat.data_routes.asks_off_version(),
+                    hat.query_routes.asks_off_version(),
+                ]
+            })
+            .chain(self.broker_hats().flat_map(|hat| {
+                [
+                    hat.client_routes.asks_off_version(),
+                    hat.client_query_routes.asks_off_version(),
+                ]
+            }));
+        memos.fold((0, 0), |(asked, computed), (a, c)| {
+            (asked + a, computed + c)
+        })
+    }
+
     /// The routing facts of face `id`, for writing: copied first if another version of the
     /// tables shares them. The face's runtime stays shared either way.
     fn face_mut(&mut self, id: FaceId) -> Option<&mut RouterFaceState> {
@@ -3493,22 +3651,45 @@ impl Tables {
     /// custom partition each subregion's router region. Each fills the one `routers` bucket of
     /// an admin leg, as each of the pin's router hats fills its own and the dispatcher merges
     /// them per resource.
+    ///
+    /// A client node's north hat fills it too when the node it is attached to is a router
+    /// ([`client_hat_fills`](Self::client_hat_fills)).
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn router_mesh_hats(&self) -> impl Iterator<Item = (Region, &MeshHat)> {
         self.hats
             .iter()
-            .filter(|(region, _)| is_router_hat(*region, self.node_mode))
+            .filter(|(region, _)| {
+                is_router_hat(*region, self.node_mode)
+                    || self.client_hat_fills(*region, WhatAmI::Router)
+            })
             .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, hat)))
     }
 
     /// The hats of the regions the pin's PEER hat serves, in region order: one on the `auto`
-    /// preset, one per subregion on a custom partition.
+    /// preset, one per subregion on a custom partition. A client node's north hat fills the
+    /// `peers` bucket when the node it is attached to is a peer.
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn peer_mesh_hats(&self) -> impl Iterator<Item = (Region, &MeshHat)> {
         self.hats
             .iter()
-            .filter(|(region, _)| is_peer_hat(*region, self.node_mode))
+            .filter(|(region, _)| {
+                is_peer_hat(*region, self.node_mode)
+                    || self.client_hat_fills(*region, WhatAmI::Peer)
+            })
             .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, hat)))
+    }
+
+    /// Whether `region` is the CLIENT hat and fills the admin bucket of `mode`: the pin's client
+    /// hat names each source by the mode of the face it came from
+    /// (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `WhatAmI::Router => srcs.routers.push(face.zid),`),
+    /// and its one face is the node the client is attached to.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn client_hat_fills(&self, region: Region, mode: WhatAmI) -> bool {
+        is_client_hat(region, self.node_mode)
+            && self
+                .faces
+                .of_tier(region)
+                .any(|(_, face)| peer_whatami_routing(&face.runtime.actions) == mode)
     }
 
     /// The hat of `region` when it is a leaf region's BROKER hat, `None`
@@ -3590,8 +3771,43 @@ impl Tables {
     /// A ROUTER node's south peer region stays face-based with the extension
     /// on: R2896 turns the flag on there so the router follows its peers'
     /// topology exchange, not to relay between them.
+    ///
+    /// The pin's CLIENT hat is face-based as well: it offers its one face what
+    /// came from another region and nothing of its own
+    /// (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `if ctx.subs.is_some() && *src_region != self.region() {`),
+    /// and it propagates a declaration to that face, not along a tree.
     fn face_based(&self, region: Region) -> bool {
-        is_peer_hat(region, self.node_mode) && !self.runs_linkstate_peers(region)
+        is_client_hat(region, self.node_mode)
+            || (is_peer_hat(region, self.node_mode) && !self.runs_linkstate_peers(region))
+    }
+
+    /// Whether this node is a CLIENT of the node north of it: its north region is the pin's
+    /// client hat ([`is_client_hat`]). The node it is attached to tells it a declaration only in
+    /// answer to an interest, so the interest of a face south of it is sent north, as a
+    /// client's is (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn route_interest`).
+    fn north_is_client(&self) -> bool {
+        is_client_hat(NORTH_REGION, self.node_mode)
+    }
+
+    /// Whether this node sends north the interests it is asked and the ones of its own session:
+    /// its north hat is the pin's peer hat, which sends a client's interest to the faces whose
+    /// remote is south-bound (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `.filter(|f| f.remote_bound.is_south())`), or its client hat, which sends every interest
+    /// of its south to its one face. A router hat answers from its own tables and asks no one.
+    fn routes_interest_north(&self) -> bool {
+        matches!(
+            hat_kind(&NORTH_REGION, self.node_mode),
+            HatKind::Peer | HatKind::Client
+        )
+    }
+
+    /// Whether `region`'s hat exchanges its graph with its faces: every mesh hat but the CLIENT
+    /// hat, which builds no net, so it sends no link state and reads none
+    /// (`zenoh/src/net/routing/hat/client/mod.rs` @ `fn handle_oam(`, which answers `Ok(())`).
+    /// The node it is attached to holds it as a client, a leaf of its own, which keeps no graph
+    /// of it either.
+    fn exchanges_topology(&self, region: Region) -> bool {
+        !is_client_hat(region, self.node_mode)
     }
 
     /// Whether `region` is a region of the pin's PEER hat that lies SOUTH of this node: the group
@@ -3606,13 +3822,14 @@ impl Tables {
 
     /// Whether every declaration this node sends to a face of `region` leaves with an id of its
     /// own ([`declaration_ids`]). Two north faces keep declarations by the id they carry: the
-    /// router that holds this node as a client, and a peer of the pin's peer hat, which the
-    /// region of a peer node is made of. The peer registers a queryable under the id it was
-    /// sent with and, for an id it already holds, takes the new info and keeps the first
-    /// resource (`zenoh/src/net/routing/hat/peer/queries.rs` @ `.and_modify(|(_, old_info)| *old_info = *info)`),
+    /// node that holds this node as a client (the north face of the client hat), and a peer of
+    /// the pin's peer hat, which the region of a peer node is made of. The peer registers a
+    /// queryable under the id it was sent with and, for an id it already holds, takes the new
+    /// info and keeps the first resource
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `.and_modify(|(_, old_info)| *old_info = *info)`),
     /// so a node that sends every declaration as id 0 is known to it by the first key alone.
     fn numbers_every_declaration_to(&self, region: Region) -> bool {
-        region == NORTH_REGION && (self.north_is_client || is_peer_hat(region, self.node_mode))
+        region == NORTH_REGION && self.routes_interest_north()
     }
 
     /// Whether `region`'s hat is a peer hat running wz's link-state peer
@@ -3688,6 +3905,23 @@ impl crate::linkstate_forward::NetHandle for TablesNet {
 fn linkstate_regions_of(tables: &Tables) -> Vec<(String, String)> {
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
     let label = |zid: &Zid| zid_to_zenoh_hex(zid.as_slice());
+    // The pin answers the regions whose hat is a peer's or a router's and no other
+    // (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)| hat.mode().is_peer() || hat.mode().is_router())`):
+    // a client node's north hat is its client hat and is not answered, the peer regions it
+    // keeps south of it are, each with its own graph.
+    if tables.north_is_client() {
+        return tables
+            .hats
+            .iter()
+            .filter(|(region, _)| {
+                is_peer_hat(*region, tables.node_mode) || is_router_hat(*region, tables.node_mode)
+            })
+            .filter_map(|(region, hat)| {
+                hat.mesh()
+                    .map(|hat| (region.to_string(), hat.net.dot_with(label)))
+            })
+            .collect();
+    }
     let north = NORTH_REGION.to_string();
     let net = tables.north_net();
     if tables.node_mode != WhatAmI::Peer {
@@ -4118,7 +4352,11 @@ router_entry_points! { on_tables:
     #[cfg(feature = "routing-interceptor-hotreload")]
     fn interceptor_cache_entries_for(&self, id: FaceId) -> (usize, usize);
     #[cfg(feature = "router-multicast-faces")]
-    fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer);
+    fn attach_mcast_group(
+        &self,
+        tx: crate::multicast_pipeline::MulticastTxProducer,
+        reads_shm: bool,
+    );
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn declarations_view(&self) -> RouterDeclarationsView;
     #[cfg(feature = "adminspace-introspection-handlers")]
@@ -4190,10 +4428,10 @@ impl RouterForwarder {
     /// the face that asked, and let go of the call's hold of the branch. What the call keeps for
     /// later ([`RouterForwarder::hold_current_query`]) keeps the branch open until it is dropped.
     ///
-    /// The queryable is called with no tables held by this function: it is the program's
-    /// callback and may declare on the node. The tables are taken for reading after it returns, to
-    /// send its replies and to end the branch. When the route that owed the call had no span
-    /// open, the caller holds its own guard and the call is made inside it, as it always was.
+    /// The queryable is called with no tables held: it is the program's callback and may declare
+    /// on the node or ask it a query. Only [`Self::deliver_owed`] calls this, once the span of the
+    /// route that owed the job has ended and its guard is let go. The tables are taken for reading
+    /// after the handler returns, to send its replies and to end the branch.
     fn run_query_job(&self, job: QueryJob) {
         let QueryJob {
             handler,
@@ -4235,19 +4473,8 @@ impl RouterForwarder {
             let _ = handler.call(|h| h(view, &mut responder));
             HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
         }
-        {
-            let on = self.on_tables();
-            for reply in replies {
-                if let Ok(mut resp) = reply.into_response() {
-                    if record.namespaced {
-                        self.put_under_namespace(&mut resp);
-                    }
-                    on.send_hosted_reply(inbound, reliable, || {
-                        NetworkMessage::Response(Box::new(resp.clone()))
-                    });
-                }
-            }
-        }
+        self.on_tables()
+            .send_hosted_replies(replies, inbound, reliable, record.namespaced);
         // The handler has returned: its hold is let go, and the branch ends with the last.
         self.release_held(&record);
     }
@@ -4257,7 +4484,7 @@ impl RouterForwarder {
     pub fn local_get(&self, request: &RequestOwned) {
         // Declared before the tables are taken, so that it ends after they are let go.
         let deliveries = local_publish::DeliveryScope::enter(self);
-        self.on_tables().local_get(request);
+        self.on_tables().local_get(request, &deliveries);
         deliveries.finish();
     }
 
@@ -4271,7 +4498,9 @@ impl RouterForwarder {
         encoding: &wz_session_core::sample::EncodingHint,
     ) -> Result<(), CodecError> {
         let deliveries = local_publish::DeliveryScope::enter(self);
-        let result = self.on_tables().local_get_shm(request, value, encoding);
+        let result = self
+            .on_tables()
+            .local_get_shm(request, value, encoding, &deliveries);
         deliveries.finish();
         result
     }
@@ -4520,11 +4749,32 @@ impl RouterForwarder {
             );
             let self_zid = *on.north_net().self_zid();
             let node_mode = on.tables.node_mode;
+            let keeps_draft_routes = on.tables.keeps_draft_routes;
             on.tables.hats = regions_of(node_mode, &partition)
                 .into_iter()
-                .map(|region| (region, Hat::for_region(region, self_zid, node_mode)))
+                .map(|region| {
+                    let hat = Hat::for_region(region, self_zid, node_mode, keeps_draft_routes);
+                    (region, hat)
+                })
                 .collect();
             on.tables.partition = partition;
+        }
+        self
+    }
+
+    /// Keep what the writer of the tables routes through its own draft when `on`
+    /// (`docs/router-table-snapshots.md`, section 6.9): a write that moves what a route memo is
+    /// read from first gives its draft a memo of its own, which the version the draft is published
+    /// as keeps. Off by default, until a measurement asks for it; the instruments of the section
+    /// build one router of each value and alternate them. Call it before any face registers.
+    #[cfg(test)]
+    pub(crate) fn with_draft_route_memos(self, on: bool) -> Self {
+        {
+            let mut written = self.on_tables_mut();
+            written.tables.keeps_draft_routes = on;
+            for (_, hat) in written.tables.hats.iter_mut() {
+                hat.keep_draft_routes(on);
+            }
         }
         self
     }
@@ -4554,21 +4804,6 @@ impl RouterForwarder {
     /// `routing-table-sharing` policy, or the one [`Self::with_table_sharing`] named.
     pub fn table_sharing(&self) -> RoutingTableSharing {
         self.tables.sharing()
-    }
-
-    /// Make this node a CLIENT of its north: a node that keeps a south apart
-    /// ([`with_south_partition`](Self::with_south_partition)) and announces itself as a client to
-    /// the router it dials. Upstream builds its north as the client hat
-    /// (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn route_interest`), which sends the
-    /// interest of a face south of it on to its one north face; the router in turn tells a client
-    /// only what the client asked for. The interest of a south face is therefore brokered north
-    /// (`broker_current_interest`, built with `routing-interest-pending-gc`) as a client's is.
-    ///
-    /// The routing tables stay a peer node's: the north region has no client hat of its own here,
-    /// and the answers a router gives a client are the ones it gives a peer that asks.
-    pub fn as_client_of_north(self) -> Self {
-        self.on_tables_mut().tables.north_is_client = true;
-        self
     }
 
     /// Record the routing of this node on a timestamp stack with `source`, the clock or the
@@ -4667,9 +4902,40 @@ impl RouterForwarder {
         )
     }
 
+    /// A forwarder for a CLIENT node that keeps a south apart
+    /// ([`with_south_partition`](Self::with_south_partition)): the pin's client hat in `North`,
+    /// whose one face is the node the client is attached to, and the hats of its subregions south
+    /// of it (`zenoh/src/net/routing/gateway.rs` @ `match (region.bound(), region.mode().unwrap_or(mode)) {`),
+    /// with its faces placed by [`region_of`] at node mode Client.
+    ///
+    /// The node it is attached to tells a client only what the client asked for, so the client
+    /// hat sends north every interest its south makes and every declaration its south holds,
+    /// and every message whose source is south unless the north face finalized its interest in
+    /// the resource (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
+    /// `timestamping` is resolved against Client, as
+    /// [`peer_with_timestamping`](Self::peer_with_timestamping) resolves it against Peer.
+    pub fn client_with_timestamping(
+        self_zid: Zid,
+        timestamping: crate::node_clock::TimestampingEnabled,
+    ) -> Self {
+        Self::build(
+            WhatAmI::Client,
+            self_zid,
+            Box::new(Instant::now),
+            timestamping,
+        )
+    }
+
     #[cfg(test)]
     fn peer(self_zid: Zid) -> Self {
         Self::peer_with_clock(self_zid, Box::new(Instant::now))
+    }
+
+    /// [`client_with_timestamping`](Self::client_with_timestamping) with the shipped
+    /// `timestamping.enabled` map.
+    #[cfg(test)]
+    fn client(self_zid: Zid) -> Self {
+        Self::client_with_timestamping(self_zid, crate::node_clock::TimestampingEnabled::default())
     }
 
     /// [`peer`](Self::peer) with an injected monotonic clock, for a test that
@@ -4700,11 +4966,11 @@ impl RouterForwarder {
                 Tables {
                     hats: regions_of(node_mode, &SouthPartition::Auto)
                         .into_iter()
-                        .map(|region| (region, Hat::for_region(region, self_zid, node_mode)))
+                        .map(|region| (region, Hat::for_region(region, self_zid, node_mode, false)))
                         .collect(),
                     node_mode,
                     partition: SouthPartition::Auto,
-                    north_is_client: false,
+                    keeps_draft_routes: false,
                     faces: FaceTable::new(),
                     #[cfg(feature = "resource-snapshot")]
                     receive_ledger: Default::default(),
@@ -5195,25 +5461,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// held, and a subscriber declared after the open is told of what comes alive after it and
     /// not of what was already there.
     ///
-    /// The expectation is the sender's decision seen from the receiving end
-    /// ([`sends_initial_interest_final`] with the roles swapped), and it is zero on a node that is
-    /// not a peer and on a peer hat that runs wz's link-state extension, which neither sends nor
-    /// expects the message.
+    /// The expectation is the sender's decision, which is one decision for both ends of the face
+    /// ([`exchanges_initial_declarations`](Self::exchanges_initial_declarations)), and it is zero
+    /// on a node that is not a peer and on a peer hat that runs wz's link-state extension, which
+    /// neither sends nor expects the message.
     pub fn initial_declares_pending(&self) -> usize {
-        if self.tables.node_mode != WhatAmI::Peer {
-            return 0;
-        }
         self.tables
             .faces
             .values()
             .filter(|state| {
                 !state.initial_final
-                    && self.tables.face_based(state.tier)
-                    && sends_initial_interest_final(
-                        peer_whatami_routing(&state.runtime.actions),
-                        self.tables.node_mode,
-                        state.runtime.actions.peer_remote_bound(),
-                    )
+                    && self.exchanges_initial_declarations(state.tier, &state.runtime.actions)
             })
             .count()
     }
@@ -5272,8 +5530,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// transport-shm -- open the pass that holds the chunks of a Push this router is about to
     /// route (see [`crate::shm_relay`]), acknowledging each of its shared-memory slices to the
     /// face that sent them. `None` is a Push that arrived on a face that never negotiated shared
-    /// memory, which is counted and not routed; the multicast ingress is such a face, since it
-    /// negotiates nothing.
+    /// memory, which is counted and not routed. The multicast ingress negotiates nothing: it is
+    /// such a face exactly when the node's group is not a shared-memory one. The node's own face
+    /// is always one, whatever its groups read: its messages come over no link.
     #[cfg(feature = "transport-shm")]
     fn open_shm_relay_pass(
         &self,
@@ -5292,19 +5551,38 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound: FaceId,
         message: crate::shm_relay::Routed<'_>,
     ) -> Option<crate::shm_relay::RelayPass<'_>> {
-        // The session of the link the message arrived on: a joined link's own, else the face's.
-        // A slice is acknowledged through the handoff of THAT link, because its peer is the one
-        // that named the counters.
-        let arrived_on = RECEIVING_LINK.with(|slot| slot.borrow().clone());
-        let actions = arrived_on.or_else(|| {
-            self.tables
-                .faces
-                .get(&inbound)
-                .map(|state| Arc::clone(&state.runtime.actions))
-        });
-        let pass = self
-            .shm_relay
-            .open_inbound_message(actions.as_deref(), message);
+        let pass = match inbound.reserved() {
+            // A group negotiates nothing and keeps no handoff: a node whose group is a
+            // shared-memory one maps a descriptor a member sends there, as upstream's member with
+            // a shared-memory context does (`io/zenoh-transport/src/multicast/rx.rs` @
+            // `if let Some(shm_context) = &self.shm_context {`), and one whose group is not
+            // refuses it, with nothing to acknowledge either way.
+            #[cfg(feature = "router-multicast-faces")]
+            Some(ReservedFace::McastIngress) => {
+                let reads_shm = self.mcast_groups.read().iter().any(|group| group.reads_shm);
+                self.shm_relay.open_message(message, || reads_shm)
+            }
+            // The node's own message arrived on no link, so nothing is acknowledged, and a
+            // descriptor in it carries no reference taken for this router to give back: the
+            // session's own chunk is adopted by `local_get_shm`, which routes without a pass. A
+            // reserved face negotiates nothing, so such a descriptor is refused, and so is one on
+            // the group ingress of a build without groups.
+            Some(_) => self.shm_relay.open_message(message, || false),
+            // The session of the link the message arrived on: a joined link's own, else the
+            // face's. A slice is acknowledged through the handoff of THAT link, because its peer
+            // is the one that named the counters.
+            None => {
+                let arrived_on = RECEIVING_LINK.with(|slot| slot.borrow().clone());
+                let actions = arrived_on.or_else(|| {
+                    self.tables
+                        .faces
+                        .get(&inbound)
+                        .map(|state| Arc::clone(&state.runtime.actions))
+                });
+                self.shm_relay
+                    .open_inbound_message(actions.as_deref(), message)
+            }
+        };
         if pass.is_none() {
             self.shm_unnegotiated_dropped.bump();
         }
@@ -5933,6 +6211,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.plane(tier)
     }
 
+    /// The graph of `tier` when its hat exchanges it with its faces
+    /// ([`Tables::exchanges_topology`]): what a link-state flood is built from and what an inbound
+    /// one is fed to. `None` for a leaf region and for the client hat, whose graph is its own.
+    fn topology_plane(&self, tier: Region) -> Option<&LinkstateNetwork> {
+        self.plane(tier)
+            .filter(|_| self.tables.exchanges_topology(tier))
+    }
+
     /// The hat of `region` when it is a MESH hat (see [`Tables::mesh_hat`]).
     fn mesh_hat(&self, region: Region) -> Option<&MeshHat> {
         self.tables.mesh_hat(region)
@@ -6196,13 +6482,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // A declaration for a face that keeps declarations by id is numbered first: the gate then
         // reads the message that goes out.
         let msg = self.number_declaration(state, msg);
-        if matches!(msg, NetworkMessage::Declare(_)) {
-            route_event!(
+        match &msg {
+            NetworkMessage::Declare(_) => route_event!(
                 "node {} sends to face {:?}: {}",
                 self.own_zid,
                 id,
                 declaration_ids::declare_digest(&msg)
-            );
+            ),
+            // A data message by the timestamp it carries, and the node behind the face: which
+            // gateways delivered one message to one node, read beside the boundary decisions
+            // ([`Self::crosses`]) and the node's own receptions (debt item 934).
+            NetworkMessage::Push(push) => route_event!(
+                "node {} sends to face {:?} (remote {:?}): {}",
+                self.own_zid,
+                id,
+                state.peer_zid,
+                Crossing::Push(push)
+            ),
+            _ => {}
         }
         let verdict = self.admit_outbound(id, state, &msg, known);
         if let Some(kind) = verdict.dropped_by() {
@@ -6292,7 +6589,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         neighbour: &Zid,
         neighbour_was_new: bool,
     ) -> Result<usize, CodecError> {
-        let Some(net) = self.plane(tier) else {
+        let Some(net) = self.topology_plane(tier) else {
             return Ok(0);
         };
         // R2893 (751 rule 8d) — both shapes are the graph's decision, by the
@@ -6325,7 +6622,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// topology at once (each receiver's own detached-node prune handles the
     /// rest). Reliable.
     fn flood_self_links_changed_tier(&self, tier: Region) -> Result<usize, CodecError> {
-        let Some(net) = self.plane(tier) else {
+        let Some(net) = self.topology_plane(tier) else {
             return Ok(0);
         };
         // R2893 — nothing to tell in a single-hop gossip `Network`.
@@ -6390,7 +6687,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
         }
-        let Some(net) = self.plane(tier) else {
+        let Some(net) = self.topology_plane(tier) else {
             return Ok(0);
         };
         // R2893 — the shape and the per-face exclusions are the graph's
@@ -6621,8 +6918,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
+        // The client hat's one face numbers its declarations too: the node a client is attached
+        // to declares to it by an id of its own and withdraws by that id with no key
+        // (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `.remote_subs.remove(&id)`).
         if let Declared::Sourced(sourced) = declared {
-            if is_peer_hat(region, self.tables.node_mode) {
+            if is_peer_hat(region, self.tables.node_mode)
+                || is_client_hat(region, self.tables.node_mode)
+            {
                 self.tables
                     .mesh_ids_mut()
                     .remember(kind, inbound, decl_id, &sourced.keyexpr);
@@ -7645,17 +7947,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// a publisher to the faces whose remote is south-bound
     /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
     /// and a router has no router to ask.
+    ///
+    /// A CLIENT node asks the one face of its client hat, whatever that remote is: the pin's
+    /// client hat sends every interest to the face it owns
+    /// (`zenoh/src/net/routing/hat/client/interests.rs` @ `if let Some(mut dst_face) = self.owned_faces(ctx.tables).next().cloned() {`).
     fn router_faces(&self) -> Vec<FaceId> {
-        if self.tables.node_mode != WhatAmI::Peer {
+        let mut faces: Vec<FaceId> = if self.tables.north_is_client() {
+            self.tables
+                .faces
+                .of_tier(NORTH_REGION)
+                .map(|(id, _)| id)
+                .collect()
+        } else if self.tables.node_mode == WhatAmI::Peer {
+            self.tables
+                .faces
+                .iter()
+                .filter(|(_, state)| {
+                    peer_whatami_routing(&state.runtime.actions) == WhatAmI::Router
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
             return Vec::new();
-        }
-        let mut faces: Vec<FaceId> = self
-            .tables
-            .faces
-            .iter()
-            .filter(|(_, state)| peer_whatami_routing(&state.runtime.actions) == WhatAmI::Router)
-            .map(|(id, _)| *id)
-            .collect();
+        };
         faces.sort_unstable();
         faces
     }
@@ -8138,6 +8452,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         let push: &PushOwned = &stamped;
+        // The arrival of a data message, by the timestamp it is routed with (the stamp above
+        // included): the start of the lines [`Self::crosses`] and [`Self::egress_to_face`] write
+        // for it (debt item 934).
+        route_event!(
+            "node {} receives from face {:?} (remote {:?}, region {:?}): {}",
+            self.own_zid,
+            inbound,
+            self.tables.faces.get(&inbound).and_then(|s| s.peer_zid),
+            tier,
+            Crossing::Push(push)
+        );
         // R2879 (open-debt item 751, step 5) — the origin and the forwarder, as
         // the inbound region's net names them: what the inter-region filter
         // decides every crossing below on, in place of the per-keyexpr master
@@ -8190,7 +8515,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // a QoS-negotiated client observes the mesh legs' band.
         let defer = tier != NORTH_REGION
             && !is_leaf(tier, self.tables.node_mode)
-            && !self.crosses(tier, NORTH_REGION, origin.0, origin.1, None);
+            && !self.crosses(
+                Crossing::Push(push),
+                tier,
+                NORTH_REGION,
+                origin.0,
+                origin.1,
+                None,
+            );
         self.deliver_to_client_subscribers(
             inbound,
             tier,
@@ -8263,9 +8595,23 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// thereafter broadcast to this group. The producer is `Send` + `Clone`, so
     /// the drive loop stays a SEPARATE task from this `!Send` forwarder — the
     /// EGRESS half needs no single-task fold (that is the INGRESS milestone).
+    /// `reads_shm` says whether the group is a shared-memory one for this node: its session
+    /// holds shared memory, which a group, negotiating nothing, takes as it is. Such a group is
+    /// sent a buffer as its descriptor and has the descriptors its members send mapped; any
+    /// other is sent the bytes and has them refused.
     #[cfg(feature = "router-multicast-faces")]
-    pub fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer) {
-        self.mcast_groups.write().push(McastGroup { tx });
+    pub fn attach_mcast_group(
+        &self,
+        tx: crate::multicast_pipeline::MulticastTxProducer,
+        reads_shm: bool,
+    ) {
+        #[cfg(not(feature = "transport-shm"))]
+        let _ = reads_shm;
+        self.mcast_groups.write().push(McastGroup {
+            tx,
+            #[cfg(feature = "transport-shm")]
+            reads_shm,
+        });
         self.note_ungoverned_group();
     }
 
@@ -8350,19 +8696,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Ok(carrier) = reliteralize_push(push, keyexpr) else {
             return;
         };
-        // transport-shm -- a multicast group negotiates nothing, so no member of it can read a
-        // chunk: a Push that names one goes out as the chunk's bytes, from the pass `route_push`
-        // holds. The descriptor it arrived with would be a few bytes of struct as every member's
-        // payload.
-        #[cfg(feature = "transport-shm")]
-        let carrier = {
-            let mut carrier = carrier;
-            if self.shm_relay.into_plain_bytes(&mut carrier).is_err() {
-                self.shm_relay_dropped.bump();
-                return;
-            }
-            carrier
-        };
         // The §5.16 egress chain, when the host chose to govern the group: judged on the
         // literal the group would receive, by the group's link, not by any peer.
         #[cfg(feature = "access-acl-multicast")]
@@ -8380,6 +8713,23 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // same contract the drive loop's own reply backing carries.
             // The group is one more face the Push is handed to: the routing is recorded for it as
             // for any other (the multicast egress does not pass `egress_to_face`).
+            //
+            // transport-shm -- a chunk the pass `route_push` holds goes to a shared-memory group
+            // as a descriptor with one reference taken for the group, which its members share as
+            // upstream's do, and to any other group as the chunk's bytes. The descriptor the Push
+            // arrived with is never sent on as it came.
+            #[cfg(feature = "transport-shm")]
+            let (push, reservations) = {
+                let mut push = carrier.clone();
+                match self.shm_relay.for_group(&mut push, group.reads_shm) {
+                    Ok(reservations) => (Box::new(push), reservations),
+                    Err(_) => {
+                        self.shm_relay_dropped.bump();
+                        continue;
+                    }
+                }
+            };
+            #[cfg(not(feature = "transport-shm"))]
             let push = Box::new(carrier.clone());
             #[cfg(feature = "pubsub-ts-stack")]
             let push = {
@@ -8391,7 +8741,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 );
                 push
             };
-            let _ = group.tx.push(MulticastTxItem::Push {
+            let pushed = group.tx.push(MulticastTxItem::Push {
                 push,
                 reliable,
                 // R311y227 — the received routing band (the inbound frame's decoded
@@ -8402,6 +8752,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // at its band, not DEFAULT.
                 priority,
             });
+            // The group's reference is kept once the frame is handed to the group; a push that
+            // was refused gives it back with `reservations`.
+            #[cfg(feature = "transport-shm")]
+            if matches!(
+                pushed,
+                Ok(wz_session_core::tx_deadline::PushOutcome::Pushed)
+            ) {
+                for reservation in reservations {
+                    reservation.commit();
+                }
+            }
+            #[cfg(not(feature = "transport-shm"))]
+            let _ = pushed;
         }
     }
 
@@ -8484,8 +8847,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// R2879 (open-debt item 751, step 5) — whether a data message crosses from
     /// region `src` to an egress in region `dst`: the pin's inter-region filter
     /// ([`InterRegionFilter`]) resolved against this router's hats.
+    ///
+    /// Every decision at a boundary is a `wz::routing` line naming the message,
+    /// the zids the filter was handed and the arm that decided
+    /// ([`CrossVerdict`](crate::routing_region::CrossVerdict)): two gateways that
+    /// both carry one message across (debt item 934) are told apart from an
+    /// election only by that arm, and a test's run log holds nothing else that
+    /// says which gateways a router saw for a node at that moment.
     fn crosses(
         &self,
+        about: Crossing<'_>,
         src: Region,
         dst: Region,
         src_zid: Option<&Zid>,
@@ -8493,14 +8864,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         dst_zid: Option<&Zid>,
     ) -> bool {
         let self_zid = *self.north_net().self_zid();
-        InterRegionFilter {
+        let verdict = InterRegionFilter {
             src,
             dst,
             src_zid,
             fwd_zid,
             dst_zid,
         }
-        .resolve(&self_zid, self)
+        .verdict(&self_zid, self);
+        if verdict != crate::routing_region::CrossVerdict::SameSide {
+            route_event!(
+                "node {} crossing {} {:?} -> {:?} src={:?} fwd={:?} dst={:?}: {:?}",
+                self_zid,
+                about,
+                src,
+                dst,
+                src_zid,
+                fwd_zid,
+                dst_zid,
+                verdict
+            );
+        }
+        verdict.passes()
     }
 
     /// The node that originated a mesh-inbound `Push` and the neighbour it came
@@ -8600,7 +8985,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 push,
                 keyexpr,
                 &gateways,
-                |dst| self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst)),
+                |dst| {
+                    self.crosses(
+                        Crossing::Push(push),
+                        inbound_tier,
+                        target_tier,
+                        src_zid,
+                        fwd_zid,
+                        Some(dst),
+                    )
+                },
             );
         }
     }
@@ -8864,7 +9258,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // R2901 — and, on a peer node, every gateway of the hat: the source is south.
             let gateways = self.gateways_owed(tier, keyexpr, false);
             self.self_publish_into_tier(tier, egress, push, keyexpr, &gateways, |dst| {
-                self.crosses(source_tier, tier, None, None, Some(dst))
+                self.crosses(
+                    Crossing::Push(push),
+                    source_tier,
+                    tier,
+                    None,
+                    None,
+                    Some(dst),
+                )
             });
         }
     }
@@ -9362,8 +9763,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `dst.has_unfinalized_subscriber_interest = true`), and the gateway, which knows its own
     /// subscribers, routes it on or drops it. Data whose source is not south, a transit message
     /// from another peer, takes no part of it (`src_region.bound().is_south()`).
+    ///
+    /// The pin's CLIENT hat takes the same rule toward its one north face
+    /// (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `dst.has_unfinalized_subscriber_interest = true`
+    /// and `zenoh/src/net/routing/hat/client/queries.rs` @ `dst.has_unfinalized_queryable_interest = true`),
+    /// which is south-bound as a gateway is: the node a client is attached to.
     fn gateways_owed(&self, tier: Region, keyexpr: &str, queryables: bool) -> Vec<FaceId> {
-        if self.tables.node_mode != WhatAmI::Peer || !is_peer_hat(tier, self.tables.node_mode) {
+        let owed = match hat_kind(&tier, self.tables.node_mode) {
+            HatKind::Client => true,
+            HatKind::Peer => self.tables.node_mode == WhatAmI::Peer,
+            HatKind::Router | HatKind::Broker => false,
+        };
+        if !owed {
             return Vec::new();
         }
         let mut gateways = self.gateway_faces();
@@ -9816,7 +10227,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                         let sources = hat.tokens.sources_of(keyexpr);
                         sources.iter().any(|source| {
                             let forwarder = self.token_forwarder(region, source);
-                            self.crosses(region, target, Some(source), forwarder.as_ref(), None)
+                            self.crosses(
+                                Crossing::Token(keyexpr),
+                                region,
+                                target,
+                                Some(source),
+                                forwarder.as_ref(),
+                                None,
+                            )
                         })
                     }
                     Some(Hat::Broker(_)) => self.token_contributions(holder, keyexpr) > 0,
@@ -10771,6 +11189,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         read
     }
 
+    /// [`Self::session_reads_chunk`] for a value the node's own session sent itself: the chunk
+    /// the pass holds is the session's own buffer, handed over as its owner views it
+    /// ([`ShmSendBuffer::receiver_view`](wz_session_core::extshm::ShmSendBuffer::receiver_view)),
+    /// and as its bytes when its owner hands none, as for a copy the implicit optimisation made
+    /// for the links. `None` when the value is not one chunk or the chunk is not held here.
+    #[cfg(feature = "transport-shm")]
+    fn session_holds_own_chunk(
+        &self,
+        descriptors: &[&[u8]],
+    ) -> Option<wz_session_core::link::RxBytes> {
+        use wz_session_core::extshm::ShmRelayHolds;
+        let [slice] = descriptors else {
+            return None;
+        };
+        let held = self
+            .shm_relay
+            .held(&wz_session_core::extshm::decode_shm_descriptor(slice)?)?;
+        Some(
+            held.receiver_view()
+                .unwrap_or_else(|| wz_session_core::link::RxBytes::from(held.bytes().to_vec())),
+        )
+    }
+
     /// Hand a publication to the subscribers this router hosts: `full` carries its key as the
     /// router names it and `relative` as the node's own session does (`None` for a key outside
     /// the namespace of the session, which is not the session's). `from_local` says whether the
@@ -11173,11 +11614,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// empty-route tail (self is excluded from the routing targets, so a GET
     /// matching only a self-hosted queryable — e.g. `@/<self-zid>/router/**` —
     /// arrives with `forwarded == 0`). Clones the matching handlers out of the
-    /// store and invokes each through [`Hosted::call`] ([`run_query_job`](Self::run_query_job)),
-    /// once the tables' read guard of the route is let go when the route opened a span for the
-    /// calls ([`local_publish::DeliveryScope`]), and inside it when it did not (see
-    /// [`dispatch_local_subscribers`](Self::dispatch_local_subscribers)
-    /// for what that allows a handler), accumulating replies via the SAME
+    /// store and invokes each through [`Hosted::call`] ([`run_query_job`](RouterForwarder::run_query_job)),
+    /// once the tables' read guard of the route is let go: the call is owed to `calls`, the span
+    /// the entry point of the route opened before it took the guard
+    /// ([`local_publish::DeliveryScope`]), accumulating replies via the SAME
     /// `QueryResponder` / `QueryReply::into_response` SSOT the wire queryable path
     /// uses, and emits them + the closing `ResponseFinal` (rid = the querier's) to
     /// `inbound`. The admin handler renders topology data + replies and NEVER
@@ -11199,6 +11639,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         keyexpr: &str,
         fan: &Arc<QueryFan>,
         deadline: Instant,
+        calls: &local_publish::DeliveryScope<'_>,
     ) -> usize {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let target = read_request_target(request);
@@ -11253,15 +11694,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the session reads the chunk the pass of this Query holds, as it reads a Put's. A value
         // it cannot read is not shown as no value; the query is not handed to the session, as a
         // session drops a query whose slice does not resolve.
+        // A query of the node's own session names a chunk the session gave itself, and its
+        // queryables are handed the value as the session holds it.
         #[cfg(feature = "transport-shm")]
         let view = match &request.body {
             wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
                 match wz_session_core::request_build::query_value_shm_parts(query) {
                     None => view,
-                    Some((encoding, descriptors)) => match self.session_reads_chunk(&descriptors) {
-                        Some(bytes) => view.with_lent_value(encoding, bytes),
-                        None => return 0,
-                    },
+                    Some((encoding, descriptors)) => {
+                        let read = if inbound == LOCAL_FACE {
+                            self.session_holds_own_chunk(&descriptors)
+                        } else {
+                            self.session_reads_chunk(&descriptors)
+                        };
+                        match read {
+                            Some(bytes) => view.with_lent_value(encoding, bytes),
+                            None => return 0,
+                        }
+                    }
                 }
             }
             #[allow(unreachable_patterns)]
@@ -11307,20 +11757,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             });
             // The queryable is the program's callback, and a callback may use the session: declare
             // on the node, publish, ask. The call is owed to the span of the route and made once
-            // the tables are let go, when there is one, and made here when there is none. The
-            // branch of the fan is taken above and ends with the call, so the final of the query
-            // is sent by the last branch to end, whichever way this goes.
-            let job = Box::new(QueryJob {
+            // the tables are let go. The branch of the fan is taken above and ends with the call,
+            // so the final of the query is sent by the last branch to end.
+            calls.owe_query(Box::new(QueryJob {
                 handler: Arc::clone(handler),
                 query: whole.clone(),
                 keyexpr: keyexpr.to_owned(),
                 record,
                 inbound,
                 reliable,
-            });
-            if let Err(job) = local_publish::owe_query(job) {
-                self.fwd.run_query_job(*job);
-            }
+            }));
         }
         dispatched
     }
@@ -11343,16 +11789,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             );
             answer(&mut responder);
         }
-        for reply in replies {
-            if let Ok(mut resp) = reply.into_response() {
-                if record.namespaced {
-                    self.fwd.put_under_namespace(&mut resp);
-                }
-                self.send_hosted_reply(to.face, record.reliable, || {
-                    NetworkMessage::Response(Box::new(resp.clone()))
-                });
-            }
-        }
+        self.send_hosted_replies(replies, to.face, record.reliable, record.namespaced);
     }
 
     /// Let go of one hold of a held query; the last one ends its branch of the fan, which sends
@@ -11475,18 +11912,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// under the request id `request` carries.
     ///
     /// [`attach_local_face`]: RouterForwarder::attach_local_face
-    pub fn local_get(&self, request: &RequestOwned) {
+    fn local_get(&self, request: &RequestOwned, calls: &local_publish::DeliveryScope<'_>) {
         // The key of the query is the session's, under its namespace if it has one.
         #[cfg(feature = "routing-namespace")]
         if let Some(local) = &self.fwd.local_namespace {
             let mut request = request.clone();
             if wz_session_core::namespace::apply_egress_request(&local.prefix, &mut request).is_ok()
             {
-                self.route_request(LOCAL_FACE, Region::Local, true, &request, None);
+                self.route_request(LOCAL_FACE, Region::Local, true, &request, None, calls);
             }
             return;
         }
-        self.route_request(LOCAL_FACE, Region::Local, true, request, None);
+        self.route_request(LOCAL_FACE, Region::Local, true, request, None, calls);
     }
 
     /// [`Self::local_get`] for a Query whose value is a chunk of shared memory its owner holds,
@@ -11496,11 +11933,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// face the bytes, and a queryable of the node's own session the chunk as its reader reads
     /// it. The caller may let go of `value` when this returns.
     #[cfg(feature = "transport-shm")]
-    pub fn local_get_shm(
+    fn local_get_shm(
         &self,
         request: &RequestOwned,
         value: wz_session_core::extshm::ShmSendHandle,
         encoding: &wz_session_core::sample::EncodingHint,
+        calls: &local_publish::DeliveryScope<'_>,
     ) -> Result<(), CodecError> {
         // Only the descriptor is wanted of this reservation: the reference it took goes back
         // when it drops, and each face is sent a reference of its own.
@@ -11516,11 +11954,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if let Some(local) = &self.fwd.local_namespace {
             if wz_session_core::namespace::apply_egress_request(&local.prefix, &mut request).is_ok()
             {
-                self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None);
+                self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None, calls);
             }
             return Ok(());
         }
-        self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None);
+        self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None, calls);
         Ok(())
     }
 
@@ -11562,6 +12000,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         request: &RequestOwned,
         group: Option<GroupMember>,
+        calls: &local_publish::DeliveryScope<'_>,
     ) {
         routing_spans::query_routed(self.own_zid, inbound, request.rid);
         // transport-shm -- hold the chunk of every shared-memory slice the query's value carries
@@ -11573,7 +12012,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         else {
             return;
         };
-        self.route_request_held(inbound, tier, reliable, request, group);
+        self.route_request_held(inbound, tier, reliable, request, group, calls);
     }
 
     /// [`Self::route_request`] once whatever holds the chunks of the Query's value holds them:
@@ -11586,6 +12025,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         request: &RequestOwned,
         group: Option<GroupMember>,
+        calls: &local_publish::DeliveryScope<'_>,
     ) {
         // Resolve the query keyexpr + the inbound face's zid/link in one scoped
         // borrow (released before any send re-borrows `faces`).
@@ -11673,6 +12113,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let client_gate = tier == NORTH_REGION
             || is_leaf(tier, self.tables.node_mode)
             || self.crosses(
+                Crossing::Query,
                 tier,
                 NORTH_REGION,
                 within.map(|(zid, _psid)| zid).or(member).as_ref(),
@@ -11777,7 +12218,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // finding about this router, in the note.
         let forwarded = forwarded
             + self.dispatch_router_local_queryables(
-                inbound, reliable, request, &keyexpr, &fan, deadline,
+                inbound, reliable, request, &keyexpr, &fan, deadline, calls,
             );
         // The routing call lets go of the query now that its branches are sent. It is the last
         // holder when every branch has ended while the route was being served (a branch an
@@ -11915,6 +12356,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
         block.crossing.map_or(true, |c| {
             self.crosses(
+                Crossing::Query,
                 c.src,
                 block.tier,
                 c.src_zid.as_ref(),
@@ -11968,9 +12410,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             forwarded += self.forward_request_to_tier(
                 block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
             );
-            // The gateways belong to the peer hat's region, whose gateway has no queryable info
-            // and is therefore asked only when that region has no complete queryable.
-            if !picked_complete && is_peer_hat(block.tier, self.tables.node_mode) {
+            // The gateways belong to the north region, the peer hat's or the client hat's, whose
+            // gateway has no queryable info and is therefore asked only when that region has no
+            // complete queryable. A south peer region's block does not ask them: each hat routes
+            // to its own faces, and a gateway asked from two blocks would be sent the query
+            // twice.
+            if !picked_complete && block.tier == NORTH_REGION {
                 forwarded += self.forward_request_to_gateways(
                     gateways, &hops, reliable, request, keyexpr, fan, deadline,
                 );
@@ -12082,7 +12527,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             forwarded += self.forward_request_to_tier(
                 block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
             );
-            if is_peer_hat(block.tier, self.tables.node_mode) {
+            // In the north block alone, as for BestMatching above.
+            if block.tier == NORTH_REGION {
                 forwarded += self.forward_request_to_gateways(
                     gateways, &hops, reliable, request, keyexpr, fan, deadline,
                 );
@@ -12377,6 +12823,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         ) else {
             return;
         };
+        // transport-shm -- a reply to a get of the node's own session whose value went through
+        // shared memory is read here, from the chunk the pass above holds, as a publication for
+        // the node's own subscribers is read: the pass took the reference the sender made for
+        // this node, so the session is handed a buffer with a reference of its own. The face's
+        // registry negotiates nothing and would refuse the descriptor.
+        #[cfg(feature = "transport-shm")]
+        if to.face == LOCAL_FACE {
+            let read = {
+                let descriptors =
+                    wz_session_core::response_build::response_shm_descriptors(&carrier);
+                (!descriptors.is_empty()).then(|| self.session_reads_chunk(&descriptors))
+            };
+            if let Some(read) = read {
+                // A value the session cannot read is not handed over as no value.
+                if let Some(payload) = read {
+                    self.tell_local_face_read_reply(carrier, payload, true);
+                }
+                return;
+            }
+        }
         self.send_to_face(to.face, reliable, || {
             NetworkMessage::Response(Box::new(carrier.clone()))
         });
@@ -12509,6 +12975,35 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         true
     }
 
+    /// [`Self::tell_local_face`] for a reply whose value the node's session holds already as
+    /// `payload`, read from a chunk of shared memory as it was routed or handed over by a
+    /// queryable of the session itself: the face is told the reply with the value it reads, as
+    /// [`LocalFaceEvent::ReplyRead`]. `routed` is [`Self::tell_local_face`]'s.
+    #[cfg(feature = "transport-shm")]
+    fn tell_local_face_read_reply(
+        &self,
+        response: ResponseOwned,
+        payload: wz_session_core::link::RxBytes,
+        routed: bool,
+    ) {
+        let Some(sink) = &self.tables.local_face_sink else {
+            return;
+        };
+        let mut msg = NetworkMessage::Response(Box::new(response));
+        if !self.fwd.strip_namespace(&mut msg) {
+            return;
+        }
+        #[cfg(feature = "pubsub-ts-stack")]
+        if routed {
+            self.record_route(&mut msg);
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        let _ = routed;
+        if let NetworkMessage::Response(response) = msg {
+            sink(LocalFaceEvent::ReplyRead { response, payload });
+        }
+    }
+
     /// A reply of a queryable of the node's own session to the face that asked. A query the
     /// session asked of its own queryable is answered without a router between the two, as
     /// upstream's session answers it, so that reply is not routed; any other face is sent the
@@ -12523,6 +13018,80 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return self.tell_local_face(build(), false);
         }
         self.send_to_face(target, reliable, build)
+    }
+
+    /// Send what a queryable of the node's own session staged in `replies` to the face `target`
+    /// that asked, each under the session's namespace when the queryable is `namespaced`. A
+    /// reply whose payload is a buffer of shared memory goes as the buffer, as a publication of
+    /// one does ([`Self::publish_shm_with`]): the faces are sent its descriptor with a reference
+    /// of their own or its bytes, through the pass that holds it, and a get of the session
+    /// itself is handed the buffer.
+    fn send_hosted_replies(
+        &self,
+        replies: wz_session_core::reply_stage::ReplyStage,
+        target: FaceId,
+        reliable: bool,
+        namespaced: bool,
+    ) {
+        for reply in replies {
+            #[cfg(feature = "transport-shm")]
+            if let Some(handle) = reply.shared_payload().cloned() {
+                self.send_hosted_shm_reply(reply, handle, target, reliable, namespaced);
+                continue;
+            }
+            let Ok(mut resp) = reply.into_response() else {
+                continue;
+            };
+            if namespaced {
+                self.fwd.put_under_namespace(&mut resp);
+            }
+            self.send_hosted_reply(target, reliable, || {
+                NetworkMessage::Response(Box::new(resp.clone()))
+            });
+        }
+    }
+
+    /// [`Self::send_hosted_replies`] for one reply whose payload is the buffer `handle`.
+    #[cfg(feature = "transport-shm")]
+    fn send_hosted_shm_reply(
+        &self,
+        reply: wz_session_core::query::QueryReply,
+        handle: wz_session_core::extshm::ShmSendHandle,
+        target: FaceId,
+        reliable: bool,
+        namespaced: bool,
+    ) {
+        // The session's own get is answered without a router between the two: its face reads
+        // no descriptor, so it is told the reply with the buffer as the value, and with the bytes
+        // where the buffer cannot be viewed.
+        if target == LOCAL_FACE {
+            let Ok(mut resp) = reply.into_response() else {
+                return;
+            };
+            if namespaced {
+                self.fwd.put_under_namespace(&mut resp);
+            }
+            match handle.receiver_view() {
+                Some(payload) => self.tell_local_face_read_reply(resp, payload, false),
+                None => {
+                    self.tell_local_face(NetworkMessage::Response(Box::new(resp)), false);
+                }
+            }
+            return;
+        }
+        // Only the descriptor is wanted of this reservation: the reference it took goes back
+        // when it drops, and the face is sent a reference of its own by the pass.
+        let descriptor = handle.reserve_for_receiver().descriptor();
+        let _pass = self.shm_relay.adopt(descriptor, handle);
+        let Ok(mut resp) = reply.into_response_naming(descriptor) else {
+            return;
+        };
+        if namespaced {
+            self.fwd.put_under_namespace(&mut resp);
+        }
+        self.send_to_face(target, reliable, || {
+            NetworkMessage::Response(Box::new(resp.clone()))
+        });
     }
 
     /// [`send_to_face`](Self::send_to_face) for a message that names no key although it is about
@@ -12758,29 +13327,46 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// That message is what the other end's open waits for, so that every declaration this node
     /// held when the link came up has reached it before its program can declare anything. It is
     /// sent where the replay is, in the same order on the same face, and by the same decision:
-    /// two peers that meet north-bound ([`sends_initial_interest_final`]) in a peer hat that
-    /// replays. A peer hat running wz's link-state extension replays nothing (the tree's
-    /// re-advertise tells the remote), so it ends nothing, and a router, a client and a pair that
-    /// is not mutually north-bound are in pull mode, where the remote asks and is answered.
+    /// two peers that meet north-bound in a peer hat that replays
+    /// ([`exchanges_initial_declarations`](Self::exchanges_initial_declarations)). A peer hat
+    /// running wz's link-state extension replays nothing (the tree's re-advertise tells the
+    /// remote), so it ends nothing, and a router, a client and a pair that is not mutually
+    /// north-bound are in pull mode, where the remote asks and is answered.
     fn end_initial_declarations(&self, face: FaceId, tier: Region) {
-        if self.tables.node_mode != WhatAmI::Peer || !self.tables.face_based(tier) {
-            return;
-        }
         let Some(state) = self.tables.faces.get(&face) else {
             return;
         };
-        let remote = peer_whatami_routing(&state.runtime.actions);
-        if !sends_initial_interest_final(
-            self.tables.node_mode,
-            remote,
-            state.runtime.actions.peer_remote_bound(),
-        ) {
+        if !self.exchanges_initial_declarations(tier, &state.runtime.actions) {
             return;
         }
         self.send_one_to_face(
             face,
             NetworkMessage::Declare(Box::new(build_declare_final_reply(INITIAL_INTEREST_ID))),
         );
+    }
+
+    /// Whether this node and the remote of a face of `tier` end their initial declarations to each
+    /// other with the `DeclareFinal` of [`INITIAL_INTEREST_ID`]. The pin's peer hat does on a face
+    /// of its NORTH region whose remote it placed north-bound as well
+    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`), which is a face
+    /// between two peers of one region on the node of mode Peer and on no other node: a peer
+    /// region south of a node (a router's, a client node's, a subregion of a peer node's custom
+    /// partition) is in pull mode, and so is a gateway. A peer hat running wz's link-state
+    /// extension neither sends nor expects the message.
+    ///
+    /// The remote's bound is placed again from `actions` by the rules that placed the face in
+    /// `tier` ([`place_face`](Self::place_face)): the partition they read is fixed before any face
+    /// registers, so the answer is the one the face was held by. The two modes and the bound the
+    /// remote announced are not enough on their own: on a custom partition they place a peer of a
+    /// south subregion north, and the node would send that peer a message it never answers and
+    /// wait for one it never sends.
+    fn exchanges_initial_declarations(&self, tier: Region, actions: &SessionLinkActions) -> bool {
+        is_peer_hat(tier, self.tables.node_mode)
+            && tier.bound().is_north()
+            && self.tables.face_based(tier)
+            && self
+                .place_face(actions)
+                .is_ok_and(|(_, remote_bound)| remote_bound.is_north())
     }
 
     fn send_one_to_face(&self, face: FaceId, msg: NetworkMessage) {
@@ -12853,12 +13439,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// A topology link-state from face `id` in `tier`: ingest it into the tier's net, re-flood
     /// the changed nodes onward to the SAME tier, purge the interest of any detached node, and
-    /// coalesce that net's recompute. A face with no net (a client) carries no topology.
+    /// coalesce that net's recompute. A face with no net (a client) carries no topology, and
+    /// neither does the face of a client hat: what the node it is attached to sends it is not
+    /// read ([`Tables::exchanges_topology`]).
     fn ingest_topology(&mut self, id: FaceId, tier: Region, oam: &OamOwned)
     where
         T: std::ops::DerefMut,
     {
-        if self.plane(tier).is_none() {
+        if self.topology_plane(tier).is_none() {
             return;
         }
         match try_parse_linkstate_oam(oam) {
@@ -13034,7 +13622,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         // A gateway that comes up is sent what the faces south of the node already asked for.
         #[cfg(feature = "routing-interest-pending-gc")]
-        if self.tables.node_mode == WhatAmI::Peer && self.gateway_faces().contains(&id) {
+        if self.tables.routes_interest_north() && self.gateway_faces().contains(&id) {
             self.repropagate_brokered_interests(id);
         }
         // A node being dialled is connected: it is a face now, and the face is what is waited on.
@@ -13365,8 +13953,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_region_of(`
     /// answers an error), and so does this router. Every region the rules can
     /// place a remote in has its hat here, a subregion's router region included.
+    ///
+    /// A client node refuses a remote it would place in the north region while another remote
+    /// holds it (`zenoh/src/net/runtime/mod.rs` @ `bail!("Client runtimes only accept one north-bound transport");`):
+    /// its client hat sends everything its south holds and asks to its one face, and a second
+    /// one would be told half of it. A second link of the remote the face already is, is no
+    /// second transport, and the admission joins or drops it.
     fn refuses_face(&self, actions: &Arc<SessionLinkActions>) -> Option<String> {
-        self.place_face(actions).err().map(|why| why.to_string())
+        let (region, _) = match self.place_face(actions) {
+            Ok(placed) => placed,
+            Err(why) => return Some(why.to_string()),
+        };
+        if !is_client_hat(region, self.tables.node_mode) {
+            return None;
+        }
+        let zid = peer_zid_routing(actions);
+        let another = self
+            .tables
+            .faces
+            .of_tier(region)
+            .any(|(_, held)| zid.is_none() || held.peer_zid != zid);
+        another.then(|| "a client node accepts one north-bound transport".to_owned())
     }
 
     /// The partition this router's hats were built from, which every session it
@@ -13467,6 +14074,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         request: &RequestOwned,
         from: Option<&MulticastPeerId>,
+        calls: &local_publish::DeliveryScope<'_>,
     ) {
         // As the Push twin above: the group's chain, by the group's link, before anything counts
         // or routes.
@@ -13487,6 +14095,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             reliable,
             request,
             Some(GroupMember::from_wire(from)),
+            calls,
         );
     }
 
@@ -13704,10 +14313,11 @@ impl RouterForwarder {
                     _ => {}
                 }
             } else {
-                // The subscribers of the node's own session are the program's callbacks, which may
-                // use the session and so write the tables: they are handed what this message
-                // brings once the guard below is let go. Declared before it, so it ends after it.
-                let _deliveries = local_publish::DeliveryScope::enter(self);
+                // The subscribers and the queryables of the node's own session are the program's
+                // callbacks, which may use the session and so write the tables: they are handed
+                // what this message brings once the guard below is let go. Declared before it, so
+                // it ends after it.
+                let deliveries = local_publish::DeliveryScope::enter(self);
                 let on = self.on_tables_for_a_frame();
                 if !on.admits_ingress(id, message) {
                     continue;
@@ -13741,7 +14351,7 @@ impl RouterForwarder {
                     // BestMatching region by region, C5b).
                     NetworkMessage::Request(request) => {
                         self.queries_seen.bump();
-                        on.route_request(id, tier, *reliable, request, None);
+                        on.route_request(id, tier, *reliable, request, None, &deliveries);
                     }
                     // A queryable's reply: route it BACK toward the querier via the
                     // pending table (C5c) — peek on a Response (more replies may
@@ -13808,6 +14418,14 @@ impl FaceForwarder for RouterForwarder {
 
     fn tick(&self) {
         self.on_tables_mut().tick()
+    }
+
+    /// The routing tables' lock: the face loop writes them (a face coming up, the tick) and
+    /// every face's thread reads them, so a loop stopped on them is told by who holds them and
+    /// how long the oldest writer has waited.
+    fn liveness_probe(&self) -> Option<crate::liveness::Probe> {
+        let tables = Arc::clone(&self.tables);
+        Some(Arc::new(move || tables.contention_text()))
     }
 
     fn read_gate(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
@@ -13925,7 +14543,7 @@ impl FaceForwarder for RouterForwarder {
         // for a face's frame. Declared before the tables are taken, so that it ends after.
         let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
-            .route_mcast_ingress_request(reliable, request, from);
+            .route_mcast_ingress_request(reliable, request, from, &deliveries);
         deliveries.finish();
     }
 
@@ -17786,6 +18404,57 @@ mod tests {
         };
         assert_eq!(query(0xCC), 1, "a subregion's peer is south of the node");
         assert_eq!(query(0xBB), 0, "a north peer's Query is transit");
+    }
+
+    /// The gateways of a query belong to the north region alone. On a peer node whose partition
+    /// keeps a subregion of peers and clients, a query from a client of the subregion is routed
+    /// into the north and into the subregion's peer region, two regions of the peer hat, and the
+    /// router north of the node is asked once: upstream's peer hat adds its south-bound faces to
+    /// a query route in the hat of the north region only
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `if self.region().bound().is_north() && src_region.bound().is_south() {`),
+    /// and each hat routes to the faces it owns. A query from a peer of the subregion, which no
+    /// block of its own region routes, is the control: it was asked once under either rule.
+    #[test]
+    fn a_south_clients_query_asks_the_router_north_of_a_partitioned_peer_node_once() {
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        let requests = |sink: &RecordingLinkDriver| -> usize {
+            use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+            (0..sink.frame_count())
+                .filter_map(|i| match parse_inbound(&sink.frame_bytes(i)) {
+                    Ok(InboundFrame::Frame { payload, .. }) => parse_frame_payload(&payload).ok(),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|m| matches!(m, NetworkMessage::Request(_)))
+                .count()
+        };
+        let partition = SouthPartition::Custom(vec![SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                zids: Some(vec![
+                    zid(0xCC).as_slice().to_vec(),
+                    zid(0xDD).as_slice().to_vec(),
+                ]),
+                ..RegionFilter::default()
+            }]),
+        }]);
+        let fwd = RouterForwarder::peer(zid(0x05)).with_south_partition(partition);
+        let (router, sink_router) = face(zid(0xAA), WIRE_ROUTER);
+        let (peer, _sink_peer) = face(zid(0xCC), WIRE_PEER);
+        let (client, _sink_client) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        fwd.register(FaceId(2), &client);
+
+        sink_router.reset();
+        forward_one(&fwd, FaceId(2), request_best(3, "demo/q"));
+        assert_eq!(
+            requests(&sink_router),
+            1,
+            "a south client's query, routed into two regions of the peer hat"
+        );
+        sink_router.reset();
+        forward_one(&fwd, FaceId(1), request_best(4, "demo/q"));
+        assert_eq!(requests(&sink_router), 1, "a subregion peer's query");
     }
 
     /// One Put on `keyexpr` from the client on face 1.
@@ -23889,6 +24558,132 @@ mod tests {
         asked.join().expect("the query");
     }
 
+    /// A query a face routes to a queryable of the session: its callback asks the node a query of
+    /// its own, whose queryable declares a subscriber, and then undeclares that queryable. Each
+    /// of those takes the tables, for reading or for writing, so each would wait for the read the
+    /// route of the face's query held if a callback were called inside it. Upstream routes a query
+    /// and lets its tables go before the faces are sent it
+    /// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `drop(rtables);`), and its session calls
+    /// the queryables once its own state is let go (`zenoh/src/api/session.rs` @ `drop(state);`).
+    #[test]
+    fn a_callback_of_the_nodes_own_queryable_may_ask_and_declare_while_a_face_routes_to_it() {
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+        use wz_session_core::sink::SampleView;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let (inner_called, inner_heard) = std::sync::mpsc::channel::<()>();
+        let inner_called = std::sync::Mutex::new(inner_called);
+        let declaring = Arc::clone(&fwd);
+        let inner = fwd.host_queryable(
+            "demo/inner",
+            false,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                declaring.register_local_subscriber(
+                    "demo/declared/**",
+                    Box::new(|_: &dyn SampleView| {}),
+                );
+                let _ = inner_called.lock().unwrap().send(());
+            }),
+        );
+        let (outer_done, outer_finished) = std::sync::mpsc::channel::<bool>();
+        let outer_done = std::sync::Mutex::new(outer_done);
+        let asking = Arc::clone(&fwd);
+        fwd.host_queryable(
+            "demo/outer",
+            false,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                let request =
+                    wz_session_core::request_build::build_request_query(2, 0, Some("demo/inner"))
+                        .expect("build request");
+                asking.local_get(&request);
+                let undeclared = asking.unhost_queryable(inner);
+                let _ = outer_done.lock().unwrap().send(undeclared);
+            }),
+        );
+        let queryables = fwd.on_tables().tables.local_queryables.len();
+        let subscribers = fwd.on_tables().tables.local_subscribers.len();
+        let routing = Arc::clone(&fwd);
+        let routed = std::thread::spawn(move || {
+            let request =
+                wz_session_core::request_build::build_request_query(1, 0, Some("demo/outer"))
+                    .expect("build request");
+            forward_one(
+                &routing,
+                FaceId(0),
+                NetworkMessage::Request(Box::new(request)),
+            );
+        });
+        assert!(
+            inner_heard.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the queryable the callback asked was called and came back from declaring"
+        );
+        assert_eq!(
+            outer_finished.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the callback came back from asking and undeclared the queryable it asked"
+        );
+        routed.join().expect("the route");
+        assert_eq!(
+            fwd.on_tables().tables.local_queryables.len(),
+            queryables - 1,
+            "the queryable the callback asked is undeclared"
+        );
+        assert_eq!(
+            fwd.on_tables().tables.local_subscribers.len(),
+            subscribers + 1,
+            "the subscriber the inner callback declared is held"
+        );
+    }
+
+    /// Two queries of the session on two threads at once, each to a queryable whose callback
+    /// declares: a callback is called with no guard of the tables held, so neither declaration
+    /// waits for the route of the other query.
+    #[test]
+    fn callbacks_of_the_nodes_own_queryables_on_two_threads_may_both_declare() {
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+        use wz_session_core::sink::SampleView;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        for key in ["demo/a", "demo/b"] {
+            let done = std::sync::Mutex::new(done.clone());
+            let inner = Arc::clone(&fwd);
+            fwd.host_queryable(
+                key,
+                false,
+                Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                    inner.register_local_subscriber(
+                        "demo/declared/**",
+                        Box::new(|_: &dyn SampleView| {}),
+                    );
+                    let _ = done.lock().unwrap().send(());
+                }),
+            );
+        }
+        let askers: Vec<_> = [(1u32, "demo/a"), (2, "demo/b")]
+            .into_iter()
+            .map(|(rid, key)| {
+                let asking = Arc::clone(&fwd);
+                std::thread::spawn(move || {
+                    let request =
+                        wz_session_core::request_build::build_request_query(rid, 0, Some(key))
+                            .expect("build request");
+                    asking.local_get(&request);
+                })
+            })
+            .collect();
+        for _ in 0..2 {
+            assert!(
+                finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+                "each callback came back from declaring"
+            );
+        }
+        for asker in askers {
+            asker.join().expect("the query");
+        }
+    }
+
     /// The same for what a face sends: the callback of a subscriber of the session is called once
     /// the guard the route of the message held is let go, and not inside it.
     #[test]
@@ -26298,7 +27093,7 @@ mod tests {
         sink_c.reset();
 
         // A declares three aliases of its own, then uses each one.
-        for (id, keyexpr) in [(7u64, "demo/tok"), (8, "demo/q"), (9, "demo/data")] {
+        for (id, keyexpr) in [(7u16, "demo/tok"), (8, "demo/q"), (9, "demo/data")] {
             forward_one(
                 &fwd,
                 FaceId(0),
@@ -26566,7 +27361,7 @@ mod tests {
 
     /// The `request_id` of the single ResponseFinal recorded on a sink — the
     /// empty-route prompt final routed back to the querier.
-    fn forwarded_response_final_rid(frame: &[u8]) -> u64 {
+    fn forwarded_response_final_rid(frame: &[u8]) -> wz_session_core::wire_id::RequestId {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse frame") else {
             panic!("not a Frame");
@@ -26580,7 +27375,7 @@ mod tests {
 
     /// A BestMatching (wire-default) Request for `keyexpr`, self-sourced (no
     /// ext_nodeid — the inbound neighbour is the querier), rid `rid`.
-    fn request_best(rid: u64, keyexpr: &str) -> NetworkMessage {
+    fn request_best(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
         NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
                 .expect("build request"),
@@ -26588,7 +27383,11 @@ mod tests {
     }
 
     /// A Request for `keyexpr` with an explicit [`QueryTarget`], self-sourced.
-    fn request_with_target(rid: u64, keyexpr: &str, target: QueryTarget) -> NetworkMessage {
+    fn request_with_target(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: &str,
+        target: QueryTarget,
+    ) -> NetworkMessage {
         NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query_with_target(
                 rid,
@@ -26712,13 +27511,15 @@ mod tests {
             matches!(classify_inbound(faces, FaceId(0)), InboundFace::Held(_)),
             "a registered face is Held"
         );
-        assert!(
-            matches!(
-                classify_inbound(faces, MCAST_INGRESS_FACE),
-                InboundFace::SourceOnly
-            ),
-            "the multicast ingress sentinel is SourceOnly, not Gone"
-        );
+        for reserved in ReservedFace::ALL {
+            assert!(
+                matches!(
+                    classify_inbound(faces, reserved.id()),
+                    InboundFace::SourceOnly
+                ),
+                "the reserved face {reserved:?} is SourceOnly, not Gone"
+            );
+        }
         assert!(
             matches!(classify_inbound(faces, FaceId(7)), InboundFace::Gone),
             "an unregistered face is Gone, not SourceOnly"
@@ -26810,6 +27611,53 @@ mod tests {
         );
     }
 
+    /// A group member's query is a remote one and not the node's own: it asks only the hosted
+    /// queryables that admit a remote querier, and what they answer reaches nobody, the node's
+    /// own session included, because the group's face has no send seam.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn a_group_query_is_neither_asked_nor_answered_as_the_nodes_own() {
+        use wz_session_core::locality::Locality;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (keyexpr, origin) in [
+            ("demo/any", Locality::Any),
+            ("demo/own", Locality::SessionLocal),
+        ] {
+            let kept = asked.clone();
+            fwd.host_queryable_from(
+                keyexpr,
+                true,
+                origin,
+                Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                    kept.lock().unwrap().push(view.keyexpr().to_owned());
+                    out.reply(b"answer");
+                }),
+            );
+        }
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = heard.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+
+        for (rid, keyexpr) in [(9, "demo/any"), (10, "demo/own")] {
+            let NetworkMessage::Request(request) = request_best(rid, keyexpr) else {
+                unreachable!("request_best builds a Request")
+            };
+            fwd.route_mcast_ingress_request(true, &request, None);
+        }
+
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["demo/any"],
+            "a queryable the session keeps for itself is not asked a member's query"
+        );
+        let heard = heard.lock().unwrap();
+        assert!(
+            heard.is_empty(),
+            "the answer to a member is not told to the node's own session: {heard:?}"
+        );
+    }
+
     /// R2734 — the anti-vacuity half of the arm above: the group querier gets
     /// NOTHING back, so the test above cannot be passing because wz invented a
     /// reply path the reference does not have.
@@ -26817,7 +27665,9 @@ mod tests {
     /// The mechanism is already in the tree and needed no new code:
     /// `send_to_face` returns false for a face absent from `faces`, and the
     /// sentinel is deliberately absent. This pins that, so a later round that
-    /// inserts a real entry for the sentinel has to come and read this.
+    /// inserts a real entry for the sentinel has to come and read this. The
+    /// node's own face is attached, so a group face that were taken for it
+    /// would be sent to through its sink.
     #[test]
     fn a_group_query_gets_no_reply_because_its_face_has_no_send_seam() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -26826,6 +27676,9 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         sink_client.reset();
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = heard.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
 
         // An UNRESOLVABLE keyexpr is the case that would emit a ResponseFinal
         // straight back to the querier on a unicast face, so it is the sharpest
@@ -26834,10 +27687,16 @@ mod tests {
             unreachable!("request_best builds a Request")
         };
         assert!(
-            !fwd.on_tables().send_to_face(MCAST_INGRESS_FACE, true, || {
-                NetworkMessage::Request(request.clone())
-            }),
+            !fwd.on_tables()
+                .send_to_face(ReservedFace::McastIngress.id(), true, || {
+                    NetworkMessage::Request(request.clone())
+                }),
             "nothing can be sent to the group ingress face -- wz's DummyPrimitives"
+        );
+        let heard = heard.lock().unwrap();
+        assert!(
+            heard.is_empty(),
+            "nor is it told to the node's own face: {heard:?}"
         );
     }
 
@@ -28596,6 +29455,8 @@ mod tests {
                 compression: false,
                 tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
                 link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+                join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+                max_sessions: None,
             },
         )
     }
@@ -28635,7 +29496,7 @@ mod tests {
     fn mcast_group_receives_routed_push_and_echo_guards() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
         let push =
             wz_session_core::push_build::build_push_literal("demo/data", b"payload").expect("push");
 
@@ -28673,6 +29534,113 @@ mod tests {
         );
     }
 
+    /// A chunk the node publishes reaches a group that reads shared memory as a descriptor of
+    /// the chunk, and a group that does not as the chunk's bytes: a group negotiates nothing, so
+    /// the node's own configuration decides, as an upstream member's shared-memory context does.
+    #[cfg(all(
+        feature = "router-multicast-faces",
+        feature = "transport-shm",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn a_chunk_the_node_publishes_reaches_a_shared_memory_group_as_its_descriptor() {
+        for reads_shm in [true, false] {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (tx, mut rx) = group_tap();
+            fwd.attach_mcast_group(tx, reads_shm);
+            let mut chunk =
+                crate::shm_provider::ShmBackedPayload::alloc(5).expect("a POSIX segment");
+            chunk.write(b"group");
+            let chunk = Arc::new(chunk);
+            fwd.publish_shm_with(
+                "demo/group",
+                chunk.send_handle(),
+                &PublishOptions::default(),
+            )
+            .expect("the node publishes a chunk");
+            let (push, _) = group_push(&mut rx).expect("the group was handed the Put");
+            let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
+                panic!("a Put");
+            };
+            let slices = wz_session_core::put_payload::shm_descriptors(put);
+            if reads_shm {
+                assert_eq!(
+                    slices.len(),
+                    1,
+                    "the group reads shared memory: a descriptor"
+                );
+                assert!(
+                    wz_session_core::extshm::decode_shm_descriptor(slices[0]).is_some(),
+                    "of a chunk"
+                );
+            } else {
+                assert!(slices.is_empty(), "a plain group names no chunk");
+                assert_eq!(
+                    wz_session_core::put_payload::inline_bytes(put),
+                    Some(&b"group"[..]),
+                    "it is sent the chunk's bytes"
+                );
+            }
+        }
+    }
+
+    /// A Put whose payload is a chunk of shared memory, its reference taken for the receiver as
+    /// a publisher takes it.
+    #[cfg(all(
+        feature = "router-multicast-faces",
+        feature = "transport-shm",
+        target_os = "linux"
+    ))]
+    fn a_put_naming_a_chunk() -> PushOwned {
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("a POSIX segment");
+        let wire = payload.wire_reference();
+        let descriptor = wire.descriptor();
+        wire.commit();
+        drop(payload);
+        wz_session_core::push_build::build_push_shm_literal(
+            "demo/own",
+            &descriptor,
+            &wz_session_core::metadata::PushMetadata::default(),
+        )
+        .expect("a Put in shared memory")
+    }
+
+    /// The node's own face is not the group ingress: with a group that reads shared memory
+    /// attached, a message on the group ingress that names a chunk is held, and the same message
+    /// of the node's own session is refused, because it came over no link that negotiated
+    /// anything and carries no reference taken for this router.
+    #[cfg(all(
+        feature = "router-multicast-faces",
+        feature = "transport-shm",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn the_nodes_own_message_is_not_judged_by_what_its_groups_read() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (tx, _rx) = group_tap();
+        fwd.attach_mcast_group(tx, true);
+        let on = fwd.on_tables();
+
+        let own = a_put_naming_a_chunk();
+        assert!(
+            on.open_shm_relay_pass(LOCAL_FACE, &own).is_none(),
+            "the node's own message is not taken down the group's path"
+        );
+        assert_eq!(
+            on.shm_unnegotiated_dropped(),
+            1,
+            "and is counted as a descriptor no negotiation admits"
+        );
+
+        let member = a_put_naming_a_chunk();
+        assert!(
+            on.open_shm_relay_pass(MCAST_INGRESS_FACE, &member)
+                .is_some(),
+            "a member's message on the group ingress is held: the group reads shared memory"
+        );
+        assert_eq!(on.shm_unnegotiated_dropped(), 1, "and refuses nothing");
+    }
+
     /// R311y188 — router-multicast-faces slice 3: a REAL routed Push (driven
     /// through `forward` -> `route_push`, not a direct `broadcast_to_mcast_groups`
     /// call as slice 1's unit did) reaches an attached multicast group at the
@@ -28692,7 +29660,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
@@ -28733,7 +29701,7 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), kexpr);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         // A pure-aliased push (id 7, no suffix): route_push resolves it via the face
         // table, and the egress must re-literalize before enqueuing to the group.
@@ -28765,7 +29733,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
         // An explicit empty relay is equivalent to never relaying: no other
         // on-group router ⇒ self is the only candidate.
         fwd.set_mcast_group_members(&[]);
@@ -28794,7 +29762,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         fwd.set_mcast_group_members(&[zid(0x02).as_slice().to_vec()]);
 
@@ -28819,7 +29787,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         fwd.set_mcast_group_members(&[zid(0x02).as_slice().to_vec()]);
 
@@ -28849,7 +29817,7 @@ mod tests {
         advertise_link_back(&fwd, FaceId(0), 0x05, 0x03, 5);
         fwd.tick();
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
         fwd.set_mcast_group_members(&[zid(0x03).as_slice().to_vec()]);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
@@ -28876,7 +29844,7 @@ mod tests {
         let (cli, _sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &cli);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         // A larger router on the group ⇒ self is NOT primary.
         fwd.set_mcast_group_members(&[zid(0x02).as_slice().to_vec()]);
@@ -29116,7 +30084,7 @@ mod tests {
     fn mcast_ingress_push_is_echo_guarded_off_the_groups() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
@@ -29222,7 +30190,7 @@ mod tests {
                 .with_govern_multicast(true),
         );
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         assert!(!group_got(&fwd, &mut rx, "admin/secret"));
         assert_eq!(fwd.interceptor_dropped(), 1);
@@ -29240,7 +30208,7 @@ mod tests {
             Vec::new(),
         ));
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         assert!(group_got(&fwd, &mut rx, "admin/secret"));
         assert_eq!(fwd.interceptor_dropped(), 0);
@@ -29323,7 +30291,7 @@ mod tests {
                     .with_govern_multicast(true),
             );
             let (tx, mut rx) = group_tap();
-            fwd.attach_mcast_group(tx);
+            fwd.attach_mcast_group(tx, false);
             assert_eq!(
                 group_got(&fwd, &mut rx, "admin/secret"),
                 expected_sent,
@@ -29360,7 +30328,9 @@ mod tests {
 
     /// Every `Request` a sink recorded, as (the keyexpr id, its literal
     /// suffix); frames that are not a Request are skipped.
-    fn recorded_request_keyexprs(sink: &RecordingLinkDriver) -> Vec<(u64, Option<String>)> {
+    fn recorded_request_keyexprs(
+        sink: &RecordingLinkDriver,
+    ) -> Vec<(wz_session_core::wire_id::ExprId, Option<String>)> {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         (0..sink.frame_count())
             .filter_map(|i| {
@@ -30525,7 +31495,10 @@ mod tests {
             NetworkMessage::Push(Box::new(push))
         }
 
-        fn stacked_request(rid: u64, conf_flags: u8) -> NetworkMessage {
+        fn stacked_request(
+            rid: wz_session_core::wire_id::RequestId,
+            conf_flags: u8,
+        ) -> NetworkMessage {
             let mut request =
                 wz_session_core::request_build::build_request_query(rid, 0, Some("demo/q"))
                     .expect("build request");
@@ -30538,7 +31511,10 @@ mod tests {
             NetworkMessage::Request(Box::new(request))
         }
 
-        fn stacked_response(qid: u64, conf_flags: u8) -> NetworkMessage {
+        fn stacked_response(
+            qid: wz_session_core::wire_id::RequestId,
+            conf_flags: u8,
+        ) -> NetworkMessage {
             let mut response =
                 wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
                     .expect("build response");
@@ -30768,7 +31744,7 @@ mod tests {
         fn a_push_broadcast_to_a_multicast_group_records_this_router() {
             let fwd = RouterForwarder::new(zid(0x01));
             let (tx, mut rx) = group_tap();
-            fwd.attach_mcast_group(tx);
+            fwd.attach_mcast_group(tx, false);
             let NetworkMessage::Push(push) = stacked_push(ALL) else {
                 unreachable!()
             };

@@ -1,4 +1,4 @@
-// SCE-MAP: encoding:60 :: _forge_body
+// SCE-MAP: encoding:64 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -26,15 +26,15 @@ use sce_forge_runtime::codec::VecSink;
 #[allow(dead_code)]
 pub struct EncodingSchemaField;
 
-impl ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField> for ::sce_forge_runtime::codec::Inline {
-    type Str = ::sce_forge_runtime::codec::InlineStr<255>;
+impl ::sce_forge_runtime::codec::HoldsBytes<EncodingSchemaField> for ::sce_forge_runtime::codec::Inline {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<255>;
 }
 
 /// What `EncodingIn` and the codecs it holds ask of a storage profile.
 #[allow(dead_code)]
-pub trait EncodingStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField> {}
+pub trait EncodingStorage: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<EncodingSchemaField> {}
 
-impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField>> EncodingStorage for S {}
+impl<S: ::core::fmt::Debug + Clone + PartialEq + ::sce_forge_runtime::codec::HoldsBytes<EncodingSchemaField>> EncodingStorage for S {}
 
 /// What `EncodingIn<Lent<'a, D>>` asks of the profile `D`: how it holds
 /// the lists of `Encoding` and of the codecs it holds, since the lent
@@ -47,9 +47,9 @@ impl<D: ::core::fmt::Debug + Clone + PartialEq> EncodingLentStorage for D {}
 /// What a decode of a frame of the lifetime `'f` asks of a storage profile
 /// beside EncodingStorage: how it stores each field of that frame.
 #[allow(dead_code)]
-pub trait EncodingFrom<'f>: EncodingStorage + ::sce_forge_runtime::codec::StoresStr<'f, EncodingSchemaField> {}
+pub trait EncodingFrom<'f>: EncodingStorage + ::sce_forge_runtime::codec::StoresBytes<'f, EncodingSchemaField> {}
 
-impl<'f, S: EncodingStorage + ::sce_forge_runtime::codec::StoresStr<'f, EncodingSchemaField>> EncodingFrom<'f> for S {}
+impl<'f, S: EncodingStorage + ::sce_forge_runtime::codec::StoresBytes<'f, EncodingSchemaField>> EncodingFrom<'f> for S {}
 
 // `EncodingIn<S>` is the one value this codec has, at the storage
 // profile `S` (docs/adr/0077 §7). `Encoding<'a>` is it on `Lent`, which
@@ -60,7 +60,7 @@ impl<'f, S: EncodingStorage + ::sce_forge_runtime::codec::StoresStr<'f, Encoding
 pub struct EncodingIn<S: EncodingStorage> {
     pub packed_id: u32,
     pub schema_len: Option<u64>,
-    pub schema: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsStr<EncodingSchemaField>>::Str, 255>>,
+    pub schema: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<EncodingSchemaField>>::Bytes, 255>>,
 }
 
 /// The eager form: bytes and text borrowed from the frame, lists held inline.
@@ -150,8 +150,7 @@ impl<S: EncodingStorage> EncodingIn<S> {
             }
             let _n = _len as usize;
             let raw = cursor.peek_slice(_n)?;
-            let _v = core::str::from_utf8(raw)
-                .map_err(|_| CodecError::InvalidUtf8)?;
+            let _v = raw;
             cursor.advance(_n)?;
             Some(_v)
         } else {
@@ -229,14 +228,14 @@ pub trait EncodingSource {
     /// The `packed_id` field.
     fn packed_id(&self) -> u32;
     /// The `schema` field.
-    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>>;
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 255>>;
 }
 
 impl<T: EncodingSource + ?Sized> EncodingSource for &T {
     fn packed_id(&self) -> u32 {
         (**self).packed_id()
     }
-    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>> {
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 255>> {
         (**self).schema()
     }
 }
@@ -250,14 +249,14 @@ pub struct EncodingParts<'a> {
     /// The `packed_id` field.
     pub packed_id: u32,
     /// The `schema` field.
-    pub schema: Option<::sce_forge_runtime::codec::Text<'a, 255>>,
+    pub schema: Option<::sce_forge_runtime::codec::Bytes<'a, 255>>,
 }
 
 impl<'a> EncodingSource for EncodingParts<'a> {
     fn packed_id(&self) -> u32 {
         self.packed_id
     }
-    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>> {
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 255>> {
         self.schema
     }
 }
@@ -266,8 +265,8 @@ impl<S: EncodingStorage> EncodingSource for EncodingOwned<S> {
     fn packed_id(&self) -> u32 {
         self.packed_id
     }
-    fn schema(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 255>> {
-        self.schema.as_ref().map(::sce_forge_runtime::codec::Bounded::as_text)
+    fn schema(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, 255>> {
+        self.schema.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes)
     }
 }
 
@@ -305,7 +304,7 @@ impl EncodingWire {
             w.write_vle_u64(_d_schema_len)?;
         }
         if let Some(_v) = src.schema() {
-            w.write_bytes(_v.into_inner().as_bytes())?;
+            w.write_bytes(_v.into_inner())?;
         }
         Ok(())
     }
@@ -469,7 +468,7 @@ impl<S: EncodingStorage> EncodingOwned<S> {
     pub fn as_borrowed_into<'o>(&'o self, _out: &mut EncodingIn<::sce_forge_runtime::codec::Lent<'o, S>>) {
         _out.packed_id = self.packed_id;
         _out.schema_len = self.schema_len;
-        _out.schema = self.schema.as_ref().map(::sce_forge_runtime::codec::Bounded::as_text);
+        _out.schema = self.schema.as_ref().map(::sce_forge_runtime::codec::Bounded::as_bytes);
         
     }
 
@@ -486,24 +485,33 @@ impl<S: EncodingStorage> EncodingOwned<S> {
     }
 }
 
+/// What the origin projection of `Encoding` asks of a storage profile
+/// beside EncodingStorage: that it is an origin profile, and
+/// that each byte string and text of `Encoding` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait EncodingOrigin: EncodingStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<EncodingSchemaField> {}
+
+impl<S: EncodingStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<EncodingSchemaField>> EncodingOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> EncodingIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: EncodingLentStorage {
     /// Project this borrowed view into an owned [`EncodingOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: EncodingStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<EncodingOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: EncodingOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<EncodingOwned<S>, CodecError> {
         Ok(EncodingOwned {
             packed_id: self.packed_id,
             schema_len: self.schema_len,
-            schema: self.schema.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<EncodingSchemaField>(origin, _v.into_inner()))).transpose()?,
+            schema: self.schema.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginBytes<EncodingSchemaField>>::bytes_from(origin, _v.into_inner()))).transpose()?,
         })
     }
 }

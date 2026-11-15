@@ -74,7 +74,7 @@ fn fresh_setup_recording() -> (
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine, recording)
 }
 
@@ -185,7 +185,7 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
     let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
 
     engine.process_event(E::InboundStart);
     assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
@@ -227,7 +227,7 @@ async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
     let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
 
     engine.process_event(E::InboundStart);
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
@@ -339,7 +339,7 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     let params = fixture_session_init_params();
     let actions = new_session_actions(driver_arc, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
 
     // Init -> AwaitingInitSyn (listener role activation)
     engine.process_event(E::InboundStart);
@@ -479,7 +479,7 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
         );
         actions.refresh_cookie_nonce(nonce);
         let mut engine = new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::InboundStart);
         let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
         let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -606,7 +606,7 @@ async fn one_bundle_mints_a_different_cookie_for_each_handshake() {
     // `P::initial_state()`.
     actions.reset_for_reopen();
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     assert_eq!(
         engine.get_current_state(),
         S::Init,
@@ -905,7 +905,9 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     initiator_params.batch_size = 2048;
     let initiator = new_session_actions(initiator_out, initiator_params, TokioTime::new());
     let mut initiator_engine = new_session_engine(&initiator);
-    initiator_engine.initialize();
+    initiator_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
     initiator_engine.process_event(E::OutboundStart);
     initiator_engine.process_event(E::LinkOpened);
     let init_syn = initiator_wire
@@ -931,7 +933,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     params.seq_num_res = 2;
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -1209,7 +1211,7 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
         "the core constructor must not invent a nonce it has no entropy for"
     );
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;

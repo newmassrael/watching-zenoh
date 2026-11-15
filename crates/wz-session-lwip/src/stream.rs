@@ -27,6 +27,7 @@
 
 use core::cell::RefCell;
 use core::ffi::c_int;
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use core::ops::Deref;
 
 #[cfg(feature = "static-link-storage")]
@@ -56,7 +57,8 @@ fn pump(link: &LwipLink, service: Service) {
 }
 
 /// One connected IPv4 stream over lwIP, with a receive buffer of `RX` bytes (at least the port's
-/// receive window: `LwipTcpSocket::connect` refuses less).
+/// receive window: `LwipTcpSocket::connect` refuses less). The port's lwIP is built without IPv6,
+/// so the peer is an IPv4 end.
 pub struct LwipTcpStream<L, const RX: usize>
 where
     L: Deref<Target = LwipLink> + Clone,
@@ -64,7 +66,7 @@ where
     socket: RefCell<LwipTcpSocket<RX>>,
     link: L,
     service: Service,
-    peer: ([u8; 4], u16),
+    peer: SocketAddrV4,
 }
 
 impl<L, const RX: usize> StreamSocket for LwipTcpStream<L, RX>
@@ -73,13 +75,17 @@ where
 {
     type Error = TcpError;
 
-    fn local(&self) -> ([u8; 4], u16) {
-        let addr = route_source(ipv4_addr_from_octets(self.peer.0)).map_or([0; 4], ipv4_octets);
-        (addr, self.socket.borrow().local_port())
+    fn local(&self) -> SocketAddr {
+        let addr = route_source(ipv4_addr_from_octets(self.peer.ip().octets()))
+            .map_or([0; 4], ipv4_octets);
+        SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::from(addr),
+            self.socket.borrow().local_port(),
+        ))
     }
 
-    fn peer(&self) -> ([u8; 4], u16) {
-        self.peer
+    fn peer(&self) -> SocketAddr {
+        SocketAddr::V4(self.peer)
     }
 
     fn send_parts(&self, parts: &[&[u8]]) -> Result<(), TcpError> {
@@ -197,7 +203,12 @@ where
 {
     type Stream = LwipTcpStream<L, RX>;
 
-    fn dial(&self, addr: [u8; 4], port: u16) -> Result<Self::Stream, LinkOpenError> {
+    fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
+        // The port's lwIP has no IPv6: a locator of that family is not this stack's to dial.
+        let SocketAddr::V4(to) = to else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        let (addr, port) = (to.ip().octets(), to.port());
         #[cfg(not(feature = "static-link-storage"))]
         let socket = LwipTcpSocket::<RX>::connect(&self.link, addr, port);
         #[cfg(feature = "static-link-storage")]
@@ -222,7 +233,7 @@ where
             socket: RefCell::new(socket),
             link: self.link.clone(),
             service: self.service,
-            peer: (addr, port),
+            peer: to,
         })
     }
 }
@@ -281,16 +292,20 @@ where
 {
     type Stream = LwipTcpStream<L, RX>;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         // Bound to every address: the port is what names it.
-        ([0; 4], self.listener.local_port())
+        SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            self.listener.local_port(),
+        ))
     }
 
     fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError> {
         // A connection arrives as its handshake is processed.
         pump(&self.link, self.service);
         Ok(self.listener.accept().map(|socket| {
-            let peer = socket.peer();
+            let (addr, port) = socket.peer();
+            let peer = SocketAddrV4::new(Ipv4Addr::from(addr), port);
             LwipTcpStream {
                 socket: RefCell::new(socket),
                 link: self.link.clone(),
@@ -389,13 +404,25 @@ mod tests {
         }
     }
 
+    /// The port's lwIP has no IPv6, so an IPv6 locator is refused as one this stack never dials,
+    /// and the refusal is made before any connection is tried.
+    #[test]
+    fn an_ipv6_dial_is_not_this_stacks_to_make() {
+        let (_gate, link) = lwip_test_link();
+        assert!(matches!(
+            dial(&link).dial(SocketAddr::from((core::net::Ipv6Addr::LOCALHOST, 47_301))),
+            Err(LinkOpenError::Unsupported)
+        ));
+    }
+
     #[test]
     fn a_dial_yields_a_stream_that_writes_waits_and_reads_like_a_socket() {
         let (_gate, link) = lwip_test_link();
         server(47_301);
-        let stream = dial(&link).dial([127, 0, 0, 1], 47_301).expect("dial");
-        assert_eq!(stream.peer(), ([127, 0, 0, 1], 47_301));
-        assert_ne!(stream.local().1, 0, "the stack picked a local port");
+        let to = SocketAddr::from(([127, 0, 0, 1], 47_301));
+        let stream = dial(&link).dial(to).expect("dial");
+        assert_eq!(stream.peer(), to);
+        assert_ne!(stream.local().port(), 0, "the stack picked a local port");
         assert_eq!(
             <LwipTcpStream<&LwipLink, RX> as StreamSocket>::PROTO,
             LinkProto::Tcp
@@ -431,7 +458,7 @@ mod tests {
         server(47_304);
         let stream = dial(&link)
             .with_service(count)
-            .dial([127, 0, 0, 1], 47_304)
+            .dial(SocketAddr::from(([127, 0, 0, 1], 47_304)))
             .expect("dial");
         let after_dial = RAN.load(Ordering::SeqCst);
         assert!(after_dial > 0, "the handshake polled through the service");
@@ -447,7 +474,9 @@ mod tests {
     fn a_peer_that_closes_reads_as_the_end_of_the_stream() {
         let (_gate, link) = lwip_test_link();
         server(47_302);
-        let stream = dial(&link).dial([127, 0, 0, 1], 47_302).expect("dial");
+        let stream = dial(&link)
+            .dial(SocketAddr::from(([127, 0, 0, 1], 47_302)))
+            .expect("dial");
         stream.send_parts(&[b"bye"]).unwrap();
         stream.wait_readable(2_000);
         assert_eq!(stream.try_read(&mut [0; 8]), Ok(Some(0)));
@@ -457,7 +486,7 @@ mod tests {
     #[test]
     fn a_dial_to_a_port_nobody_listens_on_is_refused() {
         let (_gate, link) = lwip_test_link();
-        let refused = dial(&link).dial([127, 0, 0, 1], 47_399);
+        let refused = dial(&link).dial(SocketAddr::from(([127, 0, 0, 1], 47_399)));
         assert!(matches!(refused, Err(LinkOpenError::Refused)));
     }
 
@@ -477,7 +506,9 @@ mod tests {
         // `'static` handle: the witness is a zero-sized value, leaked here.
         let link: &'static LwipLink = std::boxed::Box::leak(std::boxed::Box::new(link));
         server(47_303);
-        let stream = dial(link).dial([127, 0, 0, 1], 47_303).expect("dial");
+        let stream = dial(link)
+            .dial(SocketAddr::from(([127, 0, 0, 1], 47_303)))
+            .expect("dial");
         let driver = StreamDriver::with_buffers(stream, 2_048, HeapTx::new(2, 2_048));
 
         let batch = [7u8; 300];
@@ -520,11 +551,13 @@ mod tests {
         let link: &'static LwipLink = std::boxed::Box::leak(std::boxed::Box::new(link));
         LISTENER.listen(47_501).unwrap();
         let listen = LwipTcpListen::new(link, &LISTENER);
-        assert_eq!(listen.local(), ([0; 4], 47_501));
+        assert_eq!(listen.local(), SocketAddr::from(([0; 4], 47_501)));
         assert!(matches!(listen.accept(), Ok(None)), "nothing has arrived");
 
-        let dialled = dial(link).dial([127, 0, 0, 1], 47_501).expect("dial");
-        let dialled_port = dialled.local().1;
+        let dialled = dial(link)
+            .dial(SocketAddr::from(([127, 0, 0, 1], 47_501)))
+            .expect("dial");
+        let dialled_port = dialled.local().port();
         let mut accepted = None;
         for _ in 0..4_000 {
             if let Some(stream) = listen.accept().expect("the listener is sound") {
@@ -533,7 +566,10 @@ mod tests {
             }
         }
         let accepted = accepted.expect("the connection that arrived");
-        assert_eq!(accepted.peer(), ([127, 0, 0, 1], dialled_port));
+        assert_eq!(
+            accepted.peer(),
+            SocketAddr::from(([127, 0, 0, 1], dialled_port))
+        );
 
         let client = StreamDriver::with_buffers(dialled, 2_048, HeapTx::new(2, 2_048));
         let server = StreamDriver::with_buffers(accepted, 2_048, HeapTx::new(2, 2_048));
@@ -598,9 +634,7 @@ mod tests {
     #[test]
     fn a_tcp_only_slot_stack_dials_and_accepts_tcp_and_refuses_udp_as_unsupported() {
         use wz_runtime_coop::ip_stack::IpDriver;
-        use wz_runtime_coop::session_drive::{
-            Accept, Bind, IpEndpoint, Locator, SessionDatagramLink,
-        };
+        use wz_runtime_coop::session_drive::{Accept, Bind, Locator, SessionDatagramLink};
         use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
         use wz_session_core::reliability::Reliability;
 
@@ -609,15 +643,12 @@ mod tests {
         wz_link_lwip::test_bind::tcp_listen(&SLOT_LISTENER, 47_601).unwrap();
 
         let mut stack = LwipTcpStack::<&'static LwipLink, RX, 2>::new(
-            [127, 0, 0, 1],
+            core::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
             &SLOT_RX,
             &SLOT_TX,
             dial(link),
         );
-        let router = IpEndpoint {
-            addr: [127, 0, 0, 1],
-            port: 47_601,
-        };
+        let router = SocketAddr::from(([127, 0, 0, 1], 47_601));
         assert!(
             matches!(
                 stack.bind(Locator::udp(router)),

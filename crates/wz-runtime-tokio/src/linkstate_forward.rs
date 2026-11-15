@@ -611,7 +611,10 @@ pub(crate) fn bring_mesh_routes<T: Clone, V>(
 /// intersects and keeps the rest, instead of every route in the memo, so a client that joins or
 /// leaves costs the keys it declares, not the keys in use. A query route is reached as a data
 /// route is: a queryable's key can make a client a candidate, or complete, only for a query whose
-/// keyexpr it intersects. Called by the writer before it publishes.
+/// keyexpr it intersects. The memos of the client legs are indexed, so the routes a changed key
+/// may meet are found by the index and each is then asked the exact question, of the changed key
+/// and the route's keyexpr split into its chunks (`docs/router-table-snapshots.md`, section 6.9).
+/// Called by the writer before it publishes.
 pub(crate) fn bring_client_routes<T: Clone, V: Held>(
     routes: &mut Arc<RouteCache<T, ()>>,
     store: &ClientStore<V>,

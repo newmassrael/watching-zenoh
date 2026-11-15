@@ -47,7 +47,9 @@ use crate::connect_manager::{
     ConnectManager, DeclaredPeer, DeclaredRefusal, EndpointSource, PeerStore,
 };
 use crate::latest::{LatestRef, LatestSink};
-use crate::slot_dial::{events_of, Bind, SessionFactory, SlotDialer, SlotSession};
+use crate::slot_dial::{
+    end_released_inbound, events_of, report_inbound, Bind, SessionFactory, SlotDialer, SlotSession,
+};
 use crate::slot_host::SessionHost;
 
 /// What a declaration announces to the router.
@@ -250,12 +252,22 @@ where
     }
 
     /// Advance the node to `now_ms`: let go of the accepted sessions that have ended, take the
-    /// connections that wait on the port, keep the dialled sessions in step with the endpoints,
-    /// and send the declarations on every established session that has not had them: all of them at
-    /// once, or a burst a turn when the node is paced.
+    /// connections that wait on the port, tell the connect manager which nodes have a session of
+    /// their own here, keep the dialled sessions in step with the endpoints, end the sessions
+    /// nodes opened that the manager let go of, and send the declarations on every established
+    /// session that has not had them: all of them at once, or a burst a turn when the node is
+    /// paced.
     pub fn tick(&mut self, now_ms: u64) {
         self.admit();
+        // A node that listens on nothing (`A` is 0) holds no session a node opened, so it asks
+        // nothing of either and its image carries neither call.
+        if A != 0 {
+            report_inbound::<_, _, _, _, A>(&mut self.manager, self.accepted.iter(), now_ms);
+        }
         self.manager.tick(now_ms);
+        if A != 0 {
+            end_released_inbound(&mut self.manager, self.accepted.iter());
+        }
         for session in self.live() {
             if session.actions().is_established() && !session.declared() {
                 replay_declarations(session, self.declarations, self.pacing, now_ms);

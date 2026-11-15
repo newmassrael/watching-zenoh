@@ -88,7 +88,12 @@ PICO_BUILDS = artifact("crates/target/pico-reference")
 # A case's library is under the directory of the cargo profile it was built with.
 TARGET = artifact("crates/target")
 
-PICO_BASE = "engine-tokio,serial-drive-own-thread,rx-busy-poll"
+# The features every pico build has, read from the one place that states them, the declaration's
+# `[base] pico`, so a feature the crate's default gains (or loses) reaches the cases from there
+# and not from a second copy here; `wz_config --selftest` holds the cases to the empty selection.
+PICO_BASE = ",".join(
+    wz_config.read_decl_toml(wz_config.DECL.read_text(encoding="utf-8"))["base"]["pico"]
+)
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -124,6 +129,13 @@ COOP_SCOUT = r"wz_capi_coop::scout|scouting_host"
 # module only the feature compiles and not `RouterForwarder`, whose accept loop a default build
 # instantiates too (capic-default's note).
 ROUTER_NODE = r"drive::router_node::"
+# The acceptor half of the unicast handshake (`session-unicast-accept`): the cookie an InitAck
+# carries, which only a session that takes another's Init writes. A build that listens has it; a
+# client opens and never accepts, so the half is a plane it leaves out like the accept loop.
+ACCEPT_HANDSHAKE = r"accept_cookie::encode_accept_cookie"
+# wz's own doors that judge, emit and cost a configuration without opening it (`config-verdict`,
+# on by default): the emitter and the validators behind them are linked through these alone.
+CONFIG_VERDICT = r"^wz_capi_c_config_(validate|to_json5|device_requires|verdict_)"
 
 
 @dataclass(frozen=True)
@@ -630,12 +642,12 @@ CASES: tuple[Case, ...] = (
               "machine's reading and 3,500, to the hundred"),
     Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
-                 ROUTER_NODE)),
+                 ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
     Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_978_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
-                 ROUTER_NODE),
+                 ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
               "capic-client's 2,172,515 (-17.2%). 1,839,572 on hosted CI on 2026-10-27 (head "
@@ -820,7 +832,7 @@ CASES: tuple[Case, ...] = (
     # of `e0461bff3f` and 3,500, to the hundred.
     Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_863_400,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
-                  MULTICAST),
+                  MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
          note="837 exports with the conformance digest's door (`wz_capi_c_conformance_digest`, "
               "decision C15), 836 before. "
@@ -885,7 +897,7 @@ CASES: tuple[Case, ...] = (
     Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
          "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
-         "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,"
+         "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,config-verdict,"
          "transport_compression,auth_usrpwd,interceptors,multicast-transport",
          9_286_100,
          forbid=(ROUTER_NODE,),
@@ -1235,7 +1247,14 @@ def cmd_selftest() -> int:
                (ADVANCED, "wz_runtime_tokio::advanced_publisher::put"),
                (UDP, "wz_runtime_coop::udp_link::UdpDriver<S> as Drop>::drop"),
                (TOKIO_ENGINE, "wz_capi_core::faces::SharedSession::publish_on_wire_all"),
-               (COOP_ENGINE, "wz_capi_coop::engine::CoopEngine<L,C>::open"))))
+               (COOP_ENGINE, "wz_capi_coop::engine::CoopEngine<L,C>::open"),
+               (ACCEPT_HANDSHAKE, "wz_session_core::accept_cookie::encode_accept_cookie"),
+               (CONFIG_VERDICT, "wz_capi_c_config_validate_topology_rows"),
+               (CONFIG_VERDICT, "wz_capi_c_config_device_requires"))))
+    expect("the doors an open reads its config through are not the verdict's",
+           not any(re.search(CONFIG_VERDICT, s) for s in (
+               "wz_capi_c_config_honoured", "wz_capi_c_config_disposition",
+               "zc_config_insert_json5", "wz_capi_c::config::render_nested")))
     # The denominator's own check: a switch pico built otherwise than asked is named, both ways.
     asked = {"Z_FEATURE_MATCHING": 1, "Z_FEATURE_INTEREST": 0, "Z_FEATURE_QUERY": 0}
     expect("a reference built as asked differs nowhere",

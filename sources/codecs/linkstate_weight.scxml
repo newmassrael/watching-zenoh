@@ -27,16 +27,15 @@
 
      THE FIELD IS DECLARED AT THE WIRE'S WIDTH, NOT THE VALUE'S — the two
      are different facts and this file used to collapse them (R311y880).
-     `uint16` made SCE emit `cursor.read_vle_u16()`, which REFUSES both a
-     value past `u16::MAX` and any encoding longer than 3 bytes. Upstream
-     refuses neither: the mirror at `:192-194` is the plain `Zenoh080`
+     `uint16` makes SCE emit `cursor.read_vle_u16()`, which reads the
+     whole ZInt and then REFUSES a value past `u16::MAX`. Upstream does
+     not refuse it: the mirror at `:192-194` is the plain `Zenoh080`
      whose `uint_impl!(u16)` derive is `let x: u64 = self.read(reader)?;
      Ok(x as $uint)` — it reads the full ZInt and TRUNCATES. The codec
      that refuses an out-of-range zint is `Zenoh080Bounded<u16>`, which
-     this field does not select. So a refusing read here did not make wz
-     stricter, it made wz DROP a topology advertisement that every
-     conforming peer folds into its routing table — and, because a
-     too-narrow read stops mid-varint, leave the cursor inside the field.
+     this field does not select. So a refusing read here would not make
+     wz stricter, it would make wz DROP a topology advertisement that
+     every conforming peer folds into its routing table.
      The VALUE width is applied once, by name, at the consumer boundary:
      `wz_codecs::wire_const::linkstate_weight_from_wire`.
 

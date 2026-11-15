@@ -376,7 +376,8 @@ impl ExchangeGaps {
 ///
 /// ⚠ Whether a sibling link SHOULD close it is the same open question
 /// `crate::interest::InterestCorrelation` records, and neither round answers it.
-pub type OpenExchanges = BTreeMap<(usize, usize, u64), OpenExchange>;
+pub type OpenExchanges =
+    BTreeMap<(usize, usize, wz_session_core::wire_id::RequestId), OpenExchange>;
 
 /// Where one end of an exchange was carried, kept past its frame so the row it
 /// sits on can be judged with its own row facts when the exchange is.
@@ -1482,7 +1483,10 @@ pub(crate) mod tests {
     /// At the lifetime of the record it goes into: the codec's borrowed messages
     /// are invariant in theirs, so a key made at `'static` could ride only with a
     /// `'static` payload.
-    pub(crate) fn sender_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
+    pub(crate) fn sender_space<'a>(
+        id: wz_session_core::wire_id::ExprId,
+        suffix: Option<&'a str>,
+    ) -> Wireexpr<'a> {
         Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id,
@@ -1493,7 +1497,10 @@ pub(crate) mod tests {
     }
 
     /// `M=0` — the id lives in the RECEIVER's space.
-    fn receiver_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
+    fn receiver_space<'a>(
+        id: wz_session_core::wire_id::ExprId,
+        suffix: Option<&'a str>,
+    ) -> Wireexpr<'a> {
         Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id,
@@ -1515,7 +1522,10 @@ pub(crate) mod tests {
     /// The MID comes from the codec's generated `Default` and the `N` bit from
     /// [`FLAG_N_N`] — R311y615 named it precisely so this line, and the census
     /// fixtures beside it, stop spelling `0x20`.
-    pub(crate) fn request_query(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+    pub(crate) fn request_query(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'static>,
+    ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::lent::Request {
             header: wz_codecs::lent::Request::default().header | n,
@@ -1538,7 +1548,11 @@ pub(crate) mod tests {
     /// property of the codec's reach, not of this fixture; a `bytes` term over
     /// this plane is therefore driven with the shape whose size the decoder
     /// actually knows.
-    pub(crate) fn request_put<'a>(rid: u64, keyexpr: Wireexpr<'a>, payload: &'a [u8]) -> Vec<u8> {
+    pub(crate) fn request_put<'a>(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'a>,
+        payload: &'a [u8],
+    ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::lent::Request {
             header: wz_codecs::lent::Request::default().header | n,
@@ -1559,7 +1573,7 @@ pub(crate) mod tests {
 
     /// A `Response` carrying a `Reply` with `payload`, echoing `request_id`.
     pub(crate) fn response_reply<'a>(
-        request_id: u64,
+        request_id: wz_session_core::wire_id::RequestId,
         keyexpr: Wireexpr<'a>,
         payload: &'a [u8],
     ) -> Vec<u8> {
@@ -1585,7 +1599,10 @@ pub(crate) mod tests {
     }
 
     /// A `Response` carrying an `Err`, echoing `request_id`.
-    fn response_err(request_id: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+    fn response_err(
+        request_id: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'static>,
+    ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::lent::Response {
             header: wz_codecs::lent::Response::default().header | n,
@@ -1602,7 +1619,7 @@ pub(crate) mod tests {
     }
 
     /// The closing `ResponseFinal`.
-    pub(crate) fn response_final(request_id: u64) -> Vec<u8> {
+    pub(crate) fn response_final(request_id: wz_session_core::wire_id::RequestId) -> Vec<u8> {
         wz_codecs::lent::ResponseFinal {
             request_id,
             ..Default::default()

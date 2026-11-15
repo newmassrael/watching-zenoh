@@ -207,7 +207,7 @@ async fn query_reaches_remote_queryable_and_reply_returns() {
                     move |view: &dyn ReplyView| {
                         replies_cb.lock().unwrap().push(view.payload().to_vec());
                     },
-                    move |_rid: u64| {
+                    move |_rid| {
                         finals_cb.fetch_add(1, Ordering::SeqCst);
                     },
                 ) {

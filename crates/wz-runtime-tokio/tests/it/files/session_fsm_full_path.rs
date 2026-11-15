@@ -64,7 +64,7 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
         TokioTime::new(),
     );
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     assert_eq!(engine.get_current_state(), SessionFsmUnicastState::Init);
 
     // ─── outbound.start ─→ LinkOpening ──────────────────────────

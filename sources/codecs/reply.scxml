@@ -24,7 +24,7 @@
      Wire shape (1+ bytes):
        byte 0   : header     (MID Z_REPLY 0x04 in bits 0..4 + C@5 +
                               Z@7). C = `_Z_FLAG_Z_R_C` gates the
-                              consolidation byte; Z =
+                              consolidation mode; Z =
                               `_Z_FLAG_Z_Z` gates the ext-chain.
                               `_z_reply_encode` currently never sets
                               Z (the upstream encoder writes no
@@ -35,10 +35,17 @@
                               set Z still decode cleanly via the
                               gated tlv-chain.
        C-gated:
-         byte 1 : consolidation (uint8 — `_Z_CONSOLIDATION_MODE_*`
-                                 enum; absent encoded byte implies
-                                 `Z_CONSOLIDATION_MODE_DEFAULT` per
-                                 the decoder's else-branch L533-535).
+         bytes  : consolidation (VLE u64; an absent field implies
+                  `Z_CONSOLIDATION_MODE_DEFAULT` per the decoder's
+                  else-branch L533-535). The width is upstream's, which
+                  reads the mode with the same z64 codec as the Query's
+                  (`commons/zenoh-codec/src/zenoh/reply.rs` @
+                  `consolidation = self.codec.read(&mut *reader)?;`, which
+                  is the codec at `commons/zenoh-codec/src/zenoh/query.rs` @
+                  `let v: u64 = self.read(&mut *reader)?;`),
+                  not zenoh-pico's `_z_uint8_decode`: the two agree below
+                  0x80 and part at 0x80, where a one-byte reader takes the
+                  continuation byte for the start of the body.
        Z-gated:
          chain  : codec_zenoh_ext_entry tlv-chain (no depth bound:
                               upstream reads it until Z clears, and
@@ -83,7 +90,7 @@
       <sce:flag name="C"   bit="5"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
-    <sce:field id="consolidation" sce:type="uint8" sce:byte="1" sce:bit-size="8"
+    <sce:field id="consolidation" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
                sce:present-if="header.C"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
                    sce:present-if="header.Z"

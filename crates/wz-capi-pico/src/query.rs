@@ -47,9 +47,9 @@
 //! would need a `transmute` and hand the C side a pointer whose validity we
 //! could not check.
 
-use std::cell::UnsafeCell;
-use std::ffi::c_void;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::cell::UnsafeCell;
+use core::ffi::c_void;
 
 use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
@@ -60,6 +60,7 @@ use crate::abi::{
 };
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
+use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
@@ -288,7 +289,7 @@ struct QueryMarshal {
     /// The request id this query answers — the correlator a DEFERRED reply and
     /// the terminator both need, and the one piece of the query that is not
     /// reachable through any accessor.
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     /// R2594 — the query's QoS, which a DEFERRED reply inherits. Like `rid` it
     /// has no pico accessor; it is carried only so the escaped responder can
     /// seed its replies from it.
@@ -369,14 +370,14 @@ impl QueryMarshal {
             // uses, so a `(zid, eid, sn)` read off a query and one read off a
             // sample cannot render differently.
             source_info: view.source_info().map(crate::pubsub::source_info_of),
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             loaned_attachment: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             rid: view.rid(),
             qos: view.qos(),
@@ -425,14 +426,14 @@ impl QueryMarshal {
             source_info: self.source_info,
             payload: self.payload.clone(),
             attachment: self.attachment.clone(),
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             loaned_attachment: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             rid: self.rid,
             qos: self.qos,
@@ -521,7 +522,7 @@ impl QueryView for QueryMarshal {
     fn payload(&self) -> Option<&[u8]> {
         (!self.payload.is_empty()).then_some(self.payload.as_slice())
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.rid
     }
     fn is_local(&self) -> bool {
@@ -578,7 +579,7 @@ impl z_owned_closure_query_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -646,9 +647,9 @@ pub(crate) fn make_queryable_callback(
         // a misbehaving callback.
         let ctx = closure.context.0;
         let in_callback = crate::ffi::InCallback::enter();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let _ = crate::ffi::catch(|| unsafe {
             call(query_ptr, ctx);
-        }));
+        });
         drop(in_callback);
         marshal.flush(out);
     }
@@ -671,7 +672,7 @@ unsafe fn free_query_marshal(handle: *mut c_void) {
 /// `src` must be null or a pointer this crate handed to a query callback.
 unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> *mut c_void {
     let Some(marshal) = query_marshal(src) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     // Only a marshal the DISPATCH built can be escaped: the session it must
     // reply through comes from there. A marshal with no holder is one this
@@ -680,10 +681,10 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> *mut c_void {
     // failure rather than silently handed back. An escaped copy is the end of
     // the chain and is not escaped again.
     if marshal.deferred.is_some() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let Some(holder) = marshal.holder.as_ref() else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
     // every terminator job of its drain batch runs after, which is what makes
@@ -887,7 +888,7 @@ pub struct z_query_reply_options_t {
 }
 
 crate::option_fields::unstable_option_fields!(z_query_reply_options_t {
-    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut crate::pubsub::z_source_info_t = core::ptr::null_mut(),
 });
 
 /// The upstream layout this struct must match, measured against the vendored
@@ -899,32 +900,35 @@ crate::option_fields::unstable_option_fields!(z_query_reply_options_t {
 /// tree would have caught getting that wrong: a C caller passing the upstream
 /// struct into a wz build with a short one writes past the end of wz's view and
 /// reads garbage for every field after the mismatch, silently.
+///
+/// The numbers are the LP64 header's (the crate root says how a 32-bit image is pinned).
+#[cfg(target_pointer_width = "64")]
 const _: () = {
-    assert!(std::mem::size_of::<z_query_reply_err_options_t>() == 8);
+    assert!(core::mem::size_of::<z_query_reply_err_options_t>() == 8);
     // By OFFSET, not only by size — see `crate::get::z_get_options_t`, where the
     // same feature-conditional tail displaced a field and a size check would
     // have read that as a harmless omission. Here the unstable field IS last,
     // so nothing moves; pinning it anyway is what keeps that a measured fact
     // rather than an assumption about upstream's field order, which is exactly
     // what was wrong next door.
-    assert!(std::mem::offset_of!(z_query_reply_options_t, timestamp) == 16);
-    assert!(std::mem::offset_of!(z_query_reply_options_t, attachment) == 32);
-    assert!(std::mem::offset_of!(z_query_reply_del_options_t, timestamp) == 8);
-    assert!(std::mem::offset_of!(z_query_reply_del_options_t, attachment) == 24);
+    assert!(core::mem::offset_of!(z_query_reply_options_t, timestamp) == 16);
+    assert!(core::mem::offset_of!(z_query_reply_options_t, attachment) == 32);
+    assert!(core::mem::offset_of!(z_query_reply_del_options_t, timestamp) == 8);
+    assert!(core::mem::offset_of!(z_query_reply_del_options_t, attachment) == 24);
 };
 
-#[cfg(feature = "unstable-api")]
+#[cfg(all(feature = "unstable-api", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<z_query_reply_options_t>() == 48);
-    assert!(std::mem::size_of::<z_query_reply_del_options_t>() == 40);
-    assert!(std::mem::offset_of!(z_query_reply_options_t, source_info) == 40);
-    assert!(std::mem::offset_of!(z_query_reply_del_options_t, source_info) == 32);
+    assert!(core::mem::size_of::<z_query_reply_options_t>() == 48);
+    assert!(core::mem::size_of::<z_query_reply_del_options_t>() == 40);
+    assert!(core::mem::offset_of!(z_query_reply_options_t, source_info) == 40);
+    assert!(core::mem::offset_of!(z_query_reply_del_options_t, source_info) == 32);
 };
 
-#[cfg(not(feature = "unstable-api"))]
+#[cfg(all(not(feature = "unstable-api"), target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<z_query_reply_options_t>() == 40);
-    assert!(std::mem::size_of::<z_query_reply_del_options_t>() == 32);
+    assert!(core::mem::size_of::<z_query_reply_options_t>() == 40);
+    assert!(core::mem::size_of::<z_query_reply_del_options_t>() == 32);
 };
 
 /// Fill default reply options (pico `z_query_reply_options_default`).
@@ -933,15 +937,15 @@ pub unsafe extern "C" fn z_query_reply_options_default(options: *mut z_query_rep
     if options.is_null() {
         return;
     }
-    (*options).encoding = std::ptr::null_mut();
+    (*options).encoding = core::ptr::null_mut();
     (*options).congestion_control = Z_CONGESTION_CONTROL_BLOCK;
     (*options).priority = Z_PRIORITY_DEFAULT;
-    (*options).timestamp = std::ptr::null_mut();
+    (*options).timestamp = core::ptr::null_mut();
     (*options).is_express = false;
-    (*options).attachment = std::ptr::null_mut();
+    (*options).attachment = core::ptr::null_mut();
     #[cfg(feature = "unstable-api")]
     {
-        (*options).source_info = std::ptr::null_mut();
+        (*options).source_info = core::ptr::null_mut();
     }
 }
 
@@ -974,7 +978,7 @@ pub struct z_query_reply_del_options_t {
 }
 
 crate::option_fields::unstable_option_fields!(z_query_reply_del_options_t {
-    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut crate::pubsub::z_source_info_t = core::ptr::null_mut(),
 });
 
 /// Fill default del-reply options (pico `z_query_reply_del_options_default`).
@@ -987,12 +991,12 @@ pub unsafe extern "C" fn z_query_reply_del_options_default(
     }
     (*options).congestion_control = Z_CONGESTION_CONTROL_BLOCK;
     (*options).priority = Z_PRIORITY_DEFAULT;
-    (*options).timestamp = std::ptr::null_mut();
+    (*options).timestamp = core::ptr::null_mut();
     (*options).is_express = false;
-    (*options).attachment = std::ptr::null_mut();
+    (*options).attachment = core::ptr::null_mut();
     #[cfg(feature = "unstable-api")]
     {
-        (*options).source_info = std::ptr::null_mut();
+        (*options).source_info = core::ptr::null_mut();
     }
 }
 
@@ -1009,7 +1013,7 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
     options: *mut z_query_reply_err_options_t,
 ) {
     if !options.is_null() {
-        (*options).encoding = std::ptr::null_mut();
+        (*options).encoding = core::ptr::null_mut();
     }
 }
 
@@ -1066,8 +1070,8 @@ impl z_owned_queryable_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -1276,14 +1280,14 @@ pub unsafe extern "C" fn z_declare_queryable(
                     engine,
                     id,
                     key,
-                    loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+                    loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                     released,
                 });
                 // Point the cached view at the boxed keyexpr's final address.
                 boxed.loaned_keyexpr = boxed.key.loaned();
                 *queryable = z_owned_queryable_t {
                     handle: Box::into_raw(boxed) as *mut c_void,
-                    _pad: [std::ptr::null_mut(); 3],
+                    _pad: [core::ptr::null_mut(); 3],
                 };
                 Z_OK
             }
@@ -1345,7 +1349,7 @@ pub unsafe extern "C" fn z_queryable_keyexpr(
 ) -> *const z_loaned_keyexpr_t {
     match handle_ref::<z_loaned_queryable_t, QueryableState>(queryable) {
         Some(state) => &state.loaned_keyexpr as *const z_loaned_keyexpr_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -1358,7 +1362,7 @@ pub unsafe extern "C" fn z_query_keyexpr(
 ) -> *const z_loaned_keyexpr_t {
     match query_marshal(query) {
         Some(marshal) => &marshal.loaned_keyexpr as *const z_loaned_keyexpr_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -1376,7 +1380,7 @@ pub unsafe extern "C" fn z_query_parameters(
         }
         let (start, len) = match query_marshal(query) {
             Some(marshal) => (marshal.parameters.as_ptr(), marshal.parameters.len()),
-            None => (std::ptr::null(), 0),
+            None => (core::ptr::null(), 0),
         };
         (*parameters) = z_view_string_t {
             _start: start,
@@ -1413,7 +1417,7 @@ pub unsafe extern "C" fn z_query_payload(
 ) -> *const z_loaned_bytes_t {
     match query_marshal(query) {
         Some(marshal) => &marshal.loaned_payload as *const z_loaned_bytes_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -1454,7 +1458,7 @@ pub unsafe extern "C" fn z_query_attachment(
 ) -> *const z_loaned_bytes_t {
     match query_marshal(query) {
         Some(marshal) => &marshal.loaned_attachment as *const z_loaned_bytes_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -1659,12 +1663,12 @@ pub unsafe extern "C" fn z_query_encoding(
     query: *const z_loaned_query_t,
 ) -> *const crate::encoding::z_loaned_encoding_t {
     if query.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(query as *const QueryMarshal);
     match marshal.encoding.as_ref() {
         Some(encoding) => encoding as *const _ as *const crate::encoding::z_loaned_encoding_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -1698,12 +1702,12 @@ pub(crate) unsafe fn queryable_identity(
 pub unsafe extern "C" fn z_query_source_info(
     query: *const z_loaned_query_t,
 ) -> *const crate::pubsub::z_source_info_t {
-    crate::ffi::guard_val(std::ptr::null(), || match query_marshal(query) {
+    crate::ffi::guard_val(core::ptr::null(), || match query_marshal(query) {
         Some(marshal) => match marshal.source_info.as_ref() {
             Some(info) => info as *const crate::pubsub::z_source_info_t,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         },
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     })
 }
 
@@ -1764,7 +1768,7 @@ mod tests {
         fn payload(&self) -> Option<&[u8]> {
             Some(&self.payload)
         }
-        fn rid(&self) -> u64 {
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
             7
         }
         fn qos(&self) -> wz_session_core::sample::QosLevel {
@@ -1884,7 +1888,7 @@ mod tests {
     impl ReplyOut for QosTap {
         fn reply(&mut self, _payload: &[u8]) {}
         fn reply_del(&mut self) {}
-        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
         fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
         fn clear_responder(&mut self) {}
         fn responder(&self) -> Option<(&[u8], u32)> {
@@ -1972,25 +1976,25 @@ mod tests {
         marshal.bind();
         let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
         unsafe {
-            let mut ke: crate::abi::z_view_keyexpr_t = std::mem::zeroed();
+            let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
             assert_eq!(
                 crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/q".as_ptr()),
                 Z_OK
             );
             let ke = crate::keyexpr::z_view_keyexpr_loan(&ke);
-            let mut payload = std::mem::zeroed();
+            let mut payload = core::mem::zeroed();
             assert_eq!(
                 crate::bytes::z_bytes_copy_from_str(&mut payload, c"p".as_ptr()),
                 Z_OK
             );
-            let mut put: z_query_reply_options_t = std::mem::zeroed();
+            let mut put: z_query_reply_options_t = core::mem::zeroed();
             z_query_reply_options_default(&mut put);
             put.is_express = true;
             assert_eq!(
                 z_query_reply(query, ke, crate::bytes::z_bytes_move(&mut payload), &put),
                 Z_OK
             );
-            let mut del: z_query_reply_del_options_t = std::mem::zeroed();
+            let mut del: z_query_reply_del_options_t = core::mem::zeroed();
             z_query_reply_del_options_default(&mut del);
             del.is_express = true;
             assert_eq!(z_query_reply_del(query, ke, &del), Z_OK);
@@ -2004,7 +2008,7 @@ mod tests {
                     query,
                     ke,
                     crate::bytes::z_bytes_move(&mut payload),
-                    std::ptr::null()
+                    core::ptr::null()
                 ),
                 Z_OK
             );

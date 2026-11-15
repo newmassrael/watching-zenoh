@@ -1008,11 +1008,20 @@ impl<S: PushStorage> PushOwned<S> {
     }
 }
 
+/// What the origin projection of `Push` asks of a storage profile
+/// beside PushStorage: that it is an origin profile, and
+/// that each byte string and text of `Push` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait PushOrigin: PushStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr::WireexprOrigin + super::ext_entry::ExtEntryOrigin + super::msg_put::MsgPutOrigin + super::msg_del::MsgDelOrigin {}
+
+impl<S: PushStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr::WireexprOrigin + super::ext_entry::ExtEntryOrigin + super::msg_put::MsgPutOrigin + super::msg_del::MsgDelOrigin> PushOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> PushVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: PushLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: PushStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<PushOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: PushOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<PushOwnedVariant<S>, CodecError> {
         Ok(match self {
             Self::CodecZenohMsgPut(_b) => PushOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in_origin::<S>(origin)?),
             Self::CodecZenohMsgDel(_b) => PushOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in_origin::<S>(origin)?),
@@ -1024,17 +1033,17 @@ impl<'a, D> PushVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: Push
 #[allow(dead_code)]
 impl<'a, D> PushIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: PushLentStorage {
     /// Project this borrowed view into an owned [`PushOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: PushStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<PushOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: PushOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<PushOwned<S>, CodecError> {
         Ok(PushOwned {
             header: self.header,
             keyexpr: self.keyexpr.try_into_owned_in_origin::<S>(origin)?,

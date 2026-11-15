@@ -71,9 +71,12 @@ jobs:
         # after it finds them present; without a cache step that directory is
         # thrown away with the runner and the download is paid every release.
         #
-        # Keyed on THIS file's hash, not `ci.yml`'s: the key must change when
-        # the package list changes, and the list that matters here is the one
-        # below. The `ci.yml` jobs key on `ci.yml` for the same reason.
+        # Keyed on this job's PACKAGE LIST (`.github/apt-packages/release/release.list`,
+        # which also names the runner image), as every `ci.yml` job is on its
+        # own: the key moves when the list does and with nothing else, and a
+        # job with an equal list would share the entry. The install step below
+        # reads the same file. The list is read from the checked-out tree, so a
+        # tag cut before the file existed cannot be released by this workflow.
         #
         # RESTORE and SAVE split, and the save `if: always()`, on the reasoning
         # `ci.yml`'s first copy records: the run this helps is the one a slow
@@ -83,9 +86,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/release.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/release/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/release/{0}.list', github.job)) }}-
 
       - name: Install system dependencies
         # R2104 (open-debt item 522) — `libxml2-dev` and `pkg-config` were put
@@ -120,9 +123,7 @@ jobs:
         # `sudo timeout ... apt-get` itself, because `timeout` must be the CHILD
         # of `sudo` rather than its parent for the signal to land on apt.
         run: |
-          bash scripts/lib/apt-install.sh \
-            cmake libclang-dev pkg-config clang perl \
-            python3-yaml protobuf-compiler
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/release/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # `WZ_APT_CACHE_DIRTY` is set by `apt-install.sh` when it actually

@@ -1196,6 +1196,34 @@ Witnessed by the machine, planner, manager and loop tests; not yet witnessed ove
 a real secure channel with a peer that connects in, which needs a verified
 inbound session (carried).
 
+Corrected and witnessed over a secure channel (the round that adds this
+paragraph). On the fixed profile the session a waiting node opens is the
+shell's, which accepted it, and the connect manager held no handle of it: a
+`close` or a `reset` of a node held that way stopped or reset its machine and
+left the session up, the status read counted no link for it, the end of a
+session a dialling `open` had taken over (`PassiveUp` to `Established`) was told
+to no machine, and the client node with a listener (`SlotClientNode`) did not
+tell the manager of its accepted sessions at all. The manager now keeps the face
+each such session is held as, counts it as the node's link, hands the shell the
+order to end it when the machine lets go of it
+(`ConnectManager::take_inbound_hang_ups`), and tells the machine of its end in
+whatever state the machine is; both shells (`AdminCore`, `SlotClientNode`) report
+their running proven sessions and end the ones let go of, through one pair of
+functions (`slot_dial::report_inbound`, `slot_dial::end_released_inbound`). On
+AP the loop held a waiting node's session only when it was accepted after the
+intent; it now keeps every accepted session whose key proved its zid, so a
+passive `open` that comes after the session holds it at once, as the fixed
+profile's tick does. The AP witness is
+`crates/wz-runtime-tokio/tests/it/files/passive_hold_over_mtls_e2e.rs`: two
+loops over mutual TLS, the waiting node's lifecycle queries asked in process,
+the hold and the status read, a reset (the next session held again, the same
+generation ending nothing) and a close (the peer's next session admitted and
+held by no machine), and a passive `open` after the session; the control is a
+peer that claims a zid its key does not name, admitted over the same channel and
+not held. The fixed profile's correction is witnessed by the connect manager's
+tests; no fixed image has yet been run with a peer connecting in under a passive
+intent.
+
 **D11. One atom.** `session-close-ingress` stays one atom, PARTIAL while it has
 residuals. A second atom would carry a second cargo feature gating the same
 verbs, the phantom split of catalog invariant 1 that Round 3450 declined when
@@ -1504,9 +1532,13 @@ is refused as `NoRoom` on the fixed profile; on the AP the table's refusal is
 the loop's and is logged, because the opener answers before the loop sees the
 request (carried).
 
-What the rulings leave to build, in order: D12 (the commander in the permit port, the
-`commander` role, the image that binds the verbs); D14 (the lane's step on
-the image). D11 and D13 change what the atom is graded against and need no code.
+What the rulings left to build, in order, was D12 (the commander in the permit
+port, the `commander` role, the image that binds the verbs) and D14 (the lane's
+step on the image); both are built and witnessed, as the paragraphs under each
+say. What is left of them is a question and a carried item: whether the heap
+profile's authority takes the commander (D12 leaves it to the owner), and the
+table-full refusal of an AP `open`, which is the loop's and logged (D15). D11
+and D13 change what the atom is graded against and need no code.
 
 What is measured of the one question left, upstream zenohd and D9's pinned
 self-signed certificate: the reference router built at the pin, with mutual TLS

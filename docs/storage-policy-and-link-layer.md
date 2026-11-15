@@ -905,6 +905,28 @@ text gap that is left is about 30 KB.
 Not covered: the TLS image built with the option and was not run; the batching row (361) is above
 what the image now measures (about 330) and was left; the getter's median was not re-measured.
 
+## 5.9 A host test of the receive built with no allocator (2026-11-14)
+
+The slot-profile tests of `wz-session-lwip` were all built with the crate's default `alloc`,
+which reaches `wz-session-core`. Under it the receive parks what follows a Frame in the same
+datagram (one copy) for the next iteration, and the walk that reads the rest of a datagram where
+it lies (`drive::dispatch_datagram`, the loop of a build with no allocator) was compiled by no host
+lane: only the images built it, and an image's run does not send a datagram of two Frames.
+
+Decision: the receive of a build with no allocator gets a host test of its own, built with
+`--no-default-features` (`tests/slot_frames_without_alloc.rs`), and that test uses the slot
+profile's own application layer, not a stand-in for the heap one. That layer exists: the
+process-wide `SlotApp` observer, typed by an `ObserverSinks` of closed sink types, dispatched by
+`SlotDispatch` against the session's tables in its slot. The heap profile's
+`ApplicationLayerObserver` and `dispatch_to` stay `alloc`-only, and the file that uses them
+(`slot_control_records`) now says so in its `cfg`. The test counts the acceptor's iterations with
+the counting global allocator the other slot files use: the claim is zero allocations in the
+window, and the test binary's own heap (harness, records) is outside it. The no-allocator link
+gate is not the instrument here: it judges an image's linked symbols, and a host test binary links
+`std` and an allocator by construction. The non-default tests gate learned one token, `-default`,
+so a leg can spell a build without the package's defaults; the run and the census build a leg
+through one function. Not covered: the other slot files of the crate still build with `alloc`.
+
 ## 6. Open
 
 - The Zephyr kernel keeps a heap of its own (network buffers, POSIX objects).

@@ -52,7 +52,10 @@ use crate::transport_profile::owned::ResponseFinalOwned;
 ///
 /// `request_id` MUST equal the `rid` from the matching
 /// `build_request_query` that opened the Query/Reply session.
-pub fn build_response_final(request_id: u64, qos: crate::sample::QosLevel) -> ResponseFinalOwned {
+pub fn build_response_final(
+    request_id: crate::wire_id::RequestId,
+    qos: crate::sample::QosLevel,
+) -> ResponseFinalOwned {
     let mut response_final = ResponseFinalOwned {
         // MID 0x1A (_Z_MID_N_RESPONSE_FINAL). The Z bit is set by the chain
         // edit below when a non-DEFAULT qos puts an extension there.

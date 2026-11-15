@@ -38,8 +38,8 @@ use crate::link::RxBytes;
 use crate::multicast_dispatch::{FrameIngest, JoinOutcome, MulticastDispatcher};
 #[cfg(feature = "transport-qos")]
 use crate::multicast_join::decode_join_qos;
-use crate::multicast_join::{decode_join, validate_join};
-use crate::multicast_params::MulticastParams;
+use crate::multicast_join::{decode_join, judge_join, JoinMismatch};
+use crate::multicast_params::{GroupJoinRule, MulticastParams};
 use crate::multicast_peer_arrived::MulticastPeerArrived;
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLostReason};
 #[cfg(feature = "alloc")]
@@ -355,126 +355,127 @@ where
                 // of our own beacon is a message this link received.
                 stats.transport_message_received();
                 if join.zid != params.zid.as_slice() {
-                    if let Some(baseline) = validate_join(&join, params) {
-                        // R311y227 — group-agreed QoS admission (zenoh
-                        // multicast/rx.rs `handle_join_from_unknown`): a non-qos
-                        // node REFUSES a qos peer's JOIN (its per-priority frames
-                        // would decode as "Unknown priority" against a single
-                        // conduit), while a qos node ACCEPTS a non-qos peer and
-                        // seeds its single DEFAULT conduit. `decode_join_qos` parses
-                        // the JOIN `ext_qos` (`None` = a non-qos peer), and the
-                        // per-priority next-SNs seed each of the peer's conduits.
-                        // R2728 (§5.21 `router-multicast-faces`) — KEEP the
-                        // admission outcome. The dispatcher has always computed
-                        // the `Admitted` / `Refreshed` split and both call sites
-                        // here discarded it, so the one fact that separates a new
-                        // peer from a live peer's periodic beacon was free and
-                        // thrown away. `None` is the QoS-refused case below,
-                        // where no admission is attempted at all.
-                        #[cfg(feature = "transport-qos")]
-                        let admission = {
-                            let qos_next_sns = decode_join_qos(bytes);
-                            // Admit unless the peer is qos AND this node is not
-                            // (the ONE refused case): `peer_non_qos || local_qos`.
-                            if qos_next_sns.is_none() || params.is_qos {
-                                Some(dispatcher.ingest_join_qos(
-                                    join.zid.into_inner(),
-                                    src,
-                                    baseline,
-                                    qos_next_sns,
-                                    now_ms,
-                                ))
-                            } else {
-                                None
+                    // zenoh asks whether its table has room for a new member before it reads
+                    // the Join's terms, so a Join it turns away there is a refusal and not an
+                    // incompatible Join, whatever it advertises. zenoh-pico reads the terms first,
+                    // and its rule meets the cap where the member is admitted.
+                    if params.join_rule == GroupJoinRule::Zenoh
+                        && dispatcher.turn_away_at_capacity(src)
+                    {
+                        return MulticastRxNext::Done;
+                    }
+                    // R311y227 — the JOIN `ext_qos` (`None` = a non-qos peer), whose
+                    // per-priority next-SNs seed each of the peer's conduits. A build
+                    // without `transport-qos` reads no offer.
+                    #[cfg(feature = "transport-qos")]
+                    let qos_next_sns = decode_join_qos(bytes);
+                    #[cfg(feature = "transport-qos")]
+                    let peer_offers_qos = qos_next_sns.is_some();
+                    #[cfg(not(feature = "transport-qos"))]
+                    let peer_offers_qos = false;
+                    match judge_join(&join, params, peer_offers_qos) {
+                        Ok(baseline) => {
+                            // R2728 (§5.21 `router-multicast-faces`) — KEEP the
+                            // admission outcome: the `Admitted` / `Refreshed` split is
+                            // the one fact that separates a new peer from a live
+                            // peer's periodic beacon.
+                            #[cfg(feature = "transport-qos")]
+                            let admission = dispatcher.ingest_join_qos(
+                                join.zid.into_inner(),
+                                src,
+                                baseline,
+                                qos_next_sns,
+                                now_ms,
+                            );
+                            #[cfg(not(feature = "transport-qos"))]
+                            let admission = dispatcher.ingest_join(
+                                join.zid.into_inner(),
+                                src,
+                                baseline,
+                                now_ms,
+                            );
+                            // R2728 — announce the ARRIVAL, the half this surface
+                            // lacked: the departure event has existed since R311y784
+                            // and nothing ever said a peer had COME. Fired only on
+                            // `Admitted`, which is the branch that allocated the slot
+                            // — the same call site both references announce from
+                            // (`zenoh/src/net/routing/gateway.rs` @
+                            // `pub fn new_peer_multicast`, which is where zenoh mints
+                            // that peer's FACE, and
+                            // `vendor/zenoh-pico/src/transport/multicast/rx.c` @
+                            // `_z_connectivity_peer_connected(`). A `Refreshed`
+                            // beacon must NOT re-announce: a consumer that builds
+                            // per-peer state on arrival would rebuild it every join
+                            // interval.
+                            if matches!(admission, JoinOutcome::Admitted) {
+                                on_event(IterationEvent::MulticastPeerArrived(
+                                    MulticastPeerArrived {
+                                        peer: MulticastPeerId::from_wire(join.zid.into_inner()),
+                                        // The role is read off the BEACON, not off
+                                        // `JoinBaseline::whatami` — that field is
+                                        // `multicast-declarations`-gated because the
+                                        // Designated-Router election is what added
+                                        // it, and this announcement is owed on every
+                                        // build that has a multicast ingress. Same
+                                        // projection either way
+                                        // (`WhatAmI::from_wire` on the 2-bit JOIN
+                                        // field, `None` for a code this node does not
+                                        // recognize), taken one step nearer the wire.
+                                        whatami: WhatAmI::from_wire(join.whatami()),
+                                    },
+                                ));
                             }
-                        };
-                        #[cfg(not(feature = "transport-qos"))]
-                        let admission = Some(dispatcher.ingest_join(
-                            join.zid.into_inner(),
-                            src,
-                            baseline,
-                            now_ms,
-                        ));
-                        // R2728 — announce the ARRIVAL, the half this surface
-                        // lacked: the departure event has existed since R311y784
-                        // and nothing ever said a peer had COME. Fired only on
-                        // `Admitted`, which is the branch that allocated the slot
-                        // — the same call site both references announce from
-                        // (`zenoh/src/net/routing/gateway.rs` @
-                        // `pub fn new_peer_multicast`, which is where zenoh mints
-                        // that peer's FACE, and
-                        // `vendor/zenoh-pico/src/transport/multicast/rx.c` @
-                        // `_z_connectivity_peer_connected(`). A `Refreshed`
-                        // beacon must NOT re-announce: a consumer that builds
-                        // per-peer state on arrival would rebuild it every join
-                        // interval.
-                        if matches!(admission, Some(JoinOutcome::Admitted)) {
-                            on_event(IterationEvent::MulticastPeerArrived(MulticastPeerArrived {
-                                peer: MulticastPeerId::from_wire(join.zid.into_inner()),
-                                // The role is read off the BEACON, not off
-                                // `JoinBaseline::whatami` — that field is
-                                // `multicast-declarations`-gated because the
-                                // Designated-Router election is what added
-                                // it, and this announcement is owed on every
-                                // build that has a multicast ingress. Same
-                                // projection either way
-                                // (`WhatAmI::from_wire` on the 2-bit JOIN
-                                // field, `None` for a code this node does not
-                                // recognize), taken one step nearer the wire.
-                                whatami: WhatAmI::from_wire(join.whatami()),
-                            }));
+                            // R2417 — negotiate this peer's protocol PATCH level off
+                            // the SAME beacon, after the admission above: the level
+                            // is the sole gate on reading its fragment chains under
+                            // the `0x2 First` / `0x3 Drop` rules, and both
+                            // references re-copy it from EVERY JOIN rather than only
+                            // the admitting one (pico
+                            // `src/transport/multicast/rx.c` @
+                            // `entry->common._patch = msg->_patch < _Z_CURRENT_PATCH
+                            // ? msg->_patch : _Z_CURRENT_PATCH`, at its refresh site
+                            // beside the lease and SN copies). A refused JOIN leaves
+                            // no slot, so this is a no-op exactly then.
+                            #[cfg(feature = "reassembly")]
+                            dispatcher.record_peer_patch(
+                                src,
+                                crate::multicast_join::decode_join_patch(bytes),
+                            );
                         }
-                        // R2417 — negotiate this peer's protocol PATCH level off
-                        // the SAME beacon, after the admission above: the level
-                        // is the sole gate on reading its fragment chains under
-                        // the `0x2 First` / `0x3 Drop` rules, and both
-                        // references re-copy it from EVERY JOIN rather than only
-                        // the admitting one (pico
-                        // `src/transport/multicast/rx.c` @
-                        // `entry->common._patch = msg->_patch < _Z_CURRENT_PATCH
-                        // ? msg->_patch : _Z_CURRENT_PATCH`, at its refresh site
-                        // beside the lease and SN copies). A refused JOIN leaves
-                        // no slot, so this is a no-op exactly then.
-                        #[cfg(feature = "reassembly")]
-                        dispatcher.record_peer_patch(
-                            src,
-                            crate::multicast_join::decode_join_patch(bytes),
-                        );
-                    } else {
-                        // R2379 (open-debt item 15, `session-multicast`) — the
-                        // JOIN named capabilities this node cannot speak, and
-                        // `validate_join` has already applied pico's exact
-                        // discriminator (version, `seq_num_res`, `req_id_res`,
-                        // `batch_size`, each against OUR OWN params). For an
-                        // UNKNOWN address that is simply a refused admission,
-                        // which is what this arm has always done. For an
-                        // ALREADY-ADMITTED one it is not: the peer is on the
-                        // group and changed the terms mid-session, and holding
-                        // it to its lease means mis-parsing everything it sends
-                        // until the lease runs out.
-                        //
-                        // pico DROPS it here (`src/transport/multicast/rx.c`,
-                        // the existing-peer branch, which updates SNs and lease
-                        // only when all three match). zenoh does NOT -- its
-                        // `handle_join_from_peer` ignores the inconsistent Join
-                        // and keeps the first-announced parameters. The two
-                        // upstreams disagree and wz follows pico, for the same
-                        // reachability reason recorded on
-                        // `MulticastPeerLostReason::CapabilitiesChanged`.
-                        //
-                        // `drop_by_src_with` is a no-op when nothing is
-                        // admitted at `src`, so the unknown-address case needs
-                        // no guard here -- the departure event cannot be
-                        // manufactured for a peer that never existed.
-                        dispatcher.drop_by_src_with(
-                            src,
-                            MulticastPeerLostReason::CapabilitiesChanged,
-                            |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
-                        );
-                        // Open-debt item 913 — and what it declared goes with it.
-                        #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-                        if let Some(retracted) = dispatcher.take_member_retractions() {
-                            on_event(IterationEvent::Poll(&retracted));
+                        Err(mismatch) => {
+                            // A refused Join is counted, and its sender's frames stay
+                            // unread: the SN gate has no conduit for an address that
+                            // was never admitted. For an ALREADY-ADMITTED address the
+                            // rule decides (`GroupJoinRule`). zenoh-pico drops a member
+                            // whose resolutions or batch size changed and ignores a
+                            // Join of another version
+                            // (`src/transport/multicast/rx.c` @
+                            // `if (msg->_version != Z_PROTO_VERSION) {` returns before
+                            // the member is looked at). zenoh refuses the Join and keeps
+                            // the member here; upstream then ends its whole transport
+                            // (see `GroupJoinRule`), which wz does not.
+                            //
+                            // `drop_by_src_with` is a no-op when nothing is admitted at
+                            // `src`, so the departure event cannot be manufactured for a
+                            // peer that never existed.
+                            dispatcher.note_incompatible_join();
+                            if params.join_rule == GroupJoinRule::Pico
+                                && matches!(
+                                    mismatch,
+                                    JoinMismatch::Resolution | JoinMismatch::BatchSize
+                                )
+                            {
+                                dispatcher.drop_by_src_with(
+                                    src,
+                                    MulticastPeerLostReason::CapabilitiesChanged,
+                                    |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
+                                );
+                                // Open-debt item 913 — and what it declared goes with it.
+                                #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                                if let Some(retracted) = dispatcher.take_member_retractions() {
+                                    on_event(IterationEvent::Poll(&retracted));
+                                }
+                            }
                         }
                     }
                 }
@@ -1067,6 +1068,8 @@ mod batch_walk_tests {
             compression: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -1438,12 +1441,7 @@ mod batch_walk_tests {
         /// cleared. Derived from the production encoder so only the extension
         /// chain differs between the two peers.
         fn silent_join(zid: &[u8]) -> Vec<u8> {
-            let dgram = peer_join(zid);
-            let (_, consumed) = crate::join_decode::decode_join_body(dgram[0], &dgram[1..])
-                .expect("the real beacon's body decodes");
-            let mut out = dgram[..1 + consumed].to_vec();
-            out[0] &= !wire_const::FLAG_T_Z;
-            out
+            crate::multicast_join::join_without_chain(&peer_join(zid))
         }
 
         /// A chain-start fragment with NO extension chain at all — the wire a

@@ -356,6 +356,15 @@ original reproduced by naming it. Three things follow from it:
   default lines present, 659 of 965 with `unstable` and 715 of 1,025 with `unstable` and
   `shared-memory`; the seam over the engine is
   `docs/zenoh-api-on-the-engine.md`).
+  The task controller `zenoh-task` (`TaskController` and `TerminatableTask`, which `zenoh::internal`
+  re-exports and the ecosystem's crates spawn and stop their tasks with) is in the family under
+  upstream's name and held by a differential test; it joins `MEMBERS` with its emitted surface.
+  So is `zenoh-sync`, whole: `zenoh::internal` re-exports its `Condition`, which `zenoh-ext`'s
+  group waits on, and upstream's transport and links take its event, mvar, signal and object pool,
+  so a part of it patched into a graph would leave those crates without what they name. Two items
+  are not copied as they are (a shared `Arc` refused by `get_mut_unchecked`, the waiting counts of
+  `Mvar` held for the time a call waits); a differential test holds the condition and the event to
+  upstream's, and it joins `MEMBERS` as `zenoh-task` does.
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
   crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once
   patched, and the same graph unpatched as its control. The packages are not published (the
@@ -533,6 +542,15 @@ arm `--drop-in-features c` adds).
   allocates. The pico ABI's layout switches are capabilities, so its `arm` is empty.
   Version 1 had no `arm`, and its digest could not tell two zenoh-c drop-ins of
   different layouts apart; version 2 adds it.
+- It names the engine the build runs its sessions on (`engine`: `tokio`, or `coop`
+  for a pico build whose features select the cooperative engine and not the tokio
+  one) and the platform it is a library for (`platform`: `host`, or `zephyr` for a
+  pico build with `os-zephyr`). Version 2 had neither, and its digest could not tell a
+  pico build on one engine or platform from one on another with the same
+  capabilities; version 3 adds both.
+- It lists the ABI's protocol facts (`facts`): what a session of the ABI states on
+  the wire that no switch moves, each from a `[[protocol_fact]]` of the declaration.
+  They are outside the digest, which the ABI and the catalogue version already fix.
 - A capability is supported when it is in the build's final feature list, so the
   cooperative engine's build states what it has (its list leaves out what selects
   the tokio engine), not what its header asked for.
@@ -542,7 +560,7 @@ arm `--drop-in-features c` adds).
   read from is beside it in `derived_from` (file names only, never a path of the
   machine that made it).
 
-It is JSON, format `wz-conformance-statement` version 2; a field's meaning changes
+It is JSON, format `wz-conformance-statement` version 3; a field's meaning changes
 only with the version.
 
 The C ABI libraries carry the same digest and hand it out:

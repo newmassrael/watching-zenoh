@@ -73,6 +73,7 @@ use crate::cancellation::CancellableFan;
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
+use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
 use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 #[cfg(feature = "gossip")]
 use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
@@ -112,6 +113,7 @@ use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
+use wz_session_core::wire_id::ExprId;
 
 #[cfg(feature = "multicast-transport")]
 mod multicast;
@@ -504,7 +506,7 @@ enum PutKey<'a> {
     // Read only by the group leg, which a build without the multicast transport has not.
     #[cfg_attr(not(feature = "multicast-transport"), allow(dead_code))]
     Alias {
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&'a str>,
     },
     /// A declared alias together with the literal it stands for, which the caller holds:
@@ -513,7 +515,7 @@ enum PutKey<'a> {
     #[cfg_attr(not(feature = "multicast-transport"), allow(dead_code))]
     Declared {
         literal: &'a str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&'a str>,
     },
 }
@@ -757,7 +759,7 @@ impl QueryLeg<'_> {
 
     /// What undoes the leg issued as `rid` when its get is cancelled: its pending
     /// query, taken off the session it was issued on.
-    fn canceller(&self, rid: u64) -> Box<dyn FnOnce() + Send> {
+    fn canceller(&self, rid: wz_session_core::wire_id::RequestId) -> Box<dyn FnOnce() + Send> {
         match self {
             QueryLeg::Face(session) | QueryLeg::Local(session) => {
                 let session = (*session).clone();
@@ -782,14 +784,49 @@ fn zid_text(zid: &[u8]) -> String {
     wz_runtime_tokio::zid_hex::zid_to_zenoh_hex(zid)
 }
 
+/// The two nodes a face's subscriber names in its reception lines: this node and the node
+/// behind the face. A face with no remote zid is the local plane, `local`: a link's handshake
+/// always names the node (zenoh's `InitSyn` and `InitAck` carry the zid).
+struct FaceEnds {
+    node: String,
+    remote: String,
+}
+
+impl FaceEnds {
+    fn new(node: &[u8], remote: Option<&[u8]>) -> Self {
+        FaceEnds {
+            node: zid_text(node),
+            remote: remote.map_or_else(|| "local".to_owned(), zid_text),
+        }
+    }
+}
+
 /// Declare a subscriber on one face in `wire`'s form.
+///
+/// Each sample the face hands the subscriber is a `wz::routing` line naming this node, the node
+/// the sample came from and its timestamp (`peer <zid> receives from <zid>: key=<key>
+/// ts=<time>/<zid>`), the form the router writes its sends and boundary decisions in: a
+/// subscriber that was handed one message twice (debt item 934, upstream's
+/// `unique_timestamps`) is read back to the faces, and through them to the routers, that
+/// delivered each copy. A run that does not log `wz::routing` at debug pays a level check.
 fn declare_subscriber_on(
     session: &TokioSession,
     keyexpr: &str,
     wire: &WireKey,
     options: SubscribeOptions,
-    callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ends: FaceEnds,
+    mut callback: impl FnMut(&dyn SampleView) + Send + 'static,
 ) -> Option<Subscriber<TokioRuntime>> {
+    let callback = move |sample: &dyn SampleView| {
+        wz_runtime_tokio::route_trace(format_args!(
+            "peer {} receives from {}: key={} ts={}",
+            ends.node,
+            ends.remote,
+            sample.keyexpr(),
+            wz_runtime_tokio::TimestampText(sample.timestamp()),
+        ));
+        callback(sample);
+    };
     if wire.is_literal() {
         session
             .declare_subscriber(keyexpr.to_string(), options, callback)
@@ -1128,7 +1165,7 @@ struct QblEntry {
 /// holds our ids in its own inbound table, so two peers cannot collide, and
 /// a peer's own outbound ids live in a different table entirely.
 struct KexprEntry {
-    id: u64,
+    id: ExprId,
     keyexpr: String,
     /// How many holders the declaration has: `1` for one made through
     /// [`SharedSession::declare_keyexpr`], and one more for each
@@ -1773,7 +1810,7 @@ struct Inner {
     /// first id issued is 1: zero is reserved on the wire
     /// (`SendDeclareError::ReservedMappingIdZero`) and is also this crate's
     /// "not declared" discriminant in `z_loaned_keyexpr_t::_mapping`.
-    next_kexpr_id: u64,
+    next_kexpr_id: ExprId,
 }
 
 impl Inner {
@@ -2012,6 +2049,9 @@ pub struct SharedSession {
     /// not inert the send and receive lanes that step around a per-message verdict are off for
     /// this node's sessions. See [`SessionResources::policy`].
     policy: crate::node_policy::NodePolicy,
+    /// The aggregates the node declares under, given to the plane and to every face session.
+    /// See [`SessionResources::aggregation`].
+    aggregation: DeclarationAggregation,
     /// The session's closed latch: set once by `SessionState::close` and never cleared. It lives
     /// HERE, and the drive loop races against this same `Arc`, so that an entity that outlives
     /// the session handle (a publisher, a querier, a query being answered) asks the one fact the
@@ -2126,6 +2166,15 @@ pub struct SessionResources {
     /// whose keys are the wire's, which every node was until the key reached a session.
     #[cfg(feature = "routing-namespace")]
     pub namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
+    /// The aggregates of `aggregation/subscribers` and `aggregation/publishers`: every session
+    /// of the node declares a subscriber, and asks for a publisher's subscribers, under the first
+    /// aggregate that includes its key, once per aggregate and per face, as upstream's session
+    /// declares once per aggregate to each face of its runtime
+    /// (`zenoh/src/api/session.rs` @ `.aggregated_subscribers`). Each face session keeps its own
+    /// count of the entities under an aggregate, so a face that comes up later is declared the
+    /// aggregate by the first entity replayed to it. None is a node that declares each entity
+    /// as its own key, which every node was until the keys reached a session.
+    pub aggregation: DeclarationAggregation,
 }
 
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
@@ -2155,6 +2204,7 @@ impl Default for SessionResources {
             policy: crate::node_policy::NodePolicy::default(),
             #[cfg(feature = "routing-namespace")]
             namespace: None,
+            aggregation: DeclarationAggregation::none(),
         }
     }
 }
@@ -2269,6 +2319,7 @@ impl SharedSession {
             policy,
             #[cfg(feature = "routing-namespace")]
             namespace,
+            aggregation,
         } = resources;
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
@@ -2324,6 +2375,10 @@ impl SharedSession {
         // R3065 -- a node opened over a client storage reads what its OWN peers send through it,
         // the plane included (a local get answered by a peer's queryable is read here).
         install_shm_reader(&local, &shm_clients);
+        // The plane's link is inert, so what it declares under an aggregate reaches nobody; it is
+        // given the aggregates all the same, so that every session of the node is one participant
+        // that declares alike.
+        local.set_declaration_aggregation(aggregation.clone());
         // R2580 — the plane's face-shaped entry. Its `session` is a CLONE of
         // the field above rather than a move: the two name one session, and the
         // field stays where it is because `local_session` / `drive_local_plane`
@@ -2378,6 +2433,7 @@ impl SharedSession {
             #[cfg(feature = "routing-namespace")]
             namespace,
             policy,
+            aggregation,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "advanced")]
             tickers: StdMutex::new(BTreeMap::new()),
@@ -2436,9 +2492,17 @@ impl SharedSession {
 
     /// The next timestamp off this node's clock, or `None` when the node holds none (its role does
     /// not stamp, or the build has no clock): upstream's `runtime.hlc()` followed by
-    /// `new_timestamp`. Strictly increasing from one call to the next.
+    /// `new_timestamp`, for a caller that reads the clock for itself. No stamping policy applies
+    /// to it, as none applies to upstream's clock; the publications this node stamps take theirs
+    /// from [`NodeHlc::stamp`]. Strictly increasing from one call to the next.
     pub fn node_timestamp(&self) -> Option<wz_session_core::sample::TimestampHint> {
-        self.node_hlc.stamp()
+        self.node_hlc.clock_stamp()
+    }
+
+    /// This node's clock itself, for a host that lends it as upstream's runtime lends its
+    /// `Option<Arc<HLC>>`: the one every session and face of the node stamps with, never a copy.
+    pub fn node_hlc(&self) -> &NodeHlc {
+        &self.node_hlc
     }
 
     /// Record where this node's listeners can be reached: the locators they actually got, without
@@ -2807,6 +2871,9 @@ impl SharedSession {
         actions.set_plain_put_lane(!self.has_policy());
         // R3065 -- the face reads what its peer sends through the node's own clients.
         install_shm_reader(&session, &self.shm_clients);
+        // Before the replay below declares anything on the face: the entities it replays are
+        // declared to the peer under the node's aggregates, one declaration per aggregate.
+        session.set_declaration_aggregation(self.aggregation.clone());
 
         let peer_zid = actions.peer_zid();
         let mut guard = self.admit_under_lock(id, peer_zid.as_deref(), dialled)?;
@@ -2935,6 +3002,7 @@ impl SharedSession {
                 SubscribeOptions::default()
                     .with_allowed_origin(entry.allowed_origin)
                     .with_retraction_naming(entry.retraction.clone()),
+                FaceEnds::new(&self.zid, held.peer_zid.as_deref()),
                 (entry.sink)(),
             ) {
                 subs.insert(entry.id, sub);
@@ -3614,7 +3682,7 @@ impl SharedSession {
     #[cfg(feature = "transport-shm")]
     pub fn publish_shm_aliased_all(
         &self,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&str>,
         payload: Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
         opts: &PublishOptions,
@@ -3732,9 +3800,10 @@ impl SharedSession {
         // Measured: a publication cache stores the local copy and a querying subscriber hears
         // the wire one, and with two times they were two samples, so the value was delivered
         // twice (`z_int_pub_cache_query_sub_test` under load).
+        // The node stamps its own publication here, so the stamping policy is applied here.
         let stamped;
         let opts = match opts.timestamp {
-            None => match self.node_timestamp() {
+            None => match self.node_hlc.stamp() {
                 Some(timestamp) => {
                     stamped = opts.clone().with_timestamp(timestamp);
                     &stamped
@@ -4046,7 +4115,7 @@ impl SharedSession {
     /// the whole key.
     pub fn publish_aliased_all(
         &self,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&str>,
         payload: &[u8],
         opts: &PublishOptions,
@@ -4060,7 +4129,7 @@ impl SharedSession {
     fn publish_aliased_all_for(
         &self,
         key: Option<&str>,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&str>,
         payload: &[u8],
         opts: &PublishOptions,
@@ -4141,7 +4210,7 @@ impl SharedSession {
     pub fn publish_declared_all(
         &self,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
@@ -4186,18 +4255,14 @@ impl SharedSession {
     /// no face yet, nothing goes on the wire and the entry is still recorded,
     /// so every FUTURE face replays it in [`Self::face_up`].
     ///
-    /// Returns `None` when the id space is exhausted. The space is the WIRE's,
-    /// not ours: zenoh types `DeclareKeyExpr.id` as `ExprId = u16` and pico's
-    /// `_z_decl_kexpr_t` holds a `uint16_t`, so ids above `u16::MAX` are
-    /// rejected by `send_declare_keyexpr` and must not be handed out. Refusing
-    /// is the honest answer — wrapping would silently re-issue a live id and
-    /// re-point a peer's existing alias at a different keyexpr.
-    pub fn declare_keyexpr(&self, keyexpr: String) -> Option<u64> {
+    /// Returns `None` when the id space is exhausted. The space is the WIRE's
+    /// `ExprId`, as zenoh's `DeclareKeyExpr.id` and pico's `uint16_t _id` are,
+    /// so the counter is one and exhausts where it does. Refusing is the honest
+    /// answer — wrapping would silently re-issue a live id and re-point a
+    /// peer's existing alias at a different keyexpr.
+    pub fn declare_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         let mut guard = self.lock();
         let id = guard.next_kexpr_id.checked_add(1)?;
-        if id > u64::from(u16::MAX) {
-            return None;
-        }
         guard.next_kexpr_id = id;
 
         for face in guard.faces.values() {
@@ -4238,7 +4303,7 @@ impl SharedSession {
     /// each call there is its own declaration with its own id.
     ///
     /// `None` when the id space is exhausted, as for [`Self::declare_keyexpr`].
-    pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<u64> {
+    pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         {
             let mut guard = self.lock();
             if let Some(entry) = guard.kexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
@@ -4266,7 +4331,7 @@ impl SharedSession {
     /// The count and the retraction are one step under one lock: releasing the
     /// lock between them would let an [`Self::acquire_keyexpr`] find the entry at
     /// zero, take a holder, and then have its key retracted from under it.
-    pub fn release_keyexpr(&self, mapping_id: u64) {
+    pub fn release_keyexpr(&self, mapping_id: ExprId) {
         let mut guard = self.lock();
         let Some(entry) = guard.kexprs.iter_mut().find(|e| e.id == mapping_id) else {
             return;
@@ -4280,7 +4345,7 @@ impl SharedSession {
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
     /// in declaration order — the SSOT every new face is replayed from.
-    pub fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    pub fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.lock()
             .kexprs
             .iter()
@@ -4294,7 +4359,7 @@ impl SharedSession {
     /// No cross-lock drop dance is needed here, unlike the subscriber and
     /// queryable twins: a `KexprEntry` owns a `String` and no `Arc<CClosure>`,
     /// so releasing it cannot run C code.
-    pub fn undeclare_keyexpr(&self, mapping_id: u64) {
+    pub fn undeclare_keyexpr(&self, mapping_id: ExprId) {
         let mut guard = self.lock();
         self.retract_keyexpr_locked(&mut guard, mapping_id);
     }
@@ -4302,7 +4367,7 @@ impl SharedSession {
     /// The retraction itself, for a caller that already holds the registry lock
     /// — [`Self::undeclare_keyexpr`] and [`Self::release_keyexpr`], which must
     /// not let it go between deciding and doing.
-    fn retract_keyexpr_locked(&self, guard: &mut Inner, mapping_id: u64) {
+    fn retract_keyexpr_locked(&self, guard: &mut Inner, mapping_id: ExprId) {
         if let Some(pos) = guard.kexprs.iter().position(|e| e.id == mapping_id) {
             guard.kexprs.remove(pos);
         }
@@ -4923,7 +4988,7 @@ impl SharedSession {
     pub fn put_plain_declared(
         &self,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> Option<Result<usize, FanoutError>> {
@@ -4958,7 +5023,7 @@ impl SharedSession {
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> FilteredPut {
@@ -5012,7 +5077,7 @@ impl SharedSession {
         &self,
         targets: &FanTargets,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> FilteredPut {
@@ -5032,7 +5097,7 @@ impl SharedSession {
         &self,
         targets: &FanTargets,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> Option<Result<usize, FanoutError>> {
@@ -5113,7 +5178,7 @@ impl SharedSession {
         destination: Locality,
         reach: QueryReach<'_>,
         fan: Option<&CancellableFan>,
-        mut issue: impl FnMut(QueryLeg<'_>) -> Option<u64>,
+        mut issue: impl FnMut(QueryLeg<'_>) -> Option<wz_session_core::wire_id::RequestId>,
     ) {
         let links = reach.links;
         let target = reach.target_peer;
@@ -5335,6 +5400,7 @@ impl SharedSession {
                 SubscribeOptions::default()
                     .with_allowed_origin(allowed_origin)
                     .with_retraction_naming(retraction.clone()),
+                FaceEnds::new(&self.zid, face.peer_zid.as_deref()),
                 sink(),
             ) {
                 face.subs.insert(id, sub);
@@ -9023,5 +9089,137 @@ mod face_up_order_tests {
             None
         });
         assert_eq!(faces, 0, "the first node's link is slot 1, outside the set");
+    }
+}
+
+/// `aggregation/subscribers` on the registry of faces: what each face is declared.
+#[cfg(test)]
+mod aggregation_tests {
+    use super::*;
+    use wz_runtime_tokio_test_support::{establish_capability_pair_between, EstablishedPair};
+    use wz_session_core::inbound::InboundFrame;
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    /// The declarations a link was sent after its `before`-th send: how many, and the bytes of
+    /// the frames that carried them, which the keys they name are read from.
+    fn declarations_since(pair: &EstablishedPair, before: usize) -> (usize, Vec<u8>) {
+        let (mut declarations, mut carried) = (0, Vec::new());
+        for (bytes, _) in pair.resp_driver.snapshot().sends.iter().skip(before) {
+            let Ok(InboundFrame::Frame { payload, .. }) = pair.init_actions.handle_inbound(bytes)
+            else {
+                continue;
+            };
+            let here = parse_frame_payload(&payload)
+                .expect("the frame decodes")
+                .iter()
+                .filter(|message| matches!(message, NetworkMessage::Declare(_)))
+                .count();
+            if here > 0 {
+                declarations += here;
+                carried.extend_from_slice(&payload);
+            }
+        }
+        (declarations, carried)
+    }
+
+    fn names(carried: &[u8], key: &str) -> bool {
+        carried
+            .windows(key.len())
+            .any(|window| window == key.as_bytes())
+    }
+
+    fn no_op() -> SubscriberSink {
+        Arc::new(|| Box::new(|_sample: &dyn SampleView| {}))
+    }
+
+    /// Two subscribers under one aggregate are ONE declaration of the aggregate on each face,
+    /// the face that was up when they were declared and the face that came up afterwards and was
+    /// replayed them, while a key no aggregate includes is declared itself. The declaration is
+    /// retracted with the last subscriber under it and not before. The CONTROL is the same two
+    /// subscribers on a node that states no aggregate: two declarations, each of its own key.
+    #[tokio::test]
+    async fn each_face_is_declared_an_aggregate_once_for_the_subscribers_it_includes() {
+        let control_link =
+            establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let control =
+            SharedSession::new(TokioTime::new(), vec![0x10; 16]).expect("test host entropy");
+        assert!(control.face_up(1, &control_link.resp_actions, false));
+        let before = control_link.resp_driver.snapshot().sends.len();
+        control.declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op());
+        control.declare_subscriber("wz/agg/b".to_owned(), Locality::Any, no_op());
+        let (declared, carried) = declarations_since(&control_link, before);
+        assert_eq!(declared, 2, "CONTROL: one declaration per subscriber");
+        assert!(names(&carried, "wz/agg/a") && names(&carried, "wz/agg/b"));
+        assert!(!names(&carried, "wz/agg/**"));
+
+        let aggregation = DeclarationAggregation::new(vec!["wz/agg/**".to_owned()], Vec::new())
+            .expect("a key expression, in a build with the inclusion test");
+        let near = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let late = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources {
+                aggregation: aggregation.clone(),
+                ..SessionResources::default()
+            },
+        )
+        .expect("test host entropy");
+        assert_eq!(
+            shared.local_session().declaration_aggregation(),
+            aggregation,
+            "the plane is given the aggregates the faces are"
+        );
+
+        assert!(shared.face_up(1, &near.resp_actions, false));
+        let before = near.resp_driver.snapshot().sends.len();
+        let first = shared.declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op());
+        let second = shared.declare_subscriber("wz/agg/b".to_owned(), Locality::Any, no_op());
+        let (declared, carried) = declarations_since(&near, before);
+        assert_eq!(declared, 1, "one declaration for both subscribers");
+        assert!(names(&carried, "wz/agg/**"), "it names the aggregate");
+        assert!(!names(&carried, "wz/agg/a") && !names(&carried, "wz/agg/b"));
+
+        let before = near.resp_driver.snapshot().sends.len();
+        shared.declare_subscriber("wz/other".to_owned(), Locality::Any, no_op());
+        let (declared, carried) = declarations_since(&near, before);
+        assert_eq!(declared, 1);
+        assert!(
+            names(&carried, "wz/other"),
+            "a key no aggregate includes is itself"
+        );
+
+        let late_before = late.resp_driver.snapshot().sends.len();
+        assert!(shared.face_up(2, &late.resp_actions, false));
+        let (declared, carried) = declarations_since(&late, late_before);
+        assert_eq!(
+            declared, 2,
+            "the replay declares the aggregate once and the key outside it once"
+        );
+        assert!(names(&carried, "wz/agg/**") && names(&carried, "wz/other"));
+        assert!(!names(&carried, "wz/agg/a") && !names(&carried, "wz/agg/b"));
+
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let late_before = late.resp_driver.snapshot().sends.len();
+        shared.undeclare_subscriber(first);
+        assert_eq!(
+            (
+                declarations_since(&near, near_before).0,
+                declarations_since(&late, late_before).0
+            ),
+            (0, 0),
+            "the aggregate stands while a subscriber under it does"
+        );
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let late_before = late.resp_driver.snapshot().sends.len();
+        shared.undeclare_subscriber(second);
+        assert_eq!(
+            (
+                declarations_since(&near, near_before).0,
+                declarations_since(&late, late_before).0
+            ),
+            (1, 1),
+            "the last subscriber under the aggregate retracts it on every face"
+        );
     }
 }

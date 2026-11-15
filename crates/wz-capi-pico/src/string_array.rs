@@ -11,9 +11,10 @@
 //! contents are wz's — pico's header never dereferences the fields, every read goes through an
 //! exported accessor, so a handle in slot 0 with zero padding to the pico size is faithful.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use crate::abi::z_loaned_string_t;
+use crate::prelude::*;
 use crate::result::ZResult;
 
 /// One string-array entry, BOXED so the address of its cached view survives a
@@ -125,8 +126,8 @@ pub struct z_moved_string_array_t {
 impl z_owned_string_array_t {
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -184,7 +185,7 @@ pub unsafe extern "C" fn z_string_array_get(
 ) -> *const z_loaned_string_t {
     match string_array_state(array).and_then(|s| s.view(k)) {
         Some(view) => view as *const z_loaned_string_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -275,7 +276,7 @@ pub unsafe extern "C" fn z_string_array_take(
         return;
     }
     (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = [std::ptr::null_mut(); 3];
+    (*dst)._pad = [core::ptr::null_mut(); 3];
     (*src)._this = z_owned_string_array_t::null_value();
 }
 
@@ -295,7 +296,7 @@ pub unsafe extern "C" fn z_string_array_new(array: *mut z_owned_string_array_t) 
     }
     *array = z_owned_string_array_t {
         handle: Box::into_raw(StringArrayState::new(Vec::new())) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 3],
+        _pad: [core::ptr::null_mut(); 3],
     };
 }
 
@@ -388,7 +389,7 @@ pub unsafe extern "C" fn z_string_array_clone(
     };
     *dst = z_owned_string_array_t {
         handle: Box::into_raw(StringArrayState::new(state.to_strings())) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 3],
+        _pad: [core::ptr::null_mut(); 3],
     };
     crate::result::Z_OK
 }
@@ -409,7 +410,7 @@ pub unsafe extern "C" fn z_string_array_take_from_loaned(
     let slot = src as *mut z_owned_string_array_t;
     *dst = z_owned_string_array_t {
         handle: (*slot).handle,
-        _pad: [std::ptr::null_mut(); 3],
+        _pad: [core::ptr::null_mut(); 3],
     };
     *slot = z_owned_string_array_t::null_value();
     crate::result::Z_OK
@@ -424,10 +425,10 @@ mod tests {
     /// loaned form must keep the owned form's layout for the offset-0 loan casts.
     #[test]
     fn string_array_abi() {
-        assert_eq!(std::mem::size_of::<z_owned_string_array_t>(), 32);
+        assert_eq!(core::mem::size_of::<z_owned_string_array_t>(), 32);
         assert_eq!(
-            std::mem::size_of::<z_loaned_string_array_t>(),
-            std::mem::size_of::<z_owned_string_array_t>()
+            core::mem::size_of::<z_loaned_string_array_t>(),
+            core::mem::size_of::<z_owned_string_array_t>()
         );
     }
 
@@ -444,15 +445,15 @@ mod tests {
         let handle = (&*state) as *const StringArrayState as *mut c_void;
         let loaned = z_loaned_string_array_t {
             handle,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         unsafe {
             assert_eq!(z_string_array_len(&loaned), 2);
             assert!(!z_string_array_is_empty(&loaned));
             let first = z_string_array_get(&loaned, 0);
             assert!(!first.is_null());
-            let bytes = std::slice::from_raw_parts((*first)._start, (*first)._len);
-            assert_eq!(std::str::from_utf8(bytes).unwrap(), "tcp/127.0.0.1:7447");
+            let bytes = core::slice::from_raw_parts((*first)._start, (*first)._len);
+            assert_eq!(core::str::from_utf8(bytes).unwrap(), "tcp/127.0.0.1:7447");
             // Out of range is NULL, not a panic and not slot 0.
             assert!(z_string_array_get(&loaned, 2).is_null());
         }
@@ -496,7 +497,7 @@ mod tests {
             // freed out from under the caller.
             let e0 = z_string_array_get(loaned as *const z_loaned_string_array_t, 0);
             assert!(!e0.is_null());
-            let before = std::slice::from_raw_parts((*e0)._start, (*e0)._len).to_vec();
+            let before = core::slice::from_raw_parts((*e0)._start, (*e0)._len).to_vec();
             assert_eq!(before, b"first");
 
             let filler = z_loaned_string_t {
@@ -513,7 +514,7 @@ mod tests {
 
             // Read through the PRE-GROWTH pointer, not a fresh `get`. A fresh
             // one would pass on either layout and would be testing nothing.
-            let after = std::slice::from_raw_parts((*e0)._start, (*e0)._len).to_vec();
+            let after = core::slice::from_raw_parts((*e0)._start, (*e0)._len).to_vec();
             assert_eq!(
                 after, before,
                 "the pointer handed out before the growth no longer reads its own \

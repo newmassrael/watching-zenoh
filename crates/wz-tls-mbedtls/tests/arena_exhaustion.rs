@@ -14,7 +14,7 @@
 mod common;
 
 use std::io::Read;
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,7 +29,7 @@ use wz_runtime_posix::stream::PosixTcpDial;
 use wz_tls_mbedtls::channel::{Identity, TlsError};
 use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial};
 
-const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 fn clock_ms() -> u64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -56,8 +56,10 @@ fn a_handshake_the_arena_has_no_room_for_is_dropped_counted_and_names_a_code() {
         clock: clock_ms,
         timeout_ms: 2_000,
     });
-    let listener = dial.listen_counted(LOOPBACK, 0).expect("the port opens");
-    let (_, port) = listener.local();
+    let listener = dial
+        .listen_counted(SocketAddr::from((LOOPBACK, 0)))
+        .expect("the port opens");
+    let port = listener.local().port();
 
     let mut store = RootCertStore::empty();
     store.add(authority.cert.der().clone()).expect("a root");
@@ -76,7 +78,7 @@ fn a_handshake_the_arena_has_no_room_for_is_dropped_counted_and_names_a_code() {
         let config = Arc::clone(&config);
         let held = Arc::clone(&held);
         clients.push(thread::spawn(move || {
-            let Ok(tcp) = TcpStream::connect((Ipv4Addr::from(LOOPBACK), port)) else {
+            let Ok(tcp) = TcpStream::connect((LOOPBACK, port)) else {
                 return;
             };
             let name = ServerName::try_from("localhost").expect("a name");

@@ -904,7 +904,7 @@ impl KeyexprSpaces {
             Ok(keyexpr) => Ok((keyexpr, false)),
             Err(miss) => {
                 let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
-                match self.fixed_binding(id, suffix) {
+                match self.fixed_binding(wz_session_core::wire_id::peer_key(id), suffix) {
                     Some(keyexpr) => Ok((keyexpr, true)),
                     None => Err(miss),
                 }
@@ -954,7 +954,7 @@ impl KeyexprSpaces {
             WireexprOwnedVariant::WireexprNonlocal(_) => direction.peer(),
         };
         let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
-        self.resolve_parts(space, id, suffix)
+        self.resolve_parts(space, wz_session_core::wire_id::peer_key(id), suffix)
     }
 
     /// R2385 — resolve the keyexpr a `DeclKexpr` DECLARES, whose scope names a
@@ -980,7 +980,7 @@ impl KeyexprSpaces {
         body: &WireexprOwnedVariant<S>,
     ) -> Result<String, (Direction, u64)> {
         let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
-        self.resolve_declared_parts(direction, id, suffix)
+        self.resolve_declared_parts(direction, wz_session_core::wire_id::peer_key(id), suffix)
     }
 
     /// The same resolution of a declared keyexpr, from the PARTS a reader has
@@ -1134,7 +1134,7 @@ impl KeyexprSpaces {
                     self.tables
                         .entry(self.side(direction))
                         .or_default()
-                        .entry(d.id)
+                        .entry(wz_session_core::wire_id::declared_peer_key(d.id))
                         .or_default()
                         .push((at, Some(literal)));
                 }
@@ -1151,7 +1151,9 @@ impl KeyexprSpaces {
                 // history for it here would make `bound` count a phantom.
                 let at = self.at;
                 if let Some(table) = self.tables.get_mut(&self.side(direction)) {
-                    if let Some(history) = table.get_mut(&u.id) {
+                    if let Some(history) =
+                        table.get_mut(&wz_session_core::wire_id::declared_peer_key(u.id))
+                    {
                         history.push((at, None));
                     }
                 }
@@ -2996,7 +2998,10 @@ pub(crate) mod tests {
 
     /// `M=0` — the id lives in the RECEIVER's space. zenoh emits this shape as
     /// soon as the far side has declared anything (`resource.rs:625`).
-    fn receiver_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+    fn receiver_space(
+        id: wz_session_core::wire_id::ExprId,
+        suffix: Option<&'static str>,
+    ) -> Wireexpr<'static> {
         Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id,
@@ -3060,7 +3065,7 @@ pub(crate) mod tests {
     /// The fixture is therefore the wire shape, not a choice.
     fn declared(
         id: u64,
-        scope: u64,
+        scope: wz_session_core::wire_id::ExprId,
         suffix: Option<&'static str>,
     ) -> wz_codecs::declare::DeclareOwned<wz_codecs::Heap> {
         wz_codecs::lent::Declare {
@@ -3188,7 +3193,7 @@ pub(crate) mod tests {
             // flag, so setting it shifts the id and adds the two schema fields.
             packed_id: if schema.is_some() { 1 } else { 0 },
             schema_len: schema.map(|s| s.len() as u64),
-            schema: schema.map(|s| wz_codecs::Bounded::new(s).unwrap()),
+            schema: schema.map(|s| wz_codecs::Bounded::new(s.as_bytes()).unwrap()),
         }
         .encode_to_vec();
         wz_codecs::VecSink::new(&mut body)
@@ -3209,7 +3214,7 @@ pub(crate) mod tests {
     /// `zenoh-protocol-1.5.0/src/zenoh/query.rs:104` instead of asserting it
     /// here.
     pub(crate) fn request_query_valued(
-        rid: u64,
+        rid: wz_session_core::wire_id::RequestId,
         keyexpr: Wireexpr<'static>,
         value: Option<&'static [u8]>,
     ) -> Vec<u8> {
@@ -3226,7 +3231,7 @@ pub(crate) mod tests {
     /// A valued query whose encoding carries a SCHEMA, so the prefix the
     /// sub-decoder must walk is wider than one byte.
     pub(crate) fn request_query_valued_with_schema(
-        rid: u64,
+        rid: wz_session_core::wire_id::RequestId,
         keyexpr: Wireexpr<'static>,
         value: &[u8],
     ) -> Vec<u8> {
@@ -3251,7 +3256,7 @@ pub(crate) mod tests {
     /// `dissect`: the field document's tests are its only caller.
     #[cfg(feature = "dissect")]
     pub(crate) fn request_query_valued_as_upstream_writes_it(
-        rid: u64,
+        rid: wz_session_core::wire_id::RequestId,
         keyexpr: Wireexpr<'static>,
         payload: &[u8],
     ) -> Vec<u8> {
@@ -3265,7 +3270,10 @@ pub(crate) mod tests {
         request_query_ext(rid, keyexpr, Some(body))
     }
 
-    pub(crate) fn request_query_truncated(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+    pub(crate) fn request_query_truncated(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'static>,
+    ) -> Vec<u8> {
         use wz_codecs::SceSink;
         let mut body = wz_codecs::encoding::Encoding {
             packed_id: 0,
@@ -3282,7 +3290,7 @@ pub(crate) mod tests {
 
     /// A `Request` carrying a `Query`, optionally with `body` on the VALUE ext.
     fn request_query_ext(
-        rid: u64,
+        rid: wz_session_core::wire_id::RequestId,
         keyexpr: Wireexpr<'static>,
         value: Option<alloc::vec::Vec<u8>>,
     ) -> Vec<u8> {
@@ -4371,10 +4379,14 @@ pub(crate) mod tests {
     /// discard what WAS read — and the shortfall must be visible.
     #[test]
     fn a_halted_batch_is_reported_rather_than_quietly_short() {
-        // `0x01` is outside the network MID space (0x19..=0x1F), so
-        // `decode_one_record` cannot name it and the walk halts on it.
+        // `0x18` is outside the network MID space (0x19..=0x1F), so
+        // `decode_one_record` cannot name it and the walk halts on it. It is
+        // outside the transport ids (0x00..=0x07) too: one of those ends the
+        // Frame's records and is read as the batch's next transport message,
+        // as upstream's Frame reader rewinds to it
+        // (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`).
         let mut record = push(sender_space(0, Some("seen/before/the/halt")), &[0u8; 9]);
-        let tail = [0x01u8, 0xAA, 0xBB, 0xCC];
+        let tail = [0x18u8, 0xAA, 0xBB, 0xCC];
         record.extend_from_slice(&tail);
         let table = aggregate_datagrams(&[(true, record)]);
 
@@ -6081,7 +6093,10 @@ pub(crate) mod tests {
     /// `suffix`, so each way a key can travel is one call. `dissect`-gated: its
     /// only reader is `crate::fields_json`'s test module.
     #[cfg(feature = "dissect")]
-    pub(crate) fn push_naming(id: u64, suffix: Option<&'static str>) -> Vec<u8> {
+    pub(crate) fn push_naming(
+        id: wz_session_core::wire_id::ExprId,
+        suffix: Option<&'static str>,
+    ) -> Vec<u8> {
         push(sender_space(id, suffix), &[0u8; 11])
     }
 

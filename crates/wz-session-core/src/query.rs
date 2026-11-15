@@ -301,7 +301,7 @@ pub fn request_query_parameters(request: &RequestOwned) -> Option<&[u8]> {
 #[derive(Debug, Clone)]
 pub struct RequestQueryView {
     keyexpr: String,
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     qos: crate::sample::QosLevel,
     parameters: Option<Vec<u8>>,
     attachment: Option<Vec<u8>>,
@@ -405,7 +405,7 @@ impl crate::query_sink::QueryView for RequestQueryView {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.value.as_ref().map(|(encoding, _)| encoding)
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     #[cfg(feature = "pubsub-ts-stack")]
@@ -710,7 +710,7 @@ pub enum QueryReply {
     Reply {
         /// Echo of the inbound Request.rid so the requester
         /// correlates this reply with their pending `z_get`.
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         /// Resolved keyexpr literal the inbound Request matched
         /// against. Echoed back as the Reply's keyexpr in literal
         /// form (`mapping_id = 0`, `suffix = Some(literal)`).
@@ -794,9 +794,9 @@ pub enum QueryReply {
     /// [`crate::reply::InboundReplyBody::Err`] must always decode it.
     #[cfg(feature = "query-reply-err")]
     Err {
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr_literal: String,
-        encoding: Option<(u32, Option<String>)>,
+        encoding: Option<(u32, Option<Vec<u8>>)>,
         payload: Vec<u8>,
         /// Optional `(zid bytes, eid)` carried as the envelope-level
         /// responder ext on the emitted Response. Mirror of
@@ -855,7 +855,7 @@ impl QueryReply {
                 },
                 encoding: encoding.map(|e| EncodingHint {
                     packed_id: e.packed_id,
-                    schema: e.schema.map(String::from),
+                    schema: e.schema.map(<[u8]>::to_vec),
                 }),
                 timestamp: timestamp.map(|ts| TimestampHint {
                     time: ts.time,
@@ -872,7 +872,7 @@ impl QueryReply {
             PartsKind::Err { encoding, payload } => QueryReply::Err {
                 rid: parts.rid,
                 keyexpr_literal,
-                encoding: encoding.map(|(id, schema)| (id, schema.map(String::from))),
+                encoding: encoding.map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
                 payload: payload.to_vec(),
                 responder,
                 qos: parts.qos,
@@ -943,6 +943,31 @@ impl QueryReply {
             .map(|reservation| reservation.descriptor());
         let response = self.response_with(descriptor)?;
         Ok((response, reservation))
+    }
+
+    /// The buffer of shared memory this reply's payload is, when it is a Put reply of one.
+    #[cfg(feature = "transport-shm")]
+    pub fn shared_payload(&self) -> Option<&crate::extshm::ShmSendHandle> {
+        match self {
+            QueryReply::Reply {
+                body: ReplyBody::PutShared(handle),
+                ..
+            } => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// [`Self::into_response`] for a reply that a forwarder sends as the buffer its payload is,
+    /// holding the buffer for the faces it sends to: a Put reply of a buffer of shared memory
+    /// names `descriptor`, and the forwarder gives each face a reference of its own or the bytes
+    /// as it sends. No reference is taken here. Any other reply is what
+    /// [`Self::into_response`] builds.
+    #[cfg(all(feature = "codec-response", feature = "transport-shm"))]
+    pub fn into_response_naming(
+        self,
+        descriptor: crate::extshm::ShmDescriptor,
+    ) -> Result<ResponseOwned, CodecError> {
+        self.response_with(Some(descriptor))
     }
 
     /// The one body of [`Self::into_response`] and [`Self::into_response_shm`]: `descriptor` is
@@ -1078,7 +1103,7 @@ impl QueryReply {
 /// constructs a `QueryResponder`, so it shares the registry's gate.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 pub struct QueryResponder<'a> {
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     /// The query's keyexpr. Borrowed when the responder is built over the
     /// keyexpr the dispatch already holds (`QueryableRegistry::fire_projection`),
     /// so a matched queryable that stages nothing costs the heap nothing for it;
@@ -1192,7 +1217,7 @@ impl<'a> QueryResponder<'a> {
     /// `Block`.
     #[cfg(feature = "alloc")]
     pub fn new(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr_literal: String,
         accept: ReplyKeyExpr,
         qos: QosLevel,
@@ -1215,7 +1240,7 @@ impl<'a> QueryResponder<'a> {
     /// [`Self::new`] over a keyexpr borrowed for as long as the responder is:
     /// what the registry's own fan-out builds, once per matched queryable.
     fn over(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr: &'a str,
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
         accept: ReplyKeyExpr,
@@ -1761,7 +1786,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_err(
         &mut self,
         encoding_id: Option<u32>,
-        schema: Option<&str>,
+        schema: Option<&[u8]>,
         payload: &[u8],
     ) -> Result<(), ReplyError> {
         self.replies.stage_parts(ReplyParts {
@@ -1862,7 +1887,7 @@ impl<'a> QueryResponder<'a> {
     /// Inbound Request id this Responder is replying to. Exposed for
     /// diagnostic surfaces; user closures normally don't need it
     /// (the registry pre-fills it into every push).
-    pub fn rid(&self) -> u64 {
+    pub fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
 
@@ -1978,7 +2003,14 @@ impl ReplyOut for QueryResponder<'_> {
         packed_id: u32,
         schema: Option<&str>,
     ) -> Result<(), ReplyError> {
-        self.send_reply_keyed_encoded_parts(keyexpr, payload, EncodingParts { packed_id, schema })
+        self.send_reply_keyed_encoded_parts(
+            keyexpr,
+            payload,
+            EncodingParts {
+                packed_id,
+                schema: schema.map(str::as_bytes),
+            },
+        )
     }
     #[cfg(feature = "alloc")]
     fn reply_keyed_attached(
@@ -2034,7 +2066,7 @@ impl ReplyOut for QueryResponder<'_> {
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_del_meta(keyexpr, meta)
     }
-    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
+    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&[u8]>, payload: &[u8]) {
         #[cfg(feature = "query-reply-err")]
         let _ = self.send_err(encoding_id, schema, payload);
         #[cfg(not(feature = "query-reply-err"))]
@@ -2568,7 +2600,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
 #[derive(Debug, Clone, Copy)]
 pub struct QueryEnvelope {
     /// The request id (correlation key).
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// The requester's completeness target.
     pub target: Option<QueryTarget>,
     /// The requester's QoS, which every reply inherits.
@@ -2915,7 +2947,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     #[cfg(feature = "alloc")]
     pub fn local_query(
         &mut self,
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr: &str,
         query: &QueryOwned,
         target: Option<QueryTarget>,
@@ -3484,7 +3516,7 @@ impl QueryableRegistry<BoxedQuerySink> {
 /// will land via a separate setter (none exist on the wire today —
 /// zenoh-pico's `_z_response_final_encode` emits only header + rid).
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
+pub fn response_final_for(rid: crate::wire_id::RequestId) -> ResponseFinalOwned {
     ResponseFinal {
         request_id: rid,
         // header = 0x1a (_Z_MID_N_RESPONSE_FINAL) and extensions =
@@ -3553,7 +3585,11 @@ mod tests {
     #[cfg(feature = "request-put-del")]
     use wz_codecs::lent::{MsgPut, WireexprNonlocal};
 
-    fn request_query(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
+    fn request_query(
+        rid: crate::wire_id::RequestId,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+    ) -> RequestOwned {
         // Construct a minimal Request whose body is a default Query.
         // The Local arm (zero-init mapping = LOCAL on the zenoh-pico
         // side, mirrored by push_with_keyexpr at pubsub.rs:398-415) is
@@ -3593,7 +3629,7 @@ mod tests {
     /// dispatch path only reads `query.extensions` directly so the
     /// flag is purely for authoring fidelity.
     fn request_query_with_attachment(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         suffix: Option<&str>,
         attachment: &[u8],
     ) -> RequestOwned {
@@ -3642,7 +3678,7 @@ mod tests {
     }
 
     #[cfg(feature = "request-put-del")]
-    fn request_put(rid: u64, suffix: &str) -> RequestOwned {
+    fn request_put(rid: crate::wire_id::RequestId, suffix: &str) -> RequestOwned {
         let keyexpr = Wireexpr {
             body: wz_codecs::lent::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
@@ -3663,7 +3699,11 @@ mod tests {
 
     /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of
     /// [`request_query`]: the mapping id names OUR space, not the peer's.
-    fn request_query_nonlocal(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
+    fn request_query_nonlocal(
+        rid: crate::wire_id::RequestId,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+    ) -> RequestOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
             body: wz_codecs::lent::WireexprVariant::WireexprNonlocal(
@@ -3709,8 +3749,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/temp".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/temp".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/temp".to_string());
 
         let req = request_query_nonlocal(7, 7, None);
         let mut replies = ReplyStage::new();
@@ -3990,7 +4030,11 @@ mod tests {
     /// flag 0x40 + parameters_len + parameters). The POS contrast for the
     /// `query-selector-parameters`-OFF NEG in
     /// `request_decode_isolation_tests`.
-    fn request_query_with_parameters(rid: u64, suffix: &str, params: &[u8]) -> RequestOwned {
+    fn request_query_with_parameters(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        params: &[u8],
+    ) -> RequestOwned {
         let keyexpr = Wireexpr {
             body: wz_codecs::lent::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -4110,7 +4154,11 @@ mod tests {
     /// so the fixture composes regardless of `query-source-info` — that
     /// feature gates only the queryable-side projection.
     #[cfg(feature = "query-source-info")]
-    fn request_query_with_source_info(rid: u64, suffix: &str, zid: &[u8]) -> RequestOwned {
+    fn request_query_with_source_info(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        zid: &[u8],
+    ) -> RequestOwned {
         let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID
@@ -4597,7 +4645,7 @@ mod tests {
     fn responder_send_err_emits_err_with_encoding_tuple() {
         let mut reg = QueryableRegistry::new();
         reg.register("error/path", |_q, responder| {
-            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
         });
 
         let mut replies = ReplyStage::new();
@@ -4618,7 +4666,7 @@ mod tests {
             } => {
                 assert_eq!(*rid, 5);
                 assert_eq!(keyexpr_literal, "error/path");
-                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(*encoding, Some((4, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"oops");
             }
             other => panic!("expected Err, got {other:?}"),
@@ -4745,7 +4793,7 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("error/path", |_q, responder| {
             responder.with_responder(&[0xCC; 2], 5);
-            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
         });
 
         let mut replies = ReplyStage::new();
@@ -4763,7 +4811,7 @@ mod tests {
                 responder,
                 ..
             } => {
-                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(*encoding, Some((4, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"oops");
                 assert_eq!(*responder, Some((vec![0xCC; 2], 5_u32)));
             }
@@ -5274,7 +5322,7 @@ mod tests {
         // the decode to consume the whole encoding before the payload.
         let encoding = EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let request = RequestQueryBuilder::new(9, 0, Some("demo/data"))
             .query_value(b"the-query-value", encoding)
@@ -5373,7 +5421,7 @@ mod tests {
 
         let encoding = EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let wire = RequestQueryBuilder::new(9, 0, Some("demo/data"))
             .query_attachment(b"the-query-attachment")
@@ -5505,7 +5553,7 @@ mod tests {
         let reply = QueryReply::Err {
             rid: 42,
             keyexpr_literal: "error/path".to_string(),
-            encoding: Some((4, Some("schema_v1".to_string()))),
+            encoding: Some((4, Some(b"schema_v1".to_vec()))),
             payload: b"oops".to_vec(),
             responder: None,
             qos: QosLevel::DEFAULT,
@@ -5515,7 +5563,7 @@ mod tests {
         let response = reply.into_response().unwrap();
         let via_builder =
             crate::response_build::ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
-                .encoding(4, Some("schema_v1"))
+                .encoding(4, Some(&b"schema_v1"[..]))
                 .build()
                 .unwrap()
                 .wire();
@@ -5552,8 +5600,11 @@ mod tests {
 
         assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
         assert_eq!(
-            finals.iter().map(|(rid, _)| *rid).collect::<Vec<u64>>(),
-            vec![10u64, 11u64, 12u64],
+            finals
+                .iter()
+                .map(|(rid, _)| *rid)
+                .collect::<Vec<crate::wire_id::RequestId>>(),
+            vec![10, 11, 12],
             "one Final per DISPATCHED rid, in arrival order -- rid 12 resolved \
              but matched nobody, and a query that reached the table still owes \
              its requester the terminator"
@@ -6253,7 +6304,7 @@ mod tests {
             seen_cb.lock().unwrap().push(q.requester());
             responder.reply(b"put");
         });
-        let ask = |reg: &mut QueryableRegistry<_>, rid: u64| {
+        let ask = |reg: &mut QueryableRegistry<_>, rid: crate::wire_id::RequestId| {
             let mut replies = ReplyStage::new();
             reg.dispatch_request(
                 &request_query(rid, 0, Some("metrics/cpu")),
@@ -6464,7 +6515,7 @@ mod tests {
     /// malformed ext would satisfy the feature-off assertion just as well as a
     /// real one — and would keep satisfying it if the gate were later deleted.
     fn request_query_with_value(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         suffix: Option<&str>,
         payload: &[u8],
         encoding: &crate::sample::EncodingHint,
@@ -6556,7 +6607,7 @@ mod tests {
 
         let encoding = crate::sample::EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
         let mut replies = ReplyStage::new();
@@ -6663,7 +6714,7 @@ mod tests {
 
         let encoding = crate::sample::EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
         let mut replies = ReplyStage::new();
@@ -6734,7 +6785,11 @@ mod request_decode_isolation_tests {
     /// ENC_ZBUF). The codec `Query.extensions` field is ungated, so this
     /// is constructible with `query-attachment` off — that feature gates
     /// only `extract_query_attachment`'s projection.
-    fn request_query_with_attachment(rid: u64, suffix: &str, attachment: &[u8]) -> RequestOwned {
+    fn request_query_with_attachment(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        attachment: &[u8],
+    ) -> RequestOwned {
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x05); // ATTACHMENT_EXT_ID_QUERY
         ext.set_enc(2); // ENC_ZBUF
@@ -6771,7 +6826,11 @@ mod request_decode_isolation_tests {
     /// (header flag 0x40 + parameters_len + parameters). Ungated codec
     /// field; `query-selector-parameters` gates only the `parameters_view`
     /// projection in `fire_matching_queryables`.
-    fn request_query_with_parameters(rid: u64, suffix: &str, params: &[u8]) -> RequestOwned {
+    fn request_query_with_parameters(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        params: &[u8],
+    ) -> RequestOwned {
         let query = Query {
             header: 0x40,
             parameters_len: Some(params.len() as u64),
@@ -6853,7 +6912,11 @@ mod request_decode_isolation_tests {
     /// Constructible with `query-source-info` off — the feature gates
     /// only `extract_query_source_info`'s projection.
     #[cfg(not(feature = "query-source-info"))]
-    fn request_query_with_source_info(rid: u64, suffix: &str, zid: &[u8]) -> RequestOwned {
+    fn request_query_with_source_info(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        zid: &[u8],
+    ) -> RequestOwned {
         let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID
@@ -7641,6 +7704,57 @@ mod shm_reply_tests {
         assert!(
             reservation.is_some(),
             "the same buffer on a face that lists its protocol is the descriptor"
+        );
+    }
+
+    /// A forwarder that sends a reply as the buffer reads the buffer off the staged reply; a reply
+    /// of bytes has none.
+    #[test]
+    fn the_buffer_of_a_reply_is_read_off_it_and_a_reply_of_bytes_has_none() {
+        let (shared, reservations) = handle();
+        let reply = staged(&shared);
+        assert_eq!(reply.shared_payload(), Some(&shared));
+        assert_eq!(as_plain_bytes(&reply).shared_payload(), None);
+        assert_eq!(
+            reservations.counts(),
+            (0, 0, 0),
+            "reading the buffer takes nothing"
+        );
+    }
+
+    /// A reply a forwarder sends as the buffer names the descriptor it is given, and takes no
+    /// reference: the forwarder's pass gives each face its own. A reply of bytes is what
+    /// `into_response` builds whatever descriptor is named.
+    #[test]
+    fn a_reply_built_naming_a_descriptor_carries_it_and_takes_no_reference() {
+        let (shared, reservations) = handle();
+        let response = staged(&shared)
+            .into_response_naming(FakeSendBuffer::descriptor())
+            .expect("builds");
+        assert_eq!(
+            reservations.counts(),
+            (0, 0, 0),
+            "naming a descriptor reserves nothing"
+        );
+        let wire = response.clone().wire();
+        assert!(!contains(&wire, BYTES), "the bytes are not on the wire");
+        let mut asked = Vec::new();
+        crate::put_payload::collect_wire_payload(&put_of(response), |descriptor| {
+            asked.push(decode_shm_descriptor(descriptor));
+            Some(crate::link::RxBytes::from(BYTES.to_vec()))
+        })
+        .expect("the sliced Put reads back");
+        assert_eq!(asked, [Some(FakeSendBuffer::descriptor())]);
+
+        let plain = as_plain_bytes(&staged(&shared));
+        assert_eq!(
+            plain
+                .clone()
+                .into_response_naming(FakeSendBuffer::descriptor())
+                .unwrap()
+                .wire(),
+            plain.into_response().unwrap().wire(),
+            "a reply of bytes names no descriptor"
         );
     }
 }

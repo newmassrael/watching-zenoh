@@ -49,6 +49,22 @@ fi
 echo "build-sce: building sce-codegen from vendor/sce ..."
 echo "build-sce: pin = $(git -C "$SCE_DIR" rev-parse --short HEAD)"
 
+# The compiler is wz's, not the submodule's. vendor/sce carries its own
+# rust-toolchain.toml (SCE pins its channel for its own lanes), and rustup would
+# pick it from the directory this build runs in: a host provisioned for wz's
+# pin, or a hosted runner that keeps only that toolchain
+# (scripts/lib/rust-toolchain-pinned.sh), would then fetch another compiler or
+# fail. The generator's output does not depend on the compiler that built it,
+# and the SCE crates wz builds declare a rust-version below wz's channel, so one
+# repository builds with the one compiler its root file names.
+WZ_CHANNEL="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$ROOT/rust-toolchain.toml")"
+if [[ -z "$WZ_CHANNEL" ]]; then
+    echo "build-sce: $ROOT/rust-toolchain.toml names no channel" >&2
+    exit 2
+fi
+export RUSTUP_TOOLCHAIN="$WZ_CHANNEL"
+echo "build-sce: toolchain = $WZ_CHANNEL (wz's pin, not vendor/sce's)"
+
 cd "$SCE_DIR"
 # sce-codegen bin is feature-gated on `cli` (= clap dep). Build with
 # the feature flag so the binary target is selected and emitted to

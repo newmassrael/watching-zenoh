@@ -48,6 +48,17 @@
 # pending one. It is never read as green. When nothing on the history has
 # graded anything the gate says so and passes, the same trade the pending arm
 # already makes; it does not refuse a push over a run that measured nothing.
+#
+# ## But only a run whose JOBS say it was replaced (open-debt item 944)
+#
+# A job that started and ran into its `timeout-minutes` also ends the run
+# `cancelled`, and so does a run in which jobs failed and others then timed out
+# (run 43058242762). `hosted_cancelled_kind.py` reads each cancelled run by its
+# jobs before this gate classifies it: never started is still a replacement,
+# started and past its limit is `timed_out` (red), a failed job is `failure`
+# (red), a run stopped part way is `cancelled_after_start` (amber), and a run
+# whose jobs could not be read is `cancelled_unread`, announced as a reading
+# that did not happen and never stepped over as a replacement.
 
 # Grade the newest FINISHED run on the history of one commit, for the arms that
 # cannot grade that commit's own run: it has not finished, or it was cancelled
@@ -76,7 +87,7 @@ _wz_grade_earlier() {
         && [[ -n "$runs" ]]; then
         fallback="$(printf '%s' "$runs" | python3 \
             scripts/lib/newest_completed_ancestor_run.py \
-            --ancestors-file "$anc_file" 2>/dev/null)"
+            --ancestors-file "$anc_file" --resolve-cancelled 2>/dev/null)"
     else
         fallback=""
     fi
@@ -100,6 +111,13 @@ _wz_grade_earlier() {
         NONE)
             echo "          NOTHING on this history has finished (${fallback#*$'\t'} run(s) seen)," >&2
             echo "          so this gate measured nothing — that is not the same as no red." >&2
+            return 0
+            ;;
+        UNREAD)
+            echo "          run $(printf '%s' "$fallback" | cut -f2) ended cancelled and its jobs" >&2
+            echo "          could not be read ($(printf '%s' "$fallback" | cut -f3-))," >&2
+            echo "          so whether it timed out is unknown; the earlier-verdict" >&2
+            echo "          fallback did NOT run past it." >&2
             return 0
             ;;
         *)
@@ -148,6 +166,18 @@ wz_previous_run_gate() {
         echo "$context: gh returned nothing for ${sha:0:12}; the gate did NOT run." >&2
         return 0
     fi
+    # Item 944: each `cancelled` run is read by its jobs before it is
+    # classified below. A resolver that could not run at all leaves the words as
+    # gh gave them, and says that a cancelled run is then read as replaced.
+    local resolved
+    if resolved="$(printf '%s' "$runs" \
+        | python3 scripts/lib/hosted_cancelled_kind.py --resolve-runs 2>/dev/null)" \
+        && [[ -n "$resolved" ]]; then
+        runs="$resolved"
+    else
+        echo "$context: the job-level reading of cancelled runs did NOT run; a" >&2
+        echo "          cancelled run below is read as replaced, which is not a verdict." >&2
+    fi
 
     # THE CLASSIFICATION IS THE GATE, so it is written down once, here.
     #
@@ -181,7 +211,7 @@ if not runs:
     print("NORUN\tno hosted run exists for this commit")
     raise SystemExit(0)
 
-pending, pending_ids, red, amber, cancelled = [], [], [], [], []
+pending, pending_ids, red, amber, cancelled, unread = [], [], [], [], [], []
 for r in runs:
     name = r.get("workflowName") or "?"
     rid = r.get("databaseId")
@@ -203,15 +233,23 @@ for r in runs:
         # it is stepped over, never counted as green.
         cancelled.append("%s (%s)" % (name, rid))
         continue
+    if c == "cancelled_unread":
+        # Item 944: a cancelled run whose jobs could not be read. Whether it
+        # timed out is unknown, so it is neither a replacement nor a verdict.
+        unread.append("%s (%s): %s" % (name, rid, r.get("cancelledDetail") or "?"))
+        continue
     (red if c in RED else amber).append("%s\t%s\t%s" % (name, rid, c))
 
 if red:
     print("RED\t" + "\t".join(red[:1]))
 elif amber:
     # NOT a failure and NOT a pass: a conclusion that is neither success, a
-    # failure, nor a cancellation (neutral, action_required, stale). It graded
-    # nothing either way, and it is not an ordinary result of this workflow.
+    # failure, nor a cancellation (neutral, action_required, stale), or a
+    # cancelled run whose jobs say it was stopped after it started. It graded
+    # nothing conclusive, and it is not an ordinary result of this workflow.
     print("AMBER\t" + "\t".join(amber[:1]))
+elif unread:
+    print("UNREADABLE\tthe jobs of a cancelled run could not be read, so whether it timed out is unknown: " + "; ".join(unread))
 elif pending:
     print("PENDING\t" + ",".join(pending_ids) + "\t" + "; ".join(pending))
 elif cancelled:

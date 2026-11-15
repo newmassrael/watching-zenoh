@@ -62,7 +62,7 @@ wz::runtime_zephyr::zephyr_image!();
 /// a board whose kernel ticks at another rate gets a clock that agrees with it.
 const TICK_HZ: u32 = wz::runtime_zephyr::tick_hz_from_build!();
 /// The loopback address both endpoints bind to.
-const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const LOOPBACK: core::net::IpAddr = core::net::IpAddr::V4(core::net::Ipv4Addr::LOCALHOST);
 
 extern "C" {
     /// R2918 — how many times the board's random hook served `ZephyrEntropy`
@@ -93,7 +93,8 @@ impl AcceptorTopology for ZephyrTopology {
     }
 
     fn peer_send(&mut self, bytes: &[u8]) {
-        if self.peer.send_to(LOOPBACK, SESSION_PORT, bytes).is_err() {
+        let session = core::net::SocketAddr::new(LOOPBACK, SESSION_PORT);
+        if self.peer.send_to(session, bytes).is_err() {
             log(c"wz: the peer's send was refused");
         }
     }
@@ -102,7 +103,7 @@ impl AcceptorTopology for ZephyrTopology {
         // Zephyr delivers on its own RX thread; the drive loop's `service`
         // already yielded to it this iteration, so nothing to pump here.
         match self.peer.try_recv(&mut self.rx) {
-            Ok(Some((len, _, _))) => Some(self.rx[..len].to_vec()),
+            Ok(Some((len, _))) => Some(self.rx[..len].to_vec()),
             Ok(None) => None,
             Err(_) => {
                 log(c"wz: the peer socket failed to receive");
@@ -119,11 +120,11 @@ impl AcceptorTopology for ZephyrTopology {
 pub extern "C" fn wz_app_main() -> i32 {
     log(c"wz: acceptor session over Zephyr's own sockets starting");
 
-    let Ok(link) = ZephyrUdpSocket::bind(LOOPBACK, SESSION_PORT) else {
+    let Ok(link) = ZephyrUdpSocket::bind(core::net::SocketAddr::new(LOOPBACK, SESSION_PORT)) else {
         log(c"wz: FAIL - bind the session socket on 127.0.0.1:7460");
         return 1;
     };
-    let Ok(peer) = ZephyrUdpSocket::bind(LOOPBACK, PEER_PORT) else {
+    let Ok(peer) = ZephyrUdpSocket::bind(core::net::SocketAddr::new(LOOPBACK, PEER_PORT)) else {
         log(c"wz: FAIL - bind the peer socket on 127.0.0.1:7461");
         return 1;
     };

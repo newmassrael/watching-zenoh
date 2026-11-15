@@ -79,7 +79,7 @@ async fn acceptor_opens(open_syn: impl Fn(&[u8]) -> Vec<u8>) -> Outcome {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
 
     let mut queue = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(
@@ -212,7 +212,7 @@ async fn initiator_answers(
     let actions = new_session_actions(outbound, params, TokioTime::new());
     actions.set_south_partition(partition);
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
     assert_eq!(engine.get_current_state(), S::SentInitSyn);
@@ -243,7 +243,7 @@ async fn acceptor_announces(partition: SouthPartition) -> (Option<Option<Bound>>
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     actions.set_south_partition(partition);
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
 
     let mut queue = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(

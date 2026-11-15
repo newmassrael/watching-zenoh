@@ -83,14 +83,17 @@ const LISTENER_PORT: u16 = 7447;
 /// Every consolidation byte carried by a `Request(Query)` on one half of the
 /// relayed flow, in wire order.
 ///
-/// `Option<u8>` is the decoder's own spelling of the header's Q_C flag: `None`
+/// The value is the field's whole z64, which upstream's decoder reads too; the
+/// modes every leg here measures are one byte on the wire.
+///
+/// `Option<u64>` is the decoder's own spelling of the header's Q_C flag: `None`
 /// means the flag was clear and the field absent, which is a DIFFERENT fact
 /// from any value and must not be collapsed into one — an elided field reads as
 /// `Auto` on both upstreams.
 fn query_consolidation_bytes(
     flow: &wz_capture::FlowDissection,
     side: Direction,
-) -> Vec<Option<u8>> {
+) -> Vec<Option<u64>> {
     let mut out = Vec::new();
     for frame in flow.frames().iter() {
         if frame.direction != side {
@@ -144,7 +147,7 @@ fn wait_for_both_directions(recording: &Recording, budget: Duration) -> bool {
 fn foreign_consolidation_bytes(
     recording: &Recording,
     subject_is_listener: bool,
-) -> Vec<Option<u8>> {
+) -> Vec<Option<u64>> {
     let segments = recording.lock().expect("recording lock").clone();
     let from_dialer: usize = segments
         .iter()
@@ -196,7 +199,7 @@ fn wait_for_query_consolidation(
     recording: &Recording,
     subject_is_listener: bool,
     budget: Duration,
-) -> Vec<Option<u8>> {
+) -> Vec<Option<u64>> {
     let deadline = Instant::now() + budget;
     loop {
         let both = {
@@ -373,7 +376,7 @@ fn a_real_zenohd_writes_latest_as_the_consolidation_byte_zenoh_numbers_it() {
 
     assert_eq!(
         bytes,
-        vec![Some(3u8)],
+        vec![Some(3u64)],
         "stock zenoh resolves an unnamed get to Latest and writes it as 3 \
          (Auto=0/None=1/Monotonic=2/Latest=3). Observed: {bytes:?}"
     );
@@ -468,7 +471,7 @@ fn wz_e2e_queryable_sees_a_real_zenoh_pico_write_latest_as_the_consolidation_byt
     eprintln!("pico -> wz Query consolidation byte(s): {bytes:?}");
     assert_eq!(
         bytes,
-        vec![Some(2u8)],
+        vec![Some(2u64)],
         "zenoh-pico resolves AUTO to LATEST client-side and writes its API enum \
          raw, so LATEST is 2 (NONE=0/MONOTONIC=1/LATEST=2). Observed: {bytes:?}"
     );
@@ -600,7 +603,7 @@ async fn wz_writes_the_consolidation_byte_a_real_zenohd_writes_for_the_same_get(
     );
     assert_eq!(
         bytes,
-        vec![Some(3u8)],
+        vec![Some(3u64)],
         "wz names no mode on this get, exactly as the REST plugin's get names \
          none, so wz must put the byte a real zenohd was MEASURED writing for \
          it in the zenohd leg of this file — Some(3). Observed: {bytes:?}"

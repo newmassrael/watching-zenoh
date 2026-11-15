@@ -811,20 +811,29 @@ impl<S: InterestStorage> InterestOwned<S> {
     }
 }
 
+/// What the origin projection of `Interest` asks of a storage profile
+/// beside InterestStorage: that it is an origin profile, and
+/// that each byte string and text of `Interest` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait InterestOrigin: InterestStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::interest_body::InterestBodyOrigin {}
+
+impl<S: InterestStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::interest_body::InterestBodyOrigin> InterestOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> InterestIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: InterestLentStorage {
     /// Project this borrowed view into an owned [`InterestOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: InterestStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InterestOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: InterestOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InterestOwned<S>, CodecError> {
         Ok(InterestOwned {
             header: self.header,
             interest_id: self.interest_id,

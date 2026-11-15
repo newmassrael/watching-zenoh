@@ -68,7 +68,7 @@ pub enum Resolved {
     Unresolved {
         /// The unresolved numeric id, so a view can render `<unresolved
         /// id=17>` rather than a blank.
-        id: u64,
+        id: crate::wire_id::ExprId,
         /// WHOSE number space the id was looked up in — the half of the
         /// answer that says which side's Declare stream was missed.
         owner: Direction,
@@ -146,7 +146,7 @@ impl KeyexprTables {
                 _ => Resolved::Empty,
             };
         }
-        match self.table(owner).get(&id) {
+        match self.table(owner).get(&crate::wire_id::peer_key(id)) {
             Some(base) => Resolved::Literal(match suffix {
                 Some(s) if !s.is_empty() => {
                     let mut out = String::with_capacity(base.len() + s.len());
@@ -177,7 +177,7 @@ impl KeyexprTables {
         &mut self,
         direction: Direction,
         declare: &DeclareOwned,
-    ) -> Option<(u64, Resolved)> {
+    ) -> Option<(crate::wire_id::ExprId, Resolved)> {
         match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
                 // The BOUND expression is itself a wire expression and takes
@@ -189,12 +189,14 @@ impl KeyexprTables {
                 if let Resolved::Literal(ref path) = bound {
                     // The declarer owns the id, so it lands in the DECLARER's
                     // table regardless of how the bound expression was rooted.
-                    self.table_mut(direction).insert(d.id, path.clone());
+                    self.table_mut(direction)
+                        .insert(crate::wire_id::declared_peer_key(d.id), path.clone());
                 }
-                Some((d.id, bound))
+                Some((crate::wire_id::declared_expr_id(d.id), bound))
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-                self.table_mut(direction).remove(&u.id);
+                self.table_mut(direction)
+                    .remove(&crate::wire_id::declared_peer_key(u.id));
                 None
             }
             _ => None,
@@ -214,7 +216,7 @@ mod tests {
         suffix.map(|s| crate::codec_owned::owned_string(s).expect("fixture suffix fits"))
     }
 
-    fn local(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn local(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id,
@@ -224,7 +226,7 @@ mod tests {
         }
     }
 
-    fn nonlocal(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn nonlocal(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                 id,

@@ -103,7 +103,7 @@ fn subscriber_unregister_frees_a_slot<P: Storage>() {
 struct NoopReplySink;
 impl wz_session_core::reply_sink::ReplySink for NoopReplySink {
     fn on_reply(&mut self, _reply: &dyn wz_session_core::reply_sink::ReplyView) {}
-    fn on_final(&mut self, _rid: u64) {}
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {}
 }
 
 /// The requester's pending-query table: the entry past `MAX_PENDING_QUERIES` is
@@ -113,7 +113,7 @@ fn pending_queries_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
     use wz_session_core::reply::ReplyRegistry;
     use wz_session_core::reply_acceptance::ReplyAcceptance;
     let mut reg: ReplyRegistry<NoopReplySink, P> = ReplyRegistry::default();
-    for rid in 0..caps::MAX_PENDING_QUERIES as u64 {
+    for rid in 0..caps::MAX_PENDING_QUERIES as u32 {
         assert!(reg
             .register_sink(
                 rid,
@@ -127,7 +127,7 @@ fn pending_queries_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
     assert_eq!(reg.len(), caps::MAX_PENDING_QUERIES);
 
     let past = reg.register_sink(
-        caps::MAX_PENDING_QUERIES as u64,
+        caps::MAX_PENDING_QUERIES as u32,
         1,
         None,
         ReplyAcceptance::Any,

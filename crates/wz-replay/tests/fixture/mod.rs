@@ -36,7 +36,7 @@ fn framed_frame(record: &[u8]) -> Vec<u8> {
     out
 }
 
-fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
+fn reply(request_id: u32, suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
     wz_codecs::lent::Response {
         header: wz_codecs::lent::Response::default().header | wz_codecs::wire_const::FLAG_N_N,
         request_id,
@@ -210,7 +210,7 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
 }
 
 /// A reply whose keyexpr is the bare numeric `id`, with no suffix at all.
-fn aliased_reply(request_id: u64, id: u64, payload: &'static [u8]) -> Vec<u8> {
+fn aliased_reply(request_id: u32, id: u16, payload: &'static [u8]) -> Vec<u8> {
     wz_codecs::lent::Response {
         header: wz_codecs::lent::Response::default().header,
         request_id,

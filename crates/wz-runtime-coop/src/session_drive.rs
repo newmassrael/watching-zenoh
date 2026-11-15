@@ -45,12 +45,14 @@ use alloc::sync::Arc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
 use core::mem::MaybeUninit;
+use core::net::SocketAddr;
 #[cfg(feature = "session-slot")]
 use core::ops::{Deref, DerefMut};
 
 #[cfg(feature = "session-slot")]
 use critical_section::Mutex;
 use wz_runtime_core::TimeSource;
+use wz_session_core::caps::MAX_LOCATOR_LEN;
 #[cfg(all(feature = "rx-in-place", not(feature = "reassembly")))]
 use wz_session_core::drive::dispatch_datagram;
 #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
@@ -74,6 +76,7 @@ use wz_session_core::link::RxFrame;
 use wz_session_core::network_message::{new_record_buf, RecordBuf};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
+use wz_session_core::text_out::{FixedText, TextOut};
 
 #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
 use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, ReassemblyArena};
@@ -286,16 +289,6 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     }
 }
 
-/// An IPv4 end as its four octets and a port, written in no network stack's
-/// address word. Which protocol reaches it is a [`Locator`]'s to say.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IpEndpoint {
-    /// The address, most significant octet first.
-    pub addr: [u8; 4],
-    /// The port.
-    pub port: u16,
-}
-
 /// The protocol of a link, as a locator's scheme names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkProto {
@@ -319,19 +312,21 @@ impl LinkProto {
     }
 }
 
-/// What a dial names: a protocol and the end it reaches, `udp/a.b.c.d:port`,
-/// `tcp/a.b.c.d:port` or `tls/a.b.c.d:port`.
+/// What a dial names: a protocol and the end it reaches, an IPv4 or an IPv6 address and a port:
+/// `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, `tls/...`. The address is `core::net`'s, which every
+/// stack's socket seam takes, so one locator type reaches datagram and stream links alike and a
+/// stack refuses a family it does not carry when it opens the socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Locator {
     /// The protocol the link speaks.
     pub proto: LinkProto,
     /// The end the link reaches.
-    pub at: IpEndpoint,
+    pub at: SocketAddr,
 }
 
 impl Locator {
     /// A UDP locator.
-    pub const fn udp(at: IpEndpoint) -> Self {
+    pub const fn udp(at: SocketAddr) -> Self {
         Self {
             proto: LinkProto::Udp,
             at,
@@ -339,7 +334,7 @@ impl Locator {
     }
 
     /// A TCP locator.
-    pub const fn tcp(at: IpEndpoint) -> Self {
+    pub const fn tcp(at: SocketAddr) -> Self {
         Self {
             proto: LinkProto::Tcp,
             at,
@@ -347,24 +342,31 @@ impl Locator {
     }
 
     /// A TLS locator.
-    pub const fn tls(at: IpEndpoint) -> Self {
+    pub const fn tls(at: SocketAddr) -> Self {
         Self {
             proto: LinkProto::Tls,
             at,
         }
     }
+
+    /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
+    /// `core::fmt` into text of [`MAX_LOCATOR_LEN`] bytes. The longest IP locator
+    /// (`tcp/[ffff:...:ffff%4294967295]:65535`) is 62 bytes, inside the default bound; a build
+    /// whose bound is shorter gets the text refused, which [`FixedText::finish`] reports, never a
+    /// locator cut short.
+    pub fn text(&self) -> FixedText<MAX_LOCATOR_LEN> {
+        let mut text = FixedText::new();
+        text.push_str(self.proto.scheme());
+        text.push('/');
+        text.push_socket_addr(self.at);
+        text
+    }
 }
 
-/// zenoh's text of the locator, `<scheme>/a.b.c.d:port`.
+/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port`.
 impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let [a, b, c, d] = self.at.addr;
-        write!(
-            f,
-            "{}/{a}.{b}.{c}.{d}:{}",
-            self.proto.scheme(),
-            self.at.port
-        )
+        write!(f, "{}/{}", self.proto.scheme(), self.at)
     }
 }
 
@@ -857,7 +859,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
             // an engine that never entered `Init`, so `inbound.start` /
             // `outbound.start` does not transition into `AwaitingInitSyn` /
             // `LinkOpening` and the whole handshake stalls.
-            engine.initialize();
+            engine.initialize().unwrap_or_else(|never| match never {});
             // Under `session-slot` the activation waits for the first step (see
             // `pending_role`); every other profile activates here, as it always did.
             #[cfg(not(feature = "session-slot"))]

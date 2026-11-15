@@ -60,6 +60,62 @@
 //!   across completions is still copied — out of the window's carry, since it
 //!   lies in no one slot.
 //!
+//! ## Two framings: a byte stream and a datagram
+//!
+//! A link is attached with the rule its completions are cut by, and the rule is
+//! fixed for the link's life, as upstream fixes it at task start on
+//! `is_streamed` (`io/zenoh-transport/src/unicast/universal/link.rs` @
+//! `match link.link.is_streamed() {`):
+//!
+//! | link | attached by | one completion is | upstream's body |
+//! |---|---|---|---|
+//! | TCP, unix-domain stream, unixpipe, vsock | [`UringReactor::attach`] | any run of bytes; frames are length-prefixed and [`RxWindow`] finds them, across completions | `setup_fragmented_read` |
+//! | connected UDP | [`UringReactor::attach_datagram`] | exactly one datagram, which is one frame | `setup_read` |
+//!
+//! A datagram has no length prefix: the kernel keeps its boundary, and a read
+//! of a datagram socket returns one datagram whatever room it was given, so
+//! the completion's length IS the frame's. Putting it through the window would
+//! read its first two bytes as a length and cut it wrong. So the datagram rule
+//! is the window's absence, not a second window: the completion's slot is
+//! handed up whole as one frame, tagged with the peer the socket is connected
+//! to (the read reports no source, and a connected socket has one).
+//!
+//! Three cases differ from the stream rule, each as wz's own datagram read
+//! answers it (`crate::udp_pipeline`, `crate::link_rx_datagram`):
+//!
+//! * a read of 0 bytes is an EMPTY DATAGRAM, which is a frame and not an end
+//!   of stream (a datagram socket has none);
+//! * a read that fills the whole slot is a TRUNCATION, because a slot is wider
+//!   than any UDP datagram (65600 against 65527 over IPv6), so the last byte is
+//!   the witness: the datagram is refused, as `link_rx_datagram` refuses one,
+//!   and the link reads on;
+//! * the width flag does not exist: there is no prefix.
+//!
+//! ## Why not upstream's multishot receive over provided buffers
+//!
+//! Upstream reads every link, streamed or not, with one multishot receive over
+//! a group of buffers it provides to the kernel
+//! (`commons/zenoh-uring/src/linux/api/reader/mod.rs` @
+//! `let recv = opcode::RecvMulti::new(types::Fd(fd), group_id)`, with the
+//! buffers given in `commons/zenoh-uring/src/linux/reader/buffer_group.rs` @
+//! `let entry = opcode::ProvideBuffers::new(`). That shape answers upstream's
+//! PUSH model: a read is armed at all times and the kernel must find a buffer
+//! when a datagram ARRIVES, so the buffer is chosen then, from the group. This
+//! reactor's links PULL (one read armed when the link asks, see below), so the
+//! destination is known when the read is ARMED and a fixed read into a
+//! registered slot is the same receive with the buffer chosen one step
+//! earlier. What a datagram needs is the framing rule above; the multishot
+//! shape is the push model's, and the datagram is not what asks for it.
+//!
+//! The trade that comes with it, stated: the size of a datagram is not known
+//! when its read is armed, so every datagram lands in a slot wide enough for
+//! the largest, and a sample kept from a small datagram holds that slot.
+//! `link_rx_datagram` avoids it with a size question before each read (two
+//! size classes), which a read armed ahead of its datagram cannot ask.
+//! Upstream makes the same trade with buffers of one and a half batches
+//! (`commons/zenoh-uring/src/linux/api/reader/mod.rs` @
+//! `let batch_size = batch_size + batch_size / 2;`).
+//!
 //! ## What selects this body, and what does not
 //!
 //! ⚠ THIS PARAGRAPH SAID, FROM R2748, THAT NO LINK SELECTS THIS BODY, AND IT
@@ -69,12 +125,15 @@
 //! `get_fd`, and a TCP stream link on Linux with `runtime-tokio-uring` on is
 //! one, as are a unix-domain stream, a unixpipe and a vsock link. A reader that
 //! cannot name one (a TLS stream, QUIC, an in-memory duplex that is not a
-//! witness) stays on the framed body. Of the five links whose descriptor the
-//! pinned upstream hands its ring (TCP, unix-domain stream, unixpipe, vsock and
-//! connected UDP) wz hands this reactor all but UDP, which is what open-debt
-//! item 583 owns now and which `crate::link_ring_fd` explains. What follows is
-//! what the paragraph said when it was written, kept because the argument in
-//! it still holds:
+//! witness) stays on the framed body. The fifth link the pinned upstream hands
+//! its ring, connected UDP, is attached by `UdpReadDriver` (`udp_pipeline.rs`)
+//! with the datagram framing; an accepted UDP face reads the listener's shared
+//! socket through the accept demux and stays off the ring, as upstream's
+//! unconnected UDP does (`crate::link_ring_fd` holds the table). This module
+//! is compiled with the stream framing it shares its table and window with
+//! (`transport-link-tcp`), so a build that carries UDP and not TCP reads its
+//! UDP links through tokio. What follows is what the paragraph said when it
+//! was written, kept because the argument in it still holds:
 //!
 //! Nothing here SELECTS this body for a production link. A link reaches it by
 //! being [`attach`](UringReactor::attach)ed, and no `wire_*` constructor calls
@@ -86,6 +145,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
+use std::net::SocketAddr;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as cmd_chan;
@@ -124,14 +184,24 @@ enum Delivery {
     Lost(LostCause),
 }
 
+/// The rule a link's completions are cut into frames by, fixed at attach (see
+/// the module's "Two framings").
+enum Framing {
+    /// Length-prefixed frames over a byte stream, the prefix width following
+    /// the link's own `lowlatency` flag.
+    Stream { lowlatency: Arc<AtomicBool> },
+    /// One datagram per completion, one frame per datagram.
+    Datagram,
+}
+
 /// What a link asks the worker to do.
 enum Cmd {
-    /// Take this link on: remember its fd and its prefix-width SOURCE, and
-    /// where to deliver.
+    /// Take this link on: remember its fd and the rule its completions are cut
+    /// by, and where to deliver.
     Attach {
         id: u64,
         fd: RawFd,
-        lowlatency: Arc<AtomicBool>,
+        framing: Framing,
         deliver: frame_chan::UnboundedSender<Delivery>,
     },
     /// Arm ONE read for this link.
@@ -141,7 +211,10 @@ enum Cmd {
     /// ⚠ A read of its own may still be IN FLIGHT, and its frame stays in the
     /// worker's in-flight table until the completion arrives. The kernel holds
     /// a pointer into that frame's slot; dropping it here would free a slot the
-    /// kernel is still writing into.
+    /// kernel is still writing into. The worker cancels that read, because on
+    /// a quiet socket nothing else ever completes it: the slot would stay out
+    /// and the kernel's reference would keep the socket open after its owner
+    /// closed it.
     Detach { id: u64 },
     /// Stop: cancel what is outstanding, drain it, and end the worker.
     Stop,
@@ -289,6 +362,34 @@ impl UringReactor {
     /// contract `crate::uring::FixedSlotRing::read_framed` has and it is
     /// upheld the same way — by the driver owning both.
     pub fn attach(&self, fd: RawFd, lowlatency: Arc<AtomicBool>) -> io::Result<UringRx> {
+        self.attach_framed(fd, Framing::Stream { lowlatency }, None)
+    }
+
+    /// Take a CONNECTED datagram socket's `fd` on, and hand back the read body
+    /// for it: each completion is one datagram and is delivered as one frame
+    /// from `peer`.
+    ///
+    /// Upstream's `setup_read(link.link.get_fd()?, ring_cb)` for a link whose
+    /// `is_streamed` is false. Only a connected socket may be attached: an
+    /// unconnected one receives from any peer, and a read through the ring
+    /// would bypass the demultiplexing by source that decides which link a
+    /// datagram belongs to (upstream refuses its fd for the same reason,
+    /// `io/zenoh-links/zenoh-link-udp/src/unicast.rs` @
+    /// `bail!("FD unavailable for unconnected UDP")`). `peer` is the address
+    /// the socket is connected to, which is the source of every datagram it
+    /// can receive.
+    ///
+    /// The fd is BORROWED, under the contract [`Self::attach`] states.
+    pub fn attach_datagram(&self, fd: RawFd, peer: SocketAddr) -> io::Result<UringRx> {
+        self.attach_framed(fd, Framing::Datagram, Some(peer))
+    }
+
+    fn attach_framed(
+        &self,
+        fd: RawFd,
+        framing: Framing,
+        src: Option<SocketAddr>,
+    ) -> io::Result<UringRx> {
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -296,7 +397,7 @@ impl UringReactor {
         self.send(Cmd::Attach {
             id,
             fd,
-            lowlatency,
+            framing,
             deliver,
         })?;
         Ok(UringRx {
@@ -304,6 +405,7 @@ impl UringReactor {
             cmds: self.cmds.clone(),
             wake: Arc::clone(&self.wake),
             frames,
+            src,
             pending: VecDeque::new(),
             armed: false,
             lost: None,
@@ -347,6 +449,10 @@ pub struct UringRx {
     cmds: cmd_chan::Sender<Cmd>,
     wake: Arc<WakeFd>,
     frames: frame_chan::UnboundedReceiver<Delivery>,
+    /// The source every frame of this link is tagged with: the peer a
+    /// datagram socket is connected to, `None` for a stream link, whose frames
+    /// carry no source as `crate::poll_framed`'s do not.
+    src: Option<SocketAddr>,
     /// Frames one completion carried that the session has not asked for yet.
     ///
     /// Bounded BY THE PROTOCOL rather than by a capacity: one read is armed at
@@ -376,7 +482,10 @@ impl UringRx {
     pub async fn poll_event(&mut self) -> LinkEvent {
         loop {
             if let Some(bytes) = self.pending.pop_front() {
-                return LinkEvent::Rx(RxFrame::new(bytes));
+                return LinkEvent::Rx(match self.src {
+                    Some(src) => RxFrame::with_src(bytes, src),
+                    None => RxFrame::new(bytes),
+                });
             }
             if let Some(cause) = self.lost {
                 return LinkEvent::Lost { cause };
@@ -424,6 +533,22 @@ impl Drop for UringRx {
 /// One attached link, as the worker sees it.
 struct LinkCtx {
     fd: RawFd,
+    /// How this link's completions are cut into frames.
+    cut: Cut,
+    deliver: frame_chan::UnboundedSender<Delivery>,
+}
+
+/// The worker's state for the rule a link was attached with ([`Framing`]).
+enum Cut {
+    Stream(StreamCut),
+    /// A datagram completion is whole, so there is nothing to carry between
+    /// completions.
+    Datagram,
+}
+
+/// What cutting a byte stream into frames carries from one completion to the
+/// next.
+struct StreamCut {
     /// R2755 — the prefix width's SOURCE, not the width. See
     /// [`UringReactor::attach`] for what freezing it cost.
     lowlatency: Arc<AtomicBool>,
@@ -438,7 +563,19 @@ struct LinkCtx {
     /// reader which does not size its reads possible at all, and it lives here
     /// because the worker is what sees every completion for this link.
     window: RxWindow,
-    deliver: frame_chan::UnboundedSender<Delivery>,
+}
+
+impl Cut {
+    fn new(framing: Framing) -> Self {
+        match framing {
+            Framing::Stream { lowlatency } => Self::Stream(StreamCut {
+                width: crate::prefix_width(lowlatency.load(Ordering::Acquire)),
+                lowlatency,
+                window: RxWindow::new(),
+            }),
+            Framing::Datagram => Self::Datagram,
+        }
+    }
 }
 
 /// One read the kernel has been given and has not answered yet.
@@ -487,17 +624,14 @@ fn run_worker(mut ring: FixedSlotRing, wake: Arc<WakeFd>, cmds: cmd_chan::Receiv
                 Cmd::Attach {
                     id,
                     fd,
-                    lowlatency,
+                    framing,
                     deliver,
                 } => {
-                    let width = crate::prefix_width(lowlatency.load(Ordering::Acquire));
                     links.insert(
                         id,
                         LinkCtx {
                             fd,
-                            lowlatency,
-                            width,
-                            window: RxWindow::new(),
+                            cut: Cut::new(framing),
                             deliver,
                         },
                     );
@@ -514,10 +648,15 @@ fn run_worker(mut ring: FixedSlotRing, wake: Arc<WakeFd>, cmds: cmd_chan::Receiv
                 Cmd::Detach { id } => {
                     links.remove(&id);
                     // The frames those reads name stay where they are; only the
-                    // routing is dropped.
-                    for entry in inflight.values_mut() {
+                    // routing is dropped, and the read is cancelled so that its
+                    // completion, `-ECANCELED` or the bytes that beat the
+                    // cancel, brings the slot home. A cancel that could not be
+                    // pushed leaves the read to complete on its own, which is
+                    // what every read did before the cancel existed.
+                    for (key, entry) in inflight.iter_mut() {
                         if entry.link == Some(id) {
                             entry.link = None;
+                            let _ = ring.submit_cancel(*key);
                         }
                     }
                 }
@@ -698,11 +837,42 @@ fn deliver_completion(
 /// are cut from -- is released before its caller can send anything. The only
 /// handles left on the slot are the ranges inside the returned delivery (none
 /// at all for a lost link, whose slot is home on return).
-fn completion_delivery(mut frame: LinkRxFrame, result: i32, ctx: &mut LinkCtx) -> Delivery {
+fn completion_delivery(frame: LinkRxFrame, result: i32, ctx: &mut LinkCtx) -> Delivery {
     if result < 0 {
         return Delivery::Lost(LostCause::OsError);
     }
     let n = result as usize;
+    match &mut ctx.cut {
+        Cut::Stream(cut) => stream_delivery(frame, n, cut),
+        Cut::Datagram => datagram_delivery(frame, n),
+    }
+}
+
+/// One datagram read: the whole completion is one frame (the module's "Two
+/// framings" gives the rule and its three cases).
+fn datagram_delivery(mut frame: LinkRxFrame, n: usize) -> Delivery {
+    if n == 0 {
+        // An empty datagram, which the tokio read hands up as an empty frame
+        // too. No range of a slot is needed for no bytes.
+        return Delivery::Frames(vec![RxBytes::from(Vec::new())]);
+    }
+    if n >= AsRef::<[u8]>::as_ref(&frame).len() {
+        // The datagram filled the slot, so it was longer than the slot and its
+        // tail is gone. Refused rather than handed up cut; the slot goes home
+        // here and the link's next ask arms the next read.
+        log::warn!(
+            "wz-runtime-tokio: a datagram filled a whole ring slot ({n} bytes) and was truncated; refused"
+        );
+        return Delivery::Frames(Vec::new());
+    }
+    frame.truncate(n);
+    let slot: Arc<dyn RxStorage> = Arc::new(frame.complete());
+    let bytes = RxBytes::shared(slot, 0..n).expect("a datagram is the whole of its slot's frame");
+    Delivery::Frames(vec![bytes])
+}
+
+/// One byte-stream read: the frames that ended inside it, cut by the window.
+fn stream_delivery(mut frame: LinkRxFrame, n: usize, cut: &mut StreamCut) -> Delivery {
     if n == 0 {
         // EOF. Between frames it is a clean close; anywhere else the peer cut a
         // frame in half — and both lose the link, which is what
@@ -749,10 +919,10 @@ fn completion_delivery(mut frame: LinkRxFrame, result: i32, ctx: &mut LinkCtx) -
     // in one read, which needs the peer to have written both before either was
     // reaped; upstream avoids it by dispatching to the ring only after the
     // transport is established. Recorded rather than claimed closed.
-    if ctx.window.between_frames() {
-        ctx.width = crate::prefix_width(ctx.lowlatency.load(Ordering::Acquire));
+    if cut.window.between_frames() {
+        cut.width = crate::prefix_width(cut.lowlatency.load(Ordering::Acquire));
     }
-    match ctx.window.push(whole, ctx.width, &mut collect) {
+    match cut.window.push(whole, cut.width, &mut collect) {
         Ok(()) => Delivery::Frames(frames),
         // An oversize length prefix. `crate::poll_framed` answers a prefix
         // naming more than a frame may hold with `Lost { PeerClosed }`, and
@@ -940,9 +1110,9 @@ mod tests {
         let (deliver, _frames) = frame_chan::unbounded_channel();
         let mut ctx = LinkCtx {
             fd: -1,
-            lowlatency: universal(),
-            width: crate::prefix_width(false),
-            window: RxWindow::new(),
+            cut: Cut::new(Framing::Stream {
+                lowlatency: universal(),
+            }),
             deliver,
         };
         let mut taker = arena.clone();
@@ -975,8 +1145,11 @@ mod tests {
 
         // The three arms that lose the link hand up no range of the slot.
         let oversize = (u16::MAX as u32 + 1).to_le_bytes();
-        ctx.lowlatency.store(true, Ordering::Release);
-        ctx.width = crate::prefix_width(true);
+        let Cut::Stream(cut) = &mut ctx.cut else {
+            unreachable!("the link was attached as a stream");
+        };
+        cut.lowlatency.store(true, Ordering::Release);
+        cut.width = crate::prefix_width(true);
         for (what, wire, result) in [
             ("a read error", &[][..], -5),
             ("an end of stream", &[][..], 0),
@@ -993,6 +1166,167 @@ mod tests {
                 "{what}: the slot is home before the delivery is sent"
             );
         }
+    }
+
+    /// A DATAGRAM COMPLETION IS ONE FRAME, whatever its first bytes would say
+    /// as a length prefix, and each of the datagram rule's own cases leaves the
+    /// slot accounted for.
+    ///
+    /// The datagram begins `02 00`, which the stream rule reads as a two-byte
+    /// frame followed by the start of another; the datagram rule hands up all
+    /// five bytes as one range of the slot. An empty datagram is one empty
+    /// frame and holds no slot. A read that fills the whole slot is a truncated
+    /// datagram: no frame, slot home. A failed read loses the link.
+    ///
+    /// CONTROL: route `Cut::Datagram` to `stream_delivery` and the first
+    /// assertion reds with two-byte frame `xy`.
+    #[test]
+    fn a_built_datagram_delivery_is_the_whole_datagram_as_one_frame() {
+        use crate::session_rx_pool_ap::SLOT_COUNT;
+
+        let arena = LinkRxArena::new();
+        let (deliver, _frames) = frame_chan::unbounded_channel();
+        let mut ctx = LinkCtx {
+            fd: -1,
+            cut: Cut::new(Framing::Datagram),
+            deliver,
+        };
+        let mut taker = arena.clone();
+        let mut filled = |wire: &[u8]| {
+            let mut frame = taker.take(SLOT_SIZE);
+            assert!(frame.is_pooled(), "a fresh table lends a slot");
+            frame.as_mut()[..wire.len()].copy_from_slice(wire);
+            frame
+        };
+
+        let datagram = [0x02u8, 0x00, b'x', b'y', b'z'];
+        let Delivery::Frames(frames) =
+            completion_delivery(filled(&datagram), datagram.len() as i32, &mut ctx)
+        else {
+            panic!("a datagram is a delivery of frames");
+        };
+        assert_eq!(frames.len(), 1, "one datagram is one frame");
+        assert_eq!(frames[0], datagram, "the frame is the whole datagram");
+        assert!(frames[0].is_shared(), "the frame is a range of its slot");
+        assert_eq!(arena.free_slots(), SLOT_COUNT - 1);
+        drop(frames);
+        assert_eq!(arena.free_slots(), SLOT_COUNT, "the slot is home");
+
+        let Delivery::Frames(frames) = completion_delivery(filled(&[]), 0, &mut ctx) else {
+            panic!("an empty datagram is not the end of a datagram socket");
+        };
+        assert_eq!(frames.len(), 1, "an empty datagram is one frame");
+        assert!(frames[0].is_empty());
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT,
+            "an empty frame holds no slot"
+        );
+
+        let Delivery::Frames(frames) = completion_delivery(filled(&[]), SLOT_SIZE as i32, &mut ctx)
+        else {
+            panic!("a truncated datagram is refused, not a lost link");
+        };
+        assert!(
+            frames.is_empty(),
+            "a datagram that filled its slot is refused"
+        );
+        assert_eq!(arena.free_slots(), SLOT_COUNT, "the refused slot is home");
+
+        assert!(matches!(
+            completion_delivery(filled(&[]), -111, &mut ctx),
+            Delivery::Lost(LostCause::OsError)
+        ));
+        assert_eq!(arena.free_slots(), SLOT_COUNT);
+    }
+
+    /// DATAGRAMS ON A CONNECTED SOCKET ARRIVE ONE FRAME EACH, through the ring,
+    /// tagged with the peer.
+    ///
+    /// All three are sent before the link is polled, so the reads that carry
+    /// them are not paced by the sender: what separates them is the socket's
+    /// datagram boundary, which a stream link would not keep. The first begins
+    /// with what a stream link reads as a length prefix, and the second is
+    /// empty, which a stream link reads as the end.
+    #[tokio::test]
+    async fn datagrams_on_a_connected_socket_arrive_one_frame_each() {
+        let arena = LinkRxArena::new();
+        let reactor = UringReactor::start(arena.clone()).expect("a reactor");
+
+        let local = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let peer_addr = peer.local_addr().expect("peer address");
+        local.connect(peer_addr).expect("connect");
+        peer.connect(local.local_addr().expect("local address"))
+            .expect("connect");
+
+        let first = [0x02u8, 0x00, b'x', b'y', b'z'];
+        peer.send(&first).expect("send");
+        peer.send(&[]).expect("send");
+        peer.send(b"tail").expect("send");
+
+        let mut rx = reactor
+            .attach_datagram(local.as_raw_fd(), peer_addr)
+            .expect("attach");
+        for want in [&first[..], &[][..], &b"tail"[..]] {
+            match within(rx.poll_event()).await {
+                LinkEvent::Rx(frame) => {
+                    assert_eq!(frame.bytes, want, "one datagram, one frame");
+                    assert_eq!(frame.src, Some(peer_addr), "tagged with the peer");
+                }
+                other => panic!("expected a frame, got {other:?}"),
+            }
+        }
+
+        drop(rx);
+        drop((local, peer));
+    }
+
+    /// A DETACHED LINK'S OUTSTANDING READ IS CANCELLED, so its slot comes home
+    /// while the reactor lives.
+    ///
+    /// The link is armed on a socket nobody sends to, so its read never
+    /// completes on its own; dropping the link must still bring the slot back.
+    /// CONTROL: drop the cancel from the `Detach` arm and the count stays one
+    /// short until the reactor itself is dropped.
+    #[tokio::test]
+    async fn a_detached_links_read_is_cancelled_and_its_slot_comes_home() {
+        let arena = LinkRxArena::new();
+        let reactor = UringReactor::start(arena.clone()).expect("a reactor");
+        let whole = arena.free_slots();
+
+        let quiet = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let silent_addr = silent.local_addr().expect("address");
+        quiet.connect(silent_addr).expect("connect");
+
+        let mut rx = reactor
+            .attach_datagram(quiet.as_raw_fd(), silent_addr)
+            .expect("attach");
+        let parked = tokio::spawn(async move {
+            let _ = rx.poll_event().await;
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while arena.free_slots() == whole {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the read was never armed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        parked.abort();
+        let _ = parked.await;
+        while arena.free_slots() != whole {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the detached link's slot did not come home while the reactor lives"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        drop(reactor);
+        drop((quiet, silent));
     }
 
     /// THE REACTOR'S OWN CLAIM: two links on ONE ring each get their own bytes.

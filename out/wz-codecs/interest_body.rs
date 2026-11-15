@@ -251,7 +251,7 @@ impl<S: InterestBodyStorage> InterestBodyIn<S> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 65554;
+    pub const MAX_ENCODED_BYTES: usize = 65548;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -586,7 +586,7 @@ impl<'a> InterestBodyView<'a> {
 
     /// Worst-case encoded byte count for this codec, as
     /// [`InterestBodyIn::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 65554;
+    pub const MAX_ENCODED_BYTES: usize = 65548;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`InterestBodyIn::encode`] writes for the value [`Self::into_builder`]
@@ -750,20 +750,29 @@ impl<S: InterestBodyStorage> InterestBodyOwned<S> {
     }
 }
 
+/// What the origin projection of `InterestBody` asks of a storage profile
+/// beside InterestBodyStorage: that it is an origin profile, and
+/// that each byte string and text of `InterestBody` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait InterestBodyOrigin: InterestBodyStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr::WireexprOrigin {}
+
+impl<S: InterestBodyStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr::WireexprOrigin> InterestBodyOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> InterestBodyIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: InterestBodyLentStorage {
     /// Project this borrowed view into an owned [`InterestBodyOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: InterestBodyStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InterestBodyOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: InterestBodyOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<InterestBodyOwned<S>, CodecError> {
         Ok(InterestBodyOwned {
             header: self.header,
             keyexpr: self.keyexpr.map(|_v| _v.try_into_owned_in_origin::<S>(origin)).transpose()?,

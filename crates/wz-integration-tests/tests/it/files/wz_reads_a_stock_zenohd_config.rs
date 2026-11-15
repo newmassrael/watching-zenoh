@@ -73,8 +73,8 @@ use tempfile::NamedTempFile;
 use wz_capture::Dissection;
 use wz_codecs::whatami::WhatAmI;
 use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, wait_for_substring, wz_ap_demo_binary, zenohd_binary,
-    ChildGuard, PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
+    zenohd_binary, ChildGuard, PortReservation,
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording};
 use wz_runtime_tokio::zenoh_config::{
@@ -176,7 +176,8 @@ fn operator_config(port: u16) -> String {
       qos: {{ enabled: false }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     link: {{
       tls: {{
@@ -321,7 +322,9 @@ fn render_resolved(value: &Json5Value) -> String {
                 .iter()
                 .map(|i| match i {
                     Json5Value::String(s) => format!("\"{s}\""),
-                    other => format!("{other:?}"),
+                    // An object member (a `plugins_loading/search_dirs` spec) as its
+                    // JSON text, for the reason the object arm below gives.
+                    other => other.to_json5_text(),
                 })
                 .collect();
             format!("[{}]", joined.join(","))
@@ -446,6 +449,10 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
         ),
         (
             "transport/shared_memory/enabled",
@@ -636,6 +643,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // open applies the same two (`unwrap_or(false)` and `unwrap_or(true)`).
         "transport/link/tls/enable_mtls",
         "transport/link/tls/verify_name_on_connect",
+        // The expiry teardown is the third of those `Option` booleans, declared beside them
+        // (`commons/zenoh-config/src/lib.rs` @ `close_link_on_expiration: Option<bool>,`) with
+        // its `false` applied where it is read, so a silent file resolves it to null on the
+        // same reasoning. DERIVED from the declaration, not measured on a running zenohd: if a
+        // hosted run shows the tree answering `false`, move the key into `claims`.
+        "transport/link/tls/close_link_on_expiration",
         // R2593 — MEASURED on a running zenohd with no file key: its resolved
         // tree prints `"tcp":{"so_rcvbuf":null,"so_sndbuf":null}` and the same
         // two nulls inside `tls`. No buffer size is a kernel default, which the
@@ -644,6 +657,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "transport/link/tcp/so_sndbuf",
         "transport/link/tls/so_rcvbuf",
         "transport/link/tls/so_sndbuf",
+        // An `Option<u32>` with no default upstream
+        // (`commons/zenoh-config/src/lib.rs` @ `file_access_mask: Option<u32>`), so a silent file
+        // resolves it to null: the mode a unixpipe link takes is then the link's own default,
+        // which the resolved tree cannot show.
+        "transport/link/unixpipe/file_access_mask",
         // R2568 — honoured by R2567 and left unclassed, which this leg's own
         // gate caught. Upstream states no value for it either: DEFAULT_CONFIG
         // carries `dictionary_file: null` beside `user` and `password`, so the
@@ -752,6 +770,13 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "adminspace/permissions/write",
     ];
 
+    // Keys the zenohd BINARY sets over whatever its file says, so its resolved tree
+    // answers the binary's value and not the default a file gets from the library
+    // (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`).
+    // wz's reader carries the document's value, `None` for silence, which a host the
+    // file configures reads as the library's `false`; both halves are asserted below.
+    const THE_ZENOHD_BINARY_SETS_IT: &[&str] = &["plugins_loading/enabled"];
+
     let reservation = PortReservation::pick();
     let port = reservation.port();
     let source = census_config(port);
@@ -837,6 +862,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/unicast/max_sessions",
             wz.max_sessions.to_string(),
         ),
+        (
+            "transport/unicast/open_timeout",
+            wz.open_timeout_ms.to_string(),
+        ),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
         (
@@ -845,6 +874,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         ),
         ("transport/link/tx/batch_size", wz.batch_size.to_string()),
         ("transport/link/tx/lease", wz.lease_ms.to_string()),
+        // Upstream serializes its `Bits` by name (32bit, quoted), so a silent file resolves to
+        // the name and wz's struct answers with its own width's.
+        (
+            "transport/link/tx/sequence_number_resolution",
+            quoted(wz.sn_resolution.zenoh_name()),
+        ),
         // R2925 — the queue sizes and the two congestion waits: zenohd resolves
         // a silent file to numbers (2 per priority, 1000 and 5000000
         // microseconds), so each is compared against wz's own default.
@@ -893,12 +928,36 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             wz.tx_queue.wait_before_close_us.to_string(),
         ),
         (
+            "transport/link/tx/queue/batching/enabled",
+            wz.tx_queue.batching.to_string(),
+        ),
+        // Milliseconds in the tree, microseconds in wz's struct.
+        (
+            "transport/link/tx/queue/batching/time_limit",
+            (wz.tx_queue.batching_time_limit_us / 1_000).to_string(),
+        ),
+        // A snake-case name in the tree, as upstream's serde spells it.
+        (
+            "transport/link/tx/queue/allocation/mode",
+            quoted(wz.tx_queue.allocation.zenoh_name()),
+        ),
+        (
             "transport/link/rx/max_message_size",
             wz.link_rx.max_message_size.to_string(),
+        ),
+        // A plain `usize` upstream with its default applied at declaration (one widest batch),
+        // so the tree answers it and wz's struct answers the same.
+        (
+            "transport/link/rx/buffer_size",
+            wz.link_rx.buffer_size.to_string(),
         ),
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
         ),
         (
             "transport/shared_memory/enabled",
@@ -912,6 +971,30 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // asserted below rather than rendered here, for the literal-in-a-row
         // reason the weights row gives.
         ("plugins", String::from("{}")),
+        // The two aggregate lists resolve to `[]` for a silent file (upstream's
+        // aggregation block derives its default), and wz's two lists are empty, which is
+        // asserted below rather than rendered here.
+        ("aggregation/subscribers", String::from("[]")),
+        ("aggregation/publishers", String::from("[]")),
+        // The same for the stats filter list (upstream's stats block derives its default), and
+        // wz's list is empty, asserted below.
+        ("stats/filters", String::from("[]")),
+        // A silent file resolves to upstream's default search list, a `current_exe_parent`
+        // spec and five paths, and wz holds `None` for it, which searches that same list. The
+        // list wz searches is rendered here through the tree's own renderer, so the two are one
+        // spelling of one value.
+        (
+            "plugins_loading/search_dirs",
+            render_resolved(
+                &json5::parse(
+                    &wz.plugin_search_dirs
+                        .clone()
+                        .unwrap_or_default()
+                        .to_json5_text(),
+                )
+                .unwrap(),
+            ),
+        ),
     ];
     assert!(wz.connect.is_empty(), "the fixture states no connect list");
     assert!(
@@ -929,6 +1012,14 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     assert!(
         wz.qos_network.is_empty(),
         "the fixture states no QoS overwrite rule"
+    );
+    assert!(
+        wz.aggregation_subscribers.is_empty() && wz.aggregation_publishers.is_empty(),
+        "the fixture states no aggregate"
+    );
+    assert!(
+        wz.stats_filters.is_empty(),
+        "the fixture states no stats filter"
     );
     // The key the tree cannot answer (`THE_TREE_ANSWERS_NULL`): a silent file leaves wz on the
     // `auto` preset, the one the pinned `DEFAULT_CONFIG.json5` documents.
@@ -1014,6 +1105,15 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         Some(&Json5Value::Bool(false)),
         "{captured}"
     );
+    assert_eq!(
+        resolved.get("plugins_loading/enabled"),
+        Some(&Json5Value::Bool(true)),
+        "zenohd turns by-name plugin loading on over a silent file\n{captured}"
+    );
+    assert_eq!(
+        wz.plugins_loading_enabled, None,
+        "wz's reader carries the silent document, not the zenohd binary's override"
+    );
 
     // EXHAUSTIVE: every honoured key is in exactly one class. A key added to
     // the surface without a decision about its silent default reds here, which
@@ -1024,6 +1124,7 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         .chain(claims.iter().map(|(k, _)| *k))
         .chain(THE_TREE_ANSWERS_NULL.iter().copied())
         .chain(A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER.iter().copied())
+        .chain(THE_ZENOHD_BINARY_SETS_IT.iter().copied())
         .collect();
     accounted.sort_unstable();
     let before = accounted.len();
@@ -2118,6 +2219,184 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
     );
 }
 
+// wz-proves: none -- the registration gap the legs above record: `zenoh-config`
+// is not an inventory atom, though zenohd adjudicates every reading here.
+/// The handshake keys of [`CONFIG_KEYS_PROVEN_ON_THE_WIRE`], asked of a REAL zenohd with the SAME
+/// document before the demo is asked.
+///
+/// [`every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive`] holds the demo's frames
+/// to the value the file names, which is upstream's meaning by the protocol's text and not by a
+/// run of upstream. Here zenohd is brought up on each document first and must show the key moving
+/// its own frame: that is the POSITIVE CONTROL, and a row whose two zenohd readings agree is a
+/// failure, because it cannot tell a node that honours the key from one that drops it. Only then
+/// is the demo brought up on the same two documents, and each of its readings must equal zenohd's.
+/// Both nodes write into this test's acceptor and both frames are read by one reader
+/// ([`handshake_field_off_the_link`]), so a difference is in what the nodes wrote.
+///
+/// `mode` is asked by the arm, as the leg above asks it: the three arms' zenohd readings must be
+/// three distinct roles, and the demo must read as zenohd does in each arm.
+///
+/// The keys this zenohd cannot be asked are named with the reason ([`NOT_ASKED_OF_ZENOHD`]), and
+/// the population is the constant, so a key that joins the wire list joins this leg or that list.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd and a wz-ap-demo built with `--features zenoh-config`"]
+fn every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document() {
+    /// (key, the arm both nodes are brought up in, the fragment for run A, the fragment for run B)
+    ///
+    /// The fragments are the leg above's, so the two legs judge the same documents. `max_links` is
+    /// asked of the `PeerMesh` arm that types no `--max-links`, the one arm where the document
+    /// alone decides the demo's dial path (see `ARGV_OVERRIDABLE` above).
+    const ROWS: &[(&str, RunMode, &str, &str)] = &[
+        (
+            "transport/link/tx/batch_size",
+            RunMode::Client,
+            "transport: { link: { tx: { batch_size: 4096 } } }",
+            "transport: { link: { tx: { batch_size: 8192 } } }",
+        ),
+        (
+            "id",
+            RunMode::Client,
+            r#"id: "a1b2c3d4""#,
+            r#"id: "1f0e2d3c""#,
+        ),
+        (
+            "transport/link/tx/lease",
+            RunMode::Client,
+            "transport: { link: { tx: { lease: 7500 } } }",
+            "transport: { link: { tx: { lease: 3300 } } }",
+        ),
+        (
+            "transport/unicast/lowlatency",
+            RunMode::Client,
+            "transport: { unicast: { lowlatency: true, qos: { enabled: false } } }",
+            "transport: { unicast: { lowlatency: false, qos: { enabled: false } } }",
+        ),
+        (
+            "transport/unicast/compression/enabled",
+            RunMode::Client,
+            "transport: { unicast: { compression: { enabled: true } } }",
+            "transport: { unicast: { compression: { enabled: false } } }",
+        ),
+        (
+            "transport/unicast/qos/enabled",
+            RunMode::Client,
+            "transport: { unicast: { qos: { enabled: true }, lowlatency: false } }",
+            "transport: { unicast: { qos: { enabled: false }, lowlatency: false } }",
+        ),
+        (
+            "transport/unicast/max_links",
+            RunMode::PeerMesh,
+            "transport: { unicast: { max_links: 3 } }",
+            "transport: { unicast: { max_links: 1 } }",
+        ),
+    ];
+    /// A fragment that names nothing the template names, for the arm-varying `mode` reading.
+    const MODE_FRAGMENT: &str = r#"metadata: { name: "wire-mode-differential" }"#;
+    const MODE_ARMS: &[RunMode] = &[RunMode::Client, RunMode::PeerMesh, RunMode::RouterHat];
+
+    let mut failures: Vec<String> = Vec::new();
+
+    // The POPULATION. Every row is a wire key, every wire key is a row, `mode` or a named
+    // exception, and an exception the wire list no longer carries is stale.
+    let mut asked: Vec<&str> = ROWS.iter().map(|(key, ..)| *key).collect();
+    asked.push("mode");
+    for key in &asked {
+        if !CONFIG_KEYS_PROVEN_ON_THE_WIRE.contains(key) {
+            failures.push(format!(
+                "{key} is asked here and is not in CONFIG_KEYS_PROVEN_ON_THE_WIRE"
+            ));
+        }
+    }
+    for key in CONFIG_KEYS_PROVEN_ON_THE_WIRE {
+        let excepted = NOT_ASKED_OF_ZENOHD.iter().any(|(k, _)| k == key);
+        if !asked.contains(key) && !excepted {
+            failures.push(format!(
+                "{key} is in CONFIG_KEYS_PROVEN_ON_THE_WIRE and neither a row of this leg nor \
+                 named in NOT_ASKED_OF_ZENOHD"
+            ));
+        }
+    }
+    for (key, why) in NOT_ASKED_OF_ZENOHD {
+        if !CONFIG_KEYS_PROVEN_ON_THE_WIRE.contains(key) {
+            failures.push(format!(
+                "{key} is excepted ({why}) and is no longer a wire key, so the exception is stale"
+            ));
+        }
+    }
+
+    for (key, run_mode, frag_a, frag_b) in ROWS {
+        let upstream_a = zenohd_handshake_field_from_a_config(key, frag_a, *run_mode);
+        let upstream_b = zenohd_handshake_field_from_a_config(key, frag_b, *run_mode);
+        eprintln!("differential {key} [{run_mode:?}]: zenohd wrote {upstream_a} then {upstream_b}");
+        if upstream_a == upstream_b {
+            failures.push(format!(
+                "{run_mode:?} {key}: zenohd wrote {upstream_a} for both documents, so this zenohd \
+                 shows no effect of the key and cannot adjudicate the demo's"
+            ));
+            continue;
+        }
+        let wz_a = handshake_field_from_a_config(key, frag_a, *run_mode, None);
+        let wz_b = handshake_field_from_a_config(key, frag_b, *run_mode, None);
+        eprintln!("differential {key} [{run_mode:?}]: the demo wrote {wz_a} then {wz_b}");
+        for (fragment, upstream, wz) in [(frag_a, &upstream_a, &wz_a), (frag_b, &upstream_b, &wz_b)]
+        {
+            if upstream != wz {
+                failures.push(format!(
+                    "{run_mode:?} {key}: for `{fragment}` the demo wrote {wz} where zenohd wrote \
+                     {upstream}"
+                ));
+            }
+        }
+    }
+
+    let mut upstream_roles: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for run_mode in MODE_ARMS {
+        let upstream = zenohd_handshake_field_from_a_config("mode", MODE_FRAGMENT, *run_mode);
+        let wz = handshake_field_from_a_config("mode", MODE_FRAGMENT, *run_mode, None);
+        eprintln!("differential mode [{run_mode:?}]: zenohd wrote {upstream}, the demo {wz}");
+        if upstream != wz {
+            failures.push(format!(
+                "{run_mode:?} mode: the demo's InitSyn carried whatami {wz} where zenohd's \
+                 carried {upstream}"
+            ));
+        }
+        upstream_roles.insert(upstream);
+    }
+    if upstream_roles.len() != MODE_ARMS.len() {
+        failures.push(format!(
+            "zenohd wrote {} distinct whatami value(s) over {} arms, so its readings do not \
+             separate the roles and cannot adjudicate `mode`",
+            upstream_roles.len(),
+            MODE_ARMS.len()
+        ));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} disagreement(s) between zenohd and the demo on the same documents:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}
+
+/// The handshake keys of [`CONFIG_KEYS_PROVEN_ON_THE_WIRE`] the zenohd differential does not ask,
+/// each with the reason the pinned zenohd cannot adjudicate it on this leg's frames.
+const NOT_ASKED_OF_ZENOHD: &[(&str, &str)] = &[
+    (
+        "transport/shared_memory/enabled",
+        "the pinned zenohd is built without shared memory, so its InitSyn offers none whatever the \
+         file says; the zenoh-c differential asks it on the shared-memory arm",
+    ),
+    (
+        "transport/multicast/qos/enabled",
+        "its frame is the multicast JOIN, which a handshake acceptor does not see",
+    ),
+    (
+        "timestamping/enabled",
+        "its effect is on a relayed Put, which needs the three-node star of the relay sweep",
+    ),
+];
+
 /// The (run-mode, `--max-links`) arms every fixture is asked in.
 ///
 /// R2096 (open-debt item 516). `None` means the flag is not passed at all,
@@ -2316,6 +2595,33 @@ struct DialledDemo {
     config: NamedTempFile,
 }
 
+/// The document a node of the wire legs is brought up on: the arm's `mode`, a dial of this leg's
+/// acceptor at `port`, scouting off, and `fragment`. One template for the demo and for zenohd, so
+/// the differential leg hands both nodes the same bytes.
+///
+/// ⚠ `PeerMesh` deliberately names NO `listen`. A binding mode whose document
+/// names an empty listen list selects no run-mode at all (`args.rs`), so
+/// spelling one here would swap the arm under test for a node that never
+/// dials. Leaving it unnamed is what lets `default_listen_endpoint(Peer)`
+/// supply `tcp/[::]:0`, which is upstream's own default for the mode.
+/// `RouterHat` names one for the opposite reason — see that variant's doc.
+fn wire_document(fragment: &str, run_mode: RunMode, port: u16) -> String {
+    let mode = run_mode.document_mode();
+    let listen = match run_mode {
+        RunMode::Client | RunMode::PeerMesh => "",
+        RunMode::RouterHat => "  listen: { endpoints: [\"tcp/127.0.0.1:0\"] },\n",
+    };
+    format!(
+        r#"{{
+  mode: "{mode}",
+{listen}  connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+  scouting: {{ multicast: {{ enabled: false }} }},
+  {fragment},
+}}
+"#
+    )
+}
+
 /// Spawn the demo on a document that names `fragment`, and return once it has
 /// dialled this leg's acceptor.
 fn dial_the_demo(
@@ -2349,27 +2655,7 @@ fn dial_the_demo(
     // this leg is what holds that wiring: `PeerMesh` asks the SAME files of the
     // mesh path, and `Client` stays as the control that says a mesh failure is
     // the mesh's.
-    //
-    // ⚠ `PeerMesh` deliberately names NO `listen`. A binding mode whose document
-    // names an empty listen list selects no run-mode at all (`args.rs`), so
-    // spelling one here would swap the arm under test for a node that never
-    // dials. Leaving it unnamed is what lets `default_listen_endpoint(Peer)`
-    // supply `tcp/[::]:0`, which is upstream's own default for the mode.
-    // `RouterHat` names one for the opposite reason — see that variant's doc.
-    let mode = run_mode.document_mode();
-    let listen = match run_mode {
-        RunMode::Client | RunMode::PeerMesh => "",
-        RunMode::RouterHat => "  listen: { endpoints: [\"tcp/127.0.0.1:0\"] },\n",
-    };
-    let source = format!(
-        r#"{{
-  mode: "{mode}",
-{listen}  connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
-  scouting: {{ multicast: {{ enabled: false }} }},
-  {fragment},
-}}
-"#
-    );
+    let source = wire_document(fragment, run_mode, port);
     let file = staged_config(&source);
 
     // R2095 (open-debt item 507's discipline, applied here) — the child's stderr
@@ -2915,8 +3201,71 @@ fn handshake_field_from_a_config(
         drained: _drained,
         config: _config,
     } = dial_the_demo(fragment, run_mode, max_links, &[]);
+    let reading = handshake_field_off_the_link(key, &mut stream, &source, "the demo");
+    drop(guard);
+    reading
+}
 
-    let payload = read_stream_frame(&mut stream, &source, "the demo's first frame");
+/// A REAL zenohd brought up on the same [`wire_document`] the demo is, and what its handshake
+/// carried for `key`.
+///
+/// The acceptor is this test's socket and the reading is [`handshake_field_off_the_link`], the
+/// one the demo's frames are read with, so a difference between the two nodes' readings is a
+/// difference in what they wrote and not in how this leg read it.
+fn zenohd_handshake_field_from_a_config(key: &str, fragment: &str, run_mode: RunMode) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback acceptor");
+    let port = listener
+        .local_addr()
+        .expect("the acceptor has an address")
+        .port();
+    let source = wire_document(fragment, run_mode, port);
+    let config = staged_config(&source);
+    let (mut guard, mut capture) = spawn_on_config("zenohd (wire differential)", config.path());
+
+    listener
+        .set_nonblocking(true)
+        .expect("a listener that can be polled");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Ok(Some(status)) = guard.child_mut().try_wait() {
+                    panic!(
+                        "zenohd exited ({status}) before dialling the acceptor:\n{}\n{source}",
+                        read_captured(&mut capture)
+                    );
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "zenohd never dialled the acceptor within the deadline:\n{}\n{source}",
+                    read_captured(&mut capture)
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("the acceptor could not accept: {e}\n{source}"),
+        }
+    };
+    stream
+        .set_nonblocking(false)
+        .expect("blocking reads on the accepted stream");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("a read deadline");
+    let reading = handshake_field_off_the_link(key, &mut stream, &source, "zenohd");
+    drop(guard);
+    reading
+}
+
+/// What the handshake a node `who` opened on `stream` carried for `key`, read by this tree's
+/// dissector out of the frame [`wire_reading`] names for it.
+fn handshake_field_off_the_link(
+    key: &str,
+    stream: &mut std::net::TcpStream,
+    source: &str,
+    who: &str,
+) -> String {
+    let payload = read_stream_frame(stream, source, &format!("{who}'s first frame"));
 
     let (frame, reading) = wire_reading(key);
     let wire_name = reading.field();
@@ -2928,10 +3277,14 @@ fn handshake_field_from_a_config(
             // would leave the next read waiting on a peer that had already given
             // up, and the deadline would then blame the wrong thing.
             let init = dissect_transport_message(&payload, 0).unwrap_or_else(|e| {
-                panic!("wz cannot dissect the demo's first frame: {e:?}\n{source}")
+                panic!("wz cannot dissect {who}'s first frame: {e:?}\n{source}")
             });
+            // An INIT is told by its `zid` and an OPEN by its `lease`. Not by
+            // `batch_size`: that rides behind the `S` flag, which upstream sets
+            // only when the size or the resolution is not the default, so a
+            // zenohd InitSyn for a document that names neither carries none.
             assert!(
-                init.find("batch_size").is_some(),
+                init.find("zid").is_some() && init.find("lease").is_none(),
                 "the first frame is not an InitSyn, so the OPEN this leg wants \
                  will never be sent\n{init:?}"
             );
@@ -2941,7 +3294,7 @@ fn handshake_field_from_a_config(
             // public, which is what open-debt 505 had not checked when it listed
             // "a new observation surface" and "a hand-rolled accept FSM" as the
             // only two routes to the OPEN. The acceptor here is an INSTRUMENT --
-            // what is judged is still only what the DEMO wrote.
+            // what is judged is still only what the node wrote.
             let mut params = zenoh_interop_session_init_params(WhatAmI::Router, vec![0x0a; 4]);
             params.cookie = vec![0xc0, 0x0c, 0x1e, 0x00];
             let ack = encode_init(&params, true, &[], None)
@@ -2951,10 +3304,9 @@ fn handshake_field_from_a_config(
                 .write_all(&len.to_le_bytes())
                 .and_then(|()| stream.write_all(&ack))
                 .unwrap_or_else(|e| panic!("could not answer the InitSyn: {e}\n{source}"));
-            read_stream_frame(&mut stream, &source, "the demo's OPEN")
+            read_stream_frame(stream, source, &format!("{who}'s OPEN"))
         }
     };
-    drop(guard);
 
     let field = dissect_transport_message(&payload, 0)
         .unwrap_or_else(|e| panic!("wz cannot dissect the frame it asked for: {e:?}\n{source}"));
@@ -2978,7 +3330,7 @@ fn handshake_field_from_a_config(
         // The verdict stays canonical so the sweep can compare it; the list goes
         // to stderr, where a round asking "why is this absent" reads it under
         // `--nocapture` instead of re-deriving it.
-        eprintln!("wire {key}: the InitSyn offered {offered:?}");
+        eprintln!("wire {key} ({who}): the InitSyn offered {offered:?}");
         return if offered.iter().any(|n| n == name) {
             "offered".to_string()
         } else {
@@ -3584,11 +3936,14 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       // exercises. NON-DEFAULT on purpose (upstream's is 1000), so a wz that
       // ignored the document and kept its own default would differ.
       max_sessions: 7,
+      // Half upstream's ten seconds, and far above what a dial to the local router takes.
+      open_timeout: 5000,
       lowlatency: false,
       qos: {{ enabled: true }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     // R2627 — the pubkey identity, NAMED rather than excepted, and the contrast
     // with `usrpwd/dictionary_file` (excepted below) is the whole decision. That
@@ -3636,16 +3991,24 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         connect_certificate: "/etc/wz/client.pem",
         connect_private_key: "/etc/wz/client.key",
         verify_name_on_connect: false,
+        // Off its `false` default; it reaches each certificate kind's `--link-config` and
+        // waits unused, since nothing here dials tls or quic.
+        close_link_on_expiration: true,
         so_rcvbuf: 12288,
         so_sndbuf: 24576,
       }},
       tcp: {{ so_rcvbuf: 65536, so_sndbuf: 65536 }},
+      // The unixpipe kind's FIFO mode (0o660, decimal as upstream reads it), off its absent
+      // default; it reaches `--link-config` and waits unused, as the tls pair does.
+      unixpipe: {{ file_access_mask: 432 }},
       protocols: ["tcp", "tls"],
       // R2925 — the queue sizes and the two congestion waits, each off its
       // default so the demo has something to apply.
       tx: {{
         batch_size: 4096,
         lease: 3000,
+        // 16 bits against the router's 32: the session settles on the smaller, the file's.
+        sequence_number_resolution: "16bit",
         queue: {{
           size: {{
             control: 3, real_time: 3, interactive_high: 3, interactive_low: 3,
@@ -3655,11 +4018,17 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
             drop: {{ wait_before_drop: 2000, max_wait_before_drop_fragments: 40000 }},
             block: {{ wait_before_close: 6000000 }},
           }},
+          // Off, so each message leaves as a frame of its own: the one put still reaches. The
+          // bound is stated too, off upstream's 1 ms, and holds nothing back with batching off.
+          batching: {{ enabled: false, time_limit: 5 }},
+          // Off upstream's `lazy`: the queue takes its batches when the session is established.
+          allocation: {{ mode: "init" }},
         }},
       }},
       // The largest message a session rejoins from fragments, off its 1 GiB
-      // default and still far above anything this leg sends.
-      rx: {{ max_message_size: 65536 }},
+      // default and still far above anything this leg sends; and the read storage
+      // each stream link pools, two widest batches where the default is one.
+      rx: {{ buffer_size: 131070, max_message_size: 65536 }},
     }},
   }},
   // R311y844 — this file now names EVERY honoured key, which turns this leg
@@ -3798,6 +4167,11 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     ] }} }},
   }},
   adminspace: {{ enabled: true, permissions: {{ read: true, write: false }} }},
+  // The aggregates this client's session declares its subscribers and publishers
+  // under: one declaration each for everything below `dropin`.
+  aggregation: {{ subscribers: ["dropin/**"], publishers: ["dropin/**"] }},
+  // The key this client's session counts its payloads under.
+  stats: {{ filters: [{{ key: "dropin/**" }}] }},
 }}
 "#
     );
@@ -3847,6 +4221,13 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // reason: only a region-hat node (`--peer` or `--router-hat`) places its
     // remotes by a partition, and a connecting client holds no hat, so its run is
     // told the key was withheld from it rather than handed `--gateway-south`.
+    // `plugins_loading/enabled` is the FIFTH, beside `plugins` and for its reason: only
+    // `--storage-host` runs a plugin plane, so a connecting client looks no plugin up and its
+    // run is told the key was withheld. This process's reader is also built with no plugin host,
+    // so the one value the file could state and still be read here is the library's `false`.
+    // `plugins_loading/search_dirs` is the SIXTH, with them: the list is where that plane's
+    // lookup searches, so a connecting client's run is told it was withheld rather than handed
+    // `--plugin-search-dirs`.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
@@ -3855,6 +4236,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
         .filter(|k| *k != "plugins")
         .filter(|k| *k != "gateway/south")
+        .filter(|k| *k != "plugins_loading/enabled")
+        .filter(|k| *k != "plugins_loading/search_dirs")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

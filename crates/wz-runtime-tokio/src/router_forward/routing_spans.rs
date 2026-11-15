@@ -20,6 +20,7 @@
 //! opens `demux` (`tracing::enabled!(tracing::Level::DEBUG).then(..)`).
 
 use wz_session_core::extbound::Region;
+use wz_session_core::wire_id::RequestId;
 
 use crate::accept_loop::FaceId;
 use crate::linkstate_forward::Zid;
@@ -97,26 +98,26 @@ pub(super) fn register_queryable(_region: &Region, _keyexpr: &str) -> Held {
 /// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `"{}:{} Route query for res {}{}",`), with the
 /// face and the query id as fields, so that a reader can time a query through the node.
 #[cfg(feature = "tracing-spans")]
-pub(super) fn query_routed(zid: Zid, src: FaceId, rid: u64) {
+pub(super) fn query_routed(zid: Zid, src: FaceId, rid: RequestId) {
     tracing::debug!(zid = %zid, src = src.0, rid, "route query");
 }
 
 #[cfg(not(feature = "tracing-spans"))]
 #[inline(always)]
-pub(super) fn query_routed(_zid: Zid, _src: FaceId, _rid: u64) {}
+pub(super) fn query_routed(_zid: Zid, _src: FaceId, _rid: RequestId) {}
 
 /// The node `zid` sent face `dst` the final of its query `rid`: upstream's events at the same
 /// step, for a query routed nowhere (`zenoh/src/net/routing/dispatcher/queries.rs` @
 /// `"{}:{} Send final reply (no matching queryables or not master)",`) and for one whose last
 /// branch ended (@ `"{}:{} Propagate final reply"`).
 #[cfg(feature = "tracing-spans")]
-pub(super) fn query_final(zid: Zid, dst: FaceId, rid: u64) {
+pub(super) fn query_final(zid: Zid, dst: FaceId, rid: RequestId) {
     tracing::debug!(zid = %zid, dst = dst.0, rid, "send final reply");
 }
 
 #[cfg(not(feature = "tracing-spans"))]
 #[inline(always)]
-pub(super) fn query_final(_zid: Zid, _dst: FaceId, _rid: u64) {}
+pub(super) fn query_final(_zid: Zid, _dst: FaceId, _rid: RequestId) {}
 
 #[cfg(all(test, feature = "tracing-spans"))]
 mod tests {

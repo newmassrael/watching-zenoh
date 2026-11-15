@@ -256,7 +256,7 @@ mod tests {
     fn scout_emit_stages_framed_datagram() {
         let actions = fixture_actions();
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
 
         assert_eq!(engine.get_current_state(), ScoutingState::Sending);
@@ -281,7 +281,7 @@ mod tests {
     fn record_hello_extracts_first_locator() {
         let actions = fixture_actions();
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
         assert_eq!(engine.get_current_state(), ScoutingState::AwaitingHello);
@@ -307,7 +307,7 @@ mod tests {
     fn scout_timeout_leaves_no_locator() {
         let actions = fixture_actions();
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
         engine.process_event(ScoutingEvent::ScoutTimerElapsed);
@@ -377,7 +377,7 @@ mod tests {
     fn scout_one(dgram: Vec<u8>) -> (Arc<ScoutingActions>, Vec<ScoutedHello>) {
         let actions = fixture_actions();
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
         assert_eq!(engine.get_current_state(), ScoutingState::AwaitingHello);
@@ -460,7 +460,7 @@ mod tests {
     fn a_locator_less_hello_is_still_a_discovered_peer() {
         let actions = fixture_actions_mode(false);
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
         assert_eq!(engine.get_current_state(), ScoutingState::AwaitingHello);
@@ -507,7 +507,7 @@ mod tests {
     fn an_exit_on_first_window_stops_at_the_first_hello() {
         let actions = fixture_actions_mode(true);
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
 
@@ -546,7 +546,7 @@ mod tests {
     fn a_survey_window_records_every_responder_and_stays_awaiting() {
         let actions = fixture_actions_mode(false);
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
 
@@ -604,7 +604,7 @@ mod tests {
     fn the_dial_target_is_the_first_captured_locator_and_a_later_peer_cannot_move_it() {
         let actions = fixture_actions_mode(false);
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
 
@@ -644,7 +644,7 @@ mod tests {
     fn a_timed_out_window_records_no_hello() {
         let actions = fixture_actions();
         let mut engine = new_scouting_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
         engine.process_event(ScoutingEvent::ScoutTimerElapsed);

@@ -1537,7 +1537,7 @@ fn a_session_admits_a_protocol_only_when_the_peer_lists_it() {
 /// (`zenoh/src/net/routing/dispatcher/resource.rs:625`).
 #[cfg(all(feature = "codec-push", feature = "declare-keyexpr"))]
 fn inbound_push_aliased_in_our_space(
-    mapping_id: u64,
+    mapping_id: wz_session_core::wire_id::ExprId,
     payload: &[u8],
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
     let push = wz_codecs::lent::Push {
@@ -1578,7 +1578,7 @@ fn inbound_push_aliased_in_our_space(
 /// back as the wire carries them, then read by the same reader the loop uses.
 #[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
 fn plain_puts_frame(
-    puts: &[(u64, Option<&str>, &[u8])],
+    puts: &[(wz_session_core::wire_id::ExprId, Option<&str>, &[u8])],
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
     let mut batch = Vec::new();
     for (id, suffix, payload) in puts {
@@ -2022,7 +2022,7 @@ fn publish_options_with_metadata_setters_chain() {
     assert_eq!(ts.zid, vec![0xAA, 0xBB]);
     let enc = opts.encoding.as_ref().unwrap();
     assert_eq!(enc.packed_id, 13);
-    assert_eq!(enc.schema.as_deref(), Some("application/json"));
+    assert_eq!(enc.schema.as_deref(), Some(&b"application/json"[..]));
     let si = opts.source_info.as_ref().unwrap();
     assert_eq!(si.zid_len, 4);
     assert_eq!(si.eid, 7);
@@ -2298,7 +2298,7 @@ fn publish_loopback_propagates_encoding_to_put_sample() {
     let s = captured.lock().unwrap();
     let enc = s[0].encoding.as_ref().unwrap();
     assert_eq!(enc.packed_id, 5);
-    assert_eq!(enc.schema.as_deref(), Some("text/plain"));
+    assert_eq!(enc.schema.as_deref(), Some(&b"text/plain"[..]));
 }
 
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
@@ -3447,7 +3447,7 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
         .unwrap()
         .queryables
         .register("error/path", |_q, responder| {
-            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
         });
 
     session
@@ -3471,7 +3471,7 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
         InboundReplyBody::Err { encoding, payload } => {
             // Packed as the wire packs it, so that a loopback reply reads as a received one does:
             // the id 4 shifted over the bit that says a schema follows.
-            assert_eq!(*encoding, Some((9, Some("schema_v1".to_string()))));
+            assert_eq!(*encoding, Some((9, Some(b"schema_v1".to_vec()))));
             assert_eq!(payload, b"oops");
         }
         other => panic!("expected Err, got {other:?}"),
@@ -4230,7 +4230,7 @@ fn declare_adminspace_answers_root_get_with_local_data_json() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -4836,7 +4836,7 @@ fn declare_adminspace_config_get_returns_typed_config_json() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -4893,7 +4893,7 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -5086,7 +5086,7 @@ fn declare_adminspace_surface_document_arrives_over_the_query_path() {
                 *b.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -5586,7 +5586,7 @@ fn query_wire_branch_default_carries_the_default_timeout_ext() {
 // short-circuiting to the same bytes as the bare builder per the R240 invariant).
 #[cfg(all(test, feature = "query-get"))]
 fn expected_query_request_bytes(
-    mapping_id: u64,
+    mapping_id: wz_session_core::wire_id::ExprId,
     keyexpr: Option<&str>,
     #[allow(unused_mut)] mut meta: wz_session_core::metadata::QueryMetadata,
 ) -> Vec<u8> {
@@ -7598,7 +7598,7 @@ fn awaiting_options() -> QueryOptions {
 /// A final is a message of its own to the build (`codec-response-final`): a build that asks and
 /// does not decode one never sees a query end by it, so what needs one is gated on both.
 #[cfg(all(feature = "query-get", feature = "codec-response-final"))]
-fn finish_query(session: &TokioSession, rid: u64) {
+fn finish_query(session: &TokioSession, rid: wz_session_core::wire_id::RequestId) {
     use wz_codecs::lent::ResponseFinal;
     let response_final = ResponseFinal {
         request_id: rid,
@@ -8105,6 +8105,102 @@ fn a_publisher_clone_shares_one_interest_and_only_the_last_drop_retracts_it() {
         "the retract must name the id the declare allocated ({id}); frame was \
          {frame:02x?}",
     );
+}
+
+/// `aggregation/publishers`: publishers under one aggregate ask for subscribers
+/// with ONE interest naming the aggregate, three on one key and one on another
+/// alike, where without it each distinct key asks once; the last drop retracts
+/// it. Upstream's session sends the one interest the same way
+/// (`zenoh/src/api/session.rs` @ `.aggregated_publishers`) and retracts it when
+/// no publisher shares its id
+/// (`zenoh/src/api/session.rs` @ `p.destination != Locality::SessionLocal && p.remote_id == pub_state.remote_id`).
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-interest",
+    feature = "codec-declare",
+    feature = "keyexpr-includes"
+))]
+#[test]
+fn publishers_under_one_aggregate_ask_with_one_interest() {
+    use crate::declaration_aggregation::DeclarationAggregation;
+    use wz_session_core::interest_build::{build_interest_final, build_interest_subscribers};
+
+    // CONTROL: two keys, two interests; a second publisher on one of them, none.
+    let (plain, plain_driver) = build_session();
+    let p1 = plain.declare_publisher("home/temp", PublishOptions::put());
+    let p2 = plain.declare_publisher("home/temp", PublishOptions::put());
+    let p3 = plain.declare_publisher("home/hum", PublishOptions::put());
+    assert_eq!(plain_driver.frame_count(), 2);
+    std::mem::forget((p1, p2, p3));
+
+    let (session, driver) = build_session();
+    session.set_declaration_aggregation(
+        DeclarationAggregation::new(Vec::new(), vec![String::from("home/**")]).unwrap(),
+    );
+    let publishers: Vec<_> = ["home/temp", "home/temp", "home/temp", "home/hum"]
+        .into_iter()
+        .map(|key| session.declare_publisher(key, PublishOptions::put()))
+        .collect();
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "four publishers under one aggregate ask once"
+    );
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp"),
+        None,
+        "no interest stands on the publisher's own key"
+    );
+    let id = session
+        .matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/**")
+        .expect("the interest stands on the aggregate");
+    let wanted = build_interest_subscribers(id, true, true, 0, Some("home/**"))
+        .unwrap()
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
+        .encode_to_vec();
+    assert!(
+        driver
+            .frame_bytes(0)
+            .windows(wanted.len())
+            .any(|w| w == wanted),
+        "the interest names the aggregate"
+    );
+    let outside = session.declare_publisher("garden/soil", PublishOptions::put());
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "a key no aggregate includes asks itself"
+    );
+
+    let clone = publishers[3].clone();
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "a clone under the aggregate asks nothing"
+    );
+    drop(publishers);
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "a publisher under the aggregate still stands"
+    );
+    drop(clone);
+    assert_eq!(
+        driver.frame_count(),
+        3,
+        "the last one retracts the interest"
+    );
+    let wanted = build_interest_final(id)
+        .try_as_borrowed()
+        .expect("Final carries no exts")
+        .encode_to_vec();
+    assert!(driver
+        .frame_bytes(2)
+        .windows(wanted.len())
+        .any(|w| w == wanted));
+    std::mem::forget(outside);
 }
 
 #[cfg(feature = "pubsub-allow-loop")]
@@ -9087,6 +9183,140 @@ fn routed_subscriber_drop_emits_undecl_subscriber() {
         2,
         "Subscriber Drop emits the matching UndeclSubscriber (RAII retract)"
     );
+}
+
+/// `aggregation/subscribers`: the subscribers under one aggregate put ONE
+/// `DeclSubscriber` on the wire, naming the aggregate, where they would put one
+/// each; the declaration is retracted with the last of them; a subscriber no
+/// aggregate includes and a session-local one are declared as before. Upstream's
+/// session counts the same: one declaration per aggregate
+/// (`zenoh/src/api/session.rs` @ `.aggregated_subscribers`), retracted when no
+/// subscriber shares its id
+/// (`zenoh/src/api/session.rs` @ `s.origin != Locality::SessionLocal && s.remote_id == sub_state.remote_id`).
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-subscriber",
+    feature = "declare-undeclare",
+    feature = "keyexpr-includes"
+))]
+#[test]
+fn subscribers_under_one_aggregate_put_one_declaration_on_the_wire() {
+    use crate::declaration_aggregation::DeclarationAggregation;
+    use wz_session_core::declare_build::{build_declare_subscriber, build_undeclare_subscriber};
+
+    // CONTROL: without an aggregation, two subscribers on two keys are two
+    // declarations.
+    let (plain, plain_driver) = build_session();
+    let a = plain
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .unwrap();
+    let b = plain
+        .declare_subscriber("home/hum", SubscribeOptions::default(), |_| {})
+        .unwrap();
+    assert_eq!(plain_driver.frame_count(), 2);
+    std::mem::forget((a, b));
+
+    let (session, driver) = build_session();
+    session.set_declaration_aggregation(
+        DeclarationAggregation::new(vec![String::from("home/**")], Vec::new()).unwrap(),
+    );
+    let first = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .unwrap();
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "the first subscriber declares the aggregate"
+    );
+    let wanted = build_declare_subscriber(first.id().as_u64(), 0, Some("home/**"))
+        .unwrap()
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
+        .encode_to_vec();
+    assert!(
+        driver
+            .frame_bytes(0)
+            .windows(wanted.len())
+            .any(|w| w == wanted),
+        "the declaration names the aggregate under the first subscriber's id"
+    );
+    let second = session
+        .declare_subscriber("home/hum", SubscribeOptions::default(), |_| {})
+        .unwrap();
+    let twin = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .unwrap();
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "two more subscribers under the aggregate, one on the same key, declare nothing"
+    );
+    let local = session
+        .declare_subscriber(
+            "home/local",
+            SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "a session-local subscriber declares nothing"
+    );
+    let outside = session
+        .declare_subscriber("garden/soil", SubscribeOptions::default(), |_| {})
+        .unwrap();
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "a key no aggregate includes is declared itself"
+    );
+    let wanted = build_declare_subscriber(outside.id().as_u64(), 0, Some("garden/soil"))
+        .unwrap()
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
+        .encode_to_vec();
+    assert!(driver
+        .frame_bytes(1)
+        .windows(wanted.len())
+        .any(|w| w == wanted));
+
+    let first_id = first.id().as_u64();
+    drop(first);
+    drop(twin);
+    drop(local);
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "the declaration stands while a subscriber under it does, its maker gone or not"
+    );
+    drop(second);
+    assert_eq!(
+        driver.frame_count(),
+        3,
+        "the last subscriber under it retracts it"
+    );
+    let wanted = build_undeclare_subscriber(first_id)
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
+        .encode_to_vec();
+    assert!(
+        driver
+            .frame_bytes(2)
+            .windows(wanted.len())
+            .any(|w| w == wanted),
+        "the retraction names the id the declaration was made under"
+    );
+
+    let again = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .unwrap();
+    assert_eq!(
+        driver.frame_count(),
+        4,
+        "a subscriber after the retraction declares the aggregate again"
+    );
+    std::mem::forget((again, outside));
 }
 
 /// R2290 (open-debt item 626) — build a session whose link driver reports, per
@@ -13026,6 +13256,8 @@ fn tapped_qos_group_session() -> (
         compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        max_sessions: None,
     };
     let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
@@ -13052,7 +13284,7 @@ fn tapped_qos_group_session() -> (
 ))]
 #[test]
 fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group() {
-    use core::num::NonZeroU64;
+    use core::num::NonZeroU16;
     use wz_codecs::declare::DeclareOwnedVariant;
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::inbound::{parse_inbound, InboundFrame};
@@ -13061,7 +13293,7 @@ fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group
     let (session, mut tap) = tapped_qos_group_session();
     for (id, keyexpr) in [(1, "demo/mc/q"), (2, "other/key")] {
         session
-            .announce_keyexpr(NonZeroU64::new(id).expect("non-zero"), keyexpr)
+            .announce_keyexpr(NonZeroU16::new(id).expect("non-zero"), keyexpr)
             .expect("the declaration is pushed");
     }
     while tap.try_next().is_some() {}
@@ -13379,7 +13611,11 @@ fn group_egress(tap: &mut crate::multicast_pipeline::MulticastTxTap) -> Vec<Stri
     feature = "query-queryable",
     feature = "codec-response-final"
 ))]
-fn query_from_a_member(session: &TokioMulticastSession, rid: u64, keyexpr: &str) {
+fn query_from_a_member(
+    session: &TokioMulticastSession,
+    rid: wz_session_core::wire_id::RequestId,
+    keyexpr: &str,
+) {
     use wz_session_core::network_message::NetworkMessage;
     let request = wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
         .expect("the query builds");
@@ -14188,7 +14424,7 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
 /// wz-session-core test builders are not a dev-dep here per R311ds).
 #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
 pub(super) fn make_request_query(
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     keyexpr_literal: &str,
 ) -> wz_session_core::wire::RequestOwned {
     use wz_codecs::lent::{
@@ -14520,7 +14756,7 @@ fn remote_only_query_does_not_drain_another_planes_staged_fire() {
         "q/**",
         opts,
         |_r: &dyn wz_session_core::reply_sink::ReplyView| {},
-        |_rid: u64| {},
+        |_rid: wz_session_core::wire_id::RequestId| {},
     );
     // Non-vacuity: the query must actually have reached the drain site. A query
     // that errored early would leave the fire staged for the wrong reason.
@@ -15345,6 +15581,82 @@ fn a_driver_refusal_charges_n_dropped_and_no_sent_counter() {
              what was refused"
         );
     }
+}
+
+/// `stats/filters`: a session counts each payload it sends under every filter
+/// its key expression meets, in the per-key family of the metrics document, and
+/// under no other. CONTROL: the same sends with no filter carry no keyed series.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+#[test]
+fn a_session_counts_its_payloads_under_the_stats_filters_they_meet() {
+    use wz_session_core::stats_registry::{MetricsQuery, StatsKeyFilters, StatsRegistry};
+    let metrics_after = |filters: &[&str]| -> String {
+        let (session, _driver) = build_session();
+        session
+            .actions()
+            .set_stats_key_filters(
+                StatsKeyFilters::new(filters.iter().map(|s| s.to_string()).collect()).unwrap(),
+            )
+            .expect("a build with transport-stats takes the list");
+        for (key, value) in [("home/temp", &b"21.5"[..]), ("garden/soil", &b"dry"[..])] {
+            session
+                .publish(
+                    key,
+                    value,
+                    PublishOptions::put().with_locality(Locality::Remote),
+                )
+                .expect("published");
+        }
+        let mut registry = StatsRegistry::new("a1b2", wz_session_core::WhatAmI::Client, "test");
+        let transport =
+            registry.open_unicast_transport("c3d4", wz_session_core::WhatAmI::Router, None);
+        registry.set_transport_metrics(transport, session.actions().stats_metrics());
+        let mut doc = String::new();
+        registry.encode_metrics(&mut doc, MetricsQuery::default());
+        doc
+    };
+
+    let keyed = metrics_after(&["home/**", "nowhere/*"]);
+    let line = keyed
+        .lines()
+        .find(|l| {
+            l.starts_with("zenoh_tx_network_message_payload_per_key_bytes_count{")
+                && l.contains("key=\"home/**\"")
+        })
+        .unwrap_or_else(|| panic!("no per-key series for home/**:\n{keyed}"));
+    assert!(line.ends_with(" 1"), "one payload met home/**: {line}");
+    assert!(
+        !keyed.contains("key=\"nowhere/*\""),
+        "a filter no payload met has no series:\n{keyed}"
+    );
+
+    let bare = metrics_after(&[]);
+    assert!(
+        !bare.contains("key=\""),
+        "CONTROL: a session with no filter counts under no key:\n{bare}"
+    );
+}
+
+/// A build without `transport-stats` counts nothing, so a session of it refuses
+/// a stats filter that names a key rather than dropping it, and takes the empty
+/// list, which asks for nothing.
+#[cfg(not(feature = "transport-stats"))]
+#[test]
+fn a_build_without_transport_stats_refuses_a_stats_filter() {
+    use wz_session_core::stats_registry::{StatsKeyFilters, StatsKeyFiltersError};
+    let (session, _driver) = build_session();
+    assert_eq!(
+        session
+            .actions()
+            .set_stats_key_filters(StatsKeyFilters::new(vec![String::from("a/**")]).unwrap()),
+        Err(StatsKeyFiltersError::NotInBuild)
+    );
+    assert_eq!(
+        session
+            .actions()
+            .set_stats_key_filters(StatsKeyFilters::default()),
+        Ok(())
+    );
 }
 
 /// R2423 (open-debt item 688) — the F2 send gate learns from a `WriterGone`
@@ -16729,7 +17041,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         }),
         encoding: Some(EncodingHint {
             packed_id: 0x2d,
-            schema: Some("text/plain".to_string()),
+            schema: Some(b"text/plain".to_vec()),
         }),
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
         attachment: Some(b"attached".to_vec()),
@@ -16742,7 +17054,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         Vec<u8>,
         Option<Vec<u8>>,
         Option<(u64, Vec<u8>)>,
-        Option<(u32, Option<String>)>,
+        Option<(u32, Option<Vec<u8>>)>,
         Option<SourceInfo>,
         Option<QosLevel>,
     );
@@ -16754,7 +17066,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
             sample.timestamp_parts().map(|(t, z)| (t, z.to_vec())),
             sample
                 .encoding_parts()
-                .map(|(id, schema)| (id, schema.map(str::to_string))),
+                .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
             sample.source_info().cloned(),
             sample.qos(),
         )
@@ -16789,7 +17101,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         .expect("offloaded saw it");
     assert_eq!(offloaded, inline);
     assert_eq!(inline.2.as_deref(), Some(&b"attached"[..]), "not vacuous");
-    assert_eq!(inline.4, Some((0x2d, Some("text/plain".to_string()))));
+    assert_eq!(inline.4, Some((0x2d, Some(b"text/plain".to_vec()))));
 }
 
 /// Dropping the handle undeclares the subscription: nothing is delivered after it, and a sample

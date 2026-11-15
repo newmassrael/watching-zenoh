@@ -51,6 +51,7 @@ use wz_runtime_tokio::scouting_glue::{
 use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 
+use crate::caller_span::CallerSpan;
 use crate::scouting::SCOUT_TICK_MS;
 
 /// The first scouting window and the longest one, in milliseconds: a Scout goes out at the start
@@ -486,10 +487,12 @@ impl ScoutStream {
             .enable_all()
             .build()?;
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        // Taken on the caller's thread: the scout's thread scouts inside it.
+        let caller = CallerSpan::current();
         let thread = std::thread::Builder::new()
             .name("wz-scout".to_owned())
             .spawn(move || {
-                runtime.block_on(async move {
+                runtime.block_on(caller.carry(async move {
                     let Some(link) = ScoutLink::bind_for_scout(&plan).await else {
                         return;
                     };
@@ -500,7 +503,7 @@ impl ScoutStream {
                         }) => {}
                         _ = stopped => {}
                     }
-                });
+                }));
             })?;
         Ok(Self {
             stop: Some(stop),

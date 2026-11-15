@@ -429,23 +429,32 @@ impl<S: StreamEnvelopeStorage> StreamEnvelopeOwned<S> {
     }
 }
 
+/// What the origin projection of `StreamEnvelope` asks of a storage profile
+/// beside StreamEnvelopeStorage: that it is an origin profile, and
+/// that each byte string and text of `StreamEnvelope` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait StreamEnvelopeOrigin: StreamEnvelopeStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<StreamEnvelopePayloadField> {}
+
+impl<S: StreamEnvelopeStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<StreamEnvelopePayloadField>> StreamEnvelopeOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> StreamEnvelopeIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: StreamEnvelopeLentStorage {
     /// Project this borrowed view into an owned [`StreamEnvelopeOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: StreamEnvelopeStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<StreamEnvelopeOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: StreamEnvelopeOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<StreamEnvelopeOwned<S>, CodecError> {
         Ok(StreamEnvelopeOwned {
             payload_len: self.payload_len,
-            payload: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<StreamEnvelopePayloadField>(origin, self.payload.into_inner()))?,
+            payload: ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginBytes<StreamEnvelopePayloadField>>::bytes_from(origin, self.payload.into_inner()))?,
         })
     }
 }

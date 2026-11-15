@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The whole scouting Hello message: the header byte, the body `hello.scxml`
+     reads, and the extension chain. A scouting message, not a transport one;
+     see `scouting_scout.scxml` for the id space it belongs to.
+
+     Upstream writes header and body
+     (`commons/zenoh-codec/src/scouting/hello.rs` @
+     `impl<W> WCodec<&HelloProto, &mut W> for Zenoh080`) and reads a chain
+     after the body when Z is set, with the header of
+     `commons/zenoh-protocol/src/scouting/hello.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x02
+       bit 5    : L    the body carries a list of locators
+       bit 6    : reserved
+       bit 7    : Z    an extension chain follows the body
+
+     L is the body's input (`hello.scxml` `L`), bound here to the header bit,
+     so an encode derives it from whether the body presents a list: upstream
+     sets it `if !locators.is_empty()` and writes the list under the same
+     condition. Z is derived from whether the chain is present. Scouting
+     declares no extension of its own; an entry is read by its encoding and
+     judged one layer up. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="scouting_hello">
+  <sce:import src="hello.scxml" kind="codec" as="codec_zenoh_hello">
+    <sce:flag-bind input="L" source="header.L"/>
+  </sce:import>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x02"/>
+      <sce:flag name="L"   bit="5"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:embed id="body" type="codec_zenoh_hello" sce:byte="1"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>

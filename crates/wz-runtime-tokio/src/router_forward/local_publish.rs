@@ -125,23 +125,16 @@ pub(super) fn owe_delivery(
     true
 }
 
-/// [`owe_delivery`] for a query: the job is owed and `Ok`, or handed back when no span is open
-/// and the caller runs it itself.
-pub(super) fn owe_query(job: Box<super::QueryJob>) -> Result<(), Box<super::QueryJob>> {
-    DELIVERIES.with(|owed| match owed.borrow_mut().as_mut() {
-        Some(owed) => {
-            owed.push(OwedDelivery::Query(job));
-            Ok(())
-        }
-        None => Err(job),
-    })
-}
-
 /// The span of one route, in which the calls of the node's own session (its subscribers' and
 /// queryables' callbacks) are owed instead of made. Declare it BEFORE the guard of the tables the
 /// route takes, so that it ends after the guard is released: the calls are made then, by
 /// [`DeliveryScope::finish`] or, when the span ends any other way (a message the route skipped),
 /// by the drop.
+///
+/// The route of a query takes the scope as an argument ([`DeliveryScope::owe_query`]), so a
+/// query cannot be routed where no span is open: the queryables it finds are only ever called
+/// once the tables are let go, as upstream's session calls them once its state is
+/// (`zenoh/src/api/session.rs` @ `drop(state);`, before `cb.call(query.clone());`).
 pub(super) struct DeliveryScope<'a> {
     /// The forwarder the calls are made for, which takes the tables again to send what they answer.
     fwd: &'a super::RouterForwarder,
@@ -161,6 +154,17 @@ impl<'a> DeliveryScope<'a> {
             }
             Self { fwd, outermost }
         })
+    }
+
+    /// Owe the call of a hosted queryable to this span: it is made, with the query's branch,
+    /// once the outermost scope of the span ends and the tables are let go.
+    pub(super) fn owe_query(&self, job: Box<super::QueryJob>) {
+        DELIVERIES.with(|owed| match owed.borrow_mut().as_mut() {
+            Some(owed) => owed.push(OwedDelivery::Query(job)),
+            // `enter` opened the span or found it open, and only the end of the outermost scope,
+            // which outlives every scope that joined it, closes it.
+            None => unreachable!("a delivery scope is alive only while its span is open"),
+        });
     }
 
     /// Close the span and make the calls it owes. The span is closed first, so that a callback

@@ -146,7 +146,7 @@ impl Checkpoint {
         ));
         // W3C SCXML 3.3: enter the initial `Disarmed` leaf. Entering it is the start and asks for
         // nothing, so the duty it recorded is dropped.
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         let _ = engine.policy().actions().duties.take();
         Self {
             engine,

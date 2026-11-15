@@ -125,7 +125,7 @@ enum HeldEncoding {
     Known {
         id: u16,
         name: &'static str,
-        schema: Option<String>,
+        schema: Option<Vec<u8>>,
     },
     Unknown(u16),
     Absent,
@@ -137,7 +137,7 @@ impl HeldEncoding {
             Encoding::Known { id, name, schema } => Self::Known {
                 id,
                 name,
-                schema: schema.map(String::from),
+                schema: schema.map(<[u8]>::to_vec),
             },
             Encoding::Unknown { id } => Self::Unknown(id),
             Encoding::Absent => Self::Absent,

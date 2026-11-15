@@ -2,20 +2,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A handshake the key store has no slot for is dropped and counted, with the channel's own code.
-//! The host build keeps 1024 keys (`MBEDTLS_PSA_KEY_SLOT_COUNT`, `WZ_TLS_HOST`) and a held
-//! session takes four, so about 255 sessions fill the store. This binary starts an arena far
-//! larger than that many sessions need, so the store runs out first: the arena's own peak stays
-//! a fraction of it, which tells the two exhaustions apart (`arena_exhaustion.rs` is the other).
+//! The host build keeps 1024 keys (`HOST_KEY_SLOTS`, `MBEDTLS_PSA_KEY_SLOT_COUNT` under
+//! `WZ_TLS_HOST`) and a held session takes four, so about 255 sessions fill the store. This
+//! binary starts an arena far larger than that many sessions need, so the store runs out first:
+//! the arena's own peak stays a fraction of it, which tells the two exhaustions apart
+//! (`arena_exhaustion.rs` is the other).
 //!
-//! It drives the channel's C side, which only `vendored` builds, as the other tests here that do.
+//! It drives the channel's C side, which only `vendored` builds, and measures the host's store,
+//! which only `host-lock` declares: without it the store is the library's default of 32 keys.
 
-#![cfg(feature = "vendored")]
+#![cfg(all(feature = "vendored", feature = "host-lock"))]
 
 #[path = "common/mod.rs"]
 mod common;
 
 use std::io::Read;
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,17 +29,17 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use common::{library_sized, Authority};
 use wz_runtime_coop::stream_link::StreamListen;
 use wz_runtime_posix::stream::PosixTcpDial;
-use wz_tls_mbedtls::channel::{arena_peak, Identity, TlsError};
+use wz_tls_mbedtls::channel::{arena_peak, key_store_slots, Identity, TlsError, HOST_KEY_SLOTS};
 use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial};
 
-const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 /// Room for several times the sessions the key store can hold (about 20 KB each with RSA).
 const ARENA_BYTES: usize = 64 << 20;
 
-/// The most sessions the store of 1024 keys can hold at four each, the listener's own identity
+/// The most sessions the host's store can hold at four keys each, the listener's own identity
 /// taking at least one slot.
-const STORE_SESSIONS: usize = 256;
+const STORE_SESSIONS: usize = HOST_KEY_SLOTS / 4;
 
 fn clock_ms() -> u64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -47,6 +49,13 @@ fn clock_ms() -> u64 {
 #[test]
 fn a_handshake_the_key_store_has_no_slot_for_is_dropped_counted_and_names_a_code() {
     let _library = library_sized(ARENA_BYTES);
+    // What the counts below are reasoned from; a store of another size reds here, by name.
+    let slots = key_store_slots().expect("the host's store has a fixed size");
+    assert_eq!(
+        (slots.declared, slots.built),
+        (HOST_KEY_SLOTS, HOST_KEY_SLOTS),
+        "the store this test measures is the host's (declared, built by the library)"
+    );
     let authority = Authority::new();
     let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
     let identity: &'static Identity = Box::leak(Box::new(server.identity()));
@@ -64,8 +73,10 @@ fn a_handshake_the_key_store_has_no_slot_for_is_dropped_counted_and_names_a_code
         clock: clock_ms,
         timeout_ms: 2_000,
     });
-    let listener = dial.listen_counted(LOOPBACK, 0).expect("the port opens");
-    let (_, port) = listener.local();
+    let listener = dial
+        .listen_counted(SocketAddr::from((LOOPBACK, 0)))
+        .expect("the port opens");
+    let port = listener.local().port();
 
     let mut store = RootCertStore::empty();
     store.add(authority.cert.der().clone()).expect("a root");
@@ -84,7 +95,7 @@ fn a_handshake_the_key_store_has_no_slot_for_is_dropped_counted_and_names_a_code
         let config = Arc::clone(&config);
         let held = Arc::clone(&held);
         clients.push(thread::spawn(move || {
-            let Ok(tcp) = TcpStream::connect((Ipv4Addr::from(LOOPBACK), port)) else {
+            let Ok(tcp) = TcpStream::connect((LOOPBACK, port)) else {
                 return;
             };
             let name = ServerName::try_from("localhost").expect("a name");
@@ -136,7 +147,7 @@ fn a_handshake_the_key_store_has_no_slot_for_is_dropped_counted_and_names_a_code
     // Measured: 255 held, the store's 1024 keys at four a session less the identity's slot.
     assert!(
         (STORE_SESSIONS - 16..STORE_SESSIONS).contains(&accepted.len()),
-        "{} sessions held, not what a store of 1024 keys at four each gives",
+        "{} sessions held, not what a store of {HOST_KEY_SLOTS} keys at four each gives",
         accepted.len()
     );
     // Measured: Mbed TLS itself reports a full store from inside the handshake as its generic

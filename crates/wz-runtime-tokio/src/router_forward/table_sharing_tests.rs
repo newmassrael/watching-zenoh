@@ -168,9 +168,11 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
 
     // The faces alone first: what a read costs under each value with no write to retire a route,
     // which the window with the writer cannot separate from what the writes cost the readers.
+    let off_version_before = fwd.tables.read().routes_asked_off_version();
     let alone = routed_while(&fwd, &publishers, &subscribers, || {
         std::thread::sleep(Duration::from_millis(1))
     });
+    let off_version_alone = fwd.tables.read().routes_asked_off_version();
 
     let (mut declarations, mut transitions) = (Waits::default(), Waits::default());
     let mut round = 0u64;
@@ -196,6 +198,18 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
     );
     println!("table-sharing: declarations {}", declarations.line());
     println!("table-sharing: face transitions {}", transitions.line());
+    let off_version_together = fwd.tables.read().routes_asked_off_version();
+    println!(
+        "table-sharing: routes asked at a draft's inputs (asked, computed) with no writer {:?}, \
+         with the writer {:?}",
+        since(off_version_alone, off_version_before),
+        since(off_version_together, off_version_alone),
+    );
+}
+
+/// What a pair of counts `(asked, computed)` rose by from `was` to `now`.
+fn since(now: (usize, usize), was: (usize, usize)) -> (usize, usize) {
+    (now.0 - was.0, now.1 - was.1)
 }
 
 /// The Puts a second the `publishers` route to the `subscribers` for [`WINDOW`], each from a
@@ -541,61 +555,27 @@ fn the_puts_routed_measured_against_the_faces_up() {
 /// what its declarations do: the path copies the versions are made of, and the routes and the
 /// route caches they reach. The routes the readers computed in each window are counted beside it:
 /// keys nobody puts to retire no route the Puts are served from, so the count is expected to stay
-/// at zero, and a window where it does not measured something else.
+/// at zero, and a window where it does not measured something else. So are the routes asked at a
+/// draft's inputs, and computed then: how often the writer routes through its own draft, with the
+/// draft route memos off and on (section 6.9).
 #[test]
 #[ignore = "a measurement of what a busy writer's versions cost the readers \
             (docs/router-table-snapshots.md, section 6.7); run with --release --ignored \
             --nocapture on a build host"]
 fn the_readers_under_a_busy_writer_measured_by_what_the_writes_change() {
-    let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
-    let mut subscribers = Vec::new();
-    for s in 0..FAN_OUT {
-        let (actions, sink) = client(zid(0xC0 + s as u8));
-        fwd.register(FaceId(s), &actions);
-        bring(&fwd, FaceId(s), declare_sub("demo/data"));
-        subscribers.push(sink);
-    }
-    let mut publishers = Vec::new();
-    for p in 0..PUBLISHERS {
-        let id = FaceId(100 + p);
-        let (actions, _sink) = client(zid(0xA0 + p as u8));
-        fwd.register(id, &actions);
-        publishers.push(id);
-    }
-    let writer_face = FaceId(200);
-    let (writer_actions, _writer_sink) = client(zid(0xE0));
-    fwd.register(writer_face, &writer_actions);
-    let structure = fwd.table_sharing().id();
-    // A router nobody routes through, with the same writer face: the `declaring_elsewhere`
-    // writer does the declaring writer's work there, so that the readers share the host with
-    // that work and not the tables it writes.
-    let elsewhere = RouterForwarder::new(zid(0x02));
-    let (elsewhere_actions, _elsewhere_sink) = client(zid(0xE0));
-    elsewhere.register(writer_face, &elsewhere_actions);
-
-    // One window of `kind`: the Puts routed a second, the writes published a second (as the
-    // cell counts them: one message can be one write or several), and the client routes
-    // computed in it.
-    let window = |kind: &str, meanwhile: &mut dyn FnMut()| {
-        let computes_before = fwd.client_route_computes();
-        let writes_before = fwd.tables.writes_published();
-        let elsewhere_before = elsewhere.tables.writes_published();
-        let began = Instant::now();
-        let routed = routed_and_spent_while(&fwd, &publishers, &subscribers, &mut *meanwhile);
-        let seconds = began.elapsed().as_secs_f64();
-        let writes_per_s = (fwd.tables.writes_published() - writes_before) as f64 / seconds;
-        let elsewhere_per_s =
-            (elsewhere.tables.writes_published() - elsewhere_before) as f64 / seconds;
-        let computes = fwd.client_route_computes() - computes_before;
-        println!(
-            "readers-under-writer: structure={structure} window={kind} \
-             puts_routed_per_s={:.0} reader_cpu_ns_per_put={:.0} \
-             writes_per_s={writes_per_s:.0} elsewhere_writes_per_s={elsewhere_per_s:.0} \
-             client_route_computes={computes}",
-            routed.puts_per_s, routed.cpu_ns_per_put
-        );
-        writes_per_s
-    };
+    // `WZ_DRAFT_ROUTE_MEMOS` names the values of the draft route memos to measure
+    // (docs/router-table-snapshots.md, section 6.9), `off` by default: `off,on` builds a scene of
+    // each and runs each window kind in one, then in the other, so that the two values of one
+    // kind are measured next to each other in time.
+    let scenes: Vec<BusyScene> = std::env::var("WZ_DRAFT_ROUTE_MEMOS")
+        .unwrap_or_else(|_| "off".into())
+        .split(',')
+        .map(|value| match value {
+            "off" => BusyScene::new(false),
+            "on" => BusyScene::new(true),
+            other => panic!("WZ_DRAFT_ROUTE_MEMOS names {other:?}, which is neither off nor on"),
+        })
+        .collect();
 
     // `WZ_WRITER_WINDOWS` names the kinds to run, in order (all five by default), and
     // `WZ_WRITER_ROUNDS` how many times (3): a profile is taken of one kind at a time. The paced
@@ -607,47 +587,423 @@ fn the_readers_under_a_busy_writer_measured_by_what_the_writes_change() {
         .ok()
         .and_then(|r| r.parse().ok())
         .unwrap_or(3);
-    let mut rate: f64 = std::env::var("WZ_WRITER_RATE")
+    let first_rate: f64 = std::env::var("WZ_WRITER_RATE")
         .ok()
         .and_then(|r| r.parse().ok())
         .unwrap_or(20_000.0);
+    let mut rates = vec![first_rate; scenes.len()];
     let mut round = 0u64;
     for _ in 0..rounds {
         for kind in kinds.split(',') {
-            match kind {
-                "none" => {
-                    window(kind, &mut || std::thread::sleep(Duration::from_millis(1)));
+            for (scene, rate) in scenes.iter().zip(rates.iter_mut()) {
+                match kind {
+                    "none" => {
+                        scene.window(kind, &mut || std::thread::sleep(Duration::from_millis(1)));
+                    }
+                    "declaring" => {
+                        *rate = scene.window(kind, &mut || {
+                            let key = format!("demo/churn/{}", round % 64);
+                            round += 1;
+                            bring(&scene.fwd, WRITER_FACE, declare_sub(&key));
+                            bring(&scene.fwd, WRITER_FACE, undeclare_sub(&key));
+                        });
+                    }
+                    "declaring_elsewhere" => {
+                        scene.window(kind, &mut || {
+                            let key = format!("demo/churn/{}", round % 64);
+                            round += 1;
+                            bring(&scene.elsewhere, WRITER_FACE, declare_sub(&key));
+                            bring(&scene.elsewhere, WRITER_FACE, undeclare_sub(&key));
+                        });
+                    }
+                    "unchanged_paced" => {
+                        let interval = Duration::from_secs_f64(1.0 / rate.max(1.0));
+                        let mut next = Instant::now();
+                        scene.window(kind, &mut || {
+                            if Instant::now() >= next {
+                                next += interval;
+                                scene.fwd.tables.write().publish();
+                            }
+                        });
+                    }
+                    "unchanged" => {
+                        scene.window(kind, &mut || scene.fwd.tables.write().publish());
+                    }
+                    other => panic!("WZ_WRITER_WINDOWS names {other:?}, which is not a window"),
                 }
-                "declaring" => {
-                    rate = window(kind, &mut || {
-                        let key = format!("demo/churn/{}", round % 64);
-                        round += 1;
-                        bring(&fwd, writer_face, declare_sub(&key));
-                        bring(&fwd, writer_face, undeclare_sub(&key));
-                    });
+            }
+        }
+    }
+}
+
+/// The face the busy writer declares on, in both routers of a [`BusyScene`].
+const WRITER_FACE: FaceId = FaceId(200);
+
+/// The routers of the busy-writer instrument for one value of the draft route memos: the routed
+/// one, with the phase 0 publishers and subscribers and the writer's face, and one nobody routes
+/// through, with the writer's face alone. The `declaring_elsewhere` writer does the declaring
+/// writer's work in the second, so that the readers share the host with that work and not the
+/// tables it writes.
+struct BusyScene {
+    fwd: Arc<RouterForwarder>,
+    elsewhere: RouterForwarder,
+    publishers: Vec<FaceId>,
+    subscribers: Vec<Arc<CountingLinkDriver>>,
+    draft_route_memos: bool,
+    /// The faces' sessions, held for as long as the routers are.
+    _faces: Vec<Arc<SessionLinkActions>>,
+}
+
+impl BusyScene {
+    fn new(draft_route_memos: bool) -> Self {
+        let fwd =
+            Arc::new(RouterForwarder::new(zid(0x01)).with_draft_route_memos(draft_route_memos));
+        let mut faces = Vec::new();
+        let mut subscribers = Vec::new();
+        for s in 0..FAN_OUT {
+            let (actions, sink) = client(zid(0xC0 + s as u8));
+            fwd.register(FaceId(s), &actions);
+            bring(&fwd, FaceId(s), declare_sub("demo/data"));
+            subscribers.push(sink);
+            faces.push(actions);
+        }
+        let mut publishers = Vec::new();
+        for p in 0..PUBLISHERS {
+            let id = FaceId(100 + p);
+            let (actions, _sink) = client(zid(0xA0 + p as u8));
+            fwd.register(id, &actions);
+            publishers.push(id);
+            faces.push(actions);
+        }
+        let (writer, _writer_sink) = client(zid(0xE0));
+        fwd.register(WRITER_FACE, &writer);
+        let elsewhere = RouterForwarder::new(zid(0x02)).with_draft_route_memos(draft_route_memos);
+        let (elsewhere_writer, _elsewhere_sink) = client(zid(0xE0));
+        elsewhere.register(WRITER_FACE, &elsewhere_writer);
+        faces.push(writer);
+        faces.push(elsewhere_writer);
+        Self {
+            fwd,
+            elsewhere,
+            publishers,
+            subscribers,
+            draft_route_memos,
+            _faces: faces,
+        }
+    }
+
+    /// One window of `kind`: the Puts routed a second, the writes published a second (as the cell
+    /// counts them: one message can be one write or several), the client routes computed in it,
+    /// and the routes asked at a draft's inputs and computed then (section 6.9). Answers the writes
+    /// published a second.
+    fn window(&self, kind: &str, meanwhile: &mut dyn FnMut()) -> f64 {
+        let off_version = || self.fwd.tables.read().routes_asked_off_version();
+        let computes_before = self.fwd.client_route_computes();
+        let off_version_before = off_version();
+        let writes_before = self.fwd.tables.writes_published();
+        let elsewhere_before = self.elsewhere.tables.writes_published();
+        let began = Instant::now();
+        let routed = routed_and_spent_while(
+            &self.fwd,
+            &self.publishers,
+            &self.subscribers,
+            &mut *meanwhile,
+        );
+        let seconds = began.elapsed().as_secs_f64();
+        let writes_per_s = (self.fwd.tables.writes_published() - writes_before) as f64 / seconds;
+        let elsewhere_per_s =
+            (self.elsewhere.tables.writes_published() - elsewhere_before) as f64 / seconds;
+        let computes = self.fwd.client_route_computes() - computes_before;
+        let (asked, computed) = since(off_version(), off_version_before);
+        println!(
+            "readers-under-writer: structure={} draft_route_memos={} window={kind} \
+             puts_routed_per_s={:.0} reader_cpu_ns_per_put={:.0} \
+             writes_per_s={writes_per_s:.0} elsewhere_writes_per_s={elsewhere_per_s:.0} \
+             client_route_computes={computes} routes_asked_off_version={asked} \
+             routes_computed_off_version={computed}",
+            self.fwd.table_sharing().id(),
+            if self.draft_route_memos { "on" } else { "off" },
+            routed.puts_per_s,
+            routed.cpu_ns_per_put
+        );
+        writes_per_s
+    }
+}
+
+/// The keys a client leg's memo keeps, in the steps the route memo instrument measures at, each
+/// declared by one of [`ADMITTED`] client faces. `WZ_MEMO_KEYS` names other steps.
+const MEMO_KEYS: [u64; 4] = [256, 2_048, 16_384, 65_536];
+
+/// How many times the route memo instrument times each write that reaches no route or one.
+const MEMO_WRITES: u64 = 64;
+
+/// How many times the route memo instrument empties its memos with a key that meets every route.
+const MEMO_WIDE_ROUNDS: u64 = 3;
+
+/// The declaration id of the route memo instrument's writes, apart from the ids its keys are
+/// declared under (1 and up).
+const MEMO_WRITE_ID: u64 = u64::MAX;
+
+/// Durations in nanoseconds: the count, the median, the 99th percentile and the longest.
+fn nanos_line(samples: &mut [Duration]) -> String {
+    samples.sort_unstable();
+    let at = |q: usize| {
+        let index = (samples.len() * q / 100).min(samples.len().saturating_sub(1));
+        samples.get(index).map_or(0, Duration::as_nanos)
+    };
+    format!(
+        "n={} p50={}ns p99={}ns max={}ns",
+        samples.len(),
+        at(50),
+        at(99),
+        samples.last().map_or(0, Duration::as_nanos)
+    )
+}
+
+/// Route every key of `names` through `memo` as a reader of `store`'s version does, every key
+/// taken as declared, and answer the time a route took.
+fn route_every_key(memo: &ClientRoutes, store: &ClientSubStore, names: &[String]) -> Duration {
+    let declared = |_: &str| true;
+    let began = Instant::now();
+    for name in names {
+        std::hint::black_box(client_route(
+            store,
+            Cached {
+                routes: memo,
+                names_a_resource: &declared,
+            },
+            name,
+            true,
+        ));
+    }
+    began.elapsed() / names.len().max(1) as u32
+}
+
+/// Bring `memo` to `store`'s version as the writer does before it publishes, and answer the time
+/// it took. The memo it replaces is let go after the clock stops, as a retired version is let go
+/// after the publish.
+fn bring_timed(memo: &mut Arc<ClientRoutes>, store: &ClientSubStore) -> Duration {
+    let retired = Arc::clone(memo);
+    let began = Instant::now();
+    bring_client_routes(memo, store);
+    let took = began.elapsed();
+    drop(retired);
+    took
+}
+
+/// What the writer pays to leave out of a client leg's memo the routes a change reaches, found by
+/// the memo's index and by a scan of every route kept, and what keeping the index costs a reader
+/// that misses (`docs/router-table-snapshots.md`, section 6.9).
+///
+/// [`ADMITTED`] client faces declare the keys of each step of [`MEMO_KEYS`], `mesh/dev_<k>`, and
+/// two memos of the client leg route every one of them: one built with no index, as the memos were
+/// before section 6.9, and one indexed. Every write moves the store once and brings each memo to
+/// it, timed alone: a key no route meets (declared, then withdrawn), a key one route meets (a
+/// second face declaring it, then withdrawing it), and `mesh/**`, which meets every route. A miss
+/// is timed by routing every key into an emptied memo, and a hit by routing them again. The two
+/// forms take turns, in one order and then the other, in one process. Asserts its population: the
+/// two memos keep the same number of routes after every write, the number the write leaves.
+#[test]
+#[ignore = "a measurement of the routes a change reaches found by an index and by a scan \
+            (docs/router-table-snapshots.md, section 6.9); run with --release --ignored \
+            --nocapture on a build host"]
+fn the_routes_a_change_reaches_measured_found_by_the_index_and_by_a_scan() {
+    const FORMS: [&str; 2] = ["scan", "index"];
+    const WRITES: [&str; 3] = [
+        "reaches_no_route",
+        "reaches_one_route",
+        "reaches_every_route",
+    ];
+    let order = |turn: u64| if turn % 2 == 0 { [0, 1] } else { [1, 0] };
+    let steps: Vec<u64> = std::env::var("WZ_MEMO_KEYS").map_or_else(
+        |_| MEMO_KEYS.to_vec(),
+        |steps| {
+            steps
+                .split(',')
+                .map(|keys| keys.parse().expect("WZ_MEMO_KEYS names numbers of keys"))
+                .collect()
+        },
+    );
+    for keys in steps {
+        let names: Vec<String> = (0..keys).map(|k| format!("mesh/dev_{k}")).collect();
+        let mut store = ClientSubStore::new();
+        for (k, name) in (0..keys).zip(&names) {
+            store.insert(FaceId(k % ADMITTED), 1 + k / ADMITTED, name, ());
+        }
+        let mut memos = [
+            Arc::new(ClientRoutes::new()),
+            Arc::new(ClientRoutes::indexed()),
+        ];
+        for memo in &mut memos {
+            bring_client_routes(memo, &store);
+        }
+        let kept = |memos: &[Arc<ClientRoutes>; 2], want: usize, after: &str| {
+            for (memo, form) in memos.iter().zip(FORMS) {
+                assert_eq!(
+                    memo.len(),
+                    want,
+                    "keys={keys} form={form}: kept after {after}"
+                );
+            }
+        };
+        let mut misses: [Vec<Duration>; 2] = Default::default();
+        let mut hits: [Vec<Duration>; 2] = Default::default();
+        let mut writes: [[Vec<Duration>; 2]; 3] = Default::default();
+        let wide = "mesh/**";
+        for turn in 0..MEMO_WIDE_ROUNDS {
+            for (step, change) in [true, false].into_iter().enumerate() {
+                for f in order(turn) {
+                    misses[f].push(route_every_key(&memos[f], &store, &names));
+                    hits[f].push(route_every_key(&memos[f], &store, &names));
                 }
-                "declaring_elsewhere" => {
-                    window(kind, &mut || {
-                        let key = format!("demo/churn/{}", round % 64);
-                        round += 1;
-                        bring(&elsewhere, writer_face, declare_sub(&key));
-                        bring(&elsewhere, writer_face, undeclare_sub(&key));
-                    });
+                kept(&memos, keys as usize, "routing every key");
+                if change {
+                    store.insert(FaceId(0), MEMO_WRITE_ID, wide, ());
+                } else {
+                    store.remove_id(FaceId(0), MEMO_WRITE_ID);
                 }
-                "unchanged_paced" => {
-                    let interval = Duration::from_secs_f64(1.0 / rate.max(1.0));
-                    let mut next = Instant::now();
-                    window(kind, &mut || {
-                        if Instant::now() >= next {
-                            next += interval;
-                            fwd.tables.write().publish();
+                for f in order(turn + step as u64) {
+                    writes[2][f].push(bring_timed(&mut memos[f], &store));
+                }
+                kept(&memos, 0, "a change of a key every route meets");
+            }
+        }
+        for f in order(0) {
+            misses[f].push(route_every_key(&memos[f], &store, &names));
+        }
+        for turn in 0..MEMO_WRITES {
+            let face = FaceId(turn % ADMITTED);
+            store.insert(face, MEMO_WRITE_ID, &format!("mesh/fresh_{turn}"), ());
+            for f in order(turn) {
+                writes[0][f].push(bring_timed(&mut memos[f], &store));
+            }
+            store.remove_id(face, MEMO_WRITE_ID);
+            for f in order(turn + 1) {
+                writes[0][f].push(bring_timed(&mut memos[f], &store));
+            }
+            kept(&memos, keys as usize, "a change of a key no route meets");
+
+            let reached = (turn * 7_919 % keys) as usize;
+            let other = FaceId((reached as u64 + 1) % ADMITTED);
+            let one = std::slice::from_ref(&names[reached]);
+            store.insert(other, MEMO_WRITE_ID, &names[reached], ());
+            for f in order(turn) {
+                writes[1][f].push(bring_timed(&mut memos[f], &store));
+            }
+            kept(
+                &memos,
+                keys as usize - 1,
+                "a change of a key one route meets",
+            );
+            for memo in &memos {
+                route_every_key(memo, &store, one);
+            }
+            store.remove_id(other, MEMO_WRITE_ID);
+            for f in order(turn + 1) {
+                writes[1][f].push(bring_timed(&mut memos[f], &store));
+            }
+            kept(&memos, keys as usize - 1, "its withdrawal");
+            for memo in &memos {
+                route_every_key(memo, &store, one);
+            }
+        }
+        for (f, form) in FORMS.into_iter().enumerate() {
+            println!(
+                "route-memo: keys={keys} faces={ADMITTED} form={form} miss_per_route {} \
+                 hit_per_route {}",
+                nanos_line(&mut misses[f]),
+                nanos_line(&mut hits[f])
+            );
+            for (w, write) in WRITES.into_iter().enumerate() {
+                println!(
+                    "route-memo: keys={keys} faces={ADMITTED} form={form} write={write} bring {}",
+                    nanos_line(&mut writes[w][f])
+                );
+            }
+        }
+    }
+}
+
+/// The fan-outs the face lookup instrument measures a delivery at.
+const DELIVERY_FAN_OUTS: [u64; 4] = [1, 4, 64, 512];
+
+/// How many faces each window of the face lookup instrument visits, whatever the fan-out.
+const LOOKUPS_A_WINDOW: u64 = 4_000_000;
+
+/// How many windows of each form the face lookup instrument takes, the forms taking turns.
+const LOOKUP_WINDOWS: u64 = 6;
+
+/// What a delivery's lookups of its faces by id cost against the faces the router holds
+/// (`docs/router-table-snapshots.md`, section 6.9): a route names its faces by id, and every
+/// delivery finds each one in the version's face table and reads its tier, as
+/// `fan_out_to_faces_qos` does. The other form is a route that held its faces' state, which reads
+/// the tier where the route holds it.
+///
+/// Client faces come up [`BAND`] at a time to [`ADMITTED`], and at each band a route of each fan-out
+/// in [`DELIVERY_FAN_OUTS`] is spread over the faces up. The two forms take turns over
+/// [`LOOKUP_WINDOWS`] windows each, in one process; a window delivers [`LOOKUPS_A_WINDOW`] face
+/// visits. Prints the median and the spread of the nanoseconds a delivery took in each form.
+/// Asserts its population: every face of the route is found, in its tier, on every delivery.
+#[test]
+#[ignore = "a measurement of what a delivery's lookups of its faces by id cost against the faces \
+            held (docs/router-table-snapshots.md, section 6.9); run with --release --ignored \
+            --nocapture on a build host"]
+fn the_face_lookups_of_a_delivery_measured_against_the_faces_held() {
+    const FORMS: [&str; 2] = ["by_id", "held_state"];
+    let fwd = RouterForwarder::new(zid(0x01));
+    let structure = fwd.table_sharing().id();
+    let mut held = Vec::new();
+    for band in 1..=ADMITTED / BAND {
+        for i in (band - 1) * BAND..band * BAND {
+            let peer = Zid::from_slice(&(0x0010_0000 + i as u32).to_be_bytes());
+            let (actions, sink) = client(peer);
+            fwd.register(FaceId(i), &actions);
+            held.push((actions, sink));
+        }
+        let up = band * BAND;
+        let tables = fwd.tables.read();
+        for fan_out in DELIVERY_FAN_OUTS
+            .into_iter()
+            .filter(|fan_out| *fan_out <= up)
+        {
+            let ids: Vec<FaceId> = (0..fan_out).map(|n| FaceId(n * up / fan_out)).collect();
+            let states: Vec<Arc<RouterFaceState>> =
+                ids.iter().map(|id| Arc::clone(&tables.faces[id])).collect();
+            let tier = states[0].tier;
+            let deliveries = LOOKUPS_A_WINDOW / fan_out;
+            let mut took: [Vec<Duration>; 2] = Default::default();
+            for window in 0..LOOKUP_WINDOWS {
+                let forms = if window % 2 == 0 { [0, 1] } else { [1, 0] };
+                for form in forms {
+                    let mut found = 0u64;
+                    let began = Instant::now();
+                    for _ in 0..deliveries {
+                        if form == 0 {
+                            for id in std::hint::black_box(&ids) {
+                                found += u64::from(
+                                    tables.faces.get(id).is_some_and(|state| state.tier == tier),
+                                );
+                            }
+                        } else {
+                            for state in std::hint::black_box(&states) {
+                                found += u64::from(state.tier == tier);
+                            }
                         }
-                    });
+                    }
+                    took[form].push(began.elapsed() / deliveries as u32);
+                    assert_eq!(
+                        found,
+                        deliveries * fan_out,
+                        "every face of the route is found in its tier on every delivery"
+                    );
                 }
-                "unchanged" => {
-                    window(kind, &mut || fwd.tables.write().publish());
-                }
-                other => panic!("WZ_WRITER_WINDOWS names {other:?}, which is not a window"),
+            }
+            for (form, name) in FORMS.into_iter().enumerate() {
+                println!(
+                    "face-lookups: structure={structure} faces_up={up} fan_out={fan_out} \
+                     form={name} per_delivery {}",
+                    nanos_line(&mut took[form])
+                );
             }
         }
     }
@@ -866,7 +1222,7 @@ fn a_put_between_declarations_of_one_frame_is_routed_by_the_one_before_it() {
     let (fwd, sink, _faces) = subscriber_and_publisher();
     bring(&fwd, SUBSCRIBER, declare_sub("demo/a"));
     sink.reset();
-    let alias = |id: u64, keyexpr: &str| {
+    let alias = |id: wz_session_core::wire_id::ExprId, keyexpr: &str| {
         NetworkMessage::Declare(Box::new(
             wz_session_core::declare_build::build_declare_kexpr(id, keyexpr).expect("kexpr"),
         ))

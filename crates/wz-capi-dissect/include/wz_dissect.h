@@ -626,6 +626,12 @@
  * application data. The range is derived from the message's bytes and does not
  * change in an issued row.
  *
+ * AN ENCODING'S SCHEMA THAT IS NOT UTF-8, at field-document revision 67:
+ * `payload.schema_hex`, after `encoding`, written only then. The schema is
+ * bytes on the wire and zenoh accepts any; `encoding` names the id alone for
+ * such a schema, and `schema_hex` is its bytes in lower-case hex. Where there
+ * is no `schema_hex` the schema, if any, is the part of `encoding` after `;`.
+ *
  * AND WHAT THE RANGE IS THE SPAN OF, at field-document revision 64:
  * `payload.span_of`, the last key of the object.
  *
@@ -1688,7 +1694,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":66,"key":"kind","values":[...],
+ *     {"name":"fields","revision":68,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -2075,7 +2081,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 57
+#define WZ_DISSECT_ABI_REVISION 58
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2456,10 +2462,12 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * and `e2e.crc != ok` is `yes`. A frame's verdict depends on the frames of its
  * slot before it, so the payload plane judges every sample it walks, in capture
  * order, under the declarations the door was handed. Over a door that takes
- * none (the selection doors, the census doors) every `e2e` term over a
- * published sample or a reply carrying a put is UNDECIDED, and so it is over a
- * sample whose key did not
- * resolve; a door that takes declarations (the field documents) decides them.
+ * none (wz_dissect_live_selection, wz_dissect_live_selection_since, the census
+ * doors) every `e2e` term over a published sample or a reply carrying a put is
+ * UNDECIDED, and so it is over a sample whose key did not resolve; a door that
+ * takes declarations (the field documents, and since ABI 58
+ * wz_dissect_live_selection_declaring and
+ * wz_dissect_live_selection_since_declaring) decides them.
  *
  * `zenoh` reads the word WHETHER A FLOW IS ZENOH (wz_dissect_pcap_session_table
  * describes it) gives the flow a row is in, as the flow's evidence stands when
@@ -2701,7 +2709,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":12},"ok":true,
+ *     {"document":{"name":"session_table","revision":13},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -2709,11 +2717,11 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                   "frames":10,"bytes":64,"zenoh":"yes",
  *                   "announced_version":"own",
  *                   "zenoh_evidence":{"log2_lr_millibits":64363,
- *                     "log2_lr_no_millibits":89344,
+ *                     "log2_lr_no_millibits":96414,
  *                     "yes_at_millibits":20000,"no_at_millibits":-20000,
- *                     "model":6,"crossed_at_packet":2,
+ *                     "model":7,"crossed_at_packet":2,
  *                     "log2_lr_max_millibits":64363,"log2_lr_min_millibits":0,
- *                     "log2_lr_no_max_millibits":89344,
+ *                     "log2_lr_no_max_millibits":96414,
  *                     "log2_lr_no_min_millibits":0,
  *                     "checks":[{"check":"cookie_echo","strength":"handshake",
  *                                "confirmed":1,"violated":0,"millibits":63998,
@@ -2721,7 +2729,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                                "q_basis":"derived","eps_basis":"measured"},
  *                               {"check":"unit_reading","strength":"unit",
  *                                "confirmed":8,"violated":0,
- *                                "millibits":365,"no_millibits":25343,
+ *                                "millibits":365,"no_millibits":32413,
  *                                "q_basis":"measured",
  *                                "eps_basis":"measured"}]},
  *                   "unit_readings":{"explained":{"units":10,"bytes":44},
@@ -2861,9 +2869,9 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * version 0x09. `zenoh` is a SEQUENTIAL TEST over what the flow's messages keep
  * that other protocols rarely keep by chance, on every row and flow here and on
  * every flow object of the field document (revision 43). It keeps TWO sums in
- * millibits (model 6, field-document revision 54 and session_table revision
- * 10; model 5 was revisions 53 and 9, model 4 revisions 50 and 8, model 3
- * revisions 49 and 7):
+ * millibits (model 7, field-document revision 68 and session_table revision
+ * 13; model 6 was revisions 54 and 10, model 5 revisions 53 and 9, model 4
+ * revisions 50 and 8, model 3 revisions 49 and 7):
  * the `yes` sum is the log2 of an e-process against "another protocol", the `no`
  * sum of one against "zenoh". Each hypothesis leaves rates unknown; the one a
  * sum rejects is taken at a bound on its likeliest over what the corpus allows
@@ -2897,7 +2905,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * `zenoh_evidence` is the test, so a consumer can show what the word rests on:
  *
  *   {"log2_lr_millibits":L,"log2_lr_no_millibits":M,"yes_at_millibits":20000,
- *    "no_at_millibits":-20000,"model":6,"crossed_at_packet":P,
+ *    "no_at_millibits":-20000,"model":7,"crossed_at_packet":P,
  *    "log2_lr_max_millibits":L1,"log2_lr_min_millibits":L0,
  *    "log2_lr_no_max_millibits":M1,"log2_lr_no_min_millibits":M0,
  *    "checks":[{"check":"init_roles","strength":"handshake","confirmed":1,
@@ -5973,7 +5981,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":66,"key":"state",
+ *     "value_families":[{"name":"fields","revision":68,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7809,9 +7817,10 @@ int wz_dissect_live_set_progress(wz_dissect_live *h,
  * `selector` is the language wz_dissect_pcap_census_where_limited takes, and it
  * is refused the same way -- WZ_DISSECT_ERR_SELECTOR, with
  * wz_dissect_selector_diagnose available to say where. There is no `declarations`
- * argument, because the verdict does not depend on how a payload is decoded,
- * and no `max_messages_shown_per_flow`, which trims trees this document does
- * not render. The limit preset is the handle's, chosen at open; a row the walk
+ * argument, so an `e2e` term over a sample is `undecided` here;
+ * wz_dissect_live_selection_declaring is this door with one. There is no
+ * `max_messages_shown_per_flow`, which trims trees this document does not
+ * render. The limit preset is the handle's, chosen at open; a row the walk
  * never reached is ABSENT rather than unmatched, and dropped_by_limits says so.
  *
  * UNDER A `zid` PREFIX THAT IS AMBIGUOUS in what this handle holds (see THE
@@ -7869,8 +7878,10 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  *   - what the folds keep that is not a row's (the exchanges still open) is
  *     more than four entries per message the handle holds, and a thousand
  *     more. What they keep of the rows a ceiling took is given up before that,
- *     in one pass, each time it has doubled, so a ceiling alone never begins
- *     them again.
+ *     and so is what they keep of a row whose word was final and was said: at
+ *     the end of every call, so a ceiling alone never begins them again, and a
+ *     call that reads every row reads such a row's word from the handle's
+ *     memory of what it said.
  * Every row is read, and the folds go on, when the cursor is below the
  * `through_seq` the last document gave or the last document wrote a row with no
  * `seq`. A ceiling that trims a list's front is NOT among these: the folds go on
@@ -7956,7 +7967,9 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  *
  * `selector` is the language wz_dissect_live_selection takes and is refused the
  * same way: WZ_DISSECT_ERR_SELECTOR, with wz_dissect_selector_diagnose available
- * to say where. There is no `declarations` argument, for that door's reason.
+ * to say where. There is no `declarations` argument, so an `e2e` term over a
+ * sample is `undecided` here; wz_dissect_live_selection_since_declaring is this
+ * door with one.
  *
  * `h` is not const, for that door's reason and because the handle keeps the words
  * it said. Call it and wz_dissect_live_drain on the same side of
@@ -7970,6 +7983,49 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * @carries selection_since was passenger */
 int wz_dissect_live_selection_since(wz_dissect_live *h, const char *selector,
                                     uint64_t after_seq, char **out);
+
+/* (ABI 58) -- wz_dissect_live_selection WITH THE SAMPLES READ BY DECLARATIONS.
+ *
+ * A selector's `e2e` terms read the end-to-end judge's verdict on a sample's
+ * frame, and the judge reads a frame by the profile rule its key falls to.
+ * wz_dissect_live_selection takes no declarations, so it has no rule to ask and
+ * every `e2e` term over a published sample (or a reply carrying a put) is
+ * `undecided` there. This door reads each sample by `declarations`, the text the
+ * field doors take, as the field document reads it: the profile rules decide the
+ * `e2e` terms, a key no rule covers is `none`, and a key id a declaration fixes
+ * resolves the references the wire did not answer. Everything else is
+ * wz_dissect_live_selection's: the same `selection` document, revision and rows.
+ *
+ * AN EMPTY TEXT declares that no rule covers any key, so every sample reads
+ * `e2e == none`, decided; that is not the question no declarations asks.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null argument or text that is not UTF-8,
+ * WZ_DISSECT_ERR_SELECTOR for a selector and WZ_DISSECT_ERR_DECLARATION for a
+ * declaration text that is refused (wz_dissect_selector_diagnose and
+ * wz_dissect_declarations_diagnose say why), each with no string. */
+int wz_dissect_live_selection_declaring(wz_dissect_live *h,
+                                        const char *declarations,
+                                        const char *selector, char **out);
+
+/* (ABI 58) -- wz_dissect_live_selection_since WITH THE SAMPLES READ BY
+ * DECLARATIONS, as wz_dissect_live_selection_declaring reads them. The same
+ * `selection_since` document, cursor and `revised`.
+ *
+ * THE MEMORY IS FOR A SELECTOR UNDER A DECLARATION TEXT. The words the handle
+ * remembers are for ONE selector judged under ONE declaration text, both compared
+ * as given: the same selector asked under another text, or through
+ * wz_dissect_live_selection_since (no text), is another memory, so a judge under
+ * one profile never revises a word another profile gave. The memories are the
+ * set wz_dissect_live_set_selector_memories sizes, and `window.continued` says
+ * whether this call found the memory of this selector and this text; with one
+ * memory, a change of text empties it as a change of selector does, so ask from
+ * 0 after changing either.
+ *
+ * Refused as wz_dissect_live_selection_declaring is. */
+int wz_dissect_live_selection_since_declaring(wz_dissect_live *h,
+                                              const char *declarations,
+                                              const char *selector,
+                                              uint64_t after_seq, char **out);
 
 /* (ABI 45) -- the flags of wz_dissect_live_selected_packets, below: the picked
  * rows' packets alone, or with the context a reader needs to read them again.

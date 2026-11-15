@@ -18,8 +18,9 @@ That reason covers `changelog_entries`. It does NOT cover
 `CORRECTION (R311y440): ... no longer exists; the method is at ...`, which is an
 edit to a reason, not a record of one). So the live verdicts were the one
 population carrying upstream claims with no oracle, which is exactly what
-`depth_axis_census` reports as "read as upstream and NOT judged (R2215: this
-tree holds no oracle for them)".
+`depth_axis_census` reported as "read as upstream and NOT judged (R2215: this
+tree holds no oracle for them)". The census now asks this gate's grammar which
+of those claims are graded here, and pins the rest as citations no oracle reads.
 
   SKIP_PREFIXES IS NOT WIDENED, and that is the point. Grading the frozen
   ledger would demand repairs to entries that must not change. This gate

@@ -69,12 +69,12 @@ use crate::wireexpr_resolve::{
 /// `'r` is the delivery's borrow of the decoded record; `'f` is the frame's, in
 /// which the codec's lent timestamp is invariant.
 struct LentReply<'r, 'f> {
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     keyexpr: &'r str,
     kind: ReplyKind,
     payload: &'r [u8],
-    err_encoding: Option<(u32, Option<&'r str>)>,
-    put_encoding: Option<(u32, Option<&'r str>)>,
+    err_encoding: Option<(u32, Option<&'r [u8]>)>,
+    put_encoding: Option<(u32, Option<&'r [u8]>)>,
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
     timestamp: Option<&'r Timestamp<'f>>,
@@ -89,7 +89,7 @@ struct LentReply<'r, 'f> {
 }
 
 impl ReplyView for LentReply<'_, '_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn keyexpr(&self) -> &str {
@@ -101,13 +101,13 @@ impl ReplyView for LentReply<'_, '_> {
     fn payload(&self) -> &[u8] {
         self.payload
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.err_encoding
     }
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.put_encoding
     }
     fn source_info(&self) -> Option<&SourceInfo> {
@@ -149,8 +149,8 @@ impl ReplyView for LentReply<'_, '_> {
 struct LentBody<'r, 'f> {
     kind: ReplyKind,
     payload: &'r [u8],
-    err_encoding: Option<(u32, Option<&'r str>)>,
-    put_encoding: Option<(u32, Option<&'r str>)>,
+    err_encoding: Option<(u32, Option<&'r [u8]>)>,
+    put_encoding: Option<(u32, Option<&'r [u8]>)>,
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
     timestamp: Option<&'r Timestamp<'f>>,
@@ -252,9 +252,9 @@ fn lent_timestamp<'r, 'f>(ts: Option<&'r Timestamp<'f>>) -> Option<&'r Timestamp
     }
 }
 
-/// An encoding read where its frame lies, as the id word and the schema text a lent reply
+/// An encoding read where its frame lies, as the id word and the schema bytes a lent reply
 /// carries.
-fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Option<&'r str>) {
+fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Option<&'r [u8]>) {
     (
         encoding.packed_id,
         encoding.schema.map(|schema| schema.into_inner()),
@@ -453,17 +453,17 @@ mod tests {
     use sce_forge_runtime::codec::SceCursor;
     use std::sync::{Arc, Mutex};
 
-    const RID: u64 = 9;
+    const RID: crate::wire_id::RequestId = 9;
 
     /// Everything a sink can read through the view, as owned values.
     #[derive(Debug, Clone, PartialEq)]
     struct Seen {
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr: String,
         kind: ReplyKind,
         payload: Vec<u8>,
-        err_encoding: Option<(u32, Option<String>)>,
-        put_encoding: Option<(u32, Option<String>)>,
+        err_encoding: Option<(u32, Option<Vec<u8>>)>,
+        put_encoding: Option<(u32, Option<Vec<u8>>)>,
         attachment: Option<Vec<u8>>,
         source_info: Option<SourceInfo>,
         timestamp: Option<TimestampHint>,
@@ -481,8 +481,12 @@ mod tests {
             keyexpr: String::from(view.keyexpr()),
             kind: view.kind(),
             payload: view.payload().to_vec(),
-            err_encoding: view.err_encoding().map(|(id, s)| (id, s.map(String::from))),
-            put_encoding: view.put_encoding().map(|(id, s)| (id, s.map(String::from))),
+            err_encoding: view
+                .err_encoding()
+                .map(|(id, s)| (id, s.map(<[u8]>::to_vec))),
+            put_encoding: view
+                .put_encoding()
+                .map(|(id, s)| (id, s.map(<[u8]>::to_vec))),
             attachment: view.attachment().map(<[u8]>::to_vec),
             source_info: view.source_info().cloned(),
             timestamp: view.timestamp().cloned(),
@@ -597,7 +601,7 @@ mod tests {
         };
         let schema = EncodingHint {
             packed_id: 0x0B,
-            schema: Some(String::from("text")),
+            schema: Some(b"text".to_vec()),
         };
         let cases = [
             ResponseReplyBuilder::new(RID, 0, Some("demo/a"), b"plain")
@@ -618,7 +622,7 @@ mod tests {
                 .build()
                 .expect("build"),
             ResponseErrBuilder::new(RID, 0, Some("demo/d"), b"oops")
-                .encoding(0x0D, Some("why"))
+                .encoding(0x0D, Some(&b"why"[..]))
                 .build()
                 .expect("build"),
             // Through the peer's alias, with and without a suffix.

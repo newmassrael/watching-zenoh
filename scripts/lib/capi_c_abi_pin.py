@@ -139,7 +139,15 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 14
+#
+# Revision 15 is such a bump: `wz_capi_c_config_disposition` gained a fourth answer
+# (`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`) and `wz_capi_c_config_honoured` lists the keys of the build,
+# without the keys of a capability it was built without. No symbol moved.
+#
+# Revision 16 is such a bump too: the clock rule `wz_capi_c.h` states changed. `z_timestamp_new`
+# gives a program the node clock's time whatever its standing, and the clock-quality-stamping
+# policy holds back only the data the node stamps. No symbol moved.
+EXPECTED_REVISION = 16
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
@@ -213,7 +221,8 @@ EXPECTED_SYMBOLS = {
     # three words. The two doors above enumerate, and the honoured set is
     # infinite, so an enumeration could never be the whole answer.
     "wz_capi_c_config_disposition",
-    # R2300 (item 631) — emitting a stock-zenoh config and judging one.
+    # R2300 (item 631) — emitting a stock-zenoh config and judging one (`config-verdict`, on by
+    # default, as are the rows doors and `wz_capi_c_config_device_requires` below).
     "wz_capi_c_config_to_json5",
     "wz_capi_c_config_validate",
     "wz_capi_c_config_validate_for_build",

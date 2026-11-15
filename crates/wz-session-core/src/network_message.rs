@@ -953,12 +953,7 @@ fn first_unknown_mandatory_ext(
 ) -> Option<crate::parse_error::InboundParseError> {
     messages
         .iter()
-        .find_map(|message| match message.ext_admission() {
-            crate::ext_admit::ExtAdmission::UnknownMandatory { eid } => {
-                Some(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid })
-            }
-            _ => None,
-        })
+        .find_map(|message| message.ext_admission().refusal())
 }
 
 /// R74 — decode a `Frame.payload` byte slice into the in-order batch
@@ -1187,7 +1182,8 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 /// How the walk hands a record over ([`WalkedRecord`]). With
 /// [`RecordForm::Lent`], a Push, a Request and a Response are not projected into
 /// their owned messages at all: each is decoded where the payload lies and lent
-/// for the call, so nothing of it is copied (ARCHITECTURE section 9.2). Every
+/// for the call, so nothing of it is copied (ARCHITECTURE section 9.2); a Push
+/// whose lists are past what the node lends inline is handed over owned. Every
 /// other record is the build's [`WireStorage`] copy of the payload's bytes either
 /// way, and so is every record with [`RecordForm::Owned`]: the payload need only
 /// outlive the walk.
@@ -1348,7 +1344,8 @@ pub(crate) fn for_each_record<'f>(
 /// reliability behind one) begins where the last record ends. The walk of a Frame stops there
 /// and leaves what follows to the reader of the batch.
 #[cfg(feature = "codec-frame")]
-// Read by the record walk and by the heap profile's frame; a build with neither reads nothing.
+// Read by the record walk, the heap profile's frame, the best-effort walk and the dissector; a
+// build with none of them reads nothing.
 #[allow(dead_code)]
 pub(crate) fn is_transport_mid(mid: u8) -> bool {
     mid <= wz_codecs::wire_const::T_MID_JOIN
@@ -1460,6 +1457,13 @@ pub(crate) fn try_for_each_record<'f>(
 /// the owned rule, hand it to `each`, and answer `true`; `false` for any other
 /// kind, which the caller decodes owned.
 ///
+/// `false` too, with the cursor where the record begins, for a Push whose lists
+/// are past what the node's lent form holds inline ([`Lend::PastCapacity`]): the
+/// protocol bounds an extension chain by nothing, and a participant with an
+/// allocator reads it whole, as upstream does, in the owned form the caller
+/// decodes it into. Only the rare record past that capacity pays the second
+/// decode; every other one is still lent with nothing allocated.
+///
 /// Each kind is decoded in a function of its own, never inlined: a decoded
 /// Request or Response is a wide value (inline extension chains), and kept out of
 /// line it occupies the stack only while that one record is handed over, not
@@ -1485,7 +1489,16 @@ fn lend_record<'f>(
 ) -> Result<bool, crate::parse_error::InboundParseError> {
     match mid {
         #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
-        wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| true),
+        wire_const::N_MID_PUSH => {
+            let start = *cursor;
+            match lend_push(cursor, each)? {
+                Lend::Lent => Ok(true),
+                Lend::PastCapacity => {
+                    *cursor = start;
+                    Ok(false)
+                }
+            }
+        }
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| true),
         #[cfg(all(
@@ -1495,6 +1508,30 @@ fn lend_record<'f>(
         wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| true),
         _ => Ok(false),
     }
+}
+
+/// What [`lend_push`] did with the Push at the cursor, when the frame is one the
+/// protocol admits.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-push",
+    any(feature = "alloc", feature = "rx-push"),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+#[derive(Debug)]
+enum Lend {
+    /// Decoded where the payload lies and handed to the consumer.
+    Lent,
+    /// Its lists are past what the node's lent form holds inline. The codec
+    /// answers `CapacityExceeded` only for a frame it read whole and refused
+    /// nothing else of (SCE ADR 0077 section 7), so the record is sound and
+    /// nothing of it was handed over; the caller reads it again from where it
+    /// begins.
+    PastCapacity,
 }
 
 /// The refusal a lent record's admission makes, as the owned walk makes it.
@@ -1517,11 +1554,9 @@ fn lend_record<'f>(
 fn admit_lent(
     admission: crate::ext_admit::ExtAdmission,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    match admission {
-        crate::ext_admit::ExtAdmission::UnknownMandatory { eid } => {
-            Err(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid })
-        }
-        _ => Ok(()),
+    match admission.refusal() {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
     }
 }
 
@@ -1539,14 +1574,19 @@ fn admit_lent(
 fn lend_push<'f>(
     cursor: &mut SceCursor<'f>,
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
-) -> Result<(), crate::parse_error::InboundParseError> {
+) -> Result<Lend, crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`), at the frame's lifetime: the
     // codec's lent message is invariant in it, and the record is lent for the call alone.
     let mut push = wz_codecs::lent::Push::<'f>::default();
-    wz_codecs::lent::Push::decode_into(cursor, &mut push)
-        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    match wz_codecs::lent::Push::decode_into(cursor, &mut push) {
+        Ok(()) => {}
+        Err(sce_forge_runtime::codec::CodecError::CapacityExceeded) => {
+            return Ok(Lend::PastCapacity)
+        }
+        Err(refused) => return Err(crate::parse_error::InboundParseError::Codec(refused)),
+    }
     admit_lent(push_view_admission(&push))?;
-    each(WalkedRecord::Push(&push))
+    each(WalkedRecord::Push(&push)).map(|()| Lend::Lent)
 }
 
 #[cfg(all(
@@ -1653,7 +1693,14 @@ fn lend_any_record<'f>(
         // What the build reads off the wire (`rx-push`, `rx-response`, `rx-control`): a kind it did
         // not ask for is a MID with no decoder here, and ends the walk of its frame.
         #[cfg(all(feature = "codec-push", feature = "rx-push"))]
-        wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| Walk::Continue),
+        wire_const::N_MID_PUSH => match lend_push(cursor, each)? {
+            Lend::Lent => Ok(Walk::Continue),
+            // The slot profile holds no other form of a record, so a Push past what it
+            // lends inline is refused, as its fixed capacity says.
+            Lend::PastCapacity => Err(crate::parse_error::InboundParseError::Codec(
+                sce_forge_runtime::codec::CodecError::CapacityExceeded,
+            )),
+        },
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| Walk::Continue),
         #[cfg(all(feature = "codec-response", feature = "rx-response"))]
@@ -1882,6 +1929,17 @@ pub struct BatchParse {
     /// because a consumer reporting "N bytes unparsed" should not have to
     /// hold the payload to compute it.
     pub unparsed_bytes: usize,
+    /// Where the next transport message of the batch begins in the payload,
+    /// when the walk of a `Frame`'s payload ended at one; `None` when its
+    /// records reach the end of the payload, or the walk halted.
+    ///
+    /// A `Frame` is read as the tail of its unit, and a sender puts a message
+    /// of the other reliability into an open batch behind a second `Frame`
+    /// header. The records of this `Frame` end before that header, and the
+    /// bytes from it on are the next transport message, which the reader of the
+    /// batch reads: they are neither records of this `Frame` nor unparsed, so
+    /// the batch is complete and [`Self::unparsed_bytes`] does not count them.
+    pub next_message_at: Option<usize>,
 }
 
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
@@ -1890,6 +1948,35 @@ impl BatchParse {
     /// participant's strict parse also accepts.
     pub fn is_complete(&self) -> bool {
         self.halt.is_none()
+    }
+
+    /// Whether upstream's batch reader fails the batch these records of a
+    /// `Frame` were read from ([`parse_frame_payload_best_effort`]).
+    ///
+    /// Upstream's `Frame` reader rewinds to a record that does not decode as a
+    /// network message and ends the `Frame` there
+    /// (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`),
+    /// and the batch's loop reads the bytes from that record on as a transport
+    /// message, failing the whole batch when they are not one
+    /// (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+    /// `.map_err(|_| zerror!("{}: decoding error", link.link))?;`). A transport
+    /// id ends this walk before it halts ([`Self::next_message_at`]), so every
+    /// halt stands at a byte no transport message begins with:
+    ///
+    /// - a record that failed to decode fails the batch;
+    /// - an id in neither the transport nor the network space (`0x08` to
+    ///   `0x18`) is refused by both of upstream's dispatches
+    ///   (`commons/zenoh-codec/src/network/mod.rs` @
+    ///   `_ => return Err(DidntRead),`) and fails the batch;
+    /// - a network id this build has no decoder for is a limit of the build's
+    ///   `codec-*` selection and not of the bytes, which upstream decodes, so
+    ///   it does not.
+    pub fn fails_the_frames_batch(&self) -> bool {
+        match &self.halt {
+            None => false,
+            Some(BatchHalt::CodecError { .. }) => true,
+            Some(BatchHalt::UnknownMid { mid, .. }) => !wz_codecs::wire_const::is_wire_front(*mid),
+        }
     }
 
     /// R311y641 (§1.1n) — `(offset, len)` of the `i`th message within the
@@ -1925,29 +2012,69 @@ impl BatchParse {
 ///
 /// Never returns `Err`. An empty payload is `messages = []`, `halt = None`
 /// — a valid empty batch, exactly as in the strict parse.
+///
+/// `bytes` is the `Frame`'s payload as the tail of its unit, so the walk ends
+/// before a transport message ([`BatchParse::next_message_at`]), as the record
+/// walk of a participant does: upstream's `Frame` reader rewinds the message it
+/// cannot read as a network one and the batch's loop reads it as a transport
+/// message (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`,
+/// `io/zenoh-transport/src/unicast/universal/rx.rs` @ `while !batch.is_empty() {`).
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
-    parse_payload_best_effort(bytes, usize::MAX)
+    parse_payload_best_effort(bytes, usize::MAX, RecordsEnd::AtTransportMessage)
+}
+
+/// Decode, best-effort, the bytes a completed fragment chain joined. They are
+/// network messages and nothing else (upstream decodes a network message out of
+/// them, `io/zenoh-transport/src/common/defragmentation.rs` @
+/// `pub(crate) fn defragment`), so a transport MID among them is a record this
+/// walk cannot read, and halts it as any unknown MID does.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+pub fn parse_reassembled_payload_best_effort(bytes: &[u8]) -> BatchParse {
+    parse_payload_best_effort(bytes, usize::MAX, RecordsEnd::AtPayloadEnd)
 }
 
 /// Decode the single network record carried by a lowlatency framing unit.
 /// Trailing bytes are reported, never treated as another batched message.
+///
+/// The unit is a KeepAlive, a Close or one network message
+/// (`commons/zenoh-codec/src/transport/mod.rs` @
+/// `id::KEEP_ALIVE => TransportBodyLowLatency::KeepAlive(codec.read(&mut *reader)?),`),
+/// told apart by the masked id; its document would be a variant whose default
+/// arm is the network message dispatch, which stays by hand until a document
+/// can refuse an unknown id (SCE ADR 0100, not yet in the pinned language).
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_lowlatency_payload_best_effort(bytes: &[u8]) -> BatchParse {
-    parse_payload_best_effort(bytes, 1)
+    parse_payload_best_effort(bytes, 1, RecordsEnd::AtPayloadEnd)
+}
+
+/// Where a best-effort walk's records may end before a halt.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordsEnd {
+    /// At the payload's end only: the bytes are network messages and nothing else.
+    AtPayloadEnd,
+    /// At a transport message too: the bytes are a `Frame`'s payload read as the tail of its
+    /// unit, which ends where the batch's next transport message begins.
+    AtTransportMessage,
 }
 
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
+fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) -> BatchParse {
     let total = bytes.len();
     let mut messages = Vec::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut cursor = SceCursor::new(bytes);
     let mut halt = None;
+    let mut next_message_at = None;
     while cursor.remaining() > 0 {
         // The offset is recomputed per record rather than tracked, so it
         // cannot drift from the cursor the decoders actually advance.
         let offset = total - cursor.remaining();
+        if end == RecordsEnd::AtTransportMessage && is_transport_mid(bytes[offset] & 0x1F) {
+            next_message_at = Some(offset);
+            break;
+        }
         if messages.len() == max_records {
             halt = Some(BatchHalt::CodecError {
                 offset,
@@ -2015,6 +2142,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
         spans,
         halt,
         unparsed_bytes,
+        next_message_at,
     }
 }
 
@@ -2048,6 +2176,12 @@ fn decode_one_record(
 ) -> Result<bool, CodecError> {
     let header = cursor.peek_slice(1)?[0];
     let mid = header & 0x1F;
+    // The dispatch by the masked id stays here and not in a document: upstream
+    // refuses an id it does not know (`commons/zenoh-codec/src/network/mod.rs` @
+    // `impl<W> WCodec<&NetworkMessage, &mut W> for Zenoh080`), which a variant
+    // that reaches an arm for every tag cannot state. Masked dispatch with that
+    // refusal is what SCE ADR 0100 proposes, not yet in the pinned language.
+    //
     // Only the three data-plane arms project through the origin; on a build with
     // none of them this is the one parameter nothing reads.
     #[cfg(not(any(
@@ -2213,6 +2347,81 @@ mod chain_saturation_tests {
         }
     }
 
+    /// The chain headers (the shared-memory marker's at its place) and the
+    /// inline payload of the Put a Push record carries.
+    fn put_reading(msg: &NetworkMessage) -> (Vec<u8>, Option<Vec<u8>>) {
+        match msg {
+            NetworkMessage::Push(p) => match &p.body {
+                wz_codecs::push::PushOwnedVariant::CodecZenohMsgPut(put) => (
+                    crate::put_payload::chain_headers(put).map_or_else(Vec::new, |h| h.collect()),
+                    crate::put_payload::inline_bytes(put).map(<[u8]>::to_vec),
+                ),
+                other => panic!("expected a Put body, got {other:?}"),
+            },
+            other => panic!("expected a Push, got {other:?}"),
+        }
+    }
+
+    /// THE LENT WALK PAST THE CAP. The receive path lends a Push in the node's
+    /// lent form, whose chain holds eight entries. A Push past that is sound,
+    /// and a participant with an allocator reads it whole: the walk hands it
+    /// over owned, as the batch decode reads it, and goes on from its end, so
+    /// the Push after it is lent again. The Push at the cap before it is the
+    /// control: lent, not owned.
+    #[test]
+    fn the_lent_walk_owns_a_push_past_what_a_node_lends_and_goes_on_after_it() {
+        let depth = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
+        for count in [depth + 1, 32, 300] {
+            let wire = [
+                push_with_put_exts(depth),
+                push_with_put_exts(count),
+                push_with_put_exts(depth),
+            ]
+            .concat();
+            let batch = parse_frame_payload(&wire).expect("the batch decode reads all three");
+            assert_eq!(batch.len(), 3);
+            let expected = put_reading(&batch[1]);
+            assert_eq!(expected.0.len(), count, "the batch decode reads it whole");
+            assert_eq!(expected.1.as_deref(), Some(&[0xAAu8, 0xBB, 0xCC][..]));
+            let mut record = new_record_buf();
+            let mut seen: Vec<&str> = Vec::new();
+            let result = for_each_record(&wire, &mut record, RecordForm::Lent, |one| match one {
+                WalkedRecord::Push(_) => seen.push("lent"),
+                WalkedRecord::Owned(one) => {
+                    assert_eq!(one.len(), 1, "one record per call");
+                    assert_eq!(put_reading(&one[0]), expected, "{count} extensions");
+                    seen.push("owned");
+                }
+                #[allow(unreachable_patterns)]
+                _ => panic!("only Pushes were encoded"),
+            });
+            assert!(result.is_ok(), "{count} extensions: {result:?}");
+            assert_eq!(seen, ["lent", "owned", "lent"], "{count} extensions");
+        }
+    }
+
+    /// The slot profile's walk holds no owned form of a record, so there a Push
+    /// past what it lends is refused, after the record at the cap before it.
+    #[cfg(all(feature = "session-slot", feature = "rx-push"))]
+    #[test]
+    fn the_slot_walk_refuses_a_push_past_what_it_lends() {
+        let depth = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
+        let wire = [push_with_put_exts(depth), push_with_put_exts(depth + 1)].concat();
+        let mut record = new_record_buf();
+        let mut handed = 0;
+        let result = for_each_record(&wire, &mut record, RecordForm::LentControl, |_| handed += 1);
+        assert_eq!(handed, 1, "only the Push at the cap is handed over");
+        assert!(
+            matches!(
+                result,
+                Err(crate::parse_error::InboundParseError::Codec(
+                    sce_forge_runtime::codec::CodecError::CapacityExceeded
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+
     /// An observer keeps what it read and reports where it stopped, rather
     /// than losing the batch — G4's contract, which A1 must not undo. The
     /// leading clean record survives; the record the frame ends inside does
@@ -2297,7 +2506,7 @@ mod chain_saturation_tests {
 #[cfg(feature = "transport-stats")]
 pub fn stats_class<F>(msg: &NetworkMessage, resolve_alias: F) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, NetworkStatsClass};
     // The three arms below are `resolve_alias`'s ONLY consumers and each is
@@ -2378,7 +2587,7 @@ fn stats_space_of<F>(
     resolve_alias: &F,
 ) -> crate::stats::StatSpace
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use wz_codecs::wireexpr::WireexprOwnedVariant as V;
     let (id, suffix) = match &keyexpr.body {
@@ -2399,12 +2608,12 @@ where
     )
 ))]
 fn stats_space_of_key<F>(
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     resolve_alias: &F,
 ) -> crate::stats::StatSpace
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     if id == 0 {
         // Fully literal: the suffix IS the whole expression.
@@ -2416,19 +2625,90 @@ where
     }
 }
 
+/// The key expression a data message addresses, an alias resolved through the caller's id space
+/// as [`stats_class`] resolves one: what the session's `stats/filters` are matched against. `None`
+/// for a message with no key expression, and for an alias the space does not hold, which counts
+/// under no filter as it counts in the user space.
+#[cfg(feature = "transport-stats")]
+pub fn stats_keyexpr<F>(msg: &NetworkMessage, resolve_alias: F) -> Option<alloc::string::String>
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+{
+    #[cfg(not(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )))]
+    let _ = &resolve_alias;
+    match msg {
+        #[cfg(feature = "codec-push")]
+        NetworkMessage::Push(p) => stats_keyexpr_of_wireexpr(&p.keyexpr, &resolve_alias),
+        #[cfg(feature = "codec-request")]
+        NetworkMessage::Request(r) => stats_keyexpr_of_wireexpr(&r.keyexpr, &resolve_alias),
+        #[cfg(feature = "codec-response")]
+        NetworkMessage::Response(r) => stats_keyexpr_of_wireexpr(&r.keyexpr, &resolve_alias),
+        _ => None,
+    }
+}
+
+/// [`stats_keyexpr`] for a Wireexpr a sender holds.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+pub fn stats_keyexpr_of_wireexpr<F>(
+    keyexpr: &crate::wire::parts::WireexprOwned,
+    resolve_alias: &F,
+) -> Option<alloc::string::String>
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+{
+    use wz_codecs::wireexpr::WireexprOwnedVariant as V;
+    let (id, suffix) = match &keyexpr.body {
+        V::WireexprNonlocal(b) => (b.id, b.suffix.as_ref()),
+        V::WireexprLocal(b) => (b.id, b.suffix.as_ref()),
+    };
+    stats_keyexpr_of_key(id, suffix.map(|s| s.as_text().into_inner()), resolve_alias)
+}
+
+/// [`stats_keyexpr`] for a key given as its parts, the mapping `id` and the `suffix`: the literal
+/// when `id` is 0, else the alias's key with the suffix after it.
+#[cfg(feature = "transport-stats")]
+pub fn stats_keyexpr_of_key<F>(
+    id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    resolve_alias: &F,
+) -> Option<alloc::string::String>
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+{
+    if id == 0 {
+        return suffix.map(alloc::string::String::from);
+    }
+    let mut keyexpr = resolve_alias(id)?;
+    if let Some(suffix) = suffix {
+        keyexpr.push_str(suffix);
+    }
+    Some(keyexpr)
+}
+
 /// [`push_stats_class`] for a plain `Put` a sender holds as borrowed parts (the key's mapping
 /// `id` and `suffix`, and a payload of `pl_bytes`), with no owned message to read: a plain Put
 /// has no attachment and no shared-memory marker, so its class is the one
 /// [`push_stats_class`] gives the owned message of the same parts.
 #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
 pub fn plain_put_stats_class<F>(
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     pl_bytes: usize,
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
     NetworkStatsClass::net(
@@ -2588,7 +2868,7 @@ pub fn push_stats_class<F>(
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::push::PushOwnedVariant as V;
@@ -2614,7 +2894,7 @@ pub fn request_stats_class<F>(
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::request::RequestOwnedVariant as V;
@@ -2667,7 +2947,7 @@ pub fn response_stats_class<F>(
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::response::ResponseOwnedVariant as V;
@@ -3397,30 +3677,31 @@ mod best_effort_batch_tests {
     /// `Unknown` and stop (its length is unknowable, so there is nothing
     /// to resynchronise on), but only the best-effort one says WHERE.
     ///
-    /// `0x00` is outside the seven-wide network MID set on purpose — the
+    /// `0x18` is outside the seven-wide network MID set on purpose — the
     /// authored catalog covers all seven, so a meaningful Unknown fixture
-    /// has to be synthetic.
+    /// has to be synthetic. It is outside the transport MIDs (`0x00..=0x07`)
+    /// too: one of those ends a `Frame`'s records instead.
     #[test]
     fn an_unknown_mid_halts_with_its_offset_under_both_contracts() {
         let first = oam_record(7);
         let mut wire = first.clone();
-        wire.extend_from_slice(&[0x00, 0xAB, 0xCD]);
+        wire.extend_from_slice(&[0x18, 0xAB, 0xCD]);
 
         let strict = parse_frame_payload(&wire).expect("unknown MID absorbs, not errors");
         assert_eq!(oam_ids(&strict), vec![7]);
         assert!(matches!(
             strict.last(),
-            Some(NetworkMessage::Unknown { mid: 0x00, .. })
+            Some(NetworkMessage::Unknown { mid: 0x18, .. })
         ));
 
         let best = parse_frame_payload_best_effort(&wire);
         assert_eq!(oam_ids(&best.messages), vec![7]);
         match best.messages.last() {
             Some(NetworkMessage::Unknown { mid, body }) => {
-                assert_eq!(*mid, 0x00);
+                assert_eq!(*mid, 0x18);
                 assert_eq!(
                     body.as_slice(),
-                    &[0x00, 0xAB, 0xCD],
+                    &[0x18, 0xAB, 0xCD],
                     "the absorbed body starts AT the unknown header, not after it"
                 );
             }
@@ -3429,11 +3710,121 @@ mod best_effort_batch_tests {
         assert_eq!(
             best.halt,
             Some(BatchHalt::UnknownMid {
-                mid: 0x00,
+                mid: 0x18,
                 offset: first.len()
             })
         );
         assert_eq!(best.unparsed_bytes, 3);
+        assert_eq!(best.next_message_at, None);
+    }
+
+    /// A batch whose sender put a message of the other reliability behind a
+    /// second `Frame` header: the first `Frame`'s payload, read as the tail of
+    /// the unit, holds its own records and then that header. The best-effort
+    /// walk ends the records before it and says where it begins; nothing is
+    /// absorbed, nothing is unparsed, and the batch is complete.
+    #[test]
+    fn a_second_frame_header_ends_the_records_of_the_first() {
+        let first = [oam_record(7), oam_record(8)].concat();
+        // A best-effort `Frame` header (`R` clear, no extensions) with sn 3, and one record.
+        let second = [
+            vec![wz_codecs::wire_const::T_MID_FRAME, 0x03],
+            oam_record(9),
+        ]
+        .concat();
+        let wire = [first.clone(), second].concat();
+
+        let best = parse_frame_payload_best_effort(&wire);
+        assert_eq!(oam_ids(&best.messages), vec![7, 8]);
+        assert_eq!(best.next_message_at, Some(first.len()));
+        assert!(best.is_complete(), "a transport message is no halt");
+        assert_eq!(best.unparsed_bytes, 0);
+        assert!(
+            !best
+                .messages
+                .iter()
+                .any(|m| matches!(m, NetworkMessage::Unknown { .. })),
+            "the next transport message is not absorbed as an unknown record"
+        );
+        let (seven, eight) = (oam_record(7).len(), oam_record(8).len());
+        assert_eq!(best.spans, vec![(0, seven), (seven, eight)]);
+    }
+
+    /// WHAT FAILS A FRAME'S BATCH, as upstream's batch reader reads it: a
+    /// record that does not decode, and an id of neither space. A network id
+    /// this build has no decoder for does not (upstream decodes it), nor does
+    /// a second `Frame` header, which ends the records and is read as the next
+    /// message.
+    #[test]
+    fn only_a_failed_record_or_an_id_of_neither_space_fails_a_frames_batch() {
+        for mid in 0u8..32 {
+            let absorbed = BatchParse {
+                messages: vec![],
+                spans: vec![],
+                halt: Some(BatchHalt::UnknownMid { mid, offset: 0 }),
+                unparsed_bytes: 1,
+                next_message_at: None,
+            };
+            let of_neither_space = (0x08..=0x18).contains(&mid);
+            assert_eq!(
+                absorbed.fails_the_frames_batch(),
+                of_neither_space,
+                "mid {mid:#04x}"
+            );
+        }
+        let first = oam_record(7);
+        assert!(!parse_frame_payload_best_effort(&first).fails_the_frames_batch());
+        let truncated = [first.clone(), vec![oam_record(8)[0]]].concat();
+        assert!(parse_frame_payload_best_effort(&truncated).fails_the_frames_batch());
+        let unknown = [first.clone(), vec![0x18, 0xAB]].concat();
+        assert!(parse_frame_payload_best_effort(&unknown).fails_the_frames_batch());
+        let second_frame = [
+            first,
+            vec![wz_codecs::wire_const::T_MID_FRAME, 0x03],
+            oam_record(9),
+        ]
+        .concat();
+        assert!(!parse_frame_payload_best_effort(&second_frame).fails_the_frames_batch());
+    }
+
+    /// Every transport MID ends a `Frame`'s records, the first byte of a
+    /// payload included, and no network MID does.
+    #[test]
+    fn every_transport_mid_and_no_network_mid_ends_a_frames_records() {
+        for mid in 0u8..32 {
+            let best = parse_frame_payload_best_effort(&[mid]);
+            if mid <= wz_codecs::wire_const::T_MID_JOIN {
+                assert_eq!(best.next_message_at, Some(0), "mid {mid:#04x}");
+                assert!(best.messages.is_empty(), "mid {mid:#04x}");
+            } else {
+                assert_eq!(best.next_message_at, None, "mid {mid:#04x}");
+            }
+        }
+    }
+
+    /// The bytes of a joined fragment chain are network messages only, as
+    /// upstream decodes them: a transport MID there is an unknown record that
+    /// halts the walk, and not the end of a `Frame`.
+    #[test]
+    fn a_transport_mid_in_a_reassembled_payload_halts_as_an_unknown_record() {
+        let first = oam_record(7);
+        let wire = [
+            first.clone(),
+            vec![wz_codecs::wire_const::T_MID_FRAME, 0x03],
+            oam_record(9),
+        ]
+        .concat();
+        let joined = parse_reassembled_payload_best_effort(&wire);
+        assert_eq!(oam_ids(&joined.messages), vec![7]);
+        assert_eq!(joined.next_message_at, None);
+        assert_eq!(
+            joined.halt,
+            Some(BatchHalt::UnknownMid {
+                mid: wz_codecs::wire_const::T_MID_FRAME,
+                offset: first.len()
+            })
+        );
+        assert_eq!(joined.unparsed_bytes, wire.len() - first.len());
     }
 
     /// The two walks share ONE per-MID dispatch (`decode_one_record`), so
@@ -3770,12 +4161,12 @@ mod payload_size_tests {
     /// parts does: literal and aliased, user and admin space, an alias resolved or not.
     #[test]
     fn a_plain_put_classifies_as_its_owned_message_does() {
-        let resolve = |id: u64| match id {
+        let resolve = |id: crate::wire_id::ExprId| match id {
             7 => Some(alloc::string::String::from("@/router/abc")),
             8 => Some(alloc::string::String::from("demo/declared")),
             _ => None,
         };
-        let cases: [(u64, Option<&str>); 6] = [
+        let cases: [(crate::wire_id::ExprId, Option<&str>); 6] = [
             (0, Some("demo/plain")),
             (0, Some("@/admin/key")),
             (7, None),

@@ -224,7 +224,10 @@ impl<K> PeerEntry<K> {
             &mut *at
         };
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
-        entry.engine.initialize();
+        entry
+            .engine
+            .initialize()
+            .unwrap_or_else(|never| match never {});
         entry
     }
 

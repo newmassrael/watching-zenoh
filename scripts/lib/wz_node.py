@@ -34,7 +34,8 @@ not build the node.
 ## What a declaration may say
 
     [node]                     id (the file's name), help, target
-    [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>" (a router it dials);
+    [[endpoint]]               every locator's address is "<a.b.c.d>" or a bracketed IPv6 "[<ipv6>]";
+                               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>" (a router it dials);
                                role = "listen", locator = "tcp/<a.b.c.d>:<port>" or "tls/..." and
                                accepts = N (the port it takes connections on, and how many sessions
                                of them it holds at once; a node that listens presents itself to them
@@ -134,6 +135,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import pathlib
 import re
@@ -469,7 +471,9 @@ ENDPOINT_SHAPES = {
     "dial":{"keys": {"locator": _key("locator")}},
     "listen": {"keys": {"locator": _key("locator"), "accepts": _int(1, "max_accepts")}},
     "multicast": {"keys": {"locator": _key("locator"), "members": _int(1, "max_members"),
-                           "ttl": _int(1, 255, required=False, default=1)}},
+                           # Upstream's `ttl` (`UDP_MULTICAST_TTL`): set only when stated, as
+                           # zenoh sets it, so a group that states none sends with the kernel's.
+                           "ttl": _int(1, 255, required=False)}},
     "peer": {"keys": {"locator": _key("locator"), "zid": _key("zid")}},
     # Not an endpoint a node reaches or is reached at: the zid of a node it takes orders from, so it
     # has no locator.
@@ -861,7 +865,38 @@ TARGETS = {
     },
 }
 
-LOCATOR_RE = re.compile(r"(?P<scheme>[a-z]+)/(?P<a>\d{1,3})\.(?P<b>\d{1,3})\.(?P<c>\d{1,3})\.(?P<d>\d{1,3}):(?P<port>\d{1,5})")
+# A locator's address is an IPv4 one or a bracketed IPv6 one, as zenoh writes a socket address
+# (`io/zenoh-link-commons/src/lib.rs` @ `pub async fn get_ip_addrs(`) and the node's own reader
+# takes it (`crates/wz-session-mcu/src/dial.rs`, `parse_endpoint`). The IPv6 text is held to an
+# address by `ipaddress`, not by the pattern.
+LOCATOR_RE = re.compile(
+    r"(?P<scheme>[a-z]+)/"
+    r"(?:(?P<a>\d{1,3})\.(?P<b>\d{1,3})\.(?P<c>\d{1,3})\.(?P<d>\d{1,3})|\[(?P<v6>[0-9A-Fa-f:.]+)\])"
+    r":(?P<port>\d{1,5})")
+
+
+def locator_ip(match: re.Match) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address a matched locator names, or None for an IPv4 octet above 255 or with a leading
+    zero (which the node's reader refuses, as `core::net` does) or an IPv6 text that is no
+    address."""
+    try:
+        if match["v6"] is not None:
+            return ipaddress.IPv6Address(match["v6"])
+        return ipaddress.IPv4Address(".".join(match[o] for o in "abcd"))
+    except ValueError:
+        return None
+
+
+def rust_ip(match: re.Match | None) -> str:
+    """The `core::net::IpAddr` constant expression of a matched locator's address, the
+    unspecified IPv4 address when there is none: `Ipv4Addr::new(a, b, c, d)` for IPv4,
+    `Ipv6Addr::from_bits` of the 128-bit value for IPv6, which is one fixed width whatever the
+    address and so one line that rustfmt leaves as it is."""
+    ip = locator_ip(match) if match else ipaddress.IPv4Address(0)
+    if isinstance(ip, ipaddress.IPv6Address):
+        return f"core::net::IpAddr::V6(core::net::Ipv6Addr::from_bits(0x{int(ip):032x}))"
+    a, b, c, d = ip.packed
+    return f"core::net::IpAddr::V4(core::net::Ipv4Addr::new({a}, {b}, {c}, {d}))"
 
 
 def image_limits(target: dict) -> dict[str, int]:
@@ -1031,7 +1066,8 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             continue
         match = LOCATOR_RE.fullmatch(ep.get("locator", "")) if isinstance(ep.get("locator"), str) else None
         if match is None:
-            out.append(f"{who}: locator {ep.get('locator')!r} is not <scheme>/<a.b.c.d>:<port>")
+            out.append(f"{who}: locator {ep.get('locator')!r} is not <scheme>/<a.b.c.d>:<port> "
+                       "or <scheme>/[<ipv6>]:<port>")
         else:
             if match["scheme"] not in target["schemes"]:
                 out.append(f"{who}: scheme `{match['scheme']}` is not one of {', '.join(target['schemes'])}")
@@ -1045,11 +1081,15 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                            f"`{'`, `'.join(target['peer_schemes'])}`, not `{match['scheme']}`: only "
                            "a secure channel proves the node that answered is the one the zid names "
                            "(decision D4 of docs/session-lifecycle-intent.md)")
-            if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
-                out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
-            elif role == "multicast" and not 224 <= int(match["a"]) <= 239:
+            ip = locator_ip(match)
+            if match["v6"] is not None and ip is None:
+                out.append(f"{who}: locator {ep['locator']!r} has no IPv6 address in its brackets")
+            elif ip is None or not 1 <= int(match["port"]) <= 65535:
+                out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or with a "
+                           "leading zero, or a port outside 1..65535")
+            elif role == "multicast" and not ip.is_multicast:
                 out.append(f"{who}: locator {ep['locator']!r} is not a group: a multicast address is "
-                           "224.0.0.0 to 239.255.255.255")
+                           "224.0.0.0 to 239.255.255.255, or ff00::/8")
     if held.get("commander") and not any(is_secure(ep) for ep in endpoints):
         out.append(condition_refusal(COMMANDER_CONDITIONS, "secure_channel"))
     out += identity_problems(data)
@@ -1471,14 +1511,14 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     listen_at = listens[0]["locator"] if listens else ""
     accepts = listens[0]["accepts"] if listens else 0
     at = LOCATOR_RE.fullmatch(listen_at) if listens else None
-    listen_addr = ", ".join(at[o] for o in "abcd") if at else "0, 0, 0, 0"
+    listen_addr = rust_ip(at)
     listen_port = int(at["port"]) if at else 0
     groups = [ep for ep in data["endpoint"] if ep["role"] == "multicast"]
     group_at = groups[0]["locator"] if groups else ""
     members = groups[0]["members"] if groups else 0
-    group_ttl = groups[0].get("ttl", 1) if groups else 1
+    group_ttl = groups[0].get("ttl") if groups else None
     gat = LOCATOR_RE.fullmatch(group_at) if groups else None
-    group_addr = ", ".join(gat[o] for o in "abcd") if gat else "0, 0, 0, 0"
+    group_addr = rust_ip(gat)
     group_port = int(gat["port"]) if gat else 0
     every = data.get("entity", [])
     entities = [(e["key"], e["document_bytes"]) for e in every if e["kind"] == "queryable" and "from" not in e]
@@ -1506,16 +1546,19 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     # it, so a constant generated without it would be one the build never reads.
     listener = [
         "/// The address and port the listening locator names.",
-        f"pub const LISTEN_ADDR: [u8; 4] = [{listen_addr}];",
+        "pub const LISTEN_ADDR: core::net::IpAddr =",
+        f"    {listen_addr};",
         f"pub const LISTEN_PORT: u16 = {listen_port};",
     ] if listens else []
     group = [
         "/// The locator of the group, the address and port it names, the hop limit of what the node",
-        "/// sends and how many members of the group it tracks at once.",
+        "/// sends (`None`: the kernel's own, which zenoh leaves when no `ttl` is stated) and how many",
+        "/// members of the group it tracks at once.",
         f"pub const GROUP: &str = {rust_string(group_at)};",
-        f"pub const GROUP_ADDR: [u8; 4] = [{group_addr}];",
+        "pub const GROUP_ADDR: core::net::IpAddr =",
+        f"    {group_addr};",
         f"pub const GROUP_PORT: u16 = {group_port};",
-        f"pub const GROUP_TTL: u8 = {group_ttl};",
+        f"pub const GROUP_TTL: Option<u8> = {'None' if group_ttl is None else f'Some({group_ttl})'};",
         f"pub const MEMBERS: usize = {members};",
     ] if groups else []
     commander_lines = commander_rows(commanders)
@@ -2017,7 +2060,9 @@ def _selftest() -> int:
     lrs = emit("n", wz_config.read_decl_toml(listening), sha)
     expect("the listener is a constant of the generated file",
            'pub const LISTENS: bool = true;' in lrs and 'pub const LISTEN: &str = "tcp/0.0.0.0:17475";' in lrs
-           and "pub const LISTEN_ADDR: [u8; 4] = [0, 0, 0, 0];" in lrs and "pub const LISTEN_PORT: u16 = 17475;" in lrs
+           and "pub const LISTEN_ADDR: core::net::IpAddr =\n"
+               "    core::net::IpAddr::V4(core::net::Ipv4Addr::new(0, 0, 0, 0));" in lrs
+           and "pub const LISTEN_PORT: u16 = 17475;" in lrs
            and "pub const ACCEPTS: usize = 2;" in lrs)
     expect("its sessions are the dialled one and the accepted ones",
            'pub const DIALED: [&str; 1] = ["tcp/10.0.0.1:7447"];' in lrs and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in lrs)
@@ -2087,8 +2132,10 @@ document_bytes = 8
     grs = emit("n", wz_config.read_decl_toml(group_node), sha)
     expect("the group is a set of constants of the generated file",
            "pub const GROUPS: usize = 1;" in grs and 'pub const GROUP: &str = "udp/224.0.0.224:7447";' in grs
-           and "pub const GROUP_ADDR: [u8; 4] = [224, 0, 0, 224];" in grs and "pub const GROUP_PORT: u16 = 7447;" in grs
-           and "pub const GROUP_TTL: u8 = 1;" in grs and "pub const MEMBERS: usize = 4;" in grs
+           and "pub const GROUP_ADDR: core::net::IpAddr =\n"
+               "    core::net::IpAddr::V4(core::net::Ipv4Addr::new(224, 0, 0, 224));" in grs
+           and "pub const GROUP_PORT: u16 = 7447;" in grs
+           and "pub const GROUP_TTL: Option<u8> = None;" in grs and "pub const MEMBERS: usize = 4;" in grs
            and "pub const DIALS: usize = 0;" in grs and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in grs)
     expect("a node with no group is a member of none, and none of a group's constants is generated",
            "pub const GROUPS: usize = 0;" in rs and "MEMBERS" not in rs and "GROUP_TTL" not in rs
@@ -2145,7 +2192,7 @@ document_bytes = 8
            key_set_entities(wz_config.read_decl_toml(SAMPLE + replay))[-2:]
            == [{"kind": "publisher", "key": "lab/r"}, {"kind": "publisher", "key": "lab/r/other"}])
     expect("a ttl the declaration states is the one generated",
-           "pub const GROUP_TTL: u8 = 8;" in emit(
+           "pub const GROUP_TTL: Option<u8> = Some(8);" in emit(
                "n", wz_config.read_decl_toml(group_node.replace("members = 4", "members = 4\nttl = 8")), sha))
     both = group_node.replace("[[entity]]", '[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n\n[[entity]]', 1)
     expect("a node may dial a router and be a member of a group", problems(both) == []
@@ -2155,6 +2202,27 @@ document_bytes = 8
     refuses("a hop limit of zero", group_node.replace("members = 4", "members = 4\nttl = 0"), "ttl is 0")
     refuses("a hop limit past a byte", group_node.replace("members = 4", "members = 4\nttl = 256"), "ttl is 256")
     refuses("a group that is not a multicast address", group_node.replace("224.0.0.224", "10.0.0.1"), "is not a group")
+    # The same group and listener over IPv6: the address is written in brackets, as zenoh writes it,
+    # and the constant is the address's 128 bits.
+    group_v6 = group_node.replace("udp/224.0.0.224:7447", "udp/[ff02::7a]:7447")
+    expect("an IPv6 group is valid", problems(group_v6) == [])
+    expect("an IPv6 group is the address's bits",
+           "pub const GROUP_ADDR: core::net::IpAddr =\n"
+           "    core::net::IpAddr::V6(core::net::Ipv6Addr::from_bits("
+           "0xff02000000000000000000000000007a));"
+           in emit("n", wz_config.read_decl_toml(group_v6), sha))
+    refuses("an IPv6 unicast address as a group", group_v6.replace("ff02::7a", "fd00::1"), "is not a group")
+    refuses("brackets that hold no IPv6 address", group_v6.replace("ff02::7a", "ff02::7a::1"),
+            "no IPv6 address in its brackets")
+    refuses("an IPv6 address out of its brackets", group_v6.replace("[ff02::7a]", "ff02::7a"), "is not <scheme>")
+    refuses("an octet with a leading zero", SAMPLE.replace("10.0.0.1", "10.0.0.01"), "leading zero")
+    listening_v6 = listening.replace("tcp/0.0.0.0:17475", "tcp/[::]:17475")
+    expect("an IPv6 listener is valid", problems(listening_v6) == [])
+    expect("an IPv6 listener's address is the unspecified IPv6 address",
+           "pub const LISTEN_ADDR: core::net::IpAddr =\n"
+           "    core::net::IpAddr::V6(core::net::Ipv6Addr::from_bits("
+           "0x00000000000000000000000000000000));"
+           in emit("n", wz_config.read_decl_toml(listening_v6), sha))
     refuses("a group over TCP", group_node.replace("udp/", "tcp/"), "a group is `udp`, not `tcp`")
     refuses("members on a dialled endpoint", SAMPLE.replace('role = "dial"', 'role = "dial"\nmembers = 2'),
             "only a `multicast` endpoint has `members`")

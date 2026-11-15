@@ -1,0 +1,11 @@
+image ubuntu22
+clang
+cmake
+device-tree-compiler
+gcc-arm-none-eabi
+libclang-dev
+libnewlib-arm-none-eabi
+ninja-build
+pkg-config
+qemu-system-arm
+xz-utils

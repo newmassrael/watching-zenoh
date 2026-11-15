@@ -567,10 +567,13 @@ fn whatami_words() -> Vec<&'static str> {
 }
 
 /// The mode words a `consolidation_name` label can hold, walked from
-/// `ConsolidationMode::wire_word` over every value the byte can take rather
-/// than written down a second time.
+/// `ConsolidationMode::wire_word` rather than written down a second time.
+///
+/// The field is a z64 and its whole range cannot be walked, so the walk covers
+/// the values whose z64 is one byte: zenoh numbers its modes 0..=3, and
+/// `query_mode`'s own test holds `wire_word` to no word at 0x80 and above.
 fn consolidation_words() -> Vec<&'static str> {
-    (0..=u64::from(u8::MAX))
+    (0..0x80u64)
         .filter_map(crate::query_mode::ConsolidationMode::wire_word)
         .collect()
 }
@@ -624,6 +627,7 @@ const F_ENCODING: &[SchemaNode] = &[
     leaf("id", B),
     leaf("schema_len", U),
     leaf("schema", T),
+    leaf("schema_bytes", BY),
 ];
 const F_WIREEXPR: &[SchemaNode] = &[
     leaf("id", U),
@@ -746,11 +750,15 @@ const X_SOURCE_INFO: SchemaNode = group(
 );
 const X_RESPONDER_ID: SchemaNode = group("responder_id", &[EXT_LEVEL, ZBUF_VALUE, W_ZID_PREFIXED]);
 const X_ATTACHMENT: SchemaNode = group("attachment", &[EXT_LEVEL, ZBUF_VALUE]);
+/// The interception stack a `Push`, `Request` or `Response` may carry at `0x7`; no
+/// walker reads its body, so it is its bytes.
+const X_TS_STACK: SchemaNode = group("ts_stack", &[EXT_LEVEL, ZBUF_VALUE]);
 const fn marker(name: &'static str) -> SchemaNode {
     group(name, &[EXT_LEVEL])
 }
 
 const EXTS_NET_COMMON: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, X_NODE_ID, UNNAMED[0]];
+const EXTS_PUSH: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, X_NODE_ID, X_TS_STACK, UNNAMED[0]];
 const EXTS_REQUEST: &[SchemaNode] = &[
     X_QOS_NET,
     X_TIMESTAMP,
@@ -758,9 +766,26 @@ const EXTS_REQUEST: &[SchemaNode] = &[
     group("target", &[EXT_LEVEL, Z64_VALUE, R_TARGET]),
     group("budget", &[EXT_LEVEL, Z64_VALUE, R_NARROW]),
     group("timeout", &[EXT_LEVEL, Z64_VALUE]),
+    X_TS_STACK,
     UNNAMED[0],
 ];
-const EXTS_RESPONSE: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, X_RESPONDER_ID, UNNAMED[0]];
+const EXTS_RESPONSE: &[SchemaNode] = &[
+    X_QOS_NET,
+    X_TIMESTAMP,
+    X_RESPONDER_ID,
+    X_TS_STACK,
+    UNNAMED[0],
+];
+/// `ResponseFinal` carries `ext_qos` and `ext_tstamp` only.
+const EXTS_RESPONSE_FINAL: &[SchemaNode] = &[
+    X_QOS_NET,
+    X_TIMESTAMP,
+    // Upstream's `ResponseFinal` has no responder extension; its last field is
+    // the timestamp (`commons/zenoh-protocol/src/network/response.rs` @ `pub ext_tstamp: Option<ext::TimestampType>,`),
+    // so no walk names one. Declared only because the path was published.
+    X_RESPONDER_ID,
+    UNNAMED[0],
+];
 const EXTS_NET_OAM: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, UNNAMED[0]];
 const EXTS_DECLARE_COMMON: &[SchemaNode] = &[
     group("wire_expr", &[EXT_LEVEL, ZBUF_VALUE, W_WIRE_EXPR]),
@@ -787,6 +812,7 @@ const EXTS_QUERY: &[SchemaNode] = &[
         "query_body",
         &[EXT_LEVEL, ZBUF_VALUE, W_QUERY_BODY, W_QUERY_SLICED],
     ),
+    marker("shm"),
     group("attachment", &[EXT_LEVEL, ZBUF_VALUE, W_QUERY_SLICED]),
     group("ext", &[EXT_HEAD, ANY_VALUE, W_QUERY_SLICED]),
 ];
@@ -800,16 +826,22 @@ const EXTS_INIT: &[SchemaNode] = &[
     marker("low_latency"),
     marker("compression"),
     group("patch", &[EXT_LEVEL, Z64_VALUE, R_NARROW]),
+    group("region_name", &[EXT_LEVEL, ZBUF_VALUE]),
     UNNAMED[0],
 ];
 const EXTS_OPEN: &[SchemaNode] = &[
     marker("qos"),
+    // Published because the wz table typed upstream's `ZBuf` as a `Z64`
+    // (`commons/zenoh-protocol/src/transport/open.rs` @ `pub type Shm = zextzbuf!(0x2, false);`);
+    // no walk names it any more. The `ZBuf` reading is `shm_body`.
     group("shm", &[EXT_LEVEL, Z64_VALUE]),
+    group("shm_body", &[EXT_LEVEL, ZBUF_VALUE]),
     group("auth", &[EXT_LEVEL, ZBUF_VALUE, W_AUTH]),
     group("multi_link_syn", &[EXT_LEVEL, ZBUF_VALUE, W_PUBKEY]),
     marker("multi_link_ack"),
     marker("low_latency"),
     marker("compression"),
+    group("remote_bound", &[EXT_LEVEL, Z64_VALUE]),
     UNNAMED[0],
 ];
 const EXTS_JOIN: &[SchemaNode] = &[
@@ -951,10 +983,7 @@ const NET_ROUTED_HEAD: &[SchemaNode] = &[
 ];
 /// The messages a `Frame`'s batch holds, and a lowlatency unit is.
 pub const NETWORK_ROOTS: &[SchemaNode] = &[
-    group(
-        "Push",
-        &[NET_ROUTED_HEAD, KEYEXPR, EXTS_NET_COMMON, &[PUT, DEL]],
-    ),
+    group("Push", &[NET_ROUTED_HEAD, KEYEXPR, EXTS_PUSH, &[PUT, DEL]]),
     group(
         "Request",
         &[
@@ -984,7 +1013,7 @@ pub const NETWORK_ROOTS: &[SchemaNode] = &[
                 leaf("z", F),
                 leaf("request_id", U),
             ],
-            EXTS_RESPONSE,
+            EXTS_RESPONSE_FINAL,
         ],
     ),
     group(

@@ -39,7 +39,7 @@
 //! this is pinned against the real `libzenohpico.so` rather than against a
 //! table this crate wrote for itself — see `tests/zid_against_pico_oracle.rs`.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
@@ -117,7 +117,7 @@ impl z_owned_closure_zid_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn z_closure_zid_take(
     src: *mut z_moved_closure_zid_t,
 ) -> ZResult {
     guarded_null2(closure, src, || {
-        *closure = std::mem::replace(&mut (*src)._this, z_owned_closure_zid_t::null_value());
+        *closure = core::mem::replace(&mut (*src)._this, z_owned_closure_zid_t::null_value());
         Z_OK
     })
 }
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn z_closure_zid_drop(closure: *mut z_moved_closure_zid_t)
         if closure.is_null() {
             return Z_OK;
         }
-        let taken = std::mem::replace(&mut (*closure)._this, z_owned_closure_zid_t::null_value());
+        let taken = core::mem::replace(&mut (*closure)._this, z_owned_closure_zid_t::null_value());
         if let Some(dropfn) = taken.drop {
             dropfn(taken.context);
         }
@@ -278,7 +278,7 @@ unsafe fn enumerate_peers(
         if callback.is_null() {
             return Z_ERR_NULL;
         }
-        let taken = std::mem::replace(&mut (*callback)._this, z_owned_closure_zid_t::null_value());
+        let taken = core::mem::replace(&mut (*callback)._this, z_owned_closure_zid_t::null_value());
         // From here every return path must release `taken`, so the body runs
         // inside a closure and the release is unconditional below.
         let rc = (|| {
@@ -418,9 +418,9 @@ mod tests {
     /// corrupts memory instead of failing to link.
     #[test]
     fn closure_zid_abi_matches_pico() {
-        assert_eq!(std::mem::size_of::<z_id_t>(), 16);
-        assert_eq!(std::mem::size_of::<z_owned_closure_zid_t>(), 24);
-        assert_eq!(std::mem::size_of::<z_moved_closure_zid_t>(), 24);
+        assert_eq!(core::mem::size_of::<z_id_t>(), 16);
+        assert_eq!(core::mem::size_of::<z_owned_closure_zid_t>(), 24);
+        assert_eq!(core::mem::size_of::<z_moved_closure_zid_t>(), 24);
         let closure = z_owned_closure_zid_t::null_value();
         let base = &closure as *const _ as usize;
         assert_eq!(&closure.context as *const _ as usize - base, 0);

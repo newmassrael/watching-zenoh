@@ -1,0 +1,263 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# How a wz build answers the PICS proforma (conformance/suite/pics.toml), read from the build's
+# conformance statement (docs/build-configuration.md, decision C15), for each of the two C ABIs
+# whose libraries carry the statement's digest. docs/conformance-suite.md section 4.3 defines
+# every field; crates/wz-conformance-suite holds every row to the proforma and to the
+# declaration (deploy/wz-config.toml).
+#
+# A row answers one item for one ABI in exactly one way:
+#   capability = "<id>"  the item is supported when the statement says the capability is;
+#   limit = "<id>"       the item's value is the limit's value in the statement;
+#   policy = "<id>"      the item's value is `map[<the policy's value>]`, and `map` names every
+#                        value the policy can take;
+#   fact = "<id>"        the item's answer is the protocol fact's value for the ABI in the
+#                        statement, through `map` when the fact's words are not the item's;
+#   pixit = "<id>"       the implementation reads the value from its configuration when a session
+#                        opens, so the test environment states it in that PIXIT item;
+#   fixed = "<answer>"   the answer does not depend on the build; `why` says why;
+#   unanswered = "..."   the statement cannot answer the item; the text says what it lacks, and
+#                        the test system takes the answer from the test configuration instead.
+
+format = "wz-conformance-pics-answers"
+format_version = 1
+implementation = "wz"
+
+# ---------------------------------------------------------------------------------------------
+# The pico ABI
+
+[[answer]]
+abi = "pico"
+item = "T-UNICAST"
+fixed = "yes"
+why = "A session of the pico ABI opens a unicast session in every build; no capability turns it off."
+
+[[answer]]
+abi = "pico"
+item = "T-MCAST"
+capability = "multicast-transport"
+
+[[answer]]
+abi = "pico"
+item = "T-INITIATOR"
+fixed = "yes"
+why = "A client session dials the locator it is given, and the client role needs no capability."
+
+[[answer]]
+abi = "pico"
+item = "T-ACCEPTOR"
+capability = "peer"
+
+[[answer]]
+abi = "pico"
+item = "T-ROLE-CLIENT"
+fixed = "yes"
+why = "The client role needs no capability."
+
+[[answer]]
+abi = "pico"
+item = "T-ROLE-PEER"
+capability = "peer"
+
+[[answer]]
+abi = "pico"
+item = "T-ROLE-ROUTER"
+fact = "router-role"
+
+[[answer]]
+abi = "pico"
+item = "T-STREAM-LINK"
+fact = "tcp-link"
+
+[[answer]]
+abi = "pico"
+item = "T-DGRAM-LINK"
+capability = "link-udp"
+
+[[answer]]
+abi = "pico"
+item = "T-COMPRESSION"
+fact = "batch-compression"
+
+[[answer]]
+abi = "pico"
+item = "T-PATCH"
+fact = "patch"
+map = { "0" = "no", "1" = "yes" }
+
+[[answer]]
+abi = "pico"
+item = "N-QUERY"
+capability = "query"
+
+[[answer]]
+abi = "pico"
+item = "N-QUERYABLE"
+capability = "queryable"
+
+[[answer]]
+abi = "pico"
+item = "N-TOKEN"
+capability = "liveliness"
+
+[[answer]]
+abi = "pico"
+item = "T-VERSION"
+fixed = "9"
+why = "Every wz session speaks the one protocol version of the pinned upstream."
+
+[[answer]]
+abi = "pico"
+item = "T-FSN-RES"
+policy = "sn-resolution"
+map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
+
+[[answer]]
+abi = "pico"
+item = "T-RID-RES"
+fact = "request-id-resolution"
+
+[[answer]]
+abi = "pico"
+item = "T-BATCH-UNICAST"
+limit = "PICO_UNICAST_BATCH_BYTES"
+
+[[answer]]
+abi = "pico"
+item = "T-BATCH-MCAST"
+limit = "PICO_MULTICAST_BATCH_BYTES"
+
+[[answer]]
+abi = "pico"
+item = "T-LEASE"
+limit = "PICO_LEASE_MS"
+
+[[answer]]
+abi = "pico"
+item = "T-KA-PER-LEASE"
+limit = "PICO_KEEPALIVES_PER_LEASE"
+
+[[answer]]
+abi = "pico"
+item = "T-FRAG-MAX"
+limit = "PICO_FRAG_MAX_BYTES"
+
+# ---------------------------------------------------------------------------------------------
+# The zenoh-c ABI
+
+[[answer]]
+abi = "c"
+item = "T-UNICAST"
+fixed = "yes"
+why = "A session of the zenoh-c ABI opens a unicast session in every build; no capability turns it off."
+
+[[answer]]
+abi = "c"
+item = "T-MCAST"
+capability = "multicast-transport"
+
+[[answer]]
+abi = "c"
+item = "T-INITIATOR"
+fixed = "yes"
+why = "A client session dials the locator it is given, and the client role needs no capability."
+
+[[answer]]
+abi = "c"
+item = "T-ACCEPTOR"
+capability = "peer"
+
+[[answer]]
+abi = "c"
+item = "T-ROLE-CLIENT"
+fixed = "yes"
+why = "The client role needs no capability."
+
+[[answer]]
+abi = "c"
+item = "T-ROLE-PEER"
+capability = "peer"
+
+[[answer]]
+abi = "c"
+item = "T-ROLE-ROUTER"
+capability = "router-node"
+
+[[answer]]
+abi = "c"
+item = "T-STREAM-LINK"
+fact = "tcp-link"
+
+[[answer]]
+abi = "c"
+item = "T-DGRAM-LINK"
+capability = "link-udp"
+
+[[answer]]
+abi = "c"
+item = "T-COMPRESSION"
+capability = "transport_compression"
+
+[[answer]]
+abi = "c"
+item = "T-PATCH"
+fact = "patch"
+map = { "0" = "no", "1" = "yes" }
+
+[[answer]]
+abi = "c"
+item = "N-QUERY"
+capability = "query"
+
+[[answer]]
+abi = "c"
+item = "N-QUERYABLE"
+capability = "queryable"
+
+[[answer]]
+abi = "c"
+item = "N-TOKEN"
+capability = "liveliness"
+
+[[answer]]
+abi = "c"
+item = "T-VERSION"
+fixed = "9"
+why = "Every wz session speaks the one protocol version of the pinned upstream."
+
+[[answer]]
+abi = "c"
+item = "T-FSN-RES"
+policy = "sn-resolution"
+map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
+
+[[answer]]
+abi = "c"
+item = "T-RID-RES"
+fact = "request-id-resolution"
+
+[[answer]]
+abi = "c"
+item = "T-BATCH-UNICAST"
+pixit = "X-IUT-BATCH-UNICAST"
+
+[[answer]]
+abi = "c"
+item = "T-BATCH-MCAST"
+pixit = "X-IUT-BATCH-MCAST"
+
+[[answer]]
+abi = "c"
+item = "T-LEASE"
+pixit = "X-IUT-LEASE"
+
+[[answer]]
+abi = "c"
+item = "T-KA-PER-LEASE"
+pixit = "X-IUT-KA-PER-LEASE"
+
+[[answer]]
+abi = "c"
+item = "T-FRAG-MAX"
+pixit = "X-IUT-FRAG-MAX"

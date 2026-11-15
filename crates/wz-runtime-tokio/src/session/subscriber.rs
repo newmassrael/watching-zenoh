@@ -531,7 +531,7 @@ pub enum SubscribeAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_subscriber_aliased call).
-    UnknownMapping(u64),
+    UnknownMapping(wz_session_core::wire_id::ExprId),
     /// R311ou — the resolved keyexpr (`outbound_mapping[id] || inline_suffix`)
     /// failed the R300 outbound pico-safety gate. Projected from
     /// [`SubscribeError::InvalidKeyexpr`]; the local registration was rolled

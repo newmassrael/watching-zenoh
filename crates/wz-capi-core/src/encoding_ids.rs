@@ -26,6 +26,7 @@ pub use wz_codecs::encoding_ids::{
     lookup_id, ENCODING_ID_DEFAULT, ENCODING_ID_TO_STR, ENCODING_ID_UNKNOWN, SCHEMA_SEPARATOR,
 };
 pub use wz_session_core::encoding_hint::{
-    hint_from_parts, hint_from_str, hint_from_str_in, hint_to_string, hint_to_string_in,
-    EncodingDialect,
+    hint_from_bytes, hint_from_parts, hint_from_schema_bytes, hint_from_str, hint_from_str_in,
+    hint_to_bytes, hint_to_bytes_in, hint_to_string, hint_to_string_in, EncodingDialect,
+    NON_UTF8_SCHEMA,
 };

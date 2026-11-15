@@ -1254,11 +1254,20 @@ impl<S: DeclareStorage> DeclareOwned<S> {
     }
 }
 
+/// What the origin projection of `Declare` asks of a storage profile
+/// beside DeclareStorage: that it is an origin profile, and
+/// that each byte string and text of `Declare` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait DeclareOrigin: DeclareStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::decl_final::DeclFinalOrigin + super::decl_kexpr::DeclKexprOrigin + super::undecl_kexpr::UndeclKexprOrigin + super::decl_subscriber::DeclSubscriberOrigin + super::decl_queryable::DeclQueryableOrigin + super::decl_token::DeclTokenOrigin + super::undecl_subscriber::UndeclSubscriberOrigin + super::undecl_queryable::UndeclQueryableOrigin + super::undecl_token::UndeclTokenOrigin {}
+
+impl<S: DeclareStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::decl_final::DeclFinalOrigin + super::decl_kexpr::DeclKexprOrigin + super::undecl_kexpr::UndeclKexprOrigin + super::decl_subscriber::DeclSubscriberOrigin + super::decl_queryable::DeclQueryableOrigin + super::decl_token::DeclTokenOrigin + super::undecl_subscriber::UndeclSubscriberOrigin + super::undecl_queryable::UndeclQueryableOrigin + super::undecl_token::UndeclTokenOrigin> DeclareOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> DeclareVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclareLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: DeclareStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<DeclareOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: DeclareOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<DeclareOwnedVariant<S>, CodecError> {
         Ok(match self {
             Self::CodecZenohDeclKexpr(_b) => DeclareOwnedVariant::CodecZenohDeclKexpr(_b.try_into_owned_in_origin::<S>(origin)?),
             Self::CodecZenohUndeclKexpr(_b) => DeclareOwnedVariant::CodecZenohUndeclKexpr(_b.try_into_owned_in_origin::<S>(origin)?),
@@ -1277,17 +1286,17 @@ impl<'a, D> DeclareVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: D
 #[allow(dead_code)]
 impl<'a, D> DeclareIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: DeclareLentStorage {
     /// Project this borrowed view into an owned [`DeclareOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: DeclareStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<DeclareOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: DeclareOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<DeclareOwned<S>, CodecError> {
         Ok(DeclareOwned {
             header: self.header,
             interest_id: self.interest_id,

@@ -37,8 +37,10 @@ up_shm = { package = "zenoh-shm", version = "=1.10.2", features = ["test"] }
 wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm", features = ["test"] }
 # `zenoh`'s `bytes` module in the shared-memory arm (a payload and its buffer in shared memory), each
 # built over its own family crates; `zenoh-core` is what the blocking resolution of a builder comes
-# from.
-up_zenoh = { package = "zenoh", version = "=1.10.2", default-features = false, features = ["unstable", "shared-memory", "internal"] }
+# from. Upstream's crate carries its TCP link and its UDP link, over which an upstream session and
+# a wz session in this process exchange shared memory, linked and in a multicast group
+# (`zenoh_transport_shm`); wz's carries both by default.
+up_zenoh = { package = "zenoh", version = "=1.10.2", default-features = false, features = ["unstable", "shared-memory", "internal", "transport_tcp", "transport_udp"] }
 wz_zenoh = { package = "zenoh", path = "../../crates/wz-zenoh", features = ["unstable", "shared-memory", "internal"] }
 up_core = { package = "zenoh-core", version = "=1.10.2" }
 wz_core = { package = "zenoh-core", path = "../../crates/wz-zenoh-core" }

@@ -43,7 +43,7 @@
 //! so `z_close` could not interrupt it). R2 removes it: the bind is the whole
 //! of `z_open(listen)`, and the accept loop races a cancellable shutdown.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use crate::abi::{z_moved_config_t, z_owned_config_t};
 use crate::config::{
@@ -69,6 +69,7 @@ use crate::config::{
     Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY, Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY,
 };
 use crate::ffi::{guard_val, guarded};
+use crate::prelude::*;
 // The read-task doors' refusal, which only the multi-threaded arm has.
 #[cfg(feature = "multi-thread")]
 use crate::result::Z_EINVAL;
@@ -119,7 +120,12 @@ const fn pico_batch(bytes: usize) -> u16 {
 /// `transport/link/rx/max_message_size` (a chain a fragment would take past it is dropped,
 /// `vendor/zenoh-pico/src/transport/unicast/rx.c` @
 /// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`).
+///
+/// The read storage a stream link pools is upstream's default, which pools exactly one buffer:
+/// pico reads each unicast transport into one buffer of its own
+/// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`).
 const PICO_LINK_RX: LinkRxConf = LinkRxConf {
+    buffer_size: wz_session_core::session_init_params::RX_BUFFER_SIZE,
     max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
 };
 
@@ -179,11 +185,14 @@ const fn pico_group(
     wz_capi_core::drive::GroupProfile {
         lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
         join_interval_ms: 2_500,
+        // pico has no cap on a group's members: its list grows while its allocator gives.
+        max_sessions: None,
         seq_num_res: sn_resolution.wire_code(),
         req_id_res: 0x02,
         batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
         is_qos: false,
         compression: false,
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
     }
 }
 
@@ -376,8 +385,8 @@ impl z_owned_session_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            _val: std::ptr::null_mut(),
-            _cnt: std::ptr::null_mut(),
+            _val: core::ptr::null_mut(),
+            _cnt: core::ptr::null_mut(),
         }
     }
 }
@@ -415,7 +424,7 @@ impl PicoSessionHandle {
     }
 
     /// Keep the latch of a closure with no handle to undeclare it by, for the close to wait on.
-    pub(crate) fn keep_background(&self, latch: std::sync::Arc<crate::ffi::ReleaseLatch>) {
+    pub(crate) fn keep_background(&self, latch: alloc::sync::Arc<crate::ffi::ReleaseLatch>) {
         self.background.keep(latch);
     }
 
@@ -482,7 +491,7 @@ pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
 /// The engine behind a session handle, to keep: what an entity declared on the session holds for
 /// its own life. The engine hands itself out, so this crate never turns an engine's own type into
 /// the port's, which would instantiate the engine's drop glue a second time here.
-pub(crate) fn engine_of(handle: &PicoSessionHandle) -> std::sync::Arc<Engine> {
+pub(crate) fn engine_of(handle: &PicoSessionHandle) -> alloc::sync::Arc<Engine> {
     handle.drive.engine()
 }
 
@@ -549,7 +558,10 @@ pub unsafe extern "C" fn z_open(
         let cfg = Box::from_raw(cfg_handle as *mut ConfigState);
         (*config)._this = z_owned_config_t::null_value();
 
-        let open = open_config(&cfg);
+        let open = match open_config(&cfg) {
+            Ok(open) => open,
+            Err(code) => return code,
+        };
         // The id the session opens on, refused here if the config names one pico's reader cannot
         // take (see [`session_zid`]).
         let zid = match session_zid(&open) {
@@ -582,12 +594,12 @@ pub unsafe extern "C" fn z_open(
         let connect: Vec<String> = match (connect, &listen) {
             (Some(connect), _) => vec![connect],
             (None, Some(_)) => Vec::new(),
-            #[cfg(feature = "scout")]
+            #[cfg(any(feature = "scout", feature = "scout-mcu"))]
             (None, None) => match crate::scout::locators_by_scout(&cfg) {
                 Ok(locators) => locators,
                 Err(code) => return code,
             },
-            #[cfg(not(feature = "scout"))]
+            #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
             (None, None) => return crate::result::Z_ERR_SCOUT_NO_RESULTS,
         };
         drop(cfg);
@@ -606,12 +618,7 @@ pub unsafe extern "C" fn z_open(
         // (`vendor/zenoh-pico/src/net/session.c` @ `static z_result_t _z_locators_by_config(`).
         // The core runs it (a listener bound before the dial, an accept loop beside the dial
         // face), so it is not refused. Until R3090 it was, with `Z_ERR_INVALID`, and the comment
-        // called it a follow-up.
-        let dial_whatami = if listen.is_some() {
-            WhatAmI::Peer
-        } else {
-            dial_whatami
-        };
+        // called it a follow-up. Its role is a peer's: `open_config` reads a listen config so.
         let request = OpenRequest {
             connect,
             listen,
@@ -745,19 +752,90 @@ mod zid_tests {
     }
 }
 
-/// Read [`OpenConfig`] off `cfg`. The dial role's whatami is config-driven, mirroring pico's
-/// `_z_config_get_mode` (`~/zenoh-pico/src/net/session.c:120-140`, default CLIENT): `mode=peer`
-/// opens a dialing PEER, otherwise CLIENT. (The listen role forces PEER regardless — pico
-/// force-inserts `MODE=PEER` for any listen config, session.c:98.)
-pub(crate) fn open_config(cfg: &ConfigState) -> OpenConfig {
-    OpenConfig {
+/// Read [`OpenConfig`] off `cfg`, refusing a mode pico refuses.
+///
+/// The dial role's whatami is the config's mode, as pico's `_z_config_get_mode` reads it: none or
+/// `client` opens a client, `peer` a peer, and any other value, `router` among them, is refused
+/// with `_Z_ERR_CONFIG_INVALID_MODE` (`vendor/zenoh-pico/src/net/session.c` @
+/// `ret = _Z_ERR_CONFIG_INVALID_MODE;`): pico has no router role. A config with a listen locator
+/// is a peer whatever its mode said, because pico writes `peer` over the mode before it reads it
+/// (`vendor/zenoh-pico/src/net/session.c` @
+/// `_zp_config_insert(config, Z_CONFIG_MODE_KEY, Z_CONFIG_MODE_PEER);`), so its mode is never
+/// refused.
+pub(crate) fn open_config(cfg: &ConfigState) -> Result<OpenConfig, ZResult> {
+    let listen = cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned);
+    let dial_whatami = match cfg.get(Z_CONFIG_MODE_KEY) {
+        _ if listen.is_some() => WhatAmI::Peer,
+        None | Some("client") => WhatAmI::Client,
+        Some("peer") => WhatAmI::Peer,
+        Some(_) => return Err(crate::result::Z_ERR_CONFIG_INVALID_MODE),
+    };
+    Ok(OpenConfig {
         connect: cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned),
-        listen: cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned),
-        dial_whatami: match cfg.get(Z_CONFIG_MODE_KEY) {
-            Some("peer") => WhatAmI::Peer,
-            _ => WhatAmI::Client,
-        },
+        listen,
+        dial_whatami,
         zid: cfg.get(Z_CONFIG_SESSION_ZID_KEY).map(str::to_owned),
+    })
+}
+
+#[cfg(test)]
+mod open_config_tests {
+    use super::{open_config, ConfigState, WhatAmI, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY};
+    use crate::result::Z_ERR_CONFIG_INVALID_MODE;
+
+    fn config(entries: &[(u8, &str)]) -> ConfigState {
+        let mut cfg = ConfigState::default();
+        for (key, value) in entries {
+            cfg.insert(*key, value);
+        }
+        cfg
+    }
+
+    fn role(entries: &[(u8, &str)]) -> Result<WhatAmI, i8> {
+        open_config(&config(entries)).map(|open| open.dial_whatami)
+    }
+
+    /// zenoh-pico has no router role: its open refuses `mode=router` with
+    /// `_Z_ERR_CONFIG_INVALID_MODE` (-90), and so does this ABI.
+    #[test]
+    fn the_router_mode_is_refused_as_pico_refuses_it() {
+        assert_eq!(Z_ERR_CONFIG_INVALID_MODE, -90);
+        assert_eq!(
+            role(&[(Z_CONFIG_MODE_KEY, "router")]),
+            Err(Z_ERR_CONFIG_INVALID_MODE)
+        );
+    }
+
+    /// pico compares the mode with `client` and `peer` exactly, so any other text is refused.
+    #[test]
+    fn a_mode_pico_does_not_know_is_refused() {
+        for mode in ["", "Peer", "CLIENT", "gateway", "peer "] {
+            assert_eq!(
+                role(&[(Z_CONFIG_MODE_KEY, mode)]),
+                Err(Z_ERR_CONFIG_INVALID_MODE),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_peer_and_no_mode_are_taken() {
+        assert_eq!(role(&[]), Ok(WhatAmI::Client));
+        assert_eq!(role(&[(Z_CONFIG_MODE_KEY, "client")]), Ok(WhatAmI::Client));
+        assert_eq!(role(&[(Z_CONFIG_MODE_KEY, "peer")]), Ok(WhatAmI::Peer));
+    }
+
+    /// pico writes `peer` over the mode of a config that listens before it reads the mode, so a
+    /// listener is a peer and its mode, whatever it said, is never refused.
+    #[test]
+    fn a_listening_config_is_a_peer_whatever_its_mode() {
+        for mode in [None, Some("client"), Some("router")] {
+            let mut entries = vec![(Z_CONFIG_LISTEN_KEY, "tcp/127.0.0.1:7447")];
+            if let Some(mode) = mode {
+                entries.push((Z_CONFIG_MODE_KEY, mode));
+            }
+            assert_eq!(role(&entries), Ok(WhatAmI::Peer), "{mode:?}");
+        }
     }
 }
 
@@ -943,6 +1021,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             // The group its listen endpoint names, when it names one.
             groups,
+            // pico's config has no `qos/publication` and no `transport/shared_memory` keys, so
+            // its session applies nothing above its links.
+            session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
         },
     ) {
         Ok(state) => {
@@ -965,7 +1046,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let handle = PicoSessionHandle::new(drive, ext);
             *zs = z_owned_session_t {
                 _val: Box::into_raw(Box::new(handle)) as *mut c_void,
-                _cnt: std::ptr::null_mut(),
+                _cnt: core::ptr::null_mut(),
             };
             #[cfg(feature = "admin-space")]
             if start_admin_space {
@@ -987,7 +1068,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 }
 
 /// Open `request` on the cooperative engine and install the session in `zs`: a session dialled
-/// over the host's sockets, and with `peer` one that listens on the `tcp/` endpoint of its
+/// over the sockets of the system the build runs on (`crate::coop_host`), and with `peer` one that listens on the `tcp/` endpoint of its
 /// `listen` key as well, opened on this thread before `z_open` returns, as the tokio engine's is.
 /// A listener is open once its port is bound, as pico's `z_open(listen)` returns, and takes each
 /// inbound link as a face of the session (`wz-capi-coop`'s `listen`). A group (a `udp/` endpoint
@@ -1028,8 +1109,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
     let transport_endpoint = listen.first().or_else(|| connect.first()).cloned();
+    // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
+    // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
+    // negotiated, and a node pays its batch for each link and not the largest datagram.
     let links =
-        wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial);
+        crate::coop_host::links().with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES);
     // The `tls/` link: the secure channel over the host's streams, for the dial and the listen,
     // made from the material the config's keys named. A config whose material cannot make a
     // channel (half a listener, a key that is not its chain's) fails the open, as a malformed
@@ -1045,8 +1129,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     };
     let opened = wz_capi_coop::CoopEngine::open(
         links.waited_by_owner(),
-        wz_runtime_posix::PosixClock,
-        wz_runtime_posix::PosixEntropy,
+        crate::coop_host::clock(),
+        crate::coop_host::entropy(),
         wz_capi_coop::CoopConfig {
             endpoints: connect,
             whatami: dial_whatami,
@@ -1105,7 +1189,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     }
     *zs = z_owned_session_t {
         _val: Box::into_raw(Box::new(handle)) as *mut c_void,
-        _cnt: std::ptr::null_mut(),
+        _cnt: core::ptr::null_mut(),
     };
     #[cfg(feature = "admin-space")]
     if request.start_admin_space {
@@ -1617,14 +1701,14 @@ pub unsafe extern "C" fn z_session_is_closed(zs: *const z_loaned_session_t) -> b
 pub unsafe extern "C" fn z_publisher_keyexpr(
     publisher: *const crate::pubsub::z_loaned_publisher_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(std::ptr::null(), || {
+    crate::ffi::guard_val(core::ptr::null(), || {
         match crate::abi::handle_ref::<
             crate::pubsub::z_loaned_publisher_t,
             crate::pubsub::PublisherState,
         >(publisher)
         {
             Some(state) => state.loaned_keyexpr(),
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -1656,14 +1740,14 @@ pub unsafe extern "C" fn z_publisher_id(
 pub unsafe extern "C" fn z_querier_keyexpr(
     querier: *const crate::querier::z_loaned_querier_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(std::ptr::null(), || {
+    crate::ffi::guard_val(core::ptr::null(), || {
         match crate::abi::handle_ref::<
             crate::querier::z_loaned_querier_t,
             crate::querier::QuerierState,
         >(querier)
         {
             Some(state) => state.loaned_keyexpr(),
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -1693,14 +1777,14 @@ pub unsafe extern "C" fn z_querier_id(
 pub unsafe extern "C" fn z_subscriber_keyexpr(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(std::ptr::null(), || {
+    crate::ffi::guard_val(core::ptr::null(), || {
         match crate::abi::handle_ref::<
             crate::pubsub::z_loaned_subscriber_t,
             crate::pubsub::SubscriberState,
         >(subscriber)
         {
             Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -1888,9 +1972,11 @@ pub struct zp_task_lease_options_t {
     pub task_attributes: *mut crate::sync::z_task_attr_t,
 }
 
+// The LP64 header's numbers (the crate root says how a 32-bit image is pinned).
+#[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<z_subscriber_options_t>()
+        core::mem::size_of::<z_subscriber_options_t>()
             == if cfg!(feature = "local-subscriber") {
                 4
             } else {
@@ -1898,7 +1984,7 @@ const _: () = {
             }
     );
     assert!(
-        std::mem::size_of::<z_open_options_t>()
+        core::mem::size_of::<z_open_options_t>()
             == match (
                 cfg!(feature = "multi-thread"),
                 cfg!(feature = "admin-space")
@@ -1908,18 +1994,18 @@ const _: () = {
                 (false, _) => 1,
             }
     );
-    assert!(std::mem::size_of::<z_close_options_t>() == 1);
+    assert!(core::mem::size_of::<z_close_options_t>() == 1);
 };
 
-#[cfg(feature = "multi-thread")]
+#[cfg(all(feature = "multi-thread", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<zp_task_read_options_t>() == 8);
-    assert!(std::mem::size_of::<zp_task_lease_options_t>() == 8);
+    assert!(core::mem::size_of::<zp_task_read_options_t>() == 8);
+    assert!(core::mem::size_of::<zp_task_lease_options_t>() == 8);
 };
 
 #[cfg(feature = "admin-space")]
 const _: () = assert!(
-    std::mem::offset_of!(z_open_options_t, auto_start_admin_space)
+    core::mem::offset_of!(z_open_options_t, auto_start_admin_space)
         == if cfg!(feature = "multi-thread") {
             16
         } else {
@@ -1963,7 +2049,7 @@ pub unsafe extern "C" fn z_open_options_default(options: *mut z_open_options_t) 
             #[cfg(feature = "multi-thread")]
             auto_start_lease_task: false,
             #[cfg(feature = "multi-thread")]
-            executor_task_attributes: std::ptr::null_mut(),
+            executor_task_attributes: core::ptr::null_mut(),
             // `options->auto_start_admin_space = false;` in pico's default.
             #[cfg(feature = "admin-space")]
             auto_start_admin_space: false,
@@ -1994,7 +2080,7 @@ pub unsafe extern "C" fn z_close_options_default(options: *mut z_close_options_t
 #[no_mangle]
 pub unsafe extern "C" fn zp_task_read_options_default(options: *mut zp_task_read_options_t) {
     if !options.is_null() {
-        (*options).task_attributes = std::ptr::null_mut();
+        (*options).task_attributes = core::ptr::null_mut();
     }
 }
 
@@ -2006,7 +2092,7 @@ pub unsafe extern "C" fn zp_task_read_options_default(options: *mut zp_task_read
 #[no_mangle]
 pub unsafe extern "C" fn zp_task_lease_options_default(options: *mut zp_task_lease_options_t) {
     if !options.is_null() {
-        (*options).task_attributes = std::ptr::null_mut();
+        (*options).task_attributes = core::ptr::null_mut();
     }
 }
 
@@ -2040,7 +2126,7 @@ pub unsafe extern "C" fn zp_lease_task_is_running(zs: *const z_loaned_session_t)
 
 /// pico's default priority (pico `z_priority_default`) — `Z_PRIORITY_DATA`.
 #[no_mangle]
-pub extern "C" fn z_priority_default() -> std::ffi::c_int {
+pub extern "C" fn z_priority_default() -> core::ffi::c_int {
     crate::qos::Z_PRIORITY_DEFAULT
 }
 
@@ -2048,7 +2134,7 @@ pub extern "C" fn z_priority_default() -> std::ffi::c_int {
 /// `Z_RELIABILITY_RELIABLE`, which is 0 on this ABI and 1 in wz's own enum.
 #[cfg(feature = "unstable-api")]
 #[no_mangle]
-pub extern "C" fn z_reliability_default() -> std::ffi::c_int {
+pub extern "C" fn z_reliability_default() -> core::ffi::c_int {
     crate::pubsub::Z_RELIABILITY_RELIABLE
 }
 
@@ -2095,6 +2181,19 @@ mod build_numbers {
             assert_eq!(profile.req_id_res, default.req_id_res);
             assert_eq!(profile.batch_size, default.batch_size);
             assert_eq!(profile.lease_ms, default.lease_ms);
+        }
+    }
+
+    /// Pico states no cap on a group's members, and neither does its preset, whatever the width:
+    /// the face it joins then holds the rows of its table and no more, which is where the preset
+    /// departs from pico by decision (`docs/upstream-parity.md` section 7).
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn the_pico_group_states_no_member_cap() {
+        use wz_session_core::policy::SnResolution;
+        assert_eq!(PICO_GROUP.max_sessions, None);
+        for width in [SnResolution::Bits8, SnResolution::Bits64] {
+            assert_eq!(pico_group(width).max_sessions, None, "{}", width.id());
         }
     }
 }

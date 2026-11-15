@@ -133,6 +133,17 @@ fn case(
 
 const ZID4: [u8; 4] = [0xB0, 0xB1, 0xB2, 0xB3];
 
+/// A `Frame` payload that is one network message, in a description's hex: an
+/// OAM with a zero id and no body.
+///
+/// A payload whose record begins with a transport id in its low five bits is
+/// no record of the `Frame`: a reader ends the `Frame` there and reads the
+/// byte as the batch's next transport message, as upstream's `Frame` reader
+/// rewinds to it (`commons/zenoh-codec/src/transport/frame.rs` @
+/// `reader.rewind(mark);`), so the unit is not the one message the build
+/// describes and its report does not tile.
+pub(crate) const ONE_RECORD_PAYLOAD: &str = "1f00";
+
 fn corpus() -> Vec<Case> {
     use Want::*;
     let mut v: Vec<Case> = Vec::new();
@@ -287,7 +298,7 @@ fn corpus() -> Vec<Case> {
         v.push(case(
             format!("frame sn {sn}"),
             format!(
-                r#"{{"message":"frame","reliable":false,"sn":{},"payload":"00"}}"#,
+                r#"{{"message":"frame","reliable":false,"sn":{},"payload":"{ONE_RECORD_PAYLOAD}"}}"#,
                 quoted(sn)
             ),
             vec![("sn", Uint(sn))],
@@ -635,16 +646,41 @@ fn every_built_unit_reads_back_to_the_callers_fields() {
 /// The three framings of one description differ in the prefix and nowhere else.
 #[test]
 fn the_framings_differ_only_in_the_prefix() {
-    let json = r#"{"message":"frame","reliable":true,"sn":5,"payload":"0102030405"}"#;
-    let datagram = built(json, Framing::Datagram);
-    let tcp = built(json, Framing::TcpStream);
-    let low = built(json, Framing::LowLatencyStream);
+    let json =
+        format!(r#"{{"message":"frame","reliable":true,"sn":5,"payload":"{ONE_RECORD_PAYLOAD}"}}"#);
+    let datagram = built(&json, Framing::Datagram);
+    let tcp = built(&json, Framing::TcpStream);
+    let low = built(&json, Framing::LowLatencyStream);
     assert_eq!(datagram.unit, datagram.body);
     assert_eq!(tcp.body, datagram.body);
     assert_eq!(low.body, datagram.body);
     let len = datagram.body.len() as u8;
     assert_eq!(&tcp.unit[..2], &[len, 0]);
     assert_eq!(&low.unit[..4], &[len, 0, 0, 0]);
+}
+
+/// A `Frame` payload is the `Frame`'s records, and a record that begins with a
+/// transport id is none of them: a reader ends the `Frame` before it (see
+/// [`ONE_RECORD_PAYLOAD`]). The build describes one message, so the unit is
+/// refused at that byte, whether the id opens the payload or follows a record.
+/// A byte that is neither a transport nor a network id is a record this build
+/// cannot read, and the payload keeps it.
+#[test]
+fn a_frame_payload_that_reaches_a_transport_id_is_refused_where_the_frame_ends() {
+    let frame = |payload: &str| {
+        format!(r#"{{"message":"frame","reliable":true,"sn":5,"payload":"{payload}"}}"#)
+    };
+    // The header and the one-byte sn take bytes 0 and 1 of the body.
+    for (payload, at) in [("00", 2usize), ("0102", 2), ("1f0004", 4), ("1f0007ff", 4)] {
+        match build(&frame(payload), Framing::Datagram) {
+            Err(BuildError::Layout(crate::transport_layout::LayoutError::Untiled { at: got })) => {
+                assert_eq!(got, at, "payload {payload}")
+            }
+            other => panic!("payload {payload} should end the Frame at {at}: {other:?}"),
+        }
+    }
+    let kept = built(&frame("1f0018ff"), Framing::Datagram);
+    assert_eq!(row(&kept, "payload").width, 4);
 }
 
 // ------------------------------------------------------- 3. the negative arm

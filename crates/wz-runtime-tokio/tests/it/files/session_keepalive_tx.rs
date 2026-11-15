@@ -42,7 +42,7 @@ fn fresh_setup() -> (
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
 }
 
@@ -111,7 +111,7 @@ mod keepalive_emitter {
         let actions =
             new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
         let mut engine = new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         (recorder, actions, engine)
     }
 
@@ -261,7 +261,7 @@ mod keepalive_emitter {
         };
         let actions = new_session_actions(outbound, params, TokioTime::new());
         let mut engine = new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         drive_to_established(&mut engine);
         actions
     }
@@ -342,7 +342,7 @@ mod keepalive_emitter {
         let actions =
             new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
         let mut engine = new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         (driver, actions, engine)
     }
 
@@ -481,7 +481,7 @@ mod keepalive_emitter {
         let clock = TokioTime::new();
         let actions = new_session_actions(outbound, params, clock);
         let mut engine = new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         drive_to_established(&mut engine);
 
         let mut driver = PendingDriver;

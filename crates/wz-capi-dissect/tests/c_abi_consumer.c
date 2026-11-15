@@ -646,6 +646,75 @@ static int check_selection_since_door(void) {
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null selector rc=%d", rc);
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, NULL);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+
+    /* (ABI 58) -- the two doors that read samples by declarations. KeepAlive
+     * rows carry no sample, so the words are the older doors' words; what the
+     * declarations decide is held where samples can be built (the Rust tests). */
+    {
+        char *older = NULL;
+        char *declaring = NULL;
+
+        rc = wz_dissect_live_selection(h, "bytes >= 0", &older);
+        CHECK(rc == WZ_DISSECT_OK && older != NULL, "selection rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(h, "", "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_OK && declaring != NULL,
+              "selection_declaring rc=%d", rc);
+        CHECK(strcmp(older, declaring) == 0,
+              "rows that carry no sample read the same words:\n%s\n%s", older,
+              declaring);
+        wz_dissect_string_free(declaring);
+        wz_dissect_string_free(older);
+        declaring = NULL;
+
+        /* The same selector under a declaration text is another memory: the
+         * one memory the handle keeps was the no-text one, so this call
+         * begins its own. */
+        rc = wz_dissect_live_selection_since_declaring(h, "", "bytes >= 0", 0,
+                                                       &declaring);
+        CHECK(rc == WZ_DISSECT_OK && declaring != NULL,
+              "selection_since_declaring rc=%d", rc);
+        CHECK(strstr(declaring,
+                     "\"document\":{\"name\":\"selection_since\",\"revision\":5") !=
+                  NULL,
+              "the since document under declarations: %s", declaring);
+        CHECK(strstr(declaring, "\"continued\":false") != NULL,
+              "a declaration text begins a memory of its own: %s", declaring);
+        wz_dissect_string_free(declaring);
+        declaring = NULL;
+        rc = wz_dissect_live_selection_since_declaring(h, "", "bytes >= 0", 0,
+                                                       &declaring);
+        CHECK(rc == WZ_DISSECT_OK && declaring != NULL &&
+                  strstr(declaring, "\"continued\":true") != NULL,
+              "the same selector and text find their memory: rc=%d %s", rc,
+              declaring ? declaring : "(null)");
+        wz_dissect_string_free(declaring);
+        declaring = NULL;
+
+        /* Refusals: no string with any of them. */
+        rc = wz_dissect_live_selection_declaring(h, "not a declaration",
+                                                 "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && declaring == NULL,
+              "a refused text is ERR_DECLARATION, rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "not a declaration",
+                                                       "bytes >= 0", 0, &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && declaring == NULL,
+              "a refused text on the since door is ERR_DECLARATION, rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(h, "", "kind ==", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && declaring == NULL,
+              "a bad selector is ERR_SELECTOR, rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "", "kind ==", 0,
+                                                       &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && declaring == NULL,
+              "a bad selector on the since door is ERR_SELECTOR, rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(h, NULL, "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null declarations rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(NULL, "", "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "", NULL, 0, &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null selector rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "", "bytes >= 0", 0, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+    }
     wz_dissect_live_close(h);
     return 0;
 }
@@ -2919,20 +2988,20 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":12},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":13},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
         "\"frames\":3,\"bytes\":3,\"zenoh\":\"undecided\","
         "\"announced_version\":\"none\","
         "\"zenoh_evidence\":{\"log2_lr_millibits\":362,"
-        "\"log2_lr_no_millibits\":11045,"
-        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":6,"
+        "\"log2_lr_no_millibits\":13696,"
+        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":7,"
         "\"crossed_at_packet\":null,"
         "\"log2_lr_max_millibits\":363,\"log2_lr_min_millibits\":-2,"
-        "\"log2_lr_no_max_millibits\":11045,\"log2_lr_no_min_millibits\":0,"
+        "\"log2_lr_no_max_millibits\":13696,\"log2_lr_no_min_millibits\":0,"
         "\"checks\":[{\"check\":\"unit_reading\",\"strength\":\"unit\","
-        "\"confirmed\":3,\"violated\":0,\"millibits\":365,\"no_millibits\":9504,"
+        "\"confirmed\":3,\"violated\":0,\"millibits\":365,\"no_millibits\":12155,"
         "\"q_basis\":\"measured\",\"eps_basis\":\"measured\"},"
         "{\"check\":\"wire_front\",\"strength\":\"header\","
         "\"confirmed\":3,\"violated\":0,\"millibits\":-3,\"no_millibits\":1541,"
@@ -4411,8 +4480,15 @@ int main(void) {
      * pieces joined per query, and every opened `e2e` block gains
      * `unjudged_reason` (`reply`, `sender_unknown`, or null); a final's entry
      * gains `ended_transfers` and an ended transfer `ended_by`. Keys arrive;
-     * nothing retires. */
-    revisioned[2].revision = 66;
+     * nothing retires.
+     * 67: a payload whose encoding's schema is not UTF-8 carries the schema as
+     * `schema_hex` (its bytes in lowercase hex) and leaves it out of the
+     * `encoding` string. A key arrives; nothing retires.
+     * 68: model 7 of the zenoh test: a Frame's records end where the
+     * batch's next transport message begins, a record that does not decode
+     * fails the batch, and the parameters the corpus gives under that
+     * reading. Values move under stationary keys. */
+    revisioned[2].revision = 68;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4576,9 +4652,10 @@ int main(void) {
      * two families gain a word; nothing retires.
      * 12: `no_matching_key`, the reason a row's cells are unstated when key
      * material was handed in and named no secret of this flow's connection.
-     * One family gains a word; nothing retires. */
+     * One family gains a word; nothing retires.
+     * 13: model 7, as the field document's 68. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 12;
+    revisioned[12].revision = 13;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

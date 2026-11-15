@@ -100,8 +100,8 @@ use sce_forge_runtime::codec::CodecError;
 ///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query(
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<RequestOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
@@ -204,8 +204,8 @@ pub fn reliteralize_request(
 /// of the setter call order.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_meta(
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
     meta: &crate::metadata::QueryMetadata,
 ) -> Result<RequestOwned, CodecError> {
@@ -612,8 +612,8 @@ pub const BUDGET_BITS: u32 = Budget::BITS;
 
 #[cfg(feature = "codec-request")]
 pub struct RequestQueryBuilder {
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<String>,
     // Query-layer settings.
     consolidation: Option<ConsolidationMode>,
@@ -640,7 +640,11 @@ impl RequestQueryBuilder {
     /// [`build_request_query`]: minimal Request(Query) envelope with
     /// the keyexpr arm (literal id=0 + Some, alias id=N + None,
     /// compound id=N + Some). Same id/suffix semantics.
-    pub fn new(rid: u64, keyexpr_mapping_id: u64, keyexpr_suffix: Option<&str>) -> Self {
+    pub fn new(
+        rid: crate::wire_id::RequestId,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
+        keyexpr_suffix: Option<&str>,
+    ) -> Self {
         Self {
             rid,
             keyexpr_mapping_id,
@@ -923,7 +927,7 @@ impl RequestQueryBuilder {
         if let RequestOwnedVariant::CodecZenohQuery(ref mut query) = request.body {
             if let Some(mode) = self.consolidation {
                 query.header |= 0x20;
-                query.consolidation = Some(mode.wire_byte());
+                query.consolidation = Some(u64::from(mode.wire_byte()));
             }
             if let Some(params) = self.parameters {
                 query.header |= 0x40;
@@ -1123,8 +1127,8 @@ impl RequestQueryBuilder {
 /// params, no exts — those are separate layered helpers.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_consolidation(
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
     consolidation: ConsolidationMode,
 ) -> Result<RequestOwned, CodecError> {
@@ -1177,8 +1181,8 @@ pub const REQUEST_QUERY_PARAMETERS_MAX_LEN: usize = 256;
 /// anyke-prepend on top.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_parameters(
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
     params: &[u8],
 ) -> Result<RequestOwned, CodecError> {
@@ -1266,8 +1270,8 @@ pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 /// `_with_body_value` / `_with_full_exts` helpers layer those.
 #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
 pub fn build_request_query_with_attachment(
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
     attachment: &[u8],
 ) -> Result<RequestOwned, CodecError> {
@@ -1324,8 +1328,8 @@ pub fn build_request_query_with_attachment(
 /// mandatory for cross-router queries per network.c:140).
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_timeout_ms(
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
     timeout_ms: u64,
 ) -> Result<RequestOwned, CodecError> {
@@ -1372,8 +1376,8 @@ pub fn build_request_query_with_timeout_ms(
 /// [`build_request_query`] and let the peer fall back to default.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_target(
-    rid: u64,
-    keyexpr_mapping_id: u64,
+    rid: crate::wire_id::RequestId,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
     target: QueryTarget,
 ) -> Result<RequestOwned, CodecError> {

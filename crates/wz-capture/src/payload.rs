@@ -110,8 +110,10 @@ pub enum Encoding<'a> {
         id: u16,
         /// The table name, e.g. `application/json`.
         name: &'static str,
-        /// The schema after the `;`, when the packed word said one is present.
-        schema: Option<&'a str>,
+        /// The schema after the `;`, when the packed word said one is present:
+        /// its bytes, which need not be UTF-8 (upstream holds a schema as bytes,
+        /// `commons/zenoh-protocol/src/core/encoding.rs` @ `pub schema: Option<ZSlice>,`).
+        schema: Option<&'a [u8]>,
     },
     /// An id no table entry answers to.
     ///
@@ -130,7 +132,7 @@ pub enum Encoding<'a> {
 impl<'a> Encoding<'a> {
     /// Read the WIRE WORD — `(id << 1) | has_schema`, the packing
     /// `wz_capi_core::encoding_ids` documents — plus the schema it points at.
-    pub fn from_packed(packed_id: u32, schema: Option<&'a str>) -> Self {
+    pub fn from_packed(packed_id: u32, schema: Option<&'a [u8]>) -> Self {
         let id = (packed_id >> 1) as u16;
         match ENCODING_ID_TO_STR.get(id as usize) {
             Some(name) => Encoding::Known {
@@ -1418,14 +1420,14 @@ impl PayloadCensus {
         if let NetworkMessage::ResponseFinal(f) = message {
             let from_low = crate::agg::dir_index(direction) == 0;
             if let Some(judge) = judging {
-                judge.close(ctx.list(), from_low, f.request_id);
+                judge.close(ctx.list(), from_low, u64::from(f.request_id));
             }
             if let Some(sink) = sink {
                 sink(Sighting::Final(FinalSeen {
                     row: RowKey::of(ctx.list(), frame),
                     record,
                     from_low,
-                    request: f.request_id,
+                    request: u64::from(f.request_id),
                 }));
             }
             return;
@@ -1472,7 +1474,7 @@ impl PayloadCensus {
                     keyexpr: keyexpr.as_deref(),
                     missed: keyexpr
                         .is_none()
-                        .then(|| (id, suffix.filter(|s| !s.is_empty()))),
+                        .then(|| (u64::from(id), suffix.filter(|s| !s.is_empty()))),
                     payload: bytes,
                     elsewhere: shm,
                     sender: ctx.zid(direction),
@@ -1541,7 +1543,7 @@ impl PayloadCensus {
         let encoding = match declared {
             Some(e) => Encoding::from_packed(
                 e.packed_id,
-                e.schema.as_ref().map(|s| s.as_text().into_inner()),
+                e.schema.as_ref().map(|s| s.as_bytes().into_inner()),
             ),
             None => Encoding::Absent,
         };
@@ -1558,7 +1560,7 @@ impl PayloadCensus {
                 fixed,
                 missed: keyexpr
                     .is_none()
-                    .then(|| (id, suffix.filter(|s| !s.is_empty()))),
+                    .then(|| (u64::from(id), suffix.filter(|s| !s.is_empty()))),
                 from_low: crate::agg::dir_index(direction) == 0,
                 declared: encoding,
                 bytes,
@@ -1732,7 +1734,7 @@ pub(crate) fn sample_carrier(
             | ResponseOwnedVariant::Default { body: reply, .. } => match &reply.body {
                 ReplyOwnedVariant::CodecZenohMsgPut(_) | ReplyOwnedVariant::Default { .. } => {
                     Some(Carrier::Reply {
-                        request: r.request_id,
+                        request: u64::from(r.request_id),
                     })
                 }
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => None,
@@ -2129,6 +2131,21 @@ pub(crate) mod tests_support {
         encoding: Option<(u16, Option<&str>)>,
         payload: &[u8],
     ) -> Vec<u8> {
+        push_with_schema_bytes(
+            keyexpr,
+            encoding.map(|(id, schema)| (id, schema.map(str::as_bytes))),
+            payload,
+        )
+    }
+
+    /// [`push_with_encoding`] with the schema given as bytes, which need not be
+    /// UTF-8: upstream accepts any.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn push_with_schema_bytes(
+        keyexpr: &'static str,
+        encoding: Option<(u16, Option<&[u8]>)>,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let (header, encoding) = match encoding {
             Some((id, schema)) => (
                 wz_codecs::lent::MsgPut::default().header | wz_codecs::wire_const::FLAG_Z_PUT_E,
@@ -2228,7 +2245,7 @@ pub(crate) mod tests_support {
     /// guard below asserts `payloads() == 1` before it asserts anything about a
     /// keyexpr: an undecodable fixture would otherwise read as an unresolved one.
     pub(crate) fn push_declaring_aliased(
-        alias_id: u64,
+        alias_id: wz_session_core::wire_id::ExprId,
         encoding_id: u16,
         payload: &[u8],
     ) -> Vec<u8> {
@@ -6250,11 +6267,11 @@ mod tests {
             Some("application/json")
         );
         assert_eq!(
-            Encoding::from_packed((5 << 1) | 1, Some("v2")),
+            Encoding::from_packed((5 << 1) | 1, Some(&b"v2"[..])),
             Encoding::Known {
                 id: 5,
                 name: "application/json",
-                schema: Some("v2")
+                schema: Some(&b"v2"[..])
             }
         );
     }

@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The validation corpus of the flow zenoh test (`captures/validation/`), read
-//! the one time `docs/flow-zenoh-verdict.md` §6.12 registered: against model 6
-//! as frozen there, by group, into the report that section specifies.
+//! The validation corpora of the flow zenoh test, each read against the model a
+//! freezing entry registered it for (`docs/flow-zenoh-verdict.md` §6.12,
+//! [`crate::zenoh_evidence::freeze`]), by group, into the report §6.12
+//! specifies.
 //!
-//! The report is the test's output. The reading the section names is the first
-//! run of this test on the corpus as collected; what it printed is
-//! `captures/validation/report.txt` ([`REPORTED`]), and from then on the test
-//! holds the reader to having read the corpus that way. It reads in the build
-//! that opens lz4, the reader the model was frozen for and the build the
-//! calibration is computed in; a build without lz4 reads a compressed
-//! workload's batches as undecodable.
+//! The report is the test's output. The reading an entry names is the first run
+//! of this test on its corpus as collected; what it printed is the corpus's
+//! `report.txt`, and from then on the test holds the reader to having read the
+//! corpus that way. A model that is not the frozen one of a freeze reads no
+//! validation corpus at all. It reads in the build that opens lz4, the reader
+//! the model was frozen for and the build the calibration is computed in; a
+//! build without lz4 reads a compressed workload's batches as undecodable.
 #![cfg(all(
     feature = "network-codecs",
     feature = "reassembly",
@@ -24,12 +25,16 @@ use alloc::vec::Vec;
 
 use crate::session_table::ZenohVerdict;
 use crate::zenoh_corpus_tests::{manifest_in, Entry};
-use crate::zenoh_evidence::{recording, ZenohEvidence};
+use crate::zenoh_evidence::freeze::{self, Freeze, Seal};
+use crate::zenoh_evidence::{model, recording, ZenohEvidence};
 use crate::zenoh_hierarchy_tests::exact_interval;
 use crate::Dissection;
 
-fn validation_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../captures/validation")
+/// The directory of the validation corpus `frozen` registered.
+fn corpus_dir(frozen: &Freeze) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(frozen.corpus)
 }
 
 /// What the report needs of one flow.
@@ -61,9 +66,9 @@ fn read_flow(e: &ZenohEvidence) -> Read {
     }
 }
 
-fn read_file(entry: &Entry) -> Vec<Read> {
-    let bytes = std::fs::read(validation_dir().join(&entry.file))
-        .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
+fn read_file(dir: &std::path::Path, entry: &Entry) -> Vec<Read> {
+    let bytes =
+        std::fs::read(dir.join(&entry.file)).unwrap_or_else(|e| panic!("{}: {e}", entry.file));
     let d = recording(|| Dissection::from_capture(&bytes))
         .unwrap_or_else(|e| panic!("{}: the capture reads: {e:?}", entry.file));
     let mut out: Vec<Read> = d
@@ -166,24 +171,40 @@ fn report(groups: &BTreeMap<String, (bool, Vec<Read>)>) -> String {
     out
 }
 
-/// What the one reading of the validation corpus printed (§6.12, §6.13).
-const REPORTED: &str = include_str!("../../../captures/validation/report.txt");
-
-/// THE VALIDATION CORPUS, READ ONCE against the frozen model (§6.12): the
-/// report is what this prints, and it is held to what it printed the first
-/// time ([`REPORTED`]).
+/// THE VALIDATION CORPUS, READ ONCE against the frozen model (§6.12): when
+/// the reader's model is the frozen one of a freeze, its corpus is read and
+/// the report is held to what the first reading printed (the corpus's
+/// `report.txt`; a corpus with none is being read for the first time, and the
+/// report this prints is that file). A model numbered after every freeze reads
+/// no validation corpus.
 #[test]
 fn the_validation_corpus_read_against_the_frozen_model() {
-    let entries = manifest_in(&validation_dir(), "corpus.json5");
+    let frozen = match freeze::seal(model::MODEL, freeze::digest()) {
+        Seal::Read(f) => f,
+        Seal::Unfrozen => return,
+        Seal::Refused => panic!(
+            "model {} is not the frozen model of its number, and reads no validation corpus",
+            model::MODEL
+        ),
+    };
+    let dir = corpus_dir(&frozen);
+    let entries = manifest_in(&dir, "corpus.json5");
     let mut groups: BTreeMap<String, (bool, Vec<Read>)> = BTreeMap::new();
     for e in &entries {
         let zenoh = e.hypothesis == "zenoh";
         let slot = groups
             .entry(e.group.clone())
             .or_insert_with(|| (zenoh, Vec::new()));
-        slot.1.extend(read_file(e));
+        slot.1.extend(read_file(&dir, e));
     }
     let text = report(&groups);
     std::println!("{text}");
-    assert_eq!(text, REPORTED, "the report of the one reading:\n{text}");
+    let reported = std::fs::read_to_string(dir.join("report.txt")).unwrap_or_else(|_| {
+        panic!(
+            "{} has no report.txt: this is the one reading of that corpus, and what \
+             it printed is the file\n=====\n{text}=====",
+            frozen.corpus
+        )
+    });
+    assert_eq!(text, reported, "the report of the one reading:\n{text}");
 }

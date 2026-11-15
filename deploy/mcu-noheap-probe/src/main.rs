@@ -541,7 +541,7 @@ fn main() -> ! {
         require("thermostat session id", policy.is_ok());
         let Ok(policy) = policy else { loop {} };
         let mut engine = Engine::new(policy);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         require(
             "switchboard init",
             engine.get_current_state() == ThermostatState::Idle,

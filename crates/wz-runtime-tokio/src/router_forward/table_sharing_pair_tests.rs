@@ -248,7 +248,7 @@ fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_
     );
 
     let held = fwd.on_tables();
-    fwd.on_tables_mut().tables.north_is_client = true;
+    fwd.on_tables_mut().tables.next_hosted_id += 1;
     assert_eq!(
         fwd.tables.retired(),
         (1, 0),
@@ -260,7 +260,7 @@ fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_
         (1, 1),
         "the reader let the version go and did not free it"
     );
-    fwd.on_tables_mut().tables.north_is_client = false;
+    fwd.on_tables_mut().tables.next_hosted_id += 1;
     assert_eq!(
         fwd.tables.retired(),
         (0, 0),
@@ -268,7 +268,7 @@ fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_
     );
 
     let held = fwd.on_tables();
-    fwd.on_tables_mut().tables.north_is_client = true;
+    fwd.on_tables_mut().tables.next_hosted_id += 1;
     drop(held);
     assert_eq!(fwd.tables.retired(), (1, 1));
     fwd.tables.synchronize();
@@ -344,20 +344,21 @@ fn routing_table_sharing_snapshot_serves_a_reader_of_an_older_version_its_versio
 #[test]
 fn routing_table_sharing_snapshot_does_not_publish_a_write_that_panicked() {
     let fwd = router_with_a_client(RoutingTableSharing::Snapshot);
-    assert!(!fwd.on_tables().tables.north_is_client);
+    let before = fwd.on_tables().tables.next_hosted_id;
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut on = fwd.on_tables_mut();
-        on.tables.north_is_client = true;
+        on.tables.next_hosted_id = before + 1;
         panic!("a writer of the tables fails in the middle of its write");
     }));
     assert!(unwound.is_err(), "the write panicked");
-    assert!(
-        !fwd.on_tables().tables.north_is_client,
+    assert_eq!(
+        fwd.on_tables().tables.next_hosted_id,
+        before,
         "the draft of the write that panicked was never published"
     );
     // The writers' lock was let go with the abandoned draft: the next write gets in.
-    fwd.on_tables_mut().tables.north_is_client = true;
-    assert!(fwd.on_tables().tables.north_is_client);
+    fwd.on_tables_mut().tables.next_hosted_id = before + 1;
+    assert_eq!(fwd.on_tables().tables.next_hosted_id, before + 1);
 }
 
 /// The value is chosen before any face registers: the faces a router holds are not carried into
@@ -416,4 +417,56 @@ fn a_callback_of_the_nodes_own_subscriber_may_declare_while_the_group_ingress_ro
         "the callback came back from declaring on the node that called it"
     );
     routed.join().expect("the route");
+}
+
+/// A writer that routes the client leg through its own draft, under either value: with the draft
+/// memos off it computes the route each time it asks and keeps none, and the version it publishes
+/// computes the route again for its first reader; with them on it computes the route once and the
+/// published version serves it (`docs/router-table-snapshots.md`, section 6.9). Turned red by a
+/// draft memo that keeps nothing, or by a publish that drops what the draft kept.
+#[test]
+fn routing_table_sharing_a_writer_keeps_the_routes_of_its_draft_when_the_draft_memos_are_on() {
+    /// The client leg of `KEY` in `tables`, every keyexpr taken as declared.
+    fn client_leg(tables: &Tables) -> Arc<[FaceId]> {
+        let hat = tables.owner_broker(CLIENTS_REGION);
+        let names = |_: &str| true;
+        client_route(
+            &hat.subs,
+            Cached {
+                routes: &hat.client_routes,
+                names_a_resource: &names,
+            },
+            KEY,
+            false,
+        )
+    }
+    for sharing in [RoutingTableSharing::Rwlock, RoutingTableSharing::Snapshot] {
+        for drafts in [false, true] {
+            let case = format!("{} draft_route_memos={drafts}", sharing.id());
+            let fwd = RouterForwarder::new(zid(0x01))
+                .with_table_sharing(sharing)
+                .with_draft_route_memos(drafts);
+            let mut write = fwd.tables.write();
+            write
+                .owner_broker_mut(CLIENTS_REGION)
+                .subs_mut()
+                .insert(FaceId(7), 1, KEY, ());
+            assert_eq!(&*client_leg(&write), &[FaceId(7)], "{case}");
+            assert_eq!(&*client_leg(&write), &[FaceId(7)], "{case}");
+            assert_eq!(
+                write.routes_asked_off_version(),
+                (2, if drafts { 1 } else { 2 }),
+                "{case}: the writer asked twice at its draft's inputs"
+            );
+            write.publish();
+            let read = fwd.tables.read();
+            assert_eq!(&*client_leg(&read), &[FaceId(7)], "{case}");
+            drop(read);
+            assert_eq!(
+                fwd.client_route_computes(),
+                if drafts { 1 } else { 3 },
+                "{case}: the published version computes only what its draft did not keep"
+            );
+        }
+    }
 }

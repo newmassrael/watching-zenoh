@@ -105,19 +105,21 @@ pub(super) enum Seen {
     /// A `Response` as the querier sees it, so the request id is the
     /// querier's own, which both forwarders must restore.
     Response {
-        request_id: u64,
+        request_id: wz_session_core::wire_id::RequestId,
         keyexpr: String,
         payload: Option<Vec<u8>>,
     },
     /// An `Err` `Response` as the querier sees it, the relay's own
     /// `Err("Timeout")` included.
     ResponseErr {
-        request_id: u64,
+        request_id: wz_session_core::wire_id::RequestId,
         keyexpr: String,
         payload: Vec<u8>,
     },
     /// A `ResponseFinal` as the querier sees it.
-    ResponseFinal { request_id: u64 },
+    ResponseFinal {
+        request_id: wz_session_core::wire_id::RequestId,
+    },
     /// A link-state list, as the (zid, sorted link zids) of each entry that
     /// names its node, so the psid numbering is not compared.
     LinkState {
@@ -181,9 +183,14 @@ enum Step {
     /// A `DeclareQueryable` arrives on a face: keyexpr, completeness.
     Queryable(u64, &'static str, bool),
     /// A `Request` arrives on a face: the querier's request id, keyexpr.
-    Query(u64, u64, &'static str),
+    Query(u64, wz_session_core::wire_id::RequestId, &'static str),
     /// A `Request` that also carries what the querier asked for.
-    QueryWith(u64, u64, &'static str, Asked),
+    QueryWith(
+        u64,
+        wz_session_core::wire_id::RequestId,
+        &'static str,
+        Asked,
+    ),
     /// The queryable on a face answers the last `Request` that was forwarded
     /// to it, with a `Reply` under the keyexpr.
     Reply(u64, &'static str, &'static [u8]),
@@ -239,10 +246,10 @@ struct Node {
     /// carry. A queryable that was sent no `Request` has nothing to answer: its
     /// `Reply` and `Final` steps do nothing, and that shows as a difference on
     /// the `Query` step when only one of two nodes forwarded the request.
-    last_request: BTreeMap<u64, u64>,
+    last_request: BTreeMap<u64, wz_session_core::wire_id::RequestId>,
     /// The request id each face last ended with a `Final`, for a reply that
     /// arrives after it.
-    ended_request: BTreeMap<u64, u64>,
+    ended_request: BTreeMap<u64, wz_session_core::wire_id::RequestId>,
     /// The next declaration id. A face that reuses one replaces what it named,
     /// which is a protocol violation and not a scene, so every declaration a
     /// scene makes carries an id of its own.
@@ -538,7 +545,7 @@ impl Node {
 }
 
 /// What a frame carried and, for a `Request`, the request id it was sent with.
-pub(super) fn decode(frame: &[u8]) -> Vec<(Seen, Option<u64>)> {
+pub(super) fn decode(frame: &[u8]) -> Vec<(Seen, Option<wz_session_core::wire_id::RequestId>)> {
     use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
     let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(frame) else {
         return vec![(Seen::Other("non-frame"), None)];
@@ -1166,7 +1173,7 @@ fn what_a_querier_asks_for() -> Vec<Step> {
     for (n, asked) in asks.into_iter().enumerate() {
         let querier = if n % 2 == 0 { 0 } else { 3 };
         scene.extend([
-            Step::QueryWith(querier, 40 + n as u64, "demo/a", asked),
+            Step::QueryWith(querier, 40 + n as u32, "demo/a", asked),
             Step::Reply(1, "demo/a", b"one"),
             Step::Final(1),
             Step::Reply(2, "demo/a", b"two"),
@@ -1273,7 +1280,7 @@ fn two_replies_under_each_consolidation_mode() -> Vec<Step> {
         scene.extend([
             Step::QueryWith(
                 0,
-                60 + n as u64,
+                60 + n as u32,
                 "demo/k",
                 Asked {
                     consolidation: Some(mode),

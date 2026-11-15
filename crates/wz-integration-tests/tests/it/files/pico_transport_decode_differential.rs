@@ -244,6 +244,13 @@ enum WzVerdict {
     /// PARTICIPANT must refuse it — the chain carries a mandatory extension
     /// this message's space does not define.
     Inadmissible,
+    /// wz decoded it as a specific transport message and a participant must
+    /// refuse it because an extension of its chain has the reserved encoding
+    /// `0b11`. zenoh 1.10.2 refuses such a message and pico reads the entry as a
+    /// body-less one and accepts it, so this is kept apart from `Inadmissible`:
+    /// against pico it is a known disagreement between the two upstreams, not
+    /// a boundary wz and pico should share.
+    ReservedEncoding,
     /// wz read a message and could not name its MID.
     Unnamed,
     /// wz refused the bytes.
@@ -257,6 +264,7 @@ fn wz_verdict(bytes: &[u8]) -> WzVerdict {
         Ok(InboundFrame::Unknown { .. }) => WzVerdict::Unnamed,
         Ok(frame) => match frame.ext_admission() {
             ExtAdmission::UnknownMandatory { .. } => WzVerdict::Inadmissible,
+            ExtAdmission::ReservedEncoding { .. } => WzVerdict::ReservedEncoding,
             // `Unjudged` cannot occur on a named frame — every variant
             // `parse_inbound` produces other than `Unknown` has an extension
             // space — and treating it as admissible here would be the exact
@@ -552,6 +560,7 @@ fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
 
     let mut named = 0usize;
     let mut inadmissible = 0usize;
+    let mut reserved_encoding = 0usize;
     let mut unnamed = 0usize;
     let mut refused = 0usize;
     let mut pico_yes = 0usize;
@@ -559,6 +568,7 @@ fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
         match wz_verdict(bytes) {
             WzVerdict::Named => named += 1,
             WzVerdict::Inadmissible => inadmissible += 1,
+            WzVerdict::ReservedEncoding => reserved_encoding += 1,
             WzVerdict::Unnamed => unnamed += 1,
             WzVerdict::Refused => refused += 1,
         }
@@ -585,7 +595,8 @@ fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
         cases.len()
     );
     println!(
-        "corpus {}: wz named={named} inadmissible={inadmissible} unnamed={unnamed} \
+        "corpus {}: wz named={named} inadmissible={inadmissible} reserved_encoding={reserved_encoding} \
+         unnamed={unnamed} \
          refused={refused}; pico accepted={pico_yes}",
         cases.len()
     );
@@ -784,7 +795,9 @@ fn the_two_agree_on_the_extensions_the_spec_names() {
         let eid = bytes[1 + minimal_body(mid).expect("a generated MID").len()];
         match (mine, theirs) {
             (WzVerdict::Named, true) => both_accept += 1,
-            (WzVerdict::Inadmissible | WzVerdict::Refused, false) => both_refuse += 1,
+            (WzVerdict::Inadmissible | WzVerdict::ReservedEncoding | WzVerdict::Refused, false) => {
+                both_refuse += 1
+            }
             _ if named_divergence(mid, eid).is_some() => explained.push((mid, eid)),
             _ => disagreements.push(format!(
                 "MID {mid:#04X} ext {eid:#04X}: wz={mine:?} pico={}",
@@ -975,6 +988,7 @@ fn wz_scouting_verdict(bytes: &[u8]) -> WzVerdict {
         Ok(ScoutingFrame::Unknown { .. }) => WzVerdict::Unnamed,
         Ok(frame) => match frame.ext_admission() {
             ExtAdmission::UnknownMandatory { .. } => WzVerdict::Inadmissible,
+            ExtAdmission::ReservedEncoding { .. } => WzVerdict::ReservedEncoding,
             ExtAdmission::Admissible | ExtAdmission::Unjudged => WzVerdict::Named,
         },
         Err(_) => WzVerdict::Refused,
@@ -1008,6 +1022,7 @@ fn wz_and_pico_agree_on_what_is_a_transport_message() {
     let mut divergences: Vec<((u8, usize), String)> = Vec::new();
 
     let mut unnamed_but_accepted = 0usize;
+    let mut reserved_encoding_accepted_by_pico = 0usize;
     for bytes in corpus() {
         let mine = wz_verdict(&bytes);
         let theirs = unsafe { pico_accepts(&pico, &bytes) };
@@ -1032,6 +1047,27 @@ fn wz_and_pico_agree_on_what_is_a_transport_message() {
             // disagreement about the wire. Counted so it can never be zero by
             // accident and never mistaken for agreement.
             (WzVerdict::Unnamed, true) => unnamed_but_accepted += 1,
+            // The two upstreams disagree here and wz follows zenoh 1.10.2: an
+            // extension with the reserved encoding refuses the message
+            // (`commons/zenoh-codec/src/common/extension.rs` @ `let body = match self.header & iext::ENC_MASK {`),
+            // and pico reads it as a body-less entry. A string already pinned
+            // for another reason stays a divergence, so its pin is still
+            // judged both ways; any other is counted as this family and
+            // printed, never mistaken for agreement.
+            (WzVerdict::ReservedEncoding, true) => {
+                if KNOWN_DIVERGENCES.contains(&(bytes[0], bytes.len() - 1)) {
+                    divergences.push((
+                        (bytes[0], bytes.len() - 1),
+                        format!(
+                            "header 0x{:02X}, {} body byte(s): wz={mine:?} pico=accept",
+                            bytes[0],
+                            bytes.len() - 1,
+                        ),
+                    ));
+                } else {
+                    reserved_encoding_accepted_by_pico += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -1073,7 +1109,8 @@ fn wz_and_pico_agree_on_what_is_a_transport_message() {
     );
     println!(
         "{} pinned divergence(s) hold; {unnamed_but_accepted} MID(s) pico names \
-         and this build does not",
+         and this build does not; {reserved_encoding_accepted_by_pico} string(s) \
+         carry a reserved-encoding extension pico reads and zenoh refuses",
         KNOWN_DIVERGENCES.len()
     );
 }

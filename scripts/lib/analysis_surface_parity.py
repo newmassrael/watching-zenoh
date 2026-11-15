@@ -575,6 +575,24 @@ ONLY_CAPI = {
         "no handle to keep it in.",
         (),
     ),
+    # (ABI 58) -- filed in the round that added the symbols.
+    "a selector's verdict over an OPEN handle's rows, samples read by declarations": (
+        "wz_dissect_live_selection_declaring",
+        "DELIBERATE, for the reason the `wz_dissect_live_selection` row gives: "
+        "the command line has no handle and no list to narrow between "
+        "keystrokes. The declaration text is the one the field doors already "
+        "take, so the profile rules that decide a selector's `e2e` terms reach "
+        "the narrowed list as they reach the field document.",
+        (),
+    ),
+    "the same verdict after a cursor, remembered per selector and declaration text": (
+        "wz_dissect_live_selection_since_declaring",
+        "DELIBERATE, for the reason the `wz_dissect_live_selection_since` row "
+        "gives: a cursor kept between calls needs a handle to keep it in. The "
+        "handle keeps one memory per selector and declaration text, so a judge "
+        "under one profile never revises a word another profile gave.",
+        (),
+    ),
     # (ABI 45) -- filed in the round that added the symbol.
     "the capture packets that carried the rows a selector picks": (
         "wz_dissect_live_selected_packets",

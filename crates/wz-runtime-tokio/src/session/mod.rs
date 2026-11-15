@@ -401,7 +401,7 @@ impl Drop for Draining {
 #[cfg_attr(not(feature = "query-get"), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct QuerySelector<'a> {
-    mapping_id: u64,
+    mapping_id: wz_session_core::wire_id::ExprId,
     suffix: Option<&'a str>,
     loopback_keyexpr: &'a str,
 }
@@ -646,7 +646,7 @@ pub(crate) struct GroupKeyexprs {
 ))]
 #[derive(Default)]
 struct GroupKeyexprState {
-    declared: std::collections::BTreeMap<u64, String>,
+    declared: std::collections::BTreeMap<wz_session_core::wire_id::ExprId, String>,
     owed: Vec<OwedKeyexprs>,
 }
 
@@ -680,12 +680,12 @@ impl GroupKeyexprs {
     }
 
     /// The session declared `keyexpr` to the group as `mapping_id`.
-    fn declared(&self, mapping_id: u64, keyexpr: &str) {
+    fn declared(&self, mapping_id: wz_session_core::wire_id::ExprId, keyexpr: &str) {
         self.state().declared.insert(mapping_id, keyexpr.to_owned());
     }
 
     /// The session retracted declaration `mapping_id`.
-    fn retracted(&self, mapping_id: u64) {
+    fn retracted(&self, mapping_id: wz_session_core::wire_id::ExprId) {
         self.state().declared.remove(&mapping_id);
     }
 
@@ -796,7 +796,7 @@ pub use wz_session_core::interest_build::InterestKinds;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GroupKey<'a> {
     /// The declaration the key starts with, `0` for none.
-    pub mapping_id: u64,
+    pub mapping_id: wz_session_core::wire_id::ExprId,
     /// What follows the declaration; the whole key when `mapping_id` is 0, `None` when the
     /// declaration covers the whole key.
     pub suffix: Option<&'a str>,
@@ -1200,6 +1200,16 @@ where
     /// forwarders already hold two chains apiece.
     #[cfg(feature = "access-acl")]
     interceptors_ingress: Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+    /// `aggregation/{subscribers,publishers}`: the keys this session declares its subscribers and
+    /// publishers under ([`crate::declaration_aggregation`]). SHARED on a fork: the handles of a
+    /// session are one participant, and one that declared under another aggregation would split
+    /// a declaration the other still stands on.
+    aggregation: Arc<std::sync::RwLock<crate::declaration_aggregation::DeclarationAggregation>>,
+    /// The one subscriber declaration each aggregate stands for on the wire, and how many of this
+    /// session's subscribers stand on it. SHARED on a fork for the reason the matching refcount
+    /// is: a copy would retract a declaration another handle's subscribers still hold.
+    #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+    aggregated_subscribers: Arc<std::sync::Mutex<AggregatedSubscriberTable>>,
     // R2708 (item 785) — the buffered registry used to live HERE, on the
     // handle, and that placement was the defect: the drive loop never holds a
     // `Session`, so the only route from a registration to the loop was a stage
@@ -1362,6 +1372,30 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    /// Declare this session's subscribers and publishers under `aggregation`, as a session of
+    /// upstream opened with `aggregation/subscribers` and `aggregation/publishers` declares them
+    /// ([`crate::declaration_aggregation`]). A declaration already made keeps the key it was made
+    /// under, so a host sets this before it declares.
+    pub fn set_declaration_aggregation(
+        &self,
+        aggregation: crate::declaration_aggregation::DeclarationAggregation,
+    ) {
+        *self
+            .aggregation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = aggregation;
+    }
+
+    /// The aggregation this session declares under ([`Self::set_declaration_aggregation`]).
+    pub fn declaration_aggregation(
+        &self,
+    ) -> crate::declaration_aggregation::DeclarationAggregation {
+        self.aggregation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// How many handles share this session. Test-facing: it is how a leak is
     /// PROVEN rather than argued -- a handle that should not keep a session
     /// alive must not move this number.
@@ -1391,7 +1425,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Clone for WeakS
 #[cfg(feature = "query-queryable")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FinalKey {
-    pub(crate) rid: u64,
+    pub(crate) rid: wz_session_core::wire_id::RequestId,
     pub(crate) local: bool,
 }
 
@@ -1524,8 +1558,54 @@ where
             put_route: self.put_route.clone(),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: self.interceptors_ingress.clone(),
+            aggregation: self.aggregation.clone(),
+            #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+            aggregated_subscribers: self.aggregated_subscribers.clone(),
         }
     }
+}
+
+/// The subscriber declarations a session shares between the subscribers an aggregate holds,
+/// keyed by the aggregate.
+#[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+type AggregatedSubscriberTable = std::collections::HashMap<String, AggregatedSubscriber>;
+
+/// One aggregate's declaration: how many subscribers stand on it, and the retraction its first
+/// subscriber's announce returned.
+#[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+struct AggregatedSubscriber {
+    holders: usize,
+    /// `None` while the first holder is still putting the declaration on the wire.
+    retraction: Option<SubscriberRetraction>,
+}
+
+/// The retraction one subscriber under `aggregate` holds: it leaves the shared declaration, and
+/// the last to leave retracts it. The table's lock is released before the declaration's own
+/// retraction runs, which is called under the observer lock by a subscriber's teardown and must
+/// not be called holding a lock a declare takes before the observer.
+#[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+fn leave_aggregated_subscriber(
+    table: Arc<std::sync::Mutex<AggregatedSubscriberTable>>,
+    aggregate: String,
+) -> SubscriberRetraction {
+    Box::new(move || {
+        let last = {
+            let mut held = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(entry) = held.get_mut(&aggregate) else {
+                return;
+            };
+            if entry.holders > 1 {
+                entry.holders -= 1;
+                return;
+            }
+            held.remove(&aggregate).and_then(|entry| entry.retraction)
+        };
+        if let Some(mut retract) = last {
+            retract();
+        }
+    })
 }
 
 /// R2702 — the per-message [`InterceptorContext`] for a SESSION's own egress,
@@ -1562,11 +1642,12 @@ fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
     if R::with_mutex_mut(chain_slot, |chain| chain.is_empty()) {
         return true;
     }
-    let no_peer = hashbrown::HashMap::new();
+    let no_peer: hashbrown::HashMap<wz_session_core::wire_id::ExprId, String> =
+        hashbrown::HashMap::new();
     let keyexpr = R::with_mutex_mut(&actions.outbound_mappings, |ours| {
         crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
             msg,
-            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, &no_peer),
+            wz_session_core::wireexpr_resolve::MappingSpaces::as_sent(ours, &no_peer),
         )
     });
     let ctx = SessionAclContext { actions, keyexpr };
@@ -2511,7 +2592,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     R::with_mutex_mut(&actions.outbound_mappings, |ours| {
                         crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
                             msg,
-                            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, &peer),
+                            wz_session_core::wireexpr_resolve::MappingSpaces::as_sent(ours, &peer),
                         )
                     })
                 }
@@ -2766,7 +2847,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// else, so gating it on `query-get` would only make the C ABI's own
     /// cancellation plane vanish on a feature subset that still compiles the
     /// token type.
-    pub fn cancel_pending_query(&self, rid: u64) -> bool {
+    pub fn cancel_pending_query(&self, rid: wz_session_core::wire_id::RequestId) -> bool {
         R::with_mutex_mut(&self.observer, |observer| observer.replies.unregister(rid))
     }
 
@@ -2901,7 +2982,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// the last holder drops the query, as upstream's does.
     /// Its one caller is the shared query body, which exists with `transport-unicast`.
     #[cfg(all(feature = "transport-unicast", feature = "query-get"))]
-    fn finalize_local_query(&self, rid: u64) {
+    fn finalize_local_query(&self, rid: wz_session_core::wire_id::RequestId) {
         match self.local_delivery {
             LocalDeliveryDrain::Caller => {
                 self.drain_deferred_fires_settled();
@@ -3289,7 +3370,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 #[cfg(feature = "access-acl-multicast")]
                 link: Arc::new(std::sync::OnceLock::new()),
                 #[cfg(feature = "query-get")]
-                request_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                request_ids: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 #[cfg(feature = "query-get")]
                 membership: Arc::new(std::sync::OnceLock::new()),
                 #[cfg(all(
@@ -3348,6 +3429,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             #[cfg(feature = "access-acl")]
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
+            )),
+            aggregation: Arc::new(std::sync::RwLock::new(
+                crate::declaration_aggregation::DeclarationAggregation::none(),
+            )),
+            #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+            aggregated_subscribers: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
             )),
         })
     }
@@ -3520,11 +3608,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`;
     /// MEASURED off the group's wire: `decl_kexpr(1, demo/mc/q)`). The members map the id to the
     /// key for this session, so what it later names by the id they read as the key. Id 0 is the
-    /// wire's literal and names no declaration, hence `NonZeroU64`.
+    /// wire's literal and names no declaration, hence `NonZeroU16`, an `ExprId` that is not 0.
     #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
     pub fn announce_keyexpr(
         &self,
-        mapping_id: core::num::NonZeroU64,
+        mapping_id: core::num::NonZeroU16,
         keyexpr: &str,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         let declare =
@@ -3541,7 +3629,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
     pub fn retract_keyexpr(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         self.transport.keyexprs.retracted(mapping_id);
@@ -4007,6 +4095,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
             )),
+            aggregation: Arc::new(std::sync::RwLock::new(
+                crate::declaration_aggregation::DeclarationAggregation::none(),
+            )),
+            #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+            aggregated_subscribers: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         });
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The
@@ -4411,7 +4506,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "transport-shm")]
     pub fn publish_shm_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
         payload: &dyn crate::shm_provider::ShmPublishable,
@@ -4450,7 +4545,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "transport-shm")]
     pub fn publish_shm_aliased_auto(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         payload: &dyn crate::shm_provider::ShmPublishable,
         opts: PublishOptions,
@@ -4541,7 +4636,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "transport-shm")]
     pub fn deliver_shm_local_aliased_owned(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         payload: std::sync::Arc<crate::shm_provider::ShmBackedPayload>,
         opts: PublishOptions,
@@ -4947,7 +5042,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// outbound mapping table that would produce them as a pair.
     pub fn publish_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
         payload: &[u8],
@@ -5110,7 +5205,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// [`Self::publish_aliased`] with an explicit loopback literal.
     pub fn publish_aliased_auto(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         payload: &[u8],
         opts: PublishOptions,
@@ -5162,7 +5257,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "codec-push")]
     pub fn publish_aliased_probe(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         payload: &[u8],
         opts: PublishOptions,
@@ -5188,7 +5283,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "codec-push")]
     pub fn publish_aliased_auto_probe(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         payload: &[u8],
         opts: PublishOptions,
@@ -5351,7 +5446,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "codec-push")]
     pub fn publish_aliased_reserved(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         payload: &[u8],
         opts: PublishOptions,
@@ -5380,7 +5475,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "codec-push")]
     pub fn publish_aliased_auto_reserved(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         payload: &[u8],
         opts: PublishOptions,
@@ -5442,7 +5537,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// refusal and not a send.
     pub fn publish_plain_declared(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> Result<(), PublishError> {
@@ -5541,7 +5636,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn deferred_reply_sink(
         &self,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> crate::reply_sink::BoxedReplySink {
         use crate::reply_sink::BoxedReplySink;
         let cell: wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedReplySink> =
@@ -5562,7 +5657,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             });
         };
         let queue = self.fires.clone();
-        let staged_final = move |rid: u64| {
+        let staged_final = move |rid: wz_session_core::wire_id::RequestId| {
             cell.stage_last(&queue, move |sink| {
                 use crate::reply_sink::ReplySink as _;
                 sink.on_final(rid)
@@ -5672,7 +5767,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         keyexpr: &str,
         opts: QueryOptions,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         self.query_via(
             QuerySelector::literal(keyexpr),
@@ -5701,7 +5796,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         mut opts: QueryOptions,
         value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         Self::adopt_shm_value(&mut opts, value);
         self.query_via(
@@ -5728,7 +5823,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         opts: QueryOptions,
         shm_value: Option<ShmValueRef<'_>>,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
@@ -6292,12 +6387,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// (introduced at R311s) is now the active OFF arm here too.
     pub fn query_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
         opts: QueryOptions,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         self.query_via(
             QuerySelector {
@@ -6341,11 +6436,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// `ReplyHandle` in `Ok(...)`.
     pub fn query_aliased_auto(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         opts: QueryOptions,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         self.query_aliased_auto_via(mapping_id, inline_suffix, opts, None, on_reply, on_final)
     }
@@ -6358,12 +6453,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(all(feature = "transport-shm", feature = "query-value"))]
     pub fn query_aliased_auto_shm(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         mut opts: QueryOptions,
         value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         Self::adopt_shm_value(&mut opts, value);
         self.query_aliased_auto_via(
@@ -6380,12 +6475,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// outbound mapping is resolved first, so an unknown id fires neither leg.
     fn query_aliased_auto_via(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         opts: QueryOptions,
         shm_value: Option<ShmValueRef<'_>>,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
@@ -6497,7 +6592,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// (R311t Result-form transition).
     pub fn declare_querier_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         options: QueryOptions,
     ) -> QuerierAliased<R, T> {
@@ -6543,13 +6638,33 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // read a registry nobody had been asked to fill. Refcounted by keyexpr
         // (see the `matching_interests` field doc) because `Publisher` is
         // `Clone`.
+        //
+        // Under `aggregation/publishers` the interest names the aggregate that
+        // includes the key, and every publisher under it shares the one
+        // interest (`zenoh/src/api/session.rs` @ `.aggregated_publishers`).
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.acquire_matching_interest(MatchingPlane::Subscribers, &keyexpr);
+        let interest_key = self.publisher_interest_key(&keyexpr);
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.acquire_matching_interest(MatchingPlane::Subscribers, &interest_key);
         Publisher {
             session: self.clone(),
             keyexpr,
             options,
+            #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+            interest_key,
         }
+    }
+
+    /// The key a publisher on `keyexpr` asks for subscribers on: the first publisher aggregate
+    /// that includes it, else the key itself.
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub(crate) fn publisher_interest_key(&self, keyexpr: &str) -> String {
+        self.aggregation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .publisher_aggregate(keyexpr)
+            .unwrap_or(keyexpr)
+            .to_string()
     }
 
     /// R2577 — take a reference on this keyexpr's matching Interest, emitting
@@ -6693,7 +6808,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// that registers `mapping_id`.
     pub fn declare_publisher_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         options: PublishOptions,
     ) -> PublisherAliased<R, T> {
@@ -6737,7 +6852,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// caller-facing error on every callback fire.
     pub fn declare_subscriber_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         options: SubscribeOptions,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
@@ -6867,7 +6982,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn declare_queryable_on_wire(
         &self,
         literal: String,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         options: QueryableOptions,
         callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
@@ -7477,7 +7592,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// across all error variants.
     pub fn declare_queryable_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         options: QueryableOptions,
         callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
@@ -7538,7 +7653,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn announce_queryable(
         &self,
         id: QueryableId,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         options: &QueryableOptions,
     ) -> Result<Option<QueryableRetraction>, QueryableAliasError>
@@ -7584,12 +7699,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // `declare_queryable` lives on `impl Session<R, T,
                     // Unicast>`, so the seam never returns RequiresUnicast; every
                     // caller hands a suffix for a literal, so neither the
-                    // reserved-zero nor the missing-key arm is reachable; and
-                    // MappingIdTooWideForWire (R311y342) is a
-                    // `send_declare_keyexpr` gate this path never calls.
+                    // reserved-zero nor the missing-key arm is reachable.
                     SendDeclareError::RequiresUnicast
                     | SendDeclareError::ReservedMappingIdZero
-                    | SendDeclareError::MappingIdTooWideForWire(_)
                     | SendDeclareError::MissingKeyexpr => {
                         unreachable!("declare_queryable prepare/seam returned {e:?} unexpectedly")
                     }
@@ -7861,7 +7973,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn declare_subscriber_on_wire(
         &self,
         literal: String,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         options: SubscribeOptions,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
@@ -7878,7 +7990,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         } else {
             suffix
         };
-        let retraction = match self.announce_subscriber(id, mapping_id, wire_suffix, &options) {
+        let retraction = match self.announce_subscriber_aggregated(
+            id,
+            &keyexpr_string,
+            mapping_id,
+            wire_suffix,
+            &options,
+        ) {
             Ok(retraction) => retraction,
             Err(e) => {
                 // pico parity (`_z_register_subscriber`, primitives.c:243): roll
@@ -7904,6 +8022,106 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         })
     }
 
+    /// [`Self::announce_subscriber`] under this session's aggregation: a subscriber on `literal`
+    /// that an aggregate includes is announced as the aggregate, by the first subscriber under it
+    /// and by no later one, and the declaration is retracted with the last
+    /// ([`crate::declaration_aggregation`]). A subscriber no aggregate includes, and one local to
+    /// the session, is announced as before.
+    fn announce_subscriber_aggregated(
+        &self,
+        id: SubscriptionId,
+        literal: &str,
+        mapping_id: wz_session_core::wire_id::ExprId,
+        suffix: Option<&str>,
+        options: &SubscribeOptions,
+    ) -> Result<Option<SubscriberRetraction>, SubscribeAliasError>
+    where
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
+        T: 'static,
+    {
+        #[cfg(feature = "declare-subscriber")]
+        if options.allowed_origin.allows_remote() {
+            let aggregate = self
+                .aggregation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .subscriber_aggregate(literal)
+                .map(String::from);
+            if let Some(aggregate) = aggregate {
+                return self.join_aggregated_subscriber(id, aggregate, options);
+            }
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        let _ = literal;
+        self.announce_subscriber(id, mapping_id, suffix, options)
+    }
+
+    /// Stand subscriber `id` on `aggregate`'s declaration, making it when no subscriber of this
+    /// session stands on it yet. The table's lock is not held across the announce: sending takes
+    /// the observer lock in a build with an egress policy, and a teardown holds the observer when
+    /// it leaves the table.
+    #[cfg(feature = "declare-subscriber")]
+    fn join_aggregated_subscriber(
+        &self,
+        id: SubscriptionId,
+        aggregate: String,
+        options: &SubscribeOptions,
+    ) -> Result<Option<SubscriberRetraction>, SubscribeAliasError>
+    where
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
+        T: 'static,
+    {
+        let first = {
+            let mut held = self
+                .aggregated_subscribers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match held.get_mut(&aggregate) {
+                Some(entry) => {
+                    entry.holders += 1;
+                    false
+                }
+                None => {
+                    held.insert(
+                        aggregate.clone(),
+                        AggregatedSubscriber {
+                            holders: 1,
+                            retraction: None,
+                        },
+                    );
+                    true
+                }
+            }
+        };
+        let leave =
+            leave_aggregated_subscriber(self.aggregated_subscribers.clone(), aggregate.clone());
+        if !first {
+            return Ok(Some(leave));
+        }
+        let announced = self.announce_subscriber(id, 0, Some(aggregate.as_str()), options);
+        let mut held = self
+            .aggregated_subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match announced {
+            Ok(Some(retraction)) => {
+                // This subscriber still holds the entry, so no leave can have removed it.
+                if let Some(entry) = held.get_mut(&aggregate) {
+                    entry.retraction = Some(retraction);
+                }
+                Ok(Some(leave))
+            }
+            // Nothing stands on the wire for the aggregate, so the entry goes and the next
+            // subscriber under it announces again; one that joined meanwhile leaves nothing.
+            other => {
+                held.remove(&aggregate);
+                other
+            }
+        }
+    }
+
     /// R311ou — the wire-announce half of [`Self::declare_subscriber`] (pico
     /// `_z_register_subscriber` lines 235-246): emit `Declare(DeclSubscriber)`
     /// through the transport send seam iff `allowed_origin.allows_remote()`,
@@ -7917,7 +8135,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn announce_subscriber(
         &self,
         id: SubscriptionId,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         options: &SubscribeOptions,
     ) -> Result<Option<SubscriberRetraction>, SubscribeAliasError>
@@ -7975,11 +8193,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // Unicast>`, so the seam takes the unicast arm and never
                     // returns RequiresUnicast; every caller hands a suffix for a
                     // literal, so neither the reserved-zero nor the missing-key
-                    // arm is reachable; and MappingIdTooWideForWire (R311y342) is
-                    // a `send_declare_keyexpr` gate this path never calls.
+                    // arm is reachable.
                     SendDeclareError::RequiresUnicast
                     | SendDeclareError::ReservedMappingIdZero
-                    | SendDeclareError::MappingIdTooWideForWire(_)
                     | SendDeclareError::MissingKeyexpr => {
                         unreachable!("declare_subscriber prepare/seam returned {e:?} unexpectedly")
                     }
@@ -8220,7 +8436,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// side.
     pub fn declare_token_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         options: LivelinessOptions,
     ) -> Result<LivelinessToken<R, T>, LivelinessAliasError> {
@@ -8285,14 +8501,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // above and the prepare reconstruct below.
                         LivelinessAliasError::UnknownMapping(id)
                     }
-                    // R311y342 — MappingIdTooWideForWire joins these: it is a
-                    // `send_declare_keyexpr` gate, and the aliased-token path
-                    // never calls it (it RESOLVES an id the caller already
-                    // declared, so an out-of-range one could not have been
-                    // registered in the first place).
-                    SendDeclareError::ReservedMappingIdZero
-                    | SendDeclareError::MappingIdTooWideForWire(_)
-                    | SendDeclareError::MissingKeyexpr => {
+                    SendDeclareError::ReservedMappingIdZero | SendDeclareError::MissingKeyexpr => {
                         unreachable!(
                             "declare_token_aliased aliased-mode prepare/seam \
                          returned {e:?} unexpectedly"
@@ -8661,7 +8870,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// semantics across all error variants.
     pub fn declare_liveliness_subscriber_aliased(
         &self,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
@@ -9028,7 +9237,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         keyexpr: impl Into<String>,
         options: LivelinessGetOptions,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<u64, LivelinessGetError> {
         #[cfg(feature = "liveliness-get")]
         {

@@ -36,7 +36,6 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
-use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::{DirectoryRefusal, DirectoryZid, Lifetime, LocatorSource};
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -48,7 +47,9 @@ use crate::admin_status::DialStatus;
 use crate::connect_manager::{
     ConnectManager, NodeOpener, NodeRefusal, NodeState, PeerStore, SlotState,
 };
-use crate::slot_dial::{events_of, Bind, SessionFactory, SlotDialer, SlotSession};
+use crate::slot_dial::{
+    end_released_inbound, events_of, report_inbound, Bind, SessionFactory, SlotDialer, SlotSession,
+};
 use crate::slot_host::SessionHost;
 
 /// The declaration ids the node uses on each session; ids are per session.
@@ -198,48 +199,21 @@ where
 
     /// Advance the core to `now_ms`, given the sessions peers opened to the node (`accepted`, a
     /// cheap iterator the shell can run more than once): tell the connect manager which nodes
-    /// have a session of their own here, keep the dialled sessions in step with the control,
-    /// declare the admin space on every established session that has not had it, and report what
-    /// the node holds.
+    /// have a session of their own here, keep the dialled sessions in step with the control, end
+    /// the sessions nodes opened that the manager let go of, declare the admin space on every
+    /// established session that has not had it, and report what the node holds.
     pub fn tick<'s, I>(&mut self, now_ms: u64, accepted: I)
     where
         I: Iterator<Item = &'s SlotSession<C, T::Driver>> + Clone,
         C: 's,
         T::Driver: 's,
     {
-        self.report_inbound(accepted.clone(), now_ms);
+        // A session a peer opened holds a slot of the host, so there are no more than `S`.
+        report_inbound::<_, _, _, _, S>(&mut self.manager, accepted.clone(), now_ms);
         self.manager.tick(now_ms);
+        end_released_inbound(&mut self.manager, accepted.clone());
         self.declare_on_new_sessions(accepted.clone());
         self.report(accepted, now_ms);
-    }
-
-    /// Tell the connect manager which nodes have a session of their own here whose key proved
-    /// their zid (decision D10), so a node waited for under a passive intent holds it. A session
-    /// whose peer only claims a zid is not that peer's, and is left out.
-    fn report_inbound<'s>(
-        &mut self,
-        accepted: impl Iterator<Item = &'s SlotSession<C, T::Driver>>,
-        now_ms: u64,
-    ) where
-        C: 's,
-        T::Driver: 's,
-    {
-        // A session a peer opened holds a slot of the host, so there are no more than `S`.
-        let mut verified: [DirectoryZid; S] = [[0; CREDENTIAL_ZID_BYTES]; S];
-        let mut count = 0;
-        for session in accepted {
-            let actions = session.actions();
-            if !actions.peer_identity_verified() {
-                continue;
-            }
-            if let Some(zid) = actions.peer_zid_array() {
-                if count < S {
-                    verified[count] = zid;
-                    count += 1;
-                }
-            }
-        }
-        self.manager.inbound_sessions(&verified[..count], now_ms);
     }
 
     /// Send the admin declarations on every established session that has not had them.

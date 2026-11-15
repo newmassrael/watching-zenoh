@@ -33,6 +33,7 @@ use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
 
 use super::RouterState;
+use crate::caller_span::CallerSpan;
 
 /// A job that runs `tick` every period on a thread of its own, until `tick` answers `false` or this
 /// is dropped. Dropping tells the thread, which ends at its next wake and is not waited for: the
@@ -47,6 +48,8 @@ impl PeriodicJob {
     pub fn start(period: Duration, tick: Arc<dyn Fn() -> bool + Send + Sync>) -> Option<Self> {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let waiting = Arc::clone(&stop);
+        // Each tick runs in the span current where the job is started.
+        let starter = CallerSpan::current();
         std::thread::Builder::new()
             .name("wz-node-periodic".into())
             .spawn(move || {
@@ -60,7 +63,7 @@ impl PeriodicJob {
                         return;
                     }
                     drop(guard);
-                    if !tick() {
+                    if !starter.in_scope(&*tick) {
                         return;
                     }
                 }
@@ -253,14 +256,14 @@ impl SessionEngine for RouterState {
         }
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: String) -> Option<u64> {
+    fn acquire_keyexpr(&self, _keyexpr: String) -> Option<wz_session_core::wire_id::ExprId> {
         // A node names every key whole: there is no alias to hold.
         None
     }
 
-    fn release_keyexpr(&self, _mapping_id: u64) {}
+    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
 
-    fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
         Vec::new()
     }
 
@@ -343,7 +346,7 @@ impl SessionEngine for RouterState {
         &self,
         _filter: FilterId,
         _keyexpr: &str,
-        _mapping_id: u64,
+        _mapping_id: wz_session_core::wire_id::ExprId,
         _payload: &[u8],
         _params: &PlainPutParams,
     ) -> FilteredPut {

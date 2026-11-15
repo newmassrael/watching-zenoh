@@ -61,11 +61,11 @@
 //!   else it writes, so every row write here sets `sync`. The bytes are the
 //!   same; only the durability is stronger.
 //! - **A row wz cannot represent is refused, not approximated.** wz carries an
-//!   encoding schema as UTF-8 text and a timestamp id as its significant bytes;
-//!   a row whose schema is not UTF-8 is a read error rather than a lossy
-//!   conversion, and a timestamp id that is empty or longer than sixteen bytes is
-//!   refused on write because upstream's id cannot hold it (a zero id is not an
-//!   id at all -- `TimestampId` is non-zero).
+//!   encoding schema as the bytes upstream stores, so any schema reads back as
+//!   it was written; a timestamp id is carried as its significant bytes, and one
+//!   that is empty or longer than sixteen bytes is refused on write because
+//!   upstream's id cannot hold it (a zero id is not an id at all --
+//!   `TimestampId` is non-zero).
 
 use std::path::Path;
 
@@ -278,7 +278,7 @@ pub fn encode(info: &DataInfo) -> Result<Vec<u8>, DataInfoError> {
             let id = EncodingId::try_from(enc.packed_id >> 1).map_err(|_| {
                 DataInfoError::Unrepresentable("encoding id does not fit sixteen bits")
             })?;
-            (id, enc.schema.as_deref().unwrap_or("").as_bytes())
+            (id, enc.schema.as_deref().unwrap_or(&[]))
         }
     };
 
@@ -319,14 +319,7 @@ pub fn decode(bytes: &[u8]) -> Result<DataInfo, DataInfoError> {
     if !row.buf.is_empty() {
         return Err(DataInfoError::Corrupt("trailing bytes after the tuple"));
     }
-    let schema = if schema.is_empty() {
-        None
-    } else {
-        Some(
-            String::from_utf8(schema.to_vec())
-                .map_err(|_| DataInfoError::Corrupt("encoding schema is not UTF-8"))?,
-        )
-    };
+    let schema = (!schema.is_empty()).then(|| schema.to_vec());
     let encoding = match (id, schema) {
         (0, None) => None,
         (id, schema) => Some(EncodingHint {
@@ -361,7 +354,7 @@ mod tests {
     fn json_utf8() -> Option<EncodingHint> {
         Some(EncodingHint {
             packed_id: (5 << 1) | 1,
-            schema: Some("utf-8".to_string()),
+            schema: Some(b"utf-8".to_vec()),
         })
     }
 
@@ -419,7 +412,7 @@ mod tests {
 
     #[test]
     fn a_long_schema_takes_a_multi_byte_length_prefix() {
-        let schema = "s".repeat(200);
+        let schema = b"s".repeat(200);
         let row = info(
             &[0x01],
             Some(EncodingHint {
@@ -460,11 +453,20 @@ mod tests {
         // a zero id
         let zero_id = [&good[..9], &[0u8; 16][..], &good[25..]].concat();
         assert!(decode(&zero_id).is_err());
-        // a schema that is not UTF-8
-        let mut bad_utf8 = good.clone();
-        let n = bad_utf8.len();
-        bad_utf8[n - 1] = 0xff;
-        assert!(decode(&bad_utf8).is_err());
+    }
+
+    /// A schema is the bytes upstream stores: one that is not UTF-8 reads back as written.
+    #[test]
+    fn a_schema_that_is_not_utf8_round_trips() {
+        let row = info(
+            &[0x01],
+            Some(EncodingHint {
+                packed_id: (5 << 1) | 1,
+                schema: Some(vec![0xff, 0xfe, b'x']),
+            }),
+        );
+        let bytes = encode(&row).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), row);
     }
 
     #[test]

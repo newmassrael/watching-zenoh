@@ -39,7 +39,7 @@ normal state once nothing remains.
 
 | atom | file | blob | round |
 |---|---|---|---|
-| api-compat-rust | conformance/differential/tests/zenoh_keyexpr.rs | 69e68e8a35dbb05a0666ca60491e8acc8c3e87f2 | R3498 |
+| api-compat-rust | conformance/differential/tests/zenoh_keyexpr.rs | 12bd4d84784f8c213deb3f9cdffb9142e50197f6 | R4490 |
 | api-compat-rust | conformance/differential/tests/zenoh_protocol_transport.rs | 5c458812c876f76ebedae479e3af62ea378ac928 | R3560 |
 | api-compat-rust | conformance/differential/tests/zenoh_codec_core.rs | 0d884c8efc9ae9dcbdb3e5b60231f7e0fcca08e9 | R3565 |
 | api-compat-rust | conformance/differential/tests/zenoh_codec_messages.rs | 638565e93059b5b9586add4e695a3700c5ed650e | R3569 |

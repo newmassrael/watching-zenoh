@@ -88,7 +88,7 @@ use wz_codecs::wireexpr_local::WireexprLocalOwned;
 pub fn build_interest_liveliness_subscriber(
     interest_id: u64,
     history: bool,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
     // A liveliness subscriber always sets FUTURE (the subscription stays
@@ -133,7 +133,7 @@ pub fn build_interest_liveliness_subscriber(
 #[cfg(feature = "alloc")]
 pub fn build_interest_liveliness_get(
     interest_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
     build_liveliness_token_interest(
@@ -210,7 +210,7 @@ pub fn build_interest_propagated(
     kinds: InterestKinds,
     aggregate: bool,
     current_future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     let mut interest = build_interest_composed(
         interest_id,
@@ -358,7 +358,7 @@ fn build_restricted_interest(
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     build_interest_of_kinds(
         interest_id,
@@ -376,7 +376,7 @@ fn build_interest_of_kinds(
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     let wireexpr = match keyexpr {
         Some((mapping_id, suffix)) => {
@@ -503,7 +503,7 @@ fn build_interest_composed(
     current: bool,
     future: bool,
     aggregate: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     let mut interest = build_restricted_interest(interest_id, kinds, current, future, keyexpr)?;
     if aggregate {
@@ -523,7 +523,7 @@ fn build_liveliness_token_interest(
     interest_id: u64,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     build_restricted_interest(interest_id, InterestKinds::TOKENS, current, future, keyexpr)
 }
@@ -566,7 +566,7 @@ pub fn build_interest_subscribers(
     interest_id: u64,
     current: bool,
     future: bool,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
     build_restricted_interest(
@@ -595,7 +595,7 @@ pub fn build_interest_queryables(
     interest_id: u64,
     current: bool,
     future: bool,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
     build_restricted_interest(
@@ -623,7 +623,7 @@ pub fn build_interest_kinds(
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
     build_interest_kinds_with_aggregate(
@@ -653,7 +653,7 @@ pub fn build_interest_exact(
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     build_interest_of_kinds(interest_id, kinds, current, future, keyexpr)
 }
@@ -671,7 +671,7 @@ pub fn build_interest_kinds_with_aggregate(
     current: bool,
     future: bool,
     aggregate: bool,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
     build_interest_composed(

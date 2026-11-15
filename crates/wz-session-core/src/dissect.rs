@@ -590,12 +590,10 @@ impl<'a> SpanCursor<'a> {
     /// moved the field to [`Self::vle_u16_truncated`] on both sides of the
     /// codegen boundary at once.
     ///
-    /// It therefore has NO call site in this tree today, and that is a
-    /// measured statement rather than an oversight: `Zenoh080Bounded<u16>` is
-    /// a real upstream shape (its `u32` sibling decides `Encoding.id`), so the
-    /// primitive stays for the field that selects it next. A new call site is
+    /// The field that selects it is a key expression's scope, which upstream
+    /// reads as `Zenoh080Bounded::<ExprId>` ([`walk_wireexpr`]). A call site is
     /// not free — `scripts/lib/narrow_vle_read_census.py` reds until someone
-    /// names the upstream codec that decides that field.
+    /// names the upstream codec that decides the field.
     pub fn vle_u16(&mut self, name: &'static str) -> Result<(u16, Field), CodecError> {
         let start = self.offset();
         let v = self.cur.read_vle_u16()?;
@@ -617,10 +615,9 @@ impl<'a> SpanCursor<'a> {
     /// the linkstate `weight` (R311y880).
     ///
     /// The third reader rather than a flag on one of the two above, because
-    /// these fields agree with NEITHER. [`Self::vle_u16`] refuses a wide
-    /// encoding, which is a message stock zenoh reads to the end, and stops
-    /// INSIDE the varint while doing it; [`Self::vle_u64`] renders the wide
-    /// value, which is a number no peer computes. Upstream does the third
+    /// these fields agree with NEITHER. [`Self::vle_u16`] refuses a value past
+    /// 16 bits, in a message stock zenoh reads to the end; [`Self::vle_u64`]
+    /// renders the wide value, which is a number no peer computes. Upstream does the third
     /// thing — reads the zint whole and keeps its low 16 bits
     /// ([`wz_codecs::wire_const::zint_as_u16`]) — so the span covers every wire
     /// byte while the rendered value is what the receiving peer will act on.
@@ -1020,7 +1017,7 @@ fn walk_ext_entry_head(
 /// | `query_body` | [`crate::query_value_ext::encode_query_value_ext_body`] |
 /// | `wire_expr` | [`crate::declare_ext_keyexpr::build_ext_keyexpr`] |
 /// | `timestamp` | the generated `Timestamp` codec, via [`walk_timestamp`] |
-/// | `qos` (Join) | `crate::multicast_join::write_join_qos_ext` |
+/// | `qos` (Join) | `crate::multicast_join::qos_sns` |
 /// | `shm` (Init) | `crate::extshm::encode_shm_init_syn_body` / `..._ack_body` |
 ///
 /// | `auth` (Init / Open) | `crate::auth_dispatch::AuthDispatch::mux`, via [`walk_auth_body`] |
@@ -1038,7 +1035,7 @@ fn walk_ext_entry_head(
 ///
 /// ⚠ R311y894 — that last reason used to cover THREE rows, and for two of them
 /// it was false. `Join`'s ZBuf `qos` has been written by
-/// `crate::multicast_join::write_join_qos_ext` since R311y227 and read back by
+/// `crate::multicast_join::qos_sns` since R311y227 and read back by
 /// `decode_join_qos`; the establishment `shm` has been written by
 /// `crate::extshm` for as long as `session-extshm` has existed. Both met the
 /// rule and were excluded anyway, so the most ordinary multicast question a
@@ -1803,7 +1800,7 @@ fn walk_pubkey_challenge_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, Code
 }
 
 /// `Join`'s mandatory ZBuf `qos` body — the per-priority next-SN table
-/// `crate::multicast_join::write_join_qos_ext` writes: `Priority::NUM`
+/// `crate::multicast_join::qos_sns` writes: `Priority::NUM`
 /// `(reliable, best_effort)` VLE pairs, `Control` (0) first, and nothing else.
 ///
 /// A code span rather than an intra-doc link, and the reason is the one
@@ -1992,7 +1989,12 @@ fn walk_ext_wireexpr_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecErr
         bits("mapping", carrier, ((inner & 0x02) != 0) as u64),
         flag("n", carrier, has_suffix),
     ];
-    let (_, id) = c.vle_u64("id")?;
+    // Upstream reads this scope plain, as an `ExprLen`, and so truncates a
+    // wider one rather than refusing it
+    // (`commons/zenoh-codec/src/network/declare.rs` @
+    // `let scope: ExprLen = self.codec.read(&mut zeader)?;`): the span covers
+    // every wire byte and the value is the one a peer acts on.
+    let (_, id) = c.vle_u16_truncated("id")?;
     out.push(id);
     if has_suffix {
         let n = c.remaining();
@@ -2136,8 +2138,13 @@ pub fn walk_timestamp(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> 
     Ok(alloc::vec![time, zid_len, zid])
 }
 
-/// `Encoding` — a VLE `packed_id` whose bit 0 gates a length-prefixed schema
-/// string.
+/// `Encoding` — a VLE `packed_id` whose bit 0 gates a length-prefixed schema.
+///
+/// The schema is bytes on the wire and upstream reads it without a UTF-8 check
+/// (`commons/zenoh-protocol/src/core/encoding.rs` @ `pub schema: Option<ZSlice>,`):
+/// a UTF-8 schema is the `schema` text leaf, and any other the `schema_bytes`
+/// bytes leaf, so a frame upstream accepts is walked rather than declined and
+/// each path keeps one kind (`dissect_schema`).
 pub fn walk_encoding(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (packed, packed_field) = c.vle_u32("packed_id")?;
     let carrier = packed_field.span;
@@ -2149,7 +2156,17 @@ pub fn walk_encoding(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     if (packed & 0x1) != 0 {
         let (n, len) = c.vle_u64("schema_len")?;
         out.push(len);
-        out.push(c.text("schema", n as usize)?);
+        let n = n as usize;
+        let utf8 = c
+            .peek_rest()
+            .ok()
+            .and_then(|rest| rest.get(..n))
+            .is_some_and(|raw| core::str::from_utf8(raw).is_ok());
+        out.push(if utf8 {
+            c.text("schema", n)?
+        } else {
+            c.bytes("schema_bytes", n)?
+        });
     }
     Ok(out)
 }
@@ -2166,12 +2183,18 @@ pub fn walk_encoding(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
 /// `mapping` node at all. A `DeclareKeyExpr` is the one case — bit 6 of its
 /// header is reserved — and filling the node from the codec's literal arm
 /// would report a decoder's choice as something read off the wire.
+///
+/// The id is the scope, an `ExprId`, which upstream reads bounded
+/// (`commons/zenoh-codec/src/core/wire_expr.rs` @
+/// `let zodec = Zenoh080Bounded::<ExprId>::new();`): a wider one is refused
+/// there, so the walk refuses it too (`VleWidthOverflow`), and the record
+/// halts where upstream stops reading the batch.
 pub fn walk_wireexpr(
     c: &mut SpanCursor<'_>,
     n: u8,
     mapping: Option<u8>,
 ) -> Result<Vec<Field>, CodecError> {
-    let (_, id) = c.vle_u64("id")?;
+    let (_, id) = c.vle_u16("id")?;
     let span = id.span;
     let mut out = alloc::vec![id];
     if let Some(bit) = mapping {
@@ -2309,10 +2332,10 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("z", carrier, (header & 0x80) != 0),
     ];
     if (header & 0x20) != 0 {
-        let (byte, f) = c.u8("consolidation")?;
+        let (mode, f) = c.vle_u64("consolidation")?;
         let span = f.span;
         out.push(f);
-        out.extend(consolidation_name(span, byte));
+        out.extend(consolidation_name(span, mode));
     }
     if (header & 0x40) != 0 {
         let (n, len) = c.vle_u64("parameters_len")?;
@@ -2325,7 +2348,7 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     Ok(out)
 }
 
-/// `Reply` (zenoh MID 0x04) — a consolidation byte plus an inner put / del.
+/// `Reply` (zenoh MID 0x04) — a consolidation z64 plus an inner put / del.
 pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (header, header_field) = c.u8("header")?;
     let carrier = header_field.span;
@@ -2336,10 +2359,10 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("z", carrier, (header & 0x80) != 0),
     ];
     if (header & 0x20) != 0 {
-        let (byte, f) = c.u8("consolidation")?;
+        let (mode, f) = c.vle_u64("consolidation")?;
         let span = f.span;
         out.push(f);
-        out.extend(consolidation_name(span, byte));
+        out.extend(consolidation_name(span, mode));
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
@@ -2350,21 +2373,27 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     Ok(out)
 }
 
-/// The mode a `Query`'s or a `Reply`'s consolidation byte names, as a label
-/// beside the byte: [`crate::query_mode::ConsolidationMode::wire_word`], which
-/// reads the byte on zenoh's numbering.
+/// The mode a `Query`'s or a `Reply`'s consolidation field names, as a label
+/// beside the field: [`crate::query_mode::ConsolidationMode::wire_word`], which
+/// reads the value on zenoh's numbering.
 ///
-/// ABSENT for a byte zenoh's decoder does not number, as `whatami_name` is for
+/// The field is a z64, as upstream reads it
+/// (`commons/zenoh-codec/src/zenoh/query.rs` @
+/// `let v: u64 = self.read(&mut *reader)?;`, which the Reply's decoder calls
+/// too), so a value of 0x80 or more spans its continuation bytes and the field
+/// after it starts where upstream's does.
+///
+/// ABSENT for a value zenoh's decoder does not number, as `whatami_name` is for
 /// a role code, and the raw `consolidation` beside it still says what the
-/// sender wrote. The label aliases the byte and owns none of it, so the tiling
+/// sender wrote. The label aliases the field and owns none of it, so the tiling
 /// is unchanged.
 ///
-/// The byte is read on one numbering, not per sender: nothing in the message
+/// The value is read on one numbering, not per sender: nothing in the message
 /// says which implementation wrote it. A stock zenoh-pico sender writes its API
 /// enum one slot low (`query_mode`'s `wire_byte` states the measurement), and
-/// its byte reads here as the mode a zenoh receiver applies to it.
-fn consolidation_name(span: Span, byte: u8) -> Option<Field> {
-    let consolidation_word = crate::query_mode::ConsolidationMode::wire_word(u64::from(byte))?;
+/// its value reads here as the mode a zenoh receiver applies to it.
+fn consolidation_name(span: Span, mode: u64) -> Option<Field> {
+    let consolidation_word = crate::query_mode::ConsolidationMode::wire_word(mode)?;
     Some(label("consolidation_name", span, consolidation_word))
 }
 
@@ -2446,7 +2475,8 @@ pub fn walk_request(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("m", carrier, m != 0),
         flag("z", carrier, (header & 0x80) != 0),
     ];
-    let (_, rid) = c.vle_u64("rid")?;
+    // A `RequestId`, read bounded upstream: a wider one is refused there and here.
+    let (_, rid) = c.vle_u32("rid")?;
     out.push(rid);
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
@@ -2476,7 +2506,8 @@ pub fn walk_response(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("m", carrier, m != 0),
         flag("z", carrier, (header & 0x80) != 0),
     ];
-    let (_, rid) = c.vle_u64("request_id")?;
+    // A `RequestId`, read bounded upstream: a wider one is refused there and here.
+    let (_, rid) = c.vle_u32("request_id")?;
     out.push(rid);
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
@@ -2500,7 +2531,8 @@ pub fn walk_response_final(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecEr
         bits("mid", carrier, (header & 0x1F) as u64),
         flag("z", carrier, (header & 0x80) != 0),
     ];
-    let (_, rid) = c.vle_u64("request_id")?;
+    // A `RequestId`, read bounded upstream: a wider one is refused there and here.
+    let (_, rid) = c.vle_u32("request_id")?;
     out.push(rid);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
@@ -2633,7 +2665,14 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
             flag("m", carrier, m != 0),
             flag("z", carrier, (header & 0x80) != 0),
         ];
-        let (_, id) = c.vle_u64("id")?;
+        // A `DeclareKeyExpr`'s id is an `ExprId` upstream reads plain, so a
+        // wider one is truncated (`wire_id::declared_expr_id`); the others are
+        // entity ids, read whole.
+        let id = if has_m_bit {
+            c.vle_u64("id")?.1
+        } else {
+            c.vle_u16_truncated("id")?.1
+        };
         out.push(id);
         let mapping = has_m_bit.then_some(m);
         out.push(c.nested("keyexpr", move |c| walk_wireexpr(c, n, mapping))?);
@@ -2649,7 +2688,13 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
             bits("mid", carrier, (header & 0x1F) as u64),
             flag("z", carrier, (header & 0x80) != 0),
         ];
-        let (_, id) = c.vle_u64("id")?;
+        // `with_exts` is clear only for an `UndeclareKeyExpr`, whose id is the
+        // truncated `ExprId` its declaration's is.
+        let id = if with_exts {
+            c.vle_u64("id")?.1
+        } else {
+            c.vle_u16_truncated("id")?.1
+        };
         out.push(id);
         if with_exts && (header & 0x80) != 0 {
             out.push(c.nested("extensions", |c| {
@@ -3626,7 +3671,7 @@ fn head_keyexpr(payload: &[u8], with_request_id: bool) -> Result<HeadKeyexpr, Co
     let mut c = SpanCursor::with_base(payload, 0);
     let (header, _) = c.u8("header")?;
     if with_request_id {
-        c.vle_u64("rid")?;
+        c.vle_u32("rid")?;
     }
     let (n, m) = ((header >> 5) & 0x1, (header >> 6) & 0x1);
     let mut key = HeadKeyexpr {
@@ -3652,11 +3697,41 @@ fn head_keyexpr(payload: &[u8], with_request_id: bool) -> Result<HeadKeyexpr, Co
 /// build cannot read does not invalidate the ones before it. Never returns
 /// `Err`; an empty payload is an empty, complete dissection.
 pub fn dissect_batch(payload: &[u8], base: usize) -> BatchDissection {
+    dissect_records(payload, base, false).0
+}
+
+/// The records of a `Frame`'s payload read as the tail of its unit, and how
+/// many bytes of the payload they take: all of it, or the bytes before the
+/// batch's next transport message. A sender puts a message of the other
+/// reliability into an open batch behind a second `Frame` header; that header
+/// ends this `Frame`, and is no record of it nor a remainder, as
+/// [`crate::network_message::BatchParse::next_message_at`] says for the decoder.
+fn dissect_frame_records(payload: &[u8], base: usize) -> (BatchDissection, usize) {
+    dissect_records(payload, base, true)
+}
+
+/// The walk of [`dissect_batch`] and [`dissect_frame_records`]: the second
+/// answer is how many bytes of `payload` the walk covered, records and halted
+/// remainder, which is less than all of it only when `ends_at_transport` and a
+/// transport message ended the records.
+fn dissect_records(
+    payload: &[u8],
+    base: usize,
+    ends_at_transport: bool,
+) -> (BatchDissection, usize) {
     let mut c = SpanCursor::with_base(payload, base);
     let mut records = Vec::new();
     let mut halt = None;
+    let mut covered = payload.len();
     while c.remaining() > 0 {
         let offset = c.offset();
+        if ends_at_transport
+            && c.peek_u8()
+                .is_ok_and(|b| crate::network_message::is_transport_mid(b & 0x1F))
+        {
+            covered = offset - base;
+            break;
+        }
         match walk_network_record(&mut c) {
             Ok(Some(f)) => records.push(f),
             Ok(None) => {
@@ -3682,11 +3757,14 @@ pub fn dissect_batch(payload: &[u8], base: usize) -> BatchDissection {
         }
         None => 0,
     };
-    BatchDissection {
-        records,
-        halt,
-        unparsed_bytes,
-    }
+    (
+        BatchDissection {
+            records,
+            halt,
+            unparsed_bytes,
+        },
+        covered,
+    )
 }
 
 /// Dissect ONE transport message — the shape [`crate::inbound::parse_inbound`]
@@ -3937,13 +4015,14 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             }
             if mid == wire_const::T_MID_FRAME {
                 let payload_start = c.offset();
-                let rem = c.remaining();
+                // The payload is the tail of the unit up to the batch's next
+                // transport message, which is not this Frame's to dissect.
+                let (batch, rem) = dissect_frame_records(c.peek_rest()?, payload_start);
                 let raw = c.bytes("payload", rem)?;
                 let bytes = match &raw.value {
                     FieldValue::Bytes(b) => b.clone(),
                     _ => Vec::new(),
                 };
-                let batch = dissect_batch(&bytes, payload_start);
                 // A batch that halted keeps its walked records AND the raw
                 // remainder, so no capture byte goes unaccounted for.
                 let mut children = batch.records;
@@ -5004,6 +5083,44 @@ mod tests {
         );
         assert_eq!(f.find("sn").map(|x| x.span.end), Some(3));
         assert!(f.find("nope").is_none());
+    }
+
+    /// A request id and a scope are read at the widths upstream bounds them
+    /// to: the widest of each reads, and one past it is refused, as upstream
+    /// refuses it, rather than shown as a number no peer accepts.
+    #[test]
+    fn a_rid_or_a_scope_past_its_upstream_width_is_refused() {
+        let final_with = |rid: u64| concat(&[alloc::vec![0x1Au8], vle(rid)]);
+        let widest = final_with(u64::from(u32::MAX));
+        let fields = walk_response_final(&mut SpanCursor::new(&widest)).expect("u32::MAX reads");
+        let f = group("ResponseFinal", 0, widest.len(), fields);
+        assert_eq!(uint(&f, "request_id"), u64::from(u32::MAX));
+        assert_eq!(
+            walk_response_final(&mut SpanCursor::new(&final_with(u64::from(u32::MAX) + 1))).err(),
+            Some(CodecError::VleWidthOverflow)
+        );
+
+        let fields = walk_wireexpr(&mut SpanCursor::new(&vle(65_535)), 0, Some(1))
+            .expect("the widest scope reads");
+        let f = group("keyexpr", 0, 3, fields);
+        assert_eq!(uint(&f, "id"), 65_535);
+        assert_eq!(
+            walk_wireexpr(&mut SpanCursor::new(&vle(65_536)), 0, Some(1)).err(),
+            Some(CodecError::VleWidthOverflow)
+        );
+    }
+
+    /// The scope a declaration's key expression extension carries is read
+    /// plain upstream, which truncates: the span holds every wire byte and the
+    /// value is the low 16 bits.
+    #[test]
+    fn an_ext_scope_past_its_width_reads_truncated_as_upstream_reads_it() {
+        // inner header 0x02 (local, no suffix), then the id 0x1_0007.
+        let body = concat(&[alloc::vec![0x02u8], vle(0x1_0007)]);
+        let fields = walk_ext_wireexpr_body(&mut SpanCursor::new(&body)).expect("reads");
+        let f = group("wire_expr", 0, body.len(), fields);
+        assert_eq!(uint(&f, "id"), 7);
+        assert_eq!(f.find("id").map(|id| id.span.end), Some(body.len()));
     }
 
     // ── The differential gate ────────────────────────────────────────
@@ -6175,7 +6292,7 @@ mod tests {
                 assert_eq!(m.timestamp.as_ref().unwrap().zid, &zid);
                 assert_eq!(
                     m.encoding.as_ref().unwrap().schema.map(|s| s.into_inner()),
-                    Some("json")
+                    Some(&b"json"[..])
                 );
                 b.len() - c.remaining()
             },
@@ -6628,23 +6745,30 @@ mod tests {
         assert_eq!(raw(&f, "payload"), b"v".to_vec());
     }
 
-    /// Every consolidation byte a `Query` or a `Reply` can carry reads as the
-    /// word of the mode zenoh numbers it, and a byte zenoh does not number
+    /// Every consolidation value a `Query` or a `Reply` can carry reads as the
+    /// word of the mode zenoh numbers it, and a value zenoh does not number
     /// keeps its raw value and gets no word. Each leg names the word it
     /// expects, so a table shifted by one slot (pico's numbering) reds here.
+    /// The values at and past 0x80 are z64s of two bytes or more, and the
+    /// tiling assertion holds the field to all of them.
     #[test]
     fn a_consolidation_byte_is_named_as_zenoh_numbers_it() {
         for (byte, word) in [
-            (0u8, Some("Auto")),
+            (0u64, Some("Auto")),
             (1, Some("None")),
             (2, Some("Monotonic")),
             (3, Some("Latest")),
             (4, None),
+            (0x7F, None),
+            (0x80, None),
             (0xFF, None),
+            (0x4000, None),
+            (u64::MAX, None),
         ] {
-            let query = alloc::vec![0x03u8 | 0x20, byte];
+            let query = concat(&[alloc::vec![0x03u8 | 0x20], vle(byte)]);
             let reply = concat(&[
-                alloc::vec![0x04u8 | 0x20, byte],
+                alloc::vec![0x04u8 | 0x20],
+                vle(byte),
                 msg_put(None, None, &[], b"v"),
             ]);
             type Walk = fn(&mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError>;
@@ -6656,11 +6780,7 @@ mod tests {
                 let fields = walk(&mut c).expect("the walker rejected the fixture");
                 let f = group(name, 0, c.offset(), fields);
                 assert_tiles(&f, 0, bytes.len());
-                assert_eq!(
-                    uint(&f, "consolidation"),
-                    u64::from(byte),
-                    "{name} {byte:#04x}"
-                );
+                assert_eq!(uint(&f, "consolidation"), byte, "{name} {byte:#04x}");
                 match word {
                     Some(w) => {
                         assert_eq!(label_of(&f, "consolidation_name"), w, "{name} {byte:#04x}")
@@ -6672,6 +6792,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A consolidation value of 0x80 or more is read as the z64 upstream reads
+    /// (`commons/zenoh-codec/src/zenoh/query.rs` @
+    /// `let v: u64 = self.read(&mut *reader)?;`, called for the Reply too):
+    /// the field spans its continuation byte, the Query's parameters and the
+    /// Reply's put start after it, and the generated codec ends where the
+    /// walker does. A one-byte reader takes `0x01` for the parameters' length
+    /// and the put's header, so the parameters and the payload would differ.
+    #[test]
+    fn a_consolidation_value_past_one_byte_is_read_as_upstream_reads_it() {
+        const MODE: u64 = 0x80;
+        let params = b"k=v".to_vec();
+        let query = concat(&[
+            alloc::vec![0x03u8 | 0x20 | 0x40],
+            vle(MODE),
+            vle(params.len() as u64),
+            params.clone(),
+        ]);
+        let f = agree(
+            "Query",
+            &query,
+            |b| {
+                let mut c = SceCursor::new(b);
+                let q = wz_codecs::lent::Query::decode(&mut c).expect("codec rejected");
+                assert_eq!(q.consolidation, Some(MODE), "the codec's Query value");
+                assert_eq!(q.parameters_len, Some(params.len() as u64));
+                b.len() - c.remaining()
+            },
+            walk_query,
+        );
+        assert_eq!(uint(&f, "consolidation"), MODE);
+        let mode = f.find("consolidation").expect("the field is walked");
+        assert_eq!(mode.span.end - mode.span.start, 2, "the z64 of 0x80");
+        assert!(f.find("consolidation_name").is_none());
+        assert_eq!(uint(&f, "parameters_len"), params.len() as u64);
+        assert_eq!(raw(&f, "parameters"), params);
+
+        let reply = concat(&[
+            alloc::vec![0x04u8 | 0x20],
+            vle(MODE),
+            msg_put(None, None, &[], b"v"),
+        ]);
+        let f = agree(
+            "Reply",
+            &reply,
+            |b| {
+                let mut c = SceCursor::new(b);
+                let r = wz_codecs::lent::Reply::decode(&mut c).expect("codec rejected");
+                assert_eq!(r.consolidation, Some(MODE), "the codec's Reply value");
+                b.len() - c.remaining()
+            },
+            walk_reply,
+        );
+        assert_eq!(uint(&f, "consolidation"), MODE);
+        assert!(f.find("consolidation_name").is_none());
+        assert_eq!(raw(&f, "payload"), b"v".to_vec());
+        assert!(
+            crate::query_mode::ConsolidationMode::from_wire_byte(MODE).is_none(),
+            "upstream applies Auto to a value it does not number, which wz \
+             spells as no named mode"
+        );
     }
 
     #[test]
@@ -7090,6 +7272,56 @@ mod tests {
         assert_eq!(uint(&records[1], "request_id"), 3);
     }
 
+    /// A unit of two Frames, the second behind its own header because its
+    /// sender put a message of the other reliability into the open batch: the
+    /// first Frame's dissection ends where that header begins, with its own
+    /// record and no remainder, and the second dissects from there on its own.
+    #[test]
+    fn a_frame_ends_at_the_next_frame_header_of_its_unit() {
+        let record_a = concat(&[alloc::vec![0x1Au8], vle(3)]);
+        let record_b = concat(&[alloc::vec![0x1Au8], vle(4)]);
+        let first = concat(&[alloc::vec![0x05u8 | 0x20], vle(1), record_a.clone()]);
+        let second = concat(&[alloc::vec![0x05u8], vle(2), record_b]);
+        let unit = concat(&[first.clone(), second]);
+
+        let f = dissect_transport_message(&unit, 0).expect("the first Frame dissects");
+        assert_eq!(f.name, "Frame");
+        assert_eq!(
+            f.span,
+            Span {
+                start: 0,
+                end: first.len()
+            }
+        );
+        let payload = f.find("payload").expect("the payload");
+        assert_eq!(
+            payload.span,
+            Span {
+                start: first.len() - record_a.len(),
+                end: first.len()
+            }
+        );
+        let records = match &payload.value {
+            FieldValue::Nested(v) => v.clone(),
+            other => panic!("the frame payload was not descended into: {other:?}"),
+        };
+        assert_eq!(records.len(), 1, "one record and no remainder: {records:?}");
+        assert_eq!(records[0].name, "ResponseFinal");
+        assert_eq!(uint(&records[0], "request_id"), 3);
+
+        let g = dissect_transport_message(&unit[first.len()..], first.len())
+            .expect("the second Frame dissects");
+        assert_eq!(g.name, "Frame");
+        assert_eq!(uint(&g, "sn"), 2);
+        assert_eq!(
+            g.span,
+            Span {
+                start: first.len(),
+                end: unit.len()
+            }
+        );
+    }
+
     #[test]
     fn a_truncated_batch_keeps_what_it_read_and_says_where_it_stopped() {
         let good = concat(&[alloc::vec![0x1Au8], vle(1)]);
@@ -7126,9 +7358,11 @@ mod tests {
         // the code, so adding a codec-* arm to one side alone reds this.
         let mut decoder_known = Vec::new();
         let mut dissector_known = Vec::new();
+        // Both walks read network messages and nothing else: the reassembled
+        // payload's, which a transport MID halts as an unknown record does.
         for mid in 0u8..32 {
             let payload = [mid];
-            let parsed = crate::network_message::parse_frame_payload_best_effort(&payload);
+            let parsed = crate::network_message::parse_reassembled_payload_best_effort(&payload);
             let decodes = !matches!(
                 parsed.halt,
                 Some(crate::network_message::BatchHalt::UnknownMid { .. })
@@ -8198,7 +8432,7 @@ mod tests {
     // The module doc above listed this body among the three left opaque
     // because upstream "declares a layout this tree does not yet encode".
     // For `qos` that reason was FALSE, and the falsity is why the body
-    // stayed unread: `crate::multicast_join::write_join_qos_ext` has written
+    // stayed unread: `crate::multicast_join::qos_sns` has written
     // it since R311y227 and `decode_join_qos` reads it back, so the layout
     // has a producer HERE to be judged against — the very condition the
     // reason said was missing.
@@ -8225,7 +8459,7 @@ mod tests {
     ///
     /// The base body is the CODEC's own encode and the ext body is the
     /// tree's own VLE encoder, laid in the order
-    /// `crate::multicast_join::write_join_qos_ext` writes. `Z` is set on the
+    /// `crate::multicast_join::qos_sns` writes. `Z` is set on the
     /// transport header because the chain only exists when it is, and the
     /// ext header is `0x51` — id `0x1`, MANDATORY, ZBuf — which is the eid
     /// `crate::ext_name` matches on.
@@ -8704,6 +8938,37 @@ mod tests {
              but its author's reading (R311y605)",
         ),
         (
+            crate::ext_name::ExtCarrier::Open,
+            "shm_body",
+            "two layouts under one identity: the OpenSyn body is the challenge \
+             and the handoff counters, the OpenAck body the counters alone \
+             (`crate::extshm`), and a ZBuf body walker is handed the body and \
+             not the A flag that tells them apart",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Init,
+            "region_name",
+            "the region's name as its bytes with no framing of their own \
+             (`crate::extregion`), so the value IS the reading",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Push,
+            "ts_stack",
+            "the interception stack `crate::ts_stack` reads; no dissector \
+             walker is written for it yet, so the row renders as its bytes \
+             until one is",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Request,
+            "ts_stack",
+            "as on `Push`",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Response,
+            "ts_stack",
+            "as on `Push`",
+        ),
+        (
             crate::ext_name::ExtCarrier::Put,
             "attachment",
             "USER bytes: the protocol declares no structure there, so walking \
@@ -8831,7 +9096,7 @@ mod tests {
     ///
     /// R311y894 measured the cost of that gap. Two of the three rows the
     /// paragraph then carried had had producers for HUNDREDS of rounds --
-    /// `multicast_join::write_join_qos_ext` since R311y227 and
+    /// `multicast_join::qos_sns` since R311y227 and
     /// `extshm::encode_shm_init_*_body` for as long as `session-extshm` existed
     /// -- and both sat excluded under a reason that was already false. Nobody
     /// found it by running anything; someone read the code.
@@ -8907,6 +9172,8 @@ mod tests {
             compression: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         };
 
         // BOTH configurations, because the extension is `is_qos`-gated and a
@@ -9712,9 +9979,11 @@ mod tests {
         ),
         (
             crate::ext_name::ExtCarrier::Open,
-            "shm",
-            "the SHM challenge value the peer must echo — a nonce, and the \
-             `Init` half of the same negotiation is a ZBuf that IS walked",
+            "remote_bound",
+            "the side of a region boundary the sender puts the receiver on, \
+             a `Bound` sent as its discriminant (`crate::extbound`). Rendered \
+             as that number: no walker names the two values yet, as `target`'s \
+             does",
         ),
         (
             crate::ext_name::ExtCarrier::Request,
@@ -11112,15 +11381,10 @@ mod tests {
             cite: "zenoh::ext::SourceInfoType<ID> at put.rs:68, del.rs:57, \
                    query.rs:98 and err.rs:63",
         },
-        UpstreamTypeGroups {
-            ext: "responder_id",
-            groups: &[&[
-                crate::ext_name::ExtCarrier::Response,
-                crate::ext_name::ExtCarrier::ResponseFinal,
-            ]],
-            cite: "network::ext::EntityGlobalIdType<ID> at response.rs:70, \
-                   whose `ext` module both carriers share",
-        },
+        // `responder_id` is walked by `Response` alone: `ResponseFinal`'s struct
+        // carries `ext_qos` and `ext_tstamp` only
+        // (`commons/zenoh-protocol/src/network/response.rs` @ `pub ext_tstamp: Option<ext::TimestampType>,`),
+        // so it is no longer a name more than one carrier walks.
         UpstreamTypeGroups {
             ext: "auth",
             groups: &[&[

@@ -661,11 +661,14 @@ _runci_lane_span() {
     ' "$(_runci_self)"
 }
 
+# A ledger leg (`_runci_leg`, below) is in the population too: a lane that
+# fails in its preflight, before its ledger opens, reached none of them.
 _runci_lane_leg_lines() {
     awk -v lo="$1" -v hi="$2" '
         NR > lo && NR < hi && $0 !~ /^[[:space:]]*#/ &&
         ($0 ~ /\|\|[[:space:]]*return[[:space:]]+1/ ||
-         $0 ~ /\|\|[[:space:]]*(rc|fail)=1/) { print NR }
+         $0 ~ /\|\|[[:space:]]*(rc|fail)=1/ ||
+         $0 ~ /^[[:space:]]*_runci_leg[[:space:]]/) { print NR }
     ' "$(_runci_self)"
 }
 
@@ -696,6 +699,346 @@ _runci_unreached_report() {
     reached="$(_runci_lane_leg_lines "$lo" "$hi" | awk -v s="$stopped" '$1 <= s' | wc -l)"
     echo "  unreached: reached $reached of $total guarded leg(s) in \`$fn\`;" \
          "$((total - reached)) did not run. That is what this red is covering" >&2
+}
+
+# ─── the leg ledger (open-debt item 938) ─────────────────────────────────────
+#
+# The count above says how much a red covers; it does not uncover it. Hosted
+# Layer C1bo stopped at its C consumer's compile (run 42505060630) and only the
+# run after the repair showed `capi_bound_names.py`, three legs further on,
+# refusing two doors; Layer C0 has stopped at a leg of its own while the gate at
+# position 91 went unread for thirty rounds (`depth_axis_census.py`). Each such
+# red costs one hosted run per hidden leg, because the lane cannot say what it
+# did not reach. Most later legs do lean on an earlier one (a build, a derived
+# list), so running everything regardless is wrong too: a leg whose input failed
+# would report a second, misleading red.
+#
+# So a lane DECLARES its legs and what each leans on, and the ledger runs them
+# in the order written:
+#
+#   _runci_legs_open <lane> || return 1
+#   _runci_leg <leg> [--after <leg>[,<leg>...]] -- <command> [<arg>...]
+#   _runci_legs_close
+#
+#   * A leg whose dependency failed, or was itself skipped, does not run; it is
+#     recorded as `skipped: depends on <dep>` and named in the verdict.
+#   * Every other leg runs whatever its siblings did. A leg never stops the lane.
+#   * `_runci_legs_close` prints every failed and every skipped leg and returns 1
+#     if there is either; the lane returns what it returns.
+#   * A malformed leg (a name outside [a-z0-9][a-z0-9._-]*, a name declared
+#     twice, a dependency that is not an EARLIER leg, no `--`, no command) is a
+#     failed leg: a declaration error must not read as a pass.
+#   * The command is run as words, so an environment prefix is spelled `env K=V
+#     cmd`, and a compound leg is a function. A redirection written after the
+#     command applies to the whole call; the ledger's own lines go to stderr so a
+#     `>/dev/null` leg still names its failure.
+#
+# `run_layer` reads the ledger after the lane returns: a lane that returned with
+# its ledger open, closed it with failures and still returned 0, or ran a leg
+# outside a ledger, FAILS. `runci_leg_ledger_gate.py` (Layer C0) holds the same
+# rules on the text and keeps the census of lanes that still stop at a first
+# failure among independent gates. The ledger's own variables are `_rl_`-prefixed
+# because a leg's command runs inside `_runci_leg` and sees its locals: a lane
+# variable a leg assigns for a later leg must not be shadowed by one of them.
+_RUNCI_LEGS_LANE=""
+_RUNCI_LEGS_DECLARED=()
+_RUNCI_LEGS_UNMET=()
+_RUNCI_LEGS_FAILED=()
+_RUNCI_LEGS_SKIPPED=()
+_RUNCI_LEGS_PASSED=0
+_RUNCI_LEGS_STRAY=()
+_RUNCI_LEGS_VERDICT=""
+_RUNCI_LEGS_CLOSED=""
+
+_runci_legs_member() {
+    local _rl_needle="$1" _rl_x
+    shift
+    for _rl_x in "$@"; do
+        [[ "$_rl_x" == "$_rl_needle" ]] && return 0
+    done
+    return 1
+}
+
+_runci_legs_open() {
+    if [[ -n "$_RUNCI_LEGS_LANE" ]]; then
+        echo "  ${1:-?} FAIL: the leg ledger of ${_RUNCI_LEGS_LANE} is still open;" \
+             "one ledger is open at a time" >&2
+        _RUNCI_LEGS_STRAY+=("${1:-?}: opened inside the ledger of ${_RUNCI_LEGS_LANE}")
+        return 1
+    fi
+    if [[ -z "${1:-}" ]]; then
+        echo "  FAIL: _runci_legs_open names no lane" >&2
+        _RUNCI_LEGS_STRAY+=("a ledger opened with no lane name")
+        return 1
+    fi
+    _RUNCI_LEGS_LANE="$1"
+    _RUNCI_LEGS_DECLARED=()
+    _RUNCI_LEGS_UNMET=()
+    _RUNCI_LEGS_FAILED=()
+    _RUNCI_LEGS_SKIPPED=()
+    _RUNCI_LEGS_PASSED=0
+    _RUNCI_LEGS_VERDICT=""
+    _RUNCI_LEGS_CLOSED=""
+    return 0
+}
+
+_runci_leg() {
+    local _rl_leg="${1:-}" _rl_after="" _rl_why="" _rl_dep _rl_rc
+    local -a _rl_deps=()
+    (( $# > 0 )) && shift
+    if [[ "${1:-}" == "--after" ]]; then
+        _rl_after="${2:-}"
+        if (( $# >= 2 )); then shift 2; else shift; fi
+        [[ -n "$_rl_after" ]] || _rl_why="\`--after\` names no leg"
+    fi
+    if [[ -z "$_RUNCI_LEGS_LANE" ]]; then
+        echo "  FAIL: leg '${_rl_leg}' ran outside a leg ledger (no _runci_legs_open" \
+             "before it), so nothing would have recorded its verdict" >&2
+        _RUNCI_LEGS_STRAY+=("${_rl_leg}: outside a ledger")
+        return 1
+    fi
+    local _rl_lane="$_RUNCI_LEGS_LANE"
+    if [[ -n "$_rl_after" ]]; then
+        IFS=',' read -r -a _rl_deps <<< "$_rl_after"
+    fi
+    if [[ -n "$_rl_why" ]]; then
+        :
+    elif [[ ! "$_rl_leg" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+        _rl_why="the name '${_rl_leg}' is not [a-z0-9][a-z0-9._-]*"
+    elif _runci_legs_member "$_rl_leg" ${_RUNCI_LEGS_DECLARED[@]+"${_RUNCI_LEGS_DECLARED[@]}"}; then
+        _rl_why="the name is declared twice"
+    elif [[ "${1:-}" != "--" ]]; then
+        _rl_why="there is no \`--\` before its command"
+    elif (( $# < 2 )); then
+        _rl_why="it names no command"
+    else
+        for _rl_dep in ${_rl_deps[@]+"${_rl_deps[@]}"}; do
+            if ! _runci_legs_member "$_rl_dep" ${_RUNCI_LEGS_DECLARED[@]+"${_RUNCI_LEGS_DECLARED[@]}"}; then
+                _rl_why="it depends on '${_rl_dep}', which is not a leg declared before it"
+                break
+            fi
+        done
+    fi
+    _RUNCI_LEGS_DECLARED+=("$_rl_leg")
+    if [[ -n "$_rl_why" ]]; then
+        echo "  ${_rl_lane} FAIL: leg '${_rl_leg}' is malformed: ${_rl_why}" >&2
+        _RUNCI_LEGS_FAILED+=("$_rl_leg")
+        _RUNCI_LEGS_UNMET+=("$_rl_leg")
+        return 0
+    fi
+    for _rl_dep in ${_rl_deps[@]+"${_rl_deps[@]}"}; do
+        if _runci_legs_member "$_rl_dep" ${_RUNCI_LEGS_UNMET[@]+"${_RUNCI_LEGS_UNMET[@]}"}; then
+            echo "  ${_rl_lane} leg ${_rl_leg} skipped: depends on ${_rl_dep}" >&2
+            _RUNCI_LEGS_SKIPPED+=("${_rl_leg} (depends on ${_rl_dep})")
+            _RUNCI_LEGS_UNMET+=("$_rl_leg")
+            return 0
+        fi
+    done
+    shift
+    "$@"
+    _rl_rc=$?
+    if (( _rl_rc == 0 )); then
+        _RUNCI_LEGS_PASSED=$((_RUNCI_LEGS_PASSED + 1))
+    else
+        echo "  ${_rl_lane} FAIL: leg ${_rl_leg} exited ${_rl_rc}" >&2
+        _RUNCI_LEGS_FAILED+=("$_rl_leg")
+        _RUNCI_LEGS_UNMET+=("$_rl_leg")
+    fi
+    return 0
+}
+
+_runci_legs_close() {
+    local _rl_lane="$_RUNCI_LEGS_LANE"
+    if [[ -z "$_rl_lane" ]]; then
+        echo "  FAIL: _runci_legs_close with no leg ledger open" >&2
+        _RUNCI_LEGS_STRAY+=("a ledger closed that was never opened")
+        return 1
+    fi
+    _RUNCI_LEGS_LANE=""
+    _RUNCI_LEGS_CLOSED="$_rl_lane"
+    local _rl_failed=${#_RUNCI_LEGS_FAILED[@]} _rl_skipped=${#_RUNCI_LEGS_SKIPPED[@]}
+    local _rl_total=$((_RUNCI_LEGS_PASSED + _rl_failed + _rl_skipped))
+    if (( _rl_total == 0 )); then
+        # A ledger with no leg ran nothing; the decline reading must not see an
+        # OK line for it.
+        echo "  ${_rl_lane} FAIL: its leg ledger closed with no leg in it" >&2
+        _RUNCI_LEGS_VERDICT="no leg declared"
+        return 1
+    fi
+    if (( _rl_failed == 0 && _rl_skipped == 0 )); then
+        _runci_lane_did "$_rl_lane" "$_RUNCI_LEGS_PASSED" \
+            "ledger leg(s), each run whatever its siblings did"
+        return 0
+    fi
+    echo "  ${_rl_lane} FAIL: ${_rl_failed} of ${_rl_total} leg(s) failed:" \
+         "${_RUNCI_LEGS_FAILED[*]-}" >&2
+    if (( _rl_skipped > 0 )); then
+        local _rl_s _rl_list=""
+        for _rl_s in "${_RUNCI_LEGS_SKIPPED[@]}"; do
+            _rl_list+="${_rl_list:+, }${_rl_s}"
+        done
+        echo "  ${_rl_lane}: ${_rl_skipped} leg(s) skipped because a leg they" \
+             "depend on did not pass: ${_rl_list}" >&2
+    fi
+    echo "  ${_rl_lane}: ${_RUNCI_LEGS_PASSED} of ${_rl_total} leg(s) passed" >&2
+    # No `:` and no `,`: this text ends up in the title of a `::error`
+    # annotation, where both are property syntax.
+    _RUNCI_LEGS_VERDICT="failed legs ${_RUNCI_LEGS_FAILED[*]-}"
+    (( _rl_skipped > 0 )) && _RUNCI_LEGS_VERDICT+="; ${_rl_skipped} skipped"
+    return 1
+}
+
+# Called by `run_layer` before a lane runs: a ledger left open by a previous lane
+# has already been reported against that lane.
+_runci_legs_reset() {
+    _RUNCI_LEGS_LANE=""
+    _RUNCI_LEGS_STRAY=()
+    _RUNCI_LEGS_VERDICT=""
+    _RUNCI_LEGS_CLOSED=""
+}
+
+# Called by `run_layer` after a lane returns with its rc. Returns 1 when the
+# ledger says the lane's verdict cannot stand, having said why on stderr.
+_runci_legs_settle() {
+    local _rl_name="$1" _rl_rc="$2" _rl_bad=0
+    if [[ -n "$_RUNCI_LEGS_LANE" ]]; then
+        echo "[$(_runci_ts)] ERROR Layer ${_rl_name} returned with the leg ledger of" \
+             "${_RUNCI_LEGS_LANE} still open: the path it took has no" \
+             "_runci_legs_close, so its legs' verdicts were never read" >&2
+        _RUNCI_LEGS_LANE=""
+        _rl_bad=1
+    fi
+    if (( ${#_RUNCI_LEGS_STRAY[@]} > 0 )); then
+        echo "[$(_runci_ts)] ERROR Layer ${_rl_name} misused the leg ledger:" \
+             "${_RUNCI_LEGS_STRAY[*]}" >&2
+        _rl_bad=1
+    fi
+    if [[ -n "$_RUNCI_LEGS_VERDICT" && "$_rl_rc" -eq 0 ]]; then
+        echo "[$(_runci_ts)] ERROR Layer ${_rl_name} returned 0 after its leg ledger" \
+             "closed red (${_RUNCI_LEGS_VERDICT}); a lane returns what" \
+             "_runci_legs_close returns" >&2
+        _rl_bad=1
+    fi
+    return "$_rl_bad"
+}
+
+# The ledger's own behaviour, driven through fixture legs (`true`, `false`) in
+# subshells, so the ledger of the lane that runs this is untouched. A leg of
+# Layer C0; `runci_leg_ledger_gate.py` holds the same rules on the text.
+_runci_legs_selftest() {
+    local _rl_bad=0 _rl_out _rl_n=0
+    _rl_expect() {
+        _rl_n=$((_rl_n + 1))
+        if [[ "$3" != *"$2"* ]]; then
+            echo "  leg ledger selftest FAIL: $1 (wanted '$2' in: $3)" >&2
+            _rl_bad=1
+        fi
+    }
+    _rl_refuse() {
+        _rl_n=$((_rl_n + 1))
+        if [[ "$3" == *"$2"* ]]; then
+            echo "  leg ledger selftest FAIL: $1 (did not want '$2' in: $3)" >&2
+            _rl_bad=1
+        fi
+    }
+
+    # A red leg, its dependents skipped in a chain, a sibling run anyway, and
+    # each malformed declaration failed rather than passed.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg red -- false
+        _runci_leg after-red --after red -- true
+        _runci_leg after-skip --after after-red -- true
+        _runci_leg green -- true
+        _runci_leg Bad -- true
+        _runci_leg dup -- true
+        _runci_leg dup -- true
+        _runci_leg later --after nosuch -- true
+        _runci_leg nosep true
+        _runci_legs_close
+        echo "close=$? verdict=${_RUNCI_LEGS_VERDICT}"
+    } 2>&1 )"
+    _rl_expect "a red leg is named" "FX FAIL: leg red exited 1" "$_rl_out"
+    _rl_expect "its dependent is skipped" "FX leg after-red skipped: depends on red" "$_rl_out"
+    _rl_expect "a skip propagates" "FX leg after-skip skipped: depends on after-red" "$_rl_out"
+    _rl_expect "a bad name fails" "leg 'Bad' is malformed" "$_rl_out"
+    _rl_expect "a repeated name fails" "leg 'dup' is malformed: the name is declared twice" "$_rl_out"
+    _rl_expect "an undeclared dependency fails" "leg 'later' is malformed: it depends on 'nosuch'" "$_rl_out"
+    _rl_expect "a missing separator fails" "leg 'nosep' is malformed: there is no" "$_rl_out"
+    _rl_expect "the close fails once and names every red" \
+        "close=1 verdict=failed legs red Bad dup later nosep; 2 skipped" "$_rl_out"
+    _rl_expect "the siblings ran" "2 of 9 leg(s) passed" "$_rl_out"
+
+    # A clean ledger closes green with its derived evidence line.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg one -- true
+        _runci_leg two --after one -- true
+        _runci_legs_close
+        echo "close=$? verdict=${_RUNCI_LEGS_VERDICT}"
+    } 2>&1 )"
+    _rl_expect "a clean ledger closes green" "close=0 verdict=" "$_rl_out"
+    _rl_expect "with its evidence" "FX: OK (2 ledger leg(s)" "$_rl_out"
+    _rl_refuse "and no red" "FAIL" "$_rl_out"
+
+    # What `run_layer` refuses: an open ledger at return, a red close under a
+    # 0, a leg with no ledger, and a ledger with no leg.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg one -- true
+        _runci_legs_settle FX 0
+        echo "settle=$?"
+    } 2>&1 )"
+    _rl_expect "a lane that returns with its ledger open is refused" "settle=1" "$_rl_out"
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg red -- false
+        _runci_legs_close >/dev/null 2>&1
+        _runci_legs_settle FX 0
+        echo "settle=$?"
+    } 2>&1 )"
+    _rl_expect "a red close under a 0 is refused" "settle=1" "$_rl_out"
+    _rl_out="$( {
+        _runci_legs_reset
+        _runci_leg loose -- true
+        echo "leg=$?"
+        _runci_legs_settle FX 0
+        echo "settle=$?"
+    } 2>&1 )"
+    _rl_expect "a leg with no ledger fails" "leg=1" "$_rl_out"
+    _rl_expect "and the lane with it" "settle=1" "$_rl_out"
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_legs_close
+        echo "close=$?"
+    } 2>&1 )"
+    _rl_expect "a ledger with no leg is red" "close=1" "$_rl_out"
+
+    # A leg's command sees the lane's variables and its assignments reach the
+    # lane: the ledger's own locals shadow nothing a lane would name.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _rl_fixture_lane() {
+            local seen="" out="lane"
+            _rl_fixture_set() { seen="$out"; }
+            _runci_legs_open FX || return 9
+            _runci_leg set -- _rl_fixture_set
+            _runci_legs_close >/dev/null 2>&1
+            echo "seen=${seen}"
+        }
+        _rl_fixture_lane
+    } 2>&1 )"
+    _rl_expect "a leg assigns the lane's variable" "seen=lane" "$_rl_out"
+
+    if (( _rl_bad )); then
+        return 1
+    fi
+    echo "  leg ledger selftest: ${_rl_n} arm(s) behaved as claimed"
 }
 
 # ─── lane evidence (R2275, open-debt item 615) ─────────────────────────────
@@ -812,6 +1155,7 @@ run_layer() {
     echo "[$(_runci_ts)] INFO  ──── Layer $name ────"
     local start=$SECONDS
     _RUNCI_LANE_LINE=0
+    _runci_legs_reset
     if [[ -n "$_lane_lo" ]]; then
         _RUNCI_LO="$_lane_lo"
         _RUNCI_HI="$_lane_hi"
@@ -821,6 +1165,12 @@ run_layer() {
     if "$@"; then
         trap - DEBUG
         set +T
+        if ! _runci_legs_settle "$name" 0; then
+            echo "[$(_runci_ts)] ERROR Layer $name FAIL (its leg ledger refuses the" \
+                 "pass, $((SECONDS - start))s)" >&2
+            FAILED_LAYERS+=("$name (leg ledger)")
+            return 1
+        fi
         echo "[$(_runci_ts)] INFO  Layer $name pass ($((SECONDS - start))s)"
         # R2275 — the reading can REFUSE the pass it just read (a lane that
         # printed nothing at all). It has already named the lane in
@@ -834,8 +1184,15 @@ run_layer() {
         trap - DEBUG
         set +T
         echo "[$(_runci_ts)] ERROR Layer $name FAIL (rc=$rc, $((SECONDS - start))s)" >&2
-        _runci_unreached_report "$_lane_fn" "$_lane_lo" "$_lane_hi" "$_RUNCI_LANE_LINE"
-        FAILED_LAYERS+=("$name")
+        _runci_legs_settle "$name" "$rc" || true
+        if [[ -n "$_RUNCI_LEGS_VERDICT" && "$_RUNCI_LEGS_CLOSED" == "$name" ]]; then
+            # The ledger ran every leg it could and named each red and each
+            # skip above; the trace estimate would count its legs as reached.
+            FAILED_LAYERS+=("$name (${_RUNCI_LEGS_VERDICT})")
+        else
+            _runci_unreached_report "$_lane_fn" "$_lane_lo" "$_lane_hi" "$_RUNCI_LANE_LINE"
+            FAILED_LAYERS+=("$name")
+        fi
         return 1
     fi
 }
@@ -1574,6 +1931,9 @@ layer_b_verify_codegen() {
     #             SCE's resource ends the chain at the end of the frame, which
     #             two queries in one frame do not survive), its
     #             `entry-flag-bind` child and the import that names the entry —
+    #             and, since the consolidation width round, the `consolidation`
+    #             field's `sce:type`/`sce:bit-size` (a VLE u64 here, upstream's
+    #             z64; `uint8` there) —
     #             and every backend reports `golden mismatch`. Layer 3 and the shared-
     #             memory witnesses (a router linked against upstream's own
     #             `zenoh`, `wz_shm_query_reply_zenohd_interop`) are the wire
@@ -1831,6 +2191,11 @@ layer_c0_test_discipline() {
         echo "Layer C0 FAIL: python3 not on PATH (needed by scripts/lib/crossimpl_corpus.py)" >&2
         return 1
     fi
+    # Open-debt item 938 — every leg below is a gate that reads the tree, so no
+    # leg leans on another's output and one red must not hide the rest: the
+    # lane is a leg ledger. The one dependency is a gate's grade on its own
+    # selftest, because a gate that fails its own fixtures grades nothing.
+    _runci_legs_open C0 || return 1
     # R2279 (open-debt item 618) — the obligation is PER TEST, not per file.
     #
     # This read the FILE list and held every `#[test]` in a spawn-class file to
@@ -1857,7 +2222,7 @@ layer_c0_test_discipline() {
     # stopped reading answers "no reason" for every test -- which is silence, not
     # a violation. The fixture holds the shapes the line-oriented reader this
     # replaced would have got wrong, and asserts that reader still misses them.
-    python3 scripts/lib/crossimpl_corpus.py --selftest || return 1
+    _runci_leg crossimpl_corpus.selftest -- python3 scripts/lib/crossimpl_corpus.py --selftest
     # R2585 — the binary-dep, skip-token NAMING and skip-token OWNERSHIP arms,
     # which lived HERE as a bash loop and a Python heredoc until this round. The
     # push hook's gate 2z runs a population DERIVED from `scripts/lib` modules,
@@ -1865,8 +2230,8 @@ layer_c0_test_discipline() {
     # only. R2581 added two `zenohd` legs without the token, and the run for
     # dbc20e6f redded C0 and Layer E on them. The module's header carries each
     # arm's history; its populations must all be non-zero or it exits 2.
-    python3 scripts/lib/test_discipline_gate.py --selftest || return 1
-    python3 scripts/lib/test_discipline_gate.py --check || return 1
+    _runci_leg test_discipline_gate.selftest -- python3 scripts/lib/test_discipline_gate.py --selftest
+    _runci_leg test_discipline_gate --after test_discipline_gate.selftest -- python3 scripts/lib/test_discipline_gate.py --check
     # R2222 (open-debt items 568 + 569) — the MIRROR of the obligation above.
     # That one keeps Layer E from running a fixture another lane owns; this one
     # asks whether ANY lane runs it. Nothing had, four times: R311y528's drop-in
@@ -1882,8 +2247,8 @@ layer_c0_test_discipline() {
     # discipline to the FILE". Reachability is structural instead: the fn names,
     # the `#[ignore]`s, the token list scraped from Layer E's own sweep, and the
     # `--test` names on run-ci.sh's non-comment lines.
-    python3 scripts/lib/lane_reach_gate.py --selftest || return 1
-    python3 scripts/lib/lane_reach_gate.py --check || return 1
+    _runci_leg lane_reach_gate.selftest -- python3 scripts/lib/lane_reach_gate.py --selftest
+    _runci_leg lane_reach_gate --after lane_reach_gate.selftest -- python3 scripts/lib/lane_reach_gate.py --check
     # R311y606 — the PYTHON-FLOOR lint, FIRST because every check below it is
     # a python script and their answers are only as portable as the interpreter
     # that runs them. R311y605 landed `import tomllib` (stdlib from 3.11) in
@@ -1896,7 +2261,7 @@ layer_c0_test_discipline() {
     # DERIVED from `runs-on:` rather than written down, so bumping the image
     # moves it. Enforcement MEASURED on four arms: the y605 import verbatim, a
     # PEP 695 alias, an unrecorded runner image, and a misspelt table entry.
-    python3 scripts/lib/python_floor_lint.py || return 1
+    _runci_leg python_floor_lint -- python3 scripts/lib/python_floor_lint.py
     # R311y606 — the DISCARDED-EVIDENCE lint. Layer E failed twice in six
     # sweeps with nothing to read but `exited ExitStatus(65280)`: the harness
     # captured each foreign child's stdout, printed it in the panic, and sent
@@ -1907,7 +2272,7 @@ layer_c0_test_discipline() {
     # has a reader and is feeding it half the story. Enforcement MEASURED by
     # re-binning one of the 53 — and the gate's FIRST run found a 54th that the
     # hand sweep had missed, because its two calls were not adjacent lines.
-    python3 scripts/lib/discarded_evidence_lint.py || return 1
+    _runci_leg discarded_evidence_lint -- python3 scripts/lib/discarded_evidence_lint.py
     # R311y608 — the DUPLICATE-MODULE lint. R311y607 declared `pub mod
     # scouting;` in a crate root that already declared `pub mod scouting { .. }`
     # (the SCE-generated FSM), behind a DISJOINT feature, so rustc raises E0428
@@ -1917,7 +2282,7 @@ layer_c0_test_discipline() {
     # A build-based gate would have to guess which combination unions the two
     # cfgs; the invariant does not depend on features, so it is checked by
     # reading the declarations. Enforcement MEASURED by restoring the collision.
-    python3 scripts/lib/duplicate_module_lint.py || return 1
+    _runci_leg duplicate_module_lint -- python3 scripts/lib/duplicate_module_lint.py
     # Round 2038, open-debt item 334 — the CENSUS-ARM lint. `DroppedFrameCensus`
     # counts every `InboundFrame` variant, and the two halves are gated in
     # different files: the variant in `inbound.rs`, the arm in
@@ -1934,7 +2299,7 @@ layer_c0_test_discipline() {
     # feature its variant does not need, and severing the module-gate term —
     # which turns four correct bare arms into false positives, so that term is
     # doing the work rather than sitting there.
-    python3 scripts/lib/census_arm_gate_lint.py || return 1
+    _runci_leg census_arm_gate_lint -- python3 scripts/lib/census_arm_gate_lint.py
     # R311y616 (§7.13) — the LITERAL-WIRE-FLAG lint, scoped to wz-capture.
     # R311y615 named `wire_const::FLAG_N_N` for the network `N` bit and shipped
     # it with ONE consumer while four fixtures beside it kept writing `0x20`;
@@ -1943,7 +2308,7 @@ layer_c0_test_discipline() {
     # count OUTSIDE its scope on every run so the gate cannot be mistaken for a
     # workspace-wide claim (that sweep is §3.3, its own round). Enforcement
     # MEASURED by restoring one literal, not by observing that the script runs.
-    python3 scripts/lib/literal_wire_flag_lint.py || return 1
+    _runci_leg literal_wire_flag_lint -- python3 scripts/lib/literal_wire_flag_lint.py
     # Open-debt item 860's class — the EXTENSION-IDENTITY gate. Upstream tells a
     # received extension by its identity (the header without the chain flag);
     # item 860 and the rounds after it found two codecs and 24 host readers
@@ -1951,8 +2316,8 @@ layer_c0_test_discipline() {
     # extension. Every non-test read of the id must be a classified site, and
     # no codec chain may name the id. Enforcement MEASURED on the tree before
     # the reader fixes: all 24 functions red.
-    python3 scripts/lib/ext_identity_gate.py --selftest || return 1
-    python3 scripts/lib/ext_identity_gate.py --check || return 1
+    _runci_leg ext_identity_gate.selftest -- python3 scripts/lib/ext_identity_gate.py --selftest
+    _runci_leg ext_identity_gate --after ext_identity_gate.selftest -- python3 scripts/lib/ext_identity_gate.py --check
     # R3553 -- the zenoh family's NOTICE gate. The family crates reproduce the API and the
     # documentation of upstream's crates (EPL-2.0 OR Apache-2.0), and both licenses ask a derived
     # file to keep upstream's notice, say it was changed, and ship the license text; the first
@@ -1960,8 +2325,8 @@ layer_c0_test_discipline() {
     # must carry the notice, the manifests must declare upstream's expression, and LICENSES/ must
     # hold both texts. The FORM arm runs here; the arm that holds each statement to the pinned
     # checkout is in Layer Z, which provisions one.
-    python3 scripts/lib/family_notice_gate.py --selftest || return 1
-    python3 scripts/lib/family_notice_gate.py --check || return 1
+    _runci_leg family_notice_gate.selftest -- python3 scripts/lib/family_notice_gate.py --selftest
+    _runci_leg family_notice_gate --after family_notice_gate.selftest -- python3 scripts/lib/family_notice_gate.py --check
     # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
     # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
     # that should have caught it attached TWO planes, and the other plane
@@ -1974,7 +2339,7 @@ layer_c0_test_discipline() {
     # who forgot the page. Enforcement MEASURED three ways: a new plane with no
     # page, a solo page that gains a second plane, and a builder set the scan
     # cannot read — each reds, and the revert returns OK.
-    python3 scripts/lib/solo_plane_page_lint.py || return 1
+    _runci_leg solo_plane_page_lint -- python3 scripts/lib/solo_plane_page_lint.py
     # R311y722 (§1.1f) — the MESSAGE-PRODUCER gate. Four census planes walk one
     # enumeration (`Dissection::message_lists`, R311y721), and a `Vec<PassiveFrame>`
     # field is a producer of their rows by construction. A producer the
@@ -1986,15 +2351,15 @@ layer_c0_test_discipline() {
     # and the revert returns OK.
     # Open-debt item 924 — a field that only BORROWS a list is a view and not a
     # producer; the selftest holds that line in both directions first.
-    python3 scripts/lib/message_producer_lint.py --selftest || return 1
-    python3 scripts/lib/message_producer_lint.py || return 1
+    _runci_leg message_producer_lint.selftest -- python3 scripts/lib/message_producer_lint.py --selftest
+    _runci_leg message_producer_lint --after message_producer_lint.selftest -- python3 scripts/lib/message_producer_lint.py
     # R311y740 (carry N37) — the OWN-SPACE WITNESS gate, static half. A plane
     # that takes the `MappingSpaces` pair but carries no witness pair is
     # caught here in milliseconds; Layer C1own additionally proves the
     # witnesses actually RUN (a suite behind the wrong feature union selects
     # zero tests and reports green). Both halves read the plane population out
     # of the code, so a tenth consumer arrives already counted.
-    python3 scripts/lib/own_space_witness_lint.py >/dev/null || return 1
+    _runci_leg own_space_witness_lint -- python3 scripts/lib/own_space_witness_lint.py >/dev/null
     # R311y741 (carry N43) — the PROVENANCE gate: a gate script must name the
     # open-debt item it closes. R311y739 re-counted the ~196 base items and
     # could re-establish the open/closed state of FOUR, because nothing in the
@@ -2006,7 +2371,7 @@ layer_c0_test_discipline() {
     # only shrink. MEASURED three ways: an undeclared new gate reds by name, a
     # baselined gate that gains its citation reds asking for the baseline to
     # shrink, and a stale baseline entry reds — each revert returns OK.
-    python3 scripts/lib/gate_provenance_lint.py >/dev/null || return 1
+    _runci_leg gate_provenance_lint -- python3 scripts/lib/gate_provenance_lint.py >/dev/null
     # R2642 (no register item) — the RUNTIME-MUTABLE config surface. wz carries
     # two config surfaces, honoured-at-startup and mutable-at-runtime, and the
     # second had no declaration: its size lived as an English ordinal inside
@@ -2015,8 +2380,8 @@ layer_c0_test_discipline() {
     # landed. The gate DERIVES the slice set from the `set_*`/`reconfigure_*`
     # methods, pins it as a SET, and checks each row's declared feature against
     # the field's real `#[cfg]`. Its selftest drives both damage directions.
-    python3 scripts/lib/runtime_mutable_surface_gate.py --selftest >/dev/null || return 1
-    python3 scripts/lib/runtime_mutable_surface_gate.py --check || return 1
+    _runci_leg runtime_mutable_surface_gate.selftest -- python3 scripts/lib/runtime_mutable_surface_gate.py --selftest >/dev/null
+    _runci_leg runtime_mutable_surface_gate --after runtime_mutable_surface_gate.selftest -- python3 scripts/lib/runtime_mutable_surface_gate.py --check
     # R2338 (no register item) — the ROOT-RELATIVE EXCLUSION lint. Hosted run
     # 33839814655 failed with `upstream-reads: FAIL -- ... yielded 0 Rust
     # file(s), under the floor of 200` about a checkout that was COMPLETE:
@@ -2038,8 +2403,8 @@ layer_c0_test_discipline() {
     # selftest drives the classifier over synthetic sources including the
     # laundering case (a sibling function's relative binding must not vouch
     # for a bare name) that the first draft of this lint got wrong.
-    python3 scripts/lib/root_relative_exclusion_lint.py --selftest || return 1
-    python3 scripts/lib/root_relative_exclusion_lint.py || return 1
+    _runci_leg root_relative_exclusion_lint.selftest -- python3 scripts/lib/root_relative_exclusion_lint.py --selftest
+    _runci_leg root_relative_exclusion_lint --after root_relative_exclusion_lint.selftest -- python3 scripts/lib/root_relative_exclusion_lint.py
     # A PRODUCT PATH IS NAMED THROUGH THE ARTIFACT ROOT (scripts/lib/artifact-root.sh).
     # A consumer mounts the checkout read-only and points WZ_ARTIFACT_ROOT
     # outside it; one script or test that still spells `$ROOT/target/...` writes
@@ -2047,9 +2412,9 @@ layer_c0_test_discipline() {
     # the root is unset, which is how every other lane runs. Layer Ero measures
     # the rule on one lane; this reads every tracked script, gate and crate for the
     # spellings that bypass it.
-    python3 scripts/lib/artifact_root.py --selftest || return 1
-    python3 scripts/lib/artifact_root_lint.py --selftest >/dev/null || return 1
-    python3 scripts/lib/artifact_root_lint.py || return 1
+    _runci_leg artifact_root.selftest -- python3 scripts/lib/artifact_root.py --selftest
+    _runci_leg artifact_root_lint.selftest -- python3 scripts/lib/artifact_root_lint.py --selftest >/dev/null
+    _runci_leg artifact_root_lint --after artifact_root_lint.selftest -- python3 scripts/lib/artifact_root_lint.py
     # R2343 (no register item) — WHO CAN ATTACH A MULTICAST EGRESS GROUP. This
     # holds a WITHDRAWAL, not a rule: `router-multicast-faces` carried a residual
     # saying its egress core is gated on the broad `transport-multicast` feature
@@ -2071,8 +2436,8 @@ layer_c0_test_discipline() {
     # MEASURED: 1 production attach (atom-gated), 4 test attaches under the broad
     # feature alone, 4 under the atom; the selftest drives sibling isolation and
     # statement-level cfg, both of which the drafts got wrong.
-    python3 scripts/lib/mcast_egress_callers_gate.py --selftest || return 1
-    python3 scripts/lib/mcast_egress_callers_gate.py || return 1
+    _runci_leg mcast_egress_callers_gate.selftest -- python3 scripts/lib/mcast_egress_callers_gate.py --selftest
+    _runci_leg mcast_egress_callers_gate --after mcast_egress_callers_gate.selftest -- python3 scripts/lib/mcast_egress_callers_gate.py
     # R311y704 (§1.1n) — the DATAGRAM-HALF gate. `Dissection::flows()` is the
     # TCP half and `datagram_flows()` is the other one; a reader that walks the
     # first and forgets the second produces an EMPTY result over a multicast or
@@ -2083,7 +2448,7 @@ layer_c0_test_discipline() {
     # rule lived only in an agent note, and a note is not a gate. Enforcement
     # MEASURED: reverting `samples` to its R311y700 shape reds and names the
     # function; the restore returns OK.
-    python3 scripts/lib/datagram_half_lint.py || return 1
+    _runci_leg datagram_half_lint -- python3 scripts/lib/datagram_half_lint.py
     # R2355 (no register item) — the TCP-TUNING-SEAM gate. zenoh sets
     # TCP_NODELAY inside every link family's SHARED dial+accept constructor
     # (zenoh-link-tcp / -tls / -ws each carry the line); wz applied it at each
@@ -2102,37 +2467,37 @@ layer_c0_test_discipline() {
     # defect's measured population; the fixed tree returns OK. A first draft
     # that accepted the primitive's NAME in a caller's body passed that same
     # tree, which is why the walk resolves the chain instead of the leaf.
-    python3 scripts/lib/tcp_tuning_seam_gate.py --selftest || return 1
-    python3 scripts/lib/tcp_tuning_seam_gate.py || return 1
+    _runci_leg tcp_tuning_seam_gate.selftest -- python3 scripts/lib/tcp_tuning_seam_gate.py --selftest
+    _runci_leg tcp_tuning_seam_gate --after tcp_tuning_seam_gate.selftest -- python3 scripts/lib/tcp_tuning_seam_gate.py
     # No-allocator link proof, the part that needs no toolchain: every deploy/
     # image has a row (gated or pending) in the gate's table, and a gated image
     # declares no allocator and writes no `extern crate alloc`. The linked-ELF
     # and crate-graph halves run in Layer Q (Q.0n), where the images are built.
-    python3 scripts/lib/no_allocator_link_gate.py --selftest || return 1
-    python3 scripts/lib/no_allocator_link_gate.py --population || return 1
+    _runci_leg no_allocator_link_gate.selftest -- python3 scripts/lib/no_allocator_link_gate.py --selftest
+    _runci_leg no_allocator_link_gate.population --after no_allocator_link_gate.selftest -- python3 scripts/lib/no_allocator_link_gate.py --population
     # R3320 -- the stack-frame budget: the part that needs no toolchain, the
     # frame reader driven over each prologue shape and the rule over the Round
     # 3318 frame, and every image's declared stack read once from its source.
     # The ELF half runs in Layer Q (Q.frt, Q.frt2), where the images are built.
-    python3 scripts/lib/stack_frame_gate.py --selftest || return 1
-    python3 scripts/lib/stack_frame_gate.py --population || return 1
+    _runci_leg stack_frame_gate.selftest -- python3 scripts/lib/stack_frame_gate.py --selftest
+    _runci_leg stack_frame_gate.population --after stack_frame_gate.selftest -- python3 scripts/lib/stack_frame_gate.py --population
     # The text of an image told by who owns it: the symbol reader and the rule driven over a small
     # table. The ELF half is the kit lane's build step, where the images are built.
-    python3 scripts/lib/text_owner_gate.py --selftest || return 1
+    _runci_leg text_owner_gate.selftest -- python3 scripts/lib/text_owner_gate.py --selftest
     # R3449 -- the resource budget (D5, build-configuration step 13): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
-    python3 scripts/lib/resource_budget_gate.py --selftest || return 1
-    python3 scripts/lib/resource_budget_gate.py --check || return 1
+    _runci_leg resource_budget_gate.selftest -- python3 scripts/lib/resource_budget_gate.py --selftest
+    _runci_leg resource_budget_gate --after resource_budget_gate.selftest -- python3 scripts/lib/resource_budget_gate.py --check
     # The stack bound of the fixed-memory images with the calls through a register followed: its rules driven
     # on a small model here; the images themselves are held by `kit-lane.sh build`, where the ELF is.
-    python3 scripts/lib/stack_bound_gate.py --selftest || return 1
+    _runci_leg stack_bound_gate.selftest -- python3 scripts/lib/stack_bound_gate.py --selftest
     # The contract of those rules against the source, with no image: a rule names its site by a fragment of
     # the line (or, for the compiler's library, by a position pinned to its commit), and every fragment has
     # to be on a line of the file still. A stale position is no error of an image: the call falls to the
     # rule of the whole file and is claimed with that rule's callees, and the image passes. Two had: the
     # clock source of the engine (claimed as a call of the host) and the latest-slot read (as a reply).
-    python3 scripts/lib/stack_bound_gate.py --contract || return 1
+    _runci_leg stack_bound_gate.contract --after stack_bound_gate.selftest -- python3 scripts/lib/stack_bound_gate.py --contract
     # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
     # exit an obligation a TYPE enforces and closed that one invariant; the
     # register carried "the other multi-exit sites have not been looked at" as
@@ -2153,14 +2518,14 @@ layer_c0_test_discipline() {
     # ABOVE it hold the same invariant. Four crates now, and the allow-list is
     # crate-qualified because widening it put three `lib.rs` in the population.
     # MEASURED: a fresh unaccounted `drain` planted in `wz-analyze` reds.
-    python3 scripts/lib/discard_site_lint.py || return 1
+    _runci_leg discard_site_lint -- python3 scripts/lib/discard_site_lint.py
     # The confidential-vocabulary scan matches a SHAPE as well as a word: a
     # tracker's ticket ids have no finite list, and `grep -w` cannot say "this
     # prefix and any digits". Driven against throwaway repositories both ways --
     # it blocks what it exists to block, and a diff that only DELETES the
     # vocabulary is a scrub that must pass. MEASURED: disabling the pattern
     # compile check, and the empty-pattern check, each reds by name.
-    python3 scripts/lib/nda_scan_selftest.py || return 1
+    _runci_leg nda_scan_selftest -- python3 scripts/lib/nda_scan_selftest.py
     # R311y639 (§4.30) — the PAYLOAD-MEASUREMENT gate. Two rounds in a row a
     # carrier arm of `agg::classify` wrote a byte total with a bare assignment
     # and so had no way to say "unknown": R311y637's query carries its value in
@@ -2173,7 +2538,7 @@ layer_c0_test_discipline() {
     # set is READ from what the door writes, not listed here. Enforcement
     # MEASURED both ways in: restoring the y639 assignment reds, and a
     # `KeyexprCounts` struct literal naming a guarded field reds.
-    python3 scripts/lib/payload_measurement_lint.py || return 1
+    _runci_leg payload_measurement_lint -- python3 scripts/lib/payload_measurement_lint.py
     # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
     # or a family sat unimplemented behind a comment naming its own reason, and
     # the reason had already dissolved -- twice in the round that wrote it. Each
@@ -2181,7 +2546,7 @@ layer_c0_test_discipline() {
     # falsified, which is what makes the class mechanical rather than editorial.
     # Enforcement MEASURED by re-introducing one of the eight verbatim, not by
     # observing that the script runs.
-    python3 scripts/lib/expired_blocker_lint.py || return 1
+    _runci_leg expired_blocker_lint -- python3 scripts/lib/expired_blocker_lint.py
     # R311y779 (no register item) — the BINARY-FRESHNESS count. A fixture that
     # spawns `wz-ap-demo` tests whatever build is on disk, and a stale one reads
     # as "the feature does not work" rather than as stale -- its feature banner
@@ -2208,8 +2573,8 @@ layer_c0_test_discipline() {
     # reader over the same synthetic corpus with the blind fixtures deleted and
     # requires it to report the IDENTICAL pair across the mutation while the
     # fixture reader drops by exactly 2. Both arms were mutation-tested to fail.
-    python3 scripts/lib/binary_freshness_lint.py --selftest || return 1
-    python3 scripts/lib/binary_freshness_lint.py --check || return 1
+    _runci_leg binary_freshness_lint.selftest -- python3 scripts/lib/binary_freshness_lint.py --selftest
+    _runci_leg binary_freshness_lint --after binary_freshness_lint.selftest -- python3 scripts/lib/binary_freshness_lint.py --check
     # R311y750 (carry N40, carry N41) — the SELF-REPORT gate, the expired-blocker
     # lint's sibling one axis over: that one asks whether a stated blocker has
     # DISSOLVED, in three C-ABI crates; this one asks whether a comment declaring
@@ -2223,7 +2588,7 @@ layer_c0_test_discipline() {
     # baselined site that gains a citation reds asking the carry to shrink, a
     # stale baseline entry reds, and an empty population FAILs instead of
     # passing.
-    python3 scripts/lib/self_report_lint.py || return 1
+    _runci_leg self_report_lint -- python3 scripts/lib/self_report_lint.py
     # R311y751 (carry N54) — the STORE-READER LANE gate. Four gates read the
     # atomic store through `mnemosyne-cli`, and most hosted jobs deliberately do
     # not install it (~88s, split out in R311y428). R311y743 grew a store read on
@@ -2239,7 +2604,7 @@ layer_c0_test_discipline() {
     # unarmed reds, and a missing input FAILs. The second of those did not red at
     # first: the step's own COMMENT explains why its `WZ_*_REQUIRE` is set, and
     # the matcher read the explanation as the setting.
-    python3 scripts/lib/store_reader_lane_lint.py >/dev/null || return 1
+    _runci_leg store_reader_lane_lint -- python3 scripts/lib/store_reader_lane_lint.py >/dev/null
     # R311y758 (carry N53) — the ATOM DENOMINATOR gate. A5 prints "201 of 213
     # atoms" and A3 prints "atoms=213"; both NUMERATORS are checked to death and
     # nothing checked the denominator. R311y743 widened `inventory_kinds.is_atom`
@@ -2257,16 +2622,22 @@ layer_c0_test_discipline() {
     # FAILs instead of passing every set comparison vacuously; and an unreadable
     # store FAILs under WZ_C0_REQUIRE while skipping without it. Each revert
     # returns OK.
-    python3 scripts/lib/inventory_denominator_lint.py >/dev/null || return 1
+    _runci_leg inventory_denominator_lint -- python3 scripts/lib/inventory_denominator_lint.py >/dev/null
     # R311y581 — the UNWIRED-LANE gate: a lane in run-ci.sh but not in
     # ci.yml's --layer set runs ONLY in a local full sweep. Seven were found,
     # one of them created by the round that closed the sibling debt. See the
     # script's docstring for why this is a gate and not a fourth comment.
-    python3 scripts/lib/unwired_lane_lint.py || return 1
+    _runci_leg unwired_lane_lint -- python3 scripts/lib/unwired_lane_lint.py
     # R4268 — the planner of bx.toml's `[checks.ci]`, which hands this table to
     # the fleet as one unit per lane (docs/verdicts-in-the-fleet.md).
-    python3 scripts/lib/runci_plan.py --selftest || return 1
-    python3 scripts/lib/runci_plan.py --check || return 1
+    _runci_leg runci_plan.selftest -- python3 scripts/lib/runci_plan.py --selftest
+    _runci_leg runci_plan --after runci_plan.selftest -- python3 scripts/lib/runci_plan.py --check
+    # Open-debt item 938 — the leg ledger's rules held on the text, and the
+    # census of lanes whose independent gates still stop at the first red; and
+    # the ledger's runtime, driven through fixture legs.
+    _runci_leg runci_legs_runtime -- _runci_legs_selftest
+    _runci_leg runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --selftest
+    _runci_leg runci_leg_ledger_gate --after runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --check
     # R311y922 — the GATE TEST-PIN lint, item 232's own round. Several lanes
     # pin a SET of test names that must be PRESENT in a feature build, and
     # that pin goes stale when the test is renamed or moved. It has cost two
@@ -2274,7 +2645,7 @@ layer_c0_test_discipline() {
     # second stayed red for six pushes. This asks the question the per-crate
     # suites structurally cannot: is the subject still HERE. Seconds, and no
     # build -- the lanes that own these pins take minutes.
-    python3 scripts/lib/gate_test_pin_lint.py || return 1
+    _runci_leg gate_test_pin_lint -- python3 scripts/lib/gate_test_pin_lint.py
     # R311y595 — the DISSECT NAME CENSUS. `Field::name`'s doc declares that a
     # field is named after the generated codec's struct field, and nothing
     # compared the two: the prose was the specification and the walkers were
@@ -2298,9 +2669,9 @@ layer_c0_test_discipline() {
     # and that declaration reds when it BECOMES a name. Note the ext_name sweep
     # STRIPS comments where the census above deliberately does not: this one
     # excuses citations, and over-collection is unsafe in that direction.
-    python3 scripts/lib/rust_comments.py || return 1
-    python3 scripts/lib/dissect_name_census.py --selftest || return 1
-    python3 scripts/lib/dissect_name_census.py || return 1
+    _runci_leg rust_comments -- python3 scripts/lib/rust_comments.py
+    _runci_leg dissect_name_census.selftest -- python3 scripts/lib/dissect_name_census.py --selftest
+    _runci_leg dissect_name_census --after dissect_name_census.selftest -- python3 scripts/lib/dissect_name_census.py
     # R2186 (no register item) — A LIST WRITTEN IN THE SOURCE MUST NOT BE
     # CHECKED AGAINST ITS OWN LENGTH.
     #
@@ -2318,8 +2689,8 @@ layer_c0_test_discipline() {
     # the defect left alone. Four of the five were written after the scanner
     # got them wrong, and the shadowing case is why: a file-wide lookup
     # reported seven findings that were one mistake.
-    python3 scripts/lib/self_counted_table_gate.py --selftest || return 1
-    python3 scripts/lib/self_counted_table_gate.py --check || return 1
+    _runci_leg self_counted_table_gate.selftest -- python3 scripts/lib/self_counted_table_gate.py --selftest
+    _runci_leg self_counted_table_gate --after self_counted_table_gate.selftest -- python3 scripts/lib/self_counted_table_gate.py --check
     # R2273 (`debt-carry-N46`) — every `scripts/…` path the git hooks NAME has
     # to exist. That item said a guard hook pointed at `scripts/verify.sh`;
     # measured, the file is indeed absent and NOTHING points at it — the
@@ -2327,8 +2698,8 @@ layer_c0_test_discipline() {
     # measured it since. Closing the row would leave the hole, so the row is
     # closed by this instead. Selftest first, on the rule the gate above
     # follows: six cases, four of them RED and each pinning WHICH red.
-    python3 scripts/lib/hook_script_reference_gate.py --selftest || return 1
-    python3 scripts/lib/hook_script_reference_gate.py --check || return 1
+    _runci_leg hook_script_reference_gate.selftest -- python3 scripts/lib/hook_script_reference_gate.py --selftest
+    _runci_leg hook_script_reference_gate --after hook_script_reference_gate.selftest -- python3 scripts/lib/hook_script_reference_gate.py --check
     # R2274 (debt-carry-N57, N42) — THE DECLINE READING'S OWN VOCABULARY, pinned
     # both ways against this file. `run_layer` now reads each lane's own output
     # on the PASS path and refuses to let `all required layers pass` stand for a
@@ -2350,8 +2721,8 @@ layer_c0_test_discipline() {
     # output deleted, and fails unless that run goes RED naming the lane as
     # having printed nothing. That is the arm that keeps SILENT a finding: item
     # 615 was the residue of it being merely counted.
-    python3 scripts/lib/lane_decline_read.py --selftest || return 1
-    python3 scripts/lib/lane_decline_read.py --audit || return 1
+    _runci_leg lane_decline_read.selftest -- python3 scripts/lib/lane_decline_read.py --selftest
+    _runci_leg lane_decline_read.audit --after lane_decline_read.selftest -- python3 scripts/lib/lane_decline_read.py --audit
     # R2276 (open-debt item 614) — AND SOMETHING ARMS IT. The reading above can
     # name a lane that ran nothing, but `WZ_DECLINED_EXPECT` is what turns that
     # name into a verdict, and until this round NOTHING set it: `git grep
@@ -2366,8 +2737,8 @@ layer_c0_test_discipline() {
     # design, and arming there turns "this machine has no shellcheck" into a
     # refused push. A call site under neither directory is unclassified, which
     # is also red.
-    python3 scripts/lib/decline_arming_gate.py --selftest || return 1
-    python3 scripts/lib/decline_arming_gate.py --check || return 1
+    _runci_leg decline_arming_gate.selftest -- python3 scripts/lib/decline_arming_gate.py --selftest
+    _runci_leg decline_arming_gate --after decline_arming_gate.selftest -- python3 scripts/lib/decline_arming_gate.py --check
     # R2199 (open-debt item 557) — EVERY HANDSHAKE-NEGOTIATED AXIS IS ASSERTED.
     #
     # The consuming surface reported that no test measured `sn_resolution` or
@@ -2386,8 +2757,8 @@ layer_c0_test_discipline() {
     # `init_ack_params` reads all three body fields, so a call to it cleared
     # three axes at once until a SHARED accessor was made to require the field
     # itself in the same assertion.
-    python3 scripts/lib/negotiated_axis_witness_gate.py --selftest || return 1
-    python3 scripts/lib/negotiated_axis_witness_gate.py --check || return 1
+    _runci_leg negotiated_axis_witness_gate.selftest -- python3 scripts/lib/negotiated_axis_witness_gate.py --selftest
+    _runci_leg negotiated_axis_witness_gate --after negotiated_axis_witness_gate.selftest -- python3 scripts/lib/negotiated_axis_witness_gate.py --check
     # R2221 (open-debt item 568) — the same axes, asked a HARDER question: is
     # any of them witnessed by a test that drives a FOREIGN implementation.
     #
@@ -2402,8 +2773,8 @@ layer_c0_test_discipline() {
     # the join plus a two-directional ratchet — below the floor means an axis
     # lost its genuine witness, above it means the floor was not raised in the
     # commit that gained one.
-    python3 scripts/lib/genuine_axis_witness_gate.py --selftest || return 1
-    python3 scripts/lib/genuine_axis_witness_gate.py --check || return 1
+    _runci_leg genuine_axis_witness_gate.selftest -- python3 scripts/lib/genuine_axis_witness_gate.py --selftest
+    _runci_leg genuine_axis_witness_gate --after genuine_axis_witness_gate.selftest -- python3 scripts/lib/genuine_axis_witness_gate.py --check
     # R2190 (open-debt item 530, NARROWED) — a cargo command written down in
     # this tree names features that exist.
     #
@@ -2418,8 +2789,8 @@ layer_c0_test_discipline() {
     # NOT a phrase list, and item 530 measured why rather than arguing it: a
     # gate banning the retired spelling would have redded R2161's own commit,
     # which quoted it three times to describe the rename.
-    python3 scripts/lib/prose_feature_gate.py --selftest || return 1
-    python3 scripts/lib/prose_feature_gate.py --check || return 1
+    _runci_leg prose_feature_gate.selftest -- python3 scripts/lib/prose_feature_gate.py --selftest
+    _runci_leg prose_feature_gate --after prose_feature_gate.selftest -- python3 scripts/lib/prose_feature_gate.py --check
     # R2278 (open-debt item 612) — WHICH build of zenoh-c upstream publishes is
     # a per-release fact, and no sentence in this tree may state it wrong.
     #
@@ -2438,20 +2809,20 @@ layer_c0_test_discipline() {
     # the run-ci log confirms which lane prints `archive-arm:`. A sentence that
     # names a lane is checkable by running that lane, which is why it is worth
     # correcting rather than deleting.)
-    python3 scripts/lib/zenoh_c_archive_arm.py --selftest || return 1
-    python3 scripts/lib/zenoh_c_archive_arm.py --check || return 1
+    _runci_leg zenoh_c_archive_arm.selftest -- python3 scripts/lib/zenoh_c_archive_arm.py --selftest
+    _runci_leg zenoh_c_archive_arm --after zenoh_c_archive_arm.selftest -- python3 scripts/lib/zenoh_c_archive_arm.py --check
     # The oracle installer's `--inputs` listing is a contract a host that
     # fetches its own inputs reads instead of copying the installer's rules.
     # Driven here against a fixture pin and the shipped one, in a sandbox with
     # the network tools stubbed, so it needs no network and no oracle.
-    python3 scripts/lib/install_zenoh_c_inputs_selftest.py || return 1
+    _runci_leg install_zenoh_c_inputs_selftest -- python3 scripts/lib/install_zenoh_c_inputs_selftest.py
     # The consumer bundles' offline build entry (deploy/offline-build.json) is
     # what a hermetic consumer build reads as its input list. --check derives
     # its build scripts, tools and submodules from the crates graph, so a crate
     # that enters a bundle's closure with a build script fails here until its
     # tools are declared; Layer C1ob builds the bundles to prove the entry.
-    python3 scripts/lib/offline_build.py --selftest || return 1
-    python3 scripts/lib/offline_build.py --check || return 1
+    _runci_leg offline_build.selftest -- python3 scripts/lib/offline_build.py --selftest
+    _runci_leg offline_build --after offline_build.selftest -- python3 scripts/lib/offline_build.py --check
     # R2281 (open-debt item 617) — and TWO ORACLES AT ONE ARM measure one thing
     # twice. The sibling above says which arm upstream publishes; this one asks
     # what every oracle prefix in the tree is FOR, by deriving each prefix's arm
@@ -2464,8 +2835,8 @@ layer_c0_test_discipline() {
     # Beside the archive gate, in Layer C0, for the same reason it is: `--check`
     # reads nothing but the tree, so it runs on every push instead of skipping
     # green wherever no oracle happens to be installed.
-    python3 scripts/lib/zenoh_c_oracle_arms.py --selftest || return 1
-    python3 scripts/lib/zenoh_c_oracle_arms.py --check || return 1
+    _runci_leg zenoh_c_oracle_arms.selftest -- python3 scripts/lib/zenoh_c_oracle_arms.py --selftest
+    _runci_leg zenoh_c_oracle_arms --after zenoh_c_oracle_arms.selftest -- python3 scripts/lib/zenoh_c_oracle_arms.py --check
     # R2282 (open-debt item 620) — and a per-arm CEILING no lane runs is a
     # number nobody re-measures. The sibling above asks what each oracle prefix
     # is FOR; this one asks which of `zenoh_c_abi_symbol_census.rs::BASELINES`'s
@@ -2477,8 +2848,8 @@ layer_c0_test_discipline() {
     # escape hatch.
     #
     # In Layer C0 with its two siblings: `--check` reads nothing but the tree.
-    python3 scripts/lib/zenoh_c_census_arm_reach.py --selftest || return 1
-    python3 scripts/lib/zenoh_c_census_arm_reach.py --check || return 1
+    _runci_leg zenoh_c_census_arm_reach.selftest -- python3 scripts/lib/zenoh_c_census_arm_reach.py --selftest
+    _runci_leg zenoh_c_census_arm_reach --after zenoh_c_census_arm_reach.selftest -- python3 scripts/lib/zenoh_c_census_arm_reach.py --check
     # R2538 (open-debt item 717) — THE BUMP SWEEP, and it belongs beside the two
     # above because it RUNS them: its population is derived from the live pins,
     # so a gate carrying a current pin literal is swept whether or not anyone
@@ -2502,8 +2873,8 @@ layer_c0_test_discipline() {
     # deliberate rather than overlooked: its population is derived from the pins,
     # so it reaches a pin-carrying gate NOBODY wired into this lane, which is the
     # failure mode item 717 is about. Paying 19s for that is the trade.
-    python3 scripts/lib/bump_sweep.py --selftest || return 1
-    python3 scripts/lib/bump_sweep.py --check || return 1
+    _runci_leg bump_sweep.selftest -- python3 scripts/lib/bump_sweep.py --selftest
+    _runci_leg bump_sweep --after bump_sweep.selftest -- python3 scripts/lib/bump_sweep.py --check
     # R2540 (open-debt item 690) — the sweep above grades the GATES that carry a
     # pin; this grades the LITERAL SITES themselves. A constant spelling the pin
     # is a tripwire on purpose, so that a bump forces a human to re-derive the
@@ -2516,8 +2887,14 @@ layer_c0_test_discipline() {
     # runnable by hand mid-bump and needs no edit when a pin moves.
     #
     # MEASURED, warm: `--selftest` 0.04s, `--check` 0.4s.
-    python3 scripts/lib/pin_constant_binding_gate.py --selftest || return 1
-    python3 scripts/lib/pin_constant_binding_gate.py --check || return 1
+    _runci_leg pin_constant_binding_gate.selftest -- python3 scripts/lib/pin_constant_binding_gate.py --selftest
+    _runci_leg pin_constant_binding_gate --after pin_constant_binding_gate.selftest -- python3 scripts/lib/pin_constant_binding_gate.py --check
+    # The SCE autoroller (SCE ADR 0078 section 4): it plans the next landing of the vendor/sce
+    # pin and changes nothing, so only its selftest runs here, over a history it makes in a
+    # scratch directory: the stop rule, the classes of a path, the guide sections a landing adds
+    # or amends, the refusal of a pin off the target's line, and the control that the runtime
+    # stop comes from wz's lock file and not from the path alone.
+    _runci_leg sce_autoroll.selftest -- python3 scripts/lib/sce_autoroll.py --selftest
     # R2283 (open-debt item 621) — and a COMMIT HOOK CHECK must say which
     # artifact it grades. `pre-commit`'s Check 2 picked its files out of the
     # index and then ran `cargo fmt` over the CHECKOUT; R2282 committed an
@@ -2529,8 +2906,8 @@ layer_c0_test_discipline() {
     # own code.
     #
     # In Layer C0 with its siblings: `--check` reads nothing but the tree.
-    python3 scripts/lib/hook_graded_surface_gate.py --selftest || return 1
-    python3 scripts/lib/hook_graded_surface_gate.py --check || return 1
+    _runci_leg hook_graded_surface_gate.selftest -- python3 scripts/lib/hook_graded_surface_gate.py --selftest
+    _runci_leg hook_graded_surface_gate --after hook_graded_surface_gate.selftest -- python3 scripts/lib/hook_graded_surface_gate.py --check
     # R2284 (open-debt item 622) — the same question for `pre-push`, which could
     # not be asked until its SECTIONS were true. Its gates are delimited by
     # comment headers alone, and one header sat on a precondition while its
@@ -2541,28 +2918,28 @@ layer_c0_test_discipline() {
     # a refusal outside a gate is a gate nobody named — and then the surface,
     # in a vocabulary that is NOT the commit hook's: `pre-commit`'s four values
     # cannot cover gate 2c, which reads the previous hosted run and no file.
-    python3 scripts/lib/hook_gate_boundary_gate.py --selftest || return 1
-    python3 scripts/lib/hook_gate_boundary_gate.py --check || return 1
+    _runci_leg hook_gate_boundary_gate.selftest -- python3 scripts/lib/hook_gate_boundary_gate.py --selftest
+    _runci_leg hook_gate_boundary_gate --after hook_gate_boundary_gate.selftest -- python3 scripts/lib/hook_gate_boundary_gate.py --check
     # R3150 (open-debt item 897) — the split the two lines above do not look at:
     # which gates an ORDINARY push runs and which only `WZ_PREPUSH_EXTENDED=1`
     # does. The hook names ~90 gates and, since 2026-09-23, runs a handful of
     # them on a plain push; seven hosted runs went red on 2026-10-09 for
     # tree-only checks the hook named below its policy boundary or not at all.
     # The table in this gate is what keeps the cheap ones above it.
-    python3 scripts/lib/hook_default_region_gate.py --selftest || return 1
-    python3 scripts/lib/hook_default_region_gate.py || return 1
+    _runci_leg hook_default_region_gate.selftest -- python3 scripts/lib/hook_default_region_gate.py --selftest
+    _runci_leg hook_default_region_gate --after hook_default_region_gate.selftest -- python3 scripts/lib/hook_default_region_gate.py
     # R3190 (open-debt item 791) — pre-push gate 0b2: a commit that adds a
     # home-path line and a later commit that removes it leave the tip clean
     # (gate 0b reads the checkout) while the blob is published. The selftest
     # builds real repositories; the check itself needs a range and a term, so
     # only the selftest can run here.
-    python3 scripts/lib/home_path_range_gate.py --selftest || return 1
+    _runci_leg home_path_range_gate.selftest -- python3 scripts/lib/home_path_range_gate.py --selftest
     # R2463 (open-debt item 695) — pre-push gate 2r's own arms, beside its
     # siblings and for their reason: the gate runs on every push, so the one
     # place it is never exercised is the case it exists to refuse. Its selftest
     # earned this line on its first run by finding a `relative_to` that raises
     # instead of printing, on the very message a real failure would reach.
-    python3 scripts/lib/doc_revision_consumer_pin.py --selftest || return 1
+    _runci_leg doc_revision_consumer_pin.selftest -- python3 scripts/lib/doc_revision_consumer_pin.py --selftest
     # R2288 (open-debt item 611) — the four SN-resolution words are upstream's,
     # and only two of them reached any oracle: the zenohd interop lane feeds
     # `"16bit"` and `"32bit"` to a real router, and what tied ANY of them to
@@ -2570,8 +2947,8 @@ layer_c0_test_discipline() {
     # bound to the router pin here, because the source that decides it is
     # machine-local and a gate requiring it would SKIP green on a clone that
     # has none. `--derive` re-reads it from upstream where that exists.
-    python3 scripts/lib/sn_resolution_words.py --selftest || return 1
-    python3 scripts/lib/sn_resolution_words.py --check || return 1
+    _runci_leg sn_resolution_words.selftest -- python3 scripts/lib/sn_resolution_words.py --selftest
+    _runci_leg sn_resolution_words --after sn_resolution_words.selftest -- python3 scripts/lib/sn_resolution_words.py --check
     # R2371 (the `transport-stats` atom) — the counter SURFACE is upstream's, and
     # nothing in the tree could say so: R2332 found four flat counters against a
     # multi-axis registry, and every wz test passed the whole time because every
@@ -2581,8 +2958,8 @@ layer_c0_test_discipline() {
     # second list here — a list would be the copy that went stale in the first
     # place. `--check` SKIPs without a zenoh checkout (machine-local state); the
     # `--require` arming flag is what a lane with one sets.
-    python3 scripts/lib/transport_stats_surface_gate.py --selftest || return 1
-    python3 scripts/lib/transport_stats_surface_gate.py --check || return 1
+    _runci_leg transport_stats_surface_gate.selftest -- python3 scripts/lib/transport_stats_surface_gate.py --selftest
+    _runci_leg transport_stats_surface_gate --after transport_stats_surface_gate.selftest -- python3 scripts/lib/transport_stats_surface_gate.py --check
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.
@@ -2606,8 +2983,8 @@ layer_c0_test_discipline() {
     # edges would pass exactly the sentence this item was opened for, and the
     # selftest fixture carries a two-hop chain so that arm cannot be born
     # green.
-    python3 scripts/lib/prose_dep_graph_gate.py --selftest || return 1
-    python3 scripts/lib/prose_dep_graph_gate.py --check || return 1
+    _runci_leg prose_dep_graph_gate.selftest -- python3 scripts/lib/prose_dep_graph_gate.py --selftest
+    _runci_leg prose_dep_graph_gate --after prose_dep_graph_gate.selftest -- python3 scripts/lib/prose_dep_graph_gate.py --check
     # R2196 (open-debt item 530) — the OTHER half of the same item, and the
     # half R2192's closing note wrongly declared covered elsewhere. That gate
     # reads a dependency written as TWO NAMED CRATES. The sentence R2105
@@ -2630,8 +3007,8 @@ layer_c0_test_discipline() {
     # sentences are in it. The selftest carries that chain so the arm cannot be
     # born green, and a quoted claim is spared so a round can still retract one
     # (the R2161 counterexample).
-    python3 scripts/lib/prose_build_closure_gate.py --selftest || return 1
-    python3 scripts/lib/prose_build_closure_gate.py --check || return 1
+    _runci_leg prose_build_closure_gate.selftest -- python3 scripts/lib/prose_build_closure_gate.py --selftest
+    _runci_leg prose_build_closure_gate --after prose_build_closure_gate.selftest -- python3 scripts/lib/prose_build_closure_gate.py --check
     # R2198 (open-debt item 545) — the surviving third of that item, after
     # R2177 refuted its other two premises. Run-level `status` covers TWO
     # states with ONE word: MEASURED 2026-08-30, run 33293532416 called itself
@@ -2645,7 +3022,13 @@ layer_c0_test_discipline() {
     # carries the two REAL payloads read that day, and both have a top-level
     # `status` that DISAGREES with their jobs — so an implementation that
     # reaches for the word fails here instead of passing quietly.
-    python3 scripts/lib/hosted_pending_kind.py --selftest || return 1
+    _runci_leg hosted_pending_kind.selftest -- python3 scripts/lib/hosted_pending_kind.py --selftest
+    # Open-debt item 944: a run that ended `cancelled` is read by its jobs.
+    # Started and past its `timeout-minutes` is red; never started is a
+    # replacement. Offline for the same reason as the line above: the fixtures
+    # are three real runs, and the network stays in pre-push gate 2c.
+    _runci_leg hosted_cancelled_kind.selftest -- python3 scripts/lib/hosted_cancelled_kind.py --selftest
+    _runci_leg newest_completed_ancestor_run.selftest -- python3 scripts/lib/newest_completed_ancestor_run.py --selftest
     # R2193 (open-debt item 532) — how many of this workspace's non-default
     # features gate a public item, DERIVED rather than estimated.
     #
@@ -2666,8 +3049,8 @@ layer_c0_test_discipline() {
     # class is what decides whether the feature joins the denominator. A macro
     # invocation counts IN: it can expand to a public item and over-reporting
     # is the safe direction. Measured 0.2s.
-    python3 scripts/lib/feature_public_surface_census.py --selftest || return 1
-    python3 scripts/lib/feature_public_surface_census.py --check || return 1
+    _runci_leg feature_public_surface_census.selftest -- python3 scripts/lib/feature_public_surface_census.py --selftest
+    _runci_leg feature_public_surface_census --after feature_public_surface_census.selftest -- python3 scripts/lib/feature_public_surface_census.py --check
     # R2572 (§5.20 `switchboard`) — a facade feature must reach EVERY runtime
     # that declares it. `crates/wz` forwards with cargo's optional-dep `?`,
     # which yields the EMPTY SET when the dep is absent instead of erroring, so
@@ -2682,8 +3065,8 @@ layer_c0_test_discipline() {
     # AP-only simply is not declared by the MCU runtime and the rule never
     # reaches it. No excuse list to rot. 151 forwards today; a population of
     # zero is a FAILURE, not a pass.
-    python3 scripts/lib/facade_forward_gate.py --selftest >/dev/null || return 1
-    python3 scripts/lib/facade_forward_gate.py || return 1
+    _runci_leg facade_forward_gate.selftest -- python3 scripts/lib/facade_forward_gate.py --selftest >/dev/null
+    _runci_leg facade_forward_gate --after facade_forward_gate.selftest -- python3 scripts/lib/facade_forward_gate.py
     # R2576 — a gate fed by what a ROUND changes must run where the round
     # happens. A round mutates the atomic store (it closes an atom) and the
     # tracked corpus (it writes the code and the instrument), and gates read
@@ -2702,8 +3085,8 @@ layer_c0_test_discipline() {
     # Population DERIVED from the code (those seed rules plus the transitive
     # importers), deferrals carry a measured reason and are PRINTED, and an
     # empty population is a FAILURE.
-    python3 scripts/lib/round_fed_gate_reach.py --selftest >/dev/null || return 1
-    python3 scripts/lib/round_fed_gate_reach.py || return 1
+    _runci_leg round_fed_gate_reach.selftest -- python3 scripts/lib/round_fed_gate_reach.py --selftest >/dev/null
+    _runci_leg round_fed_gate_reach --after round_fed_gate_reach.selftest -- python3 scripts/lib/round_fed_gate_reach.py
     # R2582 — the membership rule behind pre-push gate 5b, which runs a changed
     # gate's OWN `--selftest`. Only the rule's selftest belongs here: the gate
     # itself needs a push's diff range and hosted CI already runs every selftest
@@ -2711,7 +3094,7 @@ layer_c0_test_discipline() {
     # the machine that wrote it -- the exact shape of the defect it was built
     # for, where `upstream_citation_anchor_gate`'s selftest ran only hosted and
     # its source broke it for five pushes.
-    python3 scripts/lib/changed_gate_selftests.py --selftest >/dev/null || return 1
+    _runci_leg changed_gate_selftests.selftest -- python3 scripts/lib/changed_gate_selftests.py --selftest >/dev/null
     # R2208 (open-debt item 562) — WHAT A MACHINE MUST ALREADY HAVE for the
     # lanes this script arms, and the way to ask one.
     #
@@ -2728,8 +3111,8 @@ layer_c0_test_discipline() {
     # reaches for it. `--probe [--host H]` is the other half and belongs to a
     # person about to send a lane somewhere, because what a hosted runner has
     # and what a build box has are different facts.
-    python3 scripts/lib/armed_oracle_census.py --selftest || return 1
-    python3 scripts/lib/armed_oracle_census.py --check || return 1
+    _runci_leg armed_oracle_census.selftest -- python3 scripts/lib/armed_oracle_census.py --selftest
+    _runci_leg armed_oracle_census --after armed_oracle_census.selftest -- python3 scripts/lib/armed_oracle_census.py --check
     # R2247 (open-debt item 598) — the OTHER side of the same flag. The census
     # above walks the armings this file SETS; this walks the ones a lane READS,
     # and asks whether every branch that declines to run reads its own. C1ce
@@ -2738,8 +3121,8 @@ layer_c0_test_discipline() {
     # printed `pass (0s)` and `all required layers pass`. The two populations
     # are disjoint by construction, which is why the census was green through
     # every round that hole was open.
-    python3 scripts/lib/armed_skip_guard.py --selftest || return 1
-    python3 scripts/lib/armed_skip_guard.py --check || return 1
+    _runci_leg armed_skip_guard.selftest -- python3 scripts/lib/armed_skip_guard.py --selftest
+    _runci_leg armed_skip_guard --after armed_skip_guard.selftest -- python3 scripts/lib/armed_skip_guard.py --check
     # R2250 (open-debt item 600) — the THIRD side of the same thing, and the
     # one about this tree's own sentences. The two gates above ask what a
     # machine has and what a lane reads; this asks whether a name the prose
@@ -2754,8 +3137,8 @@ layer_c0_test_discipline() {
     # The atomic store counts as PROSE here, deliberately: it is a ledger of
     # sentences in a JSON wrapper, and counted as code this round's own entry
     # would resolve the name the round was opened to remove.
-    python3 scripts/lib/prose_named_identifier_gate.py --selftest || return 1
-    python3 scripts/lib/prose_named_identifier_gate.py --check || return 1
+    _runci_leg prose_named_identifier_gate.selftest -- python3 scripts/lib/prose_named_identifier_gate.py --selftest
+    _runci_leg prose_named_identifier_gate --after prose_named_identifier_gate.selftest -- python3 scripts/lib/prose_named_identifier_gate.py --check
     # R2250b (open-debt item 603) — the SELFTEST only. `debt_plane_census.py`
     # reads an agent-memory register no runner carries, so its `--check` cannot
     # be a lane; its own docstring says the split exists precisely so the RULES
@@ -2769,7 +3152,7 @@ layer_c0_test_discipline() {
     # original folded below). That is the shape item 603 was filed for: read
     # flat, the archived wording wins and an item discharged by the convention
     # reads back as open.
-    python3 scripts/lib/debt_plane_census.py --selftest || return 1
+    _runci_leg debt_plane_census.selftest -- python3 scripts/lib/debt_plane_census.py --selftest
     # R2230 (open-debt items 579 / 582) — the machine-INDEPENDENT half of
     # `upstream_carries_the_surface.py`, whose other half needs a pinned zenohd
     # and therefore lives in Layer Z.
@@ -2784,7 +3167,13 @@ layer_c0_test_discipline() {
     # everything would satisfy every red row and be just as useless.
     #
     # Milliseconds, no binary, no source tree. Layer Z runs the adjudication.
-    python3 scripts/lib/upstream_carries_the_surface.py --selftest || return 1
+    _runci_leg upstream_carries_the_surface.selftest -- python3 scripts/lib/upstream_carries_the_surface.py --selftest
+    # The same split for `deepenable_audit.py`, the Layer Z sweep beside it. Its
+    # probe documents (a member map such as `plugins` is probed one level down)
+    # and its classifiers (the message, the resolved-config table probe and its
+    # control, the mode verdict) are driven both ways here with no zenohd, so a
+    # classifier that cannot fail is caught where every push can see it.
+    _runci_leg deepenable_audit.selftest -- python3 scripts/lib/deepenable_audit.py --selftest
     # R2336 (open-debt item 15, atom `access-extauth-pubkey`) — the same split
     # for the gate BESIDE that one. `upstream_carries_the_surface.py` asks
     # upstream's SERIALIZER whether a key exists; this asks upstream's SOURCE
@@ -2796,7 +3185,7 @@ layer_c0_test_discipline() {
     # This arm is the classifier, driven in BOTH directions plus the two
     # population floors, over a synthetic upstream with no checkout at all.
     # Layer Z runs the adjudication against the pinned source.
-    python3 scripts/lib/upstream_reads_the_surface.py --selftest || return 1
+    _runci_leg upstream_reads_the_surface.selftest -- python3 scripts/lib/upstream_reads_the_surface.py --selftest
     # R2337 (open-debt item 15, atom `routing-router`) — the same split again,
     # one layer up: not "does upstream read this config key" but "is this atom's
     # claim about upstream still TRUE at the pin".
@@ -2813,14 +3202,14 @@ layer_c0_test_discipline() {
     # This arm drives all three citation forms in BOTH directions plus each
     # floor emptied on its own, over a synthetic upstream with no checkout and
     # no store. Layer Z runs the adjudication against the pinned source.
-    python3 scripts/lib/store_reasons_resolve.py --selftest || return 1
+    _runci_leg store_reasons_resolve.selftest -- python3 scripts/lib/store_reasons_resolve.py --selftest
     # R2362 — the SHAPE arm of the serde format-surface gate. It drives the
     # full fixture, every floor emptied on its own (an empty upstream
     # population must FAIL, never report green), the reverse direction (an
     # upstream ADDITION must fail), and the alias direction — an alias is not a
     # skip, so removing the wz type an alias points at must fail too. Layer Z
     # runs the same script against the pinned checkout.
-    python3 scripts/lib/serde_format_surface_gate.py --selftest || return 1
+    _runci_leg serde_format_surface_gate.selftest -- python3 scripts/lib/serde_format_surface_gate.py --selftest
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
@@ -2832,7 +3221,7 @@ layer_c0_test_discipline() {
     # and on the TRANSPORT space respectively. The FEATURE space is the one
     # place every carrier appears exactly once, so that is where the gate goes.
     # Enforcement MEASURED by removing `codec-join` from the feature list.
-    python3 scripts/lib/dissect_feature_census.py || return 1
+    _runci_leg dissect_feature_census -- python3 scripts/lib/dissect_feature_census.py
     # R311y911 (unregistered item 407) — the LABEL VALUE census, the third
     # sibling. The two above decide the field NAMES a walker may invent and the
     # MIDs it must reach; nothing decided the VALUES a `FieldValue::Label`
@@ -2847,7 +3236,7 @@ layer_c0_test_discipline() {
     # is one every clone can run. What pico cannot name (`BlockFirst`, its
     # third congestion state) is declared with the test that pins the
     # divergence rather than skipped.
-    python3 scripts/lib/dissect_label_census.py || return 1
+    _runci_leg dissect_label_census -- python3 scripts/lib/dissect_label_census.py
     # R311y854 — WHICH SURFACE reaches each analysis capability, pinned.
     #
     # The two censuses above ask whether the DECODE covers the wire. This asks
@@ -2872,7 +3261,7 @@ layer_c0_test_discipline() {
     # and was answered in prose, which was measured wrong in two places on the
     # day the item was filed. Numbers only, by design: nothing else of the
     # delivery document is carried, and the axis works without it.
-    python3 scripts/lib/analysis_surface_parity.py || return 1
+    _runci_leg analysis_surface_parity -- python3 scripts/lib/analysis_surface_parity.py
     # R2210 (open-debt item 564) — and the half of that table nothing could
     # ask a machine about.
     #
@@ -2894,8 +3283,8 @@ layer_c0_test_discipline() {
     # all four red in the TREE -- a copied key, a dev edge to the config
     # crate, a door renamed to carry the word, and the declaration pointed at
     # another file.
-    python3 scripts/lib/analysis_surface_config_free.py || return 1
-    python3 scripts/lib/analysis_surface_config_free.py --selftest >/dev/null || return 1
+    _runci_leg analysis_surface_config_free.selftest -- python3 scripts/lib/analysis_surface_config_free.py --selftest >/dev/null
+    _runci_leg analysis_surface_config_free --after analysis_surface_config_free.selftest -- python3 scripts/lib/analysis_surface_config_free.py
     # R2300 (open-debt item 631) — THE OTHER SIDE OF THE SAME RULING, and it
     # runs here because the two are one decision read in two directions.
     #
@@ -2916,8 +3305,8 @@ layer_c0_test_discipline() {
     # table: three topology variants were unreachable through the closed door,
     # and R2300 widened the surface (an external-listener door) rather than
     # writing down why they did not count.
-    python3 scripts/lib/capi_c_config_verdict_population.py || return 1
-    python3 scripts/lib/capi_c_config_verdict_population.py --selftest >/dev/null || return 1
+    _runci_leg capi_c_config_verdict_population.selftest -- python3 scripts/lib/capi_c_config_verdict_population.py --selftest >/dev/null
+    _runci_leg capi_c_config_verdict_population --after capi_c_config_verdict_population.selftest -- python3 scripts/lib/capi_c_config_verdict_population.py
     # HEADER: every wz-own door of that library is declared in its header, both
     # directions. Item 631 (다) asked for the header because the crate shipped
     # none; a header is a hand-kept second spelling of a symbol list, and
@@ -2925,14 +3314,14 @@ layer_c0_test_discipline() {
     # not declared is invisible to every compiler. Both differences are errors
     # and they differ: an undeclared door makes a consumer write its own
     # extern, while a declaration with no door LINKS and fails at load.
-    python3 scripts/lib/capi_c_wz_door_header.py || return 1
-    python3 scripts/lib/capi_c_wz_door_header.py --selftest >/dev/null || return 1
+    _runci_leg capi_c_wz_door_header.selftest -- python3 scripts/lib/capi_c_wz_door_header.py --selftest >/dev/null
+    _runci_leg capi_c_wz_door_header --after capi_c_wz_door_header.selftest -- python3 scripts/lib/capi_c_wz_door_header.py
     # R3440 (decision C10 of docs/build-configuration.md) -- the pico drop-in
     # header declares only what zenoh-pico's own header declares at the pin, read
     # through the preprocessor under three configurations, and wz_ext.h only
     # wz_ext_* doors.
-    python3 scripts/lib/drop_in_header_gate.py || return 1
-    python3 scripts/lib/drop_in_header_gate.py --selftest >/dev/null || return 1
+    _runci_leg drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py --selftest >/dev/null
+    _runci_leg drop_in_header_gate --after drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py
     # R2213 (open-debt item 566) — and the same question asked of EVERY gate,
     # not only of the one that learned to ask it.
     #
@@ -2961,8 +3350,8 @@ layer_c0_test_discipline() {
     # reason table, a budget left standing above the real count, and a fixture
     # table given one reader outside the closure -- which turns it into a
     # reason table and takes its seven fixture literals with it.
-    python3 scripts/lib/gate_reason_claims.py || return 1
-    python3 scripts/lib/gate_reason_claims.py --selftest >/dev/null || return 1
+    _runci_leg gate_reason_claims.selftest -- python3 scripts/lib/gate_reason_claims.py --selftest >/dev/null
+    _runci_leg gate_reason_claims --after gate_reason_claims.selftest -- python3 scripts/lib/gate_reason_claims.py
     # R2218 (open-debt item 200) — the DEPTH axis, as numbers.
     #
     # Item 200's complaint is that breadth is closed and depth has no
@@ -2986,8 +3375,8 @@ layer_c0_test_discipline() {
     # FLOOR. It flagged two atoms whose reasons are dense with state and merely
     # spell it in other words, which is the sweep failing rather than the
     # grades.
-    python3 scripts/lib/depth_axis_census.py || return 1
-    python3 scripts/lib/depth_axis_census.py --selftest >/dev/null || return 1
+    _runci_leg depth_axis_census.selftest -- python3 scripts/lib/depth_axis_census.py --selftest >/dev/null
+    _runci_leg depth_axis_census --after depth_axis_census.selftest -- python3 scripts/lib/depth_axis_census.py
     # R311y887 (open-debt item 361) — and what a bounded read's OUTPUT must
     # contain, which is the gate above one layer in.
     #
@@ -3003,7 +3392,7 @@ layer_c0_test_discipline() {
     # constructor) rather than from a `_bounded` suffix, because
     # `wz_dissect_pcap_census_where_limited` takes its ceiling as an argument
     # and no name match would have found it.
-    python3 scripts/lib/bounded_output_parity.py || return 1
+    _runci_leg bounded_output_parity -- python3 scripts/lib/bounded_output_parity.py
     # R311y888 (debt-packet-fixture-witness, debt-packet-edit-after-build) —
     # the PACKET FIXTURE discipline, both halves.
     #
@@ -3024,8 +3413,8 @@ layer_c0_test_discipline() {
     # literal rather than a count. The population is now derived from what a
     # builder DOES — it fills a checksum — and the OK line prints how many
     # writes were weighed.
-    python3 scripts/lib/packet_fixture_lint.py --selftest || return 1
-    python3 scripts/lib/packet_fixture_lint.py || return 1
+    _runci_leg packet_fixture_lint.selftest -- python3 scripts/lib/packet_fixture_lint.py --selftest
+    _runci_leg packet_fixture_lint --after packet_fixture_lint.selftest -- python3 scripts/lib/packet_fixture_lint.py
     # R311y889 (debt-build-evidence) — a BUILD this CI runs must not throw its
     # own output away.
     #
@@ -3035,7 +3424,7 @@ layer_c0_test_discipline() {
     # running it again — a round spent reproducing what the failing run already
     # knew. Three sites were in that state and R311y756 had repaired a fourth,
     # which is what makes this a rule rather than a habit.
-    python3 scripts/lib/build_evidence_lint.py || return 1
+    _runci_leg build_evidence_lint -- python3 scripts/lib/build_evidence_lint.py
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks
@@ -3061,8 +3450,8 @@ layer_c0_test_discipline() {
     # in a shape the pattern cannot see — was silent, and a new reader is what
     # produces it. Measured: with the widths spelled by hand again, the
     # selftest's new-width case finds NOTHING and the live census still says OK.
-    python3 scripts/lib/narrow_vle_read_census.py --selftest || return 1
-    python3 scripts/lib/narrow_vle_read_census.py || return 1
+    _runci_leg narrow_vle_read_census.selftest -- python3 scripts/lib/narrow_vle_read_census.py --selftest
+    _runci_leg narrow_vle_read_census --after narrow_vle_read_census.selftest -- python3 scripts/lib/narrow_vle_read_census.py
     # R311y881 — the APT PACKAGE census: what every ci.yml job downloads, and
     # why. The same SET-pinned, both-directions shape as the censuses above,
     # with one arm that DERIVES instead of adjudicating: `cmake` is pulled by
@@ -3077,8 +3466,8 @@ layer_c0_test_discipline() {
     # number is right for both, so the lever is BYTES, and nothing was looking
     # at them because the package lists were copy-pasted and unowned.
     # Item 861 -- its BINDGEN_FREE arm drives the same code over fixtures first.
-    python3 scripts/lib/apt_package_census.py --selftest || return 1
-    python3 scripts/lib/apt_package_census.py || return 1
+    _runci_leg apt_package_census.selftest -- python3 scripts/lib/apt_package_census.py --selftest
+    _runci_leg apt_package_census --after apt_package_census.selftest -- python3 scripts/lib/apt_package_census.py
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries a bare
     # `| grep -qE '^test result: ok\. N passed'` shape, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard
@@ -3102,7 +3491,7 @@ layer_c0_test_discipline() {
     # written into a comment beside one of them, which is what settles it: a memo
     # is not a mechanism. The floor is PER SPELLING, so a parser that stopped
     # recognising the helper cannot hide behind the bare guards' coverage.
-    python3 scripts/lib/count_guard_lint.py || return 1
+    _runci_leg count_guard_lint -- python3 scripts/lib/count_guard_lint.py
     # R2167 (no register item) — the SELFTEST of the gate that covers what the
     # line above declares out of scope. `count_guard_lint` skips 189 of 291
     # guards because a `#[cfg]`-gated count is not derivable without a build,
@@ -3113,7 +3502,7 @@ layer_c0_test_discipline() {
     # R2166's own (the filter matches the enclosing MODULE, never the added
     # function's name) and R2158's (a count moved by REMOVING a `#[cfg]`, with
     # no `#[test]` line in the diff at all).
-    python3 scripts/lib/guarded_count_gate.py --selftest >/dev/null || return 1
+    _runci_leg guarded_count_gate.selftest -- python3 scripts/lib/guarded_count_gate.py --selftest >/dev/null
     # R2138 (unregistered open-debt item 224) — the CONFIG-KEY-to-FIXTURE gate.
     # `HONOURED_CONFIG_KEYS` lives in `wz-runtime-tokio`; the drop-in leg of
     # `wz_reads_a_stock_zenohd_config.rs` carries a hand-written JSON5 config and
@@ -3130,7 +3519,7 @@ layer_c0_test_discipline() {
     # literal, and comparing them costs ~1s with nothing built. It also runs in
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
-    python3 scripts/lib/config_key_fixture_gate.py || return 1
+    _runci_leg config_key_fixture_gate -- python3 scripts/lib/config_key_fixture_gate.py
     # R2546 — the ATTACHMENT CAPACITY WITNESS gate, closing the last clause of
     # the `attachment-bytes` atom. `sce:max-size="32"` on the ext-zbuf body is
     # the heap-free profile's capacity and is ADVISORY under `alloc`; that is
@@ -3148,8 +3537,8 @@ layer_c0_test_discipline() {
     # something compares the two. Its selftest drives both arms plus the
     # empty-population refusal. Same lane and the same reason as gate 2d above:
     # every side is on disk and nothing has to be built.
-    python3 scripts/lib/attachment_capacity_witness_gate.py || return 1
-    python3 scripts/lib/attachment_capacity_witness_gate.py --selftest >/dev/null || return 1
+    _runci_leg attachment_capacity_witness_gate.selftest -- python3 scripts/lib/attachment_capacity_witness_gate.py --selftest >/dev/null
+    _runci_leg attachment_capacity_witness_gate --after attachment_capacity_witness_gate.selftest -- python3 scripts/lib/attachment_capacity_witness_gate.py
     # R2423 (unregistered open-debt item 688) — every reason a link driver can
     # REFUSE a write must have a decided disposition on the F2 send gate, and a
     # test that witnesses it. Before this round the only consumer of a refusal
@@ -3161,8 +3550,8 @@ layer_c0_test_discipline() {
     # exhaustiveness is a decision rather than a proof that an arm fires — this
     # grades both halves. Same lane as gate 2d for the same reason: three tracked
     # files, nothing built.
-    python3 scripts/lib/link_drop_disposition_gate.py || return 1
-    python3 scripts/lib/link_drop_disposition_gate.py --selftest || return 1
+    _runci_leg link_drop_disposition_gate.selftest -- python3 scripts/lib/link_drop_disposition_gate.py --selftest
+    _runci_leg link_drop_disposition_gate --after link_drop_disposition_gate.selftest -- python3 scripts/lib/link_drop_disposition_gate.py
     # R2394 (unregistered open-debt item 675) — the GRADING-PIN ratchet. An
     # atom's inventory reason opens with its grade and then says what the grade
     # was measured against, and 61 of them still said 1.5.0 while this tree pins
@@ -3182,7 +3571,7 @@ layer_c0_test_discipline() {
     # directions FAIL: ABOVE means an atom was graded against the stale version
     # (repair the GRADING, never the budget); BELOW means a round re-measured
     # one (lower the budget in that same commit).
-    python3 scripts/lib/grading_pin_ratchet.py || return 1
+    _runci_leg grading_pin_ratchet -- python3 scripts/lib/grading_pin_ratchet.py
     # R2366 (the `runtime-tokio` atom's last residual) — the SUBSYSTEM-SPAWN
     # gate. R311y825 built the five-runtime partition and nothing production
     # ever named a subsystem, so `WZ_RUNTIME` tuned runtimes no task ran on and
@@ -3197,8 +3586,8 @@ layer_c0_test_discipline() {
     # `--selftest` first — its fixtures carry the two shapes that defeated this
     # gate's own first draft, a path-qualified `crate::runtime_pool::WzRuntime`
     # reach and a subsystem named through `.handle()` rather than `.spawn()`.
-    python3 scripts/lib/subsystem_spawn_gate.py --selftest >/dev/null || return 1
-    python3 scripts/lib/subsystem_spawn_gate.py || return 1
+    _runci_leg subsystem_spawn_gate.selftest -- python3 scripts/lib/subsystem_spawn_gate.py --selftest >/dev/null
+    _runci_leg subsystem_spawn_gate --after subsystem_spawn_gate.selftest -- python3 scripts/lib/subsystem_spawn_gate.py
     # R2354 (the `storage-replication` atom's last residual) — the
     # REPLICATION-LOG FUNNEL gate. The digest stopped being recomputed from the
     # stored set every publication cycle and is now read off a maintained log,
@@ -3217,8 +3606,8 @@ layer_c0_test_discipline() {
     # receiver, and a member whose name has a digest source as a prefix
     # (`latest_mode` vs `latest`). Both made it report a clean tree it had
     # misread.
-    python3 scripts/lib/replication_log_funnel_gate.py --selftest >/dev/null || return 1
-    python3 scripts/lib/replication_log_funnel_gate.py || return 1
+    _runci_leg replication_log_funnel_gate.selftest -- python3 scripts/lib/replication_log_funnel_gate.py --selftest >/dev/null
+    _runci_leg replication_log_funnel_gate --after replication_log_funnel_gate.selftest -- python3 scripts/lib/replication_log_funnel_gate.py
     # R2420 (unregistered open-debt item 675) — the CONFIG FINGERPRINT RECIPE,
     # `--selftest` only on this layer. The full arm needs a pinned zenoh SOURCE
     # tree and lives in Layer Z, for the reason the citation-resolution and
@@ -3239,7 +3628,7 @@ layer_c0_test_discipline() {
     # its own so a population of zero FAILS, and carries the two shapes that
     # defeated the first draft: a decoy `pub fn new(` that is not the recipe,
     # and an argument whose width comes from a cast rather than a field's type.
-    python3 scripts/lib/replication_fingerprint_recipe_gate.py --selftest >/dev/null || return 1
+    _runci_leg replication_fingerprint_recipe_gate.selftest -- python3 scripts/lib/replication_fingerprint_recipe_gate.py --selftest >/dev/null
     # R2311 (open-debt item 645) — the FOREIGN-QUERY READINESS gate. Both
     # foreign example families print their readiness line BEFORE the call that
     # declares, so a querier that dials the router separately can arrive first
@@ -3255,8 +3644,8 @@ layer_c0_test_discipline() {
     # built. `--selftest` first, because a gate that cannot fail is worth
     # nothing -- and this one could not, twice, before its fixtures were made
     # decisive. It also runs in `.githooks/pre-push` as gate 2l.
-    python3 scripts/lib/foreign_query_readiness_gate.py --selftest || return 1
-    python3 scripts/lib/foreign_query_readiness_gate.py || return 1
+    _runci_leg foreign_query_readiness_gate.selftest -- python3 scripts/lib/foreign_query_readiness_gate.py --selftest
+    _runci_leg foreign_query_readiness_gate --after foreign_query_readiness_gate.selftest -- python3 scripts/lib/foreign_query_readiness_gate.py
     # R2313 (open-debt item 47) — an inventory REASON may not outlive the code
     # it cites. Item 47 is the register's oldest unpaid entry and names three
     # shapes, of which only the first is mechanizable; this is that lower
@@ -3269,15 +3658,15 @@ layer_c0_test_discipline() {
     # in git -- so it belongs here with its neighbours. `--selftest` first,
     # because two of its four rules have NO live instance and would otherwise
     # never execute.
-    python3 scripts/lib/reason_citation_gate.py --selftest || return 1
-    python3 scripts/lib/reason_citation_gate.py || return 1
+    _runci_leg reason_citation_gate.selftest -- python3 scripts/lib/reason_citation_gate.py --selftest
+    _runci_leg reason_citation_gate --after reason_citation_gate.selftest -- python3 scripts/lib/reason_citation_gate.py
     # R3182 (open-debt item 756) -- the citation gate above says a cited file
     # still resolves, not that the sentence citing it is still true. This pins
     # each file a remaining atom's reason cites to the blob a round last read the
     # reason against, so a cited file cannot move without that reason being in
     # front of the round that moved it. Both sides are on disk (store and tree).
-    python3 scripts/lib/reason_review_pin_gate.py --selftest || return 1
-    python3 scripts/lib/reason_review_pin_gate.py --check || return 1
+    _runci_leg reason_review_pin_gate.selftest -- python3 scripts/lib/reason_review_pin_gate.py --selftest
+    _runci_leg reason_review_pin_gate --after reason_review_pin_gate.selftest -- python3 scripts/lib/reason_review_pin_gate.py --check
     # R2335 (unregistered open-debt item 15) — a lane may not claim of itself a
     # term the test it runs has DENIED of itself. Layer C1aq's comment and the
     # `ext-pubsub-advanced-publisher` atom's reason both described that lane's
@@ -3296,8 +3685,8 @@ layer_c0_test_discipline() {
     # BOTH SIDES ARE ON DISK, so it belongs here with its neighbours.
     # `--selftest` first: the honest and the overstating lane are both fixtures,
     # and a gate that cannot go red is worth nothing.
-    python3 scripts/lib/denied_term_lane_gate.py --selftest || return 1
-    python3 scripts/lib/denied_term_lane_gate.py || return 1
+    _runci_leg denied_term_lane_gate.selftest -- python3 scripts/lib/denied_term_lane_gate.py --selftest
+    _runci_leg denied_term_lane_gate --after denied_term_lane_gate.selftest -- python3 scripts/lib/denied_term_lane_gate.py
     # R2293 (unregistered open-debt item 625) — the TEST-DOUBLE WITNESS gate.
     # A test whose fixture cannot construct the input its branch needs measures
     # nothing, and R2289 walked into exactly that: nine mutations of the SHM
@@ -3312,8 +3701,8 @@ layer_c0_test_discipline() {
     # second with nothing built. `--selftest` first, for the reason the
     # count-guard gate runs its own: a gate that cannot fail is worth nothing,
     # and the fixtures are what say this one can.
-    python3 scripts/lib/test_double_knob_gate.py --selftest >/dev/null || return 1
-    python3 scripts/lib/test_double_knob_gate.py || return 1
+    _runci_leg test_double_knob_gate.selftest -- python3 scripts/lib/test_double_knob_gate.py --selftest >/dev/null
+    _runci_leg test_double_knob_gate --after test_double_knob_gate.selftest -- python3 scripts/lib/test_double_knob_gate.py
     # R2316 (unregistered open-debt item 4) — which PLANE may reach which
     # `Interest` builder. The `ext_qos` an Interest carries is a plane
     # decision, and the two planes decide it opposite ways: upstream leaves it
@@ -3331,8 +3720,8 @@ layer_c0_test_discipline() {
     # sides are in different crates, the propagation is behind a NON-DEFAULT
     # feature, and the seam's own witness counted frames. `--selftest` first,
     # because a gate that cannot fail is worth nothing. Also `pre-push` gate 2m.
-    python3 scripts/lib/router_interest_qos_gate.py --selftest >/dev/null || return 1
-    python3 scripts/lib/router_interest_qos_gate.py || return 1
+    _runci_leg router_interest_qos_gate.selftest -- python3 scripts/lib/router_interest_qos_gate.py --selftest >/dev/null
+    _runci_leg router_interest_qos_gate --after router_interest_qos_gate.selftest -- python3 scripts/lib/router_interest_qos_gate.py
     # R2306 (unregistered open-debt item 156) — how many places READ `_anyke`.
     # It had grown THREE readers and only two were ever compared, so the third
     # drifted: `wz-capi-c` split the selector parameter list on `&` where
@@ -3346,33 +3735,33 @@ layer_c0_test_discipline() {
     # the two files allowed to hold one, and the baseline bites BOTH ways — an
     # unlisted holder fails, and a listed file that stopped holding one fails
     # too. `--selftest` first, on the count-guard gate's reasoning.
-    python3 scripts/lib/anyke_reader_gate.py --selftest >/dev/null || return 1
-    python3 scripts/lib/anyke_reader_gate.py || return 1
+    _runci_leg anyke_reader_gate.selftest -- python3 scripts/lib/anyke_reader_gate.py --selftest >/dev/null
+    _runci_leg anyke_reader_gate --after anyke_reader_gate.selftest -- python3 scripts/lib/anyke_reader_gate.py
     # R3397 -- the gate that reads the C ABI binaries (Layer C1cs) is graded here first, on
     # synthetic input: its matcher, its budget arithmetic and the control that every plane it
     # forbids somewhere it requires somewhere else.
-    python3 scripts/lib/capability_cost_gate.py --selftest || return 1
+    _runci_leg capability_cost_gate.selftest -- python3 scripts/lib/capability_cost_gate.py --selftest
     # Z8 -- the harness that runs upstream's tests against the family (Layer Z8) and the gate that
     # holds its report to the table of what each file must still do: the parsers and the verdicts,
     # on synthetic text, before the lane that needs a network and an hour uses them.
-    python3 scripts/lib/z8_upstream_suite.py --selftest || return 1
-    python3 scripts/lib/z8_expectation_gate.py --selftest || return 1
+    _runci_leg z8_upstream_suite.selftest -- python3 scripts/lib/z8_upstream_suite.py --selftest
+    _runci_leg z8_expectation_gate.selftest -- python3 scripts/lib/z8_expectation_gate.py --selftest
     # The build configuration is declared once (deploy/wz-config.toml, docs/build-configuration.md
     # C1): the capability graph and the limits an image can state for itself. The generated
     # Kconfig files, the generated limit values, caps.rs's bindings and the three C ABI manifests
     # are held to it. The selftest also pins that a Kconfig selection derives the very features
     # the size gate above grades.
-    python3 scripts/lib/wz_config.py --selftest || return 1
-    python3 scripts/lib/wz_config.py --check || return 1
+    _runci_leg wz_config.selftest -- python3 scripts/lib/wz_config.py --selftest
+    _runci_leg wz_config --after wz_config.selftest -- python3 scripts/lib/wz_config.py --check
     # Every registered profile (configs/profiles) resolves, strictly (C9), on the one pinned
     # Kconfig interpreter (C11, scripts/provision-kconfiglib.sh). A job without kconfiglib
     # SKIPs out loud; the validate job provisions it and arms WZ_KCONFIG_REQUIRE.
-    python3 scripts/lib/wz_config.py --check-presets || return 1
+    _runci_leg wz_config.check-presets --after wz_config.selftest -- python3 scripts/lib/wz_config.py --check-presets
     # R3733 -- the feature model a crate's state machines are gated by (sources/features/, SCE's
     # element gate) is generated from the crate's own cargo features, and is held to them: a model
     # that drifted from the manifest lets a machine gate on a feature the crate does not have.
-    python3 scripts/lib/sce_feature_model.py --selftest || return 1
-    python3 scripts/lib/sce_feature_model.py --check || return 1
+    _runci_leg sce_feature_model.selftest -- python3 scripts/lib/sce_feature_model.py --selftest
+    _runci_leg sce_feature_model --after sce_feature_model.selftest -- python3 scripts/lib/sce_feature_model.py --check
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.
@@ -3385,8 +3774,8 @@ layer_c0_test_discipline() {
     # vacuous silently — its five mutations are shapes the PRE-R2288 tree either
     # contained or would have accepted, so a parser that stopped understanding
     # the body reds here instead of reporting a clean function.
-    python3 scripts/lib/framing_refusal_reachability_gate.py || return 1
-    python3 scripts/lib/framing_refusal_reachability_gate.py --selftest >/dev/null || return 1
+    _runci_leg framing_refusal_reachability_gate.selftest -- python3 scripts/lib/framing_refusal_reachability_gate.py --selftest >/dev/null
+    _runci_leg framing_refusal_reachability_gate --after framing_refusal_reachability_gate.selftest -- python3 scripts/lib/framing_refusal_reachability_gate.py
     # R2239 (open-debt item 586) — the ABI-provenance gate's OWN soundness.
     #
     # Its `--check` half needs zenoh-c's source checkout and the four generator
@@ -3397,7 +3786,7 @@ layer_c0_test_discipline() {
     # unstable term that zenoh 1.10.0's `ReplyError` third field added — plus
     # the four population-zero shapes (empty origin table, an upstream source
     # declaring nothing, tables in which nothing moves, three tables of four).
-    python3 scripts/lib/capi_c_abi_provenance.py --selftest || return 1
+    _runci_leg capi_c_abi_provenance.selftest -- python3 scripts/lib/capi_c_abi_provenance.py --selftest
     # R2142 (open-debt item 225) — WHICH axes of the scouting socket config can
     # move, and which are witnessed BOTH-ENDED. Here for the same reason as the
     # gate above: the whole population is on disk — the scalar parameters of
@@ -3408,7 +3797,7 @@ layer_c0_test_discipline() {
     # reds this, rather than quietly widening the denominator while the covered
     # count stands still. It also refuses a population of ZERO, which is the
     # shape where a broken reader reports everything covered.
-    python3 scripts/lib/scouting_socket_axis_census.py || return 1
+    _runci_leg scouting_socket_axis_census -- python3 scripts/lib/scouting_socket_axis_census.py
     # R2144 (unregistered open-debt item 218) — THE PRECONDITION SET, from both
     # sides. R2140's `every_flag_the_expansion_emits_carries_the_precondition_...`
     # is the DYNAMIC half and stays where it is: it expands fixture rows in three
@@ -3422,7 +3811,7 @@ layer_c0_test_discipline() {
     # invariant — a flag the binary refuses without a partner is either one the
     # expansion cannot emit or one it emits only behind a guard — is decidable by
     # reading, with nothing built and no shape staged.
-    python3 scripts/lib/flag_precondition_gate.py || return 1
+    _runci_leg flag_precondition_gate -- python3 scripts/lib/flag_precondition_gate.py
     # 2026-08-25 — the RELICENSE gate. The free tier moved from
     # `LGPL-3.0-or-later` to `AGPL-3.0-or-later` across 1032 tracked files in
     # one substitution, and the failure mode of that operation is not a crash:
@@ -3444,26 +3833,26 @@ layer_c0_test_discipline() {
     # program grading its own dispatch. The selftest drives both modes against
     # a fixture `git init` tree and asserts, for every non-write arm, that the
     # fixture is UNCHANGED. Mutating either refusal reds it.
-    python3 scripts/lib/relicense_spdx.py --selftest || return 1
-    python3 scripts/lib/relicense_spdx.py --check || return 1
+    _runci_leg relicense_spdx.selftest -- python3 scripts/lib/relicense_spdx.py --selftest
+    _runci_leg relicense_spdx --after relicense_spdx.selftest -- python3 scripts/lib/relicense_spdx.py --check
     # R3188 (item 747) — the upstream version CLAUDE.md states must be the pin
     # `UPSTREAM_VERSION` enforces; a bullet that states none FAILS, not passes.
-    python3 scripts/lib/claude_md_upstream_pin_gate.py --selftest || return 1
-    python3 scripts/lib/claude_md_upstream_pin_gate.py --check || return 1
+    _runci_leg claude_md_upstream_pin_gate.selftest -- python3 scripts/lib/claude_md_upstream_pin_gate.py --selftest
+    _runci_leg claude_md_upstream_pin_gate --after claude_md_upstream_pin_gate.selftest -- python3 scripts/lib/claude_md_upstream_pin_gate.py --check
     # The server layer (storage, admin space, auth methods) sits above wz-session-core: the core
     # names no upper crate and the list of server modules not yet moved out of it only shrinks.
-    python3 scripts/lib/layer_direction_gate.py --selftest || return 1
-    python3 scripts/lib/layer_direction_gate.py --check || return 1
+    _runci_leg layer_direction_gate.selftest -- python3 scripts/lib/layer_direction_gate.py --selftest
+    _runci_leg layer_direction_gate --after layer_direction_gate.selftest -- python3 scripts/lib/layer_direction_gate.py --check
     # Every fact the dissection has published to a selector stays published: the registry
     # crates/wz-session-core/src/published_selector_paths.txt only grows, and a line
     # origin/main holds that this tree lost or changed is refused (a moved field is renamed in
     # dissect_schema::RENAMED). Where origin/main is not in the clone the check says so.
-    python3 scripts/lib/publish_selector_paths.py --selftest || return 1
-    python3 scripts/lib/publish_selector_paths.py --check origin/main || return 1
+    _runci_leg publish_selector_paths.selftest -- python3 scripts/lib/publish_selector_paths.py --selftest
+    _runci_leg publish_selector_paths --after publish_selector_paths.selftest -- python3 scripts/lib/publish_selector_paths.py --check origin/main
     # The stats golden's provenance line against the oracle's lock (round 3976 moved the pin and the
     # golden kept its old versions; Layer E17 is where that showed, hosted and a build later).
-    python3 scripts/lib/zenoh_stats_golden.py --header-selftest || return 1
-    python3 scripts/lib/zenoh_stats_golden.py --header || return 1
+    _runci_leg zenoh_stats_golden.header-selftest -- python3 scripts/lib/zenoh_stats_golden.py --header-selftest
+    _runci_leg zenoh_stats_golden.header --after zenoh_stats_golden.header-selftest -- python3 scripts/lib/zenoh_stats_golden.py --header
     # R2084 — the ACCEPT-DEADLINE gate. A test that opens a listener and spawns
     # an external process at it has its liveness resting entirely on that
     # process dialling; `TcpListener::accept` has no deadline and
@@ -3479,8 +3868,8 @@ layer_c0_test_discipline() {
     # since a gate that opens with 58 violations becomes a ceiling instead of a
     # rule. Enforcement MEASURED by `--selftest`, which drives the same
     # predicate the scan drives and checks the window actually binds.
-    python3 scripts/lib/accept_deadline_lint.py --selftest || return 1
-    python3 scripts/lib/accept_deadline_lint.py || return 1
+    _runci_leg accept_deadline_lint.selftest -- python3 scripts/lib/accept_deadline_lint.py --selftest
+    _runci_leg accept_deadline_lint --after accept_deadline_lint.selftest -- python3 scripts/lib/accept_deadline_lint.py
     # R311y892 (debt-job-budget-binding) — the JOB-BUDGET BINDING gate. Layer
     # C0b already selftests `job-budget-margin.sh` in both directions, and what
     # had no gate at all was the number it is HANDED: the budget argument has to
@@ -3494,16 +3883,16 @@ layer_c0_test_discipline() {
     # moving one number of the pair, dropping the stamp step, quoting
     # `timeout-minutes` into a string, and renaming the script out from under
     # the lint's own regex (which must FAIL as population-zero, not pass).
-    python3 scripts/lib/job_budget_binding.py || return 1
+    _runci_leg job_budget_binding -- python3 scripts/lib/job_budget_binding.py
     # Layer C1cn's two halves (the census shards and the builds job) are one fact
     # in two places: a builds job dropped from the workflow leaves every job green
     # and the crates uncompiled with their features.
-    python3 scripts/lib/c1cn_part_binding.py --selftest || return 1
-    python3 scripts/lib/c1cn_part_binding.py || return 1
+    _runci_leg c1cn_part_binding.selftest -- python3 scripts/lib/c1cn_part_binding.py --selftest
+    _runci_leg c1cn_part_binding --after c1cn_part_binding.selftest -- python3 scripts/lib/c1cn_part_binding.py
     # A sharded job's matrix lists exactly the shards its count names: a shard dropped from the
     # list leaves every job green and its part of the work run by nobody.
-    python3 scripts/lib/shard_matrix_binding.py --selftest || return 1
-    python3 scripts/lib/shard_matrix_binding.py || return 1
+    _runci_leg shard_matrix_binding.selftest -- python3 scripts/lib/shard_matrix_binding.py --selftest
+    _runci_leg shard_matrix_binding --after shard_matrix_binding.selftest -- python3 scripts/lib/shard_matrix_binding.py
     # R311y570 — the UNSEQUENCED-PROBE lint. A C probe that passes `&x` to a
     # constructor and reads `x` through a loan accessor in the SAME full
     # expression is reading an uninitialised object: C does not order call
@@ -3514,7 +3903,7 @@ layer_c0_test_discipline() {
     #
     # Static for the same reason the count-guard gate is: both halves are in the
     # source. Enforcement MEASURED by re-introducing the y568 line verbatim.
-    python3 scripts/lib/unsequenced_probe_lint.py || return 1
+    _runci_leg unsequenced_probe_lint -- python3 scripts/lib/unsequenced_probe_lint.py
     # R311y725 (N2) — the VERDICT-REASON gate. `VerdictReason` is the SSOT for
     # what `complete: false` means, its `name()` is a wire format the export and
     # `wz-replay --alert` publish, and until this round nothing required a new
@@ -3526,7 +3915,7 @@ layer_c0_test_discipline() {
     # assertion can observe about its own absence. Its first run MEASURED
     # thirteen of twenty-three legs exercised and none of them named; all
     # thirteen were bound in the same round.
-    python3 scripts/lib/verdict_reason_lint.py || return 1
+    _runci_leg verdict_reason_lint -- python3 scripts/lib/verdict_reason_lint.py
     # R311y727 (N19) — the VERDICT-ASSERTION gate, and it is about the shape of
     # the claim rather than its existence. `reasons()` answers with a SET, so
     # `contains(&VerdictReason::X)` holds while every OTHER leg fires too: a
@@ -3540,7 +3929,7 @@ layer_c0_test_discipline() {
     # pin reds it, and replacing that pin with a comment and a string holding
     # the same text reds it too (R311y717's lesson -- a gate a comment can
     # satisfy is a gate that grades prose).
-    python3 scripts/lib/verdict_assertion_lint.py || return 1
+    _runci_leg verdict_assertion_lint -- python3 scripts/lib/verdict_assertion_lint.py
     # R311y820 — the LITERAL COOKIE SIGNING KEY gate. Static because the
     # invariant is "no SHIPPED path builds this key from a constant", which no
     # test can observe about a path it does not run. It lives in C0 rather than
@@ -3558,8 +3947,8 @@ layer_c0_test_discipline() {
     # predicate, so a test is no longer a gate edit and a move is no longer
     # invisible. The selftest runs FIRST: its refusal arms are the only place
     # the failure branches are exercised.
-    python3 scripts/lib/literal_key_gate.py --selftest || return 1
-    python3 scripts/lib/literal_key_gate.py || return 1
+    _runci_leg literal_key_gate.selftest -- python3 scripts/lib/literal_key_gate.py --selftest
+    _runci_leg literal_key_gate --after literal_key_gate.selftest -- python3 scripts/lib/literal_key_gate.py
     # R2781 (unregistered open-debt item 810) — the RELEASED PORT gate: a
     # socket's number read and then let go while the test still uses it. The
     # kernel hands a released number to the next `bind(:0)`, including a
@@ -3568,15 +3957,15 @@ layer_c0_test_discipline() {
     # with one shared helper and a sweep that was a search; the search missed
     # the second. This derives the population from the tree and FAILs on an
     # empty one, a release no row classifies, and a row with no release.
-    python3 scripts/lib/released_port_gate.py --selftest || return 1
-    python3 scripts/lib/released_port_gate.py || return 1
+    _runci_leg released_port_gate.selftest -- python3 scripts/lib/released_port_gate.py --selftest
+    _runci_leg released_port_gate --after released_port_gate.selftest -- python3 scripts/lib/released_port_gate.py
     # R2784 — the accept cookie carrier gate's refusal arms, which need no
     # checkout; the grading itself runs `--require` in Layer Z, the lane that
     # provisions the pinned upstream tree.
-    python3 scripts/lib/cookie_carrier_gate.py --selftest || return 1
+    _runci_leg cookie_carrier_gate.selftest -- python3 scripts/lib/cookie_carrier_gate.py --selftest
     # The Close reason byte's gate: refusal arms only (no checkout needed); the
     # grading against upstream's `close::reason` runs `--require` in Layer Z.
-    python3 scripts/lib/close_reason_gate.py --selftest || return 1
+    _runci_leg close_reason_gate.selftest -- python3 scripts/lib/close_reason_gate.py --selftest
     # R2150 (unregistered open-debt item 539) — the KIND of unhonoured. R2148
     # split `UNHONOURED_UPSTREAM_CONFIG_KEYS` into "wz cannot" and "the reader
     # was never told", and the test guarding that split makes it total,
@@ -3591,15 +3980,15 @@ layer_c0_test_discipline() {
     # non-default: `cargo test -p wz-runtime-tokio` does not compile it, so the
     # crate's own suite cannot stand in for this. The selftest runs FIRST; its
     # twelve arms are the only place the failure branches are exercised.
-    python3 scripts/lib/unhonoured_kind_evidence_gate.py --selftest || return 1
-    python3 scripts/lib/unhonoured_kind_evidence_gate.py || return 1
+    _runci_leg unhonoured_kind_evidence_gate.selftest -- python3 scripts/lib/unhonoured_kind_evidence_gate.py --selftest
+    _runci_leg unhonoured_kind_evidence_gate --after unhonoured_kind_evidence_gate.selftest -- python3 scripts/lib/unhonoured_kind_evidence_gate.py
     # R2872 — no combined `actions/cache` anywhere, and every restore has its
     # save. The combined action saves in a post step a red job never runs, so a
     # red after the cached work discarded it; register item 350 fixed the apt
     # members and left seven oracle caches, one of which cost run 36207477909
     # every Layer E/Z leg. The gate derives the members from the workflows.
-    python3 scripts/lib/workflow_cache_save_gate.py --selftest || return 1
-    python3 scripts/lib/workflow_cache_save_gate.py || return 1
+    _runci_leg workflow_cache_save_gate.selftest -- python3 scripts/lib/workflow_cache_save_gate.py --selftest
+    _runci_leg workflow_cache_save_gate --after workflow_cache_save_gate.selftest -- python3 scripts/lib/workflow_cache_save_gate.py
     # R3160 (open-debt item 899) — the hosted cache is capped at 10 GB and
     # evicts LRU, which lost the 5 MB RocksDB engine (293 s to rebuild) to 600 MB
     # target directories. Every cache key class is declared in
@@ -3607,25 +3996,25 @@ layer_c0_test_discipline() {
     # commit-scoped key stands outside its allow-list, every save is limited to
     # the default branch, the budgets fit under the target, and the pruner's
     # token is scoped. The pruner's selftest drives its four passes on fixtures.
-    python3 scripts/lib/workflow_cache_budget_gate.py --selftest || return 1
-    python3 scripts/lib/workflow_cache_budget_gate.py || return 1
-    python3 scripts/lib/cache_prune.py --selftest || return 1
+    _runci_leg workflow_cache_budget_gate.selftest -- python3 scripts/lib/workflow_cache_budget_gate.py --selftest
+    _runci_leg workflow_cache_budget_gate --after workflow_cache_budget_gate.selftest -- python3 scripts/lib/workflow_cache_budget_gate.py
+    _runci_leg cache_prune.selftest -- python3 scripts/lib/cache_prune.py --selftest
     # R3013 — every JSON cell that takes the integer door is named in the
     # header's integer paragraph and in its document's revision row. R2672
     # (item 774) — no two tests join the same multicast (group, port). Both ran
     # only at pre-push gate 2z, which the hook defers since 2026-09-23, so no
     # default push and no hosted layer graded them: the first stood red from
     # e2e_open 3 (the `expectation` differences) until the header named them.
-    python3 scripts/lib/json_integer_cell_gate.py --selftest || return 1
-    python3 scripts/lib/json_integer_cell_gate.py || return 1
-    python3 scripts/lib/multicast_address_collision_gate.py --selftest || return 1
-    python3 scripts/lib/multicast_address_collision_gate.py || return 1
+    _runci_leg json_integer_cell_gate.selftest -- python3 scripts/lib/json_integer_cell_gate.py --selftest
+    _runci_leg json_integer_cell_gate --after json_integer_cell_gate.selftest -- python3 scripts/lib/json_integer_cell_gate.py
+    _runci_leg multicast_address_collision_gate.selftest -- python3 scripts/lib/multicast_address_collision_gate.py --selftest
+    _runci_leg multicast_address_collision_gate --after multicast_address_collision_gate.selftest -- python3 scripts/lib/multicast_address_collision_gate.py
     # R3082 — the Zephyr board table and what its grades may claim. The refusal
     # arms run first on fixtures; the real table is then read against the
     # per-board settings, this file's lanes and the hosted jobs. Layer Qzb builds
     # exactly the rows this gate says are BUILT or HARDWARE.
-    python3 scripts/lib/zephyr_board_table_gate.py --selftest || return 1
-    python3 scripts/lib/zephyr_board_table_gate.py || return 1
+    _runci_leg zephyr_board_table_gate.selftest -- python3 scripts/lib/zephyr_board_table_gate.py --selftest
+    _runci_leg zephyr_board_table_gate --after zephyr_board_table_gate.selftest -- python3 scripts/lib/zephyr_board_table_gate.py
     # Open-debt item 876 — the admin node's verdict steps, which Layers Qa and
     # Qza run under QEMU and a lab runs against a board. The selftest drives
     # them against a fake node step by step (each step's fault reds it, and
@@ -3633,16 +4022,16 @@ layer_c0_test_discipline() {
     # they printed before the steps moved, and reads the board output through
     # this gate's record reader. About 5 s: it starts fake routers and a fake
     # QEMU and waits the lanes' one-second stack settle.
-    python3 scripts/lib/admin_node_verdict.py --selftest || return 1
+    _runci_leg admin_node_verdict.selftest -- python3 scripts/lib/admin_node_verdict.py --selftest
     # The instrument the stream steps of that verdict are made with (a fault-injecting TCP proxy): each
     # control held to its effect as the ends see it, and the cases run 20 times in one process, which is
     # how a flake is shown absent and not assumed (it waits on events, never on time).
-    python3 scripts/lib/stream_fault.py --selftest || return 1
-    python3 scripts/lib/stream_fault.py --stress 20 || return 1
+    _runci_leg stream_fault.selftest -- python3 scripts/lib/stream_fault.py --selftest
+    _runci_leg stream_fault.stress --after stream_fault.selftest -- python3 scripts/lib/stream_fault.py --stress 20
     # The stream steps' reference model of the node's contract and its faults, each of which must red
     # exactly the step that holds its property, and the drift check that holds the program's copy of the
     # lease, the retry schedule and the cells equal to the node's source (a virtual clock: no waiting).
-    python3 scripts/lib/admin_node_stream_steps.py --selftest || return 1
+    _runci_leg admin_node_stream_steps.selftest -- python3 scripts/lib/admin_node_stream_steps.py --selftest
     # R2162 (unregistered open-debt item 199) — the upstream zenoh CAPABILITY
     # FEATURE surface as a denominator. Item 199 recorded "18 of 19 have a wz
     # atom" as a hand measurement and nothing re-derived it afterwards, so a
@@ -3661,19 +4050,19 @@ layer_c0_test_discipline() {
     # other gates on this layer do not have: the upstream arm is the half NO
     # machine without a zenoh checkout exercises, so without it that arm's
     # failure branches would have a population of zero on most runs.
-    python3 scripts/lib/upstream_feature_census.py --selftest || return 1
-    python3 scripts/lib/upstream_feature_census.py || return 1
+    _runci_leg upstream_feature_census.selftest -- python3 scripts/lib/upstream_feature_census.py --selftest
+    _runci_leg upstream_feature_census --after upstream_feature_census.selftest -- python3 scripts/lib/upstream_feature_census.py
     # R3406 -- the same census for the other two originals wz replaces: every zenoh-pico
     # `Z_FEATURE_*` switch and every zenoh-c cargo feature, judged once against the drop-in
     # crates (docs/build-configuration.md C7). The pico arm reads the vendor submodule, so it
     # runs here; the zenoh-c arm needs the provisioned checkout and runs in Layer C1cc.
-    python3 scripts/lib/upstream_switch_map.py --selftest || return 1
-    python3 scripts/lib/upstream_switch_map.py || return 1
+    _runci_leg upstream_switch_map.selftest -- python3 scripts/lib/upstream_switch_map.py --selftest
+    _runci_leg upstream_switch_map --after upstream_switch_map.selftest -- python3 scripts/lib/upstream_switch_map.py
     # R3406 (open-debt item 910) -- the committed public-API surfaces of the pinned zenoh
     # crate: every arm present, each stamped with the pinned toolchain and format version.
     # The re-emission from upstream runs in Layer Z, where the source is.
-    python3 scripts/lib/rust_api_surface.py --selftest || return 1
-    python3 scripts/lib/rust_api_surface.py || return 1
+    _runci_leg rust_api_surface.selftest -- python3 scripts/lib/rust_api_surface.py --selftest
+    _runci_leg rust_api_surface --after rust_api_surface.selftest -- python3 scripts/lib/rust_api_surface.py
     # R2240 (unregistered open-debt item 592, completion condition 2) — every
     # zenohd ORACLE this tree builds must answer with the version this tree
     # PINS. The binaries are gitignored build output, so R2228 moving
@@ -3702,15 +4091,15 @@ layer_c0_test_discipline() {
     # binary returns OK. The selftest additionally drives the classes a live
     # tree cannot produce on demand (mute binary, metadata disagreeing with the
     # binary beside it, an all-absent population armed and unarmed).
-    python3 scripts/lib/oracle_pin_gate.py --selftest || return 1
-    python3 scripts/lib/oracle_pin_gate.py --check || return 1
+    _runci_leg oracle_pin_gate.selftest -- python3 scripts/lib/oracle_pin_gate.py --selftest
+    _runci_leg oracle_pin_gate --after oracle_pin_gate.selftest -- python3 scripts/lib/oracle_pin_gate.py --check
     # R3978 — the machine's store those oracles are built into and copied from.
     # The selftest drives publication (refused off the pin), copying, the key that
     # makes a half copy read as stale, pruning and the source view against a
     # temporary store; `check` derives this tree's layout and reads no binary, so
     # it grades the same on a host with no oracle as on one with four.
-    python3 scripts/lib/oracle_store.py selftest || return 1
-    python3 scripts/lib/oracle_store.py check || return 1
+    _runci_leg oracle_store.selftest -- python3 scripts/lib/oracle_store.py selftest
+    _runci_leg oracle_store.check --after oracle_store.selftest -- python3 scripts/lib/oracle_store.py check
     # R2326 (unregistered open-debt item 10) — the gate above judges the four
     # zenohd oracles. It cannot judge the other three roots this tree resolves,
     # because those oracles CANNOT ANSWER: measured 2026-09-04, `strings` finds
@@ -3737,8 +4126,8 @@ layer_c0_test_discipline() {
     # to join `target/mbedtls/include` itself reds it with that route UNCHECKED.
     # The selftest additionally drives the two population-zero refusals, which
     # a live tree cannot produce on demand.
-    python3 scripts/lib/oracle_provenance_gate.py --selftest || return 1
-    python3 scripts/lib/oracle_provenance_gate.py --check || return 1
+    _runci_leg oracle_provenance_gate.selftest -- python3 scripts/lib/oracle_provenance_gate.py --selftest
+    _runci_leg oracle_provenance_gate --after oracle_provenance_gate.selftest -- python3 scripts/lib/oracle_provenance_gate.py --check
     # R2327 (unregistered open-debt item 11) — several guarded calls run the
     # SAME cargo-test filter under DIFFERENT feature unions, and nothing
     # required their asserted counts to be consistent with each other. R311y772
@@ -3768,8 +4157,8 @@ layer_c0_test_discipline() {
     # symbol-census guards off 1 reds the AGREE axis. The selftest drives
     # R311y772's real numbers, the shell-tail and continuation hazards, and both
     # population-zero refusals.
-    python3 scripts/lib/guarded_count_lattice_gate.py --selftest || return 1
-    python3 scripts/lib/guarded_count_lattice_gate.py --check || return 1
+    _runci_leg guarded_count_lattice_gate.selftest -- python3 scripts/lib/guarded_count_lattice_gate.py --selftest
+    _runci_leg guarded_count_lattice_gate --after guarded_count_lattice_gate.selftest -- python3 scripts/lib/guarded_count_lattice_gate.py --check
     # R2328 (unregistered open-debt item 12) — a member EXCLUDED from Layer C1's
     # `cargo test --workspace` runs nowhere unless some other lane names it with
     # `-p`, and nothing required that. The exclusion is what makes the hole
@@ -3794,8 +4183,8 @@ layer_c0_test_discipline() {
     # UNRUN, and removing it returns rc=0 byte-identically. An earlier attempt
     # with `wz-tls-record` did NOT red — that crate already has a lane — which
     # is why the control group names a crate the sweep proved has none.
-    python3 scripts/lib/workspace_exclude_lane_gate.py --selftest || return 1
-    python3 scripts/lib/workspace_exclude_lane_gate.py --check || return 1
+    _runci_leg workspace_exclude_lane_gate.selftest -- python3 scripts/lib/workspace_exclude_lane_gate.py --selftest
+    _runci_leg workspace_exclude_lane_gate --after workspace_exclude_lane_gate.selftest -- python3 scripts/lib/workspace_exclude_lane_gate.py --check
     # R2329 (unregistered open-debt item 13) — `#[must_use] AdminAnswerOutcome`
     # forces a host to LOOK at the deny outcome; it cannot force the host to
     # say anything. Until this round every host said it BY HAND: the same
@@ -3819,8 +4208,8 @@ layer_c0_test_discipline() {
     # Enforcement MEASURED on the LIVE tree: deleting the emit from the
     # wz-runtime-tokio host reds it with SILENT and names that file:line;
     # restoring it returns rc=0.
-    python3 scripts/lib/deny_diagnostic_gate.py --selftest || return 1
-    python3 scripts/lib/deny_diagnostic_gate.py --check || return 1
+    _runci_leg deny_diagnostic_gate.selftest -- python3 scripts/lib/deny_diagnostic_gate.py --selftest
+    _runci_leg deny_diagnostic_gate --after deny_diagnostic_gate.selftest -- python3 scripts/lib/deny_diagnostic_gate.py --check
     # R2333 (unregistered open-debt item 15, the `transport-multicast` atom) —
     # a SHIPPED multicast drive loop that runs for the node's life must be one
     # its host can ask to stop. The library has had the graceful stop since
@@ -3852,7 +4241,7 @@ layer_c0_test_discipline() {
     # OTHER arm at the other site; and narrowing the derivation's discriminator
     # so nothing matches reds the empty-population guard. Restoring each
     # returns rc=0.
-    python3 scripts/lib/multicast_stop_wiring_gate.py || return 1
+    _runci_leg multicast_stop_wiring_gate -- python3 scripts/lib/multicast_stop_wiring_gate.py
     # R2380 (open-debt item 15) — a live atom reason that calls a run-ci lane
     # LOCAL-only must agree with the workflow that runs it. Measured when the
     # gate was written: 32 such claims across ~14 atoms and NOT ONE still true,
@@ -3869,7 +4258,7 @@ layer_c0_test_discipline() {
     # ratchet up after a repair. Enforcement MEASURED, three probes: budget one
     # low reds the "rose" arm, one high reds the "left up" arm, and an empty
     # claim population reds the subject-moved guard.
-    python3 scripts/lib/lane_locality_claim_gate.py || return 1
+    _runci_leg lane_locality_claim_gate -- python3 scripts/lib/lane_locality_claim_gate.py
     # R2241 (unregistered open-debt item 581) — an upstream claim must still
     # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
     # every source claim, which is right for OUR sources (we move those lines
@@ -3911,8 +4300,8 @@ layer_c0_test_discipline() {
     # needs one. The resolution arm runs in Layer Z, which builds zenohd; this
     # run PRINTS that deferral so a green form arm cannot be read as "every
     # citation resolves".
-    python3 scripts/lib/upstream_citation_anchor_gate.py --selftest || return 1
-    python3 scripts/lib/upstream_citation_anchor_gate.py --check || return 1
+    _runci_leg upstream_citation_anchor_gate.selftest -- python3 scripts/lib/upstream_citation_anchor_gate.py --selftest
+    _runci_leg upstream_citation_anchor_gate --after upstream_citation_anchor_gate.selftest -- python3 scripts/lib/upstream_citation_anchor_gate.py --check
     # R2358 — Layer E must not SELECT a test whose oracle it does not PROVISION.
     # That lane sweeps `-- --ignored` minus a hand-written token list, so it
     # ADOPTS every ignored test added to wz-integration-tests, and it builds only
@@ -3926,8 +4315,8 @@ layer_c0_test_discipline() {
     # sweep SELECTS, which is answerable by reading run-ci.sh and the test crate,
     # with no binary of any kind. MEASURED both ways -- removing the token reds it
     # naming exactly the three that failed hosted, and nothing else.
-    python3 scripts/lib/layer_e_oracle_scope_gate.py --selftest || return 1
-    python3 scripts/lib/layer_e_oracle_scope_gate.py || return 1
+    _runci_leg layer_e_oracle_scope_gate.selftest -- python3 scripts/lib/layer_e_oracle_scope_gate.py --selftest
+    _runci_leg layer_e_oracle_scope_gate --after layer_e_oracle_scope_gate.selftest -- python3 scripts/lib/layer_e_oracle_scope_gate.py
     # R2753 — a differential leg must not grade a side against an INTEGER
     # LITERAL while the other side stands in the same fn. HERE for the same
     # reason as the gate above: it is answered by reading the test crate, with
@@ -3935,8 +4324,8 @@ layer_c0_test_discipline() {
     # before this round's repair it names exactly the two legs that were wrong
     # and nothing else, and against the repaired tree it names none over 190
     # differential fns.
-    python3 scripts/lib/differential_literal_gate.py --selftest || return 1
-    python3 scripts/lib/differential_literal_gate.py --check || return 1
+    _runci_leg differential_literal_gate.selftest -- python3 scripts/lib/differential_literal_gate.py --selftest
+    _runci_leg differential_literal_gate --after differential_literal_gate.selftest -- python3 scripts/lib/differential_literal_gate.py --check
     # R2260 (open-debt item 593's residue) — wz's per-protocol `is_streamed` /
     # `is_reliable`, which answer zenoh-c's `z_link_is_streamed` /
     # `z_link_reliability` and are therefore UPSTREAM'S values rather than wz's
@@ -3948,15 +4337,15 @@ layer_c0_test_discipline() {
     # here; the ORACLE arm needs a zenoh source tree and is REQUIRED in Layer Z,
     # which provisions one. Without a checkout this run says so rather than
     # reporting a green that would read as "wz agrees with upstream".
-    python3 scripts/lib/upstream_link_axis_gate.py --selftest || return 1
-    python3 scripts/lib/upstream_link_axis_gate.py --check || return 1
+    _runci_leg upstream_link_axis_gate.selftest -- python3 scripts/lib/upstream_link_axis_gate.py --selftest
+    _runci_leg upstream_link_axis_gate --after upstream_link_axis_gate.selftest -- python3 scripts/lib/upstream_link_axis_gate.py --check
     # R2363 (open-debt item 15) — every locator config key an upstream link
     # crate declares is either read by wz or named as that atom's residual.
     # The SELFTEST runs here because it needs nothing; the CHECK's whole
     # population is derived from an upstream checkout, so without one it SKIPS
     # here and is REQUIRED in Layer Z, exactly like the two gates above.
-    python3 scripts/lib/upstream_link_config_keys_gate.py --selftest || return 1
-    python3 scripts/lib/upstream_link_config_keys_gate.py --check || return 1
+    _runci_leg upstream_link_config_keys_gate.selftest -- python3 scripts/lib/upstream_link_config_keys_gate.py --selftest
+    _runci_leg upstream_link_config_keys_gate --after upstream_link_config_keys_gate.selftest -- python3 scripts/lib/upstream_link_config_keys_gate.py --check
     # R2973 (open-debt items 851 / 852) — WHICH HOSTS each link and each
     # host-restricted feature runs on. `platform-macos` / `platform-windows` claim
     # wz runs there, and the only execution evidence was one link (TCP) on the
@@ -3968,23 +4357,23 @@ layer_c0_test_discipline() {
     # source and is REQUIRED in Layer Z, the same split as the link-axis gate
     # above. The hosted legs (`--run macos|windows`) run on the `portability`
     # job, which is the only place those hosts exist.
-    python3 scripts/lib/platform_surface_matrix.py --selftest || return 1
-    python3 scripts/lib/platform_surface_matrix.py --check || return 1
+    _runci_leg platform_surface_matrix.selftest -- python3 scripts/lib/platform_surface_matrix.py --selftest
+    _runci_leg platform_surface_matrix --after platform_surface_matrix.selftest -- python3 scripts/lib/platform_surface_matrix.py --check
     # R3355 — the Platform workflow starts only for a push under its `paths:`
     # list, and the list named the crates the lane is ABOUT, not the crates it
     # BUILDS: a repair to the port picker its Windows test depends on never
     # started the lane that could have graded it. The closure is derived from
     # `cargo tree`, so a crate added under a lane crate is found by that commit.
-    python3 scripts/lib/platform_trigger_paths_gate.py --selftest || return 1
-    python3 scripts/lib/platform_trigger_paths_gate.py --check || return 1
+    _runci_leg platform_trigger_paths_gate.selftest -- python3 scripts/lib/platform_trigger_paths_gate.py --selftest
+    _runci_leg platform_trigger_paths_gate --after platform_trigger_paths_gate.selftest -- python3 scripts/lib/platform_trigger_paths_gate.py --check
     # R2991 — a field of a pico options struct that NO function reads. The pico
     # ABI mirrors zenoh-pico's options field for field, and mirroring the layout
     # is not reading the fields: a program's request that nothing reads links,
     # runs and does nothing. Five rounds found one struct each by reading it; this
     # derives the population from the crate's source, so the next one is found by
     # the commit that adds the field. Both halves run here: it needs no checkout.
-    python3 scripts/lib/pico_option_field_reader_gate.py --selftest || return 1
-    python3 scripts/lib/pico_option_field_reader_gate.py --check || return 1
+    _runci_leg pico_option_field_reader_gate.selftest -- python3 scripts/lib/pico_option_field_reader_gate.py --selftest
+    _runci_leg pico_option_field_reader_gate --after pico_option_field_reader_gate.selftest -- python3 scripts/lib/pico_option_field_reader_gate.py --check
     # R2564 — the token-plane diff `routing-token-tables` rests on, re-derived
     # from upstream's own `HatTokenTrait` rather than asserted in prose. The
     # atom's residual was an UNDONE AUDIT, and the sentence naming it had already
@@ -3992,9 +4381,9 @@ layer_c0_test_discipline() {
     # which is why closing it in prose would only have restarted the decay. Same
     # split as the three gates above: the SELFTEST needs nothing and runs here,
     # the grade needs a zenoh source tree and is REQUIRED in Layer Z.
-    python3 scripts/lib/token_plane_parity_gate.py --selftest || return 1
-    python3 scripts/lib/token_plane_parity_gate.py --check || return 1
-    return 0
+    _runci_leg token_plane_parity_gate.selftest -- python3 scripts/lib/token_plane_parity_gate.py --selftest
+    _runci_leg token_plane_parity_gate --after token_plane_parity_gate.selftest -- python3 scripts/lib/token_plane_parity_gate.py --check
+    _runci_legs_close
 }
 
 # ─── Layer C0s — which lane runs a test, and what a test waits for ──
@@ -4034,14 +4423,18 @@ layer_c0_test_discipline() {
 #     layers that select the test: 29 notes named `Layer E` for tests another lane
 #     runs. It reads `cargo tree` metadata, which Layer A4 in the same job needs,
 #     and builds nothing.
+#
+# The three read the tree and not each other, so the lane is a leg ledger
+# (open-debt item 938): each grade waits only on its own gate's selftest.
 layer_c0s_test_lane_discipline() {
-    python3 scripts/lib/silent_skip_gate.py --selftest || return 1
-    python3 scripts/lib/silent_skip_gate.py --check || return 1
-    python3 scripts/lib/barrier_needle_gate.py --selftest || return 1
-    python3 scripts/lib/barrier_needle_gate.py --check || return 1
-    python3 scripts/lib/lane_feature_membership_gate.py --selftest || return 1
-    python3 scripts/lib/lane_feature_membership_gate.py || return 1
-    return 0
+    _runci_legs_open C0s || return 1
+    _runci_leg silent_skip_gate.selftest -- python3 scripts/lib/silent_skip_gate.py --selftest
+    _runci_leg silent_skip_gate --after silent_skip_gate.selftest -- python3 scripts/lib/silent_skip_gate.py --check
+    _runci_leg barrier_needle_gate.selftest -- python3 scripts/lib/barrier_needle_gate.py --selftest
+    _runci_leg barrier_needle_gate --after barrier_needle_gate.selftest -- python3 scripts/lib/barrier_needle_gate.py --check
+    _runci_leg lane_feature_membership_gate.selftest -- python3 scripts/lib/lane_feature_membership_gate.py --selftest
+    _runci_leg lane_feature_membership_gate --after lane_feature_membership_gate.selftest -- python3 scripts/lib/lane_feature_membership_gate.py
+    _runci_legs_close
 }
 
 # ─── Layer C0mut — every leg of the verdict is LOAD-BEARING ─────────
@@ -5178,12 +5571,63 @@ EOF
         scope+="$(basename "${wf}")=${n} "
     done
 
+    # Open-debt item 945: a job's packages come from its list file, the file its
+    # archive key hashes. The reader must install what a canonical list names,
+    # and refuse a list two jobs could spell differently for the same packages
+    # (they would hash apart and stop sharing an entry) or one written for
+    # another runner image.
+    local list_dir list_log list_stub
+    list_dir="$(mktemp -d)"
+    list_log="$(mktemp)"
+    list_stub="$(mktemp)"
+    # The stub's own `$*` and `$WZ_LIST_LOG` are expanded when the STUB runs, so they are
+    # written out literally here.
+    # shellcheck disable=SC2016
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$WZ_LIST_LOG"\nexit 0\n' >"$list_stub"
+    chmod +x "$list_stub"
+    printf 'image ubuntu22\nclang\ncmake\npkg-config\n' >"${list_dir}/good.list"
+    printf 'image ubuntu22\ncmake\nclang\n' >"${list_dir}/unsorted.list"
+    printf 'image ubuntu22\n# why\nclang\n' >"${list_dir}/comment.list"
+    printf 'clang\ncmake\n' >"${list_dir}/noimage.list"
+    if ! WZ_LIST_LOG="$list_log" ImageOS=ubuntu22 WZ_APT_CMD="$list_stub" WZ_APT_DEADLINE=5 \
+        bash "$script" --list "${list_dir}/good.list" >/dev/null 2>&1 \
+        || ! grep -q 'install .*clang cmake pkg-config$' "$list_log"; then
+        rm -rf "$list_dir" "$list_log" "$list_stub"
+        echo "  Layer C0g FAIL: a canonical list file did not install the packages" \
+            "it names" >&2
+        return 1
+    fi
+    local bad_list
+    for bad_list in unsorted comment noimage; do
+        : >"$list_log"
+        if WZ_LIST_LOG="$list_log" ImageOS=ubuntu22 WZ_APT_CMD="$list_stub" WZ_APT_DEADLINE=5 \
+            bash "$script" --list "${list_dir}/${bad_list}.list" >/dev/null 2>&1 \
+            || [[ -s "$list_log" ]]; then
+            rm -rf "$list_dir" "$list_log" "$list_stub"
+            echo "  Layer C0g FAIL: the ${bad_list} list was accepted or reached apt;" \
+                "a non-canonical list hashes apart from its equal and loses the" \
+                "shared archive" >&2
+            return 1
+        fi
+    done
+    : >"$list_log"
+    if WZ_LIST_LOG="$list_log" ImageOS=ubuntu24 WZ_APT_CMD="$list_stub" WZ_APT_DEADLINE=5 \
+        bash "$script" --list "${list_dir}/good.list" >/dev/null 2>&1 \
+        || [[ -s "$list_log" ]]; then
+        rm -rf "$list_dir" "$list_log" "$list_stub"
+        echo "  Layer C0g FAIL: a list written for ubuntu22 installed on an ubuntu24" \
+            "runner, under a key that names the other image" >&2
+        return 1
+    fi
+    rm -rf "$list_dir" "$list_log" "$list_stub"
+
     _runci_free_port_gate || return 1
 
     echo "  apt ceiling gate: OK (passes a prompt command, kills a hung one in" \
         "${elapsed}s against a 2s deadline -- bounded on BOTH sides, so an arm that" \
         "never hung fails too -- installs past a failed update and still fails on a" \
-        "failed install, refuses an empty package list, and ${routed} step(s)" \
+        "failed install, refuses an empty package list, installs a canonical list" \
+        "file and refuses 4 malformed or foreign ones, and ${routed} step(s)" \
         "across ${#workflows[@]} workflow(s) route through it with 0 calling" \
         "apt-get directly: ${scope% })"
     return 0
@@ -5497,11 +5941,121 @@ layer_c1_cargo_test() {
     # no_std `wz-session-core` without adding it, so C1 did not compile at all
     # (hosted run 36338677128). The multicast-tests exclude stays by name: its
     # reason is transport-unicast unification, not no_std.
+    #
+    # Open-debt item 940 — and SHARDS, which are a different kind of exclusion:
+    # a member that builds in this graph and whose tests run in a lane of their
+    # own, at the features this selection gives it (Layer C1cap). They sit
+    # outside the invocation's own parentheses on purpose: pre-push gate 8
+    # (`workspace-check-gate.sh`) reads the excludes inside them as members
+    # that CANNOT join the workspace build, and a shard must still be checked
+    # there.
     local nostd excludes=()
+    local -a sharded_out=(--exclude wz-capture)
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do excludes+=(--exclude "$member"); done
-    (cd crates && cargo test --workspace "${excludes[@]}" \
+    (cd crates && cargo test --workspace "${excludes[@]}" "${sharded_out[@]}" \
         --exclude wz-runtime-tokio-multicast-tests --quiet)
+}
+
+# ─── Layer C1cap — the wz-capture shard of Layer C1 ─────────────────
+#
+# Open-debt item 940. Hosted `validate + verify + test` used 96% of its 1800 s
+# in run 43346654760 with every lane green, and Layer C1 was the step that grew:
+# 1066 s against 792 s and 795 s in the runs either side (43178526154,
+# 43360452070), the difference being a rust-cache entry restored with `full
+# match: false`. The job's own log splits the lane. The workspace compile is
+# 173 s (full match) to 273 s (partial); ONE test binary, wz-capture's lib tests
+# (1812 tests), runs 330 s to 470 s; every other binary and the doc tests
+# together run about 300 s. The job had to lose about 160 s to sit under the
+# 90% alarm on a partial match, and the next largest step in it (C1ch) is
+# 111 s to 164 s, so the crate whose tests are a third of the lane moves: C1
+# excludes it as a shard and this lane runs it in the `capture-shard` job.
+#
+# The shard must test what C1 tested, and the lane checks the two facts that
+# make it so on every run rather than trusting this paragraph:
+#   * FEATURES. C1's `cargo test --workspace` unifies features over every member
+#     it selects, which gives wz-capture `dissect`, `fixtures` and others from
+#     its dependents; `-p wz-capture` alone would give it its defaults. The set
+#     is cargo's own resolution of C1's selection (`cargo tree -i`), passed
+#     with `--features`, so the crate's own cfg is the one C1 compiled.
+#   * THE PARTITION. Leaving wz-capture out of C1's selection must change no
+#     member's features: its dev-dependencies could have been the only source
+#     of one. The lane resolves the selection with and without it and fails on
+#     any package whose features differ.
+# What does not carry over: wz-capture's dependencies are built at the features
+# its own graph asks for rather than at the workspace union, because cargo
+# cannot run one package's tests under another selection's resolution. Their
+# own tests stay in C1, at the union.
+layer_c1cap_capture_shard() {
+    local nostd feats="" member
+    local -a selection=()
+    nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
+    for member in $nostd; do selection+=(--exclude "$member"); done
+    # Layer C1's own selection: the same derived no_std set and the same named
+    # exclusion. Its shard exclusion is what this lane is about, so it is not
+    # in the selection.
+    selection+=(--exclude wz-runtime-tokio-multicast-tests)
+
+    # One line per resolved package, `name version (source)|features`, as a
+    # sorted set. ` (*)` marks a node cargo printed in full elsewhere; it depends
+    # on traversal order, which a removed root changes, so it is not a fact.
+    _c1cap_resolution() {
+        (cd crates && cargo tree --workspace "${selection[@]}" "$@" \
+            --edges normal,build,dev --format '{p}|{f}' --prefix none) \
+            | sed -e 's/ (\*)$//' | grep -F '|' | LC_ALL=C sort -u
+    }
+    _c1cap_features() {
+        local out
+        out="$(cd crates && cargo tree --workspace "${selection[@]}" -i wz-capture \
+            --edges normal,build,dev --depth 0 --format '{f}' --prefix none)" || {
+            echo "  C1cap FAIL: cargo could not resolve Layer C1's selection for wz-capture"
+            return 1
+        }
+        feats="${out%%$'\n'*}"
+        if [[ -z "$feats" || ! "$feats" =~ ^[a-z0-9_,-]+$ ]]; then
+            echo "  C1cap FAIL: cargo named no feature list for wz-capture under Layer C1's" \
+                "selection (read '${feats}'); a shard with no feature set would test the" \
+                "crate's defaults and call it C1's"
+            return 1
+        fi
+        echo "  C1cap: wz-capture under Layer C1's selection: --features $feats"
+    }
+    _c1cap_partition() {
+        local with without diff_out
+        with="$(_c1cap_resolution)" || {
+            echo "  C1cap FAIL: cargo could not resolve Layer C1's selection"; return 1; }
+        without="$(_c1cap_resolution --exclude wz-capture)" || {
+            echo "  C1cap FAIL: cargo could not resolve Layer C1's selection without the shard"
+            return 1
+        }
+        if [[ "$with" != "$without" ]]; then
+            diff_out="$(diff <(printf '%s\n' "$with") <(printf '%s\n' "$without"))"
+            echo "  C1cap FAIL: leaving wz-capture out of Layer C1's selection changes" \
+                "the features cargo resolves (< with it, > without it):"
+            echo "$diff_out"
+            return 1
+        fi
+        echo "  C1cap: Layer C1's selection resolves $(wc -l <<<"$with") package(s) to the" \
+            "same features with and without wz-capture"
+    }
+    _c1cap_tests() {
+        local out n
+        out="$( (cd crates && cargo test -p wz-capture --features "$feats" --quiet) 2>&1 \
+            | tee /dev/stderr )" || {
+            echo "  C1cap FAIL: \`cargo test -p wz-capture --features $feats\` exited non-zero"
+            return 1
+        }
+        n="$(_runci_passed_count <<<"$out")"
+        (( n > 0 )) || {
+            echo "  C1cap FAIL: wz-capture ran no test at --features $feats"; return 1; }
+        echo "  C1cap: $n wz-capture test(s) passed at Layer C1's features"
+    }
+
+    _runci_legs_open C1cap || return 1
+    _runci_leg features -- _c1cap_features
+    _runci_leg partition -- _c1cap_partition
+    _runci_leg tests --after features -- _c1cap_tests
+    _runci_legs_close
 }
 
 # ─── Layer C1b — cargo test -p wz-runtime-core --features alloc ────
@@ -5906,7 +6460,14 @@ layer_c1v_cargo_test_ws() {
     # Round 3798 -- 12 -> 14: the two accept-bound units that came with the accept bounds
     # (`accept_loop.rs`), present in this feature set and not in C1y's, which stays at 18. Read
     # off the run, not derived.
-    _runci_guarded_test C1v 14 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # 14 -> 16: the face loop's two heartbeat tests (`wz_runtime_tokio::liveness`), the idle loop
+    # that rests and the loop stopped in its tick; ungated, so C1y moves by the same +2. Read off
+    # what the build host PRINTED (`16 passed; 702 filtered out`).
+    # 16 -> 18: the two reserved-face id tests of the face counter
+    # (`the_reserved_faces_are_a_closed_band_apart_from_every_minted_id`,
+    # `the_counter_refuses_to_mint_a_reserved_id`); ungated, so C1y moves by the same +2. Read
+    # off what the build host PRINTED (`18 passed; 723 filtered out`).
+    _runci_guarded_test C1v 18 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -6916,9 +7477,12 @@ layer_c1ay_cargo_test_router_hat() {
     # and the retired versions freed by the writer (a pair test). PRINTED by each command on pc2.
     # Section 6.8: +1 on every arm, ungated: a reader of an older version is served its version's
     # routes (a pair test). PRINTED by each command on pc2.
-    _runci_guarded_test "C1AY router_forward 310" 310 \
+    # The c2 integration (client hat and admin, router clock): 310 -> 324.
+    # MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward 324" 324 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward qos 315" 315 \
+    # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward qos 329" 329 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -6955,7 +7519,8 @@ layer_c1ay_cargo_test_router_hat() {
     # The network gate: 264 -> 266.
     # Step (b), step 5: 266 -> 267.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 324 -> 334 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward mcast-faces 338" 338 \
+    # The c2 integration: 338 -> 353. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward mcast-faces 353" 353 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -6980,7 +7545,8 @@ layer_c1ay_cargo_test_router_hat() {
     # moved from the retired single-net peer forwarder. Ungated apart from `access-acl`, and
     # `config-mutate-runtime` must be OFF, which this arm and the hotreload arm below both are.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 305 -> 314 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward 318" 318 \
+    # The c2 integration: 318 -> 332. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward 332" 332 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -7000,7 +7566,8 @@ layer_c1ay_cargo_test_router_hat() {
     # tests nothing.
     # Item 751 step 7c -- 255 -> 256, the same inert witness as the arm above.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 308 -> 317 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward hotreload 321" 321 \
+    # The c2 integration: 321 -> 335. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward hotreload 335" 335 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -7019,14 +7586,16 @@ layer_c1ay_cargo_test_router_hat() {
     # (`ask_local_tokens`, `forget_local_tokens`, `local_tokens_alive`); each is cfg(routing-token-tables),
     # so this arm alone moves. Measured on the build host.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 355 -> 364 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward 368" 368 \
+    # The c2 integration: 368 -> 382. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward 382" 382 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 297 -> 306 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward multicast 310" 310 \
+    # The c2 integration: 310 -> 324. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward multicast 324" 324 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -7040,7 +7609,8 @@ layer_c1ay_cargo_test_router_hat() {
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 299 -> 308 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward linkstate 312" 312 \
+    # The c2 integration: 312 -> 328. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward linkstate 328" 328 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -7062,7 +7632,8 @@ layer_c1ay_cargo_test_router_hat() {
     # interest that finalized it ends; an interest that never finalized clears nothing), gated
     # on this feature through the same fixture. PRINTED by the command.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 310 -> 319 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward interest broker 323" 323 \
+    # The c2 integration: 323 -> 338. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward interest broker 338" 338 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -9708,11 +10279,13 @@ layer_c1bm_cargo_test_pico_failfast() {
 # a memo of its own and leaves the old one whole (the memo brought to no version replaces the
 # changed-inputs witness). PRINTED by each command on pc2.
 layer_c1x_cargo_test_routing_routes() {
-    _runci_guarded_test "C1X route cache peer 12" 12 \
+    # The c2 integration (route memo index): 12 -> 18. MEASURED on pc2.
+    _runci_guarded_test "C1X route cache peer 18" 18 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
-    _runci_guarded_test "C1X route cache router 16" 16 \
+    # The c2 integration (route memo index): 16 -> 22. MEASURED on pc2.
+    _runci_guarded_test "C1X route cache router 22" 22 \
         cargo test -p wz-runtime-tokio --features routing-routes,routing-router-hat --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
@@ -9805,7 +10378,11 @@ layer_c1y_cargo_test_routing_peer() {
     # build host (`21 passed; 733 filtered out`).
     # 21 -> 22: the gossip re-dial test of fd2ff0a389, which landed without moving this guard
     # (hosted run 41192748568 printed `22 passed`; the build host read 22 at 925109f3ee).
-    _runci_guarded_test "C1y accept_loop" 22 \
+    # 22 -> 24: the C1v twin's same +2, the face loop's heartbeat tests. Read off what the build
+    # host PRINTED (`24 passed; 797 filtered out`).
+    # 24 -> 26: the C1v twin's same +2, the face counter's reserved-face id tests. Read off what
+    # the build host PRINTED (`26 passed; 824 filtered out`).
+    _runci_guarded_test "C1y accept_loop" 26 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
@@ -11462,9 +12039,26 @@ layer_c1ch_capi_c_config_surface() {
     # lifecycle doors (`lifecycle-doors`), the statement doors (`switch-doors`) and the segment
     # sender (`segment-sender`).
     local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender"
-    (cd crates && cargo build -p wz-capi-c --quiet --features "$plane") || return 1
-    python3 scripts/lib/capi_c_config_surface.py \
-        "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" || return 1
+    # A leg ledger (open-debt item 938): the two gates read different builds,
+    # so a red debug build does not hide what the release pin says, and each
+    # build is a function defined here so the lane's text stays the lane's.
+    _c1ch_debug_build() {
+        (cd crates && cargo build -p wz-capi-c --quiet --features "$plane")
+    }
+    _c1ch_release_build() {
+        (cd crates && cargo build -p wz-capi-c --release --quiet --features "$plane")
+    }
+    _c1ch_nm() {
+        command -v nm >/dev/null 2>&1 || {
+            echo "  C1ch FAIL: nm is absent, so the wz door set cannot be read"
+            return 1
+        }
+    }
+    _runci_legs_open C1ch || return 1
+    _runci_leg debug-build -- _c1ch_debug_build
+    _runci_leg capi_c_config_surface --after debug-build -- \
+        python3 scripts/lib/capi_c_config_surface.py \
+        "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so"
     # R2301 (open-debt item 634) — and the SYMBOL SET of those wz-own doors is
     # pinned to a REVISION NUMBER, the way `capi_abi_pin.py` pins the dissect
     # library's in C1bo.
@@ -11482,10 +12076,7 @@ layer_c1ch_capi_c_config_surface() {
     # independently, and one number covering both would force a bump on every
     # consumer of either whenever either moved. The mechanism is shared; the
     # numbers are not.
-    command -v nm >/dev/null 2>&1 || {
-        echo "  C1ch FAIL: nm is absent, so the wz door set cannot be read"
-        return 1
-    }
+    _runci_leg nm -- _c1ch_nm
     # R2309 (open-debt item 637) — the pin is shown BOTH profiles, because a
     # door set read from one build is a claim about that build. `lto = "thin"`
     # runs in release and not in debug, so a `#[no_mangle]` LTO drops was
@@ -11503,12 +12094,13 @@ layer_c1ch_capi_c_config_surface() {
     # `wz_capi_c_config_honoured` through the library, so a door LTO removed
     # makes it fail outright rather than pass quietly, and the pin below is
     # what proves no door differs between the two builds in the first place.
-    (cd crates && cargo build -p wz-capi-c --release --quiet --features "$plane") || return 1
-    python3 scripts/lib/capi_c_abi_pin.py \
+    _runci_leg release-build -- _c1ch_release_build
+    _runci_leg capi_c_abi_pin.selftest -- python3 scripts/lib/capi_c_abi_pin.py --selftest >/dev/null
+    _runci_leg capi_c_abi_pin --after debug-build,release-build,nm,capi_c_abi_pin.selftest -- \
+        python3 scripts/lib/capi_c_abi_pin.py \
         "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" \
-        "$WZ_ARTIFACTS/crates/target/release/libwz_capi_c.so" || return 1
-    python3 scripts/lib/capi_c_abi_pin.py --selftest >/dev/null || return 1
-    return 0
+        "$WZ_ARTIFACTS/crates/target/release/libwz_capi_c.so"
+    _runci_legs_close
 }
 
 # ─── Layer C1cf — every crate builds with its DEFAULT FEATURES OFF ──
@@ -11571,6 +12163,14 @@ layer_c1cs_capability_cost() {
 # The pinned tree is a shallow clone of the tag (the harness asserts its commit), the package is
 # generated under `target/z8-suite` and never committed, and the open files limit is raised by the
 # harness (a shell's 1,024 is passed by a dozen sessions of one process).
+#
+# The same table holds the rows of upstream's ecosystem crate (`zenoh-ext.<target>`), which the
+# harness builds over the family in a workspace of its own and measures in the same report. The
+# second bridge is upstream's example programs: `docs/z8-examples-expected.tsv` declares scenarios
+# of them (a subscriber and the put it receives, ...), `z8_upstream_suite.py examples-run` runs each
+# over upstream's own crates and over the family, and `--check-examples` holds the verdicts to the
+# table. Each bridge runs the rows its table puts in the lane; `WZ_Z8_ALL_ROWS=1` runs every row,
+# which is how a build host measures a row before the lane takes it.
 layer_z8_upstream_suite() {
     # Opt-in on a machine: it needs the network (the tag is cloned) and about an hour. The hosted
     # lane names it (`--layer Z8`); a person asks with `WZ_RUN_LAYER_Z8=1`.
@@ -11578,12 +12178,30 @@ layer_z8_upstream_suite() {
         echo "Layer Z8 SKIP (opt-in: needs the network and an hour; --layer Z8 or WZ_RUN_LAYER_Z8=1)"
         return 0
     fi
-    local names
-    names="$(python3 scripts/lib/z8_expectation_gate.py --names)" || return 1
+    local rows=()
+    if [[ "${WZ_Z8_ALL_ROWS:-0}" -eq 1 ]]; then
+        rows=(--all)
+    fi
+    local names scenarios
+    names="$(python3 scripts/lib/z8_expectation_gate.py --names ${rows[@]+"${rows[@]}"})" || return 1
+    scenarios="$(python3 scripts/lib/z8_expectation_gate.py --names --examples ${rows[@]+"${rows[@]}"})" || return 1
+    # A leg ledger (open-debt item 938). The two bridges stand apart: the tests' table is graded on
+    # the report its measurement writes, the examples' table on the report its run writes, and a
+    # red in one bridge leaves the other measured.
+    _runci_legs_open Z8 || return 1
     # The names are words by construction (file stems), so they are left to split.
     # shellcheck disable=SC2086
-    python3 scripts/lib/z8_upstream_suite.py measure $names || return 1
-    python3 scripts/lib/z8_expectation_gate.py --check "${Z8_OUT:-$WZ_ARTIFACTS/target/z8-suite}/report.tsv" || return 1
+    _runci_leg measure -- python3 scripts/lib/z8_upstream_suite.py measure $names
+    _runci_leg expectation --after measure -- python3 scripts/lib/z8_expectation_gate.py --check "${Z8_OUT:-$WZ_ARTIFACTS/target/z8-suite}/report.tsv"
+    if [[ -n "$scenarios" ]]; then
+        # Scenario names are words by the table's grammar, so they are left to split.
+        # shellcheck disable=SC2086
+        _runci_leg examples -- python3 scripts/lib/z8_upstream_suite.py examples-run $scenarios
+        _runci_leg examples-expectation --after examples -- python3 scripts/lib/z8_expectation_gate.py --check-examples "${Z8_EXAMPLES_OUT:-$WZ_ARTIFACTS/target/z8-examples}/report.tsv"
+    else
+        echo "Layer Z8: the examples bridge has no row in the lane (docs/z8-examples-expected.tsv); WZ_Z8_ALL_ROWS=1 runs them all"
+    fi
+    _runci_legs_close
 }
 
 # ─── Layer C1co — the pico client-only build dials a listener ──────────
@@ -12476,16 +13094,21 @@ layer_c1m_session_lwip() {
     # (decision D15), and a close removes it: the one test of the refusal it replaces became two.
     # 49 -> 52: the mode test above, and two of the passive form (decision D10): a node waited
     # for and not dialled, and an opener whose dialling open changes a passive node.
-    _runci_guarded_test "C1m mcu adminspace-write" 53 \
+    # +2 here and in the next leg (53 -> 55, 25 -> 27), counted from the source and not yet
+    # printed by a run: the session a passive node opened is ended through the shell by a close,
+    # and its end is a lost session to a machine a dialling open moved on (decision D10).
+    _runci_guarded_test "C1m mcu adminspace-write" 55 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 25 \
+    _runci_guarded_test "C1m mcu peer nodes" 27 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
     # 29 -> 31: the commanders of a verb are a list per verb, default deny, and the same request
     # is answered for the one a list names and refused by name for the others (decision D12).
     # 31 -> 32: the text a build states a list in reads as the bytes a link's key proves.
-    _runci_guarded_test "C1m mcu lifecycle verbs" 32 \
+    # 32 -> 35, counted from the source: the two passive tests of the legs above, and the verbs
+    # reaching the session a passive node opened (its link, a reset and a close through the shell).
+    _runci_guarded_test "C1m mcu lifecycle verbs" 35 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
@@ -12496,7 +13119,8 @@ layer_c1m_session_lwip() {
     # the build host.
     # 58 -> 59: the same test D15 added (a close removes the row of a node with no locator).
     # 59 -> 62: the same three as the adminspace-write leg (decision D10).
-    _runci_guarded_test "C1m mcu adminspace read+write" 63 \
+    # 63 -> 65, counted from the source: the same two as the adminspace-write leg.
+    _runci_guarded_test "C1m mcu adminspace read+write" 65 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -12959,10 +13583,22 @@ layer_c1m_session_lwip() {
     # ZERO allocations (the one interest that asks for the current subscribers owns
     # one allocation, the answer's owned build, which the file names), a frame that
     # carries a chain of its own costing the same, and the owned builders of the sends
-    # bounded: 3 = what that command PRINTED.
+    # bounded: 3 = what that command PRINTED. The fourth reads a datagram of two Frames, then
+    # one whose first Frame the SN gate refuses: each admitted Frame's record is told, the
+    # second Frame from the unit parked behind the first, as this build has `alloc`.
     wz_test_args wz-session-lwip slot_control_records
-    _runci_guarded_test "C1m slot control records" 3 \
+    _runci_guarded_test "C1m slot control records" 4 \
         cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    # The same two datagrams on the slot profile built with NO allocator (`--no-default-features`,
+    # so no crate of the session tier links `alloc`): the walk that reads a datagram on where it
+    # lies, which no build with `alloc` compiles, both Frames' records told in the one iteration
+    # through the slot observer of closed sinks, at zero allocations. Every other leg of this
+    # crate keeps the default `alloc`. 1 test.
+    wz_test_args wz-session-lwip slot_frames_without_alloc
+    _runci_guarded_test "C1m slot frames without alloc" 1 \
+        cargo test -p wz-session-lwip --no-default-features \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
@@ -13496,125 +14132,77 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # absent so a host-only developer is not forced to install the
 # cross toolchain just to clear C2.
 
-# ─── Layer C1bf — wz-runtime-tokio CROSS-FEATURE composition gate ─────
+# ─── Layer C1bf — every member clippied in its largest configurations ─
 #
-# R311y253. Layer C2 runs `clippy --workspace --all-targets` on the DEFAULT
-# feature set, so it never composes two optional features that are individually
-# exercised by their own lanes but never together. That blind spot shipped a real
-# build break: `DialConfig` (session_open.rs) has TWO `#[cfg]`-gated fields
-# (`tls` @transport-link-tls, `quic` @transport-link-quic), and every exhaustive
-# struct literal in the tree named exactly ONE of them — so the tls-side literals
-# failed E0063 the moment `transport-link-quic` was also on, and the quic-side
-# ones the moment `transport-link-tls` was. Six integration-test targets did not
-# compile under `--all-features`, and NO lane caught it, because the tls lane and
-# the quic lane each enable their own feature alone.
+# Layer C2 runs `clippy --workspace --all-targets` on the DEFAULT feature set, so
+# it never composes two optional features that their own lanes enable one at a
+# time. That shipped a real break (R311y253): `DialConfig` carried one field
+# behind `transport-link-tls` and one behind `transport-link-quic`, every struct
+# literal named one of them, and six integration-test targets failed E0063 with
+# both on while the tls lane and the quic lane each stayed green.
 #
-# This lane closes that gap by clippy-gating every crate in the HAZARD CLASS with
-# ALL of its features on at once, over --all-targets so the integration tests
-# (separate crates, and the ones that actually broke) are included.
+# This lane clippies EVERY workspace member, over `--all-targets` so the tests
+# (where that break was) are in, in each of its LARGEST configurations: every
+# feature on, or, for a crate that refuses a combination of its own features,
+# each consistent set it declares under `[package.metadata.wz-docs]`. Those are
+# the sets Layer C1bz documents, read through `scripts/lib/doc_feature_sets.py`,
+# so a crate states once what it can hold at once. The population is not a list
+# of crates that show one shape of the defect (a `cfg`-gated `pub` field): such a
+# list goes red each time a crate grows the shape, and leaves out every break of
+# another shape (a type that changes with a feature, an item a feature removes).
 #
-# R311y254 — the hazard class is "crates that declare a `#[cfg(feature ...)]`-gated
-# `pub` struct field", because that is exactly the shape an exhaustive struct
-# literal cannot survive: the literal only compiles for the one feature
-# combination its author built with. R311y253 covered wz-runtime-tokio alone and
-# NAMED the rest as a residual; the sweep that closed it found two more crates in
-# the class (wz-session-core — whose ApplicationLayerObserver carries EIGHT
-# independently-gated pub fields — and wz-ap-demo). Both already composed clean,
-# so this is a gate over a latent hazard, not a second fix.
+# One `cargo clippy -p` per configuration and never a workspace-wide
+# `--all-features`: features unify across one cargo invocation, and the
+# workspace holds selectors that exclude each other (the facade's
+# `compile_error!` pairs, sce-rust-runtime's `no_std` and `http-send`, the MCU
+# per-session slot profile the heap crates refuse with `heap_session_profile!`),
+# so that command is refused by design and is no gate.
 #
-# The audit step below is what keeps the list HONEST: it re-derives the hazard set
-# from the source on every run and fails if a crate joins the class without being
-# added to COVERED. Without it, the next crate to grow a cfg-gated pub field would
-# silently sit outside the gate — the exact way the DialConfig break shipped.
-#
-# Scoped per-crate deliberately: a WORKSPACE-wide `--all-features` is structurally
-# impossible here — sce-rust-runtime declares `no_std` and `http-send` mutually
-# exclusive (a compile_error! guard), so `--all-features` can never be a workspace
-# gate. Per-crate is the only form this check can take. If a future crate in the
-# class carries its own mutually-exclusive feature pair, NARROW its entry to an
-# explicit max-compatible feature set — do not drop it from COVERED, which would
-# restore the blind spot this lane exists to cover.
+# Hosted CI runs it in shards (`WZ_ALLFEAT_SHARD` of `WZ_ALLFEAT_SHARDS`),
+# balanced by the seconds `scripts/lib/allfeat_clippy_costs.txt` records
+# (`scripts/lib/allfeat_clippy_plan.py`); unsharded, a local run, it runs every
+# configuration. Every failing configuration is listed before the lane fails, so
+# one run names all of them, and each configuration's seconds are printed in the
+# cost table's row form.
 layer_c1bf_cargo_clippy_all_features() {
-    # R311y566 — `wz-capi-c` JOINED the hazard class and the audit caught it on
-    # HOSTED, where this lane runs and the local sweep does not. The trigger was
-    # y565's `z_close_options_t` / `z_query_reply_del_options_t`, whose fields are
-    # `#[cfg(feature = "zenoh-c-no-unstable-api")]`-gated — exactly the shape an
-    # exhaustive struct literal cannot survive. Its two features are INDEPENDENT
-    # axes rather than an exclusive pair, so `--all-features` is a real arm (the
-    # no-unstable + shared-memory one) and no narrowing is needed.
-    #
-    # `wz-capi-core` joined it with the capability features (R3394): `OpenStance` carries a
-    # `scouting` field that exists with `scout`, and `SessionResources` a `gossip` field that
-    # exists with `peer`, so a struct literal of either names the fields of the build its author
-    # made. The two ABI crates that build one say each field behind the feature that has it.
-    #
-    # The zenoh family joined with its buffers and protocol crates (R3556): the `ext_shm` field of
-    # a put, an error and a query body, and the kind of a slice, exist with `shared-memory`, so a
-    # struct literal of either names the fields of the build its author made. An entry is a
-    # DIRECTORY of `crates/`; a family crate keeps upstream's package name under a `wz-` directory,
-    # so the package is read from the manifest below rather than assumed equal to the directory.
-    #
-    # `wz-session-mcu` joined it with the slot node's entities: the schedule's deadline of a
-    # publisher or a querier (`Active`'s `queries` and `state`) and the node's `get` rows exist with
-    # `query-get`, so a struct literal of either names the fields of the build its author made.
-    # Its features are independent axes, so `--all-features` is a real arm and no narrowing is
-    # needed.
-    #
-    # `wz-zenoh-config` joined it with the configuration crate (R3664, caught hosted at R3683): a
-    # `Config`'s `unstable` field exists with `unstable`, so a struct literal of it names the fields
-    # of the build its author made. Its features are independent axes, so `--all-features` is a
-    # real arm and no narrowing is needed.
-    #
-    # `wz-ext-pubsub` joined it with the advanced publisher's composite: its options carry the
-    # QoS, encoding and attachment knobs behind the features that have their setters, so a struct
-    # literal of either names the fields of the build its author made. Its features are
-    # independent axes, so `--all-features` is a real arm and no narrowing is needed.
-    #
-    # `wz-zenoh`, the top crate, joined it with the session (Z1 of the seam note, caught hosted): its
-    # `unstable` arm adds fields to public structs (the sample, the builders) and its sessions
-    # are built per engine, so a struct literal names the fields of the build its author made. Its
-    # features are independent axes, so `--all-features` is a real arm and no narrowing is needed.
-    #
-    # `wz-admin` joined it when the admin space left the core (the server-layer split, caught
-    # hosted 2026-11-06): the `cfg(feature)`-gated pub fields of the admin rows moved with it. Its
-    # features follow the core's and are independent axes, so `--all-features` is a real arm (it
-    # builds clean, read on a build machine) and no narrowing is needed.
-    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico
-        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu wz-zenoh-config wz-ext-pubsub wz-zenoh
-        wz-admin)
-
-    # Drift audit: re-derive the hazard class from source. A crate qualifies when
-    # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
-    # declaration. Deliberately over-inclusive (an enum or private struct can trip
-    # it) — a false positive costs one line in COVERED, a false NEGATIVE costs a
-    # shipped build break.
-    local hazard=() c n
-    for c in crates/*/; do
-        n="$(grep -rn -A1 --include=*.rs '^[[:space:]]*#\[cfg(feature' "$c" 2>/dev/null \
-             | grep -cE '^[^[:space:]]+[-:][0-9]+-[[:space:]]*pub [a-z_]+:' || true)"
-        [ "${n:-0}" -gt 0 ] && hazard+=("$(basename "$c")")
-    done
-
-    local h uncovered=()
-    for h in "${hazard[@]}"; do
-        printf '%s\n' "${covered[@]}" | grep -qx "$h" || uncovered+=("$h")
-    done
-    if [ "${#uncovered[@]}" -gt 0 ]; then
-        echo "  C1bf FAIL: crate(s) grew a cfg-gated pub struct field but are not"
-        echo "  in the C1bf COVERED list, so no lane composes their features:"
-        printf '    - %s\n' "${uncovered[@]}"
-        echo "  Add them to COVERED (or narrow, if they have exclusive features)."
+    local shards="${WZ_ALLFEAT_SHARDS:-1}" shard="${WZ_ALLFEAT_SHARD:-0}"
+    local members plan crate label args_line started ran=0
+    local -a args failed=()
+    # The control group first: what decides the configurations and their shards is held
+    # in both directions before it is trusted.
+    python3 scripts/lib/doc_feature_sets.py --selftest || return 1
+    python3 scripts/lib/allfeat_clippy_plan.py --selftest || return 1
+    members="$(_c1bz_members)"
+    if [[ -z "$members" ]]; then
+        echo "  C1bf FAIL: cargo metadata listed no workspace member"
         return 1
     fi
-    echo "  C1bf audit: hazard class = ${hazard[*]} — all covered"
-
-    local dir pkg
-    for dir in "${covered[@]}"; do
-        pkg="$(awk -F'"' '/^name = /{print $2; exit}' "crates/$dir/Cargo.toml")"
-        [ -n "$pkg" ] || { echo "  C1bf FAIL: crates/$dir/Cargo.toml names no package"; return 1; }
-        (cd crates && cargo clippy -p "$pkg" --all-targets --all-features \
-            --quiet -- -D warnings) || return 1
-    done
+    plan="$(python3 scripts/lib/allfeat_clippy_plan.py plan --shard "$shard" --shards "$shards")" || {
+        echo "  C1bf FAIL: no plan for shard $shard of $shards (the line above says why)"
+        return 1
+    }
+    # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
+    while read -r crate label args_line; do
+        [[ -n "$crate" ]] || continue
+        read -r -a args <<<"$args_line"
+        started=$SECONDS
+        if ! (cd crates && cargo clippy -p "$crate" --all-targets "${args[@]}" \
+            --quiet -- -D warnings); then
+            failed+=("$crate ($label)")
+        fi
+        echo "  C1bf cost: $crate $label $((SECONDS - started))"
+        ran=$((ran + 1))
+    done <<<"$plan"
+    if [[ $ran -eq 0 ]]; then
+        echo "  C1bf FAIL: shard $shard of $shards ran no configuration"
+        return 1
+    fi
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo "  C1bf FAIL: ${#failed[@]} of $ran configuration(s) do not pass clippy -D warnings:"
+        printf '    - %s\n' "${failed[@]}"
+        return 1
+    fi
+    _runci_lane_did C1bf "$ran" "configuration(s) of shard $shard of $shards clippied, all targets"
 }
 # ─── Layer C1bn — the PASSIVE-DISSECTION feature set, RUN ────────────
 #
@@ -13794,9 +14382,12 @@ layer_c1br_uring_fixed_buffers() {
     # nothing else of this UID registers. Serialized and filtered, this lane is
     # that condition; a whole-`--lib` parallel lane (C1bn) is not, and redded it
     # on the FIRST registration in hosted run 36064882812.
+    # The datagram link chooses its read body in `udp_pipeline`, so its
+    # witnesses are a fourth module path, `udp_pipeline::ring_selection::`,
+    # named here for the reason the third one is.
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
         --lib --quiet -- --include-ignored --test-threads=1 uring:: uring_reactor:: \
-        stream_link::ring_selection:: 2>&1)" \
+        stream_link::ring_selection:: udp_pipeline::ring_selection:: 2>&1)" \
         || { echo "$out"; return 1; }
     local tests
     tests="$(_runci_passed_count <<<"$out")"
@@ -14853,19 +15444,27 @@ layer_c1bzr_reduced_docs_resolve() {
     local shards="${WZ_DOCS_SHARDS:-1}" shard="${WZ_DOCS_SHARD:-0}" out
     local -a only=()
     _c1bz_check_subset || return 1
-    python3 scripts/lib/doc_feature_sets.py --selftest || return 1
-    python3 scripts/lib/reduced_docs_gate.py --selftest || return 1
     [[ -n "${WZ_C1BZ_ONLY:-}" ]] && only=(--only "$WZ_C1BZ_ONLY")
     mkdir -p "$WZ_ARTIFACTS/crates/target/c1bzr" || return 1
     out="$WZ_ARTIFACTS/crates/target/c1bzr/shard-$shard.json"
-    python3 scripts/lib/reduced_docs_gate.py measure --out "$out" \
-        --shard "$shard" --shards "$shards" "${only[@]}" || return 1
+    # A leg ledger (open-debt item 938): the two selftests are independent, and
+    # the measurement leans on both, because the configurations it documents are
+    # `doc_feature_sets.py`'s and the findings it holds are `reduced_docs_gate.py`'s.
+    _runci_legs_open C1bzr || return 1
+    _runci_leg doc_feature_sets.selftest -- python3 scripts/lib/doc_feature_sets.py --selftest
+    _runci_leg reduced_docs_gate.selftest -- python3 scripts/lib/reduced_docs_gate.py --selftest
+    _runci_leg reduced_docs_gate.measure --after doc_feature_sets.selftest,reduced_docs_gate.selftest -- \
+        python3 scripts/lib/reduced_docs_gate.py measure --out "$out" \
+        --shard "$shard" --shards "$shards" "${only[@]}"
     if [[ "$shards" != 1 || ${#only[@]} -gt 0 ]]; then
+        _runci_legs_close || return 1
         echo "  C1bzr (shard $shard of $shards${WZ_C1BZ_ONLY:+, subset}): no finding above the" \
             "ledger — the stale-ledger direction needs every shard, settled together"
         return 0
     fi
-    python3 scripts/lib/reduced_docs_gate.py settle "$out"
+    _runci_leg reduced_docs_gate.settle --after reduced_docs_gate.measure -- \
+        python3 scripts/lib/reduced_docs_gate.py settle "$out"
+    _runci_legs_close
 }
 
 # R311y792 — which crates C1bz measures. Every workspace member by default;
@@ -15207,59 +15806,94 @@ layer_c1cj_replay_c_abi() {
     # `cc` absent -> SKIP, not FAIL, exactly as C1bo: the Rust half and the two
     # python gates below still run on every host, and a box without a C
     # compiler is a provisioning fact. Hosted has one.
-    local out cc
+    #
+    # A leg ledger (open-debt item 938), on C1bo's argument: the consumer's
+    # compile is one leg, and the gates that do not read what it builds run
+    # whether or not it compiled. Each compound leg is a function defined here,
+    # so the lane's text stays the lane's; they share `cc` and `bin`.
+    local cc bin
     cc="${CC:-cc}"
 
-    (cd crates && cargo clippy -p wz-capi-replay --all-targets --quiet -- -D warnings) || return 1
-    out="$(cd crates && cargo test -p wz-capi-replay --quiet 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
-        echo "  C1cj FAIL: wz-capi-replay ran no tests"; echo "$out"; return 1; }
+    _c1cj_clippy() {
+        (cd crates && cargo clippy -p wz-capi-replay --all-targets --quiet -- -D warnings)
+    }
+    _c1cj_tests() {
+        local out
+        out="$(cd crates && cargo test -p wz-capi-replay --quiet 2>&1)" || { echo "$out"; return 1; }
+        grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+            echo "  C1cj FAIL: wz-capi-replay ran no tests"; echo "$out"; return 1; }
+    }
+    # The cdylib the C side links. `--release` on purpose: it is the artifact a
+    # consumer ships against.
+    _c1cj_release_build() {
+        (cd crates && cargo build -p wz-capi-replay --release --quiet)
+    }
+    _c1cj_consumer_compile() {
+        local out
+        out="$("$cc" -std=c11 -Wall -Wextra -Werror \
+            -I crates/wz-capi-replay/include \
+            crates/wz-capi-replay/tests/c_abi_consumer.c \
+            -L "$WZ_ARTIFACTS/crates/target/release" -lwz_capi_replay -o "$bin" 2>&1)" || {
+            echo "  C1cj FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
+    }
+    _c1cj_consumer_run() {
+        local out
+        out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/release" "$bin" 2>&1)" || {
+            echo "$out"; return 1; }
+        echo "$out"
+    }
+    # The header must compile as C++ too, for C1bo's stated reason: the product
+    # that consumes this ABI is C++, and a header that only works in C is found
+    # at integration time.
+    _c1cj_cxx_header() {
+        command -v c++ >/dev/null 2>&1 || return 0
+        local out
+        out="$(c++ -fsyntax-only -x c++ -I crates/wz-capi-replay/include \
+            crates/wz-capi-replay/tests/c_abi_consumer.c 2>&1)" || {
+            echo "  C1cj FAIL: the header does not compile as C++"; echo "$out"; return 1; }
+    }
+    _c1cj_nm() {
+        command -v nm >/dev/null 2>&1 || {
+            echo "  C1cj FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
+    }
 
+    _runci_legs_open C1cj || return 1
+    _runci_leg clippy -- _c1cj_clippy
+    _runci_leg tests -- _c1cj_tests
     # THE VOCABULARY GATE, and it runs whether or not a C compiler is here
     # because its subject is source text rather than an artifact. It derives the
     # variant set of every `pub enum` in `wz-replay`'s plan half and fails when
     # the header does not name a constant for each -- the half of the mapping
     # the Rust compiler structurally cannot see.
-    python3 scripts/lib/capi_replay_vocabulary.py || return 1
+    _runci_leg capi_replay_vocabulary -- python3 scripts/lib/capi_replay_vocabulary.py
 
-    command -v "$cc" >/dev/null 2>&1 || {
-        echo "  C1cj SKIP (no C compiler: $cc); the vocabulary gate still ran"; return 0; }
+    if ! command -v "$cc" >/dev/null 2>&1; then
+        _runci_legs_close || return 1
+        echo "  C1cj SKIP (no C compiler: $cc); the vocabulary gate still ran"
+        return 0
+    fi
 
-    # The cdylib the C side links. `--release` on purpose: it is the artifact a
-    # consumer ships against.
-    (cd crates && cargo build -p wz-capi-replay --release --quiet) || return 1
-
-    local bin
-    bin="$(mktemp -d)/c_abi_consumer"
-    out="$("$cc" -std=c11 -Wall -Wextra -Werror \
-        -I crates/wz-capi-replay/include \
-        crates/wz-capi-replay/tests/c_abi_consumer.c \
-        -L "$WZ_ARTIFACTS/crates/target/release" -lwz_capi_replay -o "$bin" 2>&1)" || {
-        echo "  C1cj FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
-    out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/release" "$bin" 2>&1)" || {
-        echo "$out"; rm -rf "$(dirname "$bin")"; return 1; }
-    echo "$out"
-    rm -rf "$(dirname "$bin")"
-
-    # The header must compile as C++ too, for C1bo's stated reason: the product
-    # that consumes this ABI is C++, and a header that only works in C is found
-    # at integration time.
-    command -v c++ >/dev/null 2>&1 && {
-        out="$(c++ -fsyntax-only -x c++ -I crates/wz-capi-replay/include \
-            crates/wz-capi-replay/tests/c_abi_consumer.c 2>&1)" || {
-            echo "  C1cj FAIL: the header does not compile as C++"; echo "$out"; return 1; }
+    bin="$(mktemp -d)/c_abi_consumer" || {
+        echo "  C1cj FAIL: no temporary directory for the C consumer" >&2
+        _runci_legs_close
+        return 1
     }
-
+    _runci_leg release-build -- _c1cj_release_build
+    _runci_leg consumer-compile --after release-build -- _c1cj_consumer_compile
+    _runci_leg consumer-run --after consumer-compile -- _c1cj_consumer_run
+    _runci_leg cxx-header -- _c1cj_cxx_header
     # And the SYMBOL SET, the revision and the record layout, all three read
     # from that artifact rather than from the source an author just edited.
-    command -v nm >/dev/null 2>&1 || {
-        echo "  C1cj FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
-    python3 scripts/lib/capi_replay_abi_pin.py || return 1
-    # The gate now reads WZ_REPLAY_ABI_REVISION out of the header as well, and
-    # the header names that macro in prose. The selftest holds the reader to the
-    # DEFINE, so a prose mention can never answer for it; run here beside the
-    # gate it guards, the way capi_abi_pin's selftest runs beside its own.
-    python3 scripts/lib/capi_replay_abi_pin.py --selftest >/dev/null || return 1
+    # The gate reads WZ_REPLAY_ABI_REVISION out of the header as well, and the
+    # header names that macro in prose. The selftest holds the reader to the
+    # DEFINE, so a prose mention can never answer for it; it runs first, the
+    # way capi_abi_pin's selftest runs before its own gate.
+    _runci_leg nm -- _c1cj_nm
+    _runci_leg capi_replay_abi_pin.selftest -- python3 scripts/lib/capi_replay_abi_pin.py --selftest >/dev/null
+    _runci_leg capi_replay_abi_pin --after release-build,nm,capi_replay_abi_pin.selftest -- \
+        python3 scripts/lib/capi_replay_abi_pin.py
+    rm -rf "$(dirname "$bin")"
+    _runci_legs_close
 }
 
 layer_c1bo_dissect_c_abi() {
@@ -15274,40 +15908,69 @@ layer_c1bo_dissect_c_abi() {
     # `cc` absent -> SKIP, not FAIL: the Rust half still gates on every host,
     # and a box without a C compiler is a provisioning fact rather than a
     # defect. Hosted has one, so the leg runs where it matters.
-    local out cc
+    #
+    # A leg ledger (open-debt item 938). Hosted run 42505060630 stopped at the
+    # C consumer's compile, and `capi_bound_names.py` below, which reads only
+    # the header, went unread until a second run after the repair. Each leg
+    # names what it leans on; the compound ones are functions defined here, so
+    # the lane's text stays the lane's, and they share `cc` and `bin`.
+    local cc bin
     cc="${CC:-cc}"
     command -v "$cc" >/dev/null 2>&1 || {
         echo "  C1bo SKIP (no C compiler: $cc)"; return 0; }
+    bin="$(mktemp -d)/c_abi_consumer" || {
+        echo "  C1bo FAIL: no temporary directory for the C consumer" >&2; return 1; }
 
-    (cd crates && cargo clippy -p wz-capi-dissect --all-targets --quiet -- -D warnings) || return 1
-    out="$(cd crates && cargo test -p wz-capi-dissect --quiet 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
-        echo "  C1bo FAIL: wz-capi-dissect ran no tests"; echo "$out"; return 1; }
-
+    _c1bo_clippy() {
+        (cd crates && cargo clippy -p wz-capi-dissect --all-targets --quiet -- -D warnings)
+    }
+    _c1bo_tests() {
+        local out
+        out="$(cd crates && cargo test -p wz-capi-dissect --quiet 2>&1)" || { echo "$out"; return 1; }
+        grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+            echo "  C1bo FAIL: wz-capi-dissect ran no tests"; echo "$out"; return 1; }
+    }
     # The cdylib the C side links. `--release` on purpose: it is the artifact a
     # consumer ships against, and a debug-only link would not exercise the
     # symbol set LTO produces.
-    (cd crates && cargo build -p wz-capi-dissect --release --quiet) || return 1
-
-    local bin
-    bin="$(mktemp -d)/c_abi_consumer"
-    out="$("$cc" -Wall -Wextra -Werror \
-        -I crates/wz-capi-dissect/include \
-        crates/wz-capi-dissect/tests/c_abi_consumer.c \
-        -L "$WZ_ARTIFACTS/crates/target/release" -lwz_capi_dissect -o "$bin" 2>&1)" || {
-        echo "  C1bo FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
-    out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/release" "$bin" 2>&1)" || {
-        echo "$out"; rm -rf "$(dirname "$bin")"; return 1; }
-    echo "$out"
-    rm -rf "$(dirname "$bin")"
-
+    _c1bo_release_build() {
+        (cd crates && cargo build -p wz-capi-dissect --release --quiet)
+    }
+    _c1bo_consumer_compile() {
+        local out
+        out="$("$cc" -Wall -Wextra -Werror \
+            -I crates/wz-capi-dissect/include \
+            crates/wz-capi-dissect/tests/c_abi_consumer.c \
+            -L "$WZ_ARTIFACTS/crates/target/release" -lwz_capi_dissect -o "$bin" 2>&1)" || {
+            echo "  C1bo FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
+    }
+    _c1bo_consumer_run() {
+        local out
+        out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/release" "$bin" 2>&1)" || {
+            echo "$out"; return 1; }
+        echo "$out"
+    }
     # The header must compile as C++ too: the consumer this ABI exists for is
     # [REDACTED], and a header that only works in C is found at integration time.
-    command -v c++ >/dev/null 2>&1 && {
+    _c1bo_cxx_header() {
+        command -v c++ >/dev/null 2>&1 || return 0
+        local out
         out="$(c++ -fsyntax-only -x c++ -I crates/wz-capi-dissect/include \
             crates/wz-capi-dissect/tests/c_abi_consumer.c 2>&1)" || {
             echo "  C1bo FAIL: the header does not compile as C++"; echo "$out"; return 1; }
     }
+    _c1bo_nm() {
+        command -v nm >/dev/null 2>&1 || {
+            echo "  C1bo FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
+    }
+
+    _runci_legs_open C1bo || return 1
+    _runci_leg clippy -- _c1bo_clippy
+    _runci_leg tests -- _c1bo_tests
+    _runci_leg release-build -- _c1bo_release_build
+    _runci_leg consumer-compile --after release-build -- _c1bo_consumer_compile
+    _runci_leg consumer-run --after consumer-compile -- _c1bo_consumer_run
+    _runci_leg cxx-header -- _c1bo_cxx_header
 
     # R311y748 (N55) — and the SYMBOL SET is pinned to the revision number.
     # Placed HERE because this is where the release cdylib exists: the gate
@@ -15317,15 +15980,16 @@ layer_c1bo_dissect_c_abi() {
     # this ran nothing checked it -- this round nearly shipped a new symbol
     # under the old number on the strength of a doc comment that had drifted
     # from the header.
-    command -v nm >/dev/null 2>&1 || {
-        echo "  C1bo FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
-    python3 scripts/lib/capi_abi_pin.py || return 1
+    #
     # R2775 (open debt 804) -- the gate now reads WZ_DISSECT_ABI_REVISION out
     # of the header as well, and the header names that macro in prose several
     # times. The selftest holds the reader to the DEFINE, so a prose mention
-    # can never answer for it; run here beside the gate it guards, the way
-    # capi_c_abi_pin's selftest runs beside its own.
-    python3 scripts/lib/capi_abi_pin.py --selftest >/dev/null || return 1
+    # can never answer for it; it runs first, and the gate leans on it, the
+    # way capi_c_abi_pin's selftest runs beside its own.
+    _runci_leg nm -- _c1bo_nm
+    _runci_leg capi_abi_pin.selftest -- python3 scripts/lib/capi_abi_pin.py --selftest >/dev/null
+    _runci_leg capi_abi_pin --after release-build,nm,capi_abi_pin.selftest -- \
+        python3 scripts/lib/capi_abi_pin.py
 
     # R2116 (open-debt item 466) — and what the HEADER says about those same
     # symbols, held against what the library answers.
@@ -15341,7 +16005,8 @@ layer_c1bo_dissect_c_abi() {
     # through ctypes rather than parsing the Rust `Door` walk, so the header is
     # compared with the artifact instead of with another file in the same
     # commit.
-    python3 scripts/lib/capi_header_subsumption.py || return 1
+    _runci_leg capi_header_subsumption --after release-build -- \
+        python3 scripts/lib/capi_header_subsumption.py
 
     # R2120 (open-debt item 467) — and what the header's PARAMETER NAMES
     # promise, held to the discipline the header declares for each.
@@ -15359,8 +16024,9 @@ layer_c1bo_dissect_c_abi() {
     # C COMPILER. `gcc -aux-info` re-emits every prototype it parsed with full
     # types and no names, so the gate's own extraction is refused unless it
     # agrees with GCC function for function -- and the names it then reads
-    # come from a declaration a compiler has already bounded.
-    python3 scripts/lib/capi_bound_names.py || return 1
+    # come from a declaration a compiler has already bounded. It leans on no
+    # other leg, which is why a red consumer compile no longer hides it.
+    _runci_leg capi_bound_names -- python3 scripts/lib/capi_bound_names.py
 
     # R2173 (open-debt item 550) — and what a value family says about a value
     # the consumer's own build does not recognise.
@@ -15383,9 +16049,11 @@ layer_c1bo_dissect_c_abi() {
     # `--selftest` first, and it is not ceremony: it drives all eight FAIL
     # paths through fixtures AND a clean control, so a gate that had started
     # passing everything cannot be mistaken for a header that is in order.
-    python3 scripts/lib/capi_unknown_value_policy.py --selftest || return 1
-    python3 scripts/lib/capi_unknown_value_policy.py || return 1
-    return 0
+    _runci_leg capi_unknown_value_policy.selftest -- python3 scripts/lib/capi_unknown_value_policy.py --selftest
+    _runci_leg capi_unknown_value_policy --after capi_unknown_value_policy.selftest -- \
+        python3 scripts/lib/capi_unknown_value_policy.py
+    rm -rf "$(dirname "$bin")"
+    _runci_legs_close
 }
 
 # ─── Layer C1so — every cdylib carries its SONAME (R2103, item 521) ─────────
@@ -20427,7 +21095,8 @@ layer_z_zenohd_interop() {
     # frozen history. That reason does not reach `inventory_entries[*].reason`,
     # the live impl-axis verdicts, which are rewritten on every re-grade -- so
     # they were the one population with upstream claims and no oracle, exactly
-    # what `depth_axis_census` reports as "read as upstream and NOT judged".
+    # what `depth_axis_census` reported as "read as upstream and NOT judged"
+    # before it asked this gate's grammar which of them are graded here.
     #
     # HERE and not in C0, for the reason the arm above is here: this one
     # RESOLVES, so it needs the source tree this lane provisions. It has no
@@ -21525,8 +22194,11 @@ layer_z_zenohd_interop() {
     # (after the right one proved it connects at all). In this crate for the reason the legs
     # above give. MEASURED: 2 passed against zenohd 1.10.0 (the pin is 1.10.1; this lane is
     # where it is judged against the pinned binary).
+    # Raises 2 -> 3 for the differential leg: the same dictionary file handed to a zenohd
+    # listener first (it must admit the right password and refuse the wrong one) and then to
+    # the C listener, held to the same two answers.
     wz_test_args wz-capi-c listener_auth_zenohd_interop
-    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # The READ direction, which is the one that bears on replacement: an operator
@@ -21592,8 +22264,12 @@ layer_z_zenohd_interop() {
     # as a whole document, read out of a file that is the node's only source of
     # the endpoint and dialled to a real zenohd. Counted on the file's `#[ignore]`
     # tests: 12 before the leg, 13 after.
+    # Raises 13 -> 14 for LEG 14: the handshake keys of the wire list asked of a
+    # real zenohd with the same document first, each key's effect on zenohd's
+    # own frame the positive control, and the demo's frame held to zenohd's.
+    # Counted on the file's `#[ignore]` tests: 13 before the leg, 14 after.
     wz_test_args wz-integration-tests wz_reads_a_stock_zenohd_config
-    _runci_guarded_test Z 13 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 14 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2222 (open-debt items 568 + 569, and the lane hole they exposed) — the
@@ -25994,7 +26670,7 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-core)" 6 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_core || return 1
-    _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr)" 7 \
+    _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr)" 8 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_keyexpr || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr formats)" 5 \
@@ -26098,6 +26774,15 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_ts_stack_stamp || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh push put chain)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_push_put_chain || return 1
+    # A batch of several transport messages (Frames of both reliabilities, a KeepAlive behind a
+    # Frame), written by upstream's codec: the observer's reader and the participant's read the
+    # same messages, in the same Frames and order, as upstream's reader. Two tests, one a reader.
+    _runci_guarded_test "Layer E18 (differential, zenoh rx batch)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_rx_batch || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-config files)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_config_file || return 1
@@ -26122,12 +26807,23 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh session shared-memory)" 2 \
         cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
         --test zenoh_session_shm || return 1
+    # Sessions of both crates in one process, linked over TCP and in a multicast group, hand each
+    # other shared memory.
+    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 5 \
+        cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
+        --test zenoh_transport_shm || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_buffers || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-collections)" 8 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_collections || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-task)" 3 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_task || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-sync)" 3 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_sync || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-macros)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_macros || return 1
@@ -26868,6 +27564,7 @@ run_layer C0f layer_c0f_lane_demo_feature_restore || overall=1
 run_layer C0g layer_c0g_apt_ceiling || overall=1
 run_layer C0s layer_c0s_test_lane_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
+run_layer C1cap layer_c1cap_capture_shard || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1t layer_c1t_cargo_test_serial || overall=1
@@ -27147,8 +27844,10 @@ else
             # verdicts, AND cargo/clippy `error:` / `error[EXXXX]` lines so a
             # build/lint failure (no panic) is not left body-less. %/CR-encoded
             # for the wire. Keep the fallback body if extraction is empty.
+            # A ledger lane's skipped legs are lifted too (open-debt item 938):
+            # the annotation names what a red did not let run.
             _extracted="$(sed 's/\x1b\[[0-9;]*m//g' "$RUNCI_LOG_FILE" \
-                | grep -aE -A1 'panicked at|(--- |result: )FAILED|^error(\[|:)| FAIL: |^\.github/workflows/[^ ]+:[0-9]+:[0-9]+: ' \
+                | grep -aE -A1 'panicked at|(--- |result: )FAILED|^error(\[|:)| FAIL: | skipped: depends on |^\.github/workflows/[^ ]+:[0-9]+:[0-9]+: ' \
                 | sed 's/%/%25/g; s/\r//g; /^--$/d' \
                 | tail -n 40 | awk 'BEGIN{ORS="%0A"}{print}')"
             [[ -n "$_extracted" ]] && _annot="$_extracted"

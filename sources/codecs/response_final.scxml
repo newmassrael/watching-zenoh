@@ -43,7 +43,7 @@
       <sce:flag name="mid" bit="0" width="5" value="0x1A"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
-    <sce:field id="request_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:field id="request_id" sce:type="uint32" sce:byte="1" sce:bit-size="vle"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>

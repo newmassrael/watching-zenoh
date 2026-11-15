@@ -124,7 +124,7 @@ async fn the_drive_loop_waits_for_a_lagging_buffered_consumer() {
     let actions: Arc<SessionLinkActions> =
         new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);
 
     let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
@@ -246,7 +246,7 @@ async fn a_parked_drain_does_not_starve_this_sessions_keepalive() {
     let actions: Arc<SessionLinkActions> =
         new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);
 
     let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
@@ -355,7 +355,7 @@ async fn a_host_that_wires_no_stage_still_delivers_under_backpressure() {
     let actions: Arc<SessionLinkActions> =
         new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);
 
     let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(

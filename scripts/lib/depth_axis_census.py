@@ -68,10 +68,16 @@ Two axes, each a partition with no exempt bucket:
 
   CITATION  Every wz-path file citation in a PARTIAL reason resolves to exactly
             one tracked file, and any line number it carries is inside that
-            file. Upstream citations are counted apart and NOT judged -- R2215
-            measured why nothing here can judge them: the vendored trees are
-            submodules whose contents are not tracked files, and `.gitmodules`
-            does not name zenoh at all.
+            file. A citation no tracked file answers is not judged HERE, and
+            the reason has changed since R2215 measured that the vendored
+            trees hold no zenoh: the oracle for an upstream claim is the
+            pinned zenoh source tree that `upstream_citation_anchor_gate`'s
+            `upstream_root()` resolves, and `store_reason_citation_gate` grades
+            every live reason against it. This census runs where that tree is
+            not provisioned, so it asks only the anchor gate's own grammar
+            (`resolved_spans`) whether the citation is one that gate looks up.
+            One that is counts as upstream; one that is not is a path NO oracle
+            reads, and that count is pinned like the others.
 
 ## The pins, and why every one of them is two-directional
 
@@ -95,11 +101,13 @@ import pathlib
 import re
 import subprocess
 import sys
+import typing
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import atom_test_graph  # noqa: E402
 import test_sources  # noqa: E402
+import upstream_citation_anchor_gate as anchor_gate  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STORE = "docs/.atomic/workspace.atomic.json"
@@ -120,7 +128,15 @@ HEAD_TAG = re.compile(r"\s*([A-Za-z][A-Za-z0-9-]*)")
 # A file citation, with an optional line. The path may carry directories, and
 # it MUST, for the reason the header gives: a bare basename matched against
 # this tree resolves an upstream file onto an unrelated wz one.
-CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::(\d+))?")
+#
+# The extension must END the token. Without the lookahead the prefix of any
+# dotted word starting with `c`, `h` or `rs` reads as a file: a session FSM
+# event spelled with its `.close` suffix became a `.c` citation, and so did the
+# `[patch.crates-io]` table name. Each landed in the zero-candidate bucket and
+# was reported as an upstream claim nobody judged, where it was no citation.
+CITATION = re.compile(
+    r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?![A-Za-z0-9_])(?::(\d+))?"
+)
 
 # R2218 — pinned at what the tree measures today. Two-directional; see header.
 #
@@ -2886,7 +2902,10 @@ PIN_NO_SYMBOL = 0
 # corrected (Rounds 4044 and 4049), gains three wz citations of files its pin table already holds, so
 # the table keeps its 55 pairs. READ off the census's own FAIL line, `wz citations: 62 against a pin
 # of 59`.
-PIN_WZ_CITATIONS = 62
+# 62 -> 64, one atom. `session-close-ingress`'s access-control clause names the three files its
+# measurement read by their crate paths, where it named a switchboard and a bare observer file; the
+# observer pair are the two its later correction already cites, so the review table keeps its pairs.
+PIN_WZ_CITATIONS = 64
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2968,7 +2987,15 @@ PIN_WZ_CITATIONS = 62
 # carrying ONE ambiguous citation (R2697 also counted one when it arrived the
 # first time). READ off the census's own FAIL line, `ambiguous citations: 1
 # against a pin of 0`.
-PIN_AMBIGUOUS = 1
+# 1 -> 0. That one was the bare observer file of `session-close-ingress`'s access-control clause,
+# which two crates carry; the clause now names both by path (see PIN_WZ_CITATIONS).
+PIN_AMBIGUOUS = 0
+# A citation no tracked file answers and the anchor gate's grammar does not
+# grade either: a bare upstream basename, a path under an undeclared root-less
+# segment, a zenoh-pico or zenoh-c source path. No oracle in this tree judges
+# such a claim, so an arrival is something its commit wrote and names; the way
+# out is the anchored `path` @ `needle` form, or an oracle that reads it.
+PIN_UNJUDGED = 0
 
 
 class Fatal(Exception):
@@ -3047,8 +3074,9 @@ def resolve_citation(cited: str, paths: list[str]) -> list[str]:
     """The tracked paths a cited path can mean: the exact path when it is
     tracked, else every tracked path ending with it under a `/`.
 
-    One answer is a wz file, none is upstream (this tree holds no oracle for it),
-    several is ambiguity. `citation_audit` and `reason_review_pin_gate` both
+    One answer is a wz file, none is not a wz file (`citation_audit` asks the
+    upstream grammar which oracle, if any, reads it), several is ambiguity.
+    `citation_audit` and `reason_review_pin_gate` both
     read a citation through this, so the two cannot disagree about what a reason
     cites.
     """
@@ -3062,24 +3090,44 @@ def resolve_citation(cited: str, paths: list[str]) -> list[str]:
     return [p for p in paths if test_sources.canonical(p) == cited]
 
 
-def citation_audit(
-    reasons: dict[str, str], paths: list[str]
-) -> tuple[int, int, int, list[str]]:
-    """(wz citations, ambiguous, upstream, findings).
+class CitationAudit(typing.NamedTuple):
+    """Every citation of the audited reasons, in exactly one of four counts."""
+
+    #: Resolves to exactly one tracked file, and is judged here.
+    unique: int
+    #: Ends more than one tracked path; counted, never guessed at.
+    ambiguous: int
+    #: No tracked file, inside a form the anchor gate resolves at the pin.
+    upstream: int
+    #: No tracked file and no form any oracle here reads.
+    unjudged: int
+    findings: list[str]
+
+
+def citation_audit(reasons: dict[str, str], paths: list[str]) -> CitationAudit:
+    """Each citation counted once, by which oracle judges it.
 
     A citation resolves when exactly one tracked path ENDS WITH the cited path.
-    Several candidates is ambiguity and is counted, never guessed at; none is
-    read as upstream and left unjudged, which is the honest verdict R2215
-    measured rather than a shrug.
+    Several candidates is ambiguity. None means the claim is not about a wz
+    file, and then the span the citation sits in decides: inside a form
+    `upstream_citation_anchor_gate.resolved_spans` names, it is an upstream
+    claim that gate resolves against the pin (through
+    `store_reason_citation_gate`, which reads every live reason); outside all
+    of them, nothing here reads it.
     """
-    unique = ambiguous = upstream = 0
+    unique = ambiguous = upstream = unjudged = 0
     findings: list[str] = []
     for atom in sorted(reasons):
+        spans = anchor_gate.resolved_spans(reasons[atom])
         for match in CITATION.finditer(reasons[atom]):
             cited, line = match.group(1), match.group(2)
             candidates = resolve_citation(cited, paths)
             if not candidates:
-                upstream += 1
+                start, end = match.span(1)
+                if any(a <= start and end <= b for a, b in spans):
+                    upstream += 1
+                else:
+                    unjudged += 1
                 continue
             if len(candidates) > 1:
                 ambiguous += 1
@@ -3100,14 +3148,15 @@ def citation_audit(
                     f"{length} line(s) -- the residual points past the end of "
                     f"its own evidence."
                 )
-    return unique, ambiguous, upstream, findings
+    return CitationAudit(unique, ambiguous, upstream, unjudged, findings)
 
 
 def run() -> int:
     reasons = partial_atoms()
     paths = tracked()
     reach = reach_partition(reasons)
-    unique, ambiguous, upstream, findings = citation_audit(reasons, paths)
+    audit = citation_audit(reasons, paths)
+    findings = audit.findings
 
     print(
         f"depth-axis-census: {len(reasons)} atom(s) graded PARTIAL -- "
@@ -3116,17 +3165,19 @@ def run() -> int:
         f"{len(reach['no_symbol'])} with no symbol the derivation can own"
     )
     print(
-        f"  citations: {unique} resolve to one tracked wz file, "
-        f"{ambiguous} ambiguous, {upstream} read as upstream and NOT judged "
-        f"(R2215: this tree holds no oracle for them)"
+        f"  citations: {audit.unique} resolve to one tracked wz file, "
+        f"{audit.ambiguous} ambiguous, {audit.upstream} upstream in a form "
+        f"store_reason_citation_gate resolves at the pin, {audit.unjudged} "
+        f"that no oracle in this tree reads"
     )
 
     for label, actual, pin in (
         ("reached", len(reach["reached"]), PIN_REACHED),
         ("unreached", len(reach["unreached"]), PIN_UNREACHED),
         ("no-symbol", len(reach["no_symbol"]), PIN_NO_SYMBOL),
-        ("wz citations", unique, PIN_WZ_CITATIONS),
-        ("ambiguous citations", ambiguous, PIN_AMBIGUOUS),
+        ("wz citations", audit.unique, PIN_WZ_CITATIONS),
+        ("ambiguous citations", audit.ambiguous, PIN_AMBIGUOUS),
+        ("unjudged citations", audit.unjudged, PIN_UNJUDGED),
     ):
         if actual != pin:
             direction = "rose" if actual > pin else "fell"
@@ -3141,7 +3192,7 @@ def run() -> int:
             print(f"  - {finding}", file=sys.stderr)
         return 1
     print(
-        f"  {unique} wz citation(s) resolve and none points past its file's end"
+        f"  {audit.unique} wz citation(s) resolve and none points past its file's end"
     )
     return 0
 
@@ -3161,36 +3212,56 @@ def selftest() -> int:
     # ⚠ THE MATCHER CONTROL, and it is the trap this round fell into first.
     # A cited upstream path must NOT resolve onto a wz file that merely shares
     # its basename.
+    # Its first segment is neither an upstream root nor a declared root-less
+    # segment, so no oracle reads it either: it is UNJUDGED, not upstream.
     paths = ["crates/wz-statechart-bridge/src/lib.rs", "crates/wz-capture/src/agg.rs"]
     reasons = {"probe": "RESIDUAL vs zenoh: zenoh-config/src/lib.rs:362 differs"}
-    unique, ambiguous, upstream, findings = citation_audit(reasons, paths)
-    if (unique, upstream) != (0, 1) or findings:
-        return fail(
-            f"an upstream path resolved onto a wz file: unique={unique} "
-            f"upstream={upstream} findings={findings}"
-        )
+    got = citation_audit(reasons, paths)
+    if (got.unique, got.upstream, got.unjudged) != (0, 0, 1) or got.findings:
+        return fail(f"an upstream path resolved onto a wz file, or was graded: {got}")
 
     # A real wz citation resolves, and one past the end is a finding.
     real = "crates/wz-capture/src/agg.rs"
     length = len((ROOT / real).read_text(errors="replace").split("\n"))
     good = {"probe": f"RESIDUAL: see {real}:1 for the seam"}
-    unique, _amb, _up, findings = citation_audit(good, [real])
-    if unique != 1 or findings:
-        return fail(f"a real wz citation did not resolve cleanly: {findings}")
+    got = citation_audit(good, [real])
+    if got.unique != 1 or got.findings:
+        return fail(f"a real wz citation did not resolve cleanly: {got.findings}")
     bad = {"probe": f"RESIDUAL: see {real}:{length + 500} for the seam"}
-    _u, _a, _p, findings = citation_audit(bad, [real])
-    if not findings:
+    if not citation_audit(bad, [real]).findings:
         return fail("a citation past the end of its file produced no finding")
 
     # An AMBIGUOUS citation is counted, never guessed at: two tracked files
     # ending in the cited path is exactly the state the basename matcher
     # resolved by picking one.
     twin = ["crates/a/src/lib.rs", "crates/b/src/lib.rs"]
-    _u, amb, _p, findings = citation_audit({"probe": "RESIDUAL: src/lib.rs:1"}, twin)
-    if amb != 1 or findings:
-        return fail(f"an ambiguous citation was resolved instead of counted: {amb}")
+    got = citation_audit({"probe": "RESIDUAL: src/lib.rs:1"}, twin)
+    if got.ambiguous != 1 or got.findings:
+        return fail(f"an ambiguous citation was resolved instead of counted: {got}")
 
-    print("depth-axis-census: selftest OK (8 derivations driven)")
+    # The extension ends the token. A dotted word whose suffix starts like an
+    # extension is no citation, and a citation at the end of a sentence still
+    # carries its line.
+    words = "the session.close event and one [patch.crates-io] entry"
+    if [m.group(0) for m in CITATION.finditer(words)]:
+        return fail(f"a dotted word read as a file: {CITATION.findall(words)}")
+    if [m.groups() for m in CITATION.finditer("see lib.rs:3.")] != [("lib.rs", "3")]:
+        return fail("a citation ending a sentence lost its path or its line")
+
+    # A path no tracked file answers is UPSTREAM only inside a form the anchor
+    # gate resolves at the pin. The path is assembled so this tracked file
+    # writes no upstream path of its own (the anchor gate scans it).
+    rooted = "/".join((anchor_gate.UPSTREAM_ROOTS[0], "probe", "src", "seam.rs"))
+    anchored = {"probe": f"RESIDUAL: `{rooted}` @ `fn seam(` differs"}
+    got = citation_audit(anchored, paths)
+    if (got.unique, got.ambiguous, got.upstream, got.unjudged) != (0, 0, 1, 0):
+        return fail(f"an anchored upstream citation was not counted as upstream: {got}")
+    basename = {"probe": "RESIDUAL: upstream's " + "seam" + ".rs differs"}
+    got = citation_audit(basename, paths)
+    if (got.upstream, got.unjudged) != (0, 1):
+        return fail(f"a bare basename no oracle reads was counted as upstream: {got}")
+
+    print("depth-axis-census: selftest OK (10 derivations driven)")
     return 0
 
 

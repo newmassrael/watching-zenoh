@@ -353,7 +353,7 @@ fn retrieved_value(view: &dyn ReplyView) -> RetrievedValue {
         payload: view.payload().to_vec(),
         encoding: view.put_encoding().map(|(packed_id, schema)| EncodingHint {
             packed_id,
-            schema: schema.map(String::from),
+            schema: schema.map(<[u8]>::to_vec),
         }),
     }
 }
@@ -465,7 +465,7 @@ where
                     .push(decoded);
             }
         },
-        move |_rid: u64| {
+        move |_rid: wz_session_core::wire_id::RequestId| {
             if let Some(tx) = final_tx
                 .lock()
                 .expect("aligner final oneshot poisoned")
@@ -673,7 +673,12 @@ mod tests {
             self.plain += 1;
         }
         fn reply_del(&mut self) {}
-        fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {
+        fn reply_err(
+            &mut self,
+            _encoding_id: Option<u32>,
+            _schema: Option<&[u8]>,
+            _payload: &[u8],
+        ) {
         }
         fn reply_keyed_attached(
             &mut self,
@@ -890,7 +895,7 @@ mod tests {
         keyexpr: &'a str,
         payload: &'a [u8],
         attachment: Option<&'a [u8]>,
-        put_encoding: Option<(u32, Option<&'a str>)>,
+        put_encoding: Option<(u32, Option<&'a [u8]>)>,
     ) -> BorrowedReply<'a> {
         BorrowedReply {
             rid: 1,
@@ -982,7 +987,7 @@ mod tests {
             "@zid/01/1/aligner",
             &[5, 6],
             Some(&attachment),
-            Some((7, Some("text/plain"))),
+            Some((7, Some(&b"text/plain"[..]))),
         );
         let (reply, value) = decode_reply(&view).expect("a Retrieval reply decodes");
         assert!(matches!(reply, AlignmentReply::Retrieval(_)));
@@ -992,7 +997,7 @@ mod tests {
             value.encoding,
             Some(EncodingHint {
                 packed_id: 7,
-                schema: Some("text/plain".to_string()),
+                schema: Some(b"text/plain".to_vec()),
             })
         );
     }
@@ -1043,7 +1048,7 @@ mod tests {
             "@zid/01/9/aligner",
             &[5, 6],
             Some(&attachment),
-            Some((7, Some("text/plain"))),
+            Some((7, Some(&b"text/plain"[..]))),
         );
         let (reply, value) = decode_reply(&view).expect("a WildcardPut Retrieval reply decodes");
         assert!(matches!(reply, AlignmentReply::Retrieval(_)));
@@ -1053,7 +1058,7 @@ mod tests {
             value.encoding,
             Some(EncodingHint {
                 packed_id: 7,
-                schema: Some("text/plain".to_string()),
+                schema: Some(b"text/plain".to_vec()),
             })
         );
     }
@@ -1114,7 +1119,7 @@ mod tests {
         let mut dest = StorageState::new(MemoryStorage::new()).unwrap();
         for response in &responses {
             let attachment = encode_alignment_reply(&response.reply);
-            let (payload, put_encoding): (&[u8], Option<(u32, Option<&str>)>) =
+            let (payload, put_encoding): (&[u8], Option<(u32, Option<&[u8]>)>) =
                 match &response.value {
                     Some(v) => (
                         &v.payload,

@@ -148,7 +148,7 @@ impl NamedKeyexpr {
     /// a literal). `CodecError::BufferOverflow` when `suffix` is longer than
     /// [`crate::caps::MAX_KEYEXPR_BYTES`]: the refusal of a key this session holds
     /// no text for, never a truncated one.
-    pub fn new(mapping_id: u64, suffix: &str) -> Result<Self, CodecError> {
+    pub fn new(mapping_id: crate::wire_id::ExprId, suffix: &str) -> Result<Self, CodecError> {
         // The bound is on the suffix, whatever the id's VLE costs: a key is
         // refused by what it IS, not by how wide the id beside it happens to be.
         if suffix.len() > crate::caps::MAX_KEYEXPR_BYTES {
@@ -162,7 +162,7 @@ impl NamedKeyexpr {
             crate::declare_ext_keyexpr::INNER_HAS_SUFFIX
         };
         sink.write_u8(crate::declare_ext_keyexpr::INNER_IS_LOCAL | has_suffix)?;
-        sink.write_vle_u64(mapping_id)?;
+        sink.write_vle_u64(u64::from(mapping_id))?;
         sink.write_bytes(suffix.as_bytes())?;
         let len = sink.position();
         Ok(Self { body, len })
@@ -210,7 +210,7 @@ fn envelope<'a>(interest_id: Option<u64>, body: DeclareVariant<'a>) -> Declare<'
 /// `u16` length ([`crate::codec_owned::sent_suffix`]), and so for every composer
 /// below that names a key.
 pub(crate) fn local<'a>(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&'a str>,
 ) -> Result<Wireexpr<'a>, CodecError> {
     Ok(Wireexpr {
@@ -225,7 +225,10 @@ pub(crate) fn local<'a>(
 /// The `Nonlocal`-arm wireexpr, which names an id of the PEER's table, refused as
 /// [`local`] is.
 #[cfg(feature = "codec-declare")]
-fn nonlocal<'a>(mapping_id: u64, suffix: Option<&'a str>) -> Result<Wireexpr<'a>, CodecError> {
+fn nonlocal<'a>(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: Option<&'a str>,
+) -> Result<Wireexpr<'a>, CodecError> {
     Ok(Wireexpr {
         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
             id: mapping_id,
@@ -251,7 +254,10 @@ const fn n_flag(suffix: Option<&str>) -> u8 {
 /// Panics if `mapping_id == 0`, as the builder does: id zero is the
 /// literal-keyexpr sentinel and a declaration of it has no table semantics.
 #[cfg(feature = "codec-declare")]
-pub fn declare_kexpr(mapping_id: u64, suffix: &str) -> Result<Declare<'_>, CodecError> {
+pub fn declare_kexpr(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: &str,
+) -> Result<Declare<'_>, CodecError> {
     assert!(
         mapping_id != 0,
         "declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
@@ -260,7 +266,7 @@ pub fn declare_kexpr(mapping_id: u64, suffix: &str) -> Result<Declare<'_>, Codec
         None,
         DeclareVariant::CodecZenohDeclKexpr(DeclKexpr {
             header: wire_const::D_MID_KEXPR | wire_const::FLAG_D_N,
-            id: mapping_id,
+            id: u64::from(mapping_id),
             keyexpr: local(0, Some(suffix))?,
             extensions: None,
         }),
@@ -272,7 +278,7 @@ pub fn declare_kexpr(mapping_id: u64, suffix: &str) -> Result<Declare<'_>, Codec
 #[cfg(feature = "codec-declare")]
 pub fn declare_subscriber(
     subscriber_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<Declare<'_>, CodecError> {
     Ok(envelope(
@@ -294,7 +300,7 @@ pub fn declare_subscriber(
 #[cfg(feature = "codec-declare")]
 pub fn declare_queryable(
     queryable_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
     info: crate::queryable_info::QueryableInfo,
 ) -> Result<Declare<'_>, CodecError> {
@@ -323,7 +329,7 @@ pub fn declare_queryable(
 #[cfg(feature = "codec-declare")]
 pub fn declare_token(
     token_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<Declare<'_>, CodecError> {
     Ok(envelope(
@@ -343,7 +349,7 @@ pub fn declare_token(
 #[cfg(feature = "codec-declare")]
 pub fn declare_subscriber_nonlocal(
     subscriber_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<Declare<'_>, CodecError> {
     assert!(
@@ -367,7 +373,7 @@ pub fn declare_subscriber_nonlocal(
 #[cfg(feature = "codec-declare")]
 pub fn declare_queryable_nonlocal(
     queryable_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<Declare<'_>, CodecError> {
     assert!(
@@ -391,7 +397,7 @@ pub fn declare_queryable_nonlocal(
 #[cfg(feature = "codec-declare")]
 pub fn declare_token_nonlocal(
     token_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<Declare<'_>, CodecError> {
     assert!(
@@ -412,12 +418,12 @@ pub fn declare_token_nonlocal(
 /// `Declare(UndeclKexpr)`: drop `mapping_id` from the peer's table.
 /// [`crate::declare_build::build_undeclare_kexpr`], written in place.
 #[cfg(feature = "codec-declare")]
-pub fn undeclare_kexpr<'a>(mapping_id: u64) -> Declare<'a> {
+pub fn undeclare_kexpr<'a>(mapping_id: crate::wire_id::ExprId) -> Declare<'a> {
     envelope(
         None,
         DeclareVariant::CodecZenohUndeclKexpr(UndeclKexpr {
             header: wire_const::D_MID_UNDECL_KEXPR,
-            id: mapping_id,
+            id: u64::from(mapping_id),
             extensions: None,
         }),
     )
@@ -632,7 +638,7 @@ pub fn interest<'a>(
     current: bool,
     future: bool,
     aggregate: bool,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&'a str>,
 ) -> Result<Interest<'a>, CodecError> {
     assert!(
@@ -724,7 +730,7 @@ pub fn interest_final_propagated<'a>(interest_id: u64) -> Interest<'a> {
 /// counts is on the stack only while it counts.
 #[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
 #[inline(never)]
-pub fn response_final_len(request_id: u64, qos: QosLevel) -> usize {
+pub fn response_final_len(request_id: crate::wire_id::RequestId, qos: QosLevel) -> usize {
     wz_codecs::response_final::ResponseFinalWire::measure(&response_final(request_id, qos)).len()
 }
 
@@ -733,7 +739,10 @@ pub fn response_final_len(request_id: u64, qos: QosLevel) -> usize {
 /// [`crate::declare_ext_qos::set_response_final_qos`]).
 /// [`crate::response_final_build::build_response_final`], written in place.
 #[cfg(feature = "codec-response-final")]
-pub fn response_final<'a>(request_id: u64, qos: QosLevel) -> wz_codecs::lent::ResponseFinal<'a> {
+pub fn response_final<'a>(
+    request_id: crate::wire_id::RequestId,
+    qos: QosLevel,
+) -> wz_codecs::lent::ResponseFinal<'a> {
     let (header, extensions) = if qos == QosLevel::DEFAULT {
         (0x1A, None)
     } else {
@@ -777,7 +786,7 @@ mod tests {
     /// `(mapping id, suffix)` of every shape a declaration names a keyexpr by:
     /// a literal, an alias alone, an alias with a suffix, an empty suffix, a
     /// multi-byte VLE id and a long suffix.
-    fn keys() -> [(u64, Option<&'static str>); 6] {
+    fn keys() -> [(crate::wire_id::ExprId, Option<&'static str>); 6] {
         [
             (0, Some("a/b")),
             (5, None),
@@ -785,7 +794,7 @@ mod tests {
             (0, Some("")),
             (300, Some("k")),
             (
-                u64::MAX,
+                crate::wire_id::ExprId::MAX,
                 Some("a/very/long/keyexpr/chunk/that/runs/on/and/on/and/on"),
             ),
         ]
@@ -878,17 +887,21 @@ mod tests {
             );
             compared += 3;
             if id != 0 {
+                // A keyexpr's id is an `ExprId`; the entity id past its width
+                // stands for the widest one.
+                let kexpr =
+                    crate::wire_id::ExprId::try_from(id).unwrap_or(crate::wire_id::ExprId::MAX);
                 for suffix in ["a/b", "", "x/y/z/w"] {
                     assert_eq!(
-                        declare_kexpr(id, suffix).unwrap().encode_to_vec(),
-                        owned_declare(&owned::build_declare_kexpr(id, suffix).unwrap()),
-                        "kexpr {id} {suffix:?}"
+                        declare_kexpr(kexpr, suffix).unwrap().encode_to_vec(),
+                        owned_declare(&owned::build_declare_kexpr(kexpr, suffix).unwrap()),
+                        "kexpr {kexpr} {suffix:?}"
                     );
                     compared += 1;
                 }
                 assert_eq!(
-                    undeclare_kexpr(id).encode_to_vec(),
-                    owned_declare(&owned::build_undeclare_kexpr(id))
+                    undeclare_kexpr(kexpr).encode_to_vec(),
+                    owned_declare(&owned::build_undeclare_kexpr(kexpr))
                 );
                 compared += 1;
             }
@@ -987,10 +1000,10 @@ mod tests {
             );
         }
         for (id, mapping, suffix) in [
-            (1u64, 7u64, "tail"),
+            (1u64, 7u16, "tail"),
             (9, 7, ""),
             (1 << 33, 300, "k/l"),
-            (5, u64::MAX, "z"),
+            (5, crate::wire_id::ExprId::MAX, "z"),
         ] {
             let key = NamedKeyexpr::new(mapping, suffix).unwrap();
             assert_eq!(
@@ -1019,14 +1032,15 @@ mod tests {
     fn a_key_past_what_a_named_keyexpr_holds_is_refused_and_one_at_the_bound_is_not() {
         let at_bound = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES);
         let past_bound = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
-        // Even the widest id (nine VLE bytes) leaves room for a suffix at the bound.
-        let key = NamedKeyexpr::new(u64::MAX, &at_bound).expect("at the bound");
+        // Even the widest id (three VLE bytes) leaves room for a suffix at the bound.
+        let widest = crate::wire_id::ExprId::MAX;
+        let key = NamedKeyexpr::new(widest, &at_bound).expect("at the bound");
         assert_eq!(
             undeclare_token_naming(1, &key).encode_to_vec(),
-            owned_declare(&owned::build_undeclare_token_on_wire(1, u64::MAX, &at_bound).unwrap())
+            owned_declare(&owned::build_undeclare_token_on_wire(1, widest, &at_bound).unwrap())
         );
         assert_eq!(
-            NamedKeyexpr::new(u64::MAX, &past_bound).err(),
+            NamedKeyexpr::new(widest, &past_bound).err(),
             Some(CodecError::BufferOverflow),
             "past the bound is refused, not cut"
         );
@@ -1222,7 +1236,7 @@ mod tests {
             QosLevel::from_parts(Priority::Control, CongestionControl::Block, false),
             QosLevel::from_parts(Priority::DataHigh, CongestionControl::Drop, true),
         ];
-        for request_id in [0u64, 7, 1 << 50] {
+        for request_id in [0u32, 7, 1 << 28, u32::MAX] {
             for qos in levels {
                 let built = crate::response_final_build::build_response_final(request_id, qos);
                 assert_eq!(

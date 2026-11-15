@@ -2343,26 +2343,26 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     // without a SYN, so its framing is not weighed.
     let row = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
                \"zenoh_evidence\":{\"log2_lr_millibits\":64363,\
-               \"log2_lr_no_millibits\":89344,\
-               \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":6,\
+               \"log2_lr_no_millibits\":96414,\
+               \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":7,\
                \"crossed_at_packet\":2,\
                \"log2_lr_max_millibits\":64363,\"log2_lr_min_millibits\":0,\
-               \"log2_lr_no_max_millibits\":89344,\"log2_lr_no_min_millibits\":0,\
+               \"log2_lr_no_max_millibits\":96414,\"log2_lr_no_min_millibits\":0,\
                \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
                \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
                \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-               \"confirmed\":8,\"violated\":0,\"millibits\":365,\"no_millibits\":25343,\
+               \"confirmed\":8,\"violated\":0,\"millibits\":365,\"no_millibits\":32413,\
                \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     // The FLOW: the same, and the two Inits' version headers, their roles and
     // their units.
     let flow = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
                 \"zenoh_evidence\":{\"log2_lr_millibits\":81360,\
-                \"log2_lr_no_millibits\":112682,\
-                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":6,\
+                \"log2_lr_no_millibits\":121519,\
+                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":7,\
                 \"crossed_at_packet\":2,\
                 \"log2_lr_max_millibits\":81360,\"log2_lr_min_millibits\":0,\
-                \"log2_lr_no_max_millibits\":112682,\"log2_lr_no_min_millibits\":0,\
+                \"log2_lr_no_max_millibits\":121519,\"log2_lr_no_min_millibits\":0,\
                 \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
                 \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
@@ -2373,10 +2373,10 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":2,\"violated\":0,\"millibits\":15999,\"no_millibits\":16001,\
                 \"q_basis\":\"derived\",\"eps_basis\":\"derived\"},\
                 {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":31679,\
+                \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":40516,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":12}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":13}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
@@ -2623,7 +2623,7 @@ fn a_session_with_its_handshake_is_zenoh() {
     let head = alloc::format!(
         "\"zenoh\":\"yes\",\"announced_version\":\"own\",\"zenoh_evidence\":\
          {{\"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":20000,\
-         \"no_at_millibits\":-20000,\"model\":6,\"crossed_at_packet\":2,\
+         \"no_at_millibits\":-20000,\"model\":7,\"crossed_at_packet\":2,\
          \"log2_lr_max_millibits\":{},\"log2_lr_min_millibits\":{},\
          \"log2_lr_no_max_millibits\":{},\"log2_lr_no_min_millibits\":{},\
          \"checks\":[{{\"check\":\"cookie_echo\"",
@@ -3002,7 +3002,8 @@ impl crate::fields_json::RowCoordinates for ListNumbers {
 fn selected_words(d: &Dissection, selector: &str) -> Vec<String> {
     let filter =
         crate::filter::Filter::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
-    let doc = crate::selection_json::selection_json_where_coordinated(d, &filter, &ListNumbers);
+    let doc =
+        crate::selection_json::selection_json_where_coordinated(d, &filter, None, &ListNumbers);
     doc.split("\"selected\":\"")
         .skip(1)
         .map(|s| s.split('"').next().unwrap_or_default().to_string())
@@ -3105,6 +3106,7 @@ fn the_arrival_of_an_init_revises_the_rows_a_cursor_passed() {
         crate::selection_json::selection_since_json_coordinated(
             d,
             &filter,
+            None,
             &ListNumbers,
             crate::selection_json::SelectionWindow {
                 after_seq,
@@ -3683,33 +3685,58 @@ fn read_structured_flow(
 ///
 /// | n | mDNS | DNS | CoAP | NTP | SSDP, syslog |
 /// |---|---|---|---|---|---|
-/// | 1 | 0.185 / 1.00 / 1.00 / 1.00 / 111 | 0.060 / 1.00 / 1.00 / 1.00 / 36 | 0.002 / 0 / 0 / 1.00 / 1 | 0 / 0 / 0 / 0 / 0 | 0 |
-/// | 2 | 0.158 / 0.50 / 1.00 / 1.00 / 171 | 0.066 / 1.00 / 1.00 / 1.00 / 42 | 0.120 / 0.50 / 0.50 / 0.50 / 144 | 0.012 / 0 / 0.50 / 0.50 / 14 | 0 |
-/// | 3 | 0.166 / 0.67 / 0.67 / 1.00 / 43 | 0.067 / 0.67 / 0.67 / 1.00 / 39 | 0.082 / 0.33 / 0.33 / 0.33 / 0 | 0.010 / 0 / 0.33 / 0.33 / 0 | 0 |
-/// | 5 | 0.168 / 0.40 / 0.60 / 0.80 / 22 | 0.081 / 0.40 / 0.40 / 0.80 / 6 | 0.103 / 0.40 / 0.40 / 0.40 / 0 | 0.008 / 0 / 0.20 / 0.20 / 0 | 0 |
-/// | 10 | 0.164 / 0.40 / 0.40 / 0.50 / 5 | 0.078 / 0.40 / 0.40 / 0.60 / 2 | 0.135 / 0.30 / 0.40 / 0.50 / 1 | 0.012 / 0.10 / 0.10 / 0.20 / 0 | 0 |
-/// | 20 | 0.164 / 0.30 / 0.35 / 0.45 / 0 | 0.070 / 0.20 / 0.30 / 0.30 / 0 | 0.129 / 0.25 / 0.30 / 0.40 / 0 | 0.011 / 0.05 / 0.10 / 0.15 / 0 | 0 |
-/// | 50 | 0.160 / 0.24 / 0.30 / 0.32 / 0 | 0.071 / 0.16 / 0.20 / 0.28 / 0 | 0.132 / 0.20 / 0.24 / 0.26 / 0 | 0.010 / 0.04 / 0.06 / 0.06 / 0 | 0 |
+/// | 1 | 0.088 / 1.00 / 1.00 / 1.00 / 53 | 0.027 / 0 / 1.00 / 1.00 / 16 | 0.002 / 0 / 0 / 1.00 / 1 | 0 / 0 / 0 / 0 / 0 | 0 |
+/// | 2 | 0.067 / 0.50 / 0.50 / 1.00 / 74 | 0.030 / 0 / 1.00 / 1.00 / 20 | 0.004 / 0 / 0 / 0.50 / 5 | 0.006 / 0 / 0.50 / 0.50 / 7 | 0 |
+/// | 3 | 0.078 / 0.33 / 0.67 / 1.00 / 9 | 0.025 / 0.33 / 0.67 / 0.67 / 11 | 0.008 / 0 / 0.33 / 0.33 / 0 | 0.007 / 0 / 0.33 / 0.33 / 0 | 0 |
+/// | 5 | 0.077 / 0.40 / 0.40 / 0.40 / 0 | 0.045 / 0.40 / 0.40 / 0.80 / 4 | 0.005 / 0 / 0.20 / 0.20 / 0 | 0.004 / 0 / 0.20 / 0.20 / 0 | 0 |
+/// | 10 | 0.081 / 0.20 / 0.30 / 0.40 / 0 | 0.042 / 0.20 / 0.40 / 0.40 / 0 | 0.005 / 0 / 0.10 / 0.20 / 0 | 0.006 / 0.10 / 0.10 / 0.20 / 0 | 0 |
+/// | 20 | 0.077 / 0.20 / 0.25 / 0.30 / 0 | 0.034 / 0.10 / 0.20 / 0.30 / 0 | 0.006 / 0.05 / 0.05 / 0.10 / 0 | 0.006 / 0.05 / 0.05 / 0.10 / 0 | 0 |
+/// | 50 | 0.074 / 0.14 / 0.16 / 0.20 / 0 | 0.036 / 0.12 / 0.14 / 0.20 / 0 | 0.007 / 0.04 / 0.04 / 0.06 / 0 | 0.006 / 0.02 / 0.04 / 0.06 / 0 | 0 |
 ///
 /// Each cell reads mean / p95 / p99 / max / flows at or above 0.5 (SSDP and
 /// syslog read every unit `undecoded`, 54600 of 54600 each, so their cell is
 /// zero throughout). Over all 54600 datagrams of a protocol the three classes
-/// split `explained` / `residual` / `undecoded` as: mDNS 8847 / 45753 / 0, DNS
-/// 3926 / 5927 / 44747, CoAP 6929 / 11796 / 35875, NTP 575 / 38160 / 15865.
+/// split `explained` / `residual` / `undecoded` as: mDNS 4151 / 50449 / 0, DNS
+/// 1978 / 7869 / 44753, CoAP 348 / 18377 / 35875, NTP 310 / 38425 / 15865.
+///
+/// Measured with a `Frame`'s records read as upstream reads a batch
+/// (`docs/flow-zenoh-verdict.md` §6.14, measured 2026-11-14): its records end
+/// at a transport id, and a record that does not decode, or whose id is in
+/// neither space, fails the batch. The same flows, `explained` / `residual` /
+/// `undecoded`, in three readings: the first measurement (2026-10-26), the
+/// reader just before model 7 (2026-11-14, with the walk already ending a
+/// `Frame` at a transport id and the codec work's refusals), and model 7:
+///
+/// | protocol | 2026-10-26 | before model 7 | model 7 |
+/// |---|---|---|---|
+/// | mDNS | 8847 / 45753 / 0 | 8847 / 45753 / 0 | 4151 / 50449 / 0 |
+/// | DNS | 3926 / 5927 / 44747 | 2301 / 7547 / 44752 | 1978 / 7869 / 44753 |
+/// | CoAP | 6929 / 11796 / 35875 | 4922 / 13803 / 35875 | 348 / 18377 / 35875 |
+/// | NTP | 575 / 38160 / 15865 | 378 / 38357 / 15865 | 310 / 38425 / 15865 |
+///
+/// Model 7 takes units out of `explained` (mDNS 4696, DNS 323, CoAP 4574, NTP
+/// 68): batches upstream drops, a `Frame` whose records come to bytes of the
+/// names, the counts or the options that upstream reads as neither a network
+/// message nor a transport one. They go to `residual`, except that one DNS
+/// unit becomes `undecoded` with model 7, because the batch header inference
+/// asks the same rule as the walk; the other five of the six DNS units that
+/// became `undecoded` since the first measurement moved before it. The
+/// random table above was measured on 2026-10-26, and no reading since can
+/// have counted more units `explained` than that one.
 ///
 /// What it says against the random table (n = 10: mean 0.061, max 0.40):
 ///
-/// * A flow of ten or more datagrams CAN reach a share of 0.5 on structured
-///   bytes that are not zenoh: mDNS in 5 of 600 flows of ten, DNS in 2 (up to
-///   0.60) and CoAP in 1. None does at twenty or more, where the widest is mDNS
-///   at 0.45 (n = 20) and 0.32 (n = 50). So a sentence bounded by "ten units,
-///   half read whole" is crossed by real protocols, and one bounded by twenty is
-///   not, with a margin of 0.05 at its narrowest.
-/// * The mean share is no better than random: mDNS and CoAP sit at 0.16 and
-///   0.13 against random's 0.06. The mDNS id is always 0, so every datagram
-///   starts with the same byte pair and reads the same way: 84% `residual`, 16%
-///   `explained`, never `undecoded`. The unit count does not separate it from
-///   zenoh as well as it separates random bytes.
+/// * No flow of ten or more structured datagrams that are not zenoh reaches a
+///   share of 0.5: the widest at ten are mDNS and DNS at 0.40, at twenty 0.30
+///   and at fifty 0.20. Under the earlier reading mDNS reached it in 5 of 600
+///   flows of ten, DNS in 2 (up to 0.60) and CoAP in 1, all of them on units
+///   upstream drops. Shorter flows still do: DNS in 4 of 600 flows of five,
+///   mDNS in 9 of three.
+/// * mDNS alone sits above random's mean (0.08 against 0.06; DNS 0.04, CoAP
+///   and NTP under 0.01). The mDNS id is always 0, so every datagram starts
+///   with the same byte pair: 92% `residual`, 8% `explained`, never
+///   `undecoded`. The unit count does not separate it from zenoh as well as it
+///   separates random bytes.
 /// * The share alone is no verdict, and the sequential test does not read it as
 ///   one: see `the_sequential_test_says_yes_to_no_generated_flow_of_another_protocol`.
 #[test]
@@ -3736,25 +3763,23 @@ fn structured_datagrams_of_other_protocols_read_by_their_first_byte() {
         // A failing bound prints the protocol's whole row set, so the table
         // above is regenerated from the message and not from a debugger.
         let rows_text = alloc::format!("{name}: {all:?}: {rows:?}");
+        std::println!("{rows_text}");
         for (n, mean, _, _, max, over) in &rows {
-            if *n >= 20 {
+            if *n >= 10 {
                 assert!(
-                    *max < 0.5,
-                    "{name} reached a share of {max} at {n} datagrams: {rows_text}"
+                    *max < 0.5 && *over == 0,
+                    "{name} reached a share of {max} at {n} datagrams, which only a unit \
+                     read whole where upstream drops its batch can do: {rows_text}"
                 );
             }
             assert!(*max <= 1.0 && *mean < 0.25, "{rows_text}");
-            if *n == 10 {
-                assert!(*max <= 0.7 && *over <= 30, "{rows_text}");
-            }
         }
         match name {
             "ssdp" | "syslog" => assert_eq!(all.0 + all.1, 0, "text reads undecoded: {rows_text}"),
-            "mdns" => {
-                let ten = rows.iter().find(|r| r.0 == 10).unwrap();
-                assert!(ten.5 >= 1, "mdns no longer reaches 0.5 at ten: {rows_text}");
-                assert_eq!(all.2, 0, "{rows_text}");
-            }
+            "mdns" => assert_eq!(all, (4151, 50449, 0), "{rows_text}"),
+            "dns" => assert_eq!(all, (1978, 7869, 44753), "{rows_text}"),
+            "ntp" => assert_eq!(all, (310, 38425, 15865), "{rows_text}"),
+            "coap" => assert_eq!(all, (348, 18377, 35875), "{rows_text}"),
             _ => {}
         }
     }

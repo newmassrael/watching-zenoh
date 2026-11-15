@@ -273,6 +273,30 @@ pub mod session_runtime;
 #[cfg(feature = "session-unicast")]
 pub mod session_drive;
 
+/// The items given, compiled exactly where this crate declares the heap profile's link seams
+/// (`alloc` without `session-slot`: `session_drive::LinkReadiness` and the `readiness` method of
+/// the socket traits), and nothing elsewhere.
+///
+/// A platform crate that implements those seams wraps its implementation in this, and not in a
+/// `cfg` of its own features: features unify across the graph, so a platform crate built without
+/// `session-slot` can meet this crate built with it, and an item gated on the platform's features
+/// would then name a trait or a trait method this build does not have. The macro is defined by
+/// this crate's own `cfg`, so the implementation is compiled exactly when the declaration is.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[macro_export]
+macro_rules! with_heap_link_seams {
+    // Tokens and not `item` fragments, so the items read again in the position the macro is
+    // called in: an associated function of a trait implementation as well as a module item.
+    ($($tokens:tt)*) => { $($tokens)* };
+}
+
+/// See the heap-profile form of this macro: no item, on a build with no heap profile's link seams.
+#[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+#[macro_export]
+macro_rules! with_heap_link_seams {
+    ($($tokens:tt)*) => {};
+}
+
 // The session's link over UDP datagrams, written once for every stack that has BSD-style sockets
 // under a cooperative loop: a platform crate supplies the socket (`udp_link::DatagramSocket`),
 // the driver and the slot profile's stack over it are here.

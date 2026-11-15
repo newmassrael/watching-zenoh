@@ -1,0 +1,7 @@
+image ubuntu22
+clang
+gcc-arm-none-eabi
+libclang-dev
+libnewlib-arm-none-eabi
+pkg-config
+qemu-system-arm

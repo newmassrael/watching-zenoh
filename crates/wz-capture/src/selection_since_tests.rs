@@ -166,6 +166,7 @@ impl Growing {
         let kept = selection_since_json_coordinated(
             &self.d,
             &self.filter,
+            None,
             &self.numbering,
             window,
             &mut self.kept,
@@ -174,6 +175,7 @@ impl Growing {
         let again = selection_since_json_coordinated(
             &self.d,
             &self.filter,
+            None,
             &self.numbering,
             window,
             &mut self.again,
@@ -271,7 +273,7 @@ fn a_call_reads_what_arrived_and_the_requests_still_open() {
     let mut g = Growing::new(Dissection::new(), "closed == no");
     let mut open_before = 0u64;
     let mut calls = 0u64;
-    for round in 1..=6u64 {
+    for round in 1..=6u32 {
         for (from_low, record, open_after) in [
             (
                 true,
@@ -370,7 +372,7 @@ fn a_message_held_behind_a_gap_reads_every_row_again() {
 #[test]
 fn a_cursor_below_the_last_one_reads_every_row_and_folds_nothing_again() {
     let mut g = Growing::new(Dissection::new(), "closed == no");
-    for round in 1..=4u64 {
+    for round in 1..=4u32 {
         g.udp(true, &request_query(round, sender_space(0, Some("demo/q"))));
         g.ask(&alloc::format!("request {round}"));
     }
@@ -386,6 +388,62 @@ fn a_cursor_below_the_last_one_reads_every_row_and_folds_nothing_again() {
     );
     let (_, work) = g.ask("from the cursor again");
     assert_eq!(work.whole, 0, "{work:?}");
+}
+
+/// BETWEEN CALLS THE PLANES KEEP ONLY THE ROWS WHOSE WORD CAN STILL MOVE. Forty
+/// pushes and four queries nothing closes, asked at every step: the planes give
+/// up the verdict of each push once its word is said, and keep what the open
+/// exchanges need. A cursor at 0 afterwards reads every row, the pushes' words
+/// from what the memory said, and the document is still the one a memory that
+/// begins again writes (`ask_from` holds the two equal).
+#[test]
+fn between_calls_the_planes_keep_only_the_rows_whose_word_can_still_move() {
+    let mut g = Growing::new(Dissection::new(), "kind == put");
+    for round in 1..=40u32 {
+        g.udp(
+            true,
+            &push(sender_space(0, Some("demo/p")), &[round as u8; 4]),
+        );
+        if round % 10 == 0 {
+            g.udp(true, &request_query(round, sender_space(0, Some("demo/q"))));
+        }
+        g.ask(&alloc::format!("round {round}"));
+    }
+    let kept = g.kept.kept_entries();
+    assert!(
+        kept <= 16,
+        "the planes kept {kept} entries for 4 open exchanges: {:?}",
+        g.kept.work()
+    );
+    assert!(g.kept.work().forgets >= 1, "{:?}", g.kept.work());
+
+    // ANTI-VACUITY: a memory whose planes never give a row up holds the forty.
+    let mut keeps = SelectionMemory::keeping_everything();
+    let window = SelectionWindow {
+        after_seq: 0,
+        through_seq: g.numbering.issued,
+    };
+    let all =
+        selection_since_json_coordinated(&g.d, &g.filter, None, &g.numbering, window, &mut keeps);
+    assert!(keeps.kept_entries() >= 40, "{}", keeps.kept_entries());
+
+    let (doc, work) = g.ask_from(0, "every row, from the start");
+    assert_eq!(work.whole, 1, "{work:?}");
+    assert_eq!(work.fold.restarts, 0, "the planes went on: {work:?}");
+    assert_eq!(
+        doc.matches("\"selected\":\"yes\"").count(),
+        40,
+        "every push reads yes from what was said: {doc}"
+    );
+    let rows_on = |doc: &str| {
+        doc.split_once("\"rows\":")
+            .map(|(_, rest)| String::from(rest))
+    };
+    assert_eq!(
+        rows_on(&doc),
+        rows_on(&all),
+        "the rows are those a memory that kept every verdict writes"
+    );
 }
 
 /// A CEILING THAT TRIMS THE FRONT does not begin the planes again: they go on
@@ -404,7 +462,7 @@ fn a_ceiling_that_trims_the_front_does_not_begin_the_planes_again() {
     let mut numbering = Numbering::default();
     let mut memory = SelectionMemory::default();
     let mut cursor = 0u64;
-    for (packets, round) in (1..=30u64).enumerate() {
+    for (packets, round) in (1..=30u32).enumerate() {
         let record = if round % 3 == 0 {
             response_final(round - 1)
         } else {
@@ -422,6 +480,7 @@ fn a_ceiling_that_trims_the_front_does_not_begin_the_planes_again() {
         let doc = selection_since_json_coordinated(
             &d,
             &filter,
+            None,
             &numbering,
             SelectionWindow {
                 after_seq: cursor,
@@ -457,7 +516,7 @@ fn a_ceiling_that_trims_the_front_does_not_begin_the_planes_again() {
 /// document says, which is what keeping them shows.
 #[test]
 fn a_ceiling_makes_the_planes_give_up_the_rows_it_took() {
-    const ROUNDS: u64 = 900;
+    const ROUNDS: wz_session_core::wire_id::RequestId = 900;
     for selector in [
         "kind == query",
         "closed == no",
@@ -506,10 +565,17 @@ fn a_ceiling_makes_the_planes_give_up_the_rows_it_took() {
                     after_seq: cursor,
                     through_seq: numbering.issued,
                 };
-                let given_up =
-                    selection_since_json_coordinated(&d, &filter, &numbering, window, &mut forgets);
-                let kept =
-                    selection_since_json_coordinated(&d, &filter, &numbering, window, &mut keeps);
+                let given_up = selection_since_json_coordinated(
+                    &d,
+                    &filter,
+                    None,
+                    &numbering,
+                    window,
+                    &mut forgets,
+                );
+                let kept = selection_since_json_coordinated(
+                    &d, &filter, None, &numbering, window, &mut keeps,
+                );
                 assert_eq!(
                     given_up, kept,
                     "{selector}, round {round}: giving rows up changed the document"

@@ -307,7 +307,7 @@ mod tests {
         payload: Option<Vec<u8>>,
         encoding: Option<EncodingHint>,
         source_info: Option<SourceInfo>,
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         is_local: bool,
         qos: QosLevel,
         #[cfg(feature = "pubsub-ts-stack")]
@@ -316,7 +316,11 @@ mod tests {
 
     /// What one dispatch left behind: what the queryables saw, the replies they
     /// staged, and the Finals owed.
-    type Left = (Vec<Seen>, Vec<QueryReply>, Vec<(u64, QosLevel)>);
+    type Left = (
+        Vec<Seen>,
+        Vec<QueryReply>,
+        Vec<(crate::wire_id::RequestId, QosLevel)>,
+    );
 
     type Registry = super::QueryableRegistry<crate::query_sink::BoxedQuerySink>;
 
@@ -411,7 +415,7 @@ mod tests {
                 b"value",
                 EncodingHint {
                     packed_id: 0x0B,
-                    schema: Some(String::from("text")),
+                    schema: Some(b"text".to_vec()),
                 },
             );
             #[cfg(feature = "query-source-info")]
@@ -534,7 +538,7 @@ mod tests {
         let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         let (mut reg, log) = recording();
         let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());
-        for rid in 0..crate::caps::MAX_PENDING_FINALS as u64 {
+        for rid in 0..crate::caps::MAX_PENDING_FINALS as u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         reg.dispatch_iteration_event(

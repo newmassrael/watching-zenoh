@@ -11,15 +11,18 @@
 //! 32 upstream examples, `z_malloc` / `z_free` alone block nine of them and
 //! `z_sleep_s` seven, which is more than any protocol-level export.
 //!
-//! ## Why libc and not Rust's own primitives
+//! ## Why the system's allocator and not Rust's own primitives
 //!
-//! `z_malloc` and `z_free` MUST be the C allocator, not `std::alloc`. pico
-//! defines them as exactly `malloc` and `free`
+//! `z_malloc` and `z_free` MUST be the allocator pico's backend for the host names,
+//! not `std::alloc`. On a Unix pico defines them as exactly `malloc` and `free`
 //! (`vendor/zenoh-pico/src/system/unix/system.c:101,105`), and a C program is
 //! entitled to mix them with plain `free()` / `malloc()` on the same pointer —
 //! upstream's `z_ping.c` does not, but nothing in the contract stops it, and
 //! `std::alloc::dealloc` also needs a `Layout` that a bare `void*` cannot
-//! supply. Forwarding keeps the two allocators the same allocator.
+//! supply. Forwarding keeps the two allocators the same allocator. On Zephyr they
+//! are the kernel heap's (`k_malloc`, `k_free`), and `z_realloc` answers NULL, as
+//! pico's Zephyr backend does. Which it is, and how a sleep is slept, is the
+//! host layer's (`crate::os`).
 //!
 //! The clock, the wall time, the random source and the sync objects are the part of
 //! pico's platform that differs by HOST in its bytes, not just its code: the C
@@ -32,8 +35,7 @@
 //! `std::time::Instant` cannot be used because the C side stack-allocates the
 //! result and may read it.
 
-use std::ffi::{c_ulong, c_void};
-use std::time::Duration;
+use core::ffi::{c_ulong, c_void};
 
 use crate::ffi::{guard_val, guarded};
 use crate::os::{self, Unit};
@@ -46,17 +48,18 @@ use crate::result::{ZResult, Z_OK};
 /// same fields, so the register assignment matches without a shim.
 pub type z_clock_t = os::Clock;
 
-/// Allocate (pico `z_malloc`). Plain `malloc`, so the result is freeable by
-/// [`z_free`] or by the caller's own `free`.
+/// Allocate (pico `z_malloc`). The host's own allocator (the module doc): on a
+/// Unix plain `malloc`, so the result is freeable by [`z_free`] or by the
+/// caller's own `free`.
 #[no_mangle]
 pub unsafe extern "C" fn z_malloc(size: usize) -> *mut c_void {
-    libc::malloc(size)
+    os::malloc(size)
 }
 
-/// Release (pico `z_free`). Plain `free`; null-tolerant, as `free` is.
+/// Release (pico `z_free`). The host's own; null-tolerant, as `free` is.
 #[no_mangle]
 pub unsafe extern "C" fn z_free(ptr: *mut c_void) {
-    libc::free(ptr);
+    os::free(ptr);
 }
 
 /// Sleep for `time` microseconds (pico `z_sleep_us`).
@@ -65,10 +68,12 @@ pub unsafe extern "C" fn z_free(ptr: *mut c_void) {
 /// identical guarantee, so the observable contract is the same. Always `Z_OK`:
 /// the error channel exists because `usleep` can report `EINTR`, and
 /// `thread::sleep` handles interruption internally rather than surfacing it.
+/// Zephyr's sleeps answer what is left of an early wake, and the host layer
+/// sleeps that again, as pico's Zephyr backend does.
 #[no_mangle]
 pub unsafe extern "C" fn z_sleep_us(time: usize) -> ZResult {
     guard_val(Z_OK, || {
-        std::thread::sleep(Duration::from_micros(time as u64));
+        os::sleep(Unit::Micro, time);
         Z_OK
     })
 }
@@ -77,7 +82,7 @@ pub unsafe extern "C" fn z_sleep_us(time: usize) -> ZResult {
 #[no_mangle]
 pub unsafe extern "C" fn z_sleep_ms(time: usize) -> ZResult {
     guard_val(Z_OK, || {
-        std::thread::sleep(Duration::from_millis(time as u64));
+        os::sleep(Unit::Milli, time);
         Z_OK
     })
 }
@@ -86,7 +91,7 @@ pub unsafe extern "C" fn z_sleep_ms(time: usize) -> ZResult {
 #[no_mangle]
 pub unsafe extern "C" fn z_sleep_s(time: usize) -> ZResult {
     guard_val(Z_OK, || {
-        std::thread::sleep(Duration::from_secs(time as u64));
+        os::sleep(Unit::Second, time);
         Z_OK
     })
 }
@@ -268,10 +273,10 @@ pub unsafe extern "C" fn z_time_now() -> z_time_t {
 /// `buf` must be null or point at `buflen` writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn z_time_now_as_str(
-    buf: *mut std::ffi::c_char,
+    buf: *mut core::ffi::c_char,
     buflen: c_ulong,
-) -> *const std::ffi::c_char {
-    guard_val(std::ptr::null(), || {
+) -> *const core::ffi::c_char {
+    guard_val(core::ptr::null(), || {
         if buf.is_null() || buflen == 0 {
             return buf;
         }
@@ -332,14 +337,14 @@ unsafe fn wall_elapsed(time: *mut z_time_t, unit: Unit) -> c_ulong {
     })
 }
 
-/// Resize an allocation (pico `z_realloc`). Plain `realloc`, for the same
-/// reason [`z_malloc`] is plain `malloc`.
+/// Resize an allocation (pico `z_realloc`). The host's own, for the same
+/// reason [`z_malloc`] is: plain `realloc` on a Unix.
 ///
 /// # Safety
 /// `ptr` must be null or a pointer this allocator returned.
 #[no_mangle]
 pub unsafe extern "C" fn z_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    libc::realloc(ptr, size)
+    os::realloc(ptr, size)
 }
 
 /// Fill `len` bytes of `buf` with cryptographic-quality randomness (pico
@@ -446,7 +451,7 @@ pub unsafe extern "C" fn z_bytes_from_static_buf(
             bytes,
             data,
             len,
-            crate::bytes::Release::new(None, std::ptr::null_mut(), std::ptr::null_mut()),
+            crate::bytes::Release::new(None, core::ptr::null_mut(), core::ptr::null_mut()),
         )
     })
 }

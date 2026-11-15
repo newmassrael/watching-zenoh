@@ -26,20 +26,30 @@
 //!
 //! # What is shared and what is not
 //!
-//! Byte fields are shared. TEXT fields are not: a key expression suffix is a
-//! few dozen bytes, a `String` here is the heap container the rest of the
-//! workspace already uses for it, and sharing a range of a frame as a `str`
-//! would add an unchecked-UTF-8 container for a saving nobody can measure. A
-//! text field is copied, which is `HeapStr`'s own `from_view`.
+//! The profile chooses a container per byte field, by the field's tag, from
+//! the lists given to `rx_holders!` below. A payload, and the identifiers and
+//! cookies beside it, are shared: a range of the frame costs no allocation, and
+//! the payload is what a subscriber is handed. An encoding's schema is COPIED: it
+//! is at most 255 bytes of metadata, sharing it saves nothing, and the shared
+//! container is 24 bytes larger than the heap one, which a router pays again
+//! for every face it forwards a message to. Copied, the schema costs what it
+//! cost when it was text.
+//!
+//! TEXT fields are not shared either: a key expression suffix is a few dozen
+//! bytes, a `String` here is the heap container the rest of the workspace
+//! already uses for it, and sharing a range of a frame as a `str` would add an
+//! unchecked-UTF-8 container for a saving nobody can measure. A text field is
+//! copied, which is `HeapStr`'s own `from_view`.
 //!
 //! # What a slice that is not part of the frame does
 //!
 //! A borrowed view can be built by hand: a default field is the empty slice, a
 //! test passes a literal, a builder encodes a message and decodes it back from a
-//! buffer of its own. [`OriginStorage::bytes_from`](sce_forge_runtime::codec::OriginStorage::bytes_from) is told to decide, so this
-//! profile COPIES such a slice. The alternative, refusing it, would turn a
-//! message assembled outside a frame into a decode error for no reason the
-//! sender could act on; copying is what every byte field cost before.
+//! buffer of its own. The container's [`FromOrigin`] is told to decide, so
+//! [`RxSharedBytes`](crate::rx_profile::RxSharedBytes) COPIES such a slice. The
+//! alternative, refusing it, would turn a message assembled outside a frame
+//! into a decode error for no reason the sender could act on; copying is what
+//! every byte field cost before.
 //!
 //! # What this module does NOT do
 //!
@@ -52,8 +62,8 @@
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::{
-    subrange_of, CodecError, Copying, Fewest, GrowStr, HoldsBytes, HoldsList, HoldsStr,
-    OriginStorage, SceByteBuf, SceStr,
+    copy_from_origin, copy_str_from_origin, subrange_of, CodecError, Copying, Fewest, FromOrigin,
+    FromOriginStr, GrowBytes, GrowStr, HoldsBytes, HoldsList, HoldsStr, OriginStorage, SceByteBuf,
 };
 
 use crate::link::RxBytes;
@@ -69,8 +79,8 @@ pub struct RxShared;
 /// A byte field of a message decoded into [`RxShared`]: a range of the frame,
 /// or a copy when the bytes did not come from one.
 ///
-/// It grows to whatever the field's bound admits, as the heap container does:
-/// the profile answers for every field with this one type.
+/// It grows to whatever the field's bound admits, as the heap container does,
+/// so one type serves every byte field the profile shares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RxSharedBytes(RxBytes);
 
@@ -138,8 +148,8 @@ impl<const M: usize> PartialEq<&[u8; M]> for RxSharedBytes {
     }
 }
 
-// The tag is unused: every field of this profile grows, as on the heap, and only
-// a byte field's container differs from the heap's.
+// The tag is unused: every list and text field of this profile grows, as on the
+// heap; only the byte fields' containers differ from the heap's.
 impl<Tag> HoldsList<Tag> for RxShared {
     type List<T>
         = Vec<T>
@@ -151,9 +161,65 @@ impl<Tag> HoldsStr<Tag> for RxShared {
     type Str = GrowStr;
 }
 
-impl<Tag> HoldsBytes<Tag> for RxShared {
-    type Bytes = RxSharedBytes;
+/// Holds each listed byte tag of [`RxShared`] in `$holder`.
+///
+/// A list per container rather than one impl for every tag, so that a field
+/// can be copied where sharing the frame costs more than it saves. A byte tag
+/// on no list has no container here, and the bound the generated origin
+/// projection asks of the profile for it (`OriginBytes<Tag>`) does not hold: a
+/// codec that gains a byte field does not decode into this profile until the
+/// field is given a holder. A tag carries the `cfg` of the feature that builds
+/// its codec, as its module exists only then.
+macro_rules! rx_holders {
+    ($holder:ty => $( $(#[$attr:meta])* $tag:path ),+ $(,)?) => {
+        $(
+            $(#[$attr])*
+            impl HoldsBytes<$tag> for RxShared {
+                type Bytes = $holder;
+            }
+        )+
+    };
 }
+
+// Shared, a range of the frame: the payloads, and the identifiers and cookies
+// beside them.
+rx_holders!(RxSharedBytes =>
+    wz_codecs::compressed_batch::CompressedBatchPayloadField,
+    #[cfg(feature = "codec-response")]
+    wz_codecs::err::ErrPayloadField,
+    wz_codecs::ext_zbuf::ExtZbufValueField,
+    #[cfg(feature = "codec-fragment")]
+    wz_codecs::fragment::FragmentPayloadField,
+    #[cfg(feature = "codec-frame")]
+    wz_codecs::frame::FramePayloadField,
+    #[cfg(feature = "codec-hello")]
+    wz_codecs::hello::HelloZidField,
+    #[cfg(feature = "codec-init-body")]
+    wz_codecs::init_body::InitBodyCookieField,
+    #[cfg(feature = "codec-init-body")]
+    wz_codecs::init_body::InitBodyZidField,
+    #[cfg(feature = "codec-join")]
+    wz_codecs::join::JoinZidField,
+    #[cfg(feature = "codec-linkstate")]
+    wz_codecs::linkstate::LinkstateZidField,
+    wz_codecs::msg_put::MsgPutPayloadField,
+    #[cfg(feature = "codec-open-body")]
+    wz_codecs::open_body::OpenBodyCookieField,
+    #[cfg(feature = "codec-request")]
+    wz_codecs::query::QueryParametersField,
+    #[cfg(feature = "codec-request")]
+    wz_codecs::query_value_zbuf::QueryValueZbufValueField,
+    #[cfg(feature = "codec-scout")]
+    wz_codecs::scout::ScoutZidField,
+    #[cfg(feature = "transport-link-serial")]
+    wz_codecs::serial_envelope::SerialEnvelopePayloadField,
+    wz_codecs::stream_envelope::StreamEnvelopePayloadField,
+    wz_codecs::timestamp::TimestampZidField,
+    wz_codecs::zbuf_slice::ZbufSliceBytesField,
+);
+
+// Copied: at most 255 bytes of metadata, held as the text it replaced was.
+rx_holders!(GrowBytes => wz_codecs::encoding::EncodingSchemaField);
 
 /// A decode that is not handed the frame (`decode`, `try_into_owned_in`) copies
 /// each byte field out of it, as the heap does; only the origin projection
@@ -162,30 +228,37 @@ impl Copying for RxShared {}
 
 impl OriginStorage for RxShared {
     type Origin = RxBytes;
+}
 
-    fn bytes_from<Tag>(
-        origin: &RxBytes,
-        view: &[u8],
-    ) -> Result<<Self as HoldsBytes<Tag>>::Bytes, CodecError> {
+/// The shared container: a range of the frame when `view` is part of it, and a
+/// copy of `view` when it is not (see the module doc).
+impl FromOrigin<RxBytes> for RxSharedBytes {
+    fn from_origin(origin: &RxBytes, view: &[u8]) -> Result<Self, CodecError> {
         // An empty view first. `subrange_of` compares addresses, and the empty
         // slice a default field holds has a dangling one that can happen to
         // equal a position in the frame; an empty field shares nothing worth
         // naming, and an owned empty vector is the honest answer.
         if view.is_empty() {
-            return Ok(RxSharedBytes(RxBytes::from(Vec::new())));
+            return Ok(Self(RxBytes::from(Vec::new())));
         }
         match subrange_of(origin.as_slice(), view).and_then(|range| origin.subslice(range)) {
-            Some(shared) => Ok(RxSharedBytes(shared)),
-            // Not part of the frame (see the module doc): copy.
-            None => <RxSharedBytes as SceByteBuf>::from_slice(view),
+            Some(shared) => Ok(Self(shared)),
+            None => <Self as SceByteBuf>::from_slice(view),
         }
     }
+}
 
-    fn str_from<Tag>(
-        _origin: &RxBytes,
-        view: &str,
-    ) -> Result<<Self as HoldsStr<Tag>>::Str, CodecError> {
-        <GrowStr as SceStr>::from_view(view)
+/// The copying container of a byte field this profile does not share.
+impl FromOrigin<RxBytes> for GrowBytes {
+    fn from_origin(origin: &RxBytes, view: &[u8]) -> Result<Self, CodecError> {
+        copy_from_origin(origin, view)
+    }
+}
+
+/// Every text field of this profile is a copy.
+impl FromOriginStr<RxBytes> for GrowStr {
+    fn from_origin_str(origin: &RxBytes, view: &str) -> Result<Self, CodecError> {
+        copy_str_from_origin(origin, view)
     }
 }
 
@@ -195,22 +268,38 @@ mod tests {
     use crate::put_payload::inline_bytes;
     use alloc::sync::Arc;
     use alloc::vec;
-    use sce_forge_runtime::codec::{Heap, SceCursor};
+    use core::any::TypeId;
+    use core::mem::size_of;
+    use sce_forge_runtime::codec::{Heap, Lent, OriginBytes, SceCursor};
+    use wz_codecs::encoding::{EncodingIn, EncodingOwned, EncodingSchemaField};
     use wz_codecs::lent::Push;
     use wz_codecs::msg_put::{MsgPutExtensionsHas0x12, MsgPutPayloadField};
-    use wz_codecs::push::{PushOwnedVariant, PushStorage};
+    use wz_codecs::node::Node;
+    use wz_codecs::push::{PushOwned, PushOwnedVariant, PushStorage};
 
     use crate::link::RxStorage;
+
+    /// The size of a received `PushOwned` with the encoding's schema held as
+    /// text, as the AP host build measures it. The router clones one per face
+    /// it forwards to, so the schema's container must not move it. Measured on
+    /// x86_64 at SCE 9ae6a6b682, where the hot path's allocation budget passed
+    /// unchanged: the layout the text schema had.
+    const PUSH_OWNED_BYTES_AT_TEXT_SCHEMA: usize = 312;
 
     /// The wire of a literal Push carrying `payload`, laid in a larger storage
     /// at a non-zero offset so a range that were mistaken for the whole storage
     /// would show.
     fn framed(payload: &[u8]) -> (Arc<dyn RxStorage>, RxBytes, core::ops::Range<usize>) {
         let push = crate::push_build::build_push_literal("demo/rx", payload).expect("a push");
-        let wire = push.encode_to_vec();
+        laid(&push.encode_to_vec())
+    }
+
+    /// `wire` laid in a larger storage at a non-zero offset, and the frame that
+    /// is its range of that storage.
+    fn laid(wire: &[u8]) -> (Arc<dyn RxStorage>, RxBytes, core::ops::Range<usize>) {
         let mut storage = vec![0xEEu8; 7];
         let start = storage.len();
-        storage.extend_from_slice(&wire);
+        storage.extend_from_slice(wire);
         let end = storage.len();
         storage.extend_from_slice(&[0xDD; 5]);
         let storage: Arc<dyn RxStorage> = Arc::new(storage);
@@ -299,8 +388,9 @@ mod tests {
         let base = Arc::strong_count(&storage);
 
         let elsewhere = b"not in the frame at all";
-        let field: RxSharedBytes = RxShared::bytes_from::<MsgPutPayloadField>(&frame, elsewhere)
-            .expect("a foreign view is accepted");
+        let field: RxSharedBytes =
+            <RxShared as OriginBytes<MsgPutPayloadField>>::bytes_from(&frame, elsewhere)
+                .expect("a foreign view is accepted");
 
         assert_eq!(field.as_slice(), elsewhere);
         assert!(!field.is_shared(), "it is owned bytes, not a range");
@@ -316,12 +406,101 @@ mod tests {
         let inside_the_frame = &frame.as_slice()[3..3];
 
         let field: RxSharedBytes =
-            RxShared::bytes_from::<MsgPutPayloadField>(&frame, inside_the_frame)
+            <RxShared as OriginBytes<MsgPutPayloadField>>::bytes_from(&frame, inside_the_frame)
                 .expect("empty is accepted");
 
         assert!(field.as_slice().is_empty());
         assert!(!field.is_shared());
         assert_eq!(Arc::strong_count(&storage), base);
+    }
+
+    /// The schema is held in the copying container and the payload in the
+    /// shared one, told apart by type, not by size.
+    #[test]
+    fn each_byte_field_is_held_in_the_container_its_list_names() {
+        assert_eq!(
+            TypeId::of::<<RxShared as HoldsBytes<EncodingSchemaField>>::Bytes>(),
+            TypeId::of::<GrowBytes>(),
+            "the schema is copied"
+        );
+        assert_eq!(
+            TypeId::of::<<RxShared as HoldsBytes<MsgPutPayloadField>>::Bytes>(),
+            TypeId::of::<RxSharedBytes>(),
+            "the payload is shared"
+        );
+    }
+
+    /// The schema's container is the size of the text container it replaced,
+    /// so an encoding, and a Push that carries one, cost what they did then.
+    #[test]
+    fn the_schema_costs_what_its_text_cost() {
+        assert_eq!(
+            size_of::<<RxShared as HoldsBytes<EncodingSchemaField>>::Bytes>(),
+            size_of::<GrowStr>()
+        );
+        assert_eq!(
+            size_of::<EncodingOwned<RxShared>>(),
+            size_of::<EncodingOwned<Heap>>()
+        );
+        assert_eq!(
+            size_of::<PushOwned<RxShared>>(),
+            PUSH_OWNED_BYTES_AT_TEXT_SCHEMA
+        );
+    }
+
+    /// A schema decoded in origin is a copy of the frame's bytes and holds no
+    /// reference to the frame, where a payload beside it would share it.
+    #[test]
+    fn a_schema_decoded_in_origin_is_a_copy() {
+        // Encoding: id 0 with a schema (bit 0), the schema's length 3, "abc".
+        let (storage, frame, _) = laid(&[0x01, 0x03, b'a', b'b', b'c']);
+        let base = Arc::strong_count(&storage);
+
+        let borrowed = EncodingIn::<Lent<'_, Node>>::decode(&mut SceCursor::new(frame.as_slice()))
+            .expect("the encoding decodes");
+        let owned = borrowed
+            .try_into_owned_in_origin::<RxShared>(&frame)
+            .expect("the projection succeeds");
+
+        let schema = owned
+            .schema
+            .as_ref()
+            .expect("the encoding carries a schema")
+            .as_bytes()
+            .into_inner();
+        assert_eq!(schema, b"abc");
+        assert_eq!(
+            subrange_of(frame.as_slice(), schema),
+            None,
+            "the schema lives outside the frame"
+        );
+        assert_eq!(
+            Arc::strong_count(&storage),
+            base,
+            "and holds no reference to it"
+        );
+    }
+
+    /// The copying container copies a view that IS part of the frame, which
+    /// the shared one would have shared.
+    #[test]
+    fn the_copying_container_copies_a_view_of_the_frame() {
+        let (storage, frame, _) = framed(b"in the frame");
+        let base = Arc::strong_count(&storage);
+        let inside = &frame.as_slice()[1..4];
+
+        let copied: GrowBytes =
+            <RxShared as OriginBytes<EncodingSchemaField>>::bytes_from(&frame, inside)
+                .expect("a view of the frame is accepted");
+        assert_eq!(copied.as_slice(), inside);
+        assert_eq!(subrange_of(frame.as_slice(), copied.as_slice()), None);
+        assert_eq!(Arc::strong_count(&storage), base);
+
+        let shared: RxSharedBytes =
+            <RxShared as OriginBytes<MsgPutPayloadField>>::bytes_from(&frame, inside)
+                .expect("a view of the frame is accepted");
+        assert!(shared.is_shared(), "the control: the same view, shared");
+        assert_eq!(Arc::strong_count(&storage), base + 1);
     }
 
     /// An OWNED frame has no storage to share, so a payload decoded in it is a

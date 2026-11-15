@@ -33,7 +33,7 @@
 //! `WZ_ZENOHD_BIN` or run `scripts/build-zenohd.sh`). Run via Layer Z /
 //! `--ignored`.
 
-#![cfg(feature = "peer")]
+#![cfg(all(feature = "peer", feature = "config-verdict"))]
 
 use std::ffi::CString;
 use std::io::{Read, Seek, SeekFrom};

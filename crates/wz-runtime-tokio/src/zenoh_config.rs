@@ -141,6 +141,8 @@ use wz_session_core::link::InterceptorLink;
 // `qos/network` is typed at the parse for the same reason: its priorities and congestion controls
 // are enums upstream, so the reader holds the enum and not the text it has already validated.
 use wz_session_core::qos::{CongestionControl, Priority};
+// `qos/publication` names where a publication may go in the session's own vocabulary.
+use wz_session_core::locality::Locality;
 // Item 751 — what `gateway/south` reads into: the partition a node places its
 // remotes by.
 use wz_session_core::region_partition::{RegionFilter, SouthPartition, SouthSubregion};
@@ -1091,6 +1093,14 @@ pub struct ZenohNodeConfig {
     pub batch_size: u16,
     /// `transport/link/tx/lease` (milliseconds).
     pub lease_ms: u64,
+    /// `transport/link/tx/sequence_number_resolution`: the width of the frame sequence numbers
+    /// this node OFFERS in its InitSyn, which both ends then take the smaller of
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `res.set(Field::FrameSN, i_fsn_res.min(m_fsn_res));`), and states in the Join of a
+    /// group it is a member of. Upstream's transport manager reads the key into its own resolution
+    /// (`io/zenoh-transport/src/manager.rs` @
+    /// `resolution.set(Field::FrameSN, *link.tx().sequence_number_resolution());`).
+    pub sn_resolution: crate::policy::SnResolution,
     /// `transport/link/tx/keep_alive`: keepalives in one lease, so a session sends one whenever
     /// its line has been idle for the lease divided by this. Read by the zenoh-c session
     /// ([`C_ABI_SESSION_HONOURED_KEYS`]), which divides its own lease as upstream does
@@ -1098,6 +1108,10 @@ pub struct ZenohNodeConfig {
     /// `/ self.manager.config.unicast.keep_alive as u32;`); upstream's default is 4
     /// (`commons/zenoh-config/src/defaults.rs` @ `keep_alive: 4,`).
     pub keep_alive: u32,
+    /// `transport/unicast/open_timeout`, in ms: how long one open of an endpoint, its dial and
+    /// its handshake, may take before it is given up, as upstream bounds `open_transport_unicast`
+    /// (`session_open::open_within`); upstream's default is [`UPSTREAM_OPEN_TIMEOUT_MS`].
+    pub open_timeout_ms: u64,
     /// `transport/unicast/accept_timeout`, in ms: how long an inbound link gets to complete its
     /// handshake. Read by the zenoh-c session's accept loop ([`C_ABI_SESSION_HONOURED_KEYS`]);
     /// upstream's default is ten seconds (`commons/zenoh-config/src/defaults.rs` @
@@ -1117,7 +1131,9 @@ pub struct ZenohNodeConfig {
     /// `transport/link/rx/max_message_size`, the largest message a session
     /// rejoins from fragments (bytes). The session takes it through
     /// `SessionInitParams`, and its reassembly ends a chain that would pass it;
-    /// the build's reassembly slot bounds it from above.
+    /// the build's reassembly slot bounds it from above. Beside it
+    /// `transport/link/rx/buffer_size`, the read storage each stream link the
+    /// session wires pools (bytes), wz's `--rx-buffer-size`.
     pub link_rx: wz_session_core::session_init_params::LinkRxConf,
     /// `transport/unicast/max_links`.
     pub max_links: usize,
@@ -1209,6 +1225,14 @@ pub struct ZenohNodeConfig {
     /// joins ([`C_ABI_SESSION_HONOURED_KEYS`]); upstream's default is 2500
     /// (`DEFAULT_CONFIG.json5` @ `join_interval: 2500,`).
     pub multicast_join_interval_ms: u64,
+    /// `transport/multicast/max_sessions`: how many members a multicast transport holds at once.
+    /// zenoh ignores the Join of a new member past it
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if zread!(self.peers).len() >= self.manager.config.multicast.max_sessions {`), and so does
+    /// a group a wz node or a zenoh-c session joins (the demo's `--multicast-max-sessions`, the C
+    /// ABI's group profile). Upstream's default is [`UPSTREAM_MULTICAST_MAX_SESSIONS`]; zero is a
+    /// cap upstream takes, under which a group admits no member.
+    pub multicast_max_sessions: usize,
     /// `transport/multicast/compression/enabled`: whether a multicast transport sends its data
     /// as batches with the one-byte `BatchHeader`, lz4-compressed when that is smaller. Read by
     /// the zenoh-c session for the groups it joins ([`C_ABI_SESSION_HONOURED_KEYS`]); multicast
@@ -1228,13 +1252,28 @@ pub struct ZenohNodeConfig {
     /// whether the session owns a shared-memory provider of its own
     /// (upstream's `ShmContext::new` @ `if *cfg.transport_optimization.enabled() {`).
     /// Read by the zenoh-c ABI's session, which hands that provider out
-    /// through `z_obtain_shm_provider`; the implicit large-message promotion
-    /// the same switch also turns on upstream is not built here. Default
-    /// zenoh's, `true`.
+    /// through `z_obtain_shm_provider` and copies a large message into it
+    /// ([`Self::shm_message_size_threshold`]). Default zenoh's, `true`.
     pub shm_transport_optimization: bool,
     /// R2957 — `transport/shared_memory/transport_optimization/pool_size`: the
     /// size in bytes of that provider, zenoh's default 16 MiB.
     pub shm_pool_size: u64,
+    /// `transport/shared_memory/mode`: whether the shared-memory subsystem of the process is made
+    /// when a session opens or at its first use. Applied by the open of a session
+    /// ([`SESSION_HONOURED_KEYS`]); upstream's default is `lazy`
+    /// (`commons/zenoh-config/src/lib.rs` @ `pub enum ShmInitMode {`).
+    pub shm_init_mode: ShmInitMode,
+    /// `transport/shared_memory/transport_optimization/message_size_threshold`: the size in bytes
+    /// from which a plain payload is copied into the session's provider, so that it crosses a
+    /// link that negotiated shared memory as a descriptor. Applied by a session
+    /// ([`SESSION_HONOURED_KEYS`]); upstream's default is 3072
+    /// (`commons/zenoh-config/src/defaults.rs` @ `message_size_threshold: 3072,`).
+    pub shm_message_size_threshold: u64,
+    /// `transport/shared_memory/transport_optimization/messages`: the messages that copy is made
+    /// for, each one of [`DATA_MESSAGE_LITERALS`], in the order stated. A `delete` carries no
+    /// payload and is accepted and copies nothing. Upstream's default is `put`, `query` and
+    /// `reply`.
+    pub shm_optimised_messages: Vec<String>,
     /// `transport/link/tls/root_ca_certificate`. wz's `--tls-ca`.
     pub tls_root_ca: Option<String>,
     /// `transport/link/tls/listen_certificate`. wz's `--tls-cert`.
@@ -1253,6 +1292,12 @@ pub struct ZenohNodeConfig {
     /// `transport/link/tls/verify_name_on_connect`: a dial checks the name it dials against the
     /// server's certificate. `None` is an unnamed key, which upstream resolves to `true`.
     pub tls_verify_name_on_connect: Option<bool>,
+    /// `transport/link/tls/close_link_on_expiration`: a tls, quic or quic-datagram link closes
+    /// when its peer's certificate chain expires, unless its locator states otherwise. wz's
+    /// `--link-config <kind>#close_link_on_expiration=<bool>` for each of the three kinds, which
+    /// is where upstream's inspectors render it. `None` is an unnamed key, which upstream
+    /// resolves to `false`.
+    pub tls_close_link_on_expiration: Option<bool>,
     /// `transport/link/protocols`: the whitelist of the link protocols this node makes. `None`
     /// is an unnamed key, which leaves every protocol the build carries open.
     pub link_protocols: Option<Vec<String>>,
@@ -1263,6 +1308,12 @@ pub struct ZenohNodeConfig {
     /// `--link-config <kind>#so_rcvbuf=<n>` / `so_sndbuf=<n>`. `None` is an
     /// unnamed key, which upstream resolves to "leave the kernel's default".
     pub link_socket_buffers: LinkSocketBuffers,
+    /// `transport/link/unixpipe/file_access_mask`: the FIFO creation mode
+    /// upstream's unixpipe inspector renders into every unixpipe endpoint as
+    /// `file_mask`, under the endpoint's own parameters. wz's
+    /// `--link-config unixpipe#file_mask=<n>`. `None` is an unnamed key, which
+    /// leaves the link's own default (`unixpipe_pipeline::DEFAULT_FILE_MASK`).
+    pub unixpipe_file_access_mask: Option<u32>,
     /// R311y845 — the three below say WHERE a node listens for its peers, and
     /// until this round wz's answer was a constant. `wz-ap-demo`'s `SCOUT_GROUP`
     /// was `224.0.0.224` compiled in, with a doc that named this very key as
@@ -1459,6 +1510,13 @@ pub struct ZenohNodeConfig {
     /// empty list), so the absent and the empty document say the same thing and neither is a
     /// wildcard.
     pub qos_network: Vec<QosNetworkItemConf>,
+    /// `qos/publication[]`, exactly as the document stated it: the QoS a session gives the
+    /// publications on the keys each item names, over what the publication itself states.
+    /// Applied by a session ([`SESSION_HONOURED_KEYS`]).
+    ///
+    /// Empty = no item, which is upstream's default (an empty list), so the absent and the empty
+    /// document say the same thing.
+    pub publication_qos: Vec<PublicationQosItemConf>,
     /// R2652 — the five `access_control/*` keys, in the document's own shape.
     ///
     /// Unlike the two interceptor keys above, these do NOT map one-to-one onto a
@@ -1480,6 +1538,14 @@ pub struct ZenohNodeConfig {
     /// `None` = the document named no section, which a running zenohd resolves
     /// to an empty one; a present-but-empty section is `Some({})`.
     pub plugins: Option<Json5Value>,
+    /// `plugins_loading/enabled`: whether a plugin the `plugins` section names
+    /// with no `__path__` is looked up by name. `None` is an unnamed key, which
+    /// a library session reads as `false` (`Config::default()`); zenohd sets it
+    /// `true` over whatever its file says, a property of that binary and not of
+    /// the document, so the value carried here is the document's. The storage
+    /// host's plugin plane takes it as `PluginsLoading::from_config` reads it,
+    /// wz's `--plugins-loading`.
+    pub plugins_loading_enabled: Option<bool>,
     /// §5.23 `adminspace-core` — `metadata`, the operator's free-form value,
     /// which upstream carries without interpreting and serves as the
     /// `metadata` field of the adminspace's `local_data`
@@ -1495,6 +1561,22 @@ pub struct ZenohNodeConfig {
     ///
     /// `None` = the document did not say, which upstream resolves to `null`.
     pub metadata: Option<Json5Value>,
+    /// `plugins_loading/search_dirs`, the directories a plugin named without a
+    /// `__path__` is searched for in, in the document's order.
+    ///
+    /// `None` = the document did not say, and a node searches upstream's
+    /// default list ([`crate::plugin_search_dirs::LibSearchDirs::default`]),
+    /// which is also what a running zenohd resolves a silent file to.
+    pub plugin_search_dirs: Option<crate::plugin_search_dirs::LibSearchDirs>,
+    /// `aggregation/subscribers`: the key expressions the node's sessions declare their
+    /// subscribers under, one declaration per aggregate
+    /// ([`crate::declaration_aggregation`]). Empty, upstream's default, aggregates nothing.
+    pub aggregation_subscribers: Vec<String>,
+    /// `aggregation/publishers`: the same for the subscribers interest of a publisher.
+    pub aggregation_publishers: Vec<String>,
+    /// `stats/filters`: the key expressions the node's transports count payloads under, each
+    /// filter's `key` in the document's order. Empty, upstream's default, counts under no key.
+    pub stats_filters: Vec<String>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1535,10 +1617,23 @@ impl Default for ZenohNodeConfig {
             peer_linkstate: false,
             batch_size: 65_535,
             lease_ms: 10_000,
+            // Upstream's default, the width of its transport SN type
+            // (`commons/zenoh-config/src/defaults.rs` @
+            // `sequence_number_resolution: Bits::from(TransportSn::MAX),`, a `u32`), and not the
+            // build's `sn-resolution` policy: this struct is what a zenoh node makes of a file.
+            sn_resolution: crate::policy::SnResolution::Bits32,
             keep_alive: wz_session_core::session_init_params::KEEP_ALIVE_PER_LEASE,
+            open_timeout_ms: UPSTREAM_OPEN_TIMEOUT_MS,
             accept_timeout_ms: crate::config::ACCEPT_TIMEOUT_MS,
             accept_pending: crate::config::ACCEPT_PENDING,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            // Upstream's batching bound is a millisecond (`commons/zenoh-config/src/defaults.rs`
+            // @ `time_limit: 1,`). This struct is what a zenoh node makes of a file, so it holds
+            // upstream's; a session that is given no bound keeps its writer's own, shorter one
+            // (`wz_session_core::link::BATCHING_TIME_LIMIT_US`).
+            tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                batching_time_limit_us: UPSTREAM_BATCHING_TIME_LIMIT_MS * 1_000,
+                ..wz_session_core::session_init_params::TxQueueConf::default()
+            },
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             max_links: 1,
             max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
@@ -1569,22 +1664,34 @@ impl Default for ZenohNodeConfig {
             open_declares: None,
             multicast_qos: false,
             multicast_join_interval_ms: 2_500,
+            multicast_max_sessions: UPSTREAM_MULTICAST_MAX_SESSIONS,
             multicast_compression: false,
             shared_memory: true,
             // Upstream's defaults (`DEFAULT_CONFIG.json5` @ `pool_size: 16777216,`).
             shm_transport_optimization: true,
             shm_pool_size: 16 * 1024 * 1024,
+            shm_init_mode: ShmInitMode::Lazy,
+            // Upstream's (`commons/zenoh-config/src/defaults.rs` @
+            // `messages: vec![DataMessage::Put, DataMessage::Query, DataMessage::Reply],`).
+            shm_message_size_threshold: 3072,
+            shm_optimised_messages: ["put", "query", "reply"]
+                .iter()
+                .map(|message| (*message).to_owned())
+                .collect(),
             tls_root_ca: None,
             tls_listen_certificate: None,
             tls_connect_certificate: None,
             tls_connect_private_key: None,
             tls_enable_mtls: None,
             tls_verify_name_on_connect: None,
+            tls_close_link_on_expiration: None,
             link_protocols: None,
             tls_listen_private_key: None,
             // R2593 — all four resolve to `null` on a running zenohd: no buffer
             // size is set, and the kernel's defaults stand.
             link_socket_buffers: LinkSocketBuffers::default(),
+            // An `Option<u32>` upstream with no default, so a silent file resolves it to `null`.
+            unixpipe_file_access_mask: None,
             // R311y845 — all three resolve to `null` on a running zenohd (no
             // instruction), NOT to the values `DEFAULT_CONFIG.json5` documents
             // in its comments. Defaulting them to `224.0.0.224:7446` / `auto` /
@@ -1638,9 +1745,16 @@ impl Default for ZenohNodeConfig {
             low_pass_filter: Vec::new(),
             downsampling: Vec::new(),
             qos_network: Vec::new(),
+            publication_qos: Vec::new(),
             access_control: AclConfigInputs::default(),
             plugins: None,
+            // The library's `false`, not the `true` zenohd sets over its file.
+            plugins_loading_enabled: None,
             metadata: None,
+            plugin_search_dirs: None,
+            aggregation_subscribers: Vec::new(),
+            aggregation_publishers: Vec::new(),
+            stats_filters: Vec::new(),
         }
     }
 }
@@ -2010,6 +2124,7 @@ impl ZenohNodeConfig {
         out.push_str(" },\n  \"gateway\": { \"south\": ");
         out.push_str(&gateway_south_json(&self.gateway_south));
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
+        let _ = writeln!(out, "      \"open_timeout\": {},", self.open_timeout_ms);
         let _ = writeln!(out, "      \"accept_timeout\": {},", self.accept_timeout_ms);
         let _ = writeln!(out, "      \"accept_pending\": {},", self.accept_pending);
         let _ = writeln!(out, "      \"max_links\": {},", self.max_links);
@@ -2027,9 +2142,9 @@ impl ZenohNodeConfig {
         // and silently drops everything the first carried.
         let _ = writeln!(
             out,
-            "    }},\n    \"multicast\": {{ \"qos\": {{ \"enabled\": {} }}, \
+            "    }},\n    \"multicast\": {{ \"max_sessions\": {}, \"qos\": {{ \"enabled\": {} }}, \
              \"compression\": {{ \"enabled\": {} }} }},",
-            self.multicast_qos, self.multicast_compression
+            self.multicast_max_sessions, self.multicast_qos, self.multicast_compression
         );
         let _ = writeln!(
             out,
@@ -2039,6 +2154,11 @@ impl ZenohNodeConfig {
         out.push_str("    \"link\": {\n      \"tx\": {\n");
         let _ = writeln!(out, "        \"batch_size\": {},", self.batch_size);
         let _ = writeln!(out, "        \"lease\": {},", self.lease_ms);
+        let _ = writeln!(
+            out,
+            "        \"sequence_number_resolution\": \"{}\",",
+            self.sn_resolution.zenoh_name()
+        );
         let _ = writeln!(out, "        \"keep_alive\": {},", self.keep_alive);
         // R2925 — the queue sizes and the two congestion waits, in upstream's
         // `queue` shape.
@@ -2051,16 +2171,39 @@ impl ZenohNodeConfig {
                 self.tx_queue.sizes[*byte as usize]
             );
         }
-        let _ = writeln!(
+        let _ = write!(
             out,
             " }},\n          \"congestion_control\": {{ \"drop\": {{ \"wait_before_drop\": {}, \
              \"max_wait_before_drop_fragments\": {} }}, \
-             \"block\": {{ \"wait_before_close\": {} }} }}\n        }}",
+             \"block\": {{ \"wait_before_close\": {} }} }}",
             self.tx_queue.wait_before_drop_us,
             self.tx_queue.max_wait_before_drop_fragments_us,
             self.tx_queue.wait_before_close_us
         );
+        // The bound in the file's milliseconds, rounded up: a bound the writer was given in
+        // microseconds is never written as a shorter one.
+        let _ = write!(
+            out,
+            ",\n          \"batching\": {{ \"enabled\": {}, \"time_limit\": {} }}",
+            self.tx_queue.batching,
+            self.tx_queue.batching_time_limit_us.div_ceil(1_000)
+        );
+        let _ = write!(
+            out,
+            ",\n          \"allocation\": {{ \"mode\": \"{}\" }}",
+            self.tx_queue.allocation.zenoh_name()
+        );
+        out.push_str("\n        }\n");
         out.push_str("      }");
+        // `buffer_size` only where the build reads it: a build without a per-link pool reports
+        // the key ignored, and nothing wz emits may be a key it cannot read back.
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        let _ = write!(
+            out,
+            ",\n      \"rx\": {{ \"buffer_size\": {}, \"max_message_size\": {} }}",
+            self.link_rx.buffer_size, self.link_rx.max_message_size
+        );
+        #[cfg(feature = "runtime-zero-copy")]
         let _ = write!(
             out,
             ",\n      \"rx\": {{ \"max_message_size\": {} }}",
@@ -2121,6 +2264,10 @@ impl ZenohNodeConfig {
         for (key, value) in [
             ("enable_mtls", self.tls_enable_mtls),
             ("verify_name_on_connect", self.tls_verify_name_on_connect),
+            (
+                "close_link_on_expiration",
+                self.tls_close_link_on_expiration,
+            ),
         ] {
             if let Some(value) = value {
                 tls.push((key, value.to_string()));
@@ -2144,6 +2291,14 @@ impl ZenohNodeConfig {
             }
             out.push_str("\n      }");
         }
+        // The unixpipe block, only for a mode the caller set: an absent key is the link's own
+        // default, so emitting nothing is exact.
+        if let Some(mask) = self.unixpipe_file_access_mask {
+            let _ = write!(
+                out,
+                ",\n      \"unixpipe\": {{ \"file_access_mask\": {mask} }}"
+            );
+        }
         out.push_str("\n    }\n  }");
         if let Some(admin) = self.adminspace {
             out.push_str(",\n  \"adminspace\": { \"enabled\": true, \"permissions\": ");
@@ -2153,10 +2308,57 @@ impl ZenohNodeConfig {
                 admin.read, admin.write
             );
         }
+        // One `plugins_loading` block for both of its keys, each only as the caller stated it: an
+        // absent `enabled` is the library's `false`, an absent `search_dirs` upstream's default list.
+        let mut loading: Vec<String> = Vec::new();
+        if let Some(enabled) = self.plugins_loading_enabled {
+            loading.push(format!("\"enabled\": {enabled}"));
+        }
+        if let Some(dirs) = &self.plugin_search_dirs {
+            loading.push(format!("\"search_dirs\": {}", dirs.to_json5_text()));
+        }
+        if !loading.is_empty() {
+            let _ = write!(
+                out,
+                ",\n  \"plugins_loading\": {{ {} }}",
+                loading.join(", ")
+            );
+        }
+        if !self.aggregation_subscribers.is_empty() || !self.aggregation_publishers.is_empty() {
+            out.push_str(",\n  \"aggregation\": { \"subscribers\": ");
+            push_endpoints(&self.aggregation_subscribers, &mut out);
+            out.push_str(", \"publishers\": ");
+            push_endpoints(&self.aggregation_publishers, &mut out);
+            out.push_str(" }");
+        }
+        if !self.stats_filters.is_empty() {
+            out.push_str(",\n  \"stats\": { \"filters\": [");
+            for (i, key) in self.stats_filters.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str("{ \"key\": ");
+                escape_into(key, &mut out);
+                out.push_str(" }");
+            }
+            out.push_str("] }");
+        }
         out.push_str("\n}\n");
         out
     }
 }
+
+/// Upstream's `transport/link/tx/queue/batching/time_limit`, in milliseconds, which a file that
+/// states none resolves to.
+pub const UPSTREAM_BATCHING_TIME_LIMIT_MS: u64 = 1;
+
+/// Upstream's `transport/unicast/open_timeout`, in milliseconds, which a file that states none
+/// resolves to (`commons/zenoh-config/src/defaults.rs` @ `open_timeout: 10_000,`).
+pub const UPSTREAM_OPEN_TIMEOUT_MS: u64 = 10_000;
+
+/// Upstream's `transport/multicast/max_sessions`, which a file that states none resolves to
+/// (`commons/zenoh-config/src/defaults.rs` @ `max_sessions: Some(1000),`).
+pub const UPSTREAM_MULTICAST_MAX_SESSIONS: usize = 1_000;
 
 /// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
 /// `Priority` wire byte whose queue it sizes, as upstream's transport manager
@@ -2241,11 +2443,20 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // enforces it: after the dedup-by-zid rule and before the insert
     // (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`).
     "transport/unicast/max_sessions",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the
+    // `TransportUnicastConf` group, so the surface total is unchanged: every open of an endpoint
+    // a node makes, its dial and its handshake, runs within it (`session_open::open_within`), as
+    // upstream's `open_transport_unicast` does.
+    "transport/unicast/open_timeout",
     "transport/unicast/lowlatency",
     "transport/unicast/qos/enabled",
     "transport/unicast/compression/enabled",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the `LinkTxConf`
+    // group, so the surface total is unchanged: the width a node offers, which its sessions
+    // already negotiated down to the peer's and could not be told.
+    "transport/link/tx/sequence_number_resolution",
     // R2925 — the queue sizes (in `TX_QUEUE_SIZE_KEYS` order) and the two
     // congestion waits. They left `UNHONOURED_BEYOND_WZ` because the capability
     // its `LinkTxConf` row said wz lacked — bounded per-priority queues with
@@ -2263,6 +2474,17 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // R2926 — the last queue key: the per-fragment deadline it bounds is built.
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
     "transport/link/tx/queue/congestion_control/block/wait_before_close",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the `LinkTxConf`
+    // group, so the surface total is unchanged: a session configured without batching sends each
+    // message as a frame of its own, which upstream's pipeline does with batching off.
+    "transport/link/tx/queue/batching/enabled",
+    // MOVED with it, for the same reason: the bound is the one a link's writer holds a stream
+    // back for, which it took from a constant until the session handed it the file's.
+    "transport/link/tx/queue/batching/time_limit",
+    // MOVED with them: when a link's queue takes its batches, which a heap queue now does at
+    // Established when the file says `init`. With it the `LinkTxConf` group holds only
+    // `threads`, which upstream reads into nothing.
+    "transport/link/tx/queue/allocation/mode",
     // The largest message a session rejoins from fragments. It left
     // `UNHONOURED_BEYOND_WZ` and the `LinkTxConf` group because a session now
     // carries it (`LinkRxConf`) and its reassembly ends a chain past it, as
@@ -2270,6 +2492,14 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // (`io/zenoh-transport/src/common/defragmentation.rs` @
     // `if new_len > self.capacity {`).
     "transport/link/rx/max_message_size",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: the read storage each stream link pools, which a session's `LinkRxConf`
+    // carries to the links it wires, `buffer_size / mtu` buffers and at least one, as upstream's
+    // RX task pools them. The udp, ws, quic-datagram and serial links read each message into
+    // storage of its own and keep no pool, so the key sizes nothing there; a `runtime-zero-copy`
+    // build reads every link into the node's shared table and refuses the key
+    // (`CAPABILITY_HONOURED_KEYS`).
+    "transport/link/rx/buffer_size",
     "adminspace/enabled",
     "adminspace/permissions/read",
     "adminspace/permissions/write",
@@ -2309,8 +2539,8 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // `qos/network`, MOVED here from `UNHONOURED_UPSTREAM_CONFIG_KEYS` when the QoS overwrite
     // interceptor was built, for the reason the two above record: the acceptance boundary is the
     // two lists chained, so honouring a key is a move and the surface total is unchanged. Its
-    // sibling `qos/publication` stays behind: that is the API's per-key publisher defaults, a
-    // different capability.
+    // sibling `qos/publication` is the API's per-key publisher defaults, a different capability,
+    // and a session applies it ([`SESSION_HONOURED_KEYS`]).
     "qos/network",
     // R2652 — the five that close the interceptor seam, moved together because
     // upstream compiles them together: they are ONE subtree, and its
@@ -2332,6 +2562,12 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "scouting/delay",
     "open/return_conditions/connect_scouted",
     "transport/multicast/qos/enabled",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the
+    // `TransportUnicastConf` group, so the surface total is unchanged: a group's dispatcher takes
+    // it as its cap on the members, and a heap host's table grows to it
+    // (`MulticastConfig::with_max_sessions`), as upstream's multicast manager holds every group
+    // to it.
+    "transport/multicast/max_sessions",
     "transport/shared_memory/enabled",
     "transport/link/tls/root_ca_certificate",
     "transport/link/tls/listen_certificate",
@@ -2344,6 +2580,10 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/connect_private_key",
     "transport/link/tls/enable_mtls",
     "transport/link/tls/verify_name_on_connect",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: the expiry teardown of the tls and quic links, which the layer of each
+    // of those kinds in `LinkDefaults` carries under the locator's own flag.
+    "transport/link/tls/close_link_on_expiration",
     "transport/link/protocols",
     // R2593 — the per-link-kind socket buffers. MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS` (and its beyond-wz group), so the
@@ -2354,6 +2594,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tcp/so_sndbuf",
     "transport/link/tls/so_rcvbuf",
     "transport/link/tls/so_sndbuf",
+    // The unixpipe link's FIFO mode. MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and
+    // `UNHONOURED_READER_GAP`, so the surface total is unchanged: it reaches every unixpipe link
+    // through the unixpipe layer of `LinkDefaults`, under the locator's own `file_mask`, as
+    // upstream's inspector renders it under the endpoint's parameters.
+    "transport/link/unixpipe/file_access_mask",
     // R311y845 — WHERE the node looks for its peers. These three MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total below is
     // unchanged: they are resolved leaves of a real zenohd either way, and all
@@ -2428,6 +2673,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // leaf by leaf wherever it names something no plugin of wz reads — another
     // plugin entirely, or a storage manager field wz does not act on.
     "plugins",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: whether the plugin plane looks a plugin named with no `__path__` up by
+    // name. Off, the library's default, it leaves the plugin unloaded with upstream's warning;
+    // on, it refuses the lookup by name, as `plugins_loading/search_dirs` stays unhonoured.
+    "plugins_loading/enabled",
     // §5.23 `adminspace-core` — `metadata`, MOVED here from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total is unchanged. The
     // reader carries the value and every adminspace host serves it as
@@ -2444,7 +2694,216 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // and announces each remote's bound. The group said wz had no
     // "gateway region-partitioning plane", and `region_partition` is one.
     "gateway/south",
+    // Where a plugin the `plugins` section names without a `__path__` is
+    // searched for: the storage host's plugin plane searches the list
+    // (`crate::plugin_search_dirs`). Moved from the unhonoured half, so the
+    // surface total is unchanged.
+    "plugins_loading/search_dirs",
+    // The aggregates a node's sessions declare their subscribers and publishers under
+    // (`crate::declaration_aggregation`, applied by `Session::set_declaration_aggregation` and
+    // the peer node's local declarations). Moved from the unhonoured half and its
+    // declaration-aggregation group, so the surface total is unchanged.
+    "aggregation/subscribers",
+    "aggregation/publishers",
+    // The keys a node's transports count payloads under: each session's payload class carries
+    // the filters its key expression meets (`wz_session_core::stats_registry::StatsKeyFilters`).
+    // Moved from the unhonoured half and its per-keyexpr statistics group, so the surface total
+    // is unchanged.
+    "stats/filters",
 ];
+
+/// The keys of [`HONOURED_CONFIG_KEYS`] whose reader is a CAPABILITY of the build: the key, the
+/// feature of this crate its reader and its enforcer are compiled under, and whether THIS build was
+/// made with that feature.
+///
+/// [`HONOURED_CONFIG_KEYS`] is what wz honours in a build that has every capability, and the lists
+/// that partition the upstream surface, the census and the gates that compare two builds read it
+/// as that. What one build honours is that list less the rows here whose capability it was made
+/// without ([`honoured_config_keys_in_build`]): such a build has neither the reader of the key nor
+/// anything to apply it with, so it reads the key only in the spelling that states nothing
+/// (upstream's default) and refuses it by its name otherwise
+/// ([`ConfigIngestError::NotInBuild`]), and it says so for the key
+/// ([`ConfigKeyDisposition::NotInBuild`]).
+///
+/// The flag is `cfg!` of the feature, so the table is the same text in every build and the one
+/// fact it varies by is stated beside the feature's name. The certificate material of
+/// `transport/link/tls` is the `quic/` link's as well, so its keys are built with either link.
+pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
+    (
+        "low_pass_filter",
+        "access-quota",
+        cfg!(feature = "access-quota"),
+    ),
+    (
+        "downsampling",
+        "access-downsampling",
+        cfg!(feature = "access-downsampling"),
+    ),
+    (
+        "qos/network",
+        "access-qos-overwrite",
+        cfg!(feature = "access-qos-overwrite"),
+    ),
+    (
+        "transport/link/tls/root_ca_certificate",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/listen_certificate",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/listen_private_key",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/connect_certificate",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/connect_private_key",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/enable_mtls",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/verify_name_on_connect",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    // Not material, and read by the same two links: each closes at its peer chain's expiry.
+    (
+        "transport/link/tls/close_link_on_expiration",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    // The socket buffers of a `tls/` link, which the `quic/` link does not have.
+    (
+        "transport/link/tls/so_rcvbuf",
+        "transport-link-tls",
+        cfg!(feature = "transport-link-tls"),
+    ),
+    (
+        "transport/link/tls/so_sndbuf",
+        "transport-link-tls",
+        cfg!(feature = "transport-link-tls"),
+    ),
+    // The FIFO mode of a `unixpipe/` link, which a build has on a Unix target with the link.
+    (
+        "transport/link/unixpipe/file_access_mask",
+        "transport-link-unixpipe",
+        cfg!(all(feature = "transport-link-unixpipe", unix)),
+    ),
+    // The per-link RX pool the size counts out, which a `runtime-zero-copy` build replaces with
+    // the node's one table, sized by its deploy declaration (`frame_arena::link_arena`).
+    (
+        "transport/link/rx/buffer_size",
+        "a per-link RX pool (a build without runtime-zero-copy)",
+        cfg!(not(feature = "runtime-zero-copy")),
+    ),
+    // The by-name lookup of the plugin plane, which only a build with a library plugin host has.
+    (
+        "plugins_loading/enabled",
+        "plugin-dynamic-loading and adminspace-config-hotreload",
+        cfg!(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        )),
+    ),
+    // The partition a node places its remotes by, which only the region hats hold
+    // (`RouterForwarder::with_south_partition`).
+    (
+        "gateway/south",
+        "routing-router-hat",
+        cfg!(feature = "routing-router-hat"),
+    ),
+    (
+        "access_control/default_permission",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/enabled",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/policies",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/rules",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/subjects",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    // The aggregates are applied by asking which of them includes a key, the inclusion test
+    // `crate::declaration_aggregation` is built on.
+    (
+        "aggregation/subscribers",
+        crate::declaration_aggregation::AGGREGATION_CAPABILITY,
+        cfg!(feature = "keyexpr-includes"),
+    ),
+    (
+        "aggregation/publishers",
+        crate::declaration_aggregation::AGGREGATION_CAPABILITY,
+        cfg!(feature = "keyexpr-includes"),
+    ),
+    // The filters are counted under by the transport counters, which a build without them
+    // does not have.
+    (
+        "stats/filters",
+        "transport-stats",
+        cfg!(feature = "transport-stats"),
+    ),
+];
+
+/// The capability of the certificate material's keys in [`CAPABILITY_HONOURED_KEYS`]: either link
+/// that reads it.
+const TLS_MATERIAL_CAPABILITY: &str = "transport-link-tls or transport-link-quic";
+/// Whether this build has [`TLS_MATERIAL_CAPABILITY`].
+const TLS_MATERIAL_BUILT: bool = cfg!(any(
+    feature = "transport-link-tls",
+    feature = "transport-link-quic"
+));
+
+/// The capability `path`'s reader is compiled under, when it is one of
+/// [`CAPABILITY_HONOURED_KEYS`]: the feature, and whether this build has it.
+pub fn config_key_capability(path: &str) -> Option<(&'static str, bool)> {
+    CAPABILITY_HONOURED_KEYS
+        .iter()
+        .find(|(key, _, _)| *key == path)
+        .map(|(_, feature, built)| (*feature, *built))
+}
+
+/// Whether this build carries the reader of `path`: every key but a capability's whose feature the
+/// build was made without ([`CAPABILITY_HONOURED_KEYS`]).
+pub fn config_key_in_build(path: &str) -> bool {
+    !matches!(config_key_capability(path), Some((_, false)))
+}
+
+/// The keys of [`HONOURED_CONFIG_KEYS`] THIS build honours, in that list's order: what a door that
+/// reports the build's config surface enumerates.
+pub fn honoured_config_keys_in_build() -> impl Iterator<Item = &'static str> + Clone {
+    HONOURED_CONFIG_KEYS
+        .iter()
+        .copied()
+        .filter(|key| config_key_in_build(key))
+}
 
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
 /// rather than a scalar.
@@ -2628,8 +3087,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // "`qos/*` and `downsampling` an interceptor chain configured from the same
     // file" — is the sentence that stopped being true: the chain is now
     // configured from the file, for all seven of its keys.
-    "aggregation/publishers",
-    "aggregation/subscribers",
+    // `aggregation/publishers` and `aggregation/subscribers` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`: a node's sessions declare under them.
     // R311y849 removed `connect/retry` from here -- it moved to
     // `HONOURED_CONFIG_KEYS`. Its two siblings STAYED, and not for want of
     // attention: for a peer, upstream resolves `timeout_ms` to -1 (retry
@@ -2670,13 +3129,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // its peers' initial declarations. Same partition, same total.
     // R2788 — `plugins` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader
     // carries the section and the storage host runs the storage manager from
-    // it. Its two `plugins_loading/*` siblings stay: they govern how a zenohd
-    // DISCOVERS plugin libraries, which is a different capability.
-    "plugins_loading/enabled",
-    "plugins_loading/search_dirs",
+    // it. Its two `plugins_loading/*` siblings followed it: `enabled` switches the plugin
+    // plane's by-name lookup, and `search_dirs` is where that lookup searches.
     // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
     // built. Same partition, same total.
-    "qos/publication",
+    // `qos/publication` LEFT this list for [`SESSION_HONOURED_KEYS`]: a session gives the
+    // publications of the keys it names their QoS.
     // `region_name` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the open hands the name
     // to every session of the node, which announces it in its Init.
     // R2230 (open-debt item 579/582) — `routing/peer/linkstate/transport_weights`
@@ -2701,13 +3159,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // command line (`--autoconnect`), not from the file, and moving those keys
     // is a different seam with a different witness.
     //
-    // R2230 (open-debt item 579) — `stats/filters` ARRIVED in 1.10.0. ⚠ Do NOT
-    // read wz's `transport-stats` feature as answering it: that feature answers
-    // upstream's `stats` FEATURE (four per-session counters), and this key is
-    // upstream's per-KEYEXPR statistics selector. wz counts at two wire seams
-    // neither of which sees a key expression, so there is no dimension here to
-    // filter on.
-    "stats/filters",
+    // `stats/filters` LEFT this list for `HONOURED_CONFIG_KEYS`: a session's
+    // payload class now carries the filters its key expression meets, and the
+    // per-key family counts under them.
     // R2626 — `timestamping/drop_future_timestamp` LEFT this list for
     // [`HONOURED_CONFIG_KEYS`]: wz now implements zenoh's drop arm and exposes
     // the knob, so the key is acted on rather than merely accepted.
@@ -2727,36 +3181,43 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // [`HONOURED_CONFIG_KEYS`].
     // `transport/link/protocols` LEFT this list for `HONOURED_CONFIG_KEYS`: the open refuses an
     // endpoint whose protocol it leaves out.
-    "transport/link/rx/buffer_size",
+    // `transport/link/rx/buffer_size` LEFT this list for `HONOURED_CONFIG_KEYS`: a session's
+    // `LinkRxConf` sizes the RX pool of every stream link it wires.
     // `transport/link/rx/max_message_size` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: a session's reassembly now ends a chain past it.
     // R2593 — `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: `LinkDefaults` now carries them to every link.
-    "transport/link/tls/close_link_on_expiration",
+    // `transport/link/tls/close_link_on_expiration` LEFT this list for `HONOURED_CONFIG_KEYS`:
+    // `LinkDefaults` carries it to every tls and quic link.
     // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
     // and the open hands them to the tls links.
     // `transport/link/tx/keep_alive` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the
     // zenoh-c session's keepalive speaks at its own lease divided by it.
-    "transport/link/tx/queue/allocation/mode",
-    "transport/link/tx/queue/batching/enabled",
-    "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/sequence_number_resolution",
+    // `transport/link/tx/queue/allocation/mode` LEFT this list for `HONOURED_CONFIG_KEYS`: a heap
+    // queue takes its batches when it is shaped if the file says `init`.
+    // `transport/link/tx/queue/batching/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: a
+    // session leaves its batching window shut when the file turns batching off.
+    // `transport/link/tx/queue/batching/time_limit` LEFT with it: the writer holds a stream
+    // back for the file's bound.
+    // `transport/link/tx/sequence_number_resolution` LEFT this list for `HONOURED_CONFIG_KEYS`:
+    // the width a node offers comes from the file. Same partition, same total.
     "transport/link/tx/threads",
-    "transport/link/unixpipe/file_access_mask",
+    // `transport/link/unixpipe/file_access_mask` LEFT this list for `HONOURED_CONFIG_KEYS`: the
+    // unixpipe layer of `LinkDefaults` carries it to every unixpipe link.
     // `transport/multicast/compression/enabled` LEFT this list for
     // [`C_ABI_SESSION_HONOURED_KEYS`]: a group the zenoh-c session joins wraps its datagrams in
     // batches, as upstream's multicast manager does from 1.10.2.
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT this list for
     // [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's groups beacon at it.
-    "transport/multicast/max_sessions",
-    "transport/shared_memory/mode",
+    // `transport/multicast/max_sessions` LEFT this list for `HONOURED_CONFIG_KEYS`: a group's
+    // dispatcher holds its members to it. Same partition, same total.
+    // `transport/shared_memory/mode` LEFT this list for [`SESSION_HONOURED_KEYS`]: the open of
+    // a session makes the shared-memory subsystem when it says `init`.
     // R2230 (open-debt item 579) — the four `transport_optimization` knobs
-    // ARRIVED in 1.10.0. Their group sentence carries the evidence.
-    // R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
-    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
-    "transport/shared_memory/transport_optimization/message_size_threshold",
-    "transport/shared_memory/transport_optimization/messages",
+    // ARRIVED in 1.10.0. R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
+    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two that named the promotion LEFT too, for
+    // [`SESSION_HONOURED_KEYS`]: a session copies a large message into its provider by them.
     // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout` LEFT this
     // list for [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's accept loop bounds its
     // handshakes by them ([`crate::accept_loop::AcceptBounds`]).
@@ -2765,7 +3226,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // the two timeouts quantify over a half-open accept pipeline wz did not
     // model, while this one is a comparison against a table the accept loop
     // already kept. See `HONOURED_CONFIG_KEYS`.
-    "transport/unicast/open_timeout",
+    // `transport/unicast/open_timeout` LEFT this list for `HONOURED_CONFIG_KEYS`: a node's every
+    // open of an endpoint runs within it. Same partition, same total.
 ];
 
 /// The unhonoured keys wz genuinely CANNOT act on — the first of the two kinds
@@ -2785,26 +3247,25 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// bullets below are the human half of those rows and name the same anchors —
 /// the gate checks that they do, so the two cannot drift.
 ///
-/// * `aggregation/*` — a declaration-aggregation strategy (`AggregationConf`).
-/// * `qos/publication` — the API's per-key publisher defaults (`PublisherQoSConfList`):
-///   a congestion control, a priority, an express flag, a reliability and an allowed destination
-///   that a publisher takes from the first rule whose keys include its own. Its sibling
-///   `qos/network` is the QoS overwrite interceptor, which wz has since `interceptor/` gained
-///   `qos_overwrite`.
-/// * `plugins_loading/search_dirs` — plugin auto-discovery from a search path
-///   (`PluginSearchDirs`). wz loads a plugin by explicit path only.
+/// * (`qos/publication` LEFT this list: a session gives the publications of the keys it names
+///   their QoS, [`SESSION_HONOURED_KEYS`]. Its sibling `qos/network` is the QoS overwrite
+///   interceptor, which wz has since `interceptor/` gained `qos_overwrite`.)
 /// * `transport/auth/*` — a credential store (`CredentialStore`). wz has the
 ///   WIRE half (the auth-body codec has foreign witnesses) and nothing to
 ///   configure it from.
-/// * `transport/link/*` — a configurable link-TX surface (`LinkTxConf`):
-///   upstream's queue allocation, batching and the remaining link knobs, none
-///   of which wz exposes as configuration. (R2925 — the priority-queue sizes
-///   and the two congestion waits left for `HONOURED_CONFIG_KEYS`; R2926 — the
-///   per-fragment drop cap followed them, and `rx/max_message_size` followed
-///   once a session's reassembly took its bound from it.)
-/// * `transport/{unicast,multicast}/*`, `transport/shared_memory/mode` — a
-///   configurable session table (`TransportUnicastConf`): accept backlog,
-///   session caps, open/accept timeouts.
+/// * `transport/link/*` — a configurable link-TX surface (`LinkTxConf`): the
+///   link knob left, the TX thread count, which wz does not expose as
+///   configuration. (R2925 — the priority-queue sizes and the two congestion
+///   waits left for `HONOURED_CONFIG_KEYS`; R2926 — the per-fragment drop cap
+///   followed them, and `rx/max_message_size` followed once a session's
+///   reassembly took its bound from it; the queue's allocation mode, its
+///   batching switch and bound, and the offered SN width followed once a
+///   session and its writer took each from the file.)
+/// * (The configurable session table group is GONE. `transport/shared_memory/mode` left it: the
+///   open of a session makes the shared-memory subsystem, [`SESSION_HONOURED_KEYS`];
+///   `transport/unicast/open_timeout` left it: every open of an endpoint runs within it; and its
+///   last key, `transport/multicast/max_sessions`, left once a group's dispatcher held its
+///   members to the cap and a heap host's table grew to it, [`HONOURED_CONFIG_KEYS`].)
 /// * `open/return_conditions/*` — a session-open readiness barrier
 ///   (`ReturnConditionsConf`).
 /// * `routing/router/linkstate/*` — configurable link-state weighting
@@ -2816,15 +3277,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   no "gateway region-partitioning plane" (`GatewayConf`), and the region-hat
 ///   forwarder applies one. Its other half, `region_name`, left earlier for
 ///   [`UNHONOURED_READER_GAP`].)
-/// * `stats/filters` — per-keyexpr statistics (`StatsFilterConfig`). ⚠ Not
-///   answered by wz's `transport-stats`, which answers upstream's `stats`
-///   FEATURE; see the row's own comment.
-/// * `transport/shared_memory/transport_optimization/*` — an implicit
-///   large-message SHM promotion path (`LargeMessageTransportOpt`). wz HAS
-///   shared memory and still lacks this one, which is why it is worth a group.
-///   (R2957 — `enabled` and `pool_size` left it: the zenoh-c session's own
-///   provider reads them, [`C_ABI_SESSION_HONOURED_KEYS`]. The promotion's
-///   threshold and message set stay.)
+/// * (`transport/shared_memory/transport_optimization/*` LEFT this list. R2957
+///   moved `enabled` and `pool_size` to [`C_ABI_SESSION_HONOURED_KEYS`], and the
+///   promotion's threshold and message set followed to
+///   [`SESSION_HONOURED_KEYS`] once a session copied a large message into its
+///   provider by them.)
 /// * `scouting/delay` — a startup scouting delay (`ScoutingDelay`).
 /// * (§5.23 `adminspace-core`: `metadata` LEFT this list. The row said upstream
 ///   "never reads" it, which was true of the node and false of the adminspace:
@@ -2864,8 +3321,7 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// need as a name that must not exist in wz's code. That is a claim per row
 /// rather than per sweep, and it is what a future capability reds against.
 pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
-    "aggregation/publishers",
-    "aggregation/subscribers",
+    // The two `aggregation/*` keys LEFT this list: wz declares under aggregates now.
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0. Beyond wz, and the
     // negative is derived rather than grepped once: `gateway`, `south`,
     // `subregion`, `partition`, `federat` and `bridge` were each searched across
@@ -2891,9 +3347,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // value, so the capability the row named is one wz has.
     // R2950 — `connect_scouted` left for the honoured list, and `declares` followed it for
     // [`C_ABI_SESSION_HONOURED_KEYS`] once the open held on the end of the peers' declarations.
-    "plugins_loading/search_dirs",
+    // `plugins_loading/search_dirs` LEFT this list: the plugin plane searches by name.
     // `qos/network` LEFT this list as it left its sibling above: wz has the interceptor now.
-    "qos/publication",
+    // `qos/publication` LEFT it for [`SESSION_HONOURED_KEYS`], with its group.
     // ⚠ R2539 — `region_name` LEFT THIS LIST for [`UNHONOURED_READER_GAP`],
     // and the gate is what said it had to. R2230 filed it here as a capability
     // wz does not have; this round BUILT the capability
@@ -2916,16 +3372,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // false in the direction this list cannot express.
     // R2950 — `scouting/delay` left for the honoured list.
     // R3075 -- `scouting/gossip/enabled` left for the C ABI session's honoured list.
-    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and it is the row most at
-    // risk of being read as a reader gap, because wz DOES have a `transport-stats`
-    // feature. That feature answers upstream's `stats` FEATURE. This key is
-    // upstream's `StatsFilterConfig { key: OwnedKeyExpr }` — statistics selected
-    // PER KEY EXPRESSION. wz's `TransportStats` is four `AtomicUsize`
-    // (`tx_bytes`/`tx_msgs`/`rx_bytes`/`rx_msgs`) counted at two wire seams,
-    // neither of which sees a key expression, reported as one flat OpenMetrics
-    // block with no selector. There is no dimension here to filter on; wz's own
-    // doc already records that even a per-priority split is a later extension.
-    "stats/filters",
+    // `stats/filters` LEFT this list: wz's per-key payload family counts under
+    // the filters a message's key expression meets.
     // R2626 — `timestamping/drop_future_timestamp` left this half of the
     // partition too, and for the sharper reason: this list is "beyond wz", and
     // wz now HAS the surface.
@@ -2943,17 +3391,24 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // false, so the key cannot be honoured quietly. The same went for `user` and
     // `password` once the C ABI presented them when it dials.
     // `transport/link/protocols` LEFT this half: the open refuses an endpoint it leaves out.
-    "transport/link/rx/buffer_size",
+    // `transport/link/rx/buffer_size` LEFT here for [`UNHONOURED_READER_GAP`]: a link's RX
+    // pool is sized from it (`RecyclingArena::for_link`), so the capability the `LinkTxConf`
+    // group says wz lacks is one wz has, and only the reader is missing.
     // `transport/link/rx/max_message_size` left this half too: wz acts on it.
     // R2593 — the four socket-buffer keys left this half with the surface's
     // other half: wz acts on them now.
-    "transport/link/tls/close_link_on_expiration",
+    // `transport/link/tls/close_link_on_expiration` LEFT here for [`UNHONOURED_READER_GAP`]:
+    // the tls and quic links tear a link down at its peer chain's expiry when the locator
+    // asks (R2600, R2608), and the file's key is the per-link default nobody reads.
     // `transport/link/tx/keep_alive` LEFT here, and its group below: the zenoh-c session reads
     // it ([`C_ABI_SESSION_HONOURED_KEYS`]).
-    "transport/link/tx/queue/allocation/mode",
-    "transport/link/tx/queue/batching/enabled",
-    "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/sequence_number_resolution",
+    // `transport/link/tx/queue/allocation/mode` LEFT here and its group below: the queue's shape
+    // carries the mode.
+    // `transport/link/tx/queue/batching/enabled` LEFT here and its group below: the session's
+    // batching window is the switch it names. `time_limit` LEFT with it: the writer's bound is
+    // a field of the queue's shape.
+    // `transport/link/tx/sequence_number_resolution` LEFT here and its group below: the width
+    // a node offers is a parameter of its sessions, which negotiate it with the peer.
     "transport/link/tx/threads",
     // R2363 — `transport/link/unixpipe/file_access_mask` LEFT here for
     // [`UNHONOURED_READER_GAP`]. Its `LinkTxConf` group sentence said wz had no
@@ -2969,14 +3424,12 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // [`C_ABI_SESSION_HONOURED_KEYS`].
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT here, and its group
     // below: the zenoh-c session reads it ([`C_ABI_SESSION_HONOURED_KEYS`]).
-    "transport/multicast/max_sessions",
-    "transport/shared_memory/mode",
-    // R2230 (open-debt item 579) — the four `transport_optimization` knobs
-    // ARRIVED in 1.10.0. Their group sentence carries the evidence.
-    // R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
-    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
-    "transport/shared_memory/transport_optimization/message_size_threshold",
-    "transport/shared_memory/transport_optimization/messages",
+    // `transport/multicast/max_sessions` LEFT here, and with it the last of its group below:
+    // the "session table" the group said wz lacked was always the dispatcher's peer table, and
+    // what it lacked was a cap read from the file and rows that grow to it.
+    // `transport/shared_memory/mode` and the two `transport_optimization` keys that named the
+    // promotion LEFT here for [`SESSION_HONOURED_KEYS`], and the promotion's group went with
+    // its last two: a session makes the subsystem and copies a large message by them.
     // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout` LEFT here,
     // and their group below: the zenoh-c session reads them ([`C_ABI_SESSION_HONOURED_KEYS`]).
     // R2758 — `transport/unicast/max_sessions` LEFT this list too, and this is
@@ -2985,7 +3438,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // session table, and the accept loop has held one since it existed. What
     // was missing was a bound on it, which is a comparison rather than a
     // subsystem.
-    "transport/unicast/open_timeout",
+    // `transport/unicast/open_timeout` LEFT this list and its group below: the bound on one open
+    // is a timeout around the dial and the handshake, which every opener now runs within.
 ];
 
 /// The unhonoured keys wz ALREADY ACTS ON and the reader was never told — the
@@ -3009,28 +3463,30 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// * `low_pass_filter` — `LowPassRule` on the same chain, driven by
 ///   `--max-payload`. R2150 moved both: the group sentence that held them
 ///   claimed wz needed an interceptor chain, and wz has one.
-/// * `plugins_loading/enabled` — `PluginRegistry`, which loads, starts, stops
-///   and admin-reports `DynamicPlugin`s, driven today by the demo's repeated
-///   `--plugin`. `plugins_loading/search_dirs` stays in
-///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.
-///   (R2788: `plugins` itself left this list — the reader carries the section.)
+/// * (`plugins_loading/enabled` LEFT this list: the plugin plane switches its by-name lookup on
+///   it, [`HONOURED_CONFIG_KEYS`]. `plugins_loading/search_dirs` left the beyond-wz half beside
+///   it: that lookup searches it.)
 /// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
-/// * `transport/link/unixpipe/file_access_mask` — the unixpipe link's FIFO
-///   creation mode, which R2363 made configurable:
-///   `crate::unixpipe_pipeline::DEFAULT_FILE_MASK` and the
-///   `wz_session_core::locator::UnixpipeEndpoint::file_mask` the locator's
-///   `#file_mask=<n>` fills, threaded into every `mkfifo` the bind and the dial
-///   perform. Upstream's own path from the CONFIG KEY to the link is the same
-///   shape: `UnixPipeConfigurator::inspect_config` renders it into the
-///   endpoint's config span as a per-link DEFAULT, which the endpoint's own
-///   parameters then overwrite. So the reader change is "render the key onto
-///   the unixpipe endpoints", not "build a mode".
+/// * (`transport/link/rx/buffer_size` LEFT this list: a session's `LinkRxConf` carries it to the
+///   RX pool of every stream link the session wires, [`HONOURED_CONFIG_KEYS`].)
+/// * (`transport/link/tls/close_link_on_expiration` LEFT this list: the reader renders it onto
+///   the tls, quic and quic-datagram layers of `crate::link_socket::LinkDefaults`,
+///   [`HONOURED_CONFIG_KEYS`].)
+/// * (`transport/link/unixpipe/file_access_mask` LEFT this list: the reader renders it onto the
+///   unixpipe layer of `crate::link_socket::LinkDefaults`, [`HONOURED_CONFIG_KEYS`].)
 ///
 /// ⚠ Being here is NOT a claim that the move is mechanical. R311y844's ten were
 /// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
 /// build a strategy representation first. This list says the capability EXISTS,
 /// not that the reader change is free.
+///
+/// EMPTY is a state this list may be in, and the one it is meant to reach: a key
+/// leaves it only by its reader being built. What keeps an empty list from
+/// reading as the split having gone unexamined is that every unhonoured key must
+/// still be classed, so with nothing here every one of them is a claim in
+/// [`UNHONOURED_BEYOND_WZ`] that its group's anchor is absent from wz's code,
+/// and a capability wz grows reds that claim and brings the key back here.
 pub const UNHONOURED_READER_GAP: &[&str] = &[
     // R2159 (open-debt item 229) — `connect/timeout_ms` LEFT this list for
     // `HONOURED_CONFIG_KEYS`, and it is the one member of item 229's four that
@@ -3046,7 +3502,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // rules-x-subjects-x-policies join demanded is `WzConfig::acl_inputs`, and
     // with it built, none of the seven interceptor keys is a reader gap.
     // R2788 — `plugins` LEFT this list: the reader now carries the section.
-    "plugins_loading/enabled",
+    // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane takes
+    // it from the reader.
     // R2539 — `region_name` ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
     // capability (`SessionLinkActions::set_local_region`, `wz_session_core::extregion`), and it
     // LEFT for [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed that setter through the offer
@@ -3063,6 +3520,18 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
     // and the open hands them to the tls links.
+    // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group, the R2363 class again:
+    // the link-RX pool has taken its size as a parameter since R2742, and only the default
+    // reaches it, so what is missing is the reader and not a configurable RX surface.
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once a session's `LinkRxConf` carried the read
+    // value to the links it wires.
+    // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group: R2600 and R2608 built
+    // the expiry teardown on the quic and tls links, armed from the locator's
+    // `close_link_on_expiration`. Upstream renders this key into each tls endpoint's config as
+    // the per-link default (`io/zenoh-links/zenoh-link-tls/src/utils.rs`
+    // @ `.close_link_on_expiration()`), which is the reader change left.
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once the reader rendered the key onto the tls and
+    // quic layers of `LinkDefaults`.
     // R2363 — MOVED here from `UNHONOURED_BEYOND_WZ`, and the move is the
     // finding rather than the bookkeeping: that list's `LinkTxConf` group said
     // wz lacked "a configurable link-TX surface" for this key, which was true
@@ -3074,7 +3543,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // JSON5 reader has no field for it. This is the exact class the ledger's
     // own doc warns about — a beyond-wz row that becomes a reader gap because
     // wz grew the capability, and reds nothing on its own.
-    "transport/link/unixpipe/file_access_mask",
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once the reader rendered the key onto the unixpipe
+    // layer of `LinkDefaults`.
 ];
 
 /// WHICH subsystem each [`UNHONOURED_BEYOND_WZ`] key would need, as data —
@@ -3117,21 +3587,12 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
 /// subsystem"); what they cannot do is leave a key ungrouped or write an anchor
 /// the prose does not carry.
 pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
-    (
-        "a declaration-aggregation strategy",
-        "AggregationConf",
-        &["aggregation/publishers", "aggregation/subscribers"],
-    ),
-    (
-        "per-key publisher QoS defaults",
-        "PublisherQoSConfList",
-        &["qos/publication"],
-    ),
-    (
-        "plugin auto-discovery from a search path",
-        "PluginSearchDirs",
-        &["plugins_loading/search_dirs"],
-    ),
+    // The declaration-aggregation group is GONE, not emptied: both its keys are honoured,
+    // `crate::declaration_aggregation` being the strategy the row said wz lacked.
+    // The per-key publisher QoS group is GONE, not emptied: a session applies its one key
+    // ([`SESSION_HONOURED_KEYS`]).
+    // The plugin auto-discovery group is GONE, not emptied: its one key is
+    // honoured, the plugin plane searching `plugins_loading/search_dirs` by name.
     // The "a credential store" group is GONE, not emptied: its history is that
     // `key_size` / `known_keys_file` left it for [`UPSTREAM_INERT_CONFIG_KEYS`] (R2336,
     // upstream reads neither), the usrpwd dictionary left with R2567, the four pubkey
@@ -3145,20 +3606,25 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         &[
             // `transport/link/protocols` LEFT this group: the open refuses an endpoint whose
             // protocol the whitelist leaves out.
-            "transport/link/rx/buffer_size",
+            // `transport/link/rx/buffer_size` LEFT this group: a link's RX pool is sized from
+            // it, so it is a reader gap, not a link-TX surface wz lacks.
             // `transport/link/rx/max_message_size` LEFT this group: wz now has
             // the bound it configures, a session's reassembly cap.
-            "transport/link/tls/close_link_on_expiration",
+            // `transport/link/tls/close_link_on_expiration` LEFT this group: the tls and quic
+            // links close at the peer chain's expiry when the locator asks.
             // `transport/link/tx/keep_alive` LEFT this group: a keepalive's share of a lease is
             // a parameter of the session, as its lease is.
-            "transport/link/tx/queue/allocation/mode",
-            "transport/link/tx/queue/batching/enabled",
-            "transport/link/tx/queue/batching/time_limit",
+            // `transport/link/tx/queue/allocation/mode` LEFT this group: a queue's shape says
+            // when its batches are taken.
+            // `transport/link/tx/queue/batching/enabled` LEFT this group: the session's
+            // batching window opens or stays shut by it. `time_limit` LEFT with it: the
+            // writer takes its bound from the queue's shape.
             // R2925 — the eight sizes and the two waits LEFT this group: wz
             // now has the per-priority bounded queues and the drop-vs-block
             // waits they configure. R2926 — and the per-fragment drop cap
             // followed, once a fragment chain asked for room per fragment.
-            "transport/link/tx/sequence_number_resolution",
+            // `transport/link/tx/sequence_number_resolution` LEFT this group: the width a
+            // session offers is its own parameter, as its lease is.
             "transport/link/tx/threads",
             // R2363 removed `transport/link/unixpipe/file_access_mask` from
             // this group: wz now HAS the surface for it (a per-locator FIFO
@@ -3166,32 +3632,13 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // moved to `UNHONOURED_READER_GAP`.
         ],
     ),
-    (
-        "a configurable session table",
-        "TransportUnicastConf",
-        &[
-            // `transport/multicast/compression/enabled` LEFT this group: a multicast batch is
-            // wrapped by the same `compression` module a unicast session's is.
-            // Open-debt item 913 — `transport/multicast/join_interval` LEFT this group:
-            // a group's beacon interval is a profile wz's multicast transport holds.
-            "transport/multicast/max_sessions",
-            "transport/shared_memory/mode",
-            // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout`
-            // LEFT this group: the accept loop holds a half-open accept pipeline, bounded.
-            // R2758 — `transport/unicast/max_sessions` LEFT this group, and the
-            // group's own name is why it had to: "a configurable session table"
-            // is two things, and wz had the table all along. `accept_loop`'s
-            // `faces` IS the session table; what it lacked was the
-            // configurable bound, which this round built. The remaining members
-            // still need the half wz has not got — a half-open accept pipeline
-            // (`accept_pending`, the two timeouts) and a multicast peer table.
-            //
-            // This is the outcome the R2159 note below describes, in its own
-            // words: the day wz grows a capability, its group reds rather than
-            // going quietly stale. It redded, and this is the entry moving out.
-            "transport/unicast/open_timeout",
-        ],
-    ),
+    // The "a configurable session table" group is GONE, not emptied. R2758 found its name was two
+    // things and wz had the table all along: `accept_loop`'s `faces` for the unicast cap, which
+    // left first. Its members followed one by one as each was built (the half-open accept
+    // pipeline, the open bound, the shared-memory switch, the multicast compression and beacon
+    // interval), and the last, `transport/multicast/max_sessions`, left once the multicast
+    // dispatcher's peer table took its cap from the file and grew to it on a heap host. A group
+    // with no key is a hard failure, so the row went with its last key.
     // R2159 (open-debt item 229) — the `ListenConfig` group ("a dial/listen
     // failure policy") STOOD HERE with four keys and is GONE, because wz grew
     // the thing it named. `crate::startup_phase` carries the budget, the
@@ -3224,19 +3671,9 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
     // _gate` checks that claim against wz's own code: it found `RegionName` at
     // three files and refused the push. wz HAS a node region identity now; the
     // key is a reader gap, which is a different list.
-    (
-        "per-keyexpr statistics",
-        "StatsFilterConfig",
-        &["stats/filters"],
-    ),
-    (
-        "an implicit large-message SHM promotion path",
-        "LargeMessageTransportOpt",
-        &[
-            "transport/shared_memory/transport_optimization/message_size_threshold",
-            "transport/shared_memory/transport_optimization/messages",
-        ],
-    ),
+    // The per-keyexpr statistics group is GONE, not emptied: its one key is honoured.
+    // The implicit large-message promotion group is GONE, not emptied: a session copies a large
+    // message into its provider by its two keys ([`SESSION_HONOURED_KEYS`]).
     // R2950 — the `ScoutingDelay` group is GONE, not emptied: wz grew "a
     // startup scouting delay" (the C-ABI peer open's start window), and its one
     // key moved to [`HONOURED_CONFIG_KEYS`].
@@ -3271,10 +3708,20 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
 /// has ever run. (R2159 then HONOURED `connect/timeout_ms`, so it is no longer
 /// in this ledger's population at all; the sentence is R2150's reasoning about
 /// a kind that was dropped, not a live classification.)
+///
+/// `foreign-node-config` (wz's source spells the key only to configure a genuine zenohd on the
+/// other side of the wire) LEFT with its last row: `qos/publication` and
+/// `transport/link/tx/sequence_number_resolution` are both honoured now, and a kind with no
+/// population is a branch nobody runs, the reason `upstream-only` was dropped above.
+///
+/// `not-this-key` (the citing site is about a different wz mechanism) LEFT with its last row
+/// too: `transport/unicast/open_timeout` was cited beside the per-candidate dial bound, and the
+/// key is honoured now as the bound on a whole open, which that dial bound runs inside. A key
+/// that needs the kind again brings it back with its row, its anchor and its `NOT-THIS-KEY:`
+/// disclaimer in one change.
 pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
     "asserted-ignored",
-    "foreign-node-config",
-    "not-this-key",
+    // `foreign-node-config` and `not-this-key` stood here; see above for why they left.
     "wz-has-it",
 ];
 
@@ -3306,7 +3753,9 @@ pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
 ///   citing doc is a unixpipe-only `HANDSHAKE_TIMEOUT` that happens to match
 ///   the key's default, over a listener upstream gives no bound at all.
 ///   `anchor` names that other mechanism, and it must EXIST — AND the mechanism
-///   must DISCLAIM the key where the two meet. See below.
+///   must DISCLAIM the key where the two meet. See below. The kind has no row today and is
+///   out of [`UNHONOURED_CITATION_KINDS`]; this paragraph and the next say what bringing it
+///   back obliges.
 ///
 /// # The disclaimer, and the hole it closes (R2155, open-debt item 541)
 ///
@@ -3380,29 +3829,15 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // R2864 — `gateway/south`'s row is GONE (item 751, step 7d-2): the reader
     // honours the key now, and `extbound.rs`'s "not this key" disclaimer went
     // with it.
-    ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
-    // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
-    // the host is wz's, the DISCOVERY is not. A citation that says "not this
-    // one" is still a citation, and it needs a verdict like any other.
-    (
-        "plugins_loading/search_dirs",
-        "not-this-key",
-        "PluginRegistry",
-    ),
-    // R2200 (open-debt item 558) — wz's source spells `qos/publication` to
-    // configure the GENUINE zenoh `z_pub` example, never itself. The key is the
-    // only way any oracle this tree provisions can be told which PRIORITY to
-    // publish at (that binary has no priority flag; zenoh-pico's `z_pub` and
-    // `z_advanced_pub` have neither flag nor `--cfg`), and a per-conduit
-    // reassembly witness needs two priorities on one link before it has a
-    // subject at all. wz honours nothing here: the key stays in the
-    // `PublisherQoSConfList` beyond-wz group, whose subject is the API's per-key
-    // publisher defaults, which wz does not read.
-    (
-        "qos/publication",
-        "foreign-node-config",
-        "spawn_publishing_zenoh_zpub",
-    ),
+    // The `plugins_loading/enabled` row is GONE: the reader honours the key now, and this ledger
+    // carries evidence for unhonoured keys only.
+    // `plugins_loading/search_dirs`' "not this key" row is GONE with the
+    // disclaimer beside `PluginRegistry`: the reader honours the key now.
+    // R2200 (open-debt item 558) — the `qos/publication` / `foreign-node-config` row is GONE:
+    // wz's source still spells the key to configure the genuine zenoh `z_pub` example
+    // (`spawn_publishing_zenoh_zpub`), and a session of wz now applies it for itself
+    // ([`SESSION_HONOURED_KEYS`]), so this ledger, whose population is the unhonoured keys,
+    // has no verdict to give about it.
     // R2633 — the `routing/router/linkstate/transport_weights` / `wz-has-it` /
     // `update_router_link_weights` row R2632 added is GONE, deleted one round
     // after it was written, because the key is honoured now and this ledger's
@@ -3439,71 +3874,72 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // And for `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}`: their rows said the capability was in wz and the reader was
     // not, and the reader reads them now.
-    // R2363 — the unixpipe FIFO mode. The anchor is the DEFAULT rather than the
-    // parse, because the default is the whole of wz's declared divergence
-    // (0o600 where upstream defaults to 0o777) and it is what a reader
-    // rendering the key would have to override. `UnixpipeEndpoint::file_mask`
-    // is the other half and lives in `wz-session-core`; the anchor has to be a
-    // symbol in THIS crate's own sweep, so the one that is here is the one
-    // named.
-    (
-        "transport/link/unixpipe/file_access_mask",
-        "wz-has-it",
-        "DEFAULT_FILE_MASK",
-    ),
+    // The `transport/link/rx/buffer_size` row is GONE: the reader honours the key now, and this
+    // ledger carries evidence for unhonoured keys only.
+    // The `transport/link/tls/close_link_on_expiration` row is GONE: the reader honours the key
+    // now, and this ledger carries evidence for unhonoured keys only.
+    // The `transport/link/unixpipe/file_access_mask` row is GONE: the reader honours the key
+    // now, and this ledger carries evidence for unhonoured keys only.
     // R2925 — the `queue/size/data` row R2226 (open-debt item 575) kept here is
     // GONE, for the reason R2593's `so_sndbuf` row went: wz honours the key now,
     // and the ledger answers only for keys wz does not act on. The zenohd
     // fixture that spells it (`spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp`)
     // still configures the far side exactly as before.
     //
-    // R2221 (open-debt item 568) — wz's source spells
-    // `transport/link/tx/sequence_number_resolution` to configure the GENUINE
-    // zenohd, never itself, and the `qos/publication` row above is the same
-    // shape for the same reason: it is the only way to put a non-default value
-    // on the OTHER side of the wire.
-    //
-    // The axis needs that. `Resolution` is `min()`ed by both peers
-    // (`unicast/establishment/accept.rs:198-213` at zenoh 1.5.0), so a small
-    // value advertised by WZ makes the negotiated ring equal wz's own
-    // advertisement — which an implementation that ignored the InitAck entirely
-    // also produces. Only a value that exists on the ROUTER's side until its
-    // InitAck carries it back can measure whether wz ADOPTS it.
-    //
-    // wz honours nothing here: the key stays in the `LinkTxConf` beyond-wz
-    // group, whose subject is a configurable link-TX surface wz does not have.
-    // What wz has is the wire negotiation, which is a different thing from a
-    // config key that sets the local advertisement.
-    // R2224 (open-debt item 572) — the anchor is the helper-name PREFIX, not one
-    // helper. That round needed a router carrying this key AND a named
-    // `qos/enabled`, so the axes fixture moved to
-    // `spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp` and this row went
-    // RED — correctly: it had named an exact function and the function was no
-    // longer what the fixture called.
-    //
-    // Shortening it is not a weakening, and the reason is measurable: nothing
-    // else in the tree begins with these characters, so the prefix names the
-    // FAMILY of helpers that put this key on a genuine router and nothing else.
-    // Keeping the full name would have forced the axes fixture to spawn a
-    // second router to satisfy a table, which is the tail wagging the dog.
-    (
-        "transport/link/tx/sequence_number_resolution",
-        "foreign-node-config",
-        "spawn_zenohd_sn_resolution",
-    ),
+    // `transport/link/tx/sequence_number_resolution`'s row is GONE for the same reason: a
+    // node's own file now sets the width it offers. The zenohd fixtures that spell the key
+    // (`spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp`) still put a width on the far
+    // side, which is the half only a genuine router's InitAck can show wz adopting.
+    // With it the `foreign-node-config` kind had no row left (`qos/publication`, its other
+    // member, is honoured by a session), so the kind left the vocabulary.
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
     // Open-debt item 913 — `transport/multicast/join_interval`'s row is GONE: the zenoh-c
     // session honours the key now, and this ledger carries evidence for unhonoured keys.
     // Open-debt item 925 -- `transport/unicast/accept_timeout`'s row is GONE too: the zenoh-c
     // session honours the key, so the ledger of unhonoured keys carries no evidence for it.
-    // Open-debt 732 — `link_pipeline` cites this key to explain why the
-    // per-candidate dial bound is NOT derived from it: upstream clocks the whole
-    // walk plus the handshake with it, which cannot bound one candidate. The
-    // anchor is the bound's own constant; the disclaimer sits beside it.
+    // Open-debt 732 -- `transport/unicast/open_timeout`'s `not-this-key` row is GONE: the key
+    // is honoured, as the bound on a whole open, and the per-candidate dial bound it was cited
+    // beside runs inside that bound rather than in place of it.
+];
+
+/// The two decisions an [`UNHONOURED_DISPOSITIONS`] row may carry, and the one place a third is
+/// added.
+///
+/// * `build` — wz is to honour the key. The reason names what is missing: the subsystem, or for
+///   a reader gap only the reader.
+/// * `exclude` — wz will not honour the key, and the reason is why there is nothing to honour.
+///
+/// Data rather than an `enum` for the reason [`UNHONOURED_CITATION_KINDS`] gives: a script reads
+/// the vocabulary out of this source instead of carrying a copy of it.
+pub const UNHONOURED_DISPOSITION_KINDS: &[&str] = &["build", "exclude"];
+
+/// What wz DECIDES about each key it does not honour, `(key, kind, reason)`: build it, or
+/// exclude it, and why.
+///
+/// [`UNHONOURED_BEYOND_WZ`] and [`UNHONOURED_READER_GAP`] say why a key is unhonoured today;
+/// neither says whether that is a gap wz means to close. Without the decision every key of
+/// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] reads as the same open question, and a key upstream
+/// itself does nothing with weighs as much as a missing subsystem. So every one of them carries
+/// exactly one row here, of a kind in [`UNHONOURED_DISPOSITION_KINDS`], and a reader gap is
+/// never excluded: a capability wz already has is not one it declines.
+/// `every_unhonoured_key_carries_one_disposition` holds that, and `deepenable_audit.py` reads
+/// this table and prints the split beside the surface it measures. A reason is plain text with
+/// no quote, backslash or comment marker, so that the script reads every row whole.
+///
+/// One row is excluded. Upstream reads `transport/link/tx/threads` into its transport manager's
+/// configuration (`io/zenoh-transport/src/manager.rs` @ `self = self.tx_threads(*link.tx().threads());`)
+/// and copies it on into the built manager (`io/zenoh-transport/src/manager.rs` @ `tx_threads: self.tx_threads,`),
+/// and no line of the pinned checkout reads that field back: its TX tasks run on the shared
+/// runtime whatever the value. There is no behaviour to honour, and wz's own test asserts the
+/// key ignored (the `asserted-ignored` row above).
+pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
+    // A row leaves with its key once the key is honoured. This comment keeps the table one row
+    // per line when one row is left: `deepenable_audit.py` reads the body up to a line holding
+    // only `];`.
     (
-        "transport/unicast/open_timeout",
-        "not-this-key",
-        "CANDIDATE_DIAL_TIMEOUT",
+        "transport/link/tx/threads",
+        "exclude",
+        "upstream stores it on its transport manager config and nothing reads it back",
     ),
 ];
 
@@ -3725,8 +4161,8 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// What each changes: `transport_optimization/enabled` whether the session
 /// owns a shared-memory provider (`z_obtain_shm_provider` answers DISABLED
 /// without it), `pool_size` that provider's size. The implicit promotion the
-/// first key ALSO turns on upstream is not built; its two remaining keys stay
-/// unhonoured, under the promotion group.
+/// first key ALSO turns on upstream is a session's, and its two remaining keys
+/// are in [`SESSION_HONOURED_KEYS`].
 ///
 /// R2963 — it is a PART of [`HONOURED_SURFACE_PARTS`], which is the whole point
 /// of that list existing: R2957 gave it to the predicate and to nothing that
@@ -3778,6 +4214,32 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "transport/unicast/accept_timeout",
 ];
 
+/// The SEVENTH organ of [`honours_config_key`]: keys a SESSION applies itself, above the
+/// engine's links, and which the wz node does not.
+///
+/// Upstream applies each of them in its session or its runtime and not in the transport it
+/// configures: the per-key publication QoS when a publisher is declared and when a put or a
+/// delete is made (`zenoh/src/api/builders/publisher.rs` @
+/// `pub(crate) fn apply_qos_overwrites(self) -> Self {`), the shared-memory subsystem at the
+/// end of the open (`zenoh/src/net/runtime/mod.rs` @
+/// `zenoh_config::ShmInitMode::Init => zenoh_shm::init::init(),`), and the copy of a large
+/// plain payload into the session's provider (`io/zenoh-transport/src/common/shm/interop.rs` @
+/// `pub struct ShmOptimizationPolicy {`). In wz each is read once by this reader, compiled once
+/// into the session's defaults by the open plan of the engine both the C ABI and the Rust API
+/// preset open through, and applied by each session from that one value.
+///
+/// Its own list and not rows of [`C_ABI_SESSION_HONOURED_KEYS`], because whether a key here is
+/// acted on is a fact of the SESSION's build and not of this reader's: the promotion needs a
+/// provider the session holds, the subsystem a build with shared memory. So a session answers
+/// for its own build (`wz_capi_core::open_plan::key_state`, which takes what the session
+/// reaches), and [`honours_config_key`] says only that some session of wz applies the key.
+pub const SESSION_HONOURED_KEYS: &[&str] = &[
+    "qos/publication",
+    "transport/shared_memory/mode",
+    "transport/shared_memory/transport_optimization/message_size_threshold",
+    "transport/shared_memory/transport_optimization/messages",
+];
+
 /// R2963 (open-debt item 843) — the flat lists whose members are HONOURED keys
 /// of the UPSTREAM surface, and the one place that says so.
 ///
@@ -3806,7 +4268,11 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
 /// are not flat lists of upstream surface keys — a leaf below `metadata` is a
 /// leaf a real zenohd never resolves, and counting it would inflate the
 /// denominator without any fixture changing.
-pub const HONOURED_SURFACE_PARTS: &[&[&str]] = &[HONOURED_CONFIG_KEYS, C_ABI_SESSION_HONOURED_KEYS];
+pub const HONOURED_SURFACE_PARTS: &[&[&str]] = &[
+    HONOURED_CONFIG_KEYS,
+    C_ABI_SESSION_HONOURED_KEYS,
+    SESSION_HONOURED_KEYS,
+];
 
 /// Every key wz honours that the pinned upstream carries: the members of
 /// [`HONOURED_SURFACE_PARTS`], in order.
@@ -3990,6 +4456,11 @@ pub enum ConfigKeyDisposition {
     /// STATEMENT about it — which is not the same as a statement that it is
     /// ignored, and the difference is the one this enum exists for.
     Unknown,
+    /// wz honours this key in a build with the capability its reader is compiled under
+    /// ([`CAPABILITY_HONOURED_KEYS`]), and THIS build was made without it: a document that
+    /// states an instruction here is refused by the key's name, and one that states upstream's
+    /// default is read and nothing applied.
+    NotInBuild,
 }
 
 /// R2797 — [`honours_config_key`] widened from a
@@ -4008,7 +4479,13 @@ pub enum ConfigKeyDisposition {
 /// this order silently depends on.
 pub fn config_key_disposition(path: &str) -> ConfigKeyDisposition {
     if honours_config_key(path) {
-        return ConfigKeyDisposition::Honoured;
+        // What wz honours, answered for the build asked: a capability's key is honoured only by a
+        // build that has the capability.
+        return if config_key_in_build(path) {
+            ConfigKeyDisposition::Honoured
+        } else {
+            ConfigKeyDisposition::NotInBuild
+        };
     }
     if UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&path) {
         return ConfigKeyDisposition::DeclaredUnhonoured;
@@ -4363,6 +4840,17 @@ pub enum ConfigIngestError {
         /// The text as given.
         value: String,
     },
+    /// A key whose reader is a capability this build was made without
+    /// ([`CAPABILITY_HONOURED_KEYS`]) states an instruction: anything but upstream's default,
+    /// which states none. A build that cannot apply the key does not run as if it had not been
+    /// stated; a build with the capability reads it.
+    NotInBuild {
+        /// The key path.
+        path: &'static str,
+        /// The feature of this crate the key's reader is compiled under, or the features
+        /// either of which compiles it.
+        capability: &'static str,
+    },
 }
 
 impl core::fmt::Display for ConfigIngestError {
@@ -4392,6 +4880,13 @@ impl core::fmt::Display for ConfigIngestError {
                      hex, no leading zero, at most 16 bytes"
                 )
             }
+            ConfigIngestError::NotInBuild { path, capability } => {
+                write!(
+                    f,
+                    "{path} states an instruction this build cannot carry out: its reader \
+                     is the `{capability}` capability, which the build was made without"
+                )
+            }
         }
     }
 }
@@ -4406,6 +4901,68 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
         Some(Json5Value::Null) | None => None,
         other => other,
     }
+}
+
+/// A key whose reader this build was made without ([`CAPABILITY_HONOURED_KEYS`]), read the one way
+/// the build can: `states_nothing` says whether the value is upstream's default, which a real
+/// zenohd's resolved configuration carries for every such key and which asks for nothing, and any
+/// other value is refused by the key's name ([`ConfigIngestError::NotInBuild`]). An absent or
+/// `null` key states nothing either.
+// Compiled exactly when one of its callers is: a build missing any capability whose key it reads
+// in the default's spelling, or a zero-copy build, which pools no per-link read storage.
+#[cfg(any(
+    not(all(
+        feature = "access-acl",
+        feature = "access-downsampling",
+        feature = "access-quota",
+        feature = "access-qos-overwrite",
+        feature = "transport-link-tls",
+        feature = "routing-router-hat",
+        feature = "keyexpr-includes",
+        feature = "transport-stats",
+        feature = "plugin-dynamic-loading",
+        feature = "adminspace-config-hotreload",
+        feature = "transport-link-unixpipe",
+        unix
+    )),
+    feature = "runtime-zero-copy"
+))]
+fn refuse_unbuilt_instruction(
+    doc: &Json5Value,
+    path: &'static str,
+    states_nothing: fn(&Json5Value) -> bool,
+) -> Result<(), ConfigIngestError> {
+    match honoured(doc, path) {
+        Some(value) if !states_nothing(value) => Err(ConfigIngestError::NotInBuild {
+            path,
+            capability: config_key_capability(path).map_or("", |(feature, _)| feature),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// The default of a list-valued capability key: the empty list.
+#[cfg(not(all(
+    feature = "access-acl",
+    feature = "access-downsampling",
+    feature = "access-quota",
+    feature = "access-qos-overwrite",
+    feature = "keyexpr-includes",
+    feature = "transport-stats"
+)))]
+fn is_empty_list(value: &Json5Value) -> bool {
+    matches!(value, Json5Value::Array(items) if items.is_empty())
+}
+
+/// The value of a key whose every spelling is an instruction: a path, a size. Only its absence,
+/// or `null`, states nothing, and those never reach the predicate. Compiled where some such
+/// key's capability is out of the build: the `tls/` link's, or the `unixpipe/` link's.
+#[cfg(any(
+    not(feature = "transport-link-tls"),
+    not(all(feature = "transport-link-unixpipe", unix))
+))]
+fn never_states_nothing(_: &Json5Value) -> bool {
+    false
 }
 
 /// The honoured keys upstream spells as `ModeDependentValue<T>` — either the
@@ -4487,9 +5044,13 @@ const MODE_TABLE_FIELDS: &[&str] = &["router", "peer", "client"];
 /// it is what a real zenohd does with the very same file, and wz's silence was
 /// the divergence. Measured against a real zenohd rather than inferred: given
 /// `{ mode: "router", connect: [..] }` it answers on port 7447 on every
-/// interface; given the same document as `peer` it answers on an ephemeral port;
-/// and given `{ mode: "client", listen: [..] }` it starts and binds NOTHING,
-/// naming no locator at all.
+/// interface; given the same document as `peer` it answers on an ephemeral port.
+/// A client has no default listener: given `{ mode: "client", connect: [..] }` a
+/// zenohd 1.10.2 holds no listening socket. A client that NAMES a listen list binds
+/// it: given `{ mode: "client", listen: ["tcp/127.0.0.1:17449"], connect: [..] }`
+/// it holds a socket listening on 17449 and logs it as a locator (measured
+/// 2026-11-14 on a build machine; the reading of round R2091b, whose document named
+/// no router to connect to, saw no locator).
 ///
 /// A document that NAMES the key -- including as an explicitly EMPTY list --
 /// suppresses this, and that is upstream's behaviour too (measured: an empty
@@ -5238,8 +5799,8 @@ pub struct DownsamplingRuleConf {
 ///
 /// Here rather than [`crate::interceptor::downsampling::DownsamplingRule`] for
 /// the reason `LowPassFilterConf` records: that type is gated twice over and
-/// [`ZenohNodeConfig`] must read the same document to the same values in every
-/// build.
+/// [`ZenohNodeConfig`]'s fields are carried in every build, while the read of
+/// the key is the `access-downsampling` capability's.
 ///
 /// ONE item carries N rules and the axes they SHARE. The arm expands that into N
 /// wz rules, copying the shared axes onto each — upstream's own shape, where the
@@ -5261,6 +5822,7 @@ pub struct DownsamplingItemConf {
 }
 
 /// R2651 — `downsampling` as a list of [`DownsamplingItemConf`].
+#[cfg(feature = "access-downsampling")]
 fn downsampling_items_of(
     value: &Json5Value,
     path: &'static str,
@@ -5342,6 +5904,7 @@ fn downsampling_items_of(
 }
 
 /// The nested `rules[]` of one downsampling item.
+#[cfg(feature = "access-downsampling")]
 fn downsampling_rules_of(
     value: &Json5Value,
     path: &'static str,
@@ -5396,7 +5959,7 @@ fn downsampling_rules_of(
 /// them would be wrong in both directions at once.
 ///
 /// Literals here rather than the enum because `wz-access-control` is an OPTIONAL
-/// dependency (`access-acl`) and this module must read the same document in
+/// dependency (`access-acl`) and the echo types of the document are carried in
 /// every build. `acl_literals_match_the_enum` pins the correspondence where both
 /// are visible, so the two cannot drift.
 pub const ACL_MESSAGE_LITERALS: &[&str] = &[
@@ -5869,6 +6432,7 @@ pub(crate) fn first_unhonoured_key_outside(exclude: &[&str]) -> &'static str {
 ///
 /// Upstream says so in its own words -- "a subject property cannot be an empty
 /// list" -- so the two are different documents and only one of them is valid.
+#[cfg(feature = "access-acl")]
 fn optional_axis_of(
     value: &Json5Value,
     path: &'static str,
@@ -5886,6 +6450,7 @@ fn optional_axis_of(
 }
 
 /// R2652 — `access_control/rules` as a list of [`AclConfigRuleConf`].
+#[cfg(feature = "access-acl")]
 fn acl_rules_of(
     value: &Json5Value,
     path: &'static str,
@@ -5965,6 +6530,7 @@ fn acl_rules_of(
 }
 
 /// R2652 — `access_control/subjects` as a list of [`AclConfigSubjectsConf`].
+#[cfg(feature = "access-acl")]
 fn acl_subjects_of(
     value: &Json5Value,
     path: &'static str,
@@ -6065,6 +6631,7 @@ fn acl_subjects_of(
 }
 
 /// R2652 — `access_control/policies` as a list of [`AclConfigPolicyConf`].
+#[cfg(feature = "access-acl")]
 fn acl_policies_of(
     value: &Json5Value,
     path: &'static str,
@@ -6116,7 +6683,8 @@ fn acl_policies_of(
     Ok(out)
 }
 
-/// One JSON5 string, or `WrongType`.
+/// One JSON5 string, or `WrongType`. The access control's reader is its only caller.
+#[cfg(feature = "access-acl")]
 fn want_text(
     value: &Json5Value,
     path: &'static str,
@@ -6146,9 +6714,11 @@ pub const INTERCEPTOR_FLOW_LITERALS: &[&str] = &["egress", "ingress"];
 /// # Why this is not [`crate::interceptor::low_pass::LowPassRule`]
 ///
 /// That type is doubly feature-gated -- its module is `routing-peer` and the
-/// type is `access-quota` -- and [`ZenohNodeConfig`] is deliberately
-/// feature-INDEPENDENT, so a build without those features must still read the
-/// same document to the same values. The conversion happens in
+/// type is `access-quota` -- and [`ZenohNodeConfig`]'s fields are
+/// feature-INDEPENDENT: the emitter and the validators carry them in every
+/// build. The READ of the key is the `access-quota` capability's
+/// ([`CAPABILITY_HONOURED_KEYS`]), and a build with it reads the same document
+/// to the same values whatever else it was made with. The conversion happens in
 /// `apply_one_key`'s arm, which already carries those gates.
 ///
 /// The trick that lets `router_transport_weights` name a foreign type does not
@@ -6201,11 +6771,74 @@ fn string_list_of(
     Ok(out)
 }
 
+/// A list of key expressions, each checked as upstream's `OwnedKeyExpr` checks it: a member that
+/// is not one refuses the document by the key.
+#[cfg(feature = "keyexpr-includes")]
+fn keyexpr_list_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<String>, ConfigIngestError> {
+    const EXPECTED: &str = "a list of key expressions";
+    let keys = string_list_of(value, path, EXPECTED)?;
+    if keys
+        .iter()
+        .any(|key| wz_session_core::keyexpr_canon::validate_keyexpr(key).is_err())
+    {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: EXPECTED,
+        });
+    }
+    Ok(keys)
+}
+
+/// `stats/filters`: a list of `{ key: "<keyexpr>" }`, as upstream's filter type reads it
+/// (`commons/zenoh-config/src/lib.rs` @ `pub struct StatsFilterConfig {`): `key` is required and
+/// a key expression, and a field it does not know is not refused, the struct naming no
+/// `deny_unknown_fields`. More filters than a transport counts under is refused by the key.
+#[cfg(feature = "transport-stats")]
+fn stats_filters_of(value: &Json5Value) -> Result<Vec<String>, ConfigIngestError> {
+    const PATH: &str = "stats/filters";
+    let refused = || ConfigIngestError::WrongType {
+        path: PATH,
+        expected: "a list of { key: \"<keyexpr>\" }",
+    };
+    let Json5Value::Array(items) = value else {
+        return Err(refused());
+    };
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        // A member that is not an object has no `key` to get.
+        let Some(Json5Value::String(key)) = item.get("key") else {
+            return Err(refused());
+        };
+        if wz_session_core::keyexpr_canon::validate_keyexpr(key).is_err() {
+            return Err(refused());
+        }
+        keys.push(key.clone());
+    }
+    if keys.len() > wz_session_core::stats::StatsKeyMatch::CAPACITY {
+        return Err(ConfigIngestError::OutOfRange {
+            path: PATH,
+            value: format!("{} filters", keys.len()),
+        });
+    }
+    Ok(keys)
+}
+
 /// The same, refusing any member outside `allowed`.
 ///
 /// This is where wz stays exactly as strict as upstream rather than more
 /// permissive: upstream deserializes these into enums, so an unknown literal is
 /// a parse error there and must be one here.
+///
+/// The interceptor keys' readers are its callers, each compiled with its capability.
+#[cfg(any(
+    feature = "access-acl",
+    feature = "access-downsampling",
+    feature = "access-quota",
+    feature = "access-qos-overwrite"
+))]
 fn enum_list_of(
     value: &Json5Value,
     path: &'static str,
@@ -6220,6 +6853,7 @@ fn enum_list_of(
 }
 
 /// R2650 — `low_pass_filter` as a list of [`LowPassFilterConf`].
+#[cfg(feature = "access-quota")]
 fn low_pass_filters_of(
     value: &Json5Value,
     path: &'static str,
@@ -6422,9 +7056,198 @@ pub struct QosNetworkItemConf {
     pub payload_size: Option<(Option<u64>, Option<u64>)>,
 }
 
+/// How the shared-memory subsystem of the process is made (`transport/shared_memory/mode`,
+/// upstream's `ShmInitMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShmInitMode {
+    /// `lazy`: at the first buffer the process allocates or receives. Upstream's default.
+    #[default]
+    Lazy,
+    /// `init`: when a session opens, so that the first buffer pays nothing for it.
+    Init,
+}
+
+/// The spellings of [`ShmInitMode`], upstream's `#[serde(rename_all = "snake_case")]`.
+pub const SHM_INIT_MODE_LITERALS: &[(&str, ShmInitMode)] =
+    &[("init", ShmInitMode::Init), ("lazy", ShmInitMode::Lazy)];
+
+/// The destinations a `qos/publication` item spells (`PublisherLocalityConf`).
+pub const PUBLICATION_DESTINATION_LITERALS: &[(&str, Locality)] = &[
+    ("session_local", Locality::SessionLocal),
+    ("remote", Locality::Remote),
+    ("any", Locality::Any),
+];
+
+/// What a `qos/publication` item sets on the publications of its keys (`PublisherQoSConfig`):
+/// each field stated replaces what the publication states, and a field left `None` leaves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PublicationQosConf {
+    /// The congestion control, one of [`QOS_CONGESTION_LITERALS`].
+    pub congestion_control: Option<CongestionControl>,
+    /// The priority, one of [`QOS_PRIORITY_LITERALS`].
+    pub priority: Option<Priority>,
+    /// The express flag.
+    pub express: Option<bool>,
+    /// The reliability: `true` for `reliable`, `false` for `best_effort`.
+    pub reliable: Option<bool>,
+    /// The destinations the publication may reach, one of
+    /// [`PUBLICATION_DESTINATION_LITERALS`].
+    pub allowed_destination: Option<Locality>,
+}
+
+/// One `qos/publication[]` entry as the document spells it (`PublisherQoSConf`): the key
+/// expressions it governs and what it sets on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationQosItemConf {
+    /// The key expressions the item governs, each validated; possibly empty, as upstream's is a
+    /// plain list.
+    pub key_exprs: Vec<String>,
+    /// What the item sets.
+    pub config: PublicationQosConf,
+}
+
+/// The literal `value` spells in `table`, `None` for a `null` (an option upstream leaves unset),
+/// and `WrongType` naming `expected` for anything else.
+fn optional_literal<T: Copy>(
+    value: &Json5Value,
+    table: &[(&str, T)],
+    path: &'static str,
+    expected: &'static str,
+) -> Result<Option<T>, ConfigIngestError> {
+    match value {
+        Json5Value::Null => Ok(None),
+        Json5Value::String(text) => table
+            .iter()
+            .find(|(name, _)| name == text)
+            .map(|(_, literal)| Some(*literal))
+            .ok_or(ConfigIngestError::WrongType { path, expected }),
+        _ => Err(ConfigIngestError::WrongType { path, expected }),
+    }
+}
+
+/// `qos/publication` as a list of [`PublicationQosItemConf`].
+///
+/// Exactly as strict as upstream's deserialization and no stricter: an item needs `key_exprs`
+/// and `config`, each key expression must be one, and each setting must be a value its enum
+/// has; neither the item nor its `config` refuses a field it does not know, because neither
+/// carries `deny_unknown_fields` upstream (`commons/zenoh-config/src/qos.rs` @
+/// `pub(crate) struct PublisherQoSConf {`).
+fn publication_qos_items_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<PublicationQosItemConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { key_exprs: [\"<keyexpr>\"], config: { congestion_control?: \
+                         drop|block|block_first, priority?: <name>, express?: bool, \
+                         reliability?: best_effort|reliable, allowed_destination?: \
+                         session_local|remote|any } }";
+    let bad = || ConfigIngestError::WrongType {
+        path,
+        expected: SHAPE,
+    };
+    let Json5Value::Array(items) = value else {
+        return Err(bad());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(bad());
+        };
+        let mut key_exprs = None;
+        let mut config = None;
+        for (key, field) in fields {
+            match key.as_str() {
+                "key_exprs" => {
+                    let list = string_list_of(field, path, SHAPE)?;
+                    if list
+                        .iter()
+                        .any(|text| wz_session_core::keyexpr_canon::validate_keyexpr(text).is_err())
+                    {
+                        return Err(bad());
+                    }
+                    key_exprs = Some(list);
+                }
+                "config" => config = Some(publication_qos_conf_of(field, path, SHAPE)?),
+                _ => {}
+            }
+        }
+        let (Some(key_exprs), Some(config)) = (key_exprs, config) else {
+            return Err(bad());
+        };
+        out.push(PublicationQosItemConf { key_exprs, config });
+    }
+    Ok(out)
+}
+
+/// The `config` of one `qos/publication` item.
+fn publication_qos_conf_of(
+    value: &Json5Value,
+    path: &'static str,
+    shape: &'static str,
+) -> Result<PublicationQosConf, ConfigIngestError> {
+    let Json5Value::Object(fields) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: shape,
+        });
+    };
+    let mut conf = PublicationQosConf::default();
+    for (name, setting) in fields {
+        match name.as_str() {
+            "congestion_control" => {
+                conf.congestion_control =
+                    optional_literal(setting, QOS_CONGESTION_LITERALS, path, shape)?;
+            }
+            "priority" => {
+                conf.priority = optional_literal(setting, QOS_PRIORITY_LITERALS, path, shape)?;
+            }
+            "express" => {
+                conf.express = match setting {
+                    Json5Value::Null => None,
+                    other => Some(bool_of(other, path)?),
+                };
+            }
+            "reliability" => {
+                conf.reliable = optional_literal(
+                    setting,
+                    &[("best_effort", false), ("reliable", true)],
+                    path,
+                    shape,
+                )?;
+            }
+            "allowed_destination" => {
+                conf.allowed_destination =
+                    optional_literal(setting, PUBLICATION_DESTINATION_LITERALS, path, shape)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(conf)
+}
+
+/// `transport/shared_memory/transport_optimization/messages`: every member one of
+/// [`DATA_MESSAGE_LITERALS`], as upstream's `Vec<DataMessage>`, and an empty list allowed.
+fn data_messages_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<String>, ConfigIngestError> {
+    const SHAPE: &str = "a list of put|delete|query|reply";
+    let list = string_list_of(value, path, SHAPE)?;
+    if list
+        .iter()
+        .any(|message| !DATA_MESSAGE_LITERALS.contains(&message.as_str()))
+    {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    }
+    Ok(list)
+}
+
 /// `"a..b"`, `"a.."`, `"..b"` or `".."`: an inclusive range of sizes whose bounds may each be
 /// left out. Upstream's `ConfRange` reads it the same way, and refuses a text without `..` and a
 /// bound that is not an unsigned integer.
+#[cfg(feature = "access-qos-overwrite")]
 fn payload_range_of(text: &str) -> Option<(Option<u64>, Option<u64>)> {
     let (start, end) = text.split_once("..")?;
     let bound = |b: &str| -> Option<Option<u64>> {
@@ -6438,6 +7261,7 @@ fn payload_range_of(text: &str) -> Option<(Option<u64>, Option<u64>)> {
 }
 
 /// The literal `value` spells in `table`, or `None`.
+#[cfg(feature = "access-qos-overwrite")]
 fn literal_in<T: Copy>(value: &Json5Value, table: &[(&str, T)]) -> Option<T> {
     let Json5Value::String(text) = value else {
         return None;
@@ -6446,6 +7270,7 @@ fn literal_in<T: Copy>(value: &Json5Value, table: &[(&str, T)]) -> Option<T> {
 }
 
 /// `qos/network` as a list of [`QosNetworkItemConf`].
+#[cfg(feature = "access-qos-overwrite")]
 fn qos_network_items_of(
     value: &Json5Value,
     path: &'static str,
@@ -7211,9 +8036,24 @@ impl ZenohNodeConfig {
         // Item 751 — the partition, read whole by `gateway_south_of`. `honoured`
         // is right here: `null` is the preset's own spelling and so, like an
         // absent key, leaves the default standing.
+        #[cfg(feature = "routing-router-hat")]
         if let Some(value) = honoured(&doc, "gateway/south") {
             out.gateway_south = gateway_south_of(value)?;
             named.push("gateway/south");
+        }
+        // A build without the region hats holds no partition, and reads only the
+        // `auto` preset, in either of its spellings.
+        #[cfg(not(feature = "routing-router-hat"))]
+        refuse_unbuilt_instruction(&doc, "gateway/south", |value| match value {
+            Json5Value::String(preset) => preset == "auto",
+            Json5Value::Object(fields) => is_the_tagged_auto_preset(fields),
+            _ => false,
+        })?;
+        // Any `u64`, as upstream's field takes it: a bound of 0 gives every open up at once,
+        // which is what such a file asks of a zenohd too.
+        if let Some(v) = want_u64(&doc, "transport/unicast/open_timeout")? {
+            out.open_timeout_ms = v;
+            named.push("transport/unicast/open_timeout");
         }
         if let Some(v) = want_u64(&doc, "transport/unicast/accept_timeout")? {
             out.accept_timeout_ms = v;
@@ -7263,6 +8103,19 @@ impl ZenohNodeConfig {
             out.lease_ms = v;
             named.push("transport/link/tx/lease");
         }
+        // One of the four widths upstream's `Bits` deserializes, and nothing else: a width no
+        // session can offer is refused at the key, as a zenohd refuses to start on it.
+        const SN_RESOLUTION: &str = "transport/link/tx/sequence_number_resolution";
+        const SN_RESOLUTION_EXPECTED: &str = "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"";
+        if let Some(text) = want_string(&doc, SN_RESOLUTION, SN_RESOLUTION_EXPECTED)? {
+            out.sn_resolution = crate::policy::SnResolution::from_zenoh_name(&text).ok_or(
+                ConfigIngestError::WrongType {
+                    path: SN_RESOLUTION,
+                    expected: SN_RESOLUTION_EXPECTED,
+                },
+            )?;
+            named.push(SN_RESOLUTION);
+        }
         if let Some(v) = want_u64(&doc, "transport/link/tx/keep_alive")? {
             out.keep_alive = u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
                 path: "transport/link/tx/keep_alive",
@@ -7311,6 +8164,33 @@ impl ZenohNodeConfig {
             out.tx_queue.wait_before_close_us = v;
             named.push("transport/link/tx/queue/congestion_control/block/wait_before_close");
         }
+        if let Some(v) = want_bool(&doc, "transport/link/tx/queue/batching/enabled")? {
+            out.tx_queue.batching = v;
+            named.push("transport/link/tx/queue/batching/enabled");
+        }
+        // Milliseconds in the file, as upstream's `u64` field reads them, and microseconds in the
+        // session, which is the unit its writer's bound has.
+        if let Some(v) = want_u64(&doc, "transport/link/tx/queue/batching/time_limit")? {
+            out.tx_queue.batching_time_limit_us =
+                v.checked_mul(1_000)
+                    .ok_or_else(|| ConfigIngestError::OutOfRange {
+                        path: "transport/link/tx/queue/batching/time_limit",
+                        value: v.to_string(),
+                    })?;
+            named.push("transport/link/tx/queue/batching/time_limit");
+        }
+        const ALLOCATION: &str = "transport/link/tx/queue/allocation/mode";
+        const ALLOCATION_EXPECTED: &str = "one of \"init\", \"lazy\"";
+        if let Some(text) = want_string(&doc, ALLOCATION, ALLOCATION_EXPECTED)? {
+            out.tx_queue.allocation = wz_session_core::link::QueueAllocation::from_zenoh_name(
+                &text,
+            )
+            .ok_or(ConfigIngestError::WrongType {
+                path: ALLOCATION,
+                expected: ALLOCATION_EXPECTED,
+            })?;
+            named.push(ALLOCATION);
+        }
         // The largest message a session rejoins from fragments. Any `usize` is
         // accepted, as upstream's `usize` field accepts it; the build's
         // reassembly slot bounds what a session applies.
@@ -7322,6 +8202,23 @@ impl ZenohNodeConfig {
                 })?;
             named.push("transport/link/rx/max_message_size");
         }
+        // The read storage a stream link pools, a `usize` upstream, read where the build pools
+        // per link (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        if let Some(v) = want_u64(&doc, "transport/link/rx/buffer_size")? {
+            out.link_rx.buffer_size =
+                usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/link/rx/buffer_size",
+                    value: v.to_string(),
+                })?;
+            named.push("transport/link/rx/buffer_size");
+        }
+        #[cfg(feature = "runtime-zero-copy")]
+        refuse_unbuilt_instruction(&doc, "transport/link/rx/buffer_size", |value| {
+            matches!(value, Json5Value::Number(text)
+                if number_as_u64(text)
+                    == Some(wz_session_core::session_init_params::RX_BUFFER_SIZE as u64))
+        })?;
         // R311y844 — the ten keys wz already acts on. Read in
         // HONOURED_CONFIG_KEYS order so `named` reports them the way the table
         // lists them.
@@ -7360,53 +8257,86 @@ impl ZenohNodeConfig {
         // empty list counts as NAMED: a real zenohd resolves an unmentioned
         // `low_pass_filter` to `[]` (measured), so "filter nothing" and "said
         // nothing" are one instruction and the file did speak.
+        //
+        // Each interceptor key is read where the build has its capability
+        // (`CAPABILITY_HONOURED_KEYS`); a build without it reads the key only as
+        // upstream's default and refuses any other value by the key's name.
+        #[cfg(feature = "access-quota")]
         if let Some(value) = honoured(&doc, "low_pass_filter") {
             out.low_pass_filter = low_pass_filters_of(value, "low_pass_filter")?;
             named.push("low_pass_filter");
         }
+        #[cfg(not(feature = "access-quota"))]
+        refuse_unbuilt_instruction(&doc, "low_pass_filter", is_empty_list)?;
         // R2651 — the second interceptor key, same shape as the one above and
         // the same reason an empty list counts as NAMED.
+        #[cfg(feature = "access-downsampling")]
         if let Some(value) = honoured(&doc, "downsampling") {
             out.downsampling = downsampling_items_of(value, "downsampling")?;
             named.push("downsampling");
         }
+        #[cfg(not(feature = "access-downsampling"))]
+        refuse_unbuilt_instruction(&doc, "downsampling", is_empty_list)?;
         // `qos/network`, the third list of the interceptor keys, and an empty list is NAMED for
         // the reason its siblings' are: the schema default is the empty list, so "no rule" and
         // "said nothing" are one instruction.
+        #[cfg(feature = "access-qos-overwrite")]
         if let Some(value) = honoured(&doc, "qos/network") {
             out.qos_network = qos_network_items_of(value, "qos/network")?;
             named.push("qos/network");
         }
+        #[cfg(not(feature = "access-qos-overwrite"))]
+        refuse_unbuilt_instruction(&doc, "qos/network", is_empty_list)?;
         // R2652 — the five `access_control/*` keys. Read INDIVIDUALLY, because
         // each is its own honoured key and a document may name any subset; they
         // become one unit only at expansion, where upstream's own `init` builds
         // nothing unless rules, subjects and policies are all present.
-        if let Some(v) = want_bool(&doc, "access_control/enabled")? {
-            out.access_control.enabled = v;
-            named.push("access_control/enabled");
-        }
-        if let Some(value) = honoured(&doc, "access_control/default_permission") {
-            let text = want_text(value, "access_control/default_permission", "allow|deny")?;
-            if !ACL_PERMISSION_LITERALS.contains(&text.as_str()) {
-                return Err(ConfigIngestError::WrongType {
-                    path: "access_control/default_permission",
-                    expected: "allow|deny",
-                });
+        #[cfg(feature = "access-acl")]
+        {
+            if let Some(v) = want_bool(&doc, "access_control/enabled")? {
+                out.access_control.enabled = v;
+                named.push("access_control/enabled");
             }
-            out.access_control.default_permission = text;
-            named.push("access_control/default_permission");
+            if let Some(value) = honoured(&doc, "access_control/default_permission") {
+                let text = want_text(value, "access_control/default_permission", "allow|deny")?;
+                if !ACL_PERMISSION_LITERALS.contains(&text.as_str()) {
+                    return Err(ConfigIngestError::WrongType {
+                        path: "access_control/default_permission",
+                        expected: "allow|deny",
+                    });
+                }
+                out.access_control.default_permission = text;
+                named.push("access_control/default_permission");
+            }
+            if let Some(value) = honoured(&doc, "access_control/rules") {
+                out.access_control.rules = acl_rules_of(value, "access_control/rules")?;
+                named.push("access_control/rules");
+            }
+            if let Some(value) = honoured(&doc, "access_control/subjects") {
+                out.access_control.subjects = acl_subjects_of(value, "access_control/subjects")?;
+                named.push("access_control/subjects");
+            }
+            if let Some(value) = honoured(&doc, "access_control/policies") {
+                out.access_control.policies = acl_policies_of(value, "access_control/policies")?;
+                named.push("access_control/policies");
+            }
         }
-        if let Some(value) = honoured(&doc, "access_control/rules") {
-            out.access_control.rules = acl_rules_of(value, "access_control/rules")?;
-            named.push("access_control/rules");
-        }
-        if let Some(value) = honoured(&doc, "access_control/subjects") {
-            out.access_control.subjects = acl_subjects_of(value, "access_control/subjects")?;
-            named.push("access_control/subjects");
-        }
-        if let Some(value) = honoured(&doc, "access_control/policies") {
-            out.access_control.policies = acl_policies_of(value, "access_control/policies")?;
-            named.push("access_control/policies");
+        // Upstream's defaults, the ones a real zenohd's resolved configuration
+        // renders: access control off, permission `deny`, and no rule, subject
+        // or policy.
+        #[cfg(not(feature = "access-acl"))]
+        {
+            refuse_unbuilt_instruction(&doc, "access_control/enabled", |value| {
+                matches!(value, Json5Value::Bool(false))
+            })?;
+            refuse_unbuilt_instruction(
+                &doc,
+                "access_control/default_permission",
+                |value| matches!(value, Json5Value::String(text) if text == "deny"),
+            )?;
+            refuse_unbuilt_instruction(&doc, "access_control/rules", is_empty_list)?;
+            refuse_unbuilt_instruction(&doc, "access_control/subjects", is_empty_list)?;
+            refuse_unbuilt_instruction(&doc, "access_control/policies", is_empty_list)?;
         }
         // R2788 — the `plugins` section, kept whole: each member is a plugin's
         // own document and only the plugin knows what it means, so the reader
@@ -7427,6 +8357,26 @@ impl ZenohNodeConfig {
             out.plugins = Some(value.clone());
             named.push("plugins");
         }
+        // Whether a plugin named with no `__path__` is looked up by name, read where the build
+        // has a plugin plane to look it up in (`CAPABILITY_HONOURED_KEYS`). A build without one
+        // reads the library's `false` as stating nothing.
+        #[cfg(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        ))]
+        if let Some(v) = want_bool(&doc, "plugins_loading/enabled")? {
+            out.plugins_loading_enabled = Some(v);
+            named.push("plugins_loading/enabled");
+        }
+        #[cfg(not(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        )))]
+        refuse_unbuilt_instruction(&doc, "plugins_loading/enabled", |value| {
+            matches!(value, Json5Value::Bool(false))
+        })?;
         // §5.23 `adminspace-core` — `metadata`, kept whole. Any JSON value is
         // legal, as upstream's `Value` field makes it; the only refusal is the
         // one upstream's own parser makes, a number literal it cannot read.
@@ -7469,6 +8419,16 @@ impl ZenohNodeConfig {
             out.multicast_join_interval_ms = v;
             named.push("transport/multicast/join_interval");
         }
+        // Any `usize`, as upstream's field takes it, zero included: a group under a cap of none
+        // admits no member, which is what such a file asks of a zenohd too.
+        if let Some(v) = want_u64(&doc, "transport/multicast/max_sessions")? {
+            out.multicast_max_sessions =
+                usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/multicast/max_sessions",
+                    value: v.to_string(),
+                })?;
+            named.push("transport/multicast/max_sessions");
+        }
         if let Some(v) = want_bool(&doc, "transport/multicast/compression/enabled")? {
             out.multicast_compression = v;
             named.push("transport/multicast/compression/enabled");
@@ -7499,33 +8459,106 @@ impl ZenohNodeConfig {
             out.shm_pool_size = v;
             named.push("transport/shared_memory/transport_optimization/pool_size");
         }
-        if let Some(v) = want_string(&doc, "transport/link/tls/root_ca_certificate", "a path")? {
-            out.tls_root_ca = Some(v);
-            named.push("transport/link/tls/root_ca_certificate");
+        // The keys a session applies itself (`SESSION_HONOURED_KEYS`). Read in every build, as
+        // upstream's configuration reads them whatever its build: what a build without shared
+        // memory does with the three shared-memory ones is the session's to say.
+        if let Some(value) = honoured(&doc, "transport/shared_memory/mode") {
+            out.shm_init_mode = optional_literal(
+                value,
+                SHM_INIT_MODE_LITERALS,
+                "transport/shared_memory/mode",
+                "init|lazy",
+            )?
+            .unwrap_or_default();
+            named.push("transport/shared_memory/mode");
         }
-        if let Some(v) = want_string(&doc, "transport/link/tls/listen_certificate", "a path")? {
-            out.tls_listen_certificate = Some(v);
-            named.push("transport/link/tls/listen_certificate");
+        if let Some(v) = want_u64(
+            &doc,
+            "transport/shared_memory/transport_optimization/message_size_threshold",
+        )? {
+            out.shm_message_size_threshold = v;
+            named.push("transport/shared_memory/transport_optimization/message_size_threshold");
         }
-        if let Some(v) = want_string(&doc, "transport/link/tls/listen_private_key", "a path")? {
-            out.tls_listen_private_key = Some(v);
-            named.push("transport/link/tls/listen_private_key");
+        if let Some(value) = honoured(
+            &doc,
+            "transport/shared_memory/transport_optimization/messages",
+        ) {
+            out.shm_optimised_messages = data_messages_of(
+                value,
+                "transport/shared_memory/transport_optimization/messages",
+            )?;
+            named.push("transport/shared_memory/transport_optimization/messages");
         }
-        if let Some(v) = want_string(&doc, "transport/link/tls/connect_certificate", "a path")? {
-            out.tls_connect_certificate = Some(v);
-            named.push("transport/link/tls/connect_certificate");
+        if let Some(value) = honoured(&doc, "qos/publication") {
+            out.publication_qos = publication_qos_items_of(value, "qos/publication")?;
+            named.push("qos/publication");
         }
-        if let Some(v) = want_string(&doc, "transport/link/tls/connect_private_key", "a path")? {
-            out.tls_connect_private_key = Some(v);
-            named.push("transport/link/tls/connect_private_key");
+        // The certificate material of the `tls/` and `quic/` links, read where the
+        // build has either link (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+        {
+            if let Some(v) = want_string(&doc, "transport/link/tls/root_ca_certificate", "a path")?
+            {
+                out.tls_root_ca = Some(v);
+                named.push("transport/link/tls/root_ca_certificate");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/listen_certificate", "a path")? {
+                out.tls_listen_certificate = Some(v);
+                named.push("transport/link/tls/listen_certificate");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/listen_private_key", "a path")? {
+                out.tls_listen_private_key = Some(v);
+                named.push("transport/link/tls/listen_private_key");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/connect_certificate", "a path")?
+            {
+                out.tls_connect_certificate = Some(v);
+                named.push("transport/link/tls/connect_certificate");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/connect_private_key", "a path")?
+            {
+                out.tls_connect_private_key = Some(v);
+                named.push("transport/link/tls/connect_private_key");
+            }
+            if let Some(v) = want_bool(&doc, "transport/link/tls/enable_mtls")? {
+                out.tls_enable_mtls = Some(v);
+                named.push("transport/link/tls/enable_mtls");
+            }
+            if let Some(v) = want_bool(&doc, "transport/link/tls/verify_name_on_connect")? {
+                out.tls_verify_name_on_connect = Some(v);
+                named.push("transport/link/tls/verify_name_on_connect");
+            }
+            if let Some(v) = want_bool(&doc, "transport/link/tls/close_link_on_expiration")? {
+                out.tls_close_link_on_expiration = Some(v);
+                named.push("transport/link/tls/close_link_on_expiration");
+            }
         }
-        if let Some(v) = want_bool(&doc, "transport/link/tls/enable_mtls")? {
-            out.tls_enable_mtls = Some(v);
-            named.push("transport/link/tls/enable_mtls");
-        }
-        if let Some(v) = want_bool(&doc, "transport/link/tls/verify_name_on_connect")? {
-            out.tls_verify_name_on_connect = Some(v);
-            named.push("transport/link/tls/verify_name_on_connect");
+        // Upstream's defaults: no file named, no client certificate asked for, and the
+        // dialled name verified.
+        #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
+        {
+            for path in [
+                "transport/link/tls/root_ca_certificate",
+                "transport/link/tls/listen_certificate",
+                "transport/link/tls/listen_private_key",
+                "transport/link/tls/connect_certificate",
+                "transport/link/tls/connect_private_key",
+            ] {
+                refuse_unbuilt_instruction(&doc, path, never_states_nothing)?;
+            }
+            refuse_unbuilt_instruction(&doc, "transport/link/tls/enable_mtls", |value| {
+                matches!(value, Json5Value::Bool(false))
+            })?;
+            refuse_unbuilt_instruction(
+                &doc,
+                "transport/link/tls/verify_name_on_connect",
+                |value| matches!(value, Json5Value::Bool(true)),
+            )?;
+            refuse_unbuilt_instruction(
+                &doc,
+                "transport/link/tls/close_link_on_expiration",
+                |value| matches!(value, Json5Value::Bool(false)),
+            )?;
         }
         // `transport/link/protocols` is `Option<Vec<String>>` upstream: absent is every protocol,
         // and a list that names none leaves none open.
@@ -7540,10 +8573,20 @@ impl ZenohNodeConfig {
         // R2593 — the four per-link-kind socket buffers, each a `u32` upstream.
         {
             let buffers = &mut out.link_socket_buffers;
+            // A `tls/` link's pair is read where the build has the link.
+            #[cfg(not(feature = "transport-link-tls"))]
+            for path in [
+                "transport/link/tls/so_rcvbuf",
+                "transport/link/tls/so_sndbuf",
+            ] {
+                refuse_unbuilt_instruction(&doc, path, never_states_nothing)?;
+            }
             for (path, slot) in [
                 ("transport/link/tcp/so_rcvbuf", &mut buffers.tcp_so_rcvbuf),
                 ("transport/link/tcp/so_sndbuf", &mut buffers.tcp_so_sndbuf),
+                #[cfg(feature = "transport-link-tls")]
                 ("transport/link/tls/so_rcvbuf", &mut buffers.tls_so_rcvbuf),
+                #[cfg(feature = "transport-link-tls")]
                 ("transport/link/tls/so_sndbuf", &mut buffers.tls_so_sndbuf),
             ] {
                 if let Some(v) = want_u64(&doc, path)? {
@@ -7555,6 +8598,58 @@ impl ZenohNodeConfig {
                 }
             }
         }
+        // The unixpipe link's FIFO mode, a `u32` upstream, read where the build has the link.
+        #[cfg(all(feature = "transport-link-unixpipe", unix))]
+        if let Some(v) = want_u64(&doc, "transport/link/unixpipe/file_access_mask")? {
+            out.unixpipe_file_access_mask =
+                Some(u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/link/unixpipe/file_access_mask",
+                    value: v.to_string(),
+                })?);
+            named.push("transport/link/unixpipe/file_access_mask");
+        }
+        #[cfg(not(all(feature = "transport-link-unixpipe", unix)))]
+        refuse_unbuilt_instruction(
+            &doc,
+            "transport/link/unixpipe/file_access_mask",
+            never_states_nothing,
+        )?;
+        if let Some(value) = honoured(&doc, "plugins_loading/search_dirs") {
+            out.plugin_search_dirs = Some(
+                crate::plugin_search_dirs::LibSearchDirs::from_json5(value).map_err(|_| {
+                    ConfigIngestError::WrongType {
+                        path: "plugins_loading/search_dirs",
+                        expected: crate::plugin_search_dirs::LIB_SEARCH_DIRS_SHAPE,
+                    }
+                })?,
+            );
+            named.push("plugins_loading/search_dirs");
+        }
+        // The aggregates a node's sessions declare under, read where the build has the inclusion
+        // test that applies them (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(feature = "keyexpr-includes")]
+        for (path, slot) in [
+            ("aggregation/subscribers", &mut out.aggregation_subscribers),
+            ("aggregation/publishers", &mut out.aggregation_publishers),
+        ] {
+            if let Some(value) = honoured(&doc, path) {
+                *slot = keyexpr_list_of(value, path)?;
+                named.push(path);
+            }
+        }
+        #[cfg(not(feature = "keyexpr-includes"))]
+        for path in ["aggregation/subscribers", "aggregation/publishers"] {
+            refuse_unbuilt_instruction(&doc, path, is_empty_list)?;
+        }
+        // The keys a node's transports count payloads under, read where the build counts them
+        // (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(feature = "transport-stats")]
+        if let Some(value) = honoured(&doc, "stats/filters") {
+            out.stats_filters = stats_filters_of(value)?;
+            named.push("stats/filters");
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        refuse_unbuilt_instruction(&doc, "stats/filters", is_empty_list)?;
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here has to erase the block rather than record
@@ -7584,9 +8679,11 @@ impl ZenohNodeConfig {
             });
         }
 
+        // A capability's key this build was made without reached here only as upstream's default,
+        // and nothing applied it, so it is reported as ignored by this build.
         let mut ignored: Vec<String> = leaves
             .into_iter()
-            .filter(|p| !honours_config_key(p))
+            .filter(|p| !honours_config_key(p) || !config_key_in_build(p))
             .collect();
         ignored.dedup();
         Ok(ZenohConfigIngest {
@@ -7666,6 +8763,7 @@ mod tests {
     /// Item 751 — a partition a file states reaches the config's field, and the
     /// emitter writes it back: the key is read, named, and not lost on a round
     /// trip. A silent file leaves the preset.
+    #[cfg(feature = "routing-router-hat")]
     #[test]
     fn the_south_partition_is_read_from_a_file_and_survives_the_emitter() {
         let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
@@ -7713,6 +8811,192 @@ mod tests {
         assert!(again.named.contains(&KEY));
         // The sibling `qos` the same table carries is not lost by writing the new key beside it.
         assert_eq!(again.config.multicast_qos, read.config.multicast_qos);
+    }
+
+    /// `transport/multicast/max_sessions` reaches the config's field, is named and not ignored,
+    /// is a key the node honours, and survives the emitter; a silent file leaves upstream's 1000.
+    /// Zero is a cap upstream's `usize` takes, so it is read; a value that is no count is refused
+    /// by the key's name, as upstream's deserializer refuses it.
+    #[test]
+    fn multicast_max_sessions_is_read_named_and_survives_the_emitter() {
+        const KEY: &str = "transport/multicast/max_sessions";
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        assert_eq!(silent.config.multicast_max_sessions, 1_000);
+        assert!(!silent.named.contains(&KEY));
+
+        let read =
+            ZenohNodeConfig::from_json5(r#"{ transport: { multicast: { max_sessions: 9 } } }"#)
+                .expect("the key reads");
+        assert_eq!(read.config.multicast_max_sessions, 9);
+        assert!(read.named.contains(&KEY), "{:?}", read.named);
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        assert!(HONOURED_CONFIG_KEYS.contains(&KEY));
+        assert!(!UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&KEY));
+        assert!(!UNHONOURED_BEYOND_WZ.contains(&KEY));
+        assert!(UNHONOURED_DISPOSITIONS.iter().all(|(key, ..)| *key != KEY));
+
+        let again = ZenohNodeConfig::from_json5(&read.config.to_json5()).expect("it round-trips");
+        assert_eq!(again.config.multicast_max_sessions, 9);
+        assert!(again.named.contains(&KEY));
+
+        let none =
+            ZenohNodeConfig::from_json5(r#"{ transport: { multicast: { max_sessions: 0 } } }"#)
+                .expect("zero is a cap");
+        assert_eq!(none.config.multicast_max_sessions, 0);
+
+        for (doc, wrong_type) in [
+            (
+                r#"{ transport: { multicast: { max_sessions: "9" } } }"#,
+                true,
+            ),
+            (
+                r#"{ transport: { multicast: { max_sessions: true } } }"#,
+                true,
+            ),
+            (
+                r#"{ transport: { multicast: { max_sessions: -1 } } }"#,
+                false,
+            ),
+            (
+                r#"{ transport: { multicast: { max_sessions: 1.5 } } }"#,
+                false,
+            ),
+        ] {
+            let err = ZenohNodeConfig::from_json5(doc).expect_err(doc);
+            let by_name = if wrong_type {
+                matches!(err, ConfigIngestError::WrongType { path: KEY, .. })
+            } else {
+                matches!(err, ConfigIngestError::OutOfRange { path: KEY, .. })
+            };
+            assert!(by_name, "{doc} -> {err:?}");
+        }
+    }
+
+    /// Each key a session applies is read from a document that states another value than
+    /// upstream's default, named, and not reported ignored; a silent document leaves upstream's
+    /// defaults. The case list is the list, so a key added to one and not the other fails here.
+    #[test]
+    fn every_session_key_is_read_named_and_not_ignored() {
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        assert_eq!(silent.config.shm_init_mode, ShmInitMode::Lazy);
+        assert_eq!(silent.config.shm_message_size_threshold, 3072);
+        assert_eq!(
+            silent.config.shm_optimised_messages,
+            ["put", "query", "reply"]
+        );
+        assert!(silent.config.publication_qos.is_empty());
+        for key in SESSION_HONOURED_KEYS {
+            assert!(!silent.named.contains(key), "{key}");
+        }
+
+        let cases: &[(&str, &str)] = &[
+            (
+                "qos/publication",
+                r#"{ qos: { publication: [ { key_exprs: ["a/**"], config: { priority: "data_high" } } ] } }"#,
+            ),
+            (
+                "transport/shared_memory/mode",
+                r#"{ transport: { shared_memory: { mode: "init" } } }"#,
+            ),
+            (
+                "transport/shared_memory/transport_optimization/message_size_threshold",
+                r#"{ transport: { shared_memory: { transport_optimization: { message_size_threshold: 64 } } } }"#,
+            ),
+            (
+                "transport/shared_memory/transport_optimization/messages",
+                r#"{ transport: { shared_memory: { transport_optimization: { messages: ["put"] } } } }"#,
+            ),
+        ];
+        let covered: Vec<&str> = cases.iter().map(|(key, _)| *key).collect();
+        assert_eq!(covered, SESSION_HONOURED_KEYS);
+        for (key, doc) in cases {
+            let read = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert!(read.named.contains(key), "{key}: {:?}", read.named);
+            assert!(read.ignored.is_empty(), "{key}: {:?}", read.ignored);
+            assert_ne!(
+                read.config, silent.config,
+                "{key} parsed but changed nothing"
+            );
+            assert!(honours_config_key(key), "{key}");
+            assert!(!UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key), "{key}");
+        }
+    }
+
+    /// A `qos/publication` item carries every setting upstream's has, a `null` setting is one
+    /// left unset, and the shapes upstream's deserialization refuses are refused here at the key.
+    #[test]
+    fn a_publication_qos_item_reads_every_setting_and_refuses_what_upstream_refuses() {
+        let read = ZenohNodeConfig::from_json5(
+            r#"{ qos: { publication: [
+                { key_exprs: ["a/**", "b/c"], config: { congestion_control: "block",
+                  priority: "real_time", express: true, reliability: "best_effort",
+                  allowed_destination: "remote" } },
+                { key_exprs: [], config: { priority: null, express: null } }
+            ] } }"#,
+        )
+        .expect("a list zenoh reads");
+        assert_eq!(
+            read.config.publication_qos,
+            vec![
+                PublicationQosItemConf {
+                    key_exprs: vec!["a/**".to_owned(), "b/c".to_owned()],
+                    config: PublicationQosConf {
+                        congestion_control: Some(CongestionControl::Block),
+                        priority: Some(Priority::RealTime),
+                        express: Some(true),
+                        reliable: Some(false),
+                        allowed_destination: Some(Locality::Remote),
+                    },
+                },
+                PublicationQosItemConf {
+                    key_exprs: Vec::new(),
+                    config: PublicationQosConf::default(),
+                },
+            ]
+        );
+        for bad in [
+            r#"[{ key_exprs: ["a//b"], config: {} }]"#,
+            r#"[{ key_exprs: "a", config: {} }]"#,
+            r#"[{ config: {} }]"#,
+            r#"[{ key_exprs: ["a"] }]"#,
+            r#"[{ key_exprs: ["a"], config: { priority: "control" } }]"#,
+            r#"[{ key_exprs: ["a"], config: { allowed_destination: "elsewhere" } }]"#,
+            r#"[{ key_exprs: ["a"], config: { express: "yes" } }]"#,
+        ] {
+            let doc = format!("{{ qos: {{ publication: {bad} }} }}");
+            assert!(
+                matches!(
+                    ZenohNodeConfig::from_json5(&doc),
+                    Err(ConfigIngestError::WrongType { .. })
+                ),
+                "{bad} is refused upstream"
+            );
+        }
+        for (doc, key) in [
+            (
+                r#"{ transport: { shared_memory: { mode: "eager" } } }"#,
+                "mode",
+            ),
+            (
+                r#"{ transport: { shared_memory: { transport_optimization: { messages: ["nope"] } } } }"#,
+                "messages",
+            ),
+            (
+                r#"{ transport: { shared_memory: { transport_optimization: { message_size_threshold: -1 } } } }"#,
+                "message_size_threshold",
+            ),
+        ] {
+            assert!(
+                ZenohNodeConfig::from_json5(doc).is_err(),
+                "{key}: {doc} is refused upstream"
+            );
+        }
+        // CONTROL: an empty message list is upstream's plain `Vec`, and reads.
+        let none = ZenohNodeConfig::from_json5(
+            r#"{ transport: { shared_memory: { transport_optimization: { messages: [] } } } }"#,
+        )
+        .expect("an empty list reads");
+        assert!(none.config.shm_optimised_messages.is_empty());
     }
 
     /// `open/return_conditions/declares` is read, named and written back beside its sibling
@@ -8609,6 +9893,12 @@ mod tests {
                 mode: WhatAmI::Router,
                 batch_size: 4096,
                 lease_ms: 7000,
+                sn_resolution: crate::policy::SnResolution::Bits8,
+                tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                    batching: false,
+                    allocation: wz_session_core::link::QueueAllocation::Init,
+                    ..ZenohNodeConfig::default().tx_queue
+                },
                 max_links: 4,
                 qos: false,
                 lowlatency: true,
@@ -8623,6 +9913,10 @@ mod tests {
                 scout_multicast_address: Some(String::from("224.0.0.99:7999")),
                 scout_multicast_interface: Some(String::from("eth0")),
                 scout_multicast_ttl: Some(4),
+                ..ZenohNodeConfig::default()
+            },
+            ZenohNodeConfig {
+                plugin_search_dirs: Some(crate::plugin_search_dirs::LibSearchDirs::default()),
                 ..ZenohNodeConfig::default()
             },
         ] {
@@ -8783,6 +10077,11 @@ mod tests {
                 "transport/unicast/max_sessions",
                 r#"{ "transport": { "unicast": { "max_sessions": 9 } } }"#,
             ),
+            // 2.5 s against upstream's ten.
+            (
+                "transport/unicast/open_timeout",
+                r#"{ "transport": { "unicast": { "open_timeout": 2500 } } }"#,
+            ),
             (
                 "transport/unicast/lowlatency",
                 r#"{ "transport": { "unicast": { "lowlatency": true } } }"#,
@@ -8802,6 +10101,11 @@ mod tests {
             (
                 "transport/link/tx/lease",
                 r#"{ "transport": { "link": { "tx": { "lease": 7000 } } } }"#,
+            ),
+            // 16 bits against upstream's 32, so the ingest has to move.
+            (
+                "transport/link/tx/sequence_number_resolution",
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": "16bit" } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/control",
@@ -8847,9 +10151,29 @@ mod tests {
                 "transport/link/tx/queue/congestion_control/block/wait_before_close",
                 r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "block": { "wait_before_close": 6000000 } } } } } } }"#,
             ),
+            // `false` against upstream's `true`.
+            (
+                "transport/link/tx/queue/batching/enabled",
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "enabled": false } } } } } }"#,
+            ),
+            // 5 ms against upstream's 1.
+            (
+                "transport/link/tx/queue/batching/time_limit",
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "time_limit": 5 } } } } } }"#,
+            ),
+            // `init` against upstream's `lazy`.
+            (
+                "transport/link/tx/queue/allocation/mode",
+                r#"{ "transport": { "link": { "tx": { "queue": { "allocation": { "mode": "init" } } } } } }"#,
+            ),
             (
                 "transport/link/rx/max_message_size",
                 r#"{ "transport": { "link": { "rx": { "max_message_size": 65536 } } } }"#,
+            ),
+            // Four widest batches of read storage; upstream's default is one.
+            (
+                "transport/link/rx/buffer_size",
+                r#"{ "transport": { "link": { "rx": { "buffer_size": 262140 } } } }"#,
             ),
             (
                 "adminspace/enabled",
@@ -8955,6 +10279,10 @@ mod tests {
                 r#"{ "transport": { "multicast": { "qos": { "enabled": true } } } }"#,
             ),
             (
+                "transport/multicast/max_sessions",
+                r#"{ "transport": { "multicast": { "max_sessions": 9 } } }"#,
+            ),
+            (
                 "transport/shared_memory/enabled",
                 r#"{ "transport": { "shared_memory": { "enabled": false } } }"#,
             ),
@@ -8988,6 +10316,11 @@ mod tests {
                 "transport/link/tls/verify_name_on_connect",
                 r#"{ "transport": { "link": { "tls": { "verify_name_on_connect": false } } } }"#,
             ),
+            // The expiry teardown, to `true`; upstream's default is `false`.
+            (
+                "transport/link/tls/close_link_on_expiration",
+                r#"{ "transport": { "link": { "tls": { "close_link_on_expiration": true } } } }"#,
+            ),
             (
                 "transport/link/protocols",
                 r#"{ "transport": { "link": { "protocols": ["tls", "quic"] } } }"#,
@@ -9009,6 +10342,12 @@ mod tests {
             (
                 "transport/link/tls/so_sndbuf",
                 r#"{ "transport": { "link": { "tls": { "so_sndbuf": 8192 } } } }"#,
+            ),
+            // The unixpipe FIFO mode, to 0o660 (decimal, upstream's spelling); absent is the
+            // default.
+            (
+                "transport/link/unixpipe/file_access_mask",
+                r#"{ "transport": { "link": { "unixpipe": { "file_access_mask": 432 } } } }"#,
             ),
             // R311y845 — WHERE the node looks. Each is driven to a value that
             // is NOT the upstream default (`224.0.0.224:7446` / `auto` / `1`),
@@ -9119,6 +10458,11 @@ mod tests {
                 r#"{ "plugins": { "storage_manager": { "storages": { "demo":
                      { "key_expr": "demo/**", "volume": "memory" } } } } }"#,
             ),
+            // By-name lookup on; the library's default is off.
+            (
+                "plugins_loading/enabled",
+                r#"{ "plugins_loading": { "enabled": true } }"#,
+            ),
             // §5.23 `adminspace-core` — a nested value with a number, so the
             // leaves below the key are exercised and `ignored` must stay empty.
             (
@@ -9131,6 +10475,22 @@ mod tests {
             (
                 "gateway/south",
                 r#"{ "gateway": { "south": [{ "filters": [{ "modes": ["peer"] }] }] } }"#,
+            ),
+            (
+                "plugins_loading/search_dirs",
+                r#"{ "plugins_loading": { "search_dirs": ["/opt/wz/plugins"] } }"#,
+            ),
+            (
+                "aggregation/subscribers",
+                r#"{ "aggregation": { "subscribers": ["demo/**"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ "aggregation": { "publishers": ["demo/**"] } }"#,
+            ),
+            (
+                "stats/filters",
+                r#"{ "stats": { "filters": [{ "key": "demo/**" }] } }"#,
             ),
             // R2230 (items 579 / 582) — this row MOVED to the tail of the table
             // when the key left `HONOURED_CONFIG_KEYS` for
@@ -9158,6 +10518,20 @@ mod tests {
         assert_eq!(covered, expected);
 
         for (key, doc) in cases {
+            // A capability's key in a build made without it: the same non-default value is an
+            // instruction the build cannot carry out, refused by the key's name.
+            if let Some((capability, false)) = config_key_capability(key) {
+                let refused = ZenohNodeConfig::from_json5(doc).err();
+                assert!(
+                    matches!(
+                        &refused,
+                        Some(ConfigIngestError::NotInBuild { path, capability: named })
+                            if path == key && *named == capability
+                    ),
+                    "{key} is out of this build and its fixture states an instruction: {refused:?}"
+                );
+                continue;
+            }
             let ingest = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{key}: {e}"));
             assert!(
                 ingest.ignored.is_empty(),
@@ -9173,6 +10547,143 @@ mod tests {
                 ingest.config,
                 ZenohNodeConfig::default(),
                 "{key} parsed but changed nothing"
+            );
+        }
+    }
+
+    /// The two aggregate lists are read in order, a member that is not a key
+    /// expression is refused by the key, and the emitter writes what the reader
+    /// takes back.
+    #[cfg(feature = "keyexpr-includes")]
+    #[test]
+    fn the_aggregates_are_read_checked_and_survive_the_emitter() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ aggregation: { subscribers: ["demo/a/**", "demo/**"], publishers: ["s/*/t"] } }"#,
+        )
+        .expect("two lists of key expressions");
+        assert_eq!(
+            ingest.config.aggregation_subscribers,
+            ["demo/a/**", "demo/**"]
+        );
+        assert_eq!(ingest.config.aggregation_publishers, ["s/*/t"]);
+        assert!(ingest.named.contains(&"aggregation/subscribers"));
+        assert!(ingest.named.contains(&"aggregation/publishers"));
+        let back = ZenohNodeConfig::from_json5(&ingest.config.to_json5()).unwrap();
+        assert_eq!(back.config, ingest.config);
+        assert!(back.ignored.is_empty(), "{:?}", back.ignored);
+
+        for (path, doc) in [
+            (
+                "aggregation/subscribers",
+                r#"{ aggregation: { subscribers: ["demo//x"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ aggregation: { publishers: ["a/**/*"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ aggregation: { publishers: "a" } }"#,
+            ),
+        ] {
+            assert_eq!(
+                ZenohNodeConfig::from_json5(doc).err(),
+                Some(ConfigIngestError::WrongType {
+                    path,
+                    expected: "a list of key expressions",
+                }),
+                "{doc}"
+            );
+        }
+    }
+
+    /// `stats/filters` is read as upstream's filter list, its keys in order; a
+    /// member with no key expression for `key` is refused, a field upstream does
+    /// not know is not, and more filters than a transport counts under is refused
+    /// by the key. The emitter writes what the reader takes back.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn the_stats_filters_are_read_as_upstreams_list() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ stats: { filters: [{ key: "home/**" }, { key: "garden/*", note: 1 }] } }"#,
+        )
+        .expect("a list of filters");
+        assert_eq!(ingest.config.stats_filters, ["home/**", "garden/*"]);
+        assert!(ingest.named.contains(&"stats/filters"));
+        let back = ZenohNodeConfig::from_json5(&ingest.config.to_json5()).unwrap();
+        assert_eq!(back.config, ingest.config);
+
+        for bad in [
+            r#"{ stats: { filters: "home/**" } }"#,
+            r#"{ stats: { filters: ["home/**"] } }"#,
+            r#"{ stats: { filters: [{ keys: "home/**" }] } }"#,
+            r#"{ stats: { filters: [{ key: "home//x" }] } }"#,
+        ] {
+            assert!(
+                matches!(
+                    ZenohNodeConfig::from_json5(bad),
+                    Err(ConfigIngestError::WrongType {
+                        path: "stats/filters",
+                        ..
+                    })
+                ),
+                "{bad}"
+            );
+        }
+        let many: Vec<String> = (0..=wz_session_core::stats::StatsKeyMatch::CAPACITY)
+            .map(|i| format!("{{ key: \"k/{i}\" }}"))
+            .collect();
+        assert!(matches!(
+            ZenohNodeConfig::from_json5(&format!(
+                "{{ stats: {{ filters: [{}] }} }}",
+                many.join(", ")
+            )),
+            Err(ConfigIngestError::OutOfRange {
+                path: "stats/filters",
+                ..
+            })
+        ));
+    }
+
+    /// `plugins_loading/search_dirs` is read in both of upstream's spellings, in
+    /// order, and a member upstream's parser refuses is refused by the key.
+    #[test]
+    fn the_plugin_search_dirs_are_read_in_order_and_a_bad_member_is_refused() {
+        use crate::plugin_search_dirs::{LibSearchDir, LibSearchDirs};
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ plugins_loading: { search_dirs:
+                 ["/a", { kind: "current_exe_parent" }, { kind: "path", value: "~/b" }] } }"#,
+        )
+        .expect("both spellings");
+        assert_eq!(
+            ingest.config.plugin_search_dirs,
+            Some(LibSearchDirs::new(vec![
+                LibSearchDir::Path(String::from("/a")),
+                LibSearchDir::CurrentExeParent,
+                LibSearchDir::Path(String::from("~/b")),
+            ]))
+        );
+        assert!(ingest.named.contains(&"plugins_loading/search_dirs"));
+        assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+
+        let silent = ZenohNodeConfig::from_json5("{}").unwrap();
+        assert_eq!(
+            silent.config.plugin_search_dirs, None,
+            "silence searches the default list, and says so by naming none"
+        );
+
+        for bad in [
+            r#"{ plugins_loading: { search_dirs: "/a" } }"#,
+            r#"{ plugins_loading: { search_dirs: [{ kind: "elsewhere" }] } }"#,
+            r#"{ plugins_loading: { search_dirs: [7] } }"#,
+        ] {
+            assert_eq!(
+                ZenohNodeConfig::from_json5(bad).err(),
+                Some(ConfigIngestError::WrongType {
+                    path: "plugins_loading/search_dirs",
+                    expected: crate::plugin_search_dirs::LIB_SEARCH_DIRS_SHAPE,
+                }),
+                "{bad}"
             );
         }
     }
@@ -9291,6 +10802,11 @@ mod tests {
     }
 
     /// A key wz does not model is APPLIED BY NOBODY and SAID OUT LOUD.
+    ///
+    /// The fixture states the TLS root CA, whose reader is a link's capability
+    /// (`CAPABILITY_HONOURED_KEYS`), so it reads in a build with a link that holds
+    /// certificate material.
+    #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
     #[test]
     fn an_unmodelled_key_is_reported_rather_than_refused_or_swallowed() {
         let ingest = ZenohNodeConfig::from_json5(
@@ -9692,6 +11208,7 @@ mod tests {
     /// and diverge from zenohd on a document, in the direction the stock-config
     /// lane structurally cannot see: that lane only ever drives documents a real
     /// zenohd already starts on.
+    #[cfg(feature = "access-quota")]
     #[test]
     fn the_low_pass_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -9765,6 +11282,7 @@ mod tests {
     /// `QosOverwriteMessage`, so a reader that reused the other interceptors' four kinds would
     /// accept an item a real zenohd refuses; a priority is a name or a number within `-7..=7`,
     /// and `control` is not one of the names.
+    #[cfg(feature = "access-qos-overwrite")]
     #[test]
     fn the_qos_network_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -9911,6 +11429,7 @@ mod tests {
     /// second-guess them. Refusing either would tighten a surface that is
     /// upstream's — the mirror image of the `declare_subscriber` case below,
     /// where accepting would LOOSEN it.
+    #[cfg(feature = "access-downsampling")]
     #[test]
     fn the_downsampling_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -9998,6 +11517,7 @@ mod tests {
     ///
     /// So those refusals belong to [`AclCompileError`] and a parse refusal here
     /// would be stricter than the acceptance boundary this reader is held to.
+    #[cfg(feature = "access-acl")]
     #[test]
     fn the_acl_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -10675,6 +12195,38 @@ mod tests {
                 ConfigIngestError::OutOfRange {
                     path: "transport/link/tx/queue/size/real_time",
                     value: "17".into(),
+                },
+            ),
+            (
+                // Upstream's `Bits` deserializes four spellings; a width it has no name for, or
+                // the bit count as a number, is not one of them.
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": "128bit" } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/sequence_number_resolution",
+                    expected: "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"",
+                },
+            ),
+            (
+                // A bound in milliseconds whose microseconds a `u64` cannot hold.
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "time_limit": 18446744073709552 } } } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: "transport/link/tx/queue/batching/time_limit",
+                    value: "18446744073709552".into(),
+                },
+            ),
+            (
+                // Upstream's serde takes the two snake-case names and nothing else.
+                r#"{ "transport": { "link": { "tx": { "queue": { "allocation": { "mode": "Init" } } } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/queue/allocation/mode",
+                    expected: "one of \"init\", \"lazy\"",
+                },
+            ),
+            (
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": 16 } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/sequence_number_resolution",
+                    expected: "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"",
                 },
             ),
         ] {
@@ -11430,12 +12982,17 @@ mod tests {
     #[test]
     fn every_unhonoured_key_says_which_kind_of_unhonoured_it_is() {
         assert!(!UNHONOURED_BEYOND_WZ.is_empty());
-        assert!(
-            !UNHONOURED_READER_GAP.is_empty(),
-            "an empty reader-gap list makes the split vacuous — every key would \
-             be 'wz cannot', which is the undivided state this test exists to \
-             end"
-        );
+        // An empty reader-gap list is the state that list is meant to reach,
+        // not the undivided one: every key below must still be classed, and
+        // with no reader gap left each is a beyond-wz claim its group's anchor
+        // stands behind (`UNHONOURED_READER_GAP`'s doc).
+        if UNHONOURED_READER_GAP.is_empty() {
+            println!(
+                "unhonoured reader gap is EXHAUSTED: every key wz has the capability for is \
+                 read; the {} left are each claimed beyond wz",
+                UNHONOURED_BEYOND_WZ.len()
+            );
+        }
 
         let both: Vec<&&str> = UNHONOURED_BEYOND_WZ
             .iter()
@@ -11586,18 +13143,106 @@ mod tests {
         // The breakdown, per kind, and a floor on each: a kind with no rows is
         // a branch of the static gate nobody has ever run, and "19 rows" reads
         // the same whether that is true or not.
+        //
+        // `wz-has-it` is the one kind whose rows ARE a list: the two checks
+        // above bind its rows to `UNHONOURED_READER_GAP` one for one, so it is
+        // empty exactly when every reader gap has been paid, which is that
+        // list's goal rather than a branch gone quiet. Its floor is that list's.
         for kind in UNHONOURED_CITATION_KINDS {
             let rows: Vec<&str> = UNHONOURED_CITATION_LEDGER
                 .iter()
                 .filter(|(_, k, _)| k == kind)
                 .map(|(key, ..)| *key)
                 .collect();
-            assert!(
-                !rows.is_empty(),
-                "citation kind `{kind}` has no rows — drop the kind or find its \
-                 member; an unexercised branch is not coverage"
-            );
+            if *kind == "wz-has-it" {
+                assert_eq!(
+                    rows.len(),
+                    UNHONOURED_READER_GAP.len(),
+                    "every `wz-has-it` row is a reader gap and every reader gap has one"
+                );
+            } else {
+                assert!(
+                    !rows.is_empty(),
+                    "citation kind `{kind}` has no rows — drop the kind or find its \
+                     member; an unexercised branch is not coverage"
+                );
+            }
             println!("citation kind {kind}: {} row(s) {rows:?}", rows.len());
+        }
+    }
+
+    /// Every unhonoured key carries exactly one decision, of a legal kind, with a reason a
+    /// script reads whole, and a reader gap is never excluded.
+    ///
+    /// Totality is what makes the table a decision record rather than notes: a key added to
+    /// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] with no row is a key nobody decided about, and a row
+    /// outliving its key is a decision about something wz now honours.
+    #[test]
+    fn every_unhonoured_key_carries_one_disposition() {
+        assert!(
+            !UNHONOURED_DISPOSITIONS.is_empty(),
+            "an empty disposition table decides nothing and passes every check below"
+        );
+        let kinds = UNHONOURED_DISPOSITION_KINDS;
+        for (key, kind, reason) in UNHONOURED_DISPOSITIONS {
+            assert!(
+                kinds.contains(kind),
+                "{key}: kind `{kind}` is not one of {kinds:?}"
+            );
+            assert!(
+                !reason.trim().is_empty(),
+                "{key}: a decision with no reason is not one a reader can check"
+            );
+            assert!(
+                !reason.contains('"') && !reason.contains('\\') && !reason.contains("//"),
+                "{key}: the reason {reason:?} holds a quote, a backslash or a comment marker, \
+                 and deepenable_audit.py would read the row short"
+            );
+            assert!(
+                UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key),
+                "{key}: carries a disposition and is not unhonoured -- drop the row in the \
+                 round that honours the key"
+            );
+            assert!(
+                *kind != "exclude" || !UNHONOURED_READER_GAP.contains(key),
+                "{key}: a reader gap is a capability wz has, and excluding its key declines \
+                 something already built"
+            );
+        }
+
+        let mut decided: Vec<&str> = UNHONOURED_DISPOSITIONS
+            .iter()
+            .map(|(key, ..)| *key)
+            .collect();
+        let before = decided.len();
+        decided.sort_unstable();
+        decided.dedup();
+        assert_eq!(
+            before,
+            decided.len(),
+            "a key carries two dispositions -- two decisions about one key"
+        );
+
+        let undecided: Vec<&&str> = UNHONOURED_UPSTREAM_CONFIG_KEYS
+            .iter()
+            .filter(|k| !decided.contains(k))
+            .collect();
+        assert!(
+            undecided.is_empty(),
+            "unhonoured with no decision: {undecided:?}. Each needs a row in \
+             UNHONOURED_DISPOSITIONS: build it, or exclude it and say why."
+        );
+
+        for kind in kinds {
+            let rows: Vec<&str> = UNHONOURED_DISPOSITIONS
+                .iter()
+                .filter(|(_, k, _)| k == kind)
+                .map(|(key, ..)| *key)
+                .collect();
+            println!(
+                "unhonoured disposition {kind}: {} key(s) {rows:?}",
+                rows.len()
+            );
         }
     }
 
@@ -12112,9 +13757,16 @@ mod tests {
                     "{key} is in {name} AND in UNHONOURED_UPSTREAM_CONFIG_KEYS; \
                      honouring a key is a MOVE between the two lists, not an addition"
                 );
+                // A capability's key is honoured by a build that has the capability, and said to be
+                // out of the build by one that has not.
+                let honoured_here = if config_key_in_build(key) {
+                    ConfigKeyDisposition::Honoured
+                } else {
+                    ConfigKeyDisposition::NotInBuild
+                };
                 assert_eq!(
                     config_key_disposition(key),
-                    ConfigKeyDisposition::Honoured,
+                    honoured_here,
                     "{key} is in {name} and the disposition disagrees"
                 );
                 checked += 1;
@@ -12129,6 +13781,379 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "only {checked} keys carried the comparison");
+    }
+
+    /// The capability table names honoured keys, each once and each under the feature its reader
+    /// is compiled under, and what this build honours is the full list less the keys of the
+    /// capabilities it was made without.
+    #[test]
+    fn the_build_honours_the_full_list_less_its_missing_capabilities() {
+        assert!(
+            !CAPABILITY_HONOURED_KEYS.is_empty(),
+            "an empty table proves nothing"
+        );
+        for (key, _, _) in CAPABILITY_HONOURED_KEYS {
+            assert!(
+                HONOURED_CONFIG_KEYS.contains(key),
+                "{key} is a capability's key and not a honoured one"
+            );
+            assert_eq!(
+                CAPABILITY_HONOURED_KEYS
+                    .iter()
+                    .filter(|(listed, _, _)| listed == key)
+                    .count(),
+                1,
+                "{key} is listed twice"
+            );
+        }
+        for (key, feature, built) in [
+            (
+                "low_pass_filter",
+                "access-quota",
+                cfg!(feature = "access-quota"),
+            ),
+            (
+                "downsampling",
+                "access-downsampling",
+                cfg!(feature = "access-downsampling"),
+            ),
+            (
+                "access_control/enabled",
+                "access-acl",
+                cfg!(feature = "access-acl"),
+            ),
+            (
+                "access_control/rules",
+                "access-acl",
+                cfg!(feature = "access-acl"),
+            ),
+            (
+                "qos/network",
+                "access-qos-overwrite",
+                cfg!(feature = "access-qos-overwrite"),
+            ),
+            (
+                "transport/link/tls/root_ca_certificate",
+                "transport-link-tls or transport-link-quic",
+                cfg!(any(
+                    feature = "transport-link-tls",
+                    feature = "transport-link-quic"
+                )),
+            ),
+            (
+                "transport/link/tls/so_rcvbuf",
+                "transport-link-tls",
+                cfg!(feature = "transport-link-tls"),
+            ),
+            (
+                "gateway/south",
+                "routing-router-hat",
+                cfg!(feature = "routing-router-hat"),
+            ),
+            (
+                "aggregation/subscribers",
+                "keyexpr-includes",
+                cfg!(feature = "keyexpr-includes"),
+            ),
+            (
+                "aggregation/publishers",
+                "keyexpr-includes",
+                cfg!(feature = "keyexpr-includes"),
+            ),
+            (
+                "stats/filters",
+                "transport-stats",
+                cfg!(feature = "transport-stats"),
+            ),
+        ] {
+            assert_eq!(config_key_capability(key), Some((feature, built)), "{key}");
+            assert_eq!(config_key_in_build(key), built, "{key}");
+        }
+        // A key no capability holds is in every build.
+        assert_eq!(config_key_capability("mode"), None);
+        assert!(config_key_in_build("mode"));
+
+        let in_build: Vec<&str> = honoured_config_keys_in_build().collect();
+        let missing: Vec<&str> = CAPABILITY_HONOURED_KEYS
+            .iter()
+            .filter(|(_, _, built)| !built)
+            .map(|(key, _, _)| *key)
+            .collect();
+        assert_eq!(in_build.len() + missing.len(), HONOURED_CONFIG_KEYS.len());
+        for key in HONOURED_CONFIG_KEYS {
+            assert_eq!(
+                in_build.contains(key),
+                !missing.contains(key),
+                "{key}: in the build's list exactly when its capability is built"
+            );
+        }
+    }
+
+    /// Upstream's defaults of the capability keys, as a real zenohd's resolved configuration
+    /// renders them, read in every build: a build with the capability names each key, and one
+    /// without it applies nothing and reports the key ignored rather than refusing the document.
+    #[test]
+    fn the_defaults_of_the_capability_keys_read_in_every_build() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ low_pass_filter: [], downsampling: [], qos: { network: [] },
+                 access_control: { enabled: false, default_permission: "deny",
+                                   rules: [], subjects: [], policies: [] },
+                 transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true,
+                                             close_link_on_expiration: false } } },
+                 gateway: { south: "auto" },
+                 aggregation: { subscribers: [], publishers: [] },
+                 stats: { filters: [] } }"#,
+        )
+        .expect("upstream's defaults state no instruction");
+        // Every capability key whose default is a value; the others default to their absence.
+        let stated = [
+            "aggregation/subscribers",
+            "aggregation/publishers",
+            "stats/filters",
+            "low_pass_filter",
+            "downsampling",
+            "qos/network",
+            "access_control/enabled",
+            "access_control/default_permission",
+            "access_control/rules",
+            "access_control/subjects",
+            "access_control/policies",
+            "transport/link/tls/enable_mtls",
+            "transport/link/tls/verify_name_on_connect",
+            "transport/link/tls/close_link_on_expiration",
+            "gateway/south",
+        ];
+        for key in stated {
+            let built = config_key_in_build(key);
+            assert!(
+                config_key_capability(key).is_some(),
+                "{key} is a capability's key"
+            );
+            assert_eq!(ingest.named.contains(&key), built, "{key} named");
+            assert_eq!(
+                ingest.ignored.iter().any(|leaf| leaf == key),
+                !built,
+                "{key} ignored"
+            );
+        }
+    }
+
+    /// A build without a capability refuses, by the key's name, any value of the key but
+    /// upstream's default, and a build with it reads the same value.
+    #[test]
+    fn an_instruction_to_a_missing_capability_is_refused_by_the_key() {
+        for (key, doc) in [
+            (
+                "low_pass_filter",
+                r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["a/**"], size_limit: 4 } ] }"#,
+            ),
+            (
+                "downsampling",
+                r#"{ downsampling: [ { messages: ["put"],
+                     rules: [ { key_expr: "a/**", freq: 1.0 } ] } ] }"#,
+            ),
+            (
+                "access_control/enabled",
+                r#"{ access_control: { enabled: true } }"#,
+            ),
+            (
+                "access_control/default_permission",
+                r#"{ access_control: { default_permission: "allow" } }"#,
+            ),
+            (
+                "qos/network",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: { express: true } } ] } }"#,
+            ),
+            (
+                "transport/link/tls/root_ca_certificate",
+                r#"{ transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/verify_name_on_connect",
+                r#"{ transport: { link: { tls: { verify_name_on_connect: false } } } }"#,
+            ),
+            (
+                "transport/link/tls/so_rcvbuf",
+                r#"{ transport: { link: { tls: { so_rcvbuf: 4096 } } } }"#,
+            ),
+            (
+                "transport/link/unixpipe/file_access_mask",
+                r#"{ transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#,
+            ),
+            (
+                "transport/link/rx/buffer_size",
+                r#"{ transport: { link: { rx: { buffer_size: 262140 } } } }"#,
+            ),
+            (
+                "plugins_loading/enabled",
+                r#"{ plugins_loading: { enabled: true } }"#,
+            ),
+            (
+                "gateway/south",
+                r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
+            ),
+            (
+                "aggregation/subscribers",
+                r#"{ aggregation: { subscribers: ["a/**"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ aggregation: { publishers: ["a/**"] } }"#,
+            ),
+            (
+                "stats/filters",
+                r#"{ stats: { filters: [{ key: "a/**" }] } }"#,
+            ),
+        ] {
+            let read = ZenohNodeConfig::from_json5(doc);
+            match config_key_capability(key) {
+                Some((capability, false)) => assert_eq!(
+                    read.err(),
+                    Some(ConfigIngestError::NotInBuild {
+                        path: CAPABILITY_HONOURED_KEYS
+                            .iter()
+                            .map(|(listed, _, _)| *listed)
+                            .find(|listed| listed == &key)
+                            .expect("a capability's key"),
+                        capability,
+                    }),
+                    "{key}"
+                ),
+                Some((_, true)) => {
+                    let ingest = read.unwrap_or_else(|e| panic!("{key}: {e}"));
+                    assert!(ingest.named.contains(&key), "{key}");
+                }
+                None => panic!("{key} is a capability's key"),
+            }
+        }
+    }
+
+    /// `plugins_loading/enabled` is read where a plugin host is built, absent when the file is
+    /// silent (the library's `false`, not the `true` zenohd sets over its file), and written
+    /// back by the emitter. A build without the host reads the library's `false` as stating
+    /// nothing and refuses `true` by the key.
+    #[test]
+    fn plugins_loading_is_read_where_a_plugin_host_is_built() {
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        let on = r#"{ plugins_loading: { enabled: true } }"#;
+        let off = r#"{ plugins_loading: { enabled: false } }"#;
+        assert_eq!(
+            read("{}").expect("silence").config.plugins_loading_enabled,
+            None
+        );
+        match config_key_capability("plugins_loading/enabled") {
+            Some((_, true)) => {
+                let stated = read(on).expect("a bool");
+                assert_eq!(stated.config.plugins_loading_enabled, Some(true));
+                let off = read(off).expect("a bool");
+                assert_eq!(off.config.plugins_loading_enabled, Some(false));
+                assert!(off.named.contains(&"plugins_loading/enabled"));
+                let again = read(stated.config.to_json5().as_str()).expect("it round-trips");
+                assert_eq!(again.config, stated.config);
+                assert!(again.ignored.is_empty(), "{:?}", again.ignored);
+            }
+            Some((_, false)) => {
+                assert!(matches!(
+                    read(on),
+                    Err(ConfigIngestError::NotInBuild {
+                        path: "plugins_loading/enabled",
+                        ..
+                    })
+                ));
+                let off = read(off).expect("the library's default states nothing");
+                assert_eq!(off.config.plugins_loading_enabled, None);
+                assert!(off
+                    .ignored
+                    .iter()
+                    .any(|leaf| leaf == "plugins_loading/enabled"));
+            }
+            None => panic!("plugins_loading/enabled is a capability's key"),
+        }
+    }
+
+    /// `transport/link/rx/buffer_size` reads into the session's `LinkRxConf` in a build that
+    /// pools per link, upstream's default when the file is silent, and the emitter writes it
+    /// back where the reader finds it. A build whose links read into the node's table reads
+    /// upstream's default as stating nothing and refuses any other value by the key.
+    #[test]
+    fn the_rx_buffer_size_reaches_the_sessions_link_rx() {
+        use wz_session_core::session_init_params::RX_BUFFER_SIZE;
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        let stated = r#"{ transport: { link: { rx: { buffer_size: 262140 } } } }"#;
+        let silent = read("{}").expect("silence");
+        assert_eq!(silent.config.link_rx.buffer_size, RX_BUFFER_SIZE);
+        let default = read(r#"{ transport: { link: { rx: { buffer_size: 65535 } } } }"#)
+            .expect("upstream's default states nothing a build cannot carry");
+        if cfg!(feature = "runtime-zero-copy") {
+            assert!(matches!(
+                read(stated),
+                Err(ConfigIngestError::NotInBuild {
+                    path: "transport/link/rx/buffer_size",
+                    ..
+                })
+            ));
+            assert!(!default.named.contains(&"transport/link/rx/buffer_size"));
+            return;
+        }
+        assert!(default.named.contains(&"transport/link/rx/buffer_size"));
+        let ingest = read(stated).expect("a usize");
+        assert_eq!(ingest.config.link_rx.buffer_size, 262_140);
+        assert!(ingest.named.contains(&"transport/link/rx/buffer_size"));
+        let again = read(ingest.config.to_json5().as_str()).expect("it round-trips");
+        assert_eq!(again.config, ingest.config);
+        assert!(again.ignored.is_empty(), "{:?}", again.ignored);
+        assert!(matches!(
+            read(r#"{ transport: { link: { rx: { buffer_size: "big" } } } }"#),
+            Err(ConfigIngestError::WrongType {
+                path: "transport/link/rx/buffer_size",
+                ..
+            })
+        ));
+    }
+
+    /// The unixpipe FIFO mode is a `u32` upstream: read as the number it is, absent when the
+    /// file is silent, and refused by the key's name past `u32` or as anything but a number.
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
+    #[test]
+    fn the_unixpipe_file_mask_is_read_as_a_u32() {
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        assert_eq!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#)
+                .expect("a u32")
+                .config
+                .unixpipe_file_access_mask,
+            Some(432)
+        );
+        assert_eq!(
+            read("{}")
+                .expect("silence")
+                .config
+                .unixpipe_file_access_mask,
+            None
+        );
+        assert_eq!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: 4294967296 } } } }"#)
+                .err(),
+            Some(ConfigIngestError::OutOfRange {
+                path: "transport/link/unixpipe/file_access_mask",
+                value: String::from("4294967296"),
+            })
+        );
+        assert!(matches!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: "0o660" } } } }"#),
+            Err(ConfigIngestError::WrongType {
+                path: "transport/link/unixpipe/file_access_mask",
+                ..
+            })
+        ));
+        // The emitter writes the mode back where the reader finds it.
+        let stated = ZenohNodeConfig {
+            unixpipe_file_access_mask: Some(432),
+            ..ZenohNodeConfig::default()
+        };
+        let again = read(stated.to_json5().as_str()).expect("it round-trips");
+        assert_eq!(again.config, stated);
+        assert!(again.ignored.is_empty(), "{:?}", again.ignored);
     }
 
     /// R2797 — why the C door cannot be an ENUMERATION.

@@ -79,6 +79,12 @@ pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
     pub(super) options: PublishOptions,
+    /// The key this publisher's subscribers interest stands on: [`Self::keyexpr`], or the
+    /// `aggregation/publishers` aggregate that includes it, as the session decided at declare.
+    /// Kept so the clone and the drop take and release the reference the declare took, whatever
+    /// the session's aggregation says later.
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub(super) interest_key: String,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
@@ -89,12 +95,16 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
         // without it, "retract when a handle drops" would cut a live
         // publisher's interest the moment any clone went out of scope.
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.session
-            .acquire_matching_interest(crate::session::MatchingPlane::Subscribers, &self.keyexpr);
+        self.session.acquire_matching_interest(
+            crate::session::MatchingPlane::Subscribers,
+            &self.interest_key,
+        );
         Self {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
             options: self.options.clone(),
+            #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+            interest_key: self.interest_key.clone(),
         }
     }
 }
@@ -108,8 +118,10 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
 impl<R: SessionRuntime, T: TimeSource> Drop for Publisher<R, T> {
     fn drop(&mut self) {
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.session
-            .release_matching_interest(crate::session::MatchingPlane::Subscribers, &self.keyexpr);
+        self.session.release_matching_interest(
+            crate::session::MatchingPlane::Subscribers,
+            &self.interest_key,
+        );
     }
 }
 
@@ -480,7 +492,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
 #[non_exhaustive]
 pub struct PublisherAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     pub(super) session: Session<R, T, Unicast>,
-    pub(super) mapping_id: u64,
+    pub(super) mapping_id: wz_session_core::wire_id::ExprId,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: PublishOptions,
 }
@@ -498,7 +510,7 @@ impl<R: SessionRuntime, T: TimeSource> Clone for PublisherAliased<R, T> {
 
 impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
     /// The declared mapping id.
-    pub fn mapping_id(&self) -> u64 {
+    pub fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
         self.mapping_id
     }
 
@@ -603,7 +615,7 @@ pub enum PublishAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it). The wrapped value is the offending mapping id.
-    UnknownMapping(u64),
+    UnknownMapping(wz_session_core::wire_id::ExprId),
     /// W3 (SCE pin 7a94d084a) — the payload or resolved keyexpr
     /// exceeded the declared bounded-codec capacity while being copied
     /// into the no-alloc owned Push mirror, so no wire bytes were
@@ -624,6 +636,12 @@ pub enum PublishAliasError {
     /// Unlike every variant above, wire bytes MAY have been emitted (followed
     /// by a `0x3 Drop` stop fragment); resend once the budget is refilled.
     FragmentChainAbandoned,
+    /// The session had no time left to give the publication; projected from the underlying
+    /// [`PublishError::TimestampExhausted`]. No wire bytes were emitted.
+    TimestampExhausted,
+    /// The `trusted-only` clock policy held back the time the publication carries; projected
+    /// from the underlying [`PublishError::ClockUntrusted`]. No wire bytes were emitted.
+    ClockUntrusted,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -658,6 +676,16 @@ impl std::fmt::Display for PublishAliasError {
                  fragment followed any fragments already sent); resend once the \
                  budget is refilled"
             ),
+            PublishAliasError::TimestampExhausted => write!(
+                f,
+                "PublishAliasError: the session has no time left to give; the Push \
+                 was not emitted"
+            ),
+            PublishAliasError::ClockUntrusted => write!(
+                f,
+                "PublishAliasError: the trusted-only clock policy holds back the \
+                 time this publication carries; the Push was not emitted"
+            ),
         }
     }
 }
@@ -671,6 +699,8 @@ impl From<PublishError> for PublishAliasError {
             PublishError::TransportUnavailable => PublishAliasError::TransportUnavailable,
             PublishError::RequiresUnicast => PublishAliasError::RequiresUnicast,
             PublishError::FragmentChainAbandoned => PublishAliasError::FragmentChainAbandoned,
+            PublishError::TimestampExhausted => PublishAliasError::TimestampExhausted,
+            PublishError::ClockUntrusted => PublishAliasError::ClockUntrusted,
         }
     }
 }

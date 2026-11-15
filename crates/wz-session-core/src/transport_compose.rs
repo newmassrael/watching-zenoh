@@ -21,9 +21,10 @@
 //! flags that mean "this part is present" (`S`, `A`, `Z`, `R`, `M`), the lease
 //! unit flag (`T`), every length (`cookie_len`, an extension's `value_len`,
 //! the stream prefix) and the width of every VLE. It writes through the same
-//! generated codecs the session TX path does (`InitBody`, `OpenBody`, `Close`,
-//! `KeepAlive`, `Fragment`, `Frame`, `StreamEnvelope`) and through the same
-//! helpers (`lease_to_wire`, `encode_ext_chain`, `build_fragment_wire`), so the
+//! generated message documents the session TX path does (`transport_init`,
+//! `transport_open`, `transport_close`, `transport_keep_alive`, the Frame and
+//! Fragment headers, `StreamEnvelope`) and through the same helpers
+//! (`lease_to_wire`, `build_frame_wire`, `build_fragment_wire`), so the
 //! bytes are the bytes a conforming sender writes, and a field the caller sets
 //! to a value no sender would choose is still written the way the format
 //! writes it.
@@ -65,20 +66,22 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{Bounded, CodecError, SceSink, VecSink};
-use wz_codecs::close::Close;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use sce_forge_runtime::codec::{Bounded, BoundedIter, CodecError, SceSink, VecSink};
+use wz_codecs::close::CloseParts;
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant, ExtEntrySource};
 use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::init_body::{InitBody, InitBodyS};
-use wz_codecs::keep_alive::KeepAlive;
-use wz_codecs::open_body::OpenBody;
+use wz_codecs::init_body::{InitBody, InitBodyS, InitBodySource};
+use wz_codecs::open_body::{OpenBody, OpenBodySource};
 use wz_codecs::stream_envelope::StreamEnvelope;
+use wz_codecs::transport_close::{TransportCloseParts, TransportCloseWire};
+use wz_codecs::transport_init::{TransportInitSource, TransportInitWire};
+use wz_codecs::transport_keep_alive::{TransportKeepAliveParts, TransportKeepAliveWire};
+use wz_codecs::transport_open::{TransportOpenSource, TransportOpenWire};
 use wz_codecs::wire_const;
 
 use crate::codec_owned::owned_bytes;
-use crate::ext_chain::encode_ext_chain;
 use crate::frame_encode::{build_fragment_wire, build_frame_wire};
 use crate::lease::lease_to_wire;
 use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
@@ -443,7 +446,10 @@ fn cbyte(whatami: u8, zid_len: usize) -> u8 {
     whatami | (((zid_len as u8) - 1) << 4)
 }
 
-fn chain_of(extensions: &[ExtSpec<'_>]) -> Result<Vec<u8>, ComposeError> {
+/// The entries of a chain the caller states, in its order, as the message's
+/// document is handed them: the document sets each entry's continuation bit and
+/// the header's Z flag.
+fn chain_of(extensions: &[ExtSpec<'_>]) -> Result<Vec<ExtEntryOwned>, ComposeError> {
     if extensions.len() > MAX_EXT_CHAIN_DEPTH {
         return Err(ComposeError::ExtensionChain {
             entries: extensions.len(),
@@ -475,7 +481,65 @@ fn chain_of(extensions: &[ExtSpec<'_>]) -> Result<Vec<u8>, ComposeError> {
         }
         entries.push(ExtEntryOwned { header, body });
     }
-    Ok(encode_ext_chain(&entries))
+    Ok(entries)
+}
+
+/// The chain [`chain_of`] built, as a message's document reads it: none when it
+/// holds no entry.
+fn held(entries: &[ExtEntryOwned]) -> Option<Bounded<&[ExtEntryOwned], { usize::MAX }, 1>> {
+    Bounded::new(entries)
+}
+
+/// A handshake message composed from its stated fields: the header the caller's
+/// fields set, the body, and the chain. The flags a body or a chain announces
+/// (Init A and S, Open A, Z) are derived by the message's document from what is
+/// presented, so this states only the message id and the flags no body carries.
+struct Composed<'a, B> {
+    header: u8,
+    body: B,
+    extensions: Option<Bounded<&'a [ExtEntryOwned], { usize::MAX }, 1>>,
+}
+
+impl<'a, B> Composed<'a, B> {
+    fn entries(
+        &self,
+    ) -> Option<BoundedIter<core::slice::Iter<'a, ExtEntryOwned>, { usize::MAX }, 1>> {
+        self.extensions.as_ref().map(|chain| chain.iter())
+    }
+}
+
+impl TransportInitSource for Composed<'_, InitBody<'_>> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+
+    fn body(&self) -> &impl InitBodySource {
+        &self.body
+    }
+
+    fn extensions(
+        &self,
+    ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
+    {
+        self.entries()
+    }
+}
+
+impl TransportOpenSource for Composed<'_, OpenBody<'_>> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+
+    fn body(&self) -> &impl OpenBodySource {
+        &self.body
+    }
+
+    fn extensions(
+        &self,
+    ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
+    {
+        self.entries()
+    }
 }
 
 /// Compose an INIT message.
@@ -495,17 +559,10 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
         }
     }
     let chain = chain_of(spec.extensions)?;
-    let mut flags = 0u8;
     let cookie = match spec.role {
         InitRole::Syn => None,
-        InitRole::Ack { cookie } => {
-            flags |= wire_const::FLAG_T_INIT_A;
-            Some(cookie)
-        }
+        InitRole::Ack { cookie } => Some(cookie),
     };
-    if !chain.is_empty() {
-        flags |= wire_const::FLAG_T_Z;
-    }
     let body = InitBody {
         version: spec.version,
         cbyte: cbyte(spec.whatami, spec.zid.len()),
@@ -517,18 +574,14 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
         cookie_len: cookie.map(|c| c.len() as u64),
         cookie: cookie.map(held_cookie).transpose()?,
     };
-    if body.s.is_some() {
-        flags |= wire_const::FLAG_T_INIT_S;
-    }
-    let mut wire = Vec::with_capacity(
-        1 + wz_codecs::init_body::InitBodyWire::measure(&body).len() + chain.len(),
-    );
-    wire.push(flags | wire_const::T_MID_INIT);
-    {
-        let mut sink = VecSink::new(&mut wire);
-        body.encode(&mut sink).expect("VecSink is infallible");
-    }
-    wire.extend_from_slice(&chain);
+    let message = Composed {
+        header: wire_const::T_MID_INIT,
+        body,
+        extensions: held(&chain),
+    };
+    let mut wire = Vec::with_capacity(TransportInitWire::measure(&message).len());
+    TransportInitWire::encode_source(&message, &mut VecSink::new(&mut wire))
+        .expect("VecSink is infallible");
     Ok(wire)
 }
 
@@ -549,62 +602,59 @@ pub fn compose_open(spec: &OpenSpec<'_>) -> Result<Vec<u8>, ComposeError> {
             })
         }
     };
-    let mut flags = 0u8;
-    if in_seconds {
-        flags |= wire_const::FLAG_T_OPEN_T;
-    }
     let cookie = match spec.role {
         OpenRole::Syn { cookie } => Some(cookie),
-        OpenRole::Ack => {
-            flags |= wire_const::FLAG_T_OPEN_A;
-            None
-        }
+        OpenRole::Ack => None,
     };
-    if !chain.is_empty() {
-        flags |= wire_const::FLAG_T_Z;
-    }
     let body = OpenBody {
         lease: wire_lease,
         initial_sn: spec.initial_sn,
         cookie_len: cookie.map(|c| c.len() as u64),
         cookie: cookie.map(held_cookie).transpose()?,
     };
-    let mut wire = Vec::with_capacity(
-        1 + wz_codecs::open_body::OpenBodyWire::measure(&body).len() + chain.len(),
-    );
-    wire.push(flags | wire_const::T_MID_OPEN);
-    {
-        let mut sink = VecSink::new(&mut wire);
-        body.encode(&mut sink).expect("VecSink is infallible");
-    }
-    wire.extend_from_slice(&chain);
+    let message = Composed {
+        header: if in_seconds {
+            wire_const::T_MID_OPEN | wire_const::FLAG_T_OPEN_T
+        } else {
+            wire_const::T_MID_OPEN
+        },
+        body,
+        extensions: held(&chain),
+    };
+    let mut wire = Vec::with_capacity(TransportOpenWire::measure(&message).len());
+    TransportOpenWire::encode_source(&message, &mut VecSink::new(&mut wire))
+        .expect("VecSink is infallible");
     Ok(wire)
 }
 
 /// Compose a CLOSE message: `S` set for a whole-session close, clear for a
-/// link-only one, then the reason byte as given.
+/// link-only one, then the reason byte as given, written by the message's
+/// document with no chain.
 pub fn compose_close(reason: u8, session: bool) -> Vec<u8> {
-    let flags = if session {
-        wire_const::FLAG_T_CLOSE_S
-    } else {
-        0
+    let message = TransportCloseParts {
+        header: if session {
+            wire_const::T_MID_CLOSE | wire_const::FLAG_T_CLOSE_S
+        } else {
+            wire_const::T_MID_CLOSE
+        },
+        body: &CloseParts { reason },
+        extensions: None,
     };
     let mut wire = Vec::with_capacity(2);
-    wire.push(flags | wire_const::T_MID_CLOSE);
-    let mut sink = VecSink::new(&mut wire);
-    Close { reason }
-        .encode(&mut sink)
+    TransportCloseWire::encode_source(&message, &mut VecSink::new(&mut wire))
         .expect("VecSink is infallible");
     wire
 }
 
-/// Compose a KEEPALIVE message: the header byte and an empty body.
+/// Compose a KEEPALIVE message: the header byte and an empty body, written by
+/// the message's document with no chain.
 pub fn compose_keep_alive() -> Vec<u8> {
+    let message = TransportKeepAliveParts {
+        header: wire_const::T_MID_KEEP_ALIVE,
+        extensions: None,
+    };
     let mut wire = Vec::with_capacity(1);
-    wire.push(wire_const::T_MID_KEEP_ALIVE);
-    let mut sink = VecSink::new(&mut wire);
-    KeepAlive {}
-        .encode(&mut sink)
+    TransportKeepAliveWire::encode_source(&message, &mut VecSink::new(&mut wire))
         .expect("VecSink is infallible");
     wire
 }

@@ -51,8 +51,11 @@ pub mod control;
 pub mod file;
 pub mod glue;
 pub mod group;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub mod links;
+// Written over the runtime's heap link layer, so compiled where the runtime declares it.
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "alloc")]
+    pub mod links;
+}
 pub mod net;
 #[cfg(feature = "session-slot")]
 pub mod slot;

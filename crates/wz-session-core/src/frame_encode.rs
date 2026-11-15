@@ -34,7 +34,13 @@ use alloc::vec::Vec;
         any(feature = "session-unicast", feature = "session-multicast")
     )
 ))]
-use sce_forge_runtime::codec::{CodecError, SceSink};
+use sce_forge_runtime::codec::CodecError;
+// The chain of a Frame header with its QoS extension, and of a Fragment header.
+#[cfg(any(
+    feature = "transport-qos",
+    all(feature = "codec-fragment", feature = "reassembly")
+))]
+use sce_forge_runtime::codec::Bounded;
 #[cfg(any(
     feature = "alloc",
     all(
@@ -145,44 +151,39 @@ const QOS_EXT_HEADER: u8 = 0x31;
 #[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
 const QOS_EXT_WIRE_BYTES: usize = 2;
 
-/// R311y215 — append one `ext_qos` extension (`[header][VLE(priority)]`) to
-/// `buf`. `chained` sets the ext-chain continuation `Z` bit (`0x80`) so a
-/// further extension (the Fragment `FRAGMENT_FIRST` marker, id `0x2`) can follow
-/// — zenoh writes the exts in id-ascending order (`0x1` QoS, then `0x2` First),
-/// each carrying the continuation bit while another follows
-/// (`zenoh-codec/src/transport/fragment.rs` `write`). The z64 body reuses the
-/// codec's `write_vle_u64` primitive rather than a hand-rolled VLE.
+/// R311y215 — the z64 body of one `ext_qos` extension: the priority as its
+/// value. The entry is `qos_entry`; the header's document writes it, with
+/// the chain-continuation `Z` bit set while another extension follows (zenoh
+/// writes the exts in id-ascending order, `0x1` QoS, then `0x2` First,
+/// `zenoh-codec/src/transport/fragment.rs` `write`).
 #[cfg(feature = "transport-qos")]
-fn write_qos_ext(
-    buf: &mut EncodeBuf<'_>,
-    priority: Priority,
-    chained: bool,
-) -> Result<(), CodecError> {
-    let header = if chained {
-        QOS_EXT_HEADER | wire_const::FLAG_T_Z
-    } else {
-        QOS_EXT_HEADER
-    };
-    buf.append_byte(header)?;
-    let mut sink = TxSink::new(buf);
-    sink.write_vle_u64(priority.wire_byte() as u64)
+fn qos_value(priority: Priority) -> wz_codecs::ext_zint::ExtZintParts {
+    wz_codecs::ext_zint::ExtZintParts {
+        value: u64::from(priority.wire_byte()),
+    }
+}
+
+/// The `ext_qos` entry of a Frame's or a Fragment's chain, over its body.
+#[cfg(feature = "transport-qos")]
+fn qos_entry(value: &wz_codecs::ext_zint::ExtZintParts) -> wz_codecs::ext_entry::ExtEntryParts<'_> {
+    wz_codecs::ext_entry::ExtEntryParts {
+        header: QOS_EXT_HEADER,
+        body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtZint(value),
+    }
 }
 
 /// R311jq — write the FRAME prefix (header byte + `VLE(sn)`) into `buf`.
 /// The single home of the prefix wire format, shared by the
 /// immediate-path [`encode_frame_envelope`] and the batching open-frame
-/// writer in `SessionLinkActions`.
-///
-/// The `VLE(sn)` loop is bit-identical to `Frame::encode`'s sn block
-/// — it IS the wire format (zenoh-pico VLE base-128 encoding per
-/// `vendor/zenoh-pico/src/protocol/codec/core.c`), not consumer-tunable
-/// logic.
+/// writer in `SessionLinkActions`. The prefix is the Frame header, written by
+/// its document (`sources/codecs/transport_frame_header.scxml`): the SN is the
+/// codec's VLE, at most nine bytes, as upstream reads it.
 ///
 /// R311y215 — `ext_qos` carries the Frame's QoS priority (`Some` iff a QoS
 /// session sends a non-DEFAULT priority; see
 /// [`crate::session_actions::SessionLinkActions::dispatch_network_message_at`]).
 /// When present the header gains `FLAG_T_Z` and a single z64 ext_qos
-/// (`[0x31][VLE(priority)]`, [`write_qos_ext`]) is written between `VLE(sn)` and
+/// (`[0x31][VLE(priority)]`, `qos_entry`) is written between `VLE(sn)` and
 /// the payload — zenoh `frame::ext::QoS`, written only when `!= DEFAULT`
 /// (`zenoh-codec/src/transport/frame.rs`). A `None` (DEFAULT / non-QoS) Frame is
 /// byte-identical to a pre-QoS Frame. The Frame carries only the QoS ext (no
@@ -211,34 +212,30 @@ pub(crate) fn begin_frame(
     parent_flags: u8,
     ext_qos: Option<Priority>,
 ) -> Result<(), CodecError> {
-    // The QoS ext (when present) sets the Frame-level ext-chain Z flag.
+    // The QoS ext, when present, is the chain's one entry; the document sets
+    // the header's Z flag from the chain and clears the entry's own.
     #[cfg(feature = "transport-qos")]
-    let z = if ext_qos.is_some() {
-        wire_const::FLAG_T_Z
-    } else {
-        0u8
-    };
+    let qos = ext_qos.map(qos_value);
+    #[cfg(feature = "transport-qos")]
+    let chain = qos.as_ref().map(|value| [qos_entry(value)]);
+    #[cfg(feature = "transport-qos")]
+    let extensions = chain
+        .as_ref()
+        .and_then(|entries| Bounded::new(&entries[..]));
     #[cfg(not(feature = "transport-qos"))]
-    let z = {
+    let extensions = {
         let _ = ext_qos;
-        0u8
+        None
     };
-    buf.append_byte(parent_flags | z | wire_const::T_MID_FRAME)?;
-    {
-        let mut sink = TxSink::new(buf);
-        let mut vle = sn;
-        while vle >= 0x80 {
-            sink.write_u8((vle as u8 & 0x7F) | 0x80)?;
-            vle >>= 7;
-        }
-        sink.write_u8(vle as u8)?;
-    }
-    #[cfg(feature = "transport-qos")]
-    if let Some(priority) = ext_qos {
-        // Frame's sole ext → never chained (Z clear on the ext header).
-        write_qos_ext(buf, priority, false)?;
-    }
-    Ok(())
+    let head = wz_codecs::transport_frame_header::TransportFrameHeaderParts {
+        header: parent_flags | wire_const::T_MID_FRAME,
+        sn,
+        extensions,
+    };
+    wz_codecs::transport_frame_header::TransportFrameHeaderWire::encode_source(
+        &head,
+        &mut TxSink::new(buf),
+    )
 }
 
 /// R311jq — derive the link-driver [`Reliability`] of an already-encoded
@@ -682,7 +679,7 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 
 /// R311y227 — the QoS-carrying twin of [`encode_frame_with_push`]: writes the
 /// Frame `ext_qos` (id 0x1, header 0x31, low-3-bit priority — `begin_frame` /
-/// `write_qos_ext`) when `ext_qos` is `Some(non-DEFAULT priority)`, else
+/// `qos_entry`) when `ext_qos` is `Some(non-DEFAULT priority)`, else
 /// byte-identical to the anchor. The multicast per-priority TX emit
 /// ([`crate::multicast_tx::multicast_tx_emit`]) passes the clamped conduit
 /// priority; `None` (DEFAULT / non-qos group) carries no ext, so a pico /
@@ -1315,7 +1312,7 @@ pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priorit
 /// transport-level R/M/Z flags + ext chain live at this frame-composer layer).
 ///
 /// R311y215 — `ext_qos` (`Some` iff a QoS chain) prepends a z64 `ext_qos`
-/// (`write_qos_ext`) ahead of any `FRAGMENT_FIRST` marker, in zenoh's
+/// (`qos_entry`) ahead of any `FRAGMENT_FIRST` marker, in zenoh's
 /// id-ascending order (`0x1` QoS, then `0x2` First;
 /// `zenoh-codec/src/transport/fragment.rs`). The ext-chain `Z` header bit is set
 /// whenever EITHER ext is present; the QoS ext carries the chain-continuation
@@ -1392,8 +1389,9 @@ pub fn build_fragment_wire(
     wire
 }
 
-/// Everything of one `T_MID_FRAGMENT` before its payload: the header byte
-/// (R / M / Z), `VLE(sn)` written by the `wz_codecs::fragment` codec, and the
+/// Everything of one `T_MID_FRAGMENT` before its payload, written by the
+/// header's document (`sources/codecs/transport_fragment_header.scxml`): the
+/// header byte (R / M, and Z derived from the chain), `VLE(sn)`, and the
 /// extension chain in id-ascending order (`0x1` QoS, `0x2` First, `0x3` Drop).
 /// [`build_fragment_wire`] appends the payload to it on the heap; a lent chain
 /// writes the same head into a slot and the payload after it, so the head has
@@ -1411,83 +1409,66 @@ pub fn write_fragment_head(
     drop_marker: bool,
     ext_qos: Option<Priority>,
 ) -> Result<(), CodecError> {
-    let mut flags = 0u8;
+    use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
+
+    let mut header = wire_const::T_MID_FRAGMENT;
     if reliable {
-        flags |= wire_const::FLAG_T_FRAGMENT_R;
+        header |= wire_const::FLAG_T_FRAGMENT_R;
     }
     if more {
-        flags |= wire_const::FLAG_T_FRAGMENT_M;
+        header |= wire_const::FLAG_T_FRAGMENT_M;
     }
+    // The chain in id order; the document sets each entry's continuation bit
+    // and the header's Z flag from it.
+    let marker = wz_codecs::ext_unit::ExtUnitParts {};
     #[cfg(feature = "transport-qos")]
-    let has_qos = ext_qos.is_some();
-    #[cfg(not(feature = "transport-qos"))]
-    let has_qos = {
-        let _ = ext_qos;
-        false
+    let qos = ext_qos.map(qos_value);
+    let unit_entry = |entry_header: u8| ExtEntryParts {
+        header: entry_header,
+        body: ExtEntryPartsBody::CodecZenohExtUnit(&marker),
     };
-    // Z: a Fragment ext chain (ext_qos and/or the FRAGMENT_FIRST / FRAGMENT_DROP
-    // markers) follows.
-    let has_ext = first || has_qos || drop_marker;
-    if has_ext {
-        flags |= wire_const::FLAG_T_Z;
-    }
-    buf.append_byte(flags | wire_const::T_MID_FRAGMENT)?;
-    // The codec writes VLE(sn) with an empty payload so the SN wire form stays
-    // the byte-verified SSOT; the ext chain follows it, and the caller appends
-    // the payload after that.
-    {
-        let mut sink = TxSink::new(buf);
-        wz_codecs::fragment::Fragment {
-            sn,
-            payload: Default::default(),
-        }
-        .encode(&mut sink)?;
-    }
+    let mut chain = [unit_entry(FRAGMENT_FIRST_EXT_HEADER); 3];
+    let mut len = 0;
     #[cfg(feature = "transport-qos")]
-    if let Some(priority) = ext_qos {
-        // The QoS ext chains to whichever marker follows it, if any.
-        write_qos_ext(buf, priority, first || drop_marker)?;
+    if let Some(value) = &qos {
+        chain[len] = qos_entry(value);
+        len += 1;
     }
+    #[cfg(not(feature = "transport-qos"))]
+    let _ = ext_qos;
     if first {
-        // ...and First chains to Drop when both ride the same fragment.
-        let chained = if drop_marker { wire_const::FLAG_T_Z } else { 0 };
-        buf.append_byte(FRAGMENT_FIRST_EXT_HEADER | chained)?;
+        chain[len] = unit_entry(FRAGMENT_FIRST_EXT_HEADER);
+        len += 1;
     }
     if drop_marker {
-        // Last in id order, so it never carries the continuation bit.
-        buf.append_byte(FRAGMENT_DROP_EXT_HEADER)?;
+        chain[len] = unit_entry(FRAGMENT_DROP_EXT_HEADER);
+        len += 1;
     }
-    Ok(())
+    let head = wz_codecs::transport_fragment_header::TransportFragmentHeaderParts {
+        header,
+        sn,
+        extensions: Bounded::new(&chain[..len]),
+    };
+    wz_codecs::transport_fragment_header::TransportFragmentHeaderWire::encode_source(
+        &head,
+        &mut TxSink::new(buf),
+    )
 }
 
-/// Encode one `T_MID_FRAME` wire frame from its explicit fields: the header
-/// byte (`R` from `reliable`, `Z` iff `ext_qos` is present), `VLE(sn)` written
-/// by the `wz_codecs::frame` codec, the optional `ext_qos`, then `payload`
-/// verbatim.
+/// Encode one `T_MID_FRAME` wire frame from its explicit fields: the Frame
+/// header (`R` from `reliable`, `Z` iff `ext_qos` is present, `VLE(sn)`, the
+/// optional `ext_qos`) as [`begin_frame`] writes it, then `payload` verbatim.
 ///
 /// The Frame twin of `build_fragment_wire`, with the same shape and for the
 /// same reason: a caller that has to SAY every field (the transport build door
-/// in `wz-capture`) must not go through the TX path's `begin_frame`, which is
-/// written for a session that already owns its sequence numbers. This function
-/// takes `sn` and `ext_qos` as given and decides only what is derived from
-/// them: `Z`, and the width of the VLE.
+/// in `wz-capture`) takes `sn` and `ext_qos` as given, and only `Z` and the
+/// width of the VLE are derived from them. The VLE is the codec's at every
+/// value, nine bytes for the top bucket as upstream reads it
+/// (`commons/zenoh-codec/src/core/zint.rs` @ `const fn vle_len(x: u64) -> usize {`).
 ///
-/// ⚠ It parts from `begin_frame` for `sn >= 2^63`, and says so rather than
-/// matching it. `begin_frame` writes the VLE with a hand-rolled loop that emits
-/// a TENTH byte for such a value; the codec this function calls ends a VLE at
-/// nine bytes, the last carrying eight bits (`SceSink::write_vle_u64`, "1-9
-/// wire bytes. Canonical Zenoh ZInt", and upstream's `vle_len` returns 9 for the
-/// top bucket, `commons/zenoh-codec/src/core/zint.rs` @
-/// `const fn vle_len(x: u64) -> usize {`). Every value the
-/// session TX path can mint is below `2^63` (`sn::mask_from_res(3)`), where the
-/// two agree byte for byte; the test
-/// `build_frame_wire_matches_begin_frame_below_the_widest_ring` holds that,
-/// and `build_frame_wire_writes_the_codecs_nine_byte_vle_for_the_top_bucket`
-/// holds the divergence this paragraph describes.
-///
-/// `ext_qos` is written as `begin_frame` writes it (`write_qos_ext`, never
-/// chained: a Frame carries no other extension), so its presence is the
-/// caller's decision and a DEFAULT priority is written when it is asked for.
+/// `ext_qos` is written as `begin_frame` writes it (never chained: a Frame
+/// carries no other extension), so its presence is the caller's decision and a
+/// DEFAULT priority is written when it is asked for.
 #[cfg(all(feature = "codec-frame", feature = "transport-qos", feature = "alloc"))]
 pub fn build_frame_wire(
     sn: u64,
@@ -1495,30 +1476,11 @@ pub fn build_frame_wire(
     reliable: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
-    let mut flags = frame_flags(reliable);
-    if ext_qos.is_some() {
-        flags |= wire_const::FLAG_T_Z;
-    }
     // header + the widest VLE + a possible `[0x31][VLE(priority)]`, as
     // `encode_frame_envelope` reserves.
-    let mut wire = Vec::with_capacity(1 + 10 + 2 + payload.len());
-    wire.push(flags | wire_const::T_MID_FRAME);
-    {
-        // The codec writes `VLE(sn)` and, with an empty payload, nothing else:
-        // the extension has to sit between the two, which is the order the
-        // wire has (`commons/zenoh-codec/src/transport/frame.rs` @
-        // `// FrameHeader`, the header write).
-        let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
-        wz_codecs::frame::Frame {
-            sn,
-            payload: Default::default(),
-        }
-        .encode(&mut sink)
-        .expect("VecSink is infallible");
-    }
-    if let Some(priority) = ext_qos {
-        write_qos_ext(&mut wire, priority, false).expect("a Vec grows, so its sink is infallible");
-    }
+    let mut wire = Vec::with_capacity(1 + 9 + 2 + payload.len());
+    begin_frame(&mut wire, sn, frame_flags(reliable), ext_qos)
+        .expect("a Vec grows, so its sink is infallible");
     wire.extend_from_slice(payload);
     wire
 }
@@ -1675,7 +1637,7 @@ mod tests {
             }),
             encoding: Some(EncodingHint {
                 packed_id: u32::MAX,
-                schema: Some("application/x-schema".repeat(3)),
+                schema: Some(b"application/x-schema".repeat(3)),
             }),
             source_info: Some(SourceInfo {
                 zid: [0xCD; 16],
@@ -1698,7 +1660,7 @@ mod tests {
             ),
             (
                 "aliased",
-                build_push_aliased(u64::MAX >> 8, Some("tail"), b"v").unwrap(),
+                build_push_aliased(crate::wire_id::ExprId::MAX, Some("tail"), b"v").unwrap(),
             ),
             ("delete", build_push_del_literal("demo/x").unwrap()),
             (
@@ -2576,6 +2538,9 @@ mod qos_wire_tests {
     use super::*;
     use crate::inbound::{parse_inbound, InboundFrame};
     use crate::qos::Priority;
+    // `write_bytes` is the sink trait's: only the fragmentation tests below write through it.
+    #[cfg(feature = "transport-fragmentation")]
+    use sce_forge_runtime::codec::SceSink;
 
     /// R311y227 — an oversize QoS MULTICAST frame re-frames as a fragment chain
     /// that carries the `ext_qos` on EVERY fragment AND mints its follow-on SNs on

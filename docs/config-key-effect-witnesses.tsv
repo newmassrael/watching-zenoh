@@ -1,0 +1,121 @@
+# The EFFECT witness of every config key wz honours: the test that shows the key changing what a
+# node does, and whether an upstream implementation was handed the same document first.
+# Graded by scripts/lib/config_key_fixture_gate.py (its effect-witness site), which holds the key
+# column to the honoured surface (HONOURED_SURFACE_PARTS) plus WZ_EXTENSION_HONOURED_KEYS, one row
+# per key, and ratchets the count of keys that are not `differential` down.
+#
+# Columns: key <TAB> verdict <TAB> witness <TAB> host <TAB> upstream <TAB> note.
+#
+# verdict, strongest first:
+#   differential        the same document is handed to an upstream implementation and to wz, the
+#                       upstream effect is asserted first (the positive control), and wz's effect is
+#                       compared with it. The one verdict that counts as proven.
+#   foreign             an upstream implementation on the far side observes wz's effect, with a
+#                       control on the same run, but no upstream node is handed the document.
+#   wz-effect           wz's effect is observed (two documents, or with and without the key), and
+#                       no upstream implementation takes part.
+#   reader-only         surveyed: only reader or expansion tests exist, nothing observes an effect.
+#   unsurveyed          not yet classified; counted as unproven like the two above.
+#   no-upstream-effect  a wz extension the pinned upstream parses and discards, so there is no
+#                       upstream effect to compare; allowed only for WZ_EXTENSION_HONOURED_KEYS.
+# witness: <path from the repository root>::<test fn> for differential, foreign and wz-effect;
+#   `-` otherwise. The fn must be a test of that file, and the file must name the key or its leaf.
+# host: the wz node or library the witness drives (demo, peer, router-hat, storage-host, capi-c).
+# upstream: zenohd, zenoh-c or zenoh-pico for differential and foreign; `-` otherwise.
+# note: free text, `-` when there is nothing to add.
+key	verdict	witness	host	upstream	note
+mode	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	the InitSyn whatami per arm; the C ABI is held by zenoh_c_open_roles_twice_and_diff
+connect/endpoints	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_open_roles_twice_and_diff.rs::a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_and_libzenohc	capi-c	zenoh-c	the demo's dial from a file is observed by wz alone (client_connect_phase_binary)
+listen/endpoints	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+transport/auth/usrpwd/dictionary_file	differential	crates/wz-capi-c/tests/it/files/listener_auth_zenohd_interop.rs::one_dictionary_admits_and_refuses_the_same_zenohds_at_a_zenohd_and_at_a_c_listener	capi-c	zenohd	one dictionary file at a zenohd listener first, then at the C listener
+transport/auth/usrpwd/user	wz-effect	crates/wz-capi-c/tests/it/files/listener_auth.rs::a_client_presents_the_credential_its_own_config_states	capi-c	-	-
+transport/auth/usrpwd/password	wz-effect	crates/wz-capi-c/tests/it/files/listener_auth.rs::a_client_presents_the_credential_its_own_config_states	capi-c	-	-
+transport/auth/pubkey/private_key_file	wz-effect	crates/wz-capi-c/tests/it/files/listener_auth.rs::a_config_whose_pubkey_identity_cannot_be_held_fails_the_open	capi-c	-	only the refusal of an unreadable file is observed
+transport/auth/pubkey/private_key_pem	wz-effect	crates/wz-capi-c/tests/it/files/listener_auth.rs::a_client_presents_the_pubkey_identity_its_own_config_states	capi-c	-	-
+transport/auth/pubkey/public_key_file	wz-effect	crates/wz-capi-c/tests/it/files/listener_auth.rs::a_config_whose_pubkey_identity_cannot_be_held_fails_the_open	capi-c	-	only the refusal of an unreadable file is observed
+transport/auth/pubkey/public_key_pem	wz-effect	crates/wz-capi-c/tests/it/files/listener_auth.rs::a_client_presents_the_pubkey_identity_its_own_config_states	capi-c	-	-
+scouting/multicast/enabled	wz-effect	crates/wz-capi-c/tests/it/files/scouting_open.rs::a_wz_session_with_multicast_scouting_disabled_is_not_found_and_without_the_key_it_is	capi-c	-	-
+timestamping/enabled	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_advanced_publisher_declare_twice_and_diff.rs::a_nodes_clock_follows_its_role_and_its_config_on_wz_and_libzenohc	capi-c	zenoh-c	the demo's relayed stamp is observed by wz alone (the wire leg's RELAY shape)
+timestamping/drop_future_timestamp	foreign	crates/wz-integration-tests/tests/it/files/wz_router_hlc_stamp_to_pico_zsub_from_a_config_file.rs::wz_router_hat_given_a_config_file_that_drops_future_timestamps_delivers_nothing	router-hat	zenoh-pico	-
+transport/unicast/max_links	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	the multi_link offer, on the peer arm that types no --max-links
+transport/unicast/max_sessions	unsurveyed	-	-	-	an earlier reading found wz refusing after its OpenAck where upstream refuses before it
+transport/unicast/lowlatency	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	the C ABI is held by zenoh_c_session_offer_twice_and_diff
+transport/unicast/qos/enabled	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	the C ABI is held by zenoh_c_session_offer_twice_and_diff
+transport/unicast/compression/enabled	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	-
+transport/link/tx/batch_size	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	-
+transport/link/tx/lease	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	read off the OPEN that follows the leg's InitAck
+transport/link/tx/queue/size/control	unsurveyed	-	-	-	a size other than data acts only on a QoS session
+transport/link/tx/queue/size/real_time	unsurveyed	-	-	-	a size other than data acts only on a QoS session
+transport/link/tx/queue/size/interactive_high	unsurveyed	-	-	-	a size other than data acts only on a QoS session
+transport/link/tx/queue/size/interactive_low	unsurveyed	-	-	-	a size other than data acts only on a QoS session
+transport/link/tx/queue/size/data_high	unsurveyed	-	-	-	a size other than data acts only on a QoS session
+transport/link/tx/queue/size/data	unsurveyed	-	-	-	-
+transport/link/tx/queue/size/data_low	unsurveyed	-	-	-	a size other than data acts only on a QoS session
+transport/link/tx/queue/size/background	unsurveyed	-	-	-	a size other than data acts only on a QoS session
+transport/link/tx/queue/congestion_control/drop/wait_before_drop	unsurveyed	-	-	-	-
+transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments	unsurveyed	-	-	-	-
+transport/link/tx/queue/congestion_control/block/wait_before_close	unsurveyed	-	-	-	-
+transport/link/rx/max_message_size	unsurveyed	-	-	-	-
+adminspace/enabled	foreign	crates/wz-integration-tests/tests/it/files/wz_peer_adminspace_read_deny_to_pico_zget_from_a_config_file.rs::wz_peer_adminspace_without_the_read_key_in_a_config_file_serves_pico_z_get	peer	zenoh-pico	-
+adminspace/permissions/read	foreign	crates/wz-integration-tests/tests/it/files/wz_peer_adminspace_read_deny_to_pico_zget_from_a_config_file.rs::wz_peer_adminspace_read_denied_by_a_config_file_seen_by_pico_z_get	peer	zenoh-pico	-
+adminspace/permissions/write	foreign	crates/wz-integration-tests/tests/it/files/wz_peer_adminspace_write_from_pico_zput_from_a_config_file.rs::wz_peer_admin_config_write_applied_from_pico_z_put_given_a_config_file_grant	peer	zenoh-pico	-
+id	differential	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_document	demo	zenohd	the C ABI is held by zenoh_c_open_zid_twice_and_diff
+namespace	unsurveyed	-	-	-	-
+queries_default_timeout	wz-effect	crates/wz-integration-tests/tests/it/files/wz_ap_demo_query_timeout_from_a_config_file.rs::wz_ap_demo_query_timeout_from_a_config_file_fires_final_callback	demo	-	-
+routing/interests/timeout	foreign	crates/wz-integration-tests/tests/it/files/wz_peer_interest_pending_gc_pico_interop_from_a_config_file.rs::wz_peer_gc_terminates_a_pico_liveliness_get_at_the_timeout_a_config_file_states	peer	zenoh-pico	-
+routing/router/linkstate/transport_weights	wz-effect	crates/wz-integration-tests/tests/it/files/wz_router_link_weight_from_a_config_file.rs::wz_router_hat_link_weight_from_a_config_file_rides_the_flooded_linkstate	router-hat	-	-
+low_pass_filter	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::a_low_pass_filter_drops_a_payload_past_its_limit_on_both_paths	capi-c	-	-
+downsampling	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::a_downsampling_rule_thins_a_burst_on_both_paths	capi-c	-	-
+qos/network	unsurveyed	-	-	-	-
+access_control/default_permission	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	-
+access_control/enabled	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	-
+access_control/policies	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	-
+access_control/rules	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	-
+access_control/subjects	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	-
+scouting/timeout	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc	capi-c	zenoh-c	a lone client fails its open after the stated 1000 ms on both
+scouting/delay	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc	capi-c	zenoh-c	a lone peer opens after the stated 300 ms on both
+open/return_conditions/connect_scouted	wz-effect	crates/wz-ap-demo/tests/it/files/peer_start_window_binary_from_a_config_file.rs::a_config_file_saying_connect_scouted_false_starts_the_application_without_a_window	demo	-	-
+transport/multicast/qos/enabled	wz-effect	crates/wz-integration-tests/tests/it/files/wz_reads_a_stock_zenohd_config.rs::every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive	router-hat	-	read off the multicast JOIN, which the zenohd differential cannot see
+transport/shared_memory/enabled	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_session_offer_twice_and_diff.rs::a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc	capi-c	zenoh-c	the column is compared only on a shared-memory oracle arm
+transport/link/tls/root_ca_certificate	wz-effect	crates/wz-integration-tests/tests/it/files/wz_tls_keys_from_a_config_file.rs::wz_peer_tls_dialer_without_root_ca_certificate_key_does_not_establish	demo	-	-
+transport/link/tls/listen_certificate	wz-effect	crates/wz-integration-tests/tests/it/files/wz_tls_keys_from_a_config_file.rs::wz_peer_tls_acceptor_without_listen_certificate_and_key_does_not_listen	demo	-	-
+transport/link/tls/listen_private_key	wz-effect	crates/wz-integration-tests/tests/it/files/wz_tls_keys_from_a_config_file.rs::wz_peer_tls_acceptor_without_listen_certificate_and_key_does_not_listen	demo	-	-
+transport/link/tls/connect_certificate	unsurveyed	-	-	-	-
+transport/link/tls/connect_private_key	unsurveyed	-	-	-	-
+transport/link/tls/enable_mtls	unsurveyed	-	-	-	-
+transport/link/tls/verify_name_on_connect	unsurveyed	-	-	-	-
+transport/link/protocols	unsurveyed	-	-	-	-
+transport/link/tcp/so_rcvbuf	differential	crates/wz-integration-tests/tests/it/files/wz_link_socket_options_zenohd_interop.rs::socket_buffers_reach_the_kernel_as_zenohd_sets_them	demo	zenohd	one file to zenohd -c and to the demo --config, read off the kernel
+transport/link/tcp/so_sndbuf	differential	crates/wz-integration-tests/tests/it/files/wz_link_socket_options_zenohd_interop.rs::socket_buffers_reach_the_kernel_as_zenohd_sets_them	demo	zenohd	one file to zenohd -c and to the demo --config, read off the kernel
+transport/link/tls/so_rcvbuf	differential	crates/wz-integration-tests/tests/it/files/wz_link_socket_options_zenohd_interop.rs::socket_buffers_reach_the_kernel_as_zenohd_sets_them	demo	zenohd	one file to zenohd -c and to the demo --config, read off the kernel
+transport/link/tls/so_sndbuf	differential	crates/wz-integration-tests/tests/it/files/wz_link_socket_options_zenohd_interop.rs::socket_buffers_reach_the_kernel_as_zenohd_sets_them	demo	zenohd	one file to zenohd -c and to the demo --config, read off the kernel
+scouting/multicast/address	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc	capi-c	zenoh-c	every row scouts on a group of its own
+scouting/multicast/interface	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+scouting/multicast/ttl	wz-effect	crates/wz-capi-c/tests/it/files/scouting_ttl.rs::a_scout_leaves_with_the_ttl_the_config_names_and_with_one_when_it_names_none	capi-c	-	-
+scouting/multicast/listen	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc	capi-c	zenoh-c	-
+connect/retry	foreign	crates/wz-capi-c/tests/it/files/redial_zenohd_interop.rs::two_clients_redial_a_restarted_zenohd_and_deliver_again	capi-c	zenohd	-
+scouting/multicast/autoconnect	wz-effect	crates/wz-capi-c/tests/it/files/scouting_autoconnect.rs::a_peer_dials_the_node_that_answers_unless_autoconnect_leaves_its_role_out	capi-c	-	-
+scouting/multicast/autoconnect_strategy	unsurveyed	-	-	-	-
+connect/exit_on_failure	wz-effect	crates/wz-ap-demo/tests/it/files/startup_phase_lifecycle_binary.rs::a_config_file_that_says_exit_on_failure_produces_a_node_that_exits	demo	-	-
+connect/timeout_ms	wz-effect	crates/wz-capi-c/tests/it/files/connect_retry_open.rs::a_client_with_a_connect_budget_waits_for_a_late_listener	capi-c	-	-
+listen/exit_on_failure	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+listen/retry	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+listen/timeout_ms	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+plugins	wz-effect	crates/wz-integration-tests/tests/it/files/wz_storage_host_from_config_alone.rs::wz_storage_host_from_a_config_file_alone_hosts_its_storage_and_applies_its_listen_endpoint	storage-host	-	-
+metadata	differential	crates/wz-integration-tests/tests/it/files/wz_storage_host_metadata_matches_zenohd.rs::wz_storage_host_serves_its_config_metadata_as_zenohd_does	storage-host	zenohd	the same value served byte for byte
+gateway/south	unsurveyed	-	-	-	-
+open/return_conditions/declares	unsurveyed	-	-	-	-
+region_name	unsurveyed	-	-	-	-
+scouting/gossip/autoconnect	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+scouting/gossip/autoconnect_strategy	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+scouting/gossip/enabled	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+scouting/gossip/multihop	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_ext_families_twice_and_diff.rs::gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+scouting/gossip/target	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+transport/link/tx/keep_alive	unsurveyed	-	-	-	-
+transport/multicast/compression/enabled	unsurveyed	-	-	-	-
+transport/multicast/join_interval	unsurveyed	-	-	-	-
+transport/shared_memory/transport_optimization/enabled	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_session_shm_provider_twice_and_diff.rs::a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+transport/shared_memory/transport_optimization/pool_size	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_session_shm_provider_twice_and_diff.rs::a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
+transport/unicast/accept_pending	wz-effect	crates/wz-capi-c/tests/it/files/accept_bounds.rs::a_link_past_the_stated_pending_bound_is_closed_at_once	capi-c	-	-
+transport/unicast/accept_timeout	wz-effect	crates/wz-capi-c/tests/it/files/accept_bounds.rs::a_silent_link_is_dropped_when_the_stated_accept_timeout_has_passed	capi-c	-	-
+routing/peer/mode	no-upstream-effect	-	-	-	the pinned upstream parses routing/peer and discards it

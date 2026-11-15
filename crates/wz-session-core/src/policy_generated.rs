@@ -200,17 +200,21 @@ impl Default for KeySet {
 }
 
 /// `sn-resolution`: The width of the sequence numbers the sessions of the C interfaces
-/// advertise: in the InitSyn of a unicast session, where the two sides take the smaller of
-/// the two advertised widths, and in the Join of a multicast group, where a member refuses
-/// a Join that states another width than its own, so every member of a group states the
-/// same. `bits-32` is what zenoh and zenoh-pico advertise. `bits-8`, `bits-16` and
-/// `bits-64` state that width instead, for a peer built with a sequence-number width of its
-/// own. A session that negotiates a width below its peer's runs the narrower ring of the
-/// two; a ring of 8 bits wraps after 128 frames in flight, so a narrow width asks a
-/// deployment to know its traffic. The request-id resolution is not part of this policy.
+/// advertise when their configuration states none: in the InitSyn of a unicast session,
+/// where the two sides take the smaller of the two advertised widths, and in the Join of a
+/// multicast group, where a member refuses a Join that states another width than its own,
+/// so every member of a group states the same. `bits-32` is what zenoh advertises by
+/// default and what zenoh-pico always advertises. `bits-8`, `bits-16` and `bits-64` state
+/// that width instead, for a peer built with a sequence-number width of its own. A
+/// configuration that states `transport/link/tx/sequence_number_resolution` with a width
+/// other than 32 bits is followed instead of this policy, as zenoh follows the key. A
+/// session that negotiates a width below its peer's runs the narrower ring of the two; a
+/// ring of 8 bits wraps after 128 frames in flight, so a narrow width asks a deployment to
+/// know its traffic. The request-id resolution is not part of this policy.
 /// Upstream: Advertises the 32-bit sequence-number resolution in its InitSyn and in the
-/// Join of a group, and has no setting for another: zenoh's `Resolution` default and zenoh-
-/// pico's `Z_SN_RESOLUTION 0x02`.
+/// Join of a group unless its configuration states another: zenoh reads
+/// `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico
+/// builds in `Z_SN_RESOLUTION 0x02` with no setting for another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnResolution {
     /// `bits-32`.
@@ -529,8 +533,9 @@ pub struct SessionPolicy {
     /// text.
     pub key_set: KeySet,
     /// `sn-resolution`. Upstream: Advertises the 32-bit sequence-number resolution in its
-    /// InitSyn and in the Join of a group, and has no setting for another: zenoh's
-    /// `Resolution` default and zenoh-pico's `Z_SN_RESOLUTION 0x02`.
+    /// InitSyn and in the Join of a group unless its configuration states another: zenoh
+    /// reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and
+    /// zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another.
     pub sn_resolution: SnResolution,
     /// `supervision-after-expiry`. Upstream: Supervises nothing: an application that stops
     /// making progress is not noticed by the library, so there is no expiry and nothing for

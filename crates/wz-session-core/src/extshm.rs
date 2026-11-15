@@ -639,7 +639,9 @@ pub trait ShmSendBuffer: Send + Sync {
 
     /// The buffer as a holder in this process sees it, for a receiver of the session that
     /// sent it: a range of the shared page holding a reference of its own, which goes back
-    /// when the view drops. `None` when the page cannot be viewed.
+    /// when the view drops. `None` when the page cannot be viewed, and for a buffer that is the
+    /// transport's and not the application's (a copy made only to cross the links): the receiver
+    /// is then handed [`Self::bytes`].
     fn receiver_view(&self) -> Option<crate::link::RxBytes>;
 
     /// Take the reference one REMOTE receiver will release and return the reservation that

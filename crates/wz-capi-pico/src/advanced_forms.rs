@@ -201,6 +201,7 @@ mod tests {
             engine: shared.as_engine(),
             mode: WhatAmI::Peer,
             hlc: NodeHlc::default(),
+            time: crate::last_timestamp::SessionTime::new(),
         };
         let forms =
             PicoSubscriberForms::new(&session, DeclaredKeyexpr::literal_only(key.to_owned()));

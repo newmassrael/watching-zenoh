@@ -1,0 +1,12 @@
+image ubuntu22
+clang
+cmake
+libbz2-dev
+libclang-dev
+liblz4-dev
+libsnappy-dev
+libzstd-dev
+perl
+pkg-config
+python3-yaml
+zlib1g-dev

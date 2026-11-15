@@ -56,7 +56,7 @@ fn fresh_engine() -> (
         Arc::new(LifecycleRecordingDriver::default());
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
 }
 

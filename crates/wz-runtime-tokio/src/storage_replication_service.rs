@@ -235,7 +235,7 @@ impl DigestPublisher {
         // that builds the digest, and a cycle that finds it gone ends the task.
         let storage = Arc::downgrade(&state);
         drop(state);
-        let task = handle.spawn(async move {
+        let task = handle.spawn(crate::runtime_pool::in_caller_span(async move {
             // Align to the interval boundaries the whole fleet shares, rather
             // than to whenever this process happened to start (zenoh
             // core.rs:161-191). Read once, before the loop: from here on the
@@ -289,7 +289,7 @@ impl DigestPublisher {
                     clock.sleep(rest).await;
                 }
             }
-        });
+        }));
         Self { task }
     }
 }

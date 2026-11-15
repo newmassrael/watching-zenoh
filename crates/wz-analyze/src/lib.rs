@@ -24,6 +24,14 @@ use wz_capture::{CaptureError, Dissection};
 use wz_tls_record::keylog::KeyLog;
 use wz_tls_record::quic::connection::SequenceKey;
 
+// The analyzer shows everything a capture carries, and the slot profile reads less of it: a
+// received extension chain keeps only the entries of the extensions the build reads (an unknown
+// one is judged by its header and dropped), and every bounded table stops at its cap. A build
+// that unified that profile into this one would list less than the wire held and say nothing,
+// so it is refused by name. The passive reader itself builds on every profile; the refusal is
+// this reader's.
+wz_session_core::heap_session_profile!("wz-analyze";);
+
 /// How the report should be rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
@@ -627,7 +635,7 @@ EXT BODIES READ:
           Open/multi_link_syn, Push/timestamp, Put/source_info,
           Query/query_body, Query/source_info, Request/timestamp,
           Response/responder_id, Response/timestamp,
-          ResponseFinal/responder_id, ResponseFinal/timestamp
+          ResponseFinal/timestamp
     Z64   Declare/node_id, Declare/qos,
           DeclareQueryable/queryable_info, Fragment/qos, Frame/qos,
           Init/patch, Interest/node_id, Interest/qos, Join/patch,
@@ -7866,15 +7874,15 @@ mod tests {
     fn the_field_listing_resolves_a_key_declared_on_the_sessions_other_link() {
         const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
-        const ID: u64 = 7;
+        const ID: u16 = 7;
 
-        fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+        fn declare_kexpr(id: u16, suffix: &str) -> Vec<u8> {
             wz_codecs::lent::Declare {
                 body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                     wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
-                        id,
+                        id: u64::from(id),
                         keyexpr: multilink_sender_space(0, Some(suffix)),
                         extensions: None,
                     },
@@ -8117,7 +8125,7 @@ mod tests {
 
     /// A `WireExpr` in the SENDER's space (`M = 1`).
     pub(crate) fn multilink_sender_space(
-        id: u64,
+        id: u16,
         suffix: Option<&str>,
     ) -> wz_codecs::lent::Wireexpr<'_> {
         wz_codecs::lent::Wireexpr {
@@ -8138,7 +8146,7 @@ mod tests {
     /// `MsgPut` body is `put_declaring`'s unchanged, because the `0x40` header
     /// flag and the encoding group travel together and a body without them
     /// walks as `unparsed` too.
-    pub(crate) fn multilink_push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn multilink_push_by_id(id: u16, payload: &[u8]) -> Vec<u8> {
         wz_codecs::lent::Push {
             header: wz_codecs::lent::Push::default().header,
             keyexpr: multilink_sender_space(id, None),
@@ -8782,11 +8790,13 @@ mod message_name_tests {
         // `0x04` is the KeepAlive MID with every flag clear; the walker names
         // it KeepAlive and so does the session.
         let stream = framed(&[0x04]);
+        // The chain is named by the decoder's own alias: its form is the storage
+        // profile's, which a build this crate shares can change.
         let honest = frame_at(
             0,
             Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_message(sliced(&stream, &honest), &honest) {
@@ -8812,7 +8822,7 @@ mod message_name_tests {
                 // carries, so the stand-in is the ordinary one.
                 session: false,
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_message(sliced(&stream, &crossed), &crossed) {
@@ -8921,7 +8931,7 @@ mod message_name_tests {
             0,
             Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         // The truthful pairing FIRST: a check that refused everything would
@@ -8937,7 +8947,7 @@ mod message_name_tests {
                 reason: 0,
                 session: false,
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_plaintext(&keepalive, &crossed) {
@@ -9765,7 +9775,7 @@ mod quic_pass_tests {
 
         const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
-        const ID: u64 = 7;
+        const ID: u16 = 7;
         const PORTS: (u16, u16) = (50000, 7447);
 
         /// A framed unit on a QUIC stream: `u16` little-endian length, then the
@@ -9776,13 +9786,13 @@ mod quic_pass_tests {
             out
         }
 
-        fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+        fn declare_kexpr(id: u16, suffix: &str) -> Vec<u8> {
             wz_codecs::lent::Declare {
                 body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                     wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
-                        id,
+                        id: u64::from(id),
                         keyexpr: multilink_sender_space(0, Some(suffix)),
                         extensions: None,
                     },

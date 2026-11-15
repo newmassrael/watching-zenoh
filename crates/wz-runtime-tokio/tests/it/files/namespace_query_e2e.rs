@@ -165,7 +165,7 @@ async fn query_reply_round_trips_under_shared_namespace() {
                     move |view: &dyn ReplyView| {
                         replies_cb.lock().unwrap().push(view.payload().to_vec());
                     },
-                    move |_rid: u64| {
+                    move |_rid| {
                         finals_cb.fetch_add(1, Ordering::SeqCst);
                     },
                 ) {

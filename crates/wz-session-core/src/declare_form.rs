@@ -19,7 +19,7 @@ use alloc::string::String;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetractionKey {
     /// The prefix's mapping id, or `0` for a literal.
-    pub mapping_id: u64,
+    pub mapping_id: crate::wire_id::ExprId,
     /// The rest of the key after the prefix; the whole key when `mapping_id` is `0`.
     pub suffix: String,
 }
@@ -36,7 +36,7 @@ pub struct RetractionKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InterestForm {
     /// The keyexpr declaration the Interest names, `0` for none.
-    pub mapping_id: u64,
+    pub mapping_id: crate::wire_id::ExprId,
     /// What follows the declared prefix; the whole literal when `mapping_id` is 0.
     pub suffix: Option<String>,
     /// Ask the peer to answer aggregated (see

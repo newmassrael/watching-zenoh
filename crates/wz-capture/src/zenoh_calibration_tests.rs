@@ -455,17 +455,20 @@ fn render(c: &Calibration) -> String {
     use core::fmt::Write as _;
     let mut out = String::new();
     let p = &c.params;
-    out.push_str(
+    let _ = write!(
+        out,
         "// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial\n\
          // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael\n\n\
          //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.\n\
          //!\n\
-         //! The counts of the corpus and model 6's parameters computed from them\n\
-         //! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.11), written by\n\
+         //! The counts of the corpus and model {}'s parameters computed from them\n\
+         //! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.14), written by\n\
          //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which\n\
          //! fails when this file is not what the corpus gives. Regenerate with\n\
          //! `scripts/regen-calibration.sh` and commit the result with the capture\n\
-         //! that moved it. The counts are those of a build that opens lz4.\n",
+         //! or the reader change that moved it. The counts are those of a build\n\
+         //! that opens lz4.\n",
+        model::MODEL
     );
     let _ = writeln!(
         out,
@@ -519,7 +522,8 @@ fn render(c: &Calibration) -> String {
     }
     let _ = writeln!(
         out,
-        "\n/// Model 6's parameters.\npub const PARAMS: Params = Params {{\n    units: {},\n    framing: {},\n    cookie: {},\n    roles: {},\n    sn: {},\n    front: {},\n}};",
+        "\n/// Model {}'s parameters.\npub const PARAMS: Params = Params {{\n    units: {},\n    framing: {},\n    cookie: {},\n    roles: {},\n    sn: {},\n    front: {},\n}};",
+        model::MODEL,
         measured_lit(&p.units, "UNITS_CELLS"),
         measured_lit(&p.framing, "FRAMING_CELLS"),
         derived_lit(&p.cookie, "COOKIE_CELLS"),

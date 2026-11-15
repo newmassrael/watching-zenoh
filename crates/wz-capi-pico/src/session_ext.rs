@@ -12,6 +12,10 @@
 //!   and a `listen` config forces peer) and which nothing downstream of the open
 //!   can recover — a face records the PEER's role, not ours;
 //! - the session's CLOCK, for the same reason: it is built once at the open;
+//! - the LAST TIME the session gave, a program (`z_timestamp_new`) or its
+//!   advanced publisher, which pico keeps in the session (`_last_timestamp`) so
+//!   that the session's stamps strictly increase whichever clock they were read
+//!   from;
 //! - with `connectivity`, the session's CONNECTIVITY listeners, which pico keeps in
 //!   the session itself (`vendor/zenoh-pico/src/api/connectivity.c` @
 //!   `_z_connectivity_transport_listener_intmap_insert(&session->_connectivity_transport_event_listeners, id,`)
@@ -20,7 +24,7 @@
 //!   session (`_admin_space_queryable_id`) and clears with it.
 
 #[cfg(feature = "connectivity")]
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 #[cfg(feature = "connectivity")]
 use wz_capi_port::SessionEngine;
@@ -39,6 +43,9 @@ pub(crate) struct PicoSessionExt {
     /// `z_timestamp_new` stamps with once a clock source is registered.
     #[cfg(any(feature = "advanced", feature = "clock-source"))]
     pub(crate) hlc: NodeHlc,
+    /// Every time this session gives, through `z_timestamp_new` and through its advanced
+    /// publisher: the last one given, which the session's clock learns.
+    pub(crate) time: crate::last_timestamp::SessionTime,
     /// The transport and link listeners a C program declared on this session.
     #[cfg(feature = "connectivity")]
     pub(crate) connectivity: Arc<Connectivity>,
@@ -85,10 +92,17 @@ impl PicoSessionExt {
         // build.
         #[cfg(not(any(feature = "advanced", feature = "clock-source")))]
         let _ = zid;
+        #[cfg(any(feature = "advanced", feature = "clock-source"))]
+        let hlc = NodeHlc::for_node(zid, mode, TimestampingEnabled::all(true));
+        #[cfg(any(feature = "advanced", feature = "clock-source"))]
+        let time = crate::last_timestamp::SessionTime::new().learned_by(hlc.clone());
+        #[cfg(not(any(feature = "advanced", feature = "clock-source")))]
+        let time = crate::last_timestamp::SessionTime::new();
         Self {
             mode,
             #[cfg(any(feature = "advanced", feature = "clock-source"))]
-            hlc: NodeHlc::for_node(zid, mode, TimestampingEnabled::all(true)),
+            hlc,
+            time,
             #[cfg(feature = "connectivity")]
             connectivity,
             #[cfg(feature = "connectivity")]

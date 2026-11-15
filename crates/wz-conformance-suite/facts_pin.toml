@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The protocol facts of deploy/wz-config.toml, pinned at the catalogue version they hold at.
+#
+# A fact is outside the conformance statement's digest because the ABI and `catalog_version`
+# fix it; that holds only while a fact never changes without the version changing with it. This
+# file is the fixed point that makes it a check: each row is a catalogue version and the digest of
+# the facts' canonical form (`facts_canonical` in src/answer.rs) at that version, in increasing
+# version, and the last row is the declaration's now. A change of a fact's value with the
+# version left where it is fails the crate's test; so does a new version without a row for it.
+# Rows are only ever added.
+
+[[pin]]
+catalog_version = 2
+facts_digest = "sha256:d761ba330c98c5400d1480f6a5e7877698e1c26b5cd7a7d6d8bc5cd8f23699a2"

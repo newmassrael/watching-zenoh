@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- A batch of a session that negotiated compression: the one-byte batch
+     header, then the batch's payload, to the end of the unit.
+
+     Upstream writes the header into the batch buffer right after the stream
+     length (`io/zenoh-transport/src/common/batch.rs` @
+     `let _ = writer.write_u8(h.as_u8());`), with the one flag of
+     `io/zenoh-transport/src/common/batch.rs` @ `const COMPRESSION: u8 = 1; // 1 << 0`:
+
+       bit 0    : compression  the payload is an LZ4 block
+       bit 1..7 : reserved
+
+     and clears the flag when the compressed form is not smaller, so the
+     payload is then the batch's transport messages as they are. What the
+     payload holds under the flag is an LZ4 block, a transform and not a
+     layout; it is undone by the reader (`compression.rs` in
+     wz-session-core), and the messages it gives back are read by their own
+     documents.
+
+     The header is counted inside the batch, whose size is upstream's
+     `BatchSize`, a u16, so no payload reaches the bound stated here. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="little" name="compressed_batch">
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="compression" bit="0"/>
+    </sce:flags>
+    <sce:field id="payload" sce:type="bytes" sce:byte="1" sce:bit-size="tail"
+               sce:max-size="65535"/>
+  </datamodel>
+</scxml>

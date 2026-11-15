@@ -194,10 +194,9 @@ pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
 ///
 /// Same `Clone`-vs-codec rationale as [`TimestampHint`]. The wz wrapper
 /// preserves the zenoh-pico `_z_encoding_t` semantic decomposition: a
-/// VLE-packed id word whose low bit gates an optional UTF-8 schema
-/// string.
+/// VLE-packed id word whose low bit gates an optional schema.
 ///
-/// The heap profile's value (`schema` is a `String`); the slot profile reads an
+/// The heap profile's value (`schema` is owned bytes); the slot profile reads an
 /// encoding where its frame lies.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -207,10 +206,15 @@ pub struct EncodingHint {
     /// `_z_encoding_t._id` (packed shape per RFC §5.B `encoding`
     /// codec).
     pub packed_id: u32,
-    /// Optional UTF-8 schema string. Present iff the codec decoded a
-    /// non-empty schema (i.e. `packed_id & 0x1 == 1` and the inline
-    /// `<u8;z16>` block parsed).
-    pub schema: Option<String>,
+    /// The schema's bytes. Present iff the codec decoded a non-empty schema
+    /// (i.e. `packed_id & 0x1 == 1` and the inline `<u8;z8>` block parsed).
+    ///
+    /// Bytes, not text: upstream holds the schema as a byte slice and reads it
+    /// without a UTF-8 check (`commons/zenoh-protocol/src/core/encoding.rs` @
+    /// `pub schema: Option<ZSlice>,`), so a schema that is not UTF-8 is carried
+    /// through a session as it came. Each API preset decides how it shows one
+    /// ([`crate::encoding_hint`]).
+    pub schema: Option<alloc::vec::Vec<u8>>,
 }
 
 #[cfg(feature = "alloc")]
@@ -222,14 +226,23 @@ impl EncodingHint {
     ) -> Self {
         Self {
             packed_id: encoding.packed_id,
-            // The codec holds the schema in its profile's text container
+            // The codec holds the schema in its profile's byte container
             // within the schema's bound; copy it into this AP hint's alloc
-            // `Option<String>` at the projection boundary.
+            // `Option<Vec<u8>>` at the projection boundary.
             schema: encoding
                 .schema
                 .as_ref()
-                .map(|s| String::from(s.as_text().into_inner())),
+                .map(|s| s.as_bytes().into_inner().to_vec()),
         }
+    }
+
+    /// The schema as text, when it is UTF-8; `None` when there is none or it
+    /// is not UTF-8. For a reader that can only show text and says so when it
+    /// cannot (a capture row writes `schema_hex` then).
+    pub fn schema_text(&self) -> Option<&str> {
+        self.schema
+            .as_deref()
+            .and_then(|s| core::str::from_utf8(s).ok())
     }
 
     /// [`Self::from_codec`] over the encoding as it is decoded, where its frame
@@ -238,7 +251,10 @@ impl EncodingHint {
     pub fn from_view(encoding: &wz_codecs::lent::Encoding<'_>) -> Self {
         Self {
             packed_id: encoding.packed_id,
-            schema: encoding.schema.map(|s| String::from(s.into_inner())),
+            schema: encoding
+                .schema
+                .as_ref()
+                .map(|s| s.as_bytes().into_inner().to_vec()),
         }
     }
 
@@ -727,7 +743,7 @@ impl crate::sink::SampleView for Sample {
             .as_ref()
             .map(|timestamp| (timestamp.time, timestamp.zid.as_slice()))
     }
-    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         self.encoding
             .as_ref()
             .map(|encoding| (encoding.packed_id, encoding.schema.as_deref()))
@@ -1028,6 +1044,28 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// A schema that is not UTF-8 crosses the codec both ways as its bytes:
+    /// the hint encodes it, the wire carries it, and the decode reads it back
+    /// unchanged, as upstream reads a schema
+    /// (`commons/zenoh-codec/src/core/encoding.rs` @ `let zodec = Zenoh080Bounded::<u8>::new();`).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_schema_that_is_not_utf8_crosses_the_codec_unchanged() {
+        let raw: &[u8] = &[0xFF, 0xFE, b'x'];
+        let hint = crate::encoding_hint::hint_from_schema_bytes(4, raw);
+        let wire = hint
+            .to_codec()
+            .expect("a three-byte schema fits")
+            .encode_to_vec();
+        let decoded =
+            wz_codecs::lent::Encoding::decode(&mut sce_forge_runtime::codec::SceCursor::new(&wire))
+                .expect("upstream accepts a schema that is not UTF-8, and so does this decode");
+        let back = EncodingHint::from_view(&decoded);
+        assert_eq!(back, hint);
+        assert_eq!(back.schema.as_deref(), Some(raw));
+        assert_eq!(back.schema_text(), None);
+    }
+
     #[test]
     fn sample_kind_numeric_repr_matches_zenoh_pico() {
         // zenoh-pico constants.h:
@@ -1093,7 +1131,7 @@ mod tests {
         assert_eq!(ts.zid, vec![0x11, 0x22, 0x33]);
         let enc = sample.encoding.unwrap();
         assert_eq!(enc.packed_id, 5);
-        assert_eq!(enc.schema.as_deref(), Some("application/json"));
+        assert_eq!(enc.schema_text(), Some("application/json"));
         assert_eq!(sample.qos.unwrap().raw, 0b0001_1010);
         assert_eq!(sample.attachment.unwrap(), b"meta");
         let si = sample.source_info.unwrap();
@@ -1194,11 +1232,11 @@ mod tests {
         let codec: wz_codecs::encoding::EncodingOwned = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x1234,
             schema_len: Some(4),
-            schema: Some(crate::codec_owned::owned_string("text").unwrap()),
+            schema: Some(crate::codec_owned::owned_bytes(b"text").unwrap()),
         };
         let hint = EncodingHint::from_codec(&codec);
         assert_eq!(hint.packed_id, 0x1234);
-        assert_eq!(hint.schema.as_deref(), Some("text"));
+        assert_eq!(hint.schema.as_deref(), Some(&b"text"[..]));
     }
 
     #[test]

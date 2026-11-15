@@ -82,7 +82,7 @@ pub fn decl_kexpr(id: u64, keyexpr: &str) -> DeclKexprOwned {
     .unwrap()
 }
 
-pub fn decl_subscriber(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclSubscriberOwned {
+pub fn decl_subscriber(id: u64, mapping_id: u16, suffix: Option<&str>) -> DeclSubscriberOwned {
     let suffix_len = suffix.map(|s| s.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
@@ -144,7 +144,7 @@ pub fn interest_subscriber(
 
 pub fn decl_subscriber_nonlocal(
     id: u64,
-    mapping_id: u64,
+    mapping_id: u16,
     suffix: Option<&str>,
 ) -> DeclSubscriberOwned {
     let suffix_len = suffix.map(|s| s.len() as u64);
@@ -182,7 +182,7 @@ pub fn undecl_subscriber(id: u64) -> UndeclSubscriberOwned {
     .expect("undecl_subscriber owns no borrowed data")
 }
 
-pub fn decl_queryable(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclQueryableOwned {
+pub fn decl_queryable(id: u64, mapping_id: u16, suffix: Option<&str>) -> DeclQueryableOwned {
     let suffix_len = suffix.map(|s| s.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
@@ -208,7 +208,7 @@ pub fn decl_queryable(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclQue
 /// (`dispatcher/resource.rs:625`).
 pub fn decl_queryable_nonlocal(
     id: u64,
-    mapping_id: u64,
+    mapping_id: u16,
     suffix: Option<&str>,
 ) -> DeclQueryableOwned {
     let suffix_len = suffix.map(|s| s.len() as u64);
@@ -237,7 +237,7 @@ pub fn undecl_queryable(id: u64) -> UndeclQueryableOwned {
     .expect("undecl_queryable owns no borrowed data")
 }
 
-pub fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOwned {
+pub fn decl_token(id: u64, mapping_id: u16, suffix: Option<&str>) -> DeclTokenOwned {
     let suffix_len = suffix.map(|s| s.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
@@ -259,7 +259,7 @@ pub fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOw
 /// the mapping id names OUR space. Sibling of [`decl_subscriber_nonlocal`] /
 /// [`decl_queryable_nonlocal`]; the liveliness declarer, subscriber and get
 /// planes all ingest `DeclToken`, so one fixture serves the three.
-pub fn decl_token_nonlocal(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOwned {
+pub fn decl_token_nonlocal(id: u64, mapping_id: u16, suffix: Option<&str>) -> DeclTokenOwned {
     let suffix_len = suffix.map(|s| s.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {

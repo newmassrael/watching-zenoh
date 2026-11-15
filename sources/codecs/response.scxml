@@ -99,7 +99,7 @@
       <sce:flag name="M"   bit="6"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
-    <sce:field id="request_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:field id="request_id" sce:type="uint32" sce:byte="1" sce:bit-size="vle"/>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
     <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
                    sce:present-if="header.Z"

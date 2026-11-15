@@ -76,8 +76,19 @@ jobs:
           restore-keys: |
             fuzz-corpus-pcap-
 
+      # The two workers' milestone lines come out as they are written, with
+      # the seconds since the run began: a worker's `INITED` line says how long
+      # replaying the restored corpus took, which `-max_total_time` does not
+      # bound (scripts/fuzz.sh). Open-debt item 939: three nights were
+      # cancelled at 45 minutes with nothing of the workers in the log.
       - name: Fuzz ${{ matrix.target }}
         run: bash scripts/fuzz.sh run "${{ matrix.target }}" "$WZ_FUZZ_SECONDS" 2
+
+      # The end of each worker's fuzz-N.log, which libFuzzer copies out only
+      # when the worker exits, so a cancelled run shows it only here.
+      - name: The end of each worker's log
+        if: always()
+        run: bash scripts/fuzz.sh logs "${{ matrix.target }}" 80
 
       - name: Save the corpus of ${{ matrix.target }}
         # From the default branch only, where the schedule runs: an entry a
@@ -88,8 +99,11 @@ jobs:
           path: crates/target/fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
 
-      - name: Upload what crashed
-        if: failure()
+      # On every night and not only a red one: libFuzzer also writes the
+      # slowest input past ten seconds there (`slow-unit-*`), and a night that
+      # ran out of time is cancelled, which `failure()` does not take in.
+      - name: Upload what crashed or ran slow
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-crash-${{ matrix.target }}

@@ -56,8 +56,10 @@
 //! than firing per-Hello, which would have been a divergence in wz's favour.
 //! The order is the session's too, so both engines hand the peers over the same way.
 
-use std::ffi::c_void;
-use std::net::IpAddr;
+use core::ffi::c_void;
+use core::net::IpAddr;
+
+use crate::prelude::*;
 
 use wz_session_core::scouting_host::{
     parse_multicast_locator, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
@@ -91,9 +93,11 @@ pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
 /// otherwise. A scout needs no session, so the window is a plane beside the engine and not one of
 /// its methods; each engine's is the host that pumps the session's window rules over its sockets.
 mod window {
-    use std::net::IpAddr;
+    use core::net::IpAddr;
 
     use wz_session_core::scouting_host::ScoutedHello;
+
+    use crate::prelude::*;
 
     /// Scout `group:port` for `budget_ms`, handing each peer that answered to `on_hello` after the
     /// window, last responder first; the number delivered.
@@ -121,7 +125,8 @@ mod window {
         wz_capi_core::scouting::scout_first(group, port, what, zid, budget_ms)
     }
 
-    #[cfg(not(feature = "engine-tokio"))]
+    // The cooperative engine on a host with `scout`: a socket for each interface.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
     pub(super) fn run(
         group: IpAddr,
         port: u16,
@@ -141,7 +146,7 @@ mod window {
         )
     }
 
-    #[cfg(not(feature = "engine-tokio"))]
+    #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
     pub(super) fn first(
         group: IpAddr,
         port: u16,
@@ -157,6 +162,31 @@ mod window {
             zid,
             budget_ms,
         )
+    }
+
+    // The cooperative engine with `scout-mcu` alone: one datagram socket of the stack its links
+    // run on (`crate::coop_host`), as zenoh-pico scouts where it has no interface iterator.
+    #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
+    pub(super) fn run(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+        on_hello: impl FnMut(&ScoutedHello),
+    ) -> usize {
+        crate::coop_host::run_scout(group, port, what, zid, budget_ms, on_hello)
+    }
+
+    #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
+    pub(super) fn first(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+    ) -> Option<ScoutedHello> {
+        crate::coop_host::scout_first(group, port, what, zid, budget_ms)
     }
 }
 
@@ -190,7 +220,7 @@ impl HelloState {
             locators,
             locators_loan: z_loaned_string_array_t {
                 handle,
-                _pad: [std::ptr::null_mut(); 3],
+                _pad: [core::ptr::null_mut(); 3],
             },
         })
     }
@@ -219,8 +249,8 @@ pub struct z_moved_hello_t {
 impl z_owned_hello_t {
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 6],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 6],
         }
     }
 }
@@ -266,7 +296,7 @@ pub unsafe extern "C" fn zp_hello_locators(
 ) -> *const z_loaned_string_array_t {
     match hello_state(hello) {
         Some(state) => &state.locators_loan as *const z_loaned_string_array_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -288,7 +318,7 @@ pub unsafe extern "C" fn z_hello_locators(
     let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators.to_strings());
     *out = z_owned_string_array_t {
         handle: Box::into_raw(StringArrayState::new(items)) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 3],
+        _pad: [core::ptr::null_mut(); 3],
     };
 }
 
@@ -364,7 +394,7 @@ pub unsafe extern "C" fn z_hello_take(dst: *mut z_owned_hello_t, src: *mut z_mov
         return;
     }
     (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = [std::ptr::null_mut(); 6];
+    (*dst)._pad = [core::ptr::null_mut(); 6];
     (*src)._this = z_owned_hello_t::null_value();
 }
 
@@ -387,7 +417,7 @@ pub unsafe extern "C" fn z_hello_clone(
     let cloned = HelloState::new(state.zid, state.whatami, state.locators.to_strings());
     *dst = z_owned_hello_t {
         handle: Box::into_raw(cloned) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 6],
+        _pad: [core::ptr::null_mut(); 6],
     };
     crate::result::Z_OK
 }
@@ -430,7 +460,7 @@ pub struct z_moved_closure_hello_t {
 impl z_owned_closure_hello_t {
     pub(crate) fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -710,7 +740,7 @@ pub unsafe extern "C" fn z_scout(
         if let Some(call) = user_call {
             let mut loaned = z_loaned_hello_t {
                 handle: hello as *mut HelloState as *mut c_void,
-                _pad: [std::ptr::null_mut(); 6],
+                _pad: [core::ptr::null_mut(); 6],
             };
             call(&mut loaned as *mut z_loaned_hello_t, user_ctx);
         }
@@ -784,7 +814,7 @@ pub unsafe extern "C" fn z_hello_take_from_loaned(
         let rc = z_hello_clone(dst, src as *const z_loaned_hello_t);
         if rc == crate::result::Z_OK {
             // Empty the source, as every `take_from_loaned` in this crate does.
-            (*src).handle = std::ptr::null_mut();
+            (*src).handle = core::ptr::null_mut();
         }
         rc
     })
@@ -804,7 +834,7 @@ pub unsafe extern "C" fn z_closure_hello(
     closure: *mut z_owned_closure_hello_t,
     call: z_closure_hello_callback_t,
     drop: crate::pubsub::z_closure_drop_callback_t,
-    context: *mut std::ffi::c_void,
+    context: *mut core::ffi::c_void,
 ) -> ZResult {
     crate::ffi::guarded(|| {
         if closure.is_null() {
@@ -860,7 +890,7 @@ mod tests {
         );
         let loaned = z_loaned_hello_t {
             handle: (&*state) as *const HelloState as *mut c_void,
-            _pad: [std::ptr::null_mut(); 6],
+            _pad: [core::ptr::null_mut(); 6],
         };
         unsafe {
             let locs = zp_hello_locators(&loaned);

@@ -18,14 +18,23 @@
 //! * `advanced_pubsub` and `callback_drop_on_undeclare` are linked with `tests/utils/tcp_proxy.c`
 //!   and built with `Z_ADVANCED_PUBSUB_TEST_USE_TCP_PROXY`, as the CMake `if(UNIX)` arm does.
 //!
-//! Three programs are not run, and each is held by a test of its own that says why. They reach
-//! into zenoh-pico's PRIVATE layer: `_z_*` functions the library happens to export, and the
-//! fields of its structs (`sample->payload`), which a drop-in whose handles are opaque does not
-//! have. `*_reaches_pico_internals_wz_does_not_export` pins the exact set of symbols each one
-//! cannot link without, so the day wz exports one the test reds and the program moves to the run
-//! list. The control (`WZ_PICO_API_ORACLE=1`, which links the real library) passes `source_info`
-//! and `admin_space`; `timestamp` is built upstream against a library compiled with
-//! `Z_TEST_HOOKS`, which the control library is not, so it fails the control too.
+//! Three programs are not run against wz, and each is held by a test of its own that says why.
+//! They reach into zenoh-pico's PRIVATE layer: `_z_*` functions the library happens to export,
+//! and the fields of its structs (`sample->payload`, a `_z_session_t` built by hand), which a
+//! drop-in whose handles are opaque does not have. `*_reaches_pico_internals_wz_does_not_export`
+//! pins the exact set of symbols each one cannot link without, so the day wz exports one the test
+//! reds and the program moves to the run list.
+//!
+//! Under the control (`WZ_PICO_API_ORACLE=1`, which links the real library) the same three tests
+//! hold what the real library does with the program, so the verdict that the reach is private
+//! and not a defect of the program is a run and not a remembered measurement. `source_info` and
+//! `admin_space` are `BUILD_INTEGRATION` targets and run beside a zenohd as `api.sh` runs them.
+//! `timestamp` is not: upstream's `CMakeLists.txt` builds it under `BUILD_TESTING`, the arm that
+//! also compiles the library itself with `Z_TEST_HOOKS=1`, and calls
+//! `_z_timestamp_set_time_since_epoch_override`, which exists only in such a library. The
+//! integration-arm library is configured from `examples/` with pico as a subproject, where that
+//! block of pico's `CMakeLists.txt` does not run, so it lacks exactly that symbol and the control
+//! pins it.
 //!
 //! One program carries a correction. `encoding`'s `test_encoding_with_id` checks `e2` after it
 //! dropped it, where it means `e4`. The real library passes the unmodified text by accident:
@@ -36,11 +45,15 @@
 //! being skipped.
 //!
 //! A program built against a header arm that lacks its feature compiles to a stub `main` that
-//! prints `Missing config token to build this test` and exits 0. That is a pass nothing ran, so
-//! it is refused here: the leg reds and names the missing token.
+//! exits 0. That is a pass nothing ran, so it is refused here, two ways. Three stubs print
+//! `Missing config token to build this test`, and the leg reds and names the token. Five routed
+//! ones (`liveliness`, `matching`, `connectivity`, `queryable`, `source_info`) print nothing, so
+//! a routed program is also required to call `z_open`, read off the executable with `nm`: every
+//! routed body opens a session and no stub does.
 //!
-//! Every name carries `zenohd` so Layer E's `--skip zenohd` sweep leaves the file to Layer Z,
-//! which provisions the router, including the programs that need none: the file is one lane.
+//! Every ignored name carries `zenohd` so Layer E's `--skip zenohd` sweep leaves the file to
+//! Layer Z, which provisions the router, including the programs that need none: the file is one
+//! lane.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -169,6 +182,11 @@ fn run_upstream_test(name: &str, build: &Build, routed: bool) {
     let compiled = compile_upstream_test(name, build, against_wz())
         .unwrap_or_else(|diag| panic!("upstream {name}.c does not link (integration arm)\n{diag}"));
     let out = if routed {
+        assert!(
+            opens_a_session(&compiled.exe),
+            "upstream {name}.c compiled to a `main` that never calls `z_open`: the integration \
+             arm lacks a switch its body is gated on, so nothing would run beside the router"
+        );
         let (_router, port) = spawn_zenohd_multicast_scouting_on_any_interface(
             "zenohd for an upstream pico API test",
         );
@@ -203,6 +221,32 @@ fn run(exe: &Path, locator: Option<&str>) -> std::process::Output {
         .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()))
 }
 
+/// Whether the program as compiled calls `z_open`. The silent stubs leave neither output nor
+/// status to tell them from a body that ran; the executable's undefined symbols do.
+fn opens_a_session(exe: &Path) -> bool {
+    let out = Command::new("nm")
+        .arg("--undefined-only")
+        .arg(exe)
+        .output_bounded()
+        .unwrap_or_else(|e| panic!("spawn nm on {}: {e}", exe.display()));
+    assert!(
+        out.status.success(),
+        "nm failed on {}:\n{}",
+        exe.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    references_symbol(&String::from_utf8_lossy(&out.stdout), "z_open")
+}
+
+/// Whether `nm --undefined-only` output names `symbol`, by its exact name: `z_open_options_default`
+/// is not `z_open`, and a versioned reference reads `NAME@VERSION`.
+fn references_symbol(listing: &str, symbol: &str) -> bool {
+    listing
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .any(|name| name.split('@').next() == Some(symbol))
+}
+
 /// The names a linker reports as `undefined reference to `NAME'`.
 fn undefined_symbols(diag: &str) -> BTreeSet<String> {
     diag.lines()
@@ -213,23 +257,52 @@ fn undefined_symbols(diag: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Require that wz's build cannot link `name` for exactly the private symbols `expected` names.
-fn assert_needs_only(name: &str, build: &Build, expected: &[&str]) {
+/// Require that `name` cannot link for exactly the symbols `expected` names: against wz's build
+/// when `against_wz`, against the real library of the integration arm otherwise.
+fn assert_cannot_link(name: &str, build: &Build, against_wz: bool, expected: &[&str]) {
     let expected: BTreeSet<String> = expected.iter().map(|s| (*s).to_owned()).collect();
-    match compile_upstream_test(name, build, true) {
-        Ok(_) => panic!(
+    match compile_upstream_test(name, build, against_wz) {
+        Ok(_) if against_wz => panic!(
             "upstream {name}.c now links against wz: move it to the run list \
              (`upstream_tests!`) and delete its pin"
+        ),
+        Ok(_) => panic!(
+            "upstream {name}.c now links against the real integration-arm library, so that \
+             library carries what the pin says it lacks: run the program as this test's control \
+             (`Control::RunsBesideAZenohd`) and delete the control's pin"
         ),
         Err(diag) => {
             let got = undefined_symbols(&diag);
             assert_eq!(
-                got, expected,
-                "upstream {name}.c cannot link for a different set of symbols than the one \
-                 pinned; a symbol wz now exports belongs off the list, a new one needs a reading\n\
-                 {diag}"
+                got,
+                expected,
+                "upstream {name}.c cannot link against {} for a different set of symbols than \
+                 the one pinned; a symbol now exported belongs off the list, a new one needs a \
+                 reading\n{diag}",
+                if against_wz { "wz" } else { "the real library" }
             );
         }
+    }
+}
+
+/// What the control does with a program wz cannot link.
+enum Control {
+    /// The real library links it, and it runs beside a zenohd as `api.sh` runs it.
+    RunsBesideAZenohd,
+    /// The real library of the integration arm cannot link it either, for exactly these symbols.
+    CannotLink(&'static [&'static str]),
+}
+
+/// A program wz cannot link: against wz, the pin of the private symbols `wz_lacks` names; under
+/// the control, what `control` says the real library does with it.
+fn pinned(name: &str, build: &Build, wz_lacks: &[&str], control: Control) {
+    if against_wz() {
+        assert_cannot_link(name, build, true, wz_lacks);
+        return;
+    }
+    match control {
+        Control::RunsBesideAZenohd => run_upstream_test(name, build, true),
+        Control::CannotLink(lacks) => assert_cannot_link(name, build, false, lacks),
     }
 }
 
@@ -273,10 +346,11 @@ upstream_tests! {
 fn upstreams_source_info_test_reaches_pico_internals_wz_does_not_export_zenohd_lane() {
     // It reads the payload by the private `_z_bytes_*` accessors, off the `_z_sample_t` it is
     // handed as a struct.
-    assert_needs_only(
+    pinned(
         "z_api_source_info_test",
         &Build::default(),
         &["_z_bytes_len", "_z_bytes_to_buf"],
+        Control::RunsBesideAZenohd,
     );
 }
 
@@ -286,7 +360,7 @@ fn upstreams_source_info_test_reaches_pico_internals_wz_does_not_export_zenohd_l
 fn upstreams_admin_space_test_reaches_pico_internals_wz_does_not_export_zenohd_lane() {
     // It builds its keyexprs and collects the replies with pico's private list, slist, string
     // and keyexpr helpers.
-    assert_needs_only(
+    pinned(
         "z_api_admin_space_test",
         &Build::default(),
         &[
@@ -300,6 +374,7 @@ fn upstreams_admin_space_test_reaches_pico_internals_wz_does_not_export_zenohd_l
             "_z_slist_value",
             "_z_strstr",
         ],
+        Control::RunsBesideAZenohd,
     );
 }
 
@@ -308,8 +383,9 @@ fn upstreams_admin_space_test_reaches_pico_internals_wz_does_not_export_zenohd_l
 #[ignore = "compiles one of upstream's zenoh-pico API tests against wz; run by run-ci Layer Z"]
 fn upstreams_timestamp_test_reaches_pico_internals_wz_does_not_export_zenohd_lane() {
     // It builds a pico session struct itself and overrides pico's clock through a hook that
-    // exists only in a library compiled with `Z_TEST_HOOKS`.
-    assert_needs_only(
+    // exists only in a library compiled with `Z_TEST_HOOKS`, which the integration-arm library
+    // is not (see the module doc): the control lacks the hook and nothing else.
+    pinned(
         "z_api_timestamp_test",
         &WITH_TEST_HOOKS,
         &[
@@ -320,5 +396,25 @@ fn upstreams_timestamp_test_reaches_pico_internals_wz_does_not_export_zenohd_lan
             "_z_timestamp_ntp64_from_time",
             "_z_timestamp_set_time_since_epoch_override",
         ],
+        Control::CannotLink(&["_z_timestamp_set_time_since_epoch_override"]),
     );
+}
+
+// wz-proves: none -- reads a fixed nm listing; nothing foreign is run
+#[test]
+fn the_session_check_reads_z_open_by_its_exact_name() {
+    // A routed body as nm lists it, a versioned libc reference beside the library's.
+    let body = "    U __libc_start_main@GLIBC_2.34\n    U z_open\n    U z_session_drop\n";
+    assert!(references_symbol(body, "z_open"));
+    // A versioned reference to the same name is the same symbol.
+    assert!(references_symbol("    U z_open@WZ_1\n", "z_open"));
+    // A silent stub: `main` takes its arguments and returns, so only libc is undefined.
+    let stub = "    U __libc_start_main@GLIBC_2.34\n";
+    assert!(!references_symbol(stub, "z_open"));
+    // A longer name that starts with it is another symbol.
+    assert!(!references_symbol(
+        "    U z_open_options_default\n",
+        "z_open"
+    ));
+    assert!(!references_symbol("", "z_open"));
 }

@@ -69,7 +69,7 @@ const FLAG_EXT_M: u8 = 0x10;
 #[derive(Debug, Clone, Copy)]
 pub struct GetParts<'a> {
     /// The request id the peer echoes in its replies and its final.
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// The queried keyexpr, written as a literal.
     pub keyexpr: &'a str,
     /// The selector parameters; empty states none.
@@ -135,7 +135,7 @@ impl<'a> RequestWriter<'a> {
         let parameters: Option<Bytes<'_, { usize::MAX }>> = None;
         let query = QueryParts {
             header: QUERY_HEADER,
-            consolidation: parts.consolidation.map(|mode| mode.wire_byte()),
+            consolidation: parts.consolidation.map(|mode| u64::from(mode.wire_byte())),
             parameters,
             extensions: None,
         };
@@ -261,7 +261,7 @@ mod tests {
         let parameters: [&[u8]; 3] = [b"", b"_time=[..]", &[b'p'; 200]];
         let mut compared = 0usize;
         for keyexpr in ["demo/**", "a", "demo/example/zenoh-rs-pub"] {
-            for rid in [0u64, 1, 300, 1 << 40] {
+            for rid in [0u32, 1, 300, u32::MAX] {
                 for consolidation in consolidations {
                     for target in targets {
                         for params in parameters {

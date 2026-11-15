@@ -111,11 +111,17 @@ unstable = [
     "wz-runtime-tokio?/pubsub-ts-stack",
 ]
 # Upstream's `tracing-instrument` forwards to `zenoh-runtime` and to `zenoh-task`. It carries the
-# caller's tracing span onto the runtime a future is handed to (`ZRuntime::spawn` and
-# `block_in_place`), which is every spawn this facade makes. The family has no `zenoh-task`, and the
-# engine's own tasks run on `wz-runtime-tokio`, which carries no span, so the half that is upstream's
-# task controller and transport is not here: open-debt item 201.
-tracing-instrument = ["zenoh-runtime/tracing-instrument"]
+# caller's tracing span onto the runtime a future is handed to: every spawn this facade makes
+# (`ZRuntime::spawn` and `block_in_place`), every task a `TaskController` spawns, and, through the
+# engine's own features, everything a session does on the network: the drive opens it on threads
+# of its own and carries the opener's span there (`wz-capi-core`), and the transport, routing and
+# session tasks it spawns on `wz-runtime-tokio` carry it on, as upstream's transport tasks do.
+tracing-instrument = [
+    "zenoh-runtime/tracing-instrument",
+    "zenoh-task/tracing-instrument",
+    "wz-capi-core?/tracing-instrument",
+    "wz-runtime-tokio?/tracing-instrument",
+]
 
 [dependencies]
 async-trait = "0.1.89"
@@ -176,6 +182,11 @@ zenoh-protocol = { path = "../wz-zenoh-protocol", features = ["std"] }
 zenoh-result = { path = "../wz-zenoh-result", default-features = false }
 zenoh-runtime = { path = "../wz-zenoh-runtime" }
 zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
+# Upstream's `zenoh` takes it always: `zenoh::internal` re-exports its controller, and
+# `tracing-instrument` forwards to it whatever else depends on it.
+zenoh-task = { path = "../wz-zenoh-task" }
+# Upstream's `zenoh` takes it always: `zenoh::internal` re-exports its `Condition`.
+zenoh-sync = { path = "../wz-zenoh-sync" }
 zenoh-util = { path = "../wz-zenoh-util" }
 
 # The tests of the cancellation token run on a runtime of several threads.
@@ -184,6 +195,9 @@ tokio ={ version = "1.47.1", default-features = false, features = ["macros", "rt
 # The numbers the scouting tests give to sockets of their own (a group's port, a TCP listener's):
 # a number the kernel never autoselects, taken without a socket bound for the moment of the pick.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# The witness of `tracing-instrument` over an open: a subscriber that knows the parents of the
+# spans the engine opens. The registry is the smallest; the family's other crates take the same.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 
 [lints]
 workspace = true

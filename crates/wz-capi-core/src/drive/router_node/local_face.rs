@@ -37,6 +37,8 @@ use wz_session_core::reply::ReplyRegistry;
 use wz_session_core::reply_acceptance::{ReplyAcceptance, ReplyKeyExpr};
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink, ReplyView};
 
+use crate::caller_span::CallerSpan;
+
 /// What a liveliness subscriber of the face is called with, on the face's thread.
 pub type LivelinessHandler = Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static>;
 
@@ -53,14 +55,14 @@ pub type ReplyIngress =
     std::sync::Arc<dyn Fn(&mut wz_session_core::wire::ResponseOwned) + Send + Sync + 'static>;
 
 /// The hooks of the queries the face holds, by request id.
-type Ingresses = std::sync::Arc<Mutex<HashMap<u64, ReplyIngress>>>;
+type Ingresses = std::sync::Arc<Mutex<HashMap<wz_session_core::wire_id::RequestId, ReplyIngress>>>;
 
 /// A query the face is asked to hold: what it asks, how its replies are accepted and when it runs
 /// out of time, the hook its replies pass through as the router hands them over, and the
 /// handlers it is told its replies and its end with.
 pub(super) struct QueryHold {
     /// The request id the router is asked under.
-    pub(super) rid: u64,
+    pub(super) rid: wz_session_core::wire_id::RequestId,
     pub(super) keyexpr: String,
     pub(super) accept: ReplyKeyExpr,
     pub(super) timeout_ms: u32,
@@ -98,7 +100,7 @@ enum Command {
     /// The program asked a query under the request id `rid`; the router is asked next, so the
     /// replies it tells the face find the query held.
     Get {
-        rid: u64,
+        rid: wz_session_core::wire_id::RequestId,
         /// The key the query asks, which the replies are held to unless `accept` lifts it.
         keyexpr: String,
         accept: ReplyKeyExpr,
@@ -109,7 +111,7 @@ enum Command {
     },
     /// The program cancelled the query it asked under `rid`: it ends there and then, without the
     /// replies that have not come, as a query of a session ends when its token is cancelled.
-    CancelQuery(u64),
+    CancelQuery(wz_session_core::wire_id::RequestId),
     /// The program watches whether anything of `plane` matches `key` among the declarations
     /// `origin` admits.
     Watch {
@@ -312,6 +314,12 @@ impl State {
                 self.queries
                     .dispatch_response(&response, &local_face_aliases());
             }
+            // The node read the value of this reply out of shared memory as it routed it; the
+            // registry delivers what was read and not the chunk the reply names.
+            Command::Told(LocalFaceEvent::ReplyRead { response, payload }) => {
+                self.queries
+                    .dispatch_response_read(&response, &local_face_aliases(), payload);
+            }
             Command::Told(LocalFaceEvent::ReplyFinal { request_id }) => {
                 self.queries.deliver_local_final(request_id);
             }
@@ -486,45 +494,50 @@ impl LocalLiveliness {
     pub(super) fn start(router: Weak<RouterForwarder>) -> std::io::Result<(Self, LocalFaceSink)> {
         let (commands, received) = mpsc::channel::<Command>();
         let asked = router.clone();
+        // Taken on the opener's thread, as the node's own thread takes it.
+        let opener = CallerSpan::current();
         let thread = std::thread::Builder::new()
             .name("wz-router-local".to_owned())
             .spawn(move || {
-                // The thread of a face, as the thread of any other: it runs inside a
-                // single-threaded runtime, which is how a program that is handed an item here
-                // knows it must not wait on this thread for anything and queues the item for a
-                // worker of its own (see the callback context of the top crate).
-                let runtime = tokio::runtime::Builder::new_current_thread().build().ok();
-                let _inside = runtime.as_ref().map(tokio::runtime::Runtime::enter);
-                let mut state = State::new(router);
-                loop {
-                    // The next command, or the moment the first query that waits for an answer
-                    // runs out of time, whichever comes first.
-                    let command = match state.queries.next_deadline_ms() {
-                        Some(deadline) => {
-                            let wait = deadline.saturating_sub(state.now_ms());
-                            match received.recv_timeout(std::time::Duration::from_millis(wait)) {
+                opener.in_scope(|| {
+                    // The thread of a face, as the thread of any other: it runs inside a
+                    // single-threaded runtime, which is how a program that is handed an item here
+                    // knows it must not wait on this thread for anything and queues the item for a
+                    // worker of its own (see the callback context of the top crate).
+                    let runtime = tokio::runtime::Builder::new_current_thread().build().ok();
+                    let _inside = runtime.as_ref().map(tokio::runtime::Runtime::enter);
+                    let mut state = State::new(router);
+                    loop {
+                        // The next command, or the moment the first query that waits for an answer
+                        // runs out of time, whichever comes first.
+                        let command = match state.queries.next_deadline_ms() {
+                            Some(deadline) => {
+                                let wait = deadline.saturating_sub(state.now_ms());
+                                match received.recv_timeout(std::time::Duration::from_millis(wait))
+                                {
+                                    Ok(command) => Some(command),
+                                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                }
+                            }
+                            None => match received.recv() {
                                 Ok(command) => Some(command),
-                                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                Err(_) => break,
+                            },
+                        };
+                        match command {
+                            Some(command) => {
+                                if !state.handle(command) {
+                                    break;
+                                }
                             }
-                        }
-                        None => match received.recv() {
-                            Ok(command) => Some(command),
-                            Err(_) => break,
-                        },
-                    };
-                    match command {
-                        Some(command) => {
-                            if !state.handle(command) {
-                                break;
+                            None => {
+                                let now = state.now_ms();
+                                state.queries.sweep_timed_out(now);
                             }
-                        }
-                        None => {
-                            let now = state.now_ms();
-                            state.queries.sweep_timed_out(now);
                         }
                     }
-                }
+                })
             })?;
         let told = commands.clone();
         let ingresses = Ingresses::default();
@@ -532,17 +545,27 @@ impl LocalLiveliness {
         let sink: LocalFaceSink = std::sync::Arc::new(move |event| {
             // A reply of a query that asked for it is completed here, on the thread that hands it
             // over, before it waits in the queue of the face.
+            let complete = |response: &mut wz_session_core::wire::ResponseOwned| {
+                let hook = ingressing
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&response.request_id)
+                    .cloned();
+                if let Some(hook) = hook {
+                    hook(response);
+                }
+            };
             let event = match event {
                 LocalFaceEvent::Reply(mut response) => {
-                    let hook = ingressing
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .get(&response.request_id)
-                        .cloned();
-                    if let Some(hook) = hook {
-                        hook(&mut response);
-                    }
+                    complete(&mut response);
                     LocalFaceEvent::Reply(response)
+                }
+                LocalFaceEvent::ReplyRead {
+                    mut response,
+                    payload,
+                } => {
+                    complete(&mut response);
+                    LocalFaceEvent::ReplyRead { response, payload }
                 }
                 other => other,
             };
@@ -703,7 +726,7 @@ impl LocalLiveliness {
 
     /// End the query held under the request id `rid` now. A query that has already ended is not
     /// found, and nothing happens.
-    pub(super) fn cancel_query(&self, rid: u64) {
+    pub(super) fn cancel_query(&self, rid: wz_session_core::wire_id::RequestId) {
         let _ = self.commands.send(Command::CancelQuery(rid));
     }
 

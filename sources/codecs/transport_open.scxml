@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The whole transport Open message, OpenSyn and OpenAck: the header byte,
+     the body `open_body.scxml` reads, and the extension chain.
+
+     Upstream writes it header, body, chain
+     (`commons/zenoh-codec/src/transport/open.rs` @
+     `impl<W> WCodec<&OpenSyn, &mut W> for Zenoh080`), with the flags of
+     `commons/zenoh-protocol/src/transport/open.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x02
+       bit 5    : A    the message is an OpenAck; the body carries no cookie
+       bit 6    : T    the lease is in seconds, not milliseconds
+       bit 7    : Z    an extension chain follows the body
+
+     A is the body's input (`open_body.scxml` reads the cookie when A is
+     clear), bound here to the header bit, so an encode derives it from the
+     body it presents. T is presented by the value: the wire holds a VLE and
+     a flag, and which unit the lease is in is a projection of the reader
+     (`crate::lease` in wz-session-core), not a layout. Z is derived from
+     whether the chain is present.
+
+     The chain is the generic transport chain; see `transport_init.scxml`. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="transport_open">
+  <sce:import src="open_body.scxml" kind="codec" as="codec_zenoh_open_body">
+    <sce:flag-bind input="A" source="header.A"/>
+  </sce:import>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x02"/>
+      <sce:flag name="A"   bit="5"/>
+      <sce:flag name="T"   bit="6"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:embed id="body" type="codec_zenoh_open_body" sce:byte="1"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>

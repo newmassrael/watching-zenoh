@@ -62,15 +62,19 @@ extern crate alloc;
 extern crate std;
 
 pub mod core_clock;
+// The close of a socket descriptor, shared with the waits made on it from another thread.
+mod fd;
 pub mod glue;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub mod links;
+// Written over the runtime's heap link layer, so compiled where the runtime declares it.
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "alloc")]
+    pub mod links;
+    #[cfg(feature = "alloc")]
+    pub use links::{ZephyrIpLinks, ZephyrLinks};
+}
 pub mod net;
 pub mod stack;
 pub mod stream;
-
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use links::ZephyrLinks;
 
 /// A Zephyr firmware's image glue on the heap profile, written once in its crate root:
 /// the global allocator over the kernel heap, a `critical_section` implementation over

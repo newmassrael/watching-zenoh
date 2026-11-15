@@ -128,9 +128,13 @@ async fn drive_handshake_with_responder(
     let resp_actions = side(&resp_driver, responder_dispatch);
 
     let mut init_engine = new_session_engine(&init_actions);
-    init_engine.initialize();
+    init_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
     let mut resp_engine = new_session_engine(&resp_actions);
-    resp_engine.initialize();
+    resp_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
 
     // Responder: Init -> AwaitingInitSyn (listener role activation).
     resp_engine.process_event(E::InboundStart);
@@ -278,9 +282,13 @@ async fn the_usrpwd_challenge_rides_the_cookie_between_init_ack_and_open_syn() {
         )) as _]),
     );
     let mut init_engine = new_session_engine(&init_actions);
-    init_engine.initialize();
+    init_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
     let mut resp_engine = new_session_engine(&resp_actions);
-    resp_engine.initialize();
+    resp_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
 
     resp_engine.process_event(E::InboundStart);
     init_engine.process_event(E::OutboundStart);

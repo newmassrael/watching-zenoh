@@ -35,8 +35,12 @@
          model.rs::CodecField::is_flags_carrier).
        - B1-δ present-if dotted-path `packed_id.has_schema` gates the
          schema_len + schema pair.
-       - B5-ζ Surface H + Y0a `<sce:type="string" sce:bit-size="length-ref">`
-         + present-if-on-string (already shipped).
+       - a gated `<sce:type="bytes" sce:bit-size="length-ref">` schema.
+         Bytes and not a string: upstream holds the schema as a ZSlice
+         and reads it without a UTF-8 check
+         (`commons/zenoh-protocol/src/core/encoding.rs` @
+         `pub schema: Option<ZSlice>,`), so a schema that is not UTF-8
+         is a frame upstream accepts and this codec must too.
 
      Host shape (matches existing <sce:flags> precedent — raw integer
      carrier + per-flag accessors layered on top, NOT host-shifted):
@@ -44,7 +48,7 @@
        struct {
          packed_id: u32,         // raw VLE-decoded value
          schema_len: Option<u64>,
-         schema: Option<String>,
+         schema: Option<bytes>,
        }
        impl {
          fn has_schema() -> bool { (packed_id & 1) != 0 }
@@ -66,7 +70,7 @@
     </sce:flags>
     <sce:field id="schema_len" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
                sce:present-if="packed_id.has_schema"/>
-    <sce:field id="schema" sce:type="string" sce:byte="2" sce:bit-size="length-ref"
+    <sce:field id="schema" sce:type="bytes" sce:byte="2" sce:bit-size="length-ref"
                sce:length-field="schema_len" sce:max-size="255"
                sce:present-if="packed_id.has_schema"/>
   </datamodel>

@@ -383,6 +383,119 @@ pub mod ext_envelope {
     ));
 }
 
+// The whole transport messages, each the header, its body module above and the
+// extension chain, under the gate of the body it embeds.
+#[cfg(feature = "codec-init-body")]
+pub mod transport_init {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_init.rs"
+    ));
+}
+
+#[cfg(feature = "codec-open-body")]
+pub mod transport_open {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_open.rs"
+    ));
+}
+
+#[cfg(feature = "codec-close")]
+pub mod transport_close {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_close.rs"
+    ));
+}
+
+#[cfg(feature = "codec-keep-alive")]
+pub mod transport_keep_alive {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_keep_alive.rs"
+    ));
+}
+
+// The headers of the two transport messages whose payload is not a document
+// of its own: a Frame's network messages end where the batch says (L5), and a
+// Fragment's payload is a piece of a message reassembly puts together. The
+// Frame header is ungated, as the extension entry it chains is: every build
+// that sends a network message writes it, whether or not it reads Frames.
+pub mod transport_frame_header {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_frame_header.rs"
+    ));
+}
+
+#[cfg(feature = "codec-fragment")]
+pub mod transport_fragment_header {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_fragment_header.rs"
+    ));
+}
+
+// The multicast peer announcement, whole: header, the `join` body, the chain.
+#[cfg(feature = "codec-join")]
+pub mod transport_join {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_join.rs"
+    ));
+}
+
+// The batch of a compressing session: the batch header byte and the payload
+// after it. Ungated: compression is a session feature, not a codec one, and the
+// passive reader takes a batch apart on every build that decompresses.
+pub mod compressed_batch {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/compressed_batch.rs"
+    ));
+}
+
+// The transport OAM, whole: header, id, chain, then the body the header's
+// encoding names. Ungated as the network `oam` is: the session reads it on
+// every build with an allocator, under no `codec-*` feature.
+pub mod transport_oam {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_oam.rs"
+    ));
+}
+
+// The two scouting messages, whole: header, the `scout` or `hello` body, the
+// chain. Scouting ids collide with the transport ones, so these are read only
+// off a scouting link.
+#[cfg(feature = "codec-scout")]
+pub mod scouting_scout {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/scouting_scout.rs"
+    ));
+}
+
+#[cfg(feature = "codec-hello")]
+pub mod scouting_hello {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/scouting_hello.rs"
+    ));
+}
+
 // The element of a sliced payload: what `msg_put` repeats when its extension
 // chain carries the shared-memory marker. A leaf, so it is declared before the
 // module that imports it.
@@ -959,11 +1072,9 @@ pub mod wire_const {
     /// codec.read(&mut *reader)?` on the plain `Zenoh080`, so the same
     /// `uint_impl!(u16)` derive applies: read the full ZInt, TRUNCATE. wz
     /// declared the field `uint16` in `sources/codecs/linkstate_weight.scxml`
-    /// and SCE derives its read width from the storage type
-    /// (`sce-build/src/forge/generator.rs:11805`), so the emitted reader was
-    /// `read_vle_u16` — which refuses TWICE over: at a value past `u16::MAX`,
-    /// and at any encoding longer than 3 bytes, where it also stops INSIDE the
-    /// varint and leaves the cursor astray.
+    /// and SCE derives its read width from the storage type, so the emitted
+    /// reader was `read_vle_u16`, which reads the whole ZInt and refuses a
+    /// value past `u16::MAX` where upstream keeps its low 16 bits.
     ///
     /// The price was the whole advertisement, not the field.
     /// `walk_linkstate_body` declines on any parse error, so a reader saw the

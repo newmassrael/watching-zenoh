@@ -114,6 +114,8 @@ zenoh-core = { path = "../wz-zenoh-core", optional = true }
 zenoh-keyexpr = { path = "../wz-zenoh-keyexpr", optional = true }
 zenoh-macros = { path = "../wz-zenoh-macros", optional = true }
 zenoh-collections = { path = "../wz-zenoh-collections", optional = true }
+zenoh-task = { path = "../wz-zenoh-task", optional = true }
+zenoh-sync = { path = "../wz-zenoh-sync", optional = true }
 zenoh-buffers = { path = "../wz-zenoh-buffers", optional = true }
 zenoh-protocol = { path = "../wz-zenoh-protocol", optional = true }
 zenoh-codec = { path = "../wz-zenoh-codec", optional = true }
@@ -199,6 +201,11 @@ access-extauth-jwt = ["session-extauth"]
 access-extauth-pubkey = ["session-extauth", "wz-runtime-tokio?/access-extauth-pubkey"]
 access-extauth-usrpwd = ["session-extauth", "wz-runtime-tokio?/access-extauth-usrpwd"]
 access-quota = ["wz-runtime-tokio?/access-quota"]
+# The QoS overwrite (`qos/network`): the interceptor that rewrites the QoS of a message instead of
+# admitting or dropping it, and the config reader's reader of the key, which a build without it
+# refuses by name. Not in `domain-access`: the store has no atom of that name yet, and the census
+# refuses a bundle member the store does not carry.
+access-qos-overwrite = ["wz-runtime-tokio?/access-qos-overwrite"]
 
 # ----- domain: attachment (2 atomic) -----
 # attachment-bytes: the attachment-ext codec primitive (wz-session-core
@@ -1243,6 +1250,8 @@ api-compat-rust = [
     "dep:zenoh-keyexpr",
     "dep:zenoh-macros",
     "dep:zenoh-collections",
+    "dep:zenoh-task",
+    "dep:zenoh-sync",
     "dep:zenoh-buffers",
     "dep:zenoh-protocol",
     "dep:zenoh-codec",
@@ -2131,6 +2140,7 @@ preset-ap-full = [
     "access-acl-multicast",
     "access-downsampling",
     "access-quota",
+    "access-qos-overwrite",
     "access-extauth-jwt",
     "access-extauth-pubkey",
     "access-extauth-usrpwd",

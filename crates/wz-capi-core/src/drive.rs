@@ -62,6 +62,7 @@ use wz_runtime_tokio::startup_phase::{
     drive_connect_phase, endpoint_schedule, PhaseBudget, PhasePolicy,
 };
 
+use crate::caller_span::CallerSpan;
 #[cfg(feature = "peer")]
 use crate::faces::{CApiForwarder, GossipSetup};
 use crate::faces::{OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
@@ -119,6 +120,9 @@ pub struct DialPhase {
     /// peer have arrived, so a subscriber declared right after the open is told of what was
     /// already there.
     pub wait_declares: bool,
+    /// `transport/unicast/open_timeout`: how long one open of an endpoint, its dial and its
+    /// handshake, may take ([`wz_runtime_tokio::session_open::open_within`]).
+    pub open_timeout: std::time::Duration,
 }
 
 impl DialPhase {
@@ -131,6 +135,7 @@ impl DialPhase {
         start_window: None,
         router_hold: std::time::Duration::ZERO,
         wait_declares: true,
+        open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
     };
 }
 
@@ -163,6 +168,9 @@ struct Dialer {
     /// Each endpoint's dial config, built before any dial so a bad trust bundle
     /// fails the open rather than one attempt.
     dial_cfgs: Vec<(String, DialConfig)>,
+    /// `transport/unicast/open_timeout`: the bound on each open this dialer makes, a configured
+    /// endpoint's or a found one's, its dial and its handshake together.
+    open_timeout: std::time::Duration,
     params: SessionInitParams,
     /// What every link this session dials offers at its handshake. See
     /// [`open_blocking`].
@@ -249,6 +257,26 @@ impl Dialer {
     /// `expected` names is [`OpenError::LinkFailed`], and a handshake that does not complete is
     /// [`OpenError::DriveFailed`]; a link the node refused in its handshake is [`DialFailure::Held`].
     async fn open_with(
+        &self,
+        endpoint: &str,
+        dial_cfg: &DialConfig,
+        expected: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
+    ) -> Result<OpenedSession, DialFailure> {
+        // The dial and the handshake are one open, bounded by `transport/unicast/open_timeout`
+        // as `open_within` bounds the runtime's opens; one that runs out did not complete.
+        match tokio::time::timeout(
+            self.open_timeout,
+            self.open_unbounded(endpoint, dial_cfg, expected),
+        )
+        .await
+        {
+            Ok(opened) => opened,
+            Err(_) => Err(DialFailure::Failed(OpenError::DriveFailed)),
+        }
+    }
+
+    /// [`Self::open_with`] without its bound.
+    async fn open_unbounded(
         &self,
         endpoint: &str,
         dial_cfg: &DialConfig,
@@ -846,7 +874,10 @@ where
     // Onto the session's OWN runtime, named as a handle and not through the ambient spelling:
     // this node builds one runtime per session ([`open_blocking`]) and has no part in the
     // `WZ_RUNTIME` subsystem partition, so there is no subsystem for the task to name.
-    tokio::runtime::Handle::current().spawn(Pausable::new(gate.clone(), future))
+    tokio::runtime::Handle::current().spawn(Pausable::new(
+        gate.clone(),
+        CallerSpan::current().carry(future),
+    ))
 }
 
 /// Spawn the leg of one endpoint (its dial, its re-dials and its face), where the session's
@@ -861,7 +892,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     match gate.face_drive() {
-        FaceDrive::Serial => tokio::task::spawn_local(future),
+        FaceDrive::Serial => tokio::task::spawn_local(CallerSpan::current().carry(future)),
         FaceDrive::PerFace => spawn_gated(gate, future),
     }
 }
@@ -922,6 +953,9 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    // The face's thread is polled in the span its leg runs in, as is the fallback that polls it
+    // here.
+    let future = CallerSpan::current().carry(future);
     // Handed to the thread through a slot, so that when no thread starts the future is still
     // here to be run another way.
     let slot = Arc::new(StdMutex::new(Some(future)));
@@ -1049,6 +1083,9 @@ pub struct SessionState {
     /// Whether the session's drive is being run: pico's background executor. See
     /// [`ReadGate`].
     read_gate: Arc<ReadGate>,
+    /// What the session applies itself above its links, as its open was told
+    /// ([`OpenStance::session_defaults`]).
+    session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 impl SessionState {
@@ -1083,6 +1120,12 @@ impl SessionState {
     /// This ABI's per-session state, if the shim attached one of type `E`.
     pub fn abi_extension<E: std::any::Any>(&self) -> Option<&E> {
         self.abi_extension.get()?.downcast_ref::<E>()
+    }
+
+    /// What the session applies itself above its links, which every ABI that publishes through
+    /// it reads here.
+    pub fn session_defaults(&self) -> &crate::session_defaults::SessionDefaults {
+        &self.session_defaults
     }
 
     /// This session's own zid (pico `z_info_zid`). Always the id the INIT
@@ -1477,6 +1520,7 @@ fn prepare_dial(
     };
     let dialer = Arc::new(Dialer {
         dial_cfgs,
+        open_timeout: phase.open_timeout,
         params,
         offer: ctx.offer,
         clock: ctx.clock,
@@ -2321,14 +2365,16 @@ async fn drive_peer(
                     if let Some((plan, link)) = scout {
                         let mut scout_closing = closing_rx.clone();
                         let scout_zid = zid.clone();
-                        faces.push(tokio::task::spawn_local(async move {
-                            tokio::select! {
-                                _ = link.autoconnect(&plan, &scout_zid, &intents_tx) => {}
-                                _ = scout_closing.wait_for(|c| *c) => {}
-                            }
-                        }));
+                        faces.push(tokio::task::spawn_local(CallerSpan::current().carry(
+                            async move {
+                                tokio::select! {
+                                    _ = link.autoconnect(&plan, &scout_zid, &intents_tx) => {}
+                                    _ = scout_closing.wait_for(|c| *c) => {}
+                                }
+                            },
+                        )));
                     }
-                    faces.push(tokio::task::spawn_local(scouted_connector(ScoutedPeers {
+                    let connector = scouted_connector(ScoutedPeers {
                         configured: endpoints.clone(),
                         intents,
                         own_zid: zid,
@@ -2339,7 +2385,10 @@ async fn drive_peer(
                         window: window.clone(),
                         releases_window: waits_for_scouted,
                         closing: closing_rx.clone(),
-                    })));
+                    });
+                    faces.push(tokio::task::spawn_local(
+                        CallerSpan::current().carry(connector),
+                    ));
                 }
             }
             if failed {
@@ -2993,12 +3042,12 @@ fn spawn_accept_leg(
     } = leg;
     let shared = shared.clone();
     let gate = gate.clone();
-    tokio::task::spawn_local(async move {
+    tokio::task::spawn_local(CallerSpan::current().carry(async move {
         accept_faces(listening, offer, clock, shared, index, &gate, async move {
             let _ = closing.wait_for(|c| *c).await;
         })
         .await;
-    })
+    }))
 }
 
 /// An endpoint of `listen` the bind phase left to the background: still to be bound, on its own
@@ -3113,7 +3162,7 @@ impl LateBinds {
                 let (shared, gate) = (shared.clone(), gate.clone());
                 let (locators, bound_before) = (locators.clone(), bound_before.clone());
                 let mut closing = closing.clone();
-                tokio::task::spawn_local(async move {
+                tokio::task::spawn_local(CallerSpan::current().carry(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
                         bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
                     });
@@ -3140,7 +3189,7 @@ impl LateBinds {
                         },
                     )
                     .await;
-                })
+                }))
             })
             .collect()
     }
@@ -3169,7 +3218,7 @@ impl LateBinds {
                         let (tls, zid) = (tls.clone(), zid.clone());
                         let locators = locators.clone();
                         let (shared, bound_before) = (shared.clone(), bound_before.clone());
-                        tokio::task::spawn_local(async move {
+                        tokio::task::spawn_local(CallerSpan::current().carry(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
                                 bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
                             })
@@ -3184,7 +3233,7 @@ impl LateBinds {
                                 &listening.listener,
                             );
                             std::future::pending::<()>().await;
-                        })
+                        }))
                     })
                     .collect();
                 for task in held {
@@ -3704,11 +3753,13 @@ impl ResolvedGroup {
         let GroupProfile {
             lease_ms,
             join_interval_ms,
+            max_sessions,
             seq_num_res,
             req_id_res,
             batch_size,
             is_qos,
             compression,
+            join_rule,
         } = join.profile;
         Some(Self {
             endpoint: join.endpoint.clone(),
@@ -3727,6 +3778,8 @@ impl ResolvedGroup {
                 compression,
                 tx_queue,
                 link_rx,
+                join_rule,
+                max_sessions,
             },
         })
     }
@@ -3807,7 +3860,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                 .enumerate()
                 .map(|(index, group)| {
                     let (shared, stop, up) = (shared.clone(), stop_rx.clone(), up_tx.clone());
-                    tokio::task::spawn_local(async move {
+                    tokio::task::spawn_local(CallerSpan::current().carry(async move {
                         let ResolvedGroup {
                             endpoint,
                             is_shm,
@@ -3878,7 +3931,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                                 .await
                             }
                         }
-                    })
+                    }))
                 })
                 .collect();
             drop(up_tx);
@@ -4156,6 +4209,12 @@ pub struct OpenStance {
     /// a session that joins none. A build without the `multicast-transport` feature refuses
     /// an open that names one.
     pub groups: Vec<GroupJoin>,
+    /// What the session applies itself above its links: the QoS of its publications per key,
+    /// when the shared-memory subsystem is made, and which payloads are copied into shared memory
+    /// ([`SessionDefaults`](crate::session_defaults::SessionDefaults)). zenoh-c's ABI and the Rust
+    /// API compile it from their configuration; zenoh-pico's reads no such keys and says the
+    /// default, which applies nothing.
+    pub session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 /// Open-debt item 913 — whether `endpoint` names a multicast group in zenoh's sense: a `udp/`
@@ -4271,6 +4330,10 @@ pub struct GroupProfile {
     pub lease_ms: u64,
     /// How often the session beacons, in milliseconds.
     pub join_interval_ms: u64,
+    /// How many members the session holds on the group at once,
+    /// `transport/multicast/max_sessions`, or `None` for no cap of its own (zenoh-pico has none).
+    /// Not beaconed: it bounds what this session admits.
+    pub max_sessions: Option<usize>,
     /// The 2-bit wire code of the sequence number resolution.
     pub seq_num_res: u8,
     /// The 2-bit wire code of the request id resolution.
@@ -4283,6 +4346,8 @@ pub struct GroupProfile {
     /// when that pays: `transport/multicast/compression/enabled`. Multicast has no handshake
     /// to switch it on, so every member of the group must state the same.
     pub compression: bool,
+    /// Whose rule the session judges a member's Join by: the calling ABI's upstream's.
+    pub join_rule: wz_session_core::multicast_params::GroupJoinRule,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -4430,6 +4495,7 @@ pub fn open_blocking(
         policy,
         namespace,
         groups,
+        session_defaults,
         ..
     } = stance;
     // The prefix as the decorator takes it. The plan validated the text, so a text that does not
@@ -4531,6 +4597,7 @@ pub fn open_blocking(
                 policy,
                 #[cfg(feature = "routing-namespace")]
                 namespace,
+                aggregation: session_defaults.aggregation.clone(),
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,
@@ -4562,6 +4629,8 @@ pub fn open_blocking(
     wz_runtime_tokio::link_pipeline::set_rx_busy_poll(rx_busy_poll_budget(
         std::env::var("WZ_CAPI_RX_BUSY_POLL_US").ok().as_deref(),
     ));
+    // Taken on the opener's thread: the drive thread runs the whole session inside it.
+    let opener = CallerSpan::current();
     let handle = std::thread::Builder::new()
         .name("wz-capi-drive".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -4635,46 +4704,55 @@ pub fn open_blocking(
             // Polled only while the read task may run ([`Pausable`]): a stopped
             // task is a session nobody is driving, which is what pico's is.
             #[cfg(feature = "peer")]
-            rt.block_on(Pausable::new(drive_gate, async move {
-                let role = async move {
-                    if !connect.is_empty() || scouts || gossips_with_a_listener {
-                        drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
-                    } else if !listen.is_empty() {
-                        drive_listen(listen, tls, dial_whatami, ctx).await;
-                    } else {
-                        // R3067 -- no endpoint: a session alone, as zenoh starts one.
-                        // Whether a config MAY open without one is the calling ABI's
-                        // decision (a client may not, and a peer that scouts reaches
-                        // others through it), so it is asked there, not here.
-                        drive_idle(dial_whatami, ctx).await;
-                    }
-                };
-                #[cfg(feature = "multicast-transport")]
-                serve_beside_groups(group_setup, role).await;
-                #[cfg(not(feature = "multicast-transport"))]
-                role.await;
-            }));
+            opener.in_scope(|| {
+                rt.block_on(Pausable::new(drive_gate, async move {
+                    let role = async move {
+                        if !connect.is_empty() || scouts || gossips_with_a_listener {
+                            drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
+                        } else if !listen.is_empty() {
+                            drive_listen(listen, tls, dial_whatami, ctx).await;
+                        } else {
+                            // R3067 -- no endpoint: a session alone, as zenoh starts one.
+                            // Whether a config MAY open without one is the calling ABI's
+                            // decision (a client may not, and a peer that scouts reaches
+                            // others through it), so it is asked there, not here.
+                            drive_idle(dial_whatami, ctx).await;
+                        }
+                    };
+                    #[cfg(feature = "multicast-transport")]
+                    serve_beside_groups(group_setup, role).await;
+                    #[cfg(not(feature = "multicast-transport"))]
+                    role.await;
+                }))
+            });
             // The client's build has the one role, and `open_blocking` has refused any config
             // that has nothing to dial or find.
             #[cfg(not(feature = "peer"))]
-            rt.block_on(Pausable::new(
-                drive_gate,
-                drive_dial(connect, dial_whatami, tls, dial_phase, ctx),
-            ));
+            opener.in_scope(|| {
+                rt.block_on(Pausable::new(
+                    drive_gate,
+                    drive_dial(connect, dial_whatami, tls, dial_phase, ctx),
+                ))
+            });
             // `rt` is dropped here, after the drive loop has returned.
         })
         .map_err(|_| OpenError::DriveFailed)?;
 
     match rx.recv() {
-        Ok(Ok(())) => Ok(SessionState {
-            shared,
-            zid,
-            shutdown,
-            stop,
-            driver: StdMutex::new(Some(handle)),
-            abi_extension: std::sync::OnceLock::new(),
-            read_gate,
-        }),
+        Ok(Ok(())) => {
+            // Upstream makes the subsystem at the end of an open that succeeded.
+            crate::session_defaults::init_shared_memory(session_defaults.shm_init);
+            Ok(SessionState {
+                shared,
+                zid,
+                shutdown,
+                stop,
+                driver: StdMutex::new(Some(handle)),
+                abi_extension: std::sync::OnceLock::new(),
+                read_gate,
+                session_defaults,
+            })
+        }
         // Open failed (bind / link / handshake error), and the drive role said why. Join the
         // finished thread and report.
         Ok(Err(cause)) => {
@@ -4718,6 +4796,7 @@ mod tests {
                 sn_resolution: SnResolution::Bits8,
             },
             rx: LinkRxConf {
+                buffer_size: 4 * 65_535,
                 max_message_size: 4096,
             },
             accept: AcceptBounds::default(),
@@ -4939,6 +5018,7 @@ mod tests {
             });
             let dialer = Dialer {
                 dial_cfgs: Vec::new(),
+                open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Client,
                     vec![0xC1; 4],
@@ -5075,6 +5155,7 @@ mod tests {
             let dial_cfg = dial_config(&CapiTlsConfig::default(), &endpoint).expect("dial config");
             let dialer = Dialer {
                 dial_cfgs: vec![(endpoint.clone(), dial_cfg)],
+                open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Peer,
                     vec![0xC1; 4],
@@ -5153,6 +5234,7 @@ mod tests {
             let dial_cfg = dial_config(&CapiTlsConfig::default(), &endpoint).expect("dial config");
             let dialer = Dialer {
                 dial_cfgs: vec![(endpoint.clone(), dial_cfg)],
+                open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Peer,
                     vec![0xC1; 4],
@@ -5754,6 +5836,7 @@ mod tests {
             namespace: None,
             gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             groups: Vec::new(),
+            session_defaults: Default::default(),
         }
     }
 
@@ -6021,6 +6104,8 @@ mod multicast_face_tests {
             compression: false,
             tx_queue: Default::default(),
             link_rx: Default::default(),
+            join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
+            max_sessions: None,
         }
     }
 

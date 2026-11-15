@@ -206,7 +206,8 @@ impl ConfigIngestError {
             ConfigIngestError::WrongType { path, .. }
             | ConfigIngestError::OutOfRange { path, .. }
             | ConfigIngestError::UnreadableNumber { path, .. }
-            | ConfigIngestError::MalformedZid { path, .. } => Some(*path),
+            | ConfigIngestError::MalformedZid { path, .. }
+            | ConfigIngestError::NotInBuild { path, .. } => Some(*path),
             ConfigIngestError::UnknownMode { .. } => Some(KEY_MODE),
             ConfigIngestError::UnknownKey { path } => Some(path.as_str()),
         };
@@ -548,6 +549,19 @@ mod tests {
         assert_eq!(
             unreadable.finding(None).sites,
             vec![BlamedSite::at(None, Some("transport/link/tx/batch_size"))]
+        );
+
+        // Which documents draw this one depends on the capabilities of the build, so it is built
+        // directly too: it blames the key whose reader the build lacks.
+        let unbuilt = ConfigIngestError::NotInBuild {
+            path: "low_pass_filter",
+            capability: "access-quota",
+        };
+        let finding = unbuilt.finding(Some("edge"));
+        assert_eq!(finding.variant, "NotInBuild");
+        assert_eq!(
+            finding.sites,
+            vec![BlamedSite::at(Some("edge"), Some("low_pass_filter"))]
         );
     }
 

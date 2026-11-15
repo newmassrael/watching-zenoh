@@ -32,14 +32,23 @@
 //!
 //! ## What answers what, against upstream's own link
 //!
-//! | reader half | here | upstream's link |
-//! |---|---|---|
-//! | `tokio::net::tcp::OwnedReadHalf` | `Some` | tcp `Ok` |
-//! | `tokio::net::unix::OwnedReadHalf` | `Some` | unixsock_stream `Ok` |
-//! | [`crate::unixpipe_pipeline::FifoReadEnd`] | `Some` | unixpipe `Ok` |
-//! | [`crate::vsock_pipeline::VsockReadHalf`] | `Some` | vsock `Ok` |
-//! | `quinn::RecvStream` | `None` | quic `bail!` |
-//! | `ReadHalf<TlsStream<TcpStream>>` | `None` | tls `bail!` |
+//! | reader half | here | upstream's link | framing |
+//! |---|---|---|---|
+//! | `tokio::net::tcp::OwnedReadHalf` | `Some` | tcp `Ok` | stream |
+//! | `tokio::net::unix::OwnedReadHalf` | `Some` | unixsock_stream `Ok` | stream |
+//! | [`crate::unixpipe_pipeline::FifoReadEnd`] | `Some` | unixpipe `Ok` | stream |
+//! | [`crate::vsock_pipeline::VsockReadHalf`] | `Some` | vsock `Ok` | stream |
+//! | `tokio::net::UdpSocket`, connected (a dialed udp link) | `Some` | udp `Connected` `Ok` | datagram |
+//! | `tokio::net::UdpSocket`, unconnected | `None` | udp `Unconnected` `bail!` | — |
+//! | `quinn::RecvStream` | `None` | quic `bail!` | — |
+//! | `ReadHalf<TlsStream<TcpStream>>` | `None` | tls `bail!` | — |
+//!
+//! The framing column is which body `crate::uring_reactor` cuts the link's
+//! completions with: length-prefixed frames through its window for a stream,
+//! one frame per completion for a datagram (that module's "Two framings"). An
+//! accepted udp face has no row: it reads the listener's shared socket through
+//! the accept demux and never holds a socket of its own to answer for, which
+//! is the case upstream's unconnected arm refuses.
 //!
 //! Every row agrees with upstream. ⚠ R2751 CORRECTED THE VSOCK ROW, and the
 //! correction is kept visible because the reasoning that produced the wrong one
@@ -50,18 +59,28 @@
 //! descriptor, and answering for it from a rule written over `ReadHalf<T>` is
 //! what hid that. See the note above the tls impl.
 //!
-//! ⚠⚠ UDP IS ABSENT FROM THIS TABLE AND THAT IS NOT AN OVERSIGHT. Upstream's
-//! udp unicast link answers `Ok` (`io/zenoh-links/zenoh-link-udp/src/unicast.rs`
-//! @ `fn get_fd`), so upstream can ring-read one and wz cannot. It is not a row
-//! here because wz's udp is not a stream link at all: this trait bounds
-//! [`crate::stream_link::StreamReadDriver`], and udp carries its own
-//! boundary-as-frame drivers. The ring body this selects reads LENGTH-PREFIXED
-//! bytes through [`crate::link_rx_window::RxWindow`]; a datagram has no length
-//! prefix to frame by, so putting udp on it would be wrong rather than missing.
-//! Reaching udp needs the multishot/provided-buffer shape upstream's uring
-//! reader actually uses, which `ARCHITECTURE.md` line 994 deliberately does not
-//! choose for this row — so it is a DIFFERENT atom's work, declared here so a
-//! later round grades this one against the right population.
+//! ## UDP, and why it is a row with its own framing
+//!
+//! Upstream's udp unicast link answers `Ok` for its connected variant and
+//! refuses the unconnected one (`io/zenoh-links/zenoh-link-udp/src/unicast.rs`
+//! @ `fn get_fd`), and dispatches a link whose `is_streamed` is false to a body
+//! that hands each completion up whole (`setup_read`, where a stream gets
+//! `setup_fragmented_read`). This table once left udp out on the argument that
+//! the ring body reads LENGTH-PREFIXED bytes through
+//! [`crate::link_rx_window::RxWindow`] and a datagram has none, and that
+//! reaching udp needed upstream's multishot, provided-buffer receive. The first
+//! half was right and is why the datagram row has its own framing; the second
+//! was not: what a datagram needs is that one completion is one frame, which a
+//! fixed read of a datagram socket already gives, and the multishot shape is
+//! what upstream's always-armed push model needs, not what a datagram needs
+//! (`crate::uring_reactor`'s "Why not upstream's multishot receive").
+//!
+//! The answer is the SOCKET'S, as the stream rows' are the half's: a udp link's
+//! read driver holds the socket itself, since a datagram socket is not split.
+//! It is `Some` only for a connected socket, which is upstream's line and for
+//! the same reason: an unconnected socket receives from every peer, and only
+//! the demultiplexing by source that a read through the ring would bypass
+//! decides which link a datagram belongs to.
 
 #[cfg(all(
     feature = "runtime-tokio-uring",
@@ -159,6 +178,29 @@ impl RingReadable for tokio::io::ReadHalf<tokio_rustls::TlsStream<tokio::net::Tc
     }
 }
 
+/// A UDP socket — `Some` when it is CONNECTED, `None` when it is not.
+///
+/// Connected is asked of the socket (`peer_addr`), not assumed from the path
+/// that built it: a dialed udp link connects its socket, and a socket handed
+/// to the same read driver unconnected (a scouting socket, a test that wires
+/// two bound sockets) receives from any peer and must stay off the ring.
+/// Upstream's guard on the descriptor is kept beside it, as on the tcp row.
+#[cfg(feature = "transport-link-udp")]
+impl RingReadable for tokio::net::UdpSocket {
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    fn ring_fd(&self) -> Option<RawFd> {
+        if self.peer_addr().is_err() {
+            return None;
+        }
+        let fd = self.as_raw_fd();
+        (fd >= 0).then_some(fd)
+    }
+}
+
 /// An in-memory duplex pipe — `None`. It is not a socket and has no descriptor;
 /// the tests that frame over one exercise the framed body, which is what they
 /// are testing.
@@ -170,5 +212,38 @@ impl RingReadable for tokio::io::DuplexStream {
     ))]
     fn ring_fd(&self) -> Option<RawFd> {
         None
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "transport-link-udp",
+    feature = "runtime-tokio-uring",
+    target_os = "linux"
+))]
+mod tests {
+    use super::*;
+
+    /// The udp row: a connected socket names its descriptor, the same socket
+    /// before it is connected names none. CONTROL: drop the `peer_addr`
+    /// question and the unconnected leg reds with the descriptor.
+    #[tokio::test]
+    async fn a_udp_socket_names_its_descriptor_only_once_connected() {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        assert_eq!(
+            socket.ring_fd(),
+            None,
+            "an unconnected socket receives from every peer"
+        );
+        socket
+            .connect(peer.local_addr().expect("address"))
+            .await
+            .expect("connect");
+        assert_eq!(socket.ring_fd(), Some(socket.as_raw_fd()));
     }
 }

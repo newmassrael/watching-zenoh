@@ -1,4 +1,4 @@
-// SCE-MAP: reply:74 :: _forge_body
+// SCE-MAP: reply:81 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -105,7 +105,7 @@ impl<'f, S: ReplyStorage + super::ext_entry::ExtEntryFrom<'f> + super::msg_put::
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplyIn<S: ReplyStorage> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ReplyExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
     pub body: ReplyVariantIn<S>,
 }
@@ -227,9 +227,7 @@ impl<S: ReplyStorage> ReplyIn<S> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
@@ -398,7 +396,7 @@ pub trait ReplySource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `consolidation` field.
-    fn consolidation(&self) -> Option<u8>;
+    fn consolidation(&self) -> Option<u64>;
     /// The `extensions` field.
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
     /// The arm of the variant this value holds.
@@ -409,7 +407,7 @@ impl<T: ReplySource + ?Sized> ReplySource for &T {
     fn header(&self) -> u8 {
         (**self).header()
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         (**self).consolidation()
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -439,7 +437,7 @@ pub struct ReplyParts<'a> {
     /// The `header` field.
     pub header: u8,
     /// The `consolidation` field.
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     /// The `extensions` field.
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
     /// The arm of the variant this value holds.
@@ -450,7 +448,7 @@ impl<'a> ReplySource for ReplyParts<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -469,7 +467,7 @@ impl<S: ReplyStorage> ReplySource for ReplyOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -488,7 +486,7 @@ impl<'a> ReplySource for ReplyView<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -535,7 +533,7 @@ impl ReplyWire {
         let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         if let Some(_v) = src.consolidation() {
-            w.write_u8(_v)?;
+            w.write_vle_u64(_v)?;
         }
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
@@ -634,7 +632,7 @@ impl ListWalk<0> for ReplyExtensionsWalk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplyView<'a> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub extensions: Option<Bounded<ListView<'a, ReplyExtensionsWalk, 0>, { usize::MAX }, 1>>,
     pub body: ReplyViewVariant<'a>,
 }
@@ -685,9 +683,7 @@ impl<'a> ReplyView<'a> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
@@ -1006,11 +1002,20 @@ impl<S: ReplyStorage> ReplyOwned<S> {
     }
 }
 
+/// What the origin projection of `Reply` asks of a storage profile
+/// beside ReplyStorage: that it is an origin profile, and
+/// that each byte string and text of `Reply` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait ReplyOrigin: ReplyStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::msg_put::MsgPutOrigin + super::msg_del::MsgDelOrigin {}
+
+impl<S: ReplyStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::msg_put::MsgPutOrigin + super::msg_del::MsgDelOrigin> ReplyOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> ReplyVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ReplyLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: ReplyStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ReplyOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: ReplyOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ReplyOwnedVariant<S>, CodecError> {
         Ok(match self {
             Self::CodecZenohMsgPut(_b) => ReplyOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in_origin::<S>(origin)?),
             Self::CodecZenohMsgDel(_b) => ReplyOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in_origin::<S>(origin)?),
@@ -1022,17 +1027,17 @@ impl<'a, D> ReplyVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: Rep
 #[allow(dead_code)]
 impl<'a, D> ReplyIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: ReplyLentStorage {
     /// Project this borrowed view into an owned [`ReplyOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ReplyStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ReplyOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: ReplyOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<ReplyOwned<S>, CodecError> {
         Ok(ReplyOwned {
             header: self.header,
             consolidation: self.consolidation,

@@ -75,6 +75,8 @@ members = [
     "wz-zenoh-result",
     "wz-zenoh-runtime",
     "wz-zenoh-core",
+    "wz-zenoh-task",
+    "wz-zenoh-sync",
     "wz-zenoh-keyexpr",
     "wz-zenoh-macros",
     "wz-zenoh-collections",
@@ -169,6 +171,10 @@ members = [
     # C15): its build script reads the build's features, limits and policies and the library hands
     # the digest out, so a tester checks the build it talks to against the statement it was given.
     "wz-conformance-build",
+    # The front half of the zenoh conformance test suite (docs/conformance-suite.md): the
+    # conformance requirements, the PICS and PIXIT proformas and wz's PICS answers, read from
+    # `conformance/suite/` and held to their formats. It links nothing of the engine.
+    "wz-conformance-suite",
     "wz-runtime-core",
     "wz-session-core",
     # The server layer above the core, one crate per concern, each built on the core and never

@@ -151,7 +151,7 @@ pub fn literal_put_with_qos<'a>(
 /// `mapping_id` is not zero: that id is the literal key's.
 #[cfg(feature = "storage-profile")]
 pub fn aliased_put_with_qos<'a>(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&'a str>,
     value: &'a [u8],
     qos: crate::sample::QosLevel,
@@ -165,7 +165,7 @@ pub fn aliased_put_with_qos<'a>(
 /// [`literal_put`] is.
 #[cfg(feature = "storage-profile")]
 pub fn put_with_qos<'a>(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&'a str>,
     value: &'a [u8],
     qos: crate::sample::QosLevel,
@@ -216,7 +216,7 @@ pub fn put_with_qos<'a>(
 #[cfg(feature = "storage-profile")]
 pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     value: &[u8],
     qos: crate::sample::QosLevel,
@@ -253,7 +253,7 @@ where
     let mut used = 0usize;
     head[used] = header;
     used += 1;
-    used = put_vle(&mut head, used, mapping_id);
+    used = put_vle(&mut head, used, u64::from(mapping_id));
     if let Some(text) = suffix {
         used = put_vle(&mut head, used, text.len() as u64);
         sink.write_bytes(&head[..used])?;
@@ -302,20 +302,8 @@ mod tests {
     #[test]
     fn the_direct_writer_is_the_codecs_bytes() {
         let mut compared = 0usize;
-        // The ids reach every VLE width the codec writes, the nine-byte one included.
-        for id in [
-            0u64,
-            1,
-            127,
-            128,
-            300,
-            16_384,
-            65_535,
-            1 << 35,
-            1 << 56,
-            1 << 63,
-            u64::MAX,
-        ] {
+        // The ids reach every VLE width an `ExprId` takes, the three-byte one included.
+        for id in [0u16, 1, 127, 128, 300, 16_383, 16_384, 65_535] {
             for suffix in [
                 None,
                 Some("a"),
@@ -468,7 +456,7 @@ mod tests {
         use crate::sample::QosLevel;
 
         let mut compared = 0usize;
-        for id in [1u64, 7, 127, 128, 300, 65_535] {
+        for id in [1u16, 7, 127, 128, 300, 65_535] {
             for suffix in [None, Some("tail"), Some("a/longer/suffix/than/one")] {
                 for raw in [QosLevel::DEFAULT.raw, 0x11, 0x1a] {
                     for payload in [&b""[..], &b"x"[..], &[5u8; 400][..]] {

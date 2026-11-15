@@ -95,7 +95,7 @@ const INTEREST_BODY_M: u8 = 0x40;
 /// Generic over the storage profile (R3011): a namespace decorates messages of
 /// both planes, and a `Declare`'s key expression is on the default profile while
 /// a `Push`'s is on [`WireStorage`](crate::wire::WireStorage).
-fn id_suffix<S: WireexprStorage>(we: &WireexprOwned<S>) -> (u64, Option<&str>) {
+fn id_suffix<S: WireexprStorage>(we: &WireexprOwned<S>) -> (crate::wire_id::ExprId, Option<&str>) {
     match &we.body {
         WireexprOwnedVariant::WireexprLocal(a) => {
             (a.id, a.suffix.as_ref().map(|s| s.as_text().into_inner()))
@@ -435,7 +435,7 @@ pub struct NamespaceIngress {
     /// Read by the aliased-reference reconstruction path in [`Self::strip`]
     /// (always compiled); populated only by a `DeclareKeyExpr` definition
     /// (`codec-declare`).
-    incomplete: HashMap<u64, String>,
+    incomplete: HashMap<crate::wire_id::ExprId, String>,
 }
 
 impl NamespaceIngress {
@@ -512,7 +512,7 @@ impl NamespaceIngress {
     fn strip<S: for<'x> WireexprFrom<'x>>(
         &mut self,
         we: &mut WireexprOwned<S>,
-        decl_id: Option<u64>,
+        decl_id: Option<crate::wire_id::ExprId>,
     ) -> bool {
         let sender = is_sender_mapped(we);
         self.strip_mapped(we, decl_id, sender)
@@ -541,7 +541,7 @@ impl NamespaceIngress {
     fn strip_mapped<S: for<'x> WireexprFrom<'x>>(
         &mut self,
         we: &mut WireexprOwned<S>,
-        decl_id: Option<u64>,
+        decl_id: Option<crate::wire_id::ExprId>,
         sender: bool,
     ) -> bool {
         let (id, suffix_opt) = id_suffix(we);
@@ -604,11 +604,16 @@ impl NamespaceIngress {
     fn declare_ingress(&mut self, d: &mut crate::transport_profile::owned::DeclareOwned) -> bool {
         use crate::transport_profile::owned::DeclareOwnedVariant as DV;
         match &mut d.body {
-            DV::CodecZenohDeclKexpr(m) => self.strip(&mut m.keyexpr, Some(m.id)),
+            DV::CodecZenohDeclKexpr(m) => {
+                self.strip(&mut m.keyexpr, Some(crate::wire_id::declared_expr_id(m.id)))
+            }
             // A parked (non-matching) DeclareKeyExpr's undeclare is dropped; one
             // that was stripped (not in `incomplete`) forwards. zenoh:
             // `remove(&id).is_none()`.
-            DV::CodecZenohUndeclKexpr(m) => self.incomplete.remove(&m.id).is_none(),
+            DV::CodecZenohUndeclKexpr(m) => self
+                .incomplete
+                .remove(&crate::wire_id::declared_expr_id(m.id))
+                .is_none(),
             DV::CodecZenohDeclSubscriber(m) => {
                 let id = m.id;
                 if self.strip(&mut m.keyexpr, None) {
@@ -732,7 +737,7 @@ mod tests {
     }
 
     /// Sender(Local)-mapped aliased wireexpr: id != 0, M=1.
-    fn aliased_sender(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn aliased_sender(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id,
@@ -743,7 +748,7 @@ mod tests {
     }
 
     /// Receiver(Nonlocal)-mapped aliased wireexpr: id != 0, M=0.
-    fn aliased_receiver(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn aliased_receiver(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                 id,

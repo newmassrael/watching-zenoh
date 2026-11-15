@@ -45,8 +45,17 @@
        0x00 → Unit  (codec_zenoh_ext_unit, empty body)
        0x01 → ZInt  (codec_zenoh_ext_zint, VLE u64)
        0x02 → ZBuf  (codec_zenoh_ext_zbuf, VLE-length + bytes)
-       <sce:default> → Unit (catch-all preserves runtime enc on round-trip;
-                             upstream's "unknown encoding" log path)
+       <sce:default> → Unit (the reserved encoding 0b11: no body is read
+                             and the header keeps the encoding on
+                             round-trip, so an analyzer still sees the
+                             entry. zenoh 1.10.2 refuses the whole
+                             message on it (common/extension.rs, the
+                             `_ => return Err(DidntRead)` arm of the
+                             unknown-extension read); zenoh-pico reads it
+                             as a body-less entry and accepts. The
+                             refusal is the participant's, one layer up:
+                             wz-session-core ext_admit,
+                             ExtAdmission::ReservedEncoding.)
 
      Ships on all 6 backends (cpp/kotlin/go/python emit the variant
      primitive natively; no MCU-only sub-features in this codec

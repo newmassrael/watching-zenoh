@@ -1,4 +1,4 @@
-// SCE-MAP: query:117 :: _forge_body
+// SCE-MAP: query:124 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -71,7 +71,7 @@ impl<'f, S: QueryStorage + ::sce_forge_runtime::codec::StoresBytes<'f, QueryPara
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryIn<S: QueryStorage> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub parameters_len: Option<u64>,
     pub parameters: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<QueryParametersField>>::Bytes, { usize::MAX }>>,
     pub extensions: Option<QueryExtensionsList<S>>,
@@ -162,9 +162,7 @@ impl<S: QueryStorage> QueryIn<S> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
@@ -343,7 +341,7 @@ pub trait QuerySource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `consolidation` field.
-    fn consolidation(&self) -> Option<u8>;
+    fn consolidation(&self) -> Option<u64>;
     /// The `parameters` field.
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>>;
     /// The `extensions` field.
@@ -354,7 +352,7 @@ impl<T: QuerySource + ?Sized> QuerySource for &T {
     fn header(&self) -> u8 {
         (**self).header()
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         (**self).consolidation()
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -374,7 +372,7 @@ pub struct QueryParts<'a> {
     /// The `header` field.
     pub header: u8,
     /// The `consolidation` field.
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     /// The `parameters` field.
     pub parameters: Option<::sce_forge_runtime::codec::Bytes<'a, { usize::MAX }>>,
     /// The `extensions` field.
@@ -385,7 +383,7 @@ impl<'a> QuerySource for QueryParts<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -400,7 +398,7 @@ impl<S: QueryStorage> QuerySource for QueryOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -415,7 +413,7 @@ impl<'a> QuerySource for QueryView<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -460,7 +458,7 @@ impl QueryWire {
         let _c_header: u8 = (((((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x40) | (u8::from(_p_header_p_0) << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         if let Some(_v) = src.consolidation() {
-            w.write_u8(_v)?;
+            w.write_vle_u64(_v)?;
         }
         if (_c_header & 0x40) != 0 {
             w.write_vle_u64(_d_parameters_len)?;
@@ -543,7 +541,7 @@ impl ListWalk<1> for QueryExtensionsWalk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryView<'a> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub parameters_len: Option<u64>,
     pub parameters: Option<::sce_forge_runtime::codec::Bytes<'a, { usize::MAX }>>,
     pub extensions: Option<::sce_forge_runtime::codec::Lawful<Bounded<ListView<'a, QueryExtensionsWalk, 1>, { usize::MAX }, 1>, QueryExtensionsLaw>>,
@@ -601,9 +599,7 @@ impl<'a> QueryView<'a> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
@@ -836,25 +832,34 @@ impl<S: QueryStorage> QueryOwned<S> {
     }
 }
 
+/// What the origin projection of `Query` asks of a storage profile
+/// beside QueryStorage: that it is an origin profile, and
+/// that each byte string and text of `Query` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait QueryOrigin: QueryStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<QueryParametersField> + super::query_ext_entry::QueryExtEntryOrigin {}
+
+impl<S: QueryStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginBytes<QueryParametersField> + super::query_ext_entry::QueryExtEntryOrigin> QueryOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> QueryIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: QueryLentStorage {
     /// Project this borrowed view into an owned [`QueryOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: QueryStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: QueryOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryOwned<S>, CodecError> {
         Ok(QueryOwned {
             header: self.header,
             consolidation: self.consolidation,
             parameters_len: self.parameters_len,
-            parameters: self.parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<QueryParametersField>(origin, _v.into_inner()))).transpose()?,
+            parameters: self.parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built(<S as ::sce_forge_runtime::codec::OriginBytes<QueryParametersField>>::bytes_from(origin, _v.into_inner()))).transpose()?,
             extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_lawful(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
         })
     }

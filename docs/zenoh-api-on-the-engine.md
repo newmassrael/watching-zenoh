@@ -141,6 +141,19 @@ and the engine begins, what each side owns, which engine, and in what order the 
   with a table of pending declarations. wz has it only inside the tokio engine's transport
   (feature `routing-namespace`). It enters as an engine policy by the rule of section 5 of
   `build-configuration.md`, in its own slice, not as an operation of the port.
+  **Four keys are a session's and not the engine's** (`SESSION_HONOURED_KEYS` in the runtime's
+  reader): `qos/publication`, `transport/shared_memory/mode` and the promotion's
+  `message_size_threshold` and `messages`. Upstream applies each in its session or its runtime,
+  above the transport. The reader reads them once, the open plan compiles them once into the
+  session's `SessionDefaults` (`wz-capi-core/src/session_defaults.rs`), the open carries that
+  value into the registry or the node, and the C ABI and this crate apply it from there: the
+  QoS of a put, a delete and a publisher by `PublicationQos`, the subsystem made at the end of
+  the open by `init_shared_memory`, and the copy of a large payload decided by
+  `ShmPromotion::admits`. Whether a session acts on each is a fact of its own build, so the state
+  of these keys is asked with what the session reaches (`key_state(path, SessionReach)`): this
+  crate reaches all four with `shared-memory` and `unstable`, the zenoh-c ABI the QoS, the
+  subsystem and the copy of a put, and leaves the list of messages unmapped while its query
+  values and replies leave as bytes.
 - **D7. Where upstream and the engine differ, the difference is stated and held, and the default
   is upstream's (C2).** Each is a class of the differential test with the words of both
   behaviours. Known already: the engine's `interfaces` of a link is three-state where upstream's
@@ -498,10 +511,15 @@ Each lands whole with its surface lines, tests and faults in one round.
     walk of a frame's records stops before a transport message id, and what follows is the next
     unit of the batch, parked for the driver on the copying path (round 4100) and read on from
     that offset on the in-place path (round 4103). The best-effort parse that the capture tools
-    use keeps reporting the id as unknown, on purpose. The differential still sends its best-effort
-    put last: it was moved among the others and the scenario did not finish on this tree, for a
-    reason that is not the reception (the control with the old order did not finish either; that
-    hang was a deadlock of the node, repaired below). A datagram of two frames through the loops
+    use ends a frame there too now, and says where the next message begins
+    (`BatchParse::next_message_at`); a frame the SN gate refuses no longer takes the rest of its
+    batch with it; `conformance/differential/tests/zenoh_rx_batch.rs` holds both readers of a batch
+    to upstream's codec. The differential of the session sends its best-effort put in the order
+    the other scenarios publish (behind the sourced put, ahead of the deletes): it had been sent
+    last because the scenario did not finish when it was moved, and that hang was the node's
+    deadlock repaired below, not the reception. With no allocator the receive reads the second
+    frame in the iteration of the datagram (`slot_frames_without_alloc`, `wz-session-lwip`). A
+    datagram of two frames through the loops
     of the profile with no allocator is held by
     `what_follows_a_second_frame_header_in_a_batch_is_dispatched` (`wz-session-lwip`), on the
     copying loop, the in-place loop and the in-place loop on the fixed backing: the copying loop
@@ -576,7 +594,11 @@ Each lands whole with its surface lines, tests and faults in one round.
     as the subscribers' did (`a_callback_of_the_nodes_own_queryable_may_declare_while_its_session_asks`
     was red); the route now takes the branch of the query's fan under the guard and owes the call
     (`QueryJob`), which is made with no guard held and takes the tables for reading again to send
-    the replies and to end the branch.
+    the replies and to end the branch. The route of a query takes the span it owes the call to as
+    an argument, so no entry point can route a query with no span open and have the call made
+    under the guard; a callback may ask the node a query and undeclare a queryable while a face's
+    query is routed to it (upstream lets its tables go before it calls the queryables:
+    `zenoh/src/api/session.rs` @ `drop(state);`).
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on
@@ -949,10 +971,14 @@ Each lands whole with its surface lines, tests and faults in one round.
   `io/zenoh-transport/src/multicast/link.rs` @ `ext_shm: None,`, and reads a member's as
   `join.ext_shm.is_some()` only for the report of its transports; the descriptor of a group is
   read by any member that holds a reader, announced or not), so a Join that announced it would
-  differ from upstream's. **Owed:** a query value and a reply in shared memory (and the `query`
-  and `reply` lists of the optimisation), a differential of a `ZShm` over a link and a group to
-  an upstream node, and a unit test of a group's descriptor in the engine (the upstream file is
-  its test).
+  differ from upstream's. The design, the rules by which a buffer falls back to its bytes and the
+  stages left are `docs/shm-transport.md`: a reply in shared memory, from the registry and from a
+  node, and the `query` and `reply` lists of the optimisation have landed since; an error reply
+  goes as its bytes, as upstream's codec writes it, and a differential holds an upstream session
+  and a wz session in one process to what two upstream sessions hand each other over TCP.
+  **Owed:** what that note's section 7 lists as owed (the differential over a group, one
+  shared-memory system per process), and a unit test of a group's descriptor in the engine (the
+  upstream file is its test).
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its
   reason, never a deleted test.
@@ -1100,8 +1126,9 @@ Each lands whole with its surface lines, tests and faults in one round.
       in the flood and again in an answer); a client is told only what it asked, so the
       interest of a peer south of the node is brokered north, and sent again to a router that
       comes up after it; and a token the node learned as an answer was relayed and not held,
-      so its withdrawal reached no one. The client node runs on the tables of the peer node and
-      announces itself as a client; the forwarder has no client hat of its own. A south kept
+      so its withdrawal reached no one. The client node ran on the tables of the peer node
+      then; its north is the pin's client hat now, at node mode Client
+      (`docs/peer-region-hats.md`, section 15). A south kept
       apart is placed by a node alone, so an open that would keep one and fits no node (a
       client that is told no router, a C ABI or a build without `router-node`) is refused by
       the key
@@ -1221,6 +1248,93 @@ Each lands whole with its surface lines, tests and faults in one round.
       minutes (three green; the fourth lost one test of `regions`, a registration that a late peer
       of the scenario 7 group did not count, and ran to the end), so the job's ceiling is 60 minutes and it carries the margin gate of the
       other jobs (alarm at 90%, floor at 20%). It was 150 minutes with no gate.
+  - **Z8b. The ecosystem crate and the examples (harness written, not measured).** The other two
+    thirds of the gate. `zenoh-ext` is not a member of the family: it is the crate the family must
+    meet, so the harness copies its source at the pin into a workspace of its own beside the suite
+    (`zenoh-ext-suite`, sharing the suite's build directory), resolves its manifest's workspace
+    inheritance to the registry and patches the family in, and runs its library's unit tests with
+    and without its unstable half (`zenoh-ext.lib`, `zenoh-ext.lib-stable`) and its two test files,
+    as rows of the suite's report and of `docs/z8-expected.tsv`. A workspace of its own, because a
+    crate that does not resolve against the family must not stop the files of `zenoh/tests`.
+    The examples are run by `z8_upstream_suite.py examples-run`: upstream's examples package is
+    generated twice, over upstream's crates (the control) and with the family patched in, every one
+    of its 31 programs declared and compiled on its own, and `zenoh-ext` made optional behind a
+    feature that the three programs naming it require, so that crate's compile hides none of the
+    other 28. The ecosystem crate's own examples package (`zenoh-ext/examples`: the advanced
+    publisher and subscriber, and two programs of the group), which takes the first package's
+    arguments, is a member of the same generated workspace, so its 4 programs are built in the same
+    graph. `docs/z8-examples-expected.tsv` declares 31 scenarios that together run all 35 (a
+    subscriber and the put, delete or publisher it hears, a queryable and the get or querier it
+    answers, a storage between a put and a get, a forward, a pull, the three liveliness programs,
+    ping and pong, the two throughput pairs, info, scout, the programs that run alone, the advanced
+    publisher and subscriber, and two groups), each with
+    what it must show: a count of the lines that hold a text, or how a program ended. A scenario is
+    `same` when the family's run shows what the control's does, line shapes and endings included;
+    `z8_expectation_gate.py --check-examples` grades the report, and a control that does not show its
+    row fails the row. Every new row is `unmeasured`, a status that turns a measurement into a note
+    and never into a failure; the rows of the ecosystem crate are in the hosted lane, the scenarios
+    are not until a build host has measured both arms once. **What `zenoh-ext`'s unstable half
+    names of the family, read from its source; each is built, and a compiler has yet to say
+    whether anything else is owed:** the helpers `internal` re-exports from the family's own crates
+    (`bail`, `zerror`, `zlock`, `zread`, `zwrite`, `zasynclock`, `ztimeout`, `ResolveFuture`,
+    `ErrNo`) and `internal::runtime::ZRuntime`; `TaskController` and `TerminatableTask`, of the
+    member `zenoh-task`; `Condition`, of the member `zenoh-sync`, which is whole because upstream's
+    transport and links, built over the patched graph in the suite, take its event, mvar, signal and
+    object pool; the `KE_*` chunks of the admin space at the crate's root with `internal`, as
+    upstream's cfg states them (`api::admin_keys`, apart from the admin module that only `unstable`
+    compiles); `Session::downgrade` public with `internal`; a `WeakSession` that holds a `Session`
+    it never drops as one and dereferences to it, upstream's ownership; and `Session::hlc`, below.
+  - **`internal`: the one difference from upstream's surface, the type of the clock a session
+    lends.** Upstream's `Session::hlc` returns `Option<&uhlc::HLC>`, the runtime's clock. The node's
+    clock here is not a `uhlc::HLC`: the engine keeps `uhlc`'s arithmetic in one atomic word
+    (`wz_session_core::hlc`, held to `uhlc` by a differential test over random clock traces), which
+    stamps from four threads in 29 ns where `uhlc`'s lock costs 52 ns, and a refused remote stamp in
+    13 ns where `uhlc` formats a message in 78 ns (the measurements of `wz-node-time`'s
+    `node_clock`). A `uhlc::HLC` cannot be laid over that clock: its physical clock is a `fn` with
+    no state and its last stamp sits behind its own lock, so a `uhlc::HLC` beside the node's clock
+    would be a second clock of one identity with a last stamp of its own, the defect `node_clock`
+    was written to remove (two clocks of one `uhlc::ID` break the uniqueness of the stamps both
+    make). The session therefore lends the node's own clock as `zenoh::internal::NodeHlc`, with every
+    public method of `uhlc::HLC` 0.8.2 under the same signature and the same meaning
+    (`new_timestamp`, `get_id`, `get_delta`, `update_with_timestamp`; `Default`, which makes a
+    clock of its own, has no counterpart, since this clock is the node's). Its stamps, its refusals
+    and its bound are held to `uhlc::HLC` over the same traces (`wz-node-time`'s
+    `the_node_clock_lent_as_uhlc`), and a unit test of `zenoh` holds that the lent clock and
+    `Session::new_timestamp` are one clock. The text of a refusal names the remote stamp and the
+    bound, not the reading `uhlc`'s also prints, which the engine's clock does not hand out. What
+    remains different is the type's name and path; the surface gate does not read the `internal`
+    arm (its arms are the default, `unstable` and `unstable` with `shared-memory`), so there is no
+    data of it to declare the difference in, and this paragraph is where it is declared. A node of
+    any kind lends its clock: the registry of faces the one it holds (`SharedSession::node_hlc`),
+    the router data plane, which a router and a peer that accepts sessions are, the one it stamps
+    with (`RouterState::node_hlc`, by the role and `timestamping/enabled`, so a router lends one by
+    default, as upstream's router has an HLC by default), and `Session::new_timestamp` reads the
+    same clock on either. The `clock-quality-stamping` policy (`trusted-only`) is applied where the
+    node stamps data it passes on and not in the clock, because that is where upstream decides:
+    `uhlc`'s `HLC::new_timestamp` always gives a time, and each stamper chooses whether to take
+    one (`treat_timestamp!` in the dispatcher for what it forwards, `resolve_put` for a publication
+    of the session, `Session::new_timestamp` for a program that asks). So `NodeHlc::stamp`, which
+    the forward path, the publication of the session, the reply and the caches take, holds the
+    policy, and `NodeHlc::clock_stamp` and the lent clock, which a program reads for itself, do
+    not; until this was settled `Session::new_timestamp` of a `trusted-only` node answered the wall
+    clock where the clock it lends answered the node's time. The two C ABIs follow the same rule:
+    zenoh-c's `z_timestamp_new` gives the session's node clock and the system time where the node
+    holds none, as upstream's `session.new_timestamp()` does (`wz_capi_c` revision 16), and
+    zenoh-pico's gives the registered clock's time whatever its standing (`capi-pico` revision 2).
+    zenoh-pico's reads the wall clock where nothing is registered, and passes either reading
+    through the session's last time given, as pico keeps `_last_timestamp` in its session: one
+    session's stamps strictly increase whichever clock they come from, a clock registered or
+    removed while the session is open included, and run out only past the greatest time there is
+    (`Z_ERR_TIMESTAMP_GENERATION_FAILED`). The session's advanced publisher stamps through the
+    same last time given (the plane's `AdvancedPublisherPlane::order_stamp`), as pico's stamps
+    each sample with `z_timestamp_new`, and the session's node clock learns every time given
+    (`NodeHlc::absorb_word`): a program's stamps and the samples' are one order, and the node
+    clock's own proposal is that order wherever it could learn the time before it. The other
+    planes (the runtime's, zenoh-c's) carry the node clock's proposal as it is. A sample that
+    cannot be given a time is refused on every plane and nothing is sent: a pico session with
+    no time left (`PublishError::TimestampExhausted`), and a `trusted-only` node whose clock is
+    not trusted (`PublishError::ClockUntrusted`); pico's doors answer both with
+    `Z_ERR_TIMESTAMP_GENERATION_FAILED`, as pico's put answers a failed `z_timestamp_new`.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.
@@ -1333,5 +1447,21 @@ Each lands whole with its surface lines, tests and faults in one round.
   with the bound, and the Rust, C++, Kotlin, Go and Python arms and the string variant do not
   (the same gap holds for `sce:max-count` on the heap-backed repeat decode, and on the encode
   side). The fix is made in the SCE generator and wz regenerates `out/**` when it lands; wz adds
-  no check of its own in a wrapper and does not change the generated documentation. Open until
-  then.
+  no check of its own in a wrapper and does not change the generated documentation. Closed by
+  the generator: SCE 3ee3508e44 (a codec length or count past its bound is refused on every
+  backend, ADR 0077 step 1) is behind the pin since the SCE crossing of round R4167, and the
+  generated decode of a bounded length-ref, bytes or text, compares the length with the bound
+  before it reads a byte (`out/wz-codecs/timestamp.rs`, `out/wz-codecs/locator.rs`). Held in
+  two places: `crates/wz-codecs/tests/it/files/declared_bounds.rs` refuses an identity of 17
+  bytes and a locator of 256 as `LengthOutOfRange` in the lent form, the node's and the heap's,
+  with the frames at the bound as the control (only the node answers its capacity for a
+  locator of 255, after reading it whole); and
+  `conformance/differential/tests/zenoh_push_put_chain.rs` takes a Push of a Put upstream
+  wrote with an identity of 16 bytes, which both read alike, makes the identity 17 bytes, and
+  both refuse it. The truncation in the sample projection is no longer reachable from a
+  frame. The same test holds the other half of ADR 0077 section 7 to upstream: a Put whose
+  extension chain is longer than a node stores inline (9 and 32 extensions; 8 is the control)
+  is read by a participant with an allocator entry for entry as upstream reads it. Its
+  receive path lends a Push at the node's capacity and hands one past it over owned, read at
+  the heap's, where it refused it before; the profile with no allocator still refuses it, as
+  its capacity says.

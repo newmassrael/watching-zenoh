@@ -166,7 +166,7 @@ pub struct LivelinessToken<R: SessionRuntime = TokioRuntime, T: TimeSource = Tok
     /// The wire form the token was DECLARED with — `(mapping_id, suffix)`,
     /// `mapping_id == 0` for a literal — kept so a retraction that names the
     /// key names it the same way ([`LivelinessOptions::retraction_names_the_key`]).
-    declared_on: (u64, String),
+    declared_on: (wz_session_core::wire_id::ExprId, String),
     options: LivelinessOptions,
     /// R311lo — RAII disarm flag. [`Self::undeclare`] emits the
     /// `Declare(UndeclToken)` once and clears this so the natural
@@ -201,7 +201,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         session: Session<R, T, Unicast>,
         token_id: u64,
         keyexpr: String,
-        declared_on: (u64, String),
+        declared_on: (wz_session_core::wire_id::ExprId, String),
         options: LivelinessOptions,
     ) -> Self {
         // R283 — register the held token so an inbound non-final liveliness
@@ -502,7 +502,7 @@ pub enum LivelinessAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_token_aliased call).
-    UnknownMapping(u64),
+    UnknownMapping(wz_session_core::wire_id::ExprId),
     /// R300 — the keyexpr (literal for [`Session::declare_token`], or
     /// reconstructed `outbound_mapping[id] || inline_suffix` for
     /// [`Session::declare_token_aliased`]) failed the outbound
@@ -1187,7 +1187,7 @@ pub enum LivelinessSubscriberAliasError {
     /// the outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_liveliness_subscriber_aliased
     /// call).
-    UnknownMapping(u64),
+    UnknownMapping(wz_session_core::wire_id::ExprId),
     /// R283 — the session-FSM has not yet entered `Established`. The
     /// outbound `Interest` frame would be emitted into a session that
     /// is mid-handshake (InitSyn / InitAck / OpenSyn / OpenAck) and

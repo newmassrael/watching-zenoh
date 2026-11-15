@@ -8,8 +8,9 @@
 //! face that keeps them by id takes every such declaration as the one before it. Two faces are
 //! of that kind:
 //!
-//! - The router that holds this node as a CLIENT ([`RouterForwarder::as_client_of_north`]) keeps
-//!   a client's declarations by the id the client numbered them with
+//! - The router that holds this node as a CLIENT, the one face of its client hat
+//!   ([`RouterForwarder::client_with_timestamping`]), keeps a client's declarations by the id the
+//!   client numbered them with
 //!   (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `.remote_subs.remove(&id)`). A node that
 //!   sends them all as id 0 has each replace the one before: of every key it declares, the
 //!   router holds the last. A client numbers each declaration with an id of its own, one for each
@@ -240,7 +241,7 @@ mod tests {
             !numbers(&router, NORTH_REGION),
             "a router's north keeps declarations by key"
         );
-        let client = RouterForwarder::peer(zid).as_client_of_north();
+        let client = RouterForwarder::client(zid);
         assert!(numbers(&client, NORTH_REGION));
     }
 

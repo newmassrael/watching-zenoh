@@ -39,7 +39,12 @@ fn one_line(text: &str) -> String {
 
 /// One Push of `payload` under the id `id` with `suffix`, alone in a Frame,
 /// from the low end.
-fn put(wire: &mut Wire, id: u64, suffix: Option<&'static str>, payload: &[u8]) {
+fn put(
+    wire: &mut Wire,
+    id: wz_session_core::wire_id::ExprId,
+    suffix: Option<&'static str>,
+    payload: &[u8],
+) {
     wire.send(
         true,
         None,

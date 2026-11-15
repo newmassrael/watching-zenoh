@@ -903,8 +903,12 @@ impl SharedSession {
     /// Declare keyexpr `id` (`keyexpr`) to every group told the session's keyexprs, as a
     /// unicast face is told it ([`SharedSession::declare_keyexpr`]); a key declared again is
     /// declared again, as zenoh-pico sends a declaration whether or not the key was new.
-    pub(super) fn announce_keyexpr_on_groups(guard: &Inner, id: u64, keyexpr: &str) {
-        let Some(id) = core::num::NonZeroU64::new(id) else {
+    pub(super) fn announce_keyexpr_on_groups(
+        guard: &Inner,
+        id: wz_session_core::wire_id::ExprId,
+        keyexpr: &str,
+    ) {
+        let Some(id) = core::num::NonZeroU16::new(id) else {
             return;
         };
         for face in guard.mcast_faces.values() {
@@ -915,7 +919,7 @@ impl SharedSession {
     }
 
     /// Retract keyexpr `id` from every group told of it.
-    pub(super) fn retract_keyexpr_on_groups(guard: &Inner, id: u64) {
+    pub(super) fn retract_keyexpr_on_groups(guard: &Inner, id: wz_session_core::wire_id::ExprId) {
         for face in guard.mcast_faces.values() {
             if face.declarations.declares_keyexprs() {
                 let _ = face.session.retract_keyexpr(id);

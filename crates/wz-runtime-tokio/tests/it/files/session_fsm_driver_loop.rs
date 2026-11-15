@@ -59,7 +59,7 @@ fn fresh_setup() -> (
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
 }
 
@@ -669,7 +669,7 @@ async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
     params.batch_size = 512;
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     drive_to_sent_init_syn(&mut engine);
 
     // seq/req = 0/0 conform; batch_size 1024 > advertised 512.
@@ -1194,6 +1194,146 @@ async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_uni
     assert_eq!(seen, vec![(true, 1), (false, 0), (true, 2)]);
 }
 
+/// A frame the SN gate refuses is dropped with its records, and the frame of the other
+/// reliability behind it in the same batch is still delivered: upstream drains a refused frame's
+/// reader and reads the batch on. The discriminator is the empty queue again: the best-effort
+/// frame can come only from the remainder parked behind the refused one.
+#[cfg(feature = "codec-push")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_frame_leaves_the_frame_behind_it_for_the_next_unit() {
+    use wz_codecs::lent::Push;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let push = || {
+        let push = Push {
+            header: 0x1D,
+            ..Push::default()
+        };
+        wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec()
+    };
+    // [Frame(reliable, sn 1) Push], then [Frame(reliable, sn 1) Push][Frame(best-effort, sn 0) Push]
+    let mut first = vec![0x25, 0x01];
+    first.extend(push());
+    let mut batch = first.clone();
+    batch.extend([0x05, 0x00]);
+    batch.extend(push());
+    let mut driver = QueueDriver::with(vec![
+        LinkEvent::Rx(RxFrame::new(first)),
+        LinkEvent::Rx(RxFrame::new(batch)),
+    ]);
+
+    let delivered = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(
+            delivered,
+            DriverLoopOutcome::FramePayload {
+                reliable: true,
+                sn: 1,
+                ..
+            }
+        ),
+        "the first frame is delivered; got {delivered:?}"
+    );
+    let refused = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(
+            refused,
+            DriverLoopOutcome::RxSnRejected {
+                reliable: true,
+                sn: 1,
+                ..
+            }
+        ),
+        "the duplicate is refused; got {refused:?}"
+    );
+    match poll_and_dispatch_one(&mut driver, &actions, &mut engine).await {
+        DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        } => {
+            assert!(!reliable, "the best-effort frame behind the refused one");
+            assert_eq!(sn, 0);
+            assert_eq!(messages.len(), 1, "its one Push; got {messages:?}");
+            assert!(matches!(messages[0], NetworkMessage::Push(_)));
+        }
+        other => panic!("expected the best-effort frame, got {other:?}"),
+    }
+    let drained = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(drained, DriverLoopOutcome::LinkLost(LostCause::PeerClosed)),
+        "a drained unit must not keep answering; got {drained:?}"
+    );
+}
+
+/// The same batch read where it lies (`dispatch_datagram`): the refused frame's records are
+/// walked to find where they end, and the best-effort frame behind them is the next unit.
+#[cfg(feature = "codec-push")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_in_place_refused_frame_leaves_the_frame_behind_it_for_the_next_unit() {
+    use wz_codecs::lent::Push;
+    use wz_session_core::drive::{dispatch_datagram, dispatch_pending};
+    use wz_session_core::driver_loop::IterationEvent;
+    use wz_session_core::network_message::new_record_buf;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let push = || {
+        let push = Push {
+            header: 0x1D,
+            ..Push::default()
+        };
+        wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec()
+    };
+    let mut first = vec![0x25, 0x01];
+    first.extend(push());
+    let mut batch = first.clone();
+    batch.extend([0x05, 0x00]);
+    batch.extend(push());
+
+    let mut record = new_record_buf();
+    let mut seen: Vec<(bool, u64)> = Vec::new();
+    let mut refused: Vec<(bool, u64)> = Vec::new();
+    let mut sink = |event: IterationEvent<'_, '_>| match event {
+        IterationEvent::InPlace(rec) => seen.push((rec.reliable(), rec.sn())),
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        }) if !messages.is_empty() => seen.push((*reliable, *sn)),
+        IterationEvent::Poll(DriverLoopOutcome::RxSnRejected { reliable, sn, .. }) => {
+            refused.push((*reliable, *sn))
+        }
+        _ => {}
+    };
+    dispatch_datagram(&first, &actions, &mut engine, &mut record, &mut sink);
+    dispatch_datagram(&batch, &actions, &mut engine, &mut record, &mut sink);
+    // What follows the refused frame is parked on a heap build, and read before the link.
+    while let Some(outcome) = dispatch_pending(&actions, &mut engine) {
+        if let DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        } = outcome
+        {
+            assert_eq!(messages.len(), 1, "one Push for the frame");
+            seen.push((reliable, sn));
+        }
+    }
+    assert_eq!(refused, vec![(true, 1)], "the duplicate is refused");
+    assert_eq!(
+        seen,
+        vec![(true, 1), (false, 0)],
+        "the first frame, then the best-effort frame behind the refused one"
+    );
+}
+
 /// A transport message behind the last record of a Frame is the next unit of the batch as well,
 /// where a frame used to take it for a record it could not read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1263,7 +1403,7 @@ fn fresh_recording_setup() -> (
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (recorder, actions, engine)
 }
 

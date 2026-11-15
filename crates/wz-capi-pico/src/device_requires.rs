@@ -71,7 +71,12 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
         listen,
         dial_whatami,
         ..
-    } = open_config(cfg);
+    } = open_config(cfg).map_err(|code| {
+        (
+            code,
+            "the open refuses this config: its mode is neither client nor peer",
+        )
+    })?;
     #[cfg(not(feature = "peer"))]
     if listen.is_some() || dial_whatami != WhatAmI::Client {
         return Err((

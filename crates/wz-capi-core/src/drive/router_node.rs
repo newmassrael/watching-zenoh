@@ -78,7 +78,7 @@ pub struct RouterState {
     engine: engine::EngineState,
     /// The request ids the node's own face gives its queries, so that the replies the router
     /// tells the face find the query they answer.
-    next_request: AtomicU64,
+    next_request: std::sync::atomic::AtomicU32,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
@@ -86,9 +86,18 @@ pub struct RouterState {
     /// provider is one): the one place the shim attaches it, as it does on a
     /// [`SessionState`](super::SessionState). Set once, right after the open.
     abi_extension: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    /// What the node's own session applies itself above its faces, as the open was told
+    /// ([`OpenStance::session_defaults`]).
+    session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 impl RouterState {
+    /// What the node's own session applies itself above its faces, which every ABI that
+    /// publishes through the node reads here, as it does on a [`SessionState`](super::SessionState).
+    pub fn session_defaults(&self) -> &crate::session_defaults::SessionDefaults {
+        &self.session_defaults
+    }
+
     /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
     /// was handed, so a shim cannot silently replace state a live handle already reads.
     pub fn set_abi_extension<E: std::any::Any + Send + Sync>(&self, ext: E) -> Result<(), E> {
@@ -111,6 +120,13 @@ impl RouterState {
     /// holds the node declares and publishes through it while the node's thread serves the faces.
     pub fn forwarder(&self) -> &RouterForwarder {
         &self.forwarder
+    }
+
+    /// This node's clock itself, as [`SharedSession::node_hlc`](crate::faces::SharedSession::node_hlc)
+    /// is a session's: the one the router stamps with, by the role and the timestamping the
+    /// configuration states, shared and never copied.
+    pub fn node_hlc(&self) -> wz_runtime_tokio::node_clock::NodeHlc {
+        self.forwarder.node_hlc()
     }
 
     /// The data plane [`Self::forwarder`] is, counted: what a declaration made on the node holds
@@ -206,7 +222,7 @@ impl RouterState {
     /// End the query [`Self::get_numbered`] answered `id` for, now: its handlers are let go and
     /// it is told its end, without the replies that have not come. A query that has already
     /// ended is not found, and nothing happens.
-    pub fn cancel_get(&self, id: u64) {
+    pub fn cancel_get(&self, id: wz_session_core::wire_id::RequestId) {
         self.liveliness.cancel_query(id);
     }
 
@@ -219,7 +235,7 @@ impl RouterState {
         ingress: Option<ReplyIngress>,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
-    ) -> Result<u64, String> {
+    ) -> Result<wz_session_core::wire_id::RequestId, String> {
         let (rid, request) = self.hold_query(keyexpr, options, ingress, on_reply, on_final)?;
         self.forwarder.local_get(&request);
         Ok(rid)
@@ -239,7 +255,7 @@ impl RouterState {
         ingress: Option<ReplyIngress>,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
-    ) -> Result<u64, String> {
+    ) -> Result<wz_session_core::wire_id::RequestId, String> {
         // The value rides beside the query: a query built with a value of its own would carry
         // two, which the chain refuses.
         let mut options = options.clone();
@@ -263,7 +279,13 @@ impl RouterState {
         ingress: Option<ReplyIngress>,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
-    ) -> Result<(u64, wz_session_core::wire::RequestOwned), String> {
+    ) -> Result<
+        (
+            wz_session_core::wire_id::RequestId,
+            wz_session_core::wire::RequestOwned,
+        ),
+        String,
+    > {
         use wz_session_core::request_build::{build_request_query, build_request_query_with_meta};
 
         let rid = self.next_request.fetch_add(1, Ordering::Relaxed);
@@ -414,6 +436,11 @@ pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     if stance.groups.len() > 1 {
         return Some("more than one multicast group");
     }
+    // The node's own subscribers and publishers are entries of its tables, each under its own
+    // key, and not declarations of a session that `aggregation/*` could name an aggregate for.
+    if !stance.session_defaults.aggregation.is_empty() {
+        return Some("`aggregation/subscribers` or `aggregation/publishers`");
+    }
     None
 }
 
@@ -423,6 +450,9 @@ struct JoinedGroup {
     /// group is on, which an endpoint that named port 0 did not state.
     locator: String,
     face: wz_runtime_tokio::multicast_glue::RouterMcastGroup,
+    /// Whether the group is a shared-memory one for the node (`GroupJoin::is_shm`): the node
+    /// sends a buffer to it as a descriptor and maps the descriptors its members send.
+    reads_shm: bool,
 }
 
 /// Join the group `join` names, as a router joins its group locator: either family, with the
@@ -467,11 +497,28 @@ async fn join_group(
             compression: join.profile.compression,
             tx_queue: link_conf.tx.queue,
             link_rx: link_conf.rx,
+            // The beacon the configuration states, as a session that is not a node states it on
+            // its group: a member ignores a beacon whose resolutions or batch size differ from
+            // its own.
+            beacon: wz_runtime_tokio::multicast_glue::GroupBeacon {
+                lease_ms: join.profile.lease_ms,
+                join_interval_ms: join.profile.join_interval_ms,
+                seq_num_res: join.profile.seq_num_res,
+                req_id_res: join.profile.req_id_res,
+                batch_size: join.profile.batch_size,
+            },
+            // The rule of the preset that opened the node.
+            join_rule: join.profile.join_rule,
+            max_sessions: join.profile.max_sessions,
         },
         opts,
         None,
     );
-    Ok(JoinedGroup { locator, face })
+    Ok(JoinedGroup {
+        locator,
+        face,
+        reads_shm: join.is_shm,
+    })
 }
 
 /// Open a router node on `listen`: bind the endpoints, answer the scouts that name it and serve
@@ -517,6 +564,7 @@ pub(crate) fn open_router_blocking(
         namespace,
         gateway_south,
         groups,
+        session_defaults,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -550,17 +598,12 @@ pub(crate) fn open_router_blocking(
     let own_zid = Zid::from_slice(&wire_zid);
     let forwarder = match role {
         NodeRole::Router => RouterForwarder::with_timestamping(own_zid, timestamping),
-        // A client node routes on the peer node's tables: its south is kept apart by the same
-        // partition, and what it owes the router it dialled is what a peer owes its gateway, which
-        // declares nothing of what its other remotes hold, so every message whose source is south
-        // goes up to it (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn maybe_propagate_subscriber`,
-        // and the client hat sends all it has north). What differs is how the node announces
-        // itself: as a client, which the router tells only what the node asked for, so the
-        // interest of its south goes north.
         NodeRole::Peer => RouterForwarder::peer_with_timestamping(own_zid, timestamping),
-        NodeRole::Client => {
-            RouterForwarder::peer_with_timestamping(own_zid, timestamping).as_client_of_north()
-        }
+        // A client node's north is the pin's client hat: its one face is the router it dialled,
+        // which tells a client only what the client asked for, so the hat sends that face every
+        // interest and every declaration of its south and every message whose source is south
+        // (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
+        NodeRole::Client => RouterForwarder::client_with_timestamping(own_zid, timestamping),
     };
     #[cfg(feature = "routing-namespace")]
     let forwarder = match namespace {
@@ -649,6 +692,8 @@ pub(crate) fn open_router_blocking(
     // for each).
     let dials = connect.len();
     let face_drive = RoutingFaceDrive::default();
+    // Taken on the opener's thread: the node's thread runs the whole node inside it.
+    let opener = CallerSpan::current();
     let handle = std::thread::Builder::new()
         .name("wz-capi-router".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -678,7 +723,7 @@ pub(crate) fn open_router_blocking(
                     return;
                 }
             };
-            rt.block_on(run_router(
+            rt.block_on(opener.carry(run_router(
                 role,
                 node_zid,
                 connect,
@@ -698,7 +743,7 @@ pub(crate) fn open_router_blocking(
                 node_shutdown,
                 node_stop,
                 tx,
-            ));
+            )));
         })
         .map_err(|_| OpenError::DriveFailed)?;
     // A router's open is held for `scouting/delay` in full, as the other roles' is (R3125): the
@@ -735,8 +780,8 @@ pub(crate) fn open_router_blocking(
                 // waited for until their face is up and has ended its declarations.
                 //
                 // A client node is told no gossip by the router it dialled, which holds it for a
-                // client, so its start condition is the connection and the end of the router's
-                // initial declarations.
+                // client, and no face of its client hat ends initial declarations, so its start
+                // condition is the connection.
                 NodeRole::Peer | NodeRole::Client if dials > 0 => {
                     let deadline = std::time::Instant::now() + window;
                     while (forwarder.face_snapshots().len() < dials
@@ -751,17 +796,21 @@ pub(crate) fn open_router_blocking(
                 }
                 NodeRole::Peer | NodeRole::Client => {}
             }
+            // Upstream makes the subsystem at the end of an open that succeeded, whatever the
+            // mode of the runtime.
+            crate::session_defaults::init_shared_memory(session_defaults.shm_init);
             Ok(RouterState {
                 zid: wire_zid,
                 forwarder,
                 listen_locators,
                 liveliness: Arc::new(liveliness),
                 engine: engine::EngineState::new(),
-                next_request: AtomicU64::new(1),
+                next_request: std::sync::atomic::AtomicU32::new(1),
                 shutdown,
                 stop,
                 driver: StdMutex::new(Some(handle)),
                 abi_extension: std::sync::OnceLock::new(),
+                session_defaults,
             })
         }
         Ok(Err(cause)) => {
@@ -927,8 +976,10 @@ async fn run_router(
     // What the group's members send the router rides the face loop; what the router forwards
     // into the group goes out through the forwarder, which holds the group's producer.
     let (mcast_ingress, mcast_members, mcast_group_subs, group_stop) = match group {
-        Some(JoinedGroup { face, .. }) => {
-            forwarder.attach_mcast_group(face.outbound);
+        Some(JoinedGroup {
+            face, reads_shm, ..
+        }) => {
+            forwarder.attach_mcast_group(face.outbound, reads_shm);
             (
                 Some(face.ingress),
                 Some(face.members),

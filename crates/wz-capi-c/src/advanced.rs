@@ -585,27 +585,30 @@ impl AdvPubState {
         }
     }
 
-    /// Publish `bytes`, best-effort.
-    fn put(&self, bytes: &[u8]) {
-        let _ = match &self.host {
+    /// Publish `bytes`; what the publisher answered.
+    fn put(&self, bytes: &[u8]) -> Result<usize, wz_runtime_tokio::session::PublishError> {
+        match &self.host {
             AdvPubHost::Registry { publisher, .. } => publisher.put(bytes),
             #[cfg(feature = "router-node")]
             AdvPubHost::Node(node) => node.publisher.put(bytes),
-        };
+        }
     }
 
-    /// Publish a chunk of shared memory, best-effort.
+    /// Publish a chunk of shared memory; what the publisher answered.
     #[cfg(all(
         feature = "zenoh-c-shared-memory",
         not(feature = "zenoh-c-no-unstable-api")
     ))]
-    fn put_chunk(&self, chunk: &Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk>) {
+    fn put_chunk(
+        &self,
+        chunk: &Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk>,
+    ) -> Result<usize, wz_runtime_tokio::session::PublishError> {
         let options = wz_ext_pubsub::advanced_publisher::AdvancedPutOptions::default();
-        let _ = match &self.host {
+        match &self.host {
             AdvPubHost::Registry { publisher, .. } => publisher.put_shm_with(chunk, options),
             #[cfg(feature = "router-node")]
             AdvPubHost::Node(node) => node.publisher.put_shm_with(chunk, options),
-        };
+        }
     }
 
     /// Publish a delete; whether the plane took it.
@@ -899,9 +902,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let (Some(state), Some(buf)) = (unsafe { adv_pub_state(this_) }, buf) else {
             return Z_ENULL;
         };
-        // Best-effort, as the ordinary publish is: a put no face took is not an error to a C
-        // caller, which has no per-face handle to retry with.
-        match buf {
+        let sent = match buf {
             Outbound::Bytes(bytes) => state.put(&bytes),
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
@@ -912,11 +913,25 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
                 // the descriptor, and the cache holds the chunk so a recovery reply replays it
                 // as shared memory.
                 let chunk: Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk> = chunk;
-                state.put_chunk(&chunk);
+                state.put_chunk(&chunk)
             }
-        }
-        Z_OK
+        };
+        advanced_put_code(sent)
     })
+}
+
+/// What `ze_advanced_publisher_put` answers for what the publisher did with the sample.
+///
+/// Best-effort, as the ordinary publish is: a put no face took is not an error to a C caller,
+/// which has no per-face handle to retry with. A sample the publisher refused for want of a time
+/// (the `trusted-only` policy withholding an untrusted clock's stamp, or a session with no time
+/// left) was never made, which the caller is told.
+fn advanced_put_code(sent: Result<usize, wz_runtime_tokio::session::PublishError>) -> ZResult {
+    use wz_runtime_tokio::session::PublishError;
+    match sent {
+        Err(PublishError::ClockUntrusted | PublishError::TimestampExhausted) => Z_EGENERIC,
+        _ => Z_OK,
+    }
 }
 
 /// Zero an owned advanced publisher (zenoh-c
@@ -2071,6 +2086,28 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sample refused for want of a time is an error to the C caller; every other outcome of an
+    /// advanced put stays best-effort, as it was.
+    #[test]
+    fn only_a_sample_refused_for_want_of_a_time_is_an_error_of_the_put() {
+        use wz_runtime_tokio::session::PublishError;
+        assert_eq!(advanced_put_code(Ok(3)), Z_OK);
+        assert_eq!(advanced_put_code(Ok(0)), Z_OK);
+        assert_eq!(
+            advanced_put_code(Err(PublishError::TransportUnavailable)),
+            Z_OK
+        );
+        assert_eq!(advanced_put_code(Err(PublishError::ExceedsCapacity)), Z_OK);
+        assert_eq!(
+            advanced_put_code(Err(PublishError::ClockUntrusted)),
+            Z_EGENERIC
+        );
+        assert_eq!(
+            advanced_put_code(Err(PublishError::TimestampExhausted)),
+            Z_EGENERIC
+        );
+    }
 
     /// A miss closure that does nothing — only its MEMBERSHIP in the set is
     /// graded below, never a call.

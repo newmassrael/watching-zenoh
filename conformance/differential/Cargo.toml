@@ -101,6 +101,13 @@ schemars = { version = "1", features = ["either1"] }
 # container but `SingleOrVec`.
 up_collections = { package = "zenoh-collections", version = "=1.10.2" }
 wz_collections = { package = "zenoh-collections", path = "../../crates/wz-zenoh-collections" }
+# `zenoh-task`: the pair again, each over its own `zenoh-runtime` and `zenoh-core` (the ones named
+# above), so each controller spawns on, and waits on, its own crate's pool.
+up_task = { package = "zenoh-task", version = "=1.10.2" }
+wz_task = { package = "zenoh-task", path = "../../crates/wz-zenoh-task" }
+# `zenoh-sync`: the pair, for the condition variable `zenoh::internal` re-exports.
+up_sync = { package = "zenoh-sync", version = "=1.10.2" }
+wz_sync = { package = "zenoh-sync", path = "../../crates/wz-zenoh-sync" }
 # `zenoh-macros`: a macro cannot be called with the same input to two crates, so each crate's macros
 # are compiled into a probe program (`probes/`) and the programs' transcripts are compared. Each probe
 # has its own stub of the `zenoh` that the expanded code names.
@@ -110,9 +117,12 @@ probe-wz = { path = "probes/probe-wz" }
 # the one registry package, so the tests name it too.
 token-cell = { version = "2", default-features = false }
 # The session core, for the one function a node writes the timestamp of an interception of a
-# timestamp stack with (`zenoh_ts_stack_stamp.rs` holds it to upstream's codec). The `wz` crate
-# above is built on it, so it adds nothing to the graph.
-wz_session_core = { package = "wz-session-core", path = "../../crates/wz-session-core", features = ["pubsub-ts-stack"] }
+# timestamp stack with (`zenoh_ts_stack_stamp.rs` holds it to upstream's codec), for the
+# readers of a batch (`zenoh_rx_batch.rs` holds them to upstream's codec): the Frame, the
+# KeepAlive and the Push the batches are made of, and for the decode a participant reads a
+# frame's Push records with (`zenoh_push_put_chain.rs`). The `wz` crate above is built on it, so
+# it adds nothing to the graph.
+wz_session_core = { package = "wz-session-core", path = "../../crates/wz-session-core", features = ["pubsub-ts-stack", "codec-frame", "codec-keep-alive", "codec-push"] }
 
 # The exhaustive comparisons run every string of a small alphabet to a length, which is millions of
 # calls of two dynamic programs; optimised, they take seconds.

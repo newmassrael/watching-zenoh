@@ -125,13 +125,15 @@ impl StatePolicy for TimerProbePolicy {
     type Workspace = Workspace<{ state_scratch(1) }, 1, 6, 0>;
     type RunStore = RunStore<{ state_words(1) }, 0, 0>;
     type Configuration = BoundedVec<St, 1>;
+    // No script engine, so nothing can refuse the start.
+    type StartFailure = core::convert::Infallible;
 
     // A flat machine: one child of the `<scxml>` element, and the only row of
     // the transitions table is the document's own initial transition, which
     // enters that state through its one target (a single target is the row's
     // own, so the list table is empty). The null event is the first of
     // `EVENTS`, and none of the events is an `error.` one.
-    const TABLES: &'static DocumentTables = &DocumentTables {
+    const TABLES: &'static DocumentTables<'static> = &DocumentTables {
         states: &[StateRow::new(None, StateKind::Atomic, StateId(0), None)],
         histories: &[],
         transitions: &[TransitionRow::new(
@@ -245,7 +247,7 @@ impl StatePolicy for TimerProbePolicy {
 fn anchor(epoch_ms: u64) -> Engine<TimerProbePolicy> {
     test_hal_set_ticks(epoch_ms);
     let mut engine = Engine::<TimerProbePolicy>::new(TimerProbePolicy::new());
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine
 }
 
@@ -258,8 +260,8 @@ fn link_open_timeout_5s_fires_when_hal_advances_past_ready_at() {
     let _guard = hal_lock();
     let mut engine = anchor(10_000_000);
 
-    // The trailing "" is the delayed send's `_event.origin` (SCE added the
-    // argument after this probe was written): a host-side timer has none.
+    // The trailing "" is the session that sent the delayed event: a host-side
+    // timer has none.
     engine.schedule_event(Ev::LinkOpenTimeout, Duration::from_secs(5), "lk1", "", "");
 
     assert!(

@@ -1573,10 +1573,25 @@ impl LiveDissection {
     /// tree. The verdict is decided by the record plane and needs no such walk,
     /// so this takes no container and a handle fed by `push` gets datagram
     /// verdicts it cannot get from the field document.
-    pub fn selection(&mut self, filter: &wz_capture::filter::Filter) -> String {
+    ///
+    /// # Declarations
+    ///
+    /// `declarations` is what the payload plane reads a sample by, as the field
+    /// document reads it. With none, every `e2e` term over a published sample is
+    /// `undecided`; under declarations its profile rules decide it.
+    pub fn selection(
+        &mut self,
+        filter: &wz_capture::filter::Filter,
+        declarations: Option<&wz_capture::payload::formats::FormatMap<'_>>,
+    ) -> String {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
-        wz_capture::selection_json::selection_json_where_coordinated(&self.dissection, filter, &ids)
+        wz_capture::selection_json::selection_json_where_coordinated(
+            &self.dissection,
+            filter,
+            declarations,
+            &ids,
+        )
     }
 
     /// THE PACKETS THAT CARRIED THE ROWS A SELECTOR PICKS, over the rows
@@ -1625,6 +1640,14 @@ impl LiveDissection {
     /// compared as given, so a selector that means the same thing in other words
     /// starts a memory too, which costs a full answer and never a wrong one.
     ///
+    /// # The declarations
+    ///
+    /// `declarations` is what the payload plane reads a sample by, with the text it
+    /// was declared from, as [`Self::selection`] takes it. A memory is for one
+    /// selector under one declaration text: the same selector asked under another
+    /// text, or under none, is another memory, kept or given up as another
+    /// selector's is.
+    ///
     /// The document's `window.continued` says which of the two this call was:
     /// `true` when an earlier call under the selector wrote the memory used, `false`
     /// when this call began it, the first call or the first after the memory was
@@ -1645,6 +1668,7 @@ impl LiveDissection {
         &mut self,
         selector: &str,
         filter: &wz_capture::filter::Filter,
+        declarations: Option<wz_capture::selection_json::Declared<'_, '_>>,
         after_seq: u64,
     ) -> String {
         self.drain(&mut []);
@@ -1652,15 +1676,19 @@ impl LiveDissection {
         // The highest number the handle has issued: the cursor to give next, as
         // for `fields_since`.
         let through_seq = self.next_seq - 1;
+        let memory = self
+            .selection_said
+            .for_selector(selector, declarations.map(|declared| declared.text));
         wz_capture::selection_json::selection_since_json_coordinated(
             &self.dissection,
             filter,
+            declarations,
             &ids,
             wz_capture::selection_json::SelectionWindow {
                 after_seq,
                 through_seq,
             },
-            self.selection_said.for_selector(selector),
+            memory,
         )
     }
 

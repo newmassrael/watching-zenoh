@@ -58,7 +58,7 @@ fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     assert_eq!(engine.get_current_state(), SessionFsmUnicastState::Init);
 
     // Init → LinkOpening (outbound start).
@@ -1070,7 +1070,7 @@ async fn inbound_openack_captures_peer_advertised_lease_ms() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(SessionFsmUnicastEvent::OutboundStart);
     engine.process_event(SessionFsmUnicastEvent::LinkOpened);
     assert_eq!(*actions.peer_open_lease_ms.lock().unwrap(), None);

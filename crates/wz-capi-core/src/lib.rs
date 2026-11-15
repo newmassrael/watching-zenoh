@@ -56,6 +56,9 @@
 /// The one cancellation token both C ABIs hand out: the port's (`wz_capi_port::cancellation`),
 /// where every engine that issues a get registers with it. Re-exported under its old path.
 pub use wz_capi_port::cancellation;
+/// The span of the code that opens or closes a session, carried across the engine's threads and
+/// onto its tasks; the facade crate carries it across its own close with it.
+pub mod caller_span;
 pub mod codec;
 pub mod drive;
 pub mod encoding_ids;
@@ -73,8 +76,9 @@ pub mod node_policy;
 // What a zenoh config document means for an open: needs the runtime's zenoh config reader.
 #[cfg(feature = "open-plan")]
 pub mod open_plan;
-// What an open of that plan asks of the operating system (docs/target-build-contract.md T9).
-#[cfg(feature = "open-plan")]
+// What an open of that plan asks of the operating system (docs/target-build-contract.md T9). Asked
+// by a door that judges a configuration without opening it, so it is that capability's.
+#[cfg(all(feature = "open-plan", feature = "config-verdict"))]
 pub mod open_facilities;
 #[cfg(feature = "scout")]
 pub mod scouting;
@@ -82,6 +86,9 @@ pub mod scouting;
 pub mod scouting_node;
 #[cfg(feature = "peer")]
 pub mod scouting_responder;
+// What a session applies itself above its links, compiled once from its configuration and read
+// by every ABI that publishes through the session.
+pub mod session_defaults;
 
 /// The runtime this engine runs its sessions on, for an ABI's modules that reach past the port
 /// (queries, liveliness, the advanced plane, ...): they name the runtime through the engine they

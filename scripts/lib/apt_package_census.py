@@ -180,11 +180,11 @@ for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev
           "feature-gates-peel-2",
           "transport-modes", "reduced-docs", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
           "e2e-router-scale",
-          # Layer C1bf clippies wz-runtime-tokio at --all-features, which turns on
-          # its `rocksdb` feature, so the matrices' job restores the engine.
-          "tokio-matrices"])
+          # Layer C1bf clippies every member at its largest feature sets, which turns
+          # on wz-runtime-tokio's `rocksdb`, so its job restores the engine.
+          "allfeat-clippy"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
-     ["nondefault", "nondefault-builds", "nondefault-legs", "reduced-docs", "tokio-matrices"])
+     ["nondefault", "nondefault-builds", "nondefault-legs", "reduced-docs", "allfeat-clippy"])
 _add("strace", "Layer C1st's facility oracle reads each packaged artifact's runs through it "
      "(scripts/lib/facility_trace.py --judge).", ["capi-c-arms"])
 _add("bubblewrap", "Layer C1st's facility oracle runs a raw Ethernet group on a network of its own "
@@ -292,10 +292,13 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
-        # The wz-runtime-tokio matrices (C4c, C4d, C1bf), peeled off `isolated-crates`
-        # for its budget: they build that crate at every subset and at --all-features,
-        # which reaches librocksdb-sys, so the job takes the same rows.
+        # The wz-runtime-tokio matrices (C4c, C4d), peeled off `isolated-crates` for
+        # its budget: they build that crate at every subset, so the job takes the
+        # same rows.
         "tokio-matrices",
+        # Layer C1bf's shards: clippy of every member at its largest feature sets,
+        # which reaches librocksdb-sys, lwip-sys and zenoh-pico-sys.
+        "allfeat-clippy",
         # R4245 -- five lanes peeled off `isolated-crates` for its budget, one of them
         # Layer C1bz, which documents every workspace member: it takes that job's rows.
         "analyzer-crates",
@@ -363,6 +366,7 @@ _add(
         "transport-modes",
         "isolated-crates",
         "tokio-matrices",
+        "allfeat-clippy",
         "analyzer-crates",
         "analyzer-docs",
         "capi-c-arms",
@@ -428,6 +432,9 @@ _add(
         "transport-modes",
         "isolated-crates",
         "tokio-matrices",
+        # Layer C1bf's shards: every member at its largest feature sets selects
+        # the TLS and QUIC link features where `ring` is reached.
+        "allfeat-clippy",
         "analyzer-crates",
         "analyzer-docs",
         "capi-c-arms",
@@ -648,6 +655,7 @@ _add(
         "transport-modes",
         "isolated-crates",
         "tokio-matrices",
+        "allfeat-clippy",
         "analyzer-crates",
         "analyzer-docs",
         "capi-c-arms",
@@ -689,7 +697,10 @@ _add(
     "depends on. DERIVED by the SHORTFALL and EXCESS arms.",
     # R3016 -- Layer B2 moved to `codegen-verify`, and with it the `xtask` build
     # this row exists for: the one job is now that one.
-    ["codegen-verify"],
+    # 2026-11-14 -- `gate-provenance` builds a member of the `xtask` workspace
+    # too (the SHORTFALL arm found it once that job's packages moved into their
+    # own list), so it joins the row by the rule above.
+    ["codegen-verify", "gate-provenance"],
 )
 _add(
     "protobuf-compiler",
@@ -721,6 +732,99 @@ DECLARED_OUTSIDE_CARGO = {
 }
 
 
+# Open-debt item 945: a job names its packages in ONE list file, the file its
+# archive cache key hashes, and `apt-install.sh --list` installs from it. The
+# canonical form is what lets jobs with equal lists share one cache entry, so
+# it is held here as well as at install time: `image <ImageOS>` first, then one
+# package per line, sorted in the C locale, no repeats, no comments.
+APT_LISTS = ROOT / ".github/apt-packages"
+APT_LIST_IMAGE = re.compile(r"^image ([a-z0-9.]+)$")
+APT_LIST_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]*(=[A-Za-z0-9.+:~-]+)?$")
+
+
+def read_apt_list(path: Path) -> list[str]:
+    """The packages of a list file, or ValueError naming what is not canonical."""
+    rel = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ValueError(f"{rel}: cannot be read ({e})") from e
+    if not text.endswith("\n"):
+        raise ValueError(f"{rel}: does not end with a newline")
+    lines = text[:-1].split("\n")
+    if not APT_LIST_IMAGE.match(lines[0]):
+        raise ValueError(f"{rel}: must open with `image <ImageOS>`, found {lines[0]!r}")
+    pkgs = lines[1:]
+    if not pkgs:
+        raise ValueError(f"{rel}: names no package")
+    for p in pkgs:
+        if not APT_LIST_PACKAGE.match(p):
+            raise ValueError(
+                f"{rel}: {p!r} is not a package name (no comments, no blank lines)"
+            )
+    if pkgs != sorted(set(pkgs)):
+        raise ValueError(
+            f"{rel}: packages must be sorted in the C locale with no repeats, so "
+            "that equal lists hash equal and share one cache entry"
+        )
+    return pkgs
+
+
+def site_packages(text: str, job: str, where: str) -> set[str]:
+    """The packages one install site names: its arguments, or its `--list` file.
+
+    The list path is written with `${GITHUB_JOB}` in the workflow so a job can
+    only read its own file; it is resolved here with the job the site sits in.
+    """
+    words = [w.strip("\"'") for w in text.replace("\\", " ").split() if w]
+    if "--list" in words:
+        i = words.index("--list")
+        if i + 1 >= len(words):
+            raise RuntimeError(f"{where}: `--list` names no file")
+        rel = words[i + 1].replace("${GITHUB_JOB}", job).replace("$GITHUB_JOB", job)
+        try:
+            return set(read_apt_list(ROOT / rel))
+        except ValueError as e:
+            raise RuntimeError(f"{where}: {e}") from e
+    return {w for w in words if not w.startswith("-")}
+
+
+def list_file_findings(path: Path = CI_YML) -> list[str]:
+    """Each list file of a workflow is read by the job it is named after, and
+    each `--list` site of that workflow reads a file that exists."""
+    findings: list[str] = []
+    wf_dir = APT_LISTS / path.stem
+    files = {p.stem for p in wf_dir.glob("*.list")} if wf_dir.is_dir() else set()
+    readers: set[str] = set()
+    job = None
+    for line in path.read_text().splitlines():
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if m:
+            job = m.group(1)
+        if line.strip().startswith("#") or "apt-install.sh --list" not in line:
+            continue
+        if '".github/apt-packages/' + path.stem + '/${GITHUB_JOB}.list"' not in line:
+            findings.append(
+                f"{path.name} [{job}]: an `apt-install.sh --list` site that does not read "
+                f"`.github/apt-packages/{path.stem}/${{GITHUB_JOB}}.list`; a job reads its "
+                "own list, the one its archive key hashes"
+            )
+            continue
+        readers.add(job)
+    for stem in sorted(files - readers):
+        findings.append(
+            f".github/apt-packages/{path.stem}/{stem}.list: no job of {path.name} named "
+            f"`{stem}` installs from it; a list nobody reads still moves nobody's key"
+        )
+    for j in sorted(readers - files):
+        findings.append(
+            f"{path.name} [{j}]: installs from .github/apt-packages/{path.stem}/{j}.list, "
+            "which does not exist; hashFiles() of a missing file is empty and every such "
+            "job would share one key"
+        )
+    return findings
+
+
 def ci_sites() -> dict[str, set[str]]:
     """job id -> the packages its `apt-install.sh` steps install."""
     lines = CI_YML.read_text().splitlines()
@@ -740,7 +844,7 @@ def ci_sites() -> dict[str, set[str]]:
         while lines[j].rstrip().endswith("\\"):
             j += 1
             text += " " + lines[j]
-        pkgs = {w for w in text.replace("\\", " ").split() if w and not w.startswith("-")}
+        pkgs = site_packages(text, job, f"{CI_YML.name}:{i + 1}")
         out.setdefault(job, set()).update(pkgs)
     return out
 
@@ -1213,7 +1317,7 @@ def apt_sites(path: Path) -> dict[str, set[str]]:
         while lines[j].rstrip().endswith("\\"):
             j += 1
             text += " " + lines[j]
-        pkgs = {w for w in text.replace("\\", " ").split() if w and not w.startswith("-")}
+        pkgs = site_packages(text, job, f"{path.name}:{i + 1}")
         out.setdefault(job, set()).update(pkgs)
     return out
 
@@ -1846,6 +1950,37 @@ def selftest() -> int:
     expect("a comment is not a call",
            run(ci={"j": steps["j"] + ["        # cargo test -p wz"]}), None)
     expect("a row whose job is gone", run(ci={}), "does not have")
+
+    # The list-file reader (item 945): canonical accepted, every other spelling
+    # of the same packages refused, so equal lists can only hash equal.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        def listed(name: str, body: str):
+            p = Path(td) / f"{name}.list"
+            p.write_text(body, encoding="utf-8")
+            try:
+                return read_apt_list(p)
+            except ValueError as e:
+                return str(e)
+
+        got = listed("good", "image ubuntu22\nclang\ncmake\npkg-config=0.29.2-1ubuntu3\n")
+        if got != ["clang", "cmake", "pkg-config=0.29.2-1ubuntu3"]:
+            failures.append(f"a canonical list read as {got!r}")
+        for name, body, needle in (
+            ("unsorted", "image ubuntu22\ncmake\nclang\n", "sorted"),
+            ("repeated", "image ubuntu22\nclang\nclang\n", "sorted"),
+            ("comment", "image ubuntu22\n# why\nclang\n", "not a package"),
+            ("blank", "image ubuntu22\n\nclang\n", "not a package"),
+            ("noimage", "clang\ncmake\n", "image"),
+            ("empty", "image ubuntu22\n", "no package"),
+            ("unterminated", "image ubuntu22\nclang", "newline"),
+        ):
+            got = listed(name, body)
+            if not isinstance(got, str) or needle not in got:
+                failures.append(f"the {name} list was not refused by its cause: {got!r}")
+    if site_packages("cmake clang \\", "j", "fixture") != {"cmake", "clang"}:
+        failures.append("an argument site did not read its arguments")
     if failures:
         for f in failures:
             print(f"  apt-packages selftest FAIL: {f}", file=sys.stderr)
@@ -1878,6 +2013,13 @@ def main() -> int:
 
     found = {f"{job}::{pkg}" for job, pkgs in sites.items() for pkg in pkgs}
     failed = False
+
+    # The LIST-FILE arm (item 945): every list is read by the job it is named
+    # after, and every `--list` site reads its own job's file.
+    for wf in sorted(WORKFLOWS.glob("*.yml")):
+        for finding in list_file_findings(wf):
+            failed = True
+            print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
 
     for key in sorted(found - ADJUDICATED.keys()):
         failed = True

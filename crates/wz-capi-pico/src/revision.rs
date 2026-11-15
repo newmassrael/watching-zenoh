@@ -25,7 +25,22 @@
 //! revision before this round, so there is no earlier number to be compatible with.
 
 /// The revision the stamp carries.
-pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 1;
+///
+/// It moved to 2 when the meaning of a wz-only behaviour changed: with a registered clock
+/// (`wz_ext_clock_source_register`), `z_timestamp_new` gives a program the clock's time whatever
+/// the clock's standing, and the `clock-quality-stamping` policy holds back only the data the node
+/// stamps; at 1 a `trusted-only` build gave a program no time until the clock was reported trusted.
+/// Also at 2, every time one session gives strictly increases, whichever clock it is read from and
+/// whether a program asks for it (`z_timestamp_new`) or the session's advanced publisher stamps a
+/// sample with it: one last time given per session, which the session's node clock learns. So a
+/// stamp made after a registered clock ahead of the system clock is removed goes on from the last
+/// one given, and a sample is never stamped at or before a time a program was given; at 1 the
+/// first was the system clock's reading and the two were not ordered against each other. And at 2
+/// an advanced put or delete that cannot be given a time is refused with
+/// `Z_ERR_TIMESTAMP_GENERATION_FAILED` and sends nothing, as pico refuses the put whose
+/// `z_timestamp_new` failed: a session with no time left, and a `trusted-only` build whose clock
+/// is not yet reported synchronised; at 1 the second sent the sample stamped with the system clock.
+pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 2;
 
 wz_abi_stamp::stamp!(
     family = "capi-pico",

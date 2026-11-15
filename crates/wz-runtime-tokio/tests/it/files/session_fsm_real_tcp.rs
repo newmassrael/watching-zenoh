@@ -61,7 +61,7 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     let actions_for_engine = actions.clone();
     let engine_handle = tokio::task::spawn_blocking(move || {
         let mut engine = new_session_engine(&actions_for_engine);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(SessionFsmUnicastEvent::OutboundStart);
         engine.process_event(SessionFsmUnicastEvent::LinkOpened);
         assert_eq!(

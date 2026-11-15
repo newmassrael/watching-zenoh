@@ -64,8 +64,10 @@ Nothing here carries a copy of anything.
     site, and two of this round's own additions are exactly that shape.
 
 Every anchor is a HARD FAIL when it does not match, and so is an empty
-population at any step. A gate that cannot find its subject must not report on
-it.
+population at any step but one. A gate that cannot find its subject must not
+report on it. The one is the reader-gap list, whose emptiness is the state it
+exists to reach: a key leaves it only by its reader being built, and with it
+empty every unhonoured key is a beyond-wz claim the group half still grades.
 
 ## What this cannot do, stated rather than hidden
 
@@ -372,10 +374,14 @@ def audit(src: str, files: dict[str, str]) -> tuple[list[str], list[str]]:
     kinds = parse_str_list(src, "UNHONOURED_CITATION_KINDS")
     ledger = parse_ledger(src)
 
+    # The reader-gap list is absent from this loop on purpose: it is the one list
+    # whose emptiness is the goal (a key leaves it only by its reader being
+    # built), and with it empty every unhonoured key is a beyond-wz claim the
+    # group half below grades. Its `wz-has-it` rows are bound to it one for one
+    # by the crate's own test, which is why the kind floor below follows it.
     for name, population in (
         (WHOLE, whole),
         (BEYOND, beyond),
-        (READER_GAP, gap),
         ("UNHONOURED_CITATION_KINDS", kinds),
         ("UNHONOURED_CITATION_LEDGER", ledger),
     ):
@@ -496,7 +502,9 @@ def audit(src: str, files: dict[str, str]) -> tuple[list[str], list[str]]:
     # branch of this dispatch nobody has ever run, and the total hides that.
     for kind in kinds:
         members = sorted(k for k, (kd, _) in rows.items() if kd == kind and k in cited)
-        if not members:
+        # `wz-has-it` rows are the reader gaps' evidence, so an empty reader
+        # gap leaves this kind nothing to grade, and that is the gap paid off.
+        if not members and not (kind == "wz-has-it" and not gap):
             failures.append(
                 f"citation kind `{kind}` has no cited row — an unexercised "
                 f"branch is not coverage"
@@ -721,6 +729,19 @@ def _selftest() -> int:
     # A kind with no cited row is an unexercised branch.
     src = _FIXTURE_SRC.replace('    ("ee", "asserted-ignored", "ignored"),\n', "")
     arms.append(("kind with no member", src, dict(_FIXTURE_FILES), "asserted-ignored"))
+
+    # The reader gap paid off: its one key honoured (gone from the whole and
+    # from the gap) and its `wz-has-it` row gone with it. An empty gap and the
+    # empty kind bound to it are the goal state, and must grade clean.
+    src = _FIXTURE_SRC.replace('\n    "aa/bb",', "").replace(
+        '    ("aa/bb", "wz-has-it", "set_aa_bb"),\n', ""
+    )
+    arms.append(("reader gap paid off", src, dict(_FIXTURE_FILES), None))
+
+    # But the `wz-has-it` floor still holds while a reader gap remains: the
+    # same row gone with its key still in the gap is a failure, not a pass.
+    src = _FIXTURE_SRC.replace('    ("aa/bb", "wz-has-it", "set_aa_bb"),\n', "")
+    arms.append(("reader gap with its evidence gone", src, dict(_FIXTURE_FILES), "aa/bb"))
 
     # The enumerator exclusion itself: with nothing excluded, every key looks
     # cited and the population is meaningless.

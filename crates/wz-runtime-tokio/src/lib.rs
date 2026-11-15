@@ -67,12 +67,9 @@ const _: () = assert!(
 // vectors, shares a kernel between links (multilink), and opens them per
 // connection without a table to take them from, so a build graph that unified the
 // selector into this crate would not compile its sessions, or would refuse the
-// ones it could.
-const _: () = assert!(
-    !wz_session_core::tx_buf::SESSION_SLOT,
-    "wz-runtime-tokio builds its sessions on the heap; \
-     `wz-session-core/session-slot` (the MCU per-session slot profile) was unified into an AP build"
-);
+// ones it could. Refused while the macros expand and not by a constant: such a
+// build fails its type check, and a constant's assertion is evaluated after it.
+wz_session_core::heap_session_profile!("wz-runtime-tokio";);
 
 // R311mk — `session_glue` is the unicast handshake driver (it names the
 // `SessionFsmUnicast{Policy,Event}` types + drives `session_actions` /
@@ -116,6 +113,27 @@ macro_rules! route_event {
 /// debug level pays a level check.
 pub fn route_trace(line: core::fmt::Arguments<'_>) {
     route_event!("{}", line);
+}
+
+/// A data message's timestamp as a `wz::routing` line names it: the NTP64 time in hex and the
+/// stamping node's zid as zenoh prints it (`<time>/<zid>`), or `none`. Upstream's regions tests
+/// judge a duplicate delivery by this pair (`unique_timestamps`), so the router's egress lines,
+/// its boundary decisions and a peer's receptions name one message by it. Formatted only when a
+/// line is written.
+pub struct TimestampText<'a>(pub Option<&'a wz_session_core::sample::TimestampHint>);
+
+impl core::fmt::Display for TimestampText<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(ts) => write!(
+                f,
+                "{:016x}/{}",
+                ts.time,
+                wz_session_core::zid_hex::zid_to_zenoh_hex(&ts.zid)
+            ),
+            None => f.write_str("none"),
+        }
+    }
 }
 
 /// R311y453 — live NIC-name resolution for the §5.16 `interfaces` subject axis.
@@ -484,6 +502,12 @@ pub use wz_session_core::reply_acceptance;
 /// One reader is the whole reason this module exists (`json5`'s own header),
 /// and a second copy in `wz-capi-c` is exactly what the re-export prevents.
 pub use wz_session_core::json5;
+
+/// The stats registry and its `stats/filters` key list, on the same precedent: a
+/// node host hands the key list to its sessions
+/// (`SessionLinkActions::set_stats_key_filters`, `node_stats::NodeStats`) and
+/// reaches them without depending on `wz-session-core`.
+pub use wz_session_core::stats_registry;
 
 /// Open-debt item 751 — the south partition type, on the same precedent: a
 /// router host hands one to
@@ -1184,6 +1208,18 @@ pub mod plugins_config;
 ))]
 pub mod plugin_plane;
 
+/// `aggregation/{subscribers,publishers}`: the key expressions a session
+/// declares its subscribers and publishers under, one declaration per aggregate.
+/// Held in every build; a build without `keyexpr-includes` refuses a non-empty
+/// list, having no inclusion test to apply it with.
+pub mod declaration_aggregation;
+
+/// `plugins_loading/search_dirs`: the directories a plugin named without a
+/// `__path__` is searched for in, and the file name it is searched for by. Plain
+/// data and file-system reads, so the config reader holds it in every build and
+/// the plugin plane searches with it where a build loads plugins.
+pub mod plugin_search_dirs;
+
 /// R311y786 — the connection-retry SCHEDULE (zenoh's `ConnectionRetryPeriod`):
 /// one transcription of the grow-then-clamp arithmetic, shared by the client
 /// reconnect supervisor and the router peer auto-reconnect so the two cannot
@@ -1397,6 +1433,11 @@ pub mod runtime_pool;
 /// A job that runs every period on the `net` runtime: the one loop of the advanced publisher's
 /// heartbeat beacon and of the periodic jobs a C ABI starts on its engine.
 pub mod periodic;
+
+/// Whether the node's long-running loops still turn: each turns a heartbeat, and one watcher
+/// thread outside every runtime reports a loop that stopped, with its step, its owner's probe and
+/// the process's threads.
+pub mod liveness;
 
 /// R311il — the engine-free unicast session FSM (the
 /// `SessionFsmUnicastState` / `SessionFsmUnicastEvent` enums, the
@@ -3124,11 +3165,15 @@ where
 impl TcpDriver {
     /// Wrap an already-open TcpStream (acceptor side). The
     /// `open()` method is a no-op for this constructor.
+    ///
+    /// This driver carries no session parameters, so its RX pool is upstream's
+    /// default `transport/link/rx/buffer_size`; a link opened through
+    /// `session_open` pools the size its session reads instead.
     pub fn from_stream(stream: TcpStream) -> Self {
         Self {
             stream: Some(stream),
             read_state: ReadState::Idle,
-            arena: frame_arena::link_arena(),
+            arena: frame_arena::link_arena(wz_session_core::session_init_params::RX_BUFFER_SIZE),
         }
     }
 

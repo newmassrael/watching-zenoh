@@ -62,7 +62,7 @@ struct Endpoint {
     node: u8,
     face: u64,
     inbox: Vec<Seen>,
-    open_request: Option<u64>,
+    open_request: Option<wz_session_core::wire_id::RequestId>,
 }
 
 /// One thing that happens to the network. Nodes exist from the start; links and
@@ -95,7 +95,7 @@ enum NetStep {
     /// The link between two nodes goes down, both ends told.
     Cut(u8, u8),
     /// An end point queries, with its own request id.
-    Query(u8, u64, &'static str),
+    Query(u8, wz_session_core::wire_id::RequestId, &'static str),
     /// An end point answers the request it was last sent.
     Reply(u8, &'static str, &'static [u8]),
     /// An end point ends the request it was last sent.

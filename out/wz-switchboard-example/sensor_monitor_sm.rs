@@ -141,7 +141,7 @@ pub type SensorMonitorConfiguration = ::sce_rust_runtime::helpers::hierarchy::Bo
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
-pub const SENSOR_MONITOR_TABLES: ::sce_rust_runtime::DocumentTables = {
+pub const SENSOR_MONITOR_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
         DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
         TransitionRow,
@@ -292,6 +292,10 @@ pub struct SensorMonitorPolicy {
     pub invoke_id: String,
     // W3C SCXML 6.5: Child session ID for finalize origin matching.
     pub child_session_id: String,
+    // W3C SCXML C.1: the id of the session that invoked this one, whose
+    // published location reaches it as `#_parent` does (docs/adr/0090);
+    // empty for a session its host started.
+    pub parent_session_id: String,
 }
 
 impl SensorMonitorPolicy {
@@ -302,6 +306,7 @@ impl SensorMonitorPolicy {
             parent_external_queue: None,
             invoke_id: String::new(),
             child_session_id: String::new(),
+            parent_session_id: String::new(),
         }
     }
 
@@ -428,7 +433,7 @@ impl StatePolicy for SensorMonitorPolicy {
     // histories and events by the numbers the tables know them by. Each of the
     // three lists is in the order of those numbers, so it is the inverse of the
     // enum's discriminant.
-    const TABLES: &'static ::sce_rust_runtime::DocumentTables = &SENSOR_MONITOR_TABLES;
+    const TABLES: &'static ::sce_rust_runtime::DocumentTables<'static> = &SENSOR_MONITOR_TABLES;
     const STATES: &'static [Self::State] = &[
         SensorMonitorState::Idle,
         SensorMonitorState::Hot,
@@ -472,10 +477,18 @@ impl StatePolicy for SensorMonitorPolicy {
     type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(3) }, 1, 5, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(3) }, { ::sce_rust_runtime::record_words(3, 0) }, 0>;
     type Configuration = SensorMonitorConfiguration;
+    // docs/adr/0096: what refuses this machine's start. One with a script
+    // engine is refused when its script session cannot be established; one
+    // without cannot be refused that way, so its host starts it with
+    // `engine.initialize().unwrap_or_else(|never| match never {})`.
+    type StartFailure = ::core::convert::Infallible;
 
     // W3C SCXML feature flags
     const HAS_PARALLEL_STATES: bool = false;
     const NEEDS_SCRIPT_ENGINE: bool = false;
+    // Exactly when there is a script engine: the datamodel's initialization is
+    // where the script session is established (docs/adr/0096), so a machine
+    // with a session to establish always has it run at its start.
     const NEEDS_DATA_MODEL_INIT: bool = false;
     // The same fact the generate manifest publishes as `needs_event_scheduler`.
     // A `build.rs` consumer never sees that manifest — `compile_scxml` returns
@@ -552,7 +565,8 @@ impl StatePolicy for SensorMonitorPolicy {
     // read that view out of the `data` every other producer fills — `<send>`
     // with `<param>`, an invoke forwarding either way, autoforward, BasicHTTP,
     // mesh. A payload that does not read as this event's schema is returned as
-    // a refusal, which the engine raises as `error.execution`.
+    // a refusal, on which the engine refuses the delivery whole and takes an
+    // `error.execution` in its place (docs/adr/0086, section 4.2).
     fn lift_event_payload(
         &mut self,
         event: Self::Event,
@@ -574,7 +588,7 @@ impl StatePolicy for SensorMonitorPolicy {
                 let fields = ::sce_rust_runtime::event_payload::PayloadFields::decode(data)?;
                 self.pending_payload = SensorMonitorPayload::TempUpdate(SensorMonitorTempUpdatePayload {
                     celsius_centi: fields.unsigned::<u16>("celsius_centi")?,
-                    sensor_id: fields.text("sensor_id")?,
+                    sensor_id: fields.text("sensor_id", 64)?,
                     raw: fields.bytes("raw")?,
                 });
             }
@@ -717,6 +731,15 @@ impl StatePolicy for SensorMonitorPolicy {
     // invoking parent installs is the link to it.
     fn has_parent_session(&self) -> bool {
         self.parent_external_queue.is_some()
+    }
+
+    // W3C SCXML C.1: whether `session_id` names the session that invoked this
+    // one — the location it publishes is a target, so a reply sent to the
+    // origin of an event the parent sent reaches it (docs/adr/0090).
+    fn is_parent_session(&self, session_id: &str) -> bool {
+        self.parent_external_queue.is_some()
+            && !session_id.is_empty()
+            && self.parent_session_id == session_id
     }
 
     // docs/adr/0045: this session's own id, as a saved state holds it.

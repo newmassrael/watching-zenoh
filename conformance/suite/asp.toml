@@ -1,0 +1,290 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The abstract service primitives of the zenoh conformance test suite (ISO/IEC 9646-2): what the
+# lower tester asks of the upper tester (a request, each answered by one confirm of the test
+# management protocol) and what the upper tester reports (an indication). They are derived from
+# zenoh's services, not from one API: an adapter maps each to its API family, and answers a request
+# its API family has no counterpart for with the result `unsupported`. docs/conformance-suite.md
+# section 8 defines every field; crates/wz-conformance-suite holds the file to it and to
+# tmp.toml.
+#
+# `code` is the primitive's number on the test management protocol, unique among the primitives.
+# A parameter's `key` is its key in the protocol's parameter map, unique within the primitive;
+# `type` is one of uint, int, bool, text, bytes, keyexpr (a key expression, as text), handle (a
+# number the upper tester gave an entity in a confirm), enum (one of `values`) and duration (in
+# milliseconds). `optional` parameters may be left out, and a selection names the PICS support
+# items the primitive needs.
+
+format = "wz-conformance-asp"
+format_version = 1
+
+# ---------------------------------------------------------------------------------------------
+# Session
+
+[[primitive]]
+id = "SESSION-OPEN"
+code = 1
+kind = "request"
+summary = "Open the session, in a mode, dialling and listening on the locators given."
+parameters = [
+    { key = 1, name = "mode", type = "enum", values = ["client", "peer", "router"] },
+    { key = 2, name = "connect", type = "text", optional = true },
+    { key = 3, name = "listen", type = "text", optional = true },
+]
+
+[[primitive]]
+id = "SESSION-CLOSE"
+code = 2
+kind = "request"
+summary = "Close the session."
+parameters = [{ key = 1, name = "session", type = "handle" }]
+
+[[primitive]]
+id = "SESSION-ZID"
+code = 3
+kind = "request"
+summary = "Report the session's zenoh id; the confirm carries it."
+parameters = [{ key = 1, name = "session", type = "handle" }]
+
+# ---------------------------------------------------------------------------------------------
+# Publication and subscription
+
+[[primitive]]
+id = "KEYEXPR-DECLARE"
+code = 10
+kind = "request"
+summary = "Declare a key expression to the network."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr" },
+]
+
+[[primitive]]
+id = "KEYEXPR-UNDECLARE"
+code = 11
+kind = "request"
+summary = "Undeclare a declared key expression."
+parameters = [{ key = 1, name = "keyexpr", type = "handle" }]
+
+[[primitive]]
+id = "PUBLISHER-DECLARE"
+code = 12
+kind = "request"
+summary = "Declare a publisher with its quality of service."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr" },
+    { key = 3, name = "priority", type = "uint", optional = true },
+    { key = 4, name = "congestion", type = "enum", values = ["drop", "block"], optional = true },
+    { key = 5, name = "express", type = "bool", optional = true },
+    { key = 6, name = "reliability", type = "enum", values = ["reliable", "best-effort"], optional = true },
+]
+
+[[primitive]]
+id = "PUBLISHER-UNDECLARE"
+code = 13
+kind = "request"
+summary = "Undeclare a publisher."
+parameters = [{ key = 1, name = "publisher", type = "handle" }]
+
+[[primitive]]
+id = "PUBLISHER-PUT"
+code = 14
+kind = "request"
+summary = "Put a value through a publisher."
+parameters = [
+    { key = 1, name = "publisher", type = "handle" },
+    { key = 2, name = "payload", type = "bytes" },
+    { key = 3, name = "encoding", type = "text", optional = true },
+    { key = 4, name = "attachment", type = "bytes", optional = true },
+    { key = 5, name = "timestamp", type = "bytes", optional = true },
+]
+
+[[primitive]]
+id = "PUBLISHER-DELETE"
+code = 15
+kind = "request"
+summary = "Delete through a publisher."
+parameters = [
+    { key = 1, name = "publisher", type = "handle" },
+    { key = 4, name = "attachment", type = "bytes", optional = true },
+]
+
+[[primitive]]
+id = "SESSION-PUT"
+code = 16
+kind = "request"
+summary = "Put a value on a key expression without a publisher."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr" },
+    { key = 3, name = "payload", type = "bytes" },
+    { key = 4, name = "encoding", type = "text", optional = true },
+    { key = 5, name = "attachment", type = "bytes", optional = true },
+    { key = 6, name = "priority", type = "uint", optional = true },
+    { key = 7, name = "congestion", type = "enum", values = ["drop", "block"], optional = true },
+    { key = 8, name = "express", type = "bool", optional = true },
+]
+
+[[primitive]]
+id = "SESSION-DELETE"
+code = 17
+kind = "request"
+summary = "Delete a key expression without a publisher."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr" },
+]
+
+[[primitive]]
+id = "SUBSCRIBER-DECLARE"
+code = 18
+kind = "request"
+summary = "Declare a subscriber; its samples arrive as indications."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr" },
+    { key = 3, name = "locality", type = "enum", values = ["any", "session-local", "remote"], optional = true },
+]
+
+[[primitive]]
+id = "SUBSCRIBER-UNDECLARE"
+code = 19
+kind = "request"
+summary = "Undeclare a subscriber."
+parameters = [{ key = 1, name = "subscriber", type = "handle" }]
+
+# ---------------------------------------------------------------------------------------------
+# Queries
+
+[[primitive]]
+id = "QUERYABLE-DECLARE"
+code = 30
+kind = "request"
+selection = "N-QUERYABLE"
+summary = "Declare a queryable; its queries arrive as indications."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr" },
+    { key = 3, name = "complete", type = "bool", optional = true },
+]
+
+[[primitive]]
+id = "QUERYABLE-UNDECLARE"
+code = 31
+kind = "request"
+selection = "N-QUERYABLE"
+summary = "Undeclare a queryable."
+parameters = [{ key = 1, name = "queryable", type = "handle" }]
+
+[[primitive]]
+id = "QUERY-REPLY"
+code = 32
+kind = "request"
+selection = "N-QUERYABLE"
+summary = "Reply to a query the upper tester indicated, with a value or an error."
+parameters = [
+    { key = 1, name = "query", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr", optional = true },
+    { key = 3, name = "payload", type = "bytes" },
+    { key = 4, name = "error", type = "bool", optional = true },
+]
+
+[[primitive]]
+id = "QUERY-END"
+code = 33
+kind = "request"
+selection = "N-QUERYABLE"
+summary = "End a query the upper tester indicated: the reply final."
+parameters = [{ key = 1, name = "query", type = "handle" }]
+
+[[primitive]]
+id = "GET"
+code = 34
+kind = "request"
+selection = "N-QUERY"
+summary = "Send a query; its replies arrive as indications, then its end."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "selector", type = "text" },
+    { key = 3, name = "target", type = "enum", values = ["best-matching", "all", "all-complete"], optional = true },
+    { key = 4, name = "consolidation", type = "enum", values = ["auto", "none", "monotonic", "latest"], optional = true },
+    { key = 5, name = "timeout", type = "duration", optional = true },
+    { key = 6, name = "payload", type = "bytes", optional = true },
+]
+
+# ---------------------------------------------------------------------------------------------
+# Liveliness
+
+[[primitive]]
+id = "TOKEN-DECLARE"
+code = 40
+kind = "request"
+selection = "N-TOKEN"
+summary = "Declare a liveliness token."
+parameters = [
+    { key = 1, name = "session", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr" },
+]
+
+[[primitive]]
+id = "TOKEN-UNDECLARE"
+code = 41
+kind = "request"
+selection = "N-TOKEN"
+summary = "Undeclare a liveliness token."
+parameters = [{ key = 1, name = "token", type = "handle" }]
+
+# ---------------------------------------------------------------------------------------------
+# Indications
+
+[[primitive]]
+id = "SAMPLE"
+code = 100
+kind = "indication"
+summary = "A subscriber received a sample."
+parameters = [
+    { key = 1, name = "subscriber", type = "handle" },
+    { key = 2, name = "kind", type = "enum", values = ["put", "delete"] },
+    { key = 3, name = "keyexpr", type = "keyexpr" },
+    { key = 4, name = "payload", type = "bytes" },
+    { key = 5, name = "encoding", type = "text", optional = true },
+    { key = 6, name = "attachment", type = "bytes", optional = true },
+    { key = 7, name = "timestamp", type = "bytes", optional = true },
+    { key = 8, name = "priority", type = "uint", optional = true },
+]
+
+[[primitive]]
+id = "QUERY"
+code = 101
+kind = "indication"
+selection = "N-QUERYABLE"
+summary = "A queryable received a query; the handle is what QUERY-REPLY and QUERY-END name."
+parameters = [
+    { key = 1, name = "queryable", type = "handle" },
+    { key = 2, name = "query", type = "handle" },
+    { key = 3, name = "selector", type = "text" },
+    { key = 4, name = "payload", type = "bytes", optional = true },
+]
+
+[[primitive]]
+id = "REPLY"
+code = 102
+kind = "indication"
+selection = "N-QUERY"
+summary = "A query the upper tester sent received a reply, with a value or an error."
+parameters = [
+    { key = 1, name = "get", type = "handle" },
+    { key = 2, name = "keyexpr", type = "keyexpr", optional = true },
+    { key = 3, name = "payload", type = "bytes" },
+    { key = 4, name = "error", type = "bool" },
+]
+
+[[primitive]]
+id = "REPLY-END"
+code = 103
+kind = "indication"
+selection = "N-QUERY"
+summary = "A query the upper tester sent ended: no more replies follow."
+parameters = [{ key = 1, name = "get", type = "handle" }]

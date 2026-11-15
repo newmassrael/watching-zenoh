@@ -12,7 +12,8 @@
 //!
 //! The library cannot know whether the registered clock follows a reference. The program can, so
 //! it reports it ([`report`]), and a build whose `clock-quality-stamping` policy is `trusted-only`
-//! stamps nothing until it has said so.
+//! stamps no data until it has said so; a program that reads the clock is given its time whatever
+//! its standing.
 
 use std::ffi::c_void;
 

@@ -74,6 +74,11 @@ use wz_capture::Dissection;
 use wz_session_core::dissect::{dissect_message, dissect_transport_message, to_json};
 use wz_session_core::lifecycle_wire;
 
+// The analyzer's library, refused with the slot profile for `wz-analyze`'s reason: that profile
+// keeps only the extension entries the build reads and caps every bounded table, so a record
+// would hold less than the wire did and not say so.
+wz_session_core::heap_session_profile!("wz-capi-dissect";);
+
 pub mod live;
 
 pub use live::WzDissectRecord;
@@ -467,6 +472,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // with a key log a caller hands in beside the keys a capture carries. Every
     // door now opens the TLS and QUIC flows those carried keys reach, which
     // moves values of the documents and no key of them.
+    // 58, for `wz_dissect_live_selection_declaring` and
+    // `wz_dissect_live_selection_since_declaring`: the selection documents with
+    // the samples read by declarations, so a selector's `e2e` terms are decided
+    // under a profile rule. The documents and their revisions do not move.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -484,7 +493,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 57;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 58;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -5536,10 +5545,12 @@ pub unsafe extern "C" fn wz_dissect_live_set_progress(
 /// No `bytes` / `len`: the field document re-reads each datagram from the capture
 /// container to walk its tree, and this document walks no tree. A handle fed by
 /// [`wz_dissect_live_push`], which has no container, therefore gets datagram
-/// verdicts here that it cannot get from the field document. No `declarations`
-/// and no `max_messages_shown_per_flow`: the verdict does not depend on how a
-/// payload is decoded, and a row cap is a statement about rendering trees. The
-/// limit preset is the handle's, as it is for every live door.
+/// verdicts here that it cannot get from the field document. No `declarations`,
+/// so an `e2e` term over a sample is `undecided`
+/// ([`wz_dissect_live_selection_declaring`] is this door with them), and no
+/// `max_messages_shown_per_flow`, because a row cap is a statement about
+/// rendering trees. The limit preset is the handle's, as it is for every live
+/// door.
 ///
 /// # An empty selector is the identity
 ///
@@ -5578,7 +5589,7 @@ pub unsafe extern "C" fn wz_dissect_live_selection(
         Err(_) => return WZ_DISSECT_ERR_SELECTOR,
     };
     // SAFETY: caller contract above.
-    let doc = unsafe { (*handle).selection(&filter) };
+    let doc = unsafe { (*handle).selection(&filter, None) };
     write_string(doc, out)
 }
 
@@ -5658,7 +5669,154 @@ pub unsafe extern "C" fn wz_dissect_live_selection_since(
         Err(_) => return WZ_DISSECT_ERR_SELECTOR,
     };
     // SAFETY: caller contract above.
-    let doc = unsafe { (*handle).selection_since(expr, &filter, after_seq) };
+    let doc = unsafe { (*handle).selection_since(expr, &filter, None, after_seq) };
+    write_string(doc, out)
+}
+
+/// What a selection door that takes declarations was handed, read and parsed.
+struct DeclaredSelection<'t> {
+    /// The declaration text, as given.
+    text: &'t str,
+    /// The declarations, installed from `text`.
+    map: wz_capture::payload::formats::FormatMap<'static>,
+    /// The selector's text, as given.
+    selector: &'t str,
+    /// The selector, parsed.
+    filter: wz_capture::filter::Filter,
+}
+
+impl DeclaredSelection<'_> {
+    /// Read and parse `declarations` and `selector`, or answer the code the door
+    /// returns instead: a text that is not UTF-8 is an invalid argument, and a
+    /// selector or a declaration text that is refused is its own code.
+    ///
+    /// # Safety
+    /// `declarations` and `selector` must be non-null NUL-terminated C strings
+    /// that outlive what this returns.
+    unsafe fn read(declarations: *const c_char, selector: *const c_char) -> Result<Self, c_int> {
+        // SAFETY: caller contract above.
+        let (Ok(text), Ok(selector)) = (
+            unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str(),
+            unsafe { std::ffi::CStr::from_ptr(selector) }.to_str(),
+        ) else {
+            return Err(WZ_DISSECT_ERR_INVALID_ARG);
+        };
+        let Ok(filter) = wz_capture::filter::Filter::parse(selector) else {
+            return Err(WZ_DISSECT_ERR_SELECTOR);
+        };
+        let mut map = wz_capture::payload::formats::FormatMap::new();
+        if map.declare_all(text).is_err() {
+            return Err(WZ_DISSECT_ERR_DECLARATION);
+        }
+        Ok(Self {
+            text,
+            map,
+            selector,
+            filter,
+        })
+    }
+}
+
+/// (ABI 58) — [`wz_dissect_live_selection`], with the samples read by
+/// `declarations`.
+///
+/// # What the declarations decide
+///
+/// A selector's `e2e` terms read the end-to-end judge's verdict on a sample's
+/// frame, and the judge reads a frame by the profile rule its key falls to. A
+/// door handed no declarations has no rule to ask, so every `e2e` term over a
+/// published sample (or a reply carrying a put) is `undecided` through
+/// [`wz_dissect_live_selection`]. Here the payload plane reads each sample by
+/// `declarations`, as the field document does: the profile rules decide the
+/// `e2e` terms, a key no rule covers is `none`, and a key id a declaration fixes
+/// resolves the references the wire did not answer. The document is the
+/// `selection` document, with its revision and its keys.
+///
+/// An EMPTY text declares that no rule covers any key, so every sample is
+/// `e2e == none`, decided; that is not the same question as no declarations.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer or text that is not UTF-8,
+/// [`WZ_DISSECT_ERR_SELECTOR`] for a selector and [`WZ_DISSECT_ERR_DECLARATION`]
+/// for a declaration text that is refused (`wz_dissect_selector_diagnose` and
+/// `wz_dissect_declarations_diagnose` say why), each with no string.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `declarations` and
+/// `selector` must be NUL-terminated C strings and `out` a writable pointer to a
+/// `*mut c_char`; none of the four may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_selection_declaring(
+    handle: *mut live::LiveDissection,
+    declarations: *const c_char,
+    selector: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || declarations.is_null() || selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let asked = match unsafe { DeclaredSelection::read(declarations, selector) } {
+        Ok(asked) => asked,
+        Err(rc) => return rc,
+    };
+    // SAFETY: caller contract above.
+    let doc = unsafe { (*handle).selection(&asked.filter, Some(&asked.map)) };
+    write_string(doc, out)
+}
+
+/// (ABI 58) — [`wz_dissect_live_selection_since`], with the samples read by
+/// `declarations`.
+///
+/// # What the declarations decide
+///
+/// What [`wz_dissect_live_selection_declaring`] says: the profile rules decide
+/// the `e2e` terms over a sample, which [`wz_dissect_live_selection_since`]
+/// leaves `undecided`. The document is the `selection_since` document, with its
+/// revision, its cursor and its `revised`.
+///
+/// # The memory is for a selector under a declaration text
+///
+/// The words the handle remembers are for ONE selector judged under ONE
+/// declaration text, both compared as given: the same selector asked under
+/// another text, or through [`wz_dissect_live_selection_since`] (no text), is
+/// another memory, so a judge with another profile never revises a word an
+/// earlier profile gave. The memories are the set
+/// [`wz_dissect_live_set_selector_memories`] sizes; `window.continued` says
+/// whether this call found the memory of this selector and this text.
+///
+/// # Errors
+///
+/// As [`wz_dissect_live_selection_declaring`].
+///
+/// # Safety
+/// As [`wz_dissect_live_selection_declaring`].
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_selection_since_declaring(
+    handle: *mut live::LiveDissection,
+    declarations: *const c_char,
+    selector: *const c_char,
+    after_seq: u64,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || declarations.is_null() || selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let asked = match unsafe { DeclaredSelection::read(declarations, selector) } {
+        Ok(asked) => asked,
+        Err(rc) => return rc,
+    };
+    let declared = wz_capture::selection_json::Declared {
+        map: &asked.map,
+        text: asked.text,
+    };
+    // SAFETY: caller contract above.
+    let doc = unsafe {
+        (*handle).selection_since(asked.selector, &asked.filter, Some(declared), after_seq)
+    };
     write_string(doc, out)
 }
 
@@ -7553,15 +7711,7 @@ mod tests {
         // size, so the missing segment splices the stream MID-FRAME.
         let mut stream = Vec::new();
         for i in 0..400u16 {
-            let body = [
-                wz_session_core::wire_const::T_MID_FRAME
-                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
-                (i % 0x80) as u8,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ];
+            let body = numbered_frame((i % 0x80) as u8);
             stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
             stream.extend_from_slice(&body);
         }
@@ -7739,15 +7889,7 @@ mod tests {
     fn hole_capture() -> Vec<u8> {
         let mut stream = Vec::new();
         for i in 0..64u16 {
-            let body = [
-                wz_session_core::wire_const::T_MID_FRAME
-                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
-                (i % 0x80) as u8,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ];
+            let body = numbered_frame((i % 0x80) as u8);
             stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
             stream.extend_from_slice(&body);
         }
@@ -7769,6 +7911,26 @@ mod tests {
             .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
             .collect();
         wz_capture::pcap::write(1, &records)
+    }
+
+    /// A reliable `Frame` numbered `sn` whose four-byte body is two network
+    /// OAM records, each its header and a zero id with no body.
+    ///
+    /// Every byte after the header is a record of the `Frame`, so the unit is
+    /// one transport message. A record whose first byte has a transport id in
+    /// its low five bits would end the `Frame` there and be read as the
+    /// batch's next transport message, as upstream's `Frame` reader rewinds to
+    /// it (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`).
+    fn numbered_frame(sn: u8) -> [u8; 6] {
+        use wz_session_core::wire_const::{FLAG_T_FRAME_R, N_MID_OAM, T_MID_FRAME};
+        [
+            T_MID_FRAME | FLAG_T_FRAME_R,
+            sn,
+            N_MID_OAM,
+            0x00,
+            N_MID_OAM,
+            0x00,
+        ]
     }
 
     #[test]
@@ -8723,6 +8885,10 @@ mod tests {
             "a handle still waiting on its gap cannot already agree with a \
              reader that gave up on it"
         );
+        // Two records per Frame: each unit of `hole_capture` is a Frame whose
+        // payload is two network OAMs (`numbered_frame`), both of which a Frame
+        // reader reads as records, as upstream's does. 16 units lie before the
+        // hole and 47 survive it, so 32 and 94 records are walked.
         assert!(
             still_open.contains("\"walked_records\":32") && whole.contains("\"walked_records\":94"),
             "and the difference is the bytes BEHIND the hole:\n  open:  \
@@ -10153,7 +10319,12 @@ mod tests {
         // three symbols, a key log's bytes in beside what the older doors take;
         // the handle keeps the secrets it names and hands none back; no struct
         // is new.
-        assert_eq!(wz_dissect_abi_version(), 57);
+        // 58, for `wz_dissect_live_selection_declaring` and
+        // `wz_dissect_live_selection_since_declaring`: two symbols, the
+        // declaration text a C string beside what the older doors take, a
+        // `char*` released by `wz_dissect_string_free` out; the handle keeps a
+        // selection memory per selector and declaration text; no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 58);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -15317,6 +15488,61 @@ mod tests {
         Ok(doc)
     }
 
+    /// The string a door wrote through `out`, freed, or its refusal code with no
+    /// string.
+    fn answered(rc: c_int, out: *mut c_char) -> Result<String, c_int> {
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// `wz_dissect_live_selection_declaring` under `declarations` and
+    /// `selector`, the way C calls it.
+    fn live_selection_declaring(
+        handle: *mut live::LiveDissection,
+        declarations: &str,
+        selector: &str,
+    ) -> Result<String, c_int> {
+        let text = std::ffi::CString::new(declarations).expect("no interior NUL");
+        let expr = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_selection_declaring(handle, text.as_ptr(), expr.as_ptr(), &mut out)
+        };
+        answered(rc, out)
+    }
+
+    /// `wz_dissect_live_selection_since_declaring` under `declarations` and
+    /// `selector` after `after_seq`, the way C calls it.
+    fn live_selection_since_declaring(
+        handle: *mut live::LiveDissection,
+        declarations: &str,
+        selector: &str,
+        after_seq: u64,
+    ) -> Result<String, c_int> {
+        let text = std::ffi::CString::new(declarations).expect("no interior NUL");
+        let expr = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_selection_since_declaring(
+                handle,
+                text.as_ptr(),
+                expr.as_ptr(),
+                after_seq,
+                &mut out,
+            )
+        };
+        answered(rc, out)
+    }
+
     /// The text of the array under `key`, brackets included, in a since document.
     fn since_array<'a>(doc: &'a str, key: &str) -> &'a str {
         let marker = format!("\"{key}\":[");
@@ -16981,18 +17207,23 @@ mod tests {
     /// the sum would divide by five.
     #[test]
     fn the_health_door_reports_the_datagram_sequence_apart_from_the_total() {
-        // A numbered `Frame` (`T_MID_FRAME | FLAG_T_FRAME_R`) with a four-byte
-        // body, as one datagram and as one length-prefixed stream message.
-        let frame = |sn: u8| [0x25, sn, 0x1F, 0x00, 0x00, 0x00];
+        // A numbered `Frame` with a four-byte body, as one datagram and as one
+        // length-prefixed stream message.
         let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
         for sn in [0u8, 1, 4] {
-            let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &frame(sn));
+            let packet = udp_packet(
+                [10, 0, 0, 1],
+                7447,
+                [10, 0, 0, 2],
+                7447,
+                &numbered_frame(sn),
+            );
             push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);
         }
         let mut seq = 1000u32;
         for sn in [0u8, 1] {
             let mut framed = vec![6u8, 0];
-            framed.extend_from_slice(&frame(sn));
+            framed.extend_from_slice(&numbered_frame(sn));
             let packet = tcp_packet(seq, &framed);
             seq += framed.len() as u32;
             push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);
@@ -17377,7 +17608,7 @@ mod tests {
     /// and the closes), for a test that feeds them to a live handle one at a
     /// time.
     fn selector_packets() -> (Vec<u8>, Vec<u8>) {
-        let request = |rid: u64| {
+        let request = |rid: u32| {
             wz_codecs::lent::Request {
                 header: wz_codecs::lent::Request::default().header
                     | wz_codecs::wire_const::FLAG_N_N,
@@ -17390,7 +17621,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let reply = |request_id: u64| {
+        let reply = |request_id: u32| {
             wz_codecs::lent::Response {
                 header: wz_codecs::lent::Response::default().header
                     | wz_codecs::wire_const::FLAG_N_N,
@@ -17414,7 +17645,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let close_of = |request_id: u64| {
+        let close_of = |request_id: u32| {
             wz_codecs::lent::ResponseFinal {
                 request_id,
                 ..Default::default()
@@ -19657,6 +19888,105 @@ mod tests {
             work.fold.messages_folded, cursor,
             "each message is folded once (one row a message here): {work:?}"
         );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// THE DECLARING SELECTION DOORS DECIDE WHAT THE OLDER DOORS LEAVE UNDECIDED.
+    /// Over a run of pushes, `e2e == none` is `undecided` on every push through the
+    /// doors that take no declarations; under an empty declaration text no rule
+    /// covers any key, so every push is `none`, decided. The since door keeps a
+    /// memory per selector AND declaration text, and refuses a text the
+    /// declarations door refuses.
+    #[test]
+    fn the_declaring_selection_doors_decide_the_e2e_terms_the_older_doors_leave() {
+        let file = wz_capture::fixtures::push_run_capture(
+            20,
+            wz_capture::fixtures::RunTransport::Datagram,
+        );
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        unsafe { (*handle).follow(&file).expect("follows") };
+        let selector = "e2e == none";
+
+        let words =
+            |doc: &str, word: &str| doc.matches(&format!("\"selected\":\"{word}\"")).count();
+        let older = live_selection(handle, selector).expect("the older door answers");
+        assert!(words(&older, "undecided") > 0, "{older}");
+        let declaring =
+            live_selection_declaring(handle, "", selector).expect("the declaring door answers");
+        assert_eq!(words(&declaring, "undecided"), 0, "{declaring}");
+        assert_eq!(
+            words(&declaring, "yes"),
+            words(&older, "yes") + words(&older, "undecided"),
+            "every push the older door could not decide is `none` under the text"
+        );
+
+        // One memory, the default: each change of text begins its own.
+        let first = live_selection_since(handle, selector, 0).expect("no text");
+        assert!(first.contains("\"continued\":false"), "{first}");
+        let judged = live_selection_since_declaring(handle, "", selector, 0).expect("a text");
+        assert!(judged.contains("\"continued\":false"), "{judged}");
+        assert!(!judged.contains("\"undecided\""), "{judged}");
+        let again = live_selection_since_declaring(handle, "", selector, through_seq_of(&judged))
+            .expect("the same text");
+        assert!(again.contains("\"continued\":true"), "{again}");
+        assert_eq!(since_array(&again, "revised"), "[]", "{again}");
+        let back = live_selection_since(handle, selector, 0).expect("no text again");
+        assert!(
+            back.contains("\"continued\":false"),
+            "the no-text memory was given up for the text's: {back}"
+        );
+
+        assert_eq!(
+            live_selection_declaring(handle, "not a declaration", selector),
+            Err(WZ_DISSECT_ERR_DECLARATION)
+        );
+        assert_eq!(
+            live_selection_since_declaring(handle, "not a declaration", selector, 0),
+            Err(WZ_DISSECT_ERR_DECLARATION)
+        );
+        assert_eq!(
+            live_selection_declaring(handle, "", "kind =="),
+            Err(WZ_DISSECT_ERR_SELECTOR)
+        );
+        assert_eq!(
+            live_selection_since_declaring(handle, "", "kind ==", 0),
+            Err(WZ_DISSECT_ERR_SELECTOR)
+        );
+        let text = std::ffi::CString::new("").expect("no interior NUL");
+        let good = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                wz_dissect_live_selection_declaring(
+                    handle,
+                    core::ptr::null(),
+                    good.as_ptr(),
+                    &mut out
+                ),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection_since_declaring(
+                    core::ptr::null_mut(),
+                    text.as_ptr(),
+                    good.as_ptr(),
+                    0,
+                    &mut out
+                ),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection_since_declaring(
+                    handle,
+                    text.as_ptr(),
+                    good.as_ptr(),
+                    0,
+                    core::ptr::null_mut()
+                ),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+        }
+        assert!(out.is_null(), "a refusal writes no string");
         unsafe { wz_dissect_live_close(handle) };
     }
 

@@ -123,7 +123,7 @@ const KEY: &str = "demo/q";
 
 /// Two handshakes, then a request, a reply and the final that closes it, each in
 /// a Frame of its own.
-fn exchange(link: Link, rid: u64) -> Wire {
+fn exchange(link: Link, rid: wz_session_core::wire_id::RequestId) -> Wire {
     let mut wire = Wire::new(link, true);
     wire.send(
         true,
@@ -458,7 +458,7 @@ const ASKED_NS: u64 = 1_700_000_000_000_000_000;
 
 /// A query, its reply 575 microseconds later and its final 900 microseconds
 /// after the query: the consumer's one-query, one-reply fixture.
-fn timed_exchange(link: Link, rid: u64) -> Wire {
+fn timed_exchange(link: Link, rid: wz_session_core::wire_id::RequestId) -> Wire {
     let mut wire = Wire::new(link, true);
     wire.send(
         true,
@@ -566,21 +566,21 @@ fn only_the_first_reply_carries_the_round_trip_and_the_rows_add_up() {
             at += by;
             Some(at)
         };
-        for rid in [1u64, 2, 3] {
+        for rid in [1u32, 2, 3] {
             wire.send(
                 true,
                 step(100_000),
                 &frame_carrying(&request_query(rid, sender_space(0, Some(KEY)))),
             );
         }
-        for rid in [2u64, 1, 3, 1, 2, 3] {
+        for rid in [2u32, 1, 3, 1, 2, 3] {
             wire.send(
                 false,
-                step(37_000 + rid * 1_000),
+                step(37_000 + u64::from(rid) * 1_000),
                 &frame_carrying(&response_reply(rid, sender_space(0, Some(KEY)), b"x")),
             );
         }
-        for rid in [3u64, 1, 2] {
+        for rid in [3u32, 1, 2] {
             wire.send(false, step(250_000), &frame_carrying(&response_final(rid)));
         }
         let doc = since_all(&wire, 14);

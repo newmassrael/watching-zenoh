@@ -152,7 +152,7 @@ pub enum MulticastTxItem {
     ResponseFinal {
         /// The request id whose reply chain this frame terminates (drained
         /// from the observer's `pending_final_rids`).
-        request_id: u64,
+        request_id: crate::wire_id::RequestId,
         /// R2595 — the QUERY's QoS, which the terminator carries as its
         /// replies do, and which also picks the conduit this frame rides.
         qos: crate::sample::QosLevel,
@@ -1441,6 +1441,8 @@ mod qos_emit_tests {
             compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -1535,6 +1537,8 @@ mod push_tests {
             compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -1926,6 +1930,8 @@ mod lend_tests {
             compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -2132,6 +2138,8 @@ mod lent_emit_tests {
             compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 

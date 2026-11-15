@@ -26,8 +26,8 @@
 //!   marshaled sample is opaque to the C code — it only borrows it (valid for
 //!   the duration of `call`) and reads the keyexpr / payload back out.
 
-use std::ffi::{c_int, c_void};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::{c_int, c_void};
 
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
@@ -45,8 +45,10 @@ use crate::bytes::ByteBuf;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
+use crate::prelude::*;
 use crate::result::{
-    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
+    Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
@@ -83,7 +85,7 @@ const PICO_SAMPLE_PAYLOAD_OFFSET: usize = 48;
 /// the BUILD here rather than producing a leg that mysteriously publishes
 /// garbage.
 const _: () = assert!(
-    std::mem::offset_of!(SampleMarshal, pico_payload) == PICO_SAMPLE_PAYLOAD_OFFSET,
+    core::mem::offset_of!(SampleMarshal, pico_payload) == PICO_SAMPLE_PAYLOAD_OFFSET,
     "SampleMarshal.pico_payload must sit at offsetof(_z_sample_t, payload)"
 );
 
@@ -183,14 +185,14 @@ impl SampleMarshal {
             qos: None,
             reliability: Reliability::default(),
             source_info: None,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             loaned_attachment: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
         }
     }
@@ -223,7 +225,7 @@ impl SampleMarshal {
     pub(crate) fn with_reply_metadata(
         mut self,
         attachment: Option<&[u8]>,
-        encoding: Option<(u32, Option<&str>)>,
+        encoding: Option<(u32, Option<&[u8]>)>,
         timestamp: Option<&wz_session_core::sample::TimestampHint>,
         source_info: Option<&wz_session_core::sample::SourceInfo>,
     ) -> Self {
@@ -232,7 +234,7 @@ impl SampleMarshal {
         self.encoding = encoding.map(|(packed_id, schema)| {
             own_encoding(wz_session_core::sample::EncodingHint {
                 packed_id,
-                schema: schema.map(str::to_owned),
+                schema: schema.map(<[u8]>::to_vec),
             })
         });
         // R311y562 — the FOURTH field, and it went missing for the same reason
@@ -300,14 +302,14 @@ impl SampleMarshal {
                 .as_ref()
                 // SAFETY: `encoding` is an owned encoding this crate stored.
                 .map(|owned| unsafe { crate::encoding::clone_owned_encoding(owned) }),
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             loaned_attachment: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
         }
     }
@@ -330,7 +332,7 @@ unsafe fn free_sample_marshal(handle: *mut c_void) {
 /// `src` must be null or a pointer this crate handed to a sample callback.
 unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> *mut c_void {
     if src.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let marshal = &*(src as *const SampleMarshal);
     let mut boxed = Box::new(marshal.deep_copy());
@@ -427,7 +429,7 @@ impl z_owned_closure_sample_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -508,9 +510,9 @@ pub(crate) fn make_liveliness_callback(
         // drive thread, so it is caught here.
         let ctx = closure.context.0;
         let _in_callback = crate::ffi::InCallback::enter();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let _ = crate::ffi::catch(|| unsafe {
             call(sample_ptr, ctx);
-        }));
+        });
     }
 }
 
@@ -540,9 +542,9 @@ pub(crate) fn make_subscriber_callback(
         // a misbehaving callback.
         let ctx = closure.context.0;
         let _in_callback = crate::ffi::InCallback::enter();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let _ = crate::ffi::catch(|| unsafe {
             call(sample_ptr, ctx);
-        }));
+        });
     }
 }
 
@@ -572,11 +574,11 @@ pub unsafe extern "C" fn z_sample_attachment(
     sample: *const z_loaned_sample_t,
 ) -> *const z_loaned_bytes_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     if marshal.attachment.is_none() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     &marshal.loaned_attachment as *const z_loaned_bytes_t
 }
@@ -591,7 +593,7 @@ pub unsafe extern "C" fn z_sample_encoding(
     sample: *const z_loaned_sample_t,
 ) -> *const crate::encoding::z_loaned_encoding_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     match marshal.encoding.as_ref() {
@@ -599,7 +601,7 @@ pub unsafe extern "C" fn z_sample_encoding(
         // A sample that carried no encoding reports the DEFAULT one, which the
         // marshal materialises lazily on first use so the borrow it hands back
         // outlives this call.
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -613,12 +615,12 @@ pub unsafe extern "C" fn z_sample_timestamp(
     sample: *const z_loaned_sample_t,
 ) -> *const z_timestamp_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     match marshal.timestamp.as_ref() {
         Some(ts) => ts as *const z_timestamp_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -642,8 +644,9 @@ pub unsafe extern "C" fn z_timestamp_id(ts: *const z_timestamp_t) -> crate::zid:
 }
 
 /// The wall clock as an NTP64 word, through the host's [`EpochSource`]: the tokio engine's
-/// runtime's where that engine is built in, the host's sockets' runtime otherwise. A clock set
-/// before 1970 reads as the epoch itself.
+/// runtime's where that engine is built in, the cooperative engine's host's otherwise (the
+/// process's on a host, the board's in a Zephyr image). A clock set before 1970, or a board that
+/// does not know the date yet, reads as the epoch itself.
 ///
 /// [`EpochSource`]: wz_session_core::epoch::EpochSource
 fn wall_clock_ntp64() -> u64 {
@@ -654,7 +657,7 @@ fn wall_clock_ntp64() -> u64 {
     #[cfg(not(feature = "engine-tokio"))]
     {
         use wz_session_core::epoch::EpochSource;
-        wz_runtime_posix::PosixEpoch
+        crate::coop_host::epoch()
             .try_now_ntp64()
             .map_or(0, |ntp| ntp.as_word())
     }
@@ -662,15 +665,23 @@ fn wall_clock_ntp64() -> u64 {
 
 /// Mint a timestamp from a session's clock and zid (pico `z_timestamp_new`).
 ///
-/// **NAMED DIVERGENCE, and it is observable.** pico stamps from its HLC when one
-/// is configured and otherwise fails (`_z_timestamp_new` returns
-/// `_Z_ERR_GENERIC` with no clock). wz's C session carries no HLC, so this
-/// stamps from the session's monotonic clock in NTP64 form with the session's
-/// own zid. The value is well-formed and monotonic within one session; it is NOT
-/// comparable across nodes the way a real HLC timestamp is. A program that only
-/// attaches and reads back its own stamp — which is what
-/// `z_pub_attachment.c` / `z_sub_attachment.c` do — cannot tell the difference,
-/// and one that orders events across peers by it can.
+/// pico's reads the time since the epoch, gives it when it is later than the last time the session
+/// gave and the last plus one otherwise, and pairs it with the session's zid
+/// (`vendor/zenoh-pico/src/api/api.c` @ `z_result_t z_timestamp_new(`); it applies no policy, and
+/// fails only when the time cannot be read or the session already gave the greatest time there is
+/// (`Z_ERR_TIMESTAMP_GENERATION_FAILED`). This reads one of two clocks and then applies pico's rule
+/// through the session's last time given:
+///
+/// - with a registered clock, the session's node clock, which reads that clock and applies no
+///   stamping policy: the `clock-quality-stamping` policy is the stamper's (the data the node
+///   stamps), not a program's that asks for the time;
+/// - with nothing registered, the wall clock.
+///
+/// A program may register a clock and remove it while the session is open, so one session's stamps
+/// can come from both; the one last time given is what keeps them strictly increasing across that,
+/// as pico's keeps them across a clock that steps back. The session's advanced publisher stamps its
+/// samples through the same last time given, as pico's stamps them with this function, and the
+/// session's node clock learns every time given (`SessionTime`).
 #[no_mangle]
 pub unsafe extern "C" fn z_timestamp_new(
     ts: *mut z_timestamp_t,
@@ -684,50 +695,337 @@ pub unsafe extern "C" fn z_timestamp_new(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        // A program that registered a clock (`wz_ext_clock_source_register`) is stamped from it,
-        // through the session's node clock, so successive stamps strictly increase whatever the
-        // clock does. A registered clock that cannot say what time it is leaves no stamp to give:
-        // pico's own answer to a stamp with no clock, and the system clock is not the fallback of
-        // a clock the program chose. With nothing registered the stamp is the wall clock, below.
-        #[cfg(feature = "clock-source")]
-        if !wz_node_time::clock_registry::GLOBAL.is_empty() {
-            return match state.ext.hlc.stamp() {
-                Some(stamp) => {
-                    *ts = z_timestamp_t {
-                        valid: true,
-                        id: crate::zid::z_id_t {
-                            id: state.drive.zid(),
-                        },
-                        time: stamp.time,
-                    };
-                    Z_OK
-                }
-                None => Z_ERR_GENERIC,
-            };
-        }
+        // pico clears the timestamp before it reads the clock, so one it refuses is not valid.
         *ts = z_timestamp_t {
-            valid: true,
-            id: crate::zid::z_id_t {
-                id: state.drive.zid(),
-            },
-            // R311y569 — the WALL CLOCK, through wz's own NTP64 SSOT.
-            //
-            // This was `ntp64_from_millis(shared.now_monotonic_ms())`, the same
-            // defect the debt ledger had carried on the zenoh-c ABI since y557
-            // and the same fix. `now_monotonic_ms` is `Instant::elapsed()` from
-            // the moment the session was CONSTRUCTED, so the seconds half of the
-            // word counted session uptime rather than time — measured on the
-            // sibling ABI as `ntp_secs=0` where the real library printed
-            // `time(NULL)`.
-            //
-            // Found by looking: the zenoh-c fix names its own mechanism, and the
-            // mechanism is shared, so the question "does the other ABI do this
-            // too" answers itself. Both now read the wall clock through session-core's
-            // `EpochSource`, the source the storage stack stamps with.
-            time: wall_clock_ntp64(),
+            valid: false,
+            id: crate::zid::z_id_t::empty(),
+            time: 0,
         };
-        Z_OK
+        // A registered clock that cannot say what time it is leaves no time to give: pico's own
+        // answer to a time it cannot read, and the system clock is not the fallback of a clock the
+        // program chose.
+        #[cfg(feature = "clock-source")]
+        let reading = if wz_node_time::clock_registry::GLOBAL.is_empty() {
+            Some(wall_clock_ntp64())
+        } else {
+            clock_reading(&state.ext.hlc)
+        };
+        #[cfg(not(feature = "clock-source"))]
+        let reading = Some(wall_clock_ntp64());
+        match session_timestamp(reading, &state.ext.time, state.drive.zid()) {
+            Ok(given) => {
+                *ts = given;
+                Z_OK
+            }
+            Err(code) => code,
+        }
     })
+}
+
+/// What [`z_timestamp_new`] gives a session whose times given are `session_time` and whose id is
+/// `zid`, for a clock that reads `reading` (`None` when it cannot say what time it is): pico's rule
+/// (`vendor/zenoh-pico/src/api/api.c` @ `if (time > s->_last_timestamp) {`), with pico's codes for
+/// a time that cannot be read and for a session with no greater time left to give.
+fn session_timestamp(
+    reading: Option<u64>,
+    session_time: &crate::last_timestamp::SessionTime,
+    zid: [u8; crate::zid::Z_ID_SIZE],
+) -> Result<z_timestamp_t, ZResult> {
+    let reading = reading.ok_or(Z_ERR_GENERIC)?;
+    let time = session_time
+        .give(reading)
+        .ok_or(Z_ERR_TIMESTAMP_GENERATION_FAILED)?;
+    Ok(z_timestamp_t {
+        valid: true,
+        id: crate::zid::z_id_t { id: zid },
+        time,
+    })
+}
+
+#[cfg(test)]
+mod session_timestamp_tests {
+    use super::session_timestamp;
+    use crate::last_timestamp::SessionTime;
+    use crate::result::{Z_ERR_GENERIC, Z_ERR_TIMESTAMP_GENERATION_FAILED};
+
+    const ZID: [u8; crate::zid::Z_ID_SIZE] = [0x3a; crate::zid::Z_ID_SIZE];
+
+    fn time_of(reading: Option<u64>, last: &SessionTime) -> u64 {
+        match session_timestamp(reading, last, ZID) {
+            Ok(given) => {
+                assert!(given.valid, "a given timestamp is valid");
+                assert_eq!(given.id.id, ZID, "and carries the session's zid");
+                given.time
+            }
+            Err(code) => panic!("refused with {code}"),
+        }
+    }
+
+    /// The wall clock reads the same word twice (two calls within its resolution): the second
+    /// stamp is the first plus one, not a duplicate.
+    #[test]
+    fn a_wall_clock_that_reads_the_same_twice_gives_strictly_increasing_stamps() {
+        let last = SessionTime::new();
+        let wall = 0x6900_0000_8000_0000;
+        let first = time_of(Some(wall), &last);
+        let second = time_of(Some(wall), &last);
+        assert_eq!(first, wall);
+        assert_eq!(second, wall + 1);
+    }
+
+    /// A registered clock ahead of the wall clock is removed while the session is open: the wall
+    /// clock's next reading is behind the last stamp, and the stamp goes on from the last one
+    /// given rather than back to the wall clock.
+    #[test]
+    fn a_stamp_after_a_clock_ahead_is_removed_does_not_go_back() {
+        let last = SessionTime::new();
+        let wall = 0x6900_0000_0000_0000;
+        let registered = 0xEE6B_2800_0000_0010;
+        assert_eq!(time_of(Some(wall), &last), wall);
+        assert_eq!(time_of(Some(registered), &last), registered);
+        assert_eq!(time_of(Some(wall + 5), &last), registered + 1);
+    }
+
+    /// A clock that cannot say what time it is gives no stamp, with pico's generic code, and
+    /// leaves the last time given as it was.
+    #[test]
+    fn a_clock_that_cannot_be_read_is_refused_and_moves_nothing() {
+        let last = SessionTime::new();
+        assert_eq!(time_of(Some(50), &last), 50);
+        assert_eq!(
+            session_timestamp(None, &last, ZID).err(),
+            Some(Z_ERR_GENERIC)
+        );
+        assert_eq!(time_of(Some(50), &last), 51);
+    }
+
+    /// A session that gave the greatest time there is has none greater to give, and says so with
+    /// pico's own code.
+    #[test]
+    fn a_session_with_no_greater_time_left_is_refused_with_picos_code() {
+        let last = SessionTime::new();
+        assert_eq!(time_of(Some(u64::MAX), &last), u64::MAX);
+        assert_eq!(
+            session_timestamp(Some(u64::MAX), &last, ZID).err(),
+            Some(Z_ERR_TIMESTAMP_GENERATION_FAILED)
+        );
+    }
+}
+
+/// A program's stamps (`z_timestamp_new`) and the session's advanced publisher's are one order:
+/// both pass through the session's last time given, which the node clock learns.
+#[cfg(all(test, feature = "advanced"))]
+mod one_session_time_tests {
+    use alloc::vec::Vec;
+
+    use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
+    use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
+    use wz_session_core::ntp64::Ntp64;
+    use wz_session_core::WhatAmI;
+
+    use super::session_timestamp;
+    use crate::last_timestamp::SessionTime;
+
+    const ZID: [u8; crate::zid::Z_ID_SIZE] = [0x4b; crate::zid::Z_ID_SIZE];
+
+    /// The seconds the session's node clock reads.
+    const CLOCK_SECS: u64 = 1_000_000;
+
+    /// A clock of the program's that stands still, so every step forward is the clocks' order and
+    /// not time passing.
+    struct StandingClock;
+
+    impl EpochSource for StandingClock {
+        fn try_since_epoch(&self) -> Result<SinceEpoch, EpochUnavailable> {
+            Ok(SinceEpoch {
+                secs: CLOCK_SECS,
+                nanos: 0,
+            })
+        }
+    }
+
+    fn node_clock() -> NodeHlc {
+        NodeHlc::for_node_over_source(
+            &ZID,
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            StandingClock,
+        )
+        .with_trusted_only_stamping(false)
+    }
+
+    /// What `z_timestamp_new` gives for a clock that reads `reading`.
+    fn program(reading: Option<u64>, time: &SessionTime) -> u64 {
+        session_timestamp(reading, time, ZID)
+            .expect("the program is given a time")
+            .time
+    }
+
+    /// What the advanced publisher stamps a sample with: the node clock's proposal, as the
+    /// composite takes it, ordered as the pico plane orders it. Both words, the proposal first.
+    fn sample(hlc: &NodeHlc, time: &SessionTime) -> (u64, u64) {
+        let proposed = hlc.stamp().expect("a clock under `always` stamps").time;
+        let given = time
+            .order_data_stamp(proposed)
+            .expect("the session has time left");
+        (proposed, given)
+    }
+
+    /// A session that already gave the greatest time there is refuses a sample, as pico refuses
+    /// the put whose `z_timestamp_new` failed.
+    #[test]
+    fn a_session_with_no_time_left_refuses_a_sample() {
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        assert_eq!(program(Some(u64::MAX), &time), u64::MAX);
+        let proposed = hlc.stamp().expect("a clock under `always` stamps").time;
+        assert_eq!(
+            time.order_data_stamp(proposed),
+            Err(wz_session_core::publish_options::PublishError::TimestampExhausted)
+        );
+    }
+
+    /// A program stamp from the wall clock, a sample, a program stamp from the node clock (a
+    /// registered clock is read through it), the wall clock again far behind once the clock is
+    /// removed, and a sample: each strictly after the one before, and each sample is the node
+    /// clock's own proposal, because the clock learned every program stamp before it.
+    #[test]
+    fn a_programs_and_a_publishers_stamps_are_one_order_across_a_change_of_clock() {
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let clock = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
+        let within_bound = hlc.max_delta_word().expect("the node holds a clock") / 2;
+
+        let p1 = program(Some(clock + within_bound), &time);
+        assert_eq!(p1, clock + within_bound, "the wall clock, as it reads");
+        let (proposed, d1) = sample(&hlc, &time);
+        assert!(
+            proposed > p1,
+            "the node clock learned the program's stamp: {proposed} after {p1}"
+        );
+        assert_eq!(d1, proposed, "and the sample carries the clock's own time");
+
+        let p2 = program(hlc.clock_stamp().map(|stamp| stamp.time), &time);
+        assert!(
+            p2 > d1,
+            "the node clock read for the program: {p2} after {d1}"
+        );
+
+        let p3 = program(Some(clock - 3_600 * (1u64 << 32)), &time);
+        assert_eq!(p3, p2 + 1, "the wall clock is behind: the stamp goes on");
+        let (proposed, d2) = sample(&hlc, &time);
+        assert!(
+            proposed > p3,
+            "the node clock learned that stamp too: {proposed} after {p3}"
+        );
+        assert_eq!(d2, proposed);
+    }
+
+    /// A time the node clock cannot learn (further ahead of its reading than it accepts) still
+    /// orders the next sample: the last time given steps in where the clock could not.
+    #[test]
+    fn a_sample_after_a_stamp_the_clock_could_not_learn_still_comes_after_it() {
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let clock = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
+        let beyond_bound = hlc.max_delta_word().expect("the node holds a clock") * 4;
+
+        let p1 = program(Some(clock + beyond_bound), &time);
+        let (proposed, d1) = sample(&hlc, &time);
+        assert!(proposed < p1, "the clock did not learn it: {proposed} {p1}");
+        assert_eq!(d1, p1 + 1);
+    }
+
+    /// Programs and publishers stamping one session from threads of their own are each given
+    /// times no other stamp of the session has, and each thread's own go forward.
+    #[test]
+    fn programs_and_publishers_on_threads_are_given_distinct_increasing_times() {
+        const EACH: usize = 1_000;
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let wall = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let program_time = time.clone();
+            threads.push(std::thread::spawn(move || {
+                (0..EACH)
+                    .map(|_| program(Some(wall), &program_time))
+                    .collect::<Vec<u64>>()
+            }));
+            let sample_time = time.clone();
+            let publisher = hlc.clone();
+            threads.push(std::thread::spawn(move || {
+                (0..EACH)
+                    .map(|_| sample(&publisher, &sample_time).1)
+                    .collect::<Vec<u64>>()
+            }));
+        }
+        let mut all = Vec::new();
+        for thread in threads {
+            let mine = thread.join().expect("the stamping thread ends");
+            assert!(
+                mine.windows(2).all(|pair| pair[0] < pair[1]),
+                "one thread's stamps go forward"
+            );
+            all.extend(mine);
+        }
+        all.sort_unstable();
+        assert!(
+            all.windows(2).all(|pair| pair[0] < pair[1]),
+            "no two stamps of the session are the same time"
+        );
+        assert_eq!(all.len(), 8 * EACH);
+    }
+}
+
+/// What [`z_timestamp_new`] reads, before the session's last time given is applied, when a clock is
+/// registered: the session's node clock's next time, with no stamping policy applied, or `None`
+/// when the clock cannot say what time it is.
+#[cfg(feature = "clock-source")]
+fn clock_reading(hlc: &wz_node_time::node_clock::NodeHlc) -> Option<u64> {
+    hlc.clock_stamp().map(|stamp| stamp.time)
+}
+
+#[cfg(all(test, feature = "clock-source"))]
+mod clock_reading_tests {
+    use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
+    use wz_node_time::timestamp_source::SystemEpoch;
+    use wz_session_core::WhatAmI;
+
+    use super::clock_reading;
+
+    /// A node whose clock is not trusted stamps none of its data under `trusted-only`, and a
+    /// program that asks for the time is given the clock's all the same: one clock, so what the
+    /// program is given and what the node stamps once the clock is trusted interleave.
+    #[test]
+    fn a_trusted_only_session_gives_a_program_the_time_of_the_clock_it_stamps_data_with() {
+        let zid = [0x5c; crate::zid::Z_ID_SIZE];
+        let hlc = NodeHlc::for_node_over_source(
+            &zid,
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            SystemEpoch,
+        )
+        .with_trusted_only_stamping(true);
+        assert!(
+            hlc.stamp().is_none(),
+            "no reference reported: no data is stamped"
+        );
+        let first = clock_reading(&hlc).expect("the program is given the time");
+        assert!(hlc.report_sync_acquired());
+        let stamped = hlc.stamp().expect("a trusted clock stamps data").time;
+        let second = clock_reading(&hlc).expect("and given it again");
+        assert!(
+            first < stamped && stamped < second,
+            "one clock: {first} {stamped} {second}"
+        );
+    }
+
+    /// A node that holds no clock has no time to give from it.
+    #[test]
+    fn a_session_with_no_clock_gives_no_time_from_it() {
+        assert!(clock_reading(&NodeHlc::disabled()).is_none());
+    }
 }
 
 /// Default publisher-put options (pico `z_publisher_put_options_default`).
@@ -745,7 +1043,7 @@ pub struct z_publisher_put_options_t {
 }
 
 unstable_option_fields!(z_publisher_put_options_t {
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// Fill default publisher-put options (pico `z_publisher_put_options_default`).
@@ -755,11 +1053,11 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
         return;
     }
     *options = z_publisher_put_options_t {
-        encoding: std::ptr::null_mut(),
-        timestamp: std::ptr::null_mut(),
-        attachment: std::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
+        attachment: core::ptr::null_mut(),
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -806,7 +1104,10 @@ pub(crate) struct PlainPublisher {
     /// id the key is named by when its declaration covers the whole key. Both
     /// `Some` is what lets [`PlainPublisher::publish_plain`] skip the per-put clone
     /// of the options and the per-put look-up of the key's wire form.
-    plain: Option<(wz_session_core::publish_options::PlainPutParams, u64)>,
+    plain: Option<(
+        wz_session_core::publish_options::PlainPutParams,
+        wz_session_core::wire_id::ExprId,
+    )>,
 }
 
 /// What a pico publisher is declared with, and sends with on every put and
@@ -1120,8 +1421,8 @@ impl z_owned_publisher_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -1192,8 +1493,8 @@ impl z_owned_subscriber_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -1379,7 +1680,7 @@ crate::locality::locality_option_field!(z_put_options_t, allowed_destination, "l
 
 unstable_option_fields!(z_put_options_t {
     reliability: c_int = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_delete_options_t` (`api/types.h:413-425`).
@@ -1408,7 +1709,7 @@ crate::locality::locality_option_field!(
 
 unstable_option_fields!(z_delete_options_t {
     reliability: c_int = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_publisher_delete_options_t` (`api/types.h:454-459`).
@@ -1420,7 +1721,7 @@ pub struct z_publisher_delete_options_t {
 }
 
 unstable_option_fields!(z_publisher_delete_options_t {
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// Fill default put options (pico `z_put_options_default`).
@@ -1433,18 +1734,18 @@ pub unsafe extern "C" fn z_put_options_default(options: *mut z_put_options_t) {
         return;
     }
     *options = z_put_options_t {
-        encoding: std::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
         congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
         priority: crate::qos::Z_PRIORITY_DEFAULT,
-        timestamp: std::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
         is_express: false,
-        attachment: std::ptr::null_mut(),
+        attachment: core::ptr::null_mut(),
         #[cfg(feature = "local-subscriber")]
         allowed_destination: crate::locality::Z_LOCALITY_ANY,
         #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -1461,13 +1762,13 @@ pub unsafe extern "C" fn z_delete_options_default(options: *mut z_delete_options
         congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
         priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
-        timestamp: std::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
         #[cfg(feature = "local-subscriber")]
         allowed_destination: crate::locality::Z_LOCALITY_ANY,
         #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -1484,9 +1785,9 @@ pub unsafe extern "C" fn z_publisher_delete_options_default(
         return;
     }
     *options = z_publisher_delete_options_t {
-        timestamp: std::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -1836,7 +2137,7 @@ pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_o
         return;
     }
     *options = z_publisher_options_t {
-        encoding: std::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
         congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
         priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
@@ -1881,12 +2182,12 @@ pub unsafe extern "C" fn z_declare_publisher(
         };
         let mut boxed = Box::new(PublisherState {
             core,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
         });
         boxed.bind();
         *publisher = z_owned_publisher_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })
@@ -2161,13 +2462,13 @@ pub unsafe extern "C" fn z_declare_subscriber(
             shared: engine,
             id,
             key,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             released,
         });
         boxed.bind();
         *subscriber = z_owned_subscriber_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })
@@ -2273,7 +2574,7 @@ pub unsafe extern "C" fn z_sample_keyexpr(
     sample: *const z_loaned_sample_t,
 ) -> *const z_loaned_keyexpr_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     &marshal.loaned_keyexpr as *const z_loaned_keyexpr_t
@@ -2285,7 +2586,7 @@ pub unsafe extern "C" fn z_sample_payload(
     sample: *const z_loaned_sample_t,
 ) -> *const z_loaned_bytes_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     &marshal.loaned_payload as *const z_loaned_bytes_t
@@ -2334,8 +2635,8 @@ pub struct z_source_info_t {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<z_source_info_t>() == 24);
-    assert!(std::mem::align_of::<z_source_info_t>() == 4);
+    assert!(core::mem::size_of::<z_source_info_t>() == 24);
+    assert!(core::mem::align_of::<z_source_info_t>() == 4);
 };
 
 impl z_source_info_t {
@@ -2462,12 +2763,12 @@ pub unsafe extern "C" fn z_source_info_sn(info: *const z_source_info_t) -> u32 {
 pub unsafe extern "C" fn z_sample_source_info(
     sample: *const z_loaned_sample_t,
 ) -> *const z_source_info_t {
-    crate::ffi::guard_val(std::ptr::null(), || match sample_marshal(sample) {
+    crate::ffi::guard_val(core::ptr::null(), || match sample_marshal(sample) {
         Some(m) => match m.source_info.as_ref() {
             Some(info) => info as *const z_source_info_t,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         },
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     })
 }
 

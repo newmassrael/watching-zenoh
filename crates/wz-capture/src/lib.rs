@@ -119,6 +119,8 @@ mod e2e_tests;
 #[cfg(feature = "network-codecs")]
 mod e2e_plane;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod e2e_selection_tests;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod e2e_selector_tests;
 pub mod e2e_words;
 /// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and
@@ -11720,8 +11722,24 @@ mod datagram_tests {
         alloc::vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]
     }
 
+    /// The four-byte batch the fixed-body `Frame` fixtures carry: two network
+    /// OAM records, each its header and a zero id with no body.
+    ///
+    /// Every byte is a record of the `Frame`, so the unit holds one transport
+    /// message. A record whose first byte has a transport id in its low five
+    /// bits would end the `Frame` there, and the batch's loop would read it as
+    /// the next transport message: upstream's `Frame` reader rewinds the record
+    /// it cannot read as a network message
+    /// (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`).
+    pub(crate) const TWO_OAM_RECORDS: [u8; 4] = [
+        wz_session_core::wire_const::N_MID_OAM,
+        0x00,
+        wz_session_core::wire_const::N_MID_OAM,
+        0x00,
+    ];
+
     /// R311y609 — one length-prefixed `T_MID_FRAME` carrying `sn` and a
-    /// four-byte body, through the real VLE encoder.
+    /// four-byte body ([`TWO_OAM_RECORDS`]), through the real VLE encoder.
     ///
     /// `codec-frame` is not optional for this crate — a capture front end
     /// reads what is on the wire — so there is no cfg here.
@@ -11731,7 +11749,7 @@ mod datagram_tests {
             wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,
             sn,
         ];
-        wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+        wire.extend_from_slice(&TWO_OAM_RECORDS);
         let mut out = (wire.len() as u16).to_le_bytes().to_vec();
         out.extend_from_slice(&wire);
         out
@@ -11743,17 +11761,32 @@ mod datagram_tests {
     /// those can never exercise the defect §4.1 names: a two-byte prefix read
     /// off `1F 00` claims 31, not 40000. A capture of real traffic carries USER
     /// BYTES, and a length prefix read off user bytes claims 32 KiB on average.
-    /// The payload is an opaque tail to `parse_inbound`, so the frame still
-    /// decodes as the frame it is — the entropy is in the part the transport
-    /// layer does not read, exactly as it is on the wire.
+    ///
+    /// The user bytes ride where a sender puts them, inside a network message
+    /// that says how long they are: the `len` bytes are one network OAM whose
+    /// `ZBuf` body is the pseudo-random bytes. Laid bare behind the header, a
+    /// byte of them with a transport id in its low five bits would end the
+    /// `Frame`'s records and be read as the next transport message (see
+    /// [`TWO_OAM_RECORDS`]), so the entropy is in the body the walk of the
+    /// records steps over, exactly as it is on the wire.
     pub(crate) fn framed_frame_with_payload(sn: u8, len: usize, seed: u32) -> Vec<u8> {
         assert!(sn < 0x80, "the one-byte VLE arm");
+        // The OAM's header and id are two bytes, then the body's VLE length.
+        let body_len = (1..=9usize)
+            .filter_map(|width| len.checked_sub(2 + width))
+            .find(|n| 2 + vle_bytes(*n as u64).len() + n == len)
+            .expect("a payload length one ZBuf OAM fills exactly");
         let mut wire = alloc::vec![
             wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,
             sn,
+            // An OAM's header carries its body's encoding in an extension's bits
+            // (`commons/zenoh-codec/src/network/oam.rs` @ `iext::ENC_ZBUF => {`).
+            wz_session_core::wire_const::N_MID_OAM | wz_session_core::ext_header::EXT_ENC_ZBUF,
+            0x00,
         ];
+        wire.extend_from_slice(&vle_bytes(body_len as u64));
         let mut x = seed;
-        for _ in 0..len {
+        for _ in 0..body_len {
             x = x.wrapping_mul(1664525).wrapping_add(1013904223);
             wire.push((x >> 16) as u8);
         }
@@ -11850,7 +11883,10 @@ mod datagram_tests {
     /// At the lifetime of the record it goes into: the codec's borrowed messages
     /// are invariant in theirs, so a key made at `'static` could ride only with a
     /// `'static` payload.
-    pub(crate) fn sender_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
+    pub(crate) fn sender_space<'a>(
+        id: wz_session_core::wire_id::ExprId,
+        suffix: Option<&'a str>,
+    ) -> Wireexpr<'a> {
         Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id,
@@ -12090,7 +12126,7 @@ mod datagram_tests {
                 wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R
             ];
             wire.extend_from_slice(&vle_bytes(sn));
-            wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+            wire.extend_from_slice(&TWO_OAM_RECORDS);
             wire
         };
         let mut messages = alloc::vec![
@@ -13935,9 +13971,22 @@ mod datagram_tests {
             w
         };
         // FRAME and FRAGMENT are hand-walked by `parse_inbound` rather than
-        // routed through a body codec (a VLE sn then the tail), so there is no
-        // codec to anchor to and the bytes are the sn and the payload.
-        let frame = alloc::vec![wc::T_MID_FRAME, 0x00, 0xDE, 0xAD];
+        // routed through a body codec (a VLE sn then the tail), so the header
+        // bytes are the sn and the tail. A Frame's tail is network records, and
+        // upstream drops a batch whose record does not decode, so it carries
+        // one, built by its own codec; a Fragment's tail is a piece of a
+        // network message and is not read as records.
+        let frame = {
+            let mut w = alloc::vec![wc::T_MID_FRAME, 0x00];
+            w.extend_from_slice(
+                &wz_codecs::lent::Oam {
+                    id: 0,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            w
+        };
         let fragment = alloc::vec![wc::T_MID_FRAGMENT, 0x00, 0xBE, 0xEF];
         let join = {
             let body = wz_codecs::join::Join {
@@ -15348,15 +15397,13 @@ mod datagram_tests {
     #[test]
     fn frames_the_sender_numbered_and_this_capture_lacks_reach_the_verdict() {
         let frame = |sn: u8| {
-            alloc::vec![
+            let mut wire = alloc::vec![
                 wz_session_core::wire_const::T_MID_FRAME
                     | wz_session_core::wire_const::FLAG_T_FRAME_R,
                 sn,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ]
+            ];
+            wire.extend_from_slice(&TWO_OAM_RECORDS);
+            wire
         };
         let mut d = Dissection::new();
         let mut at = 0usize;
@@ -15475,15 +15522,13 @@ mod datagram_tests {
     #[test]
     fn the_datagram_sequence_is_the_datagram_links_share_of_the_total() {
         let frame = |sn: u8| {
-            alloc::vec![
+            let mut wire = alloc::vec![
                 wz_session_core::wire_const::T_MID_FRAME
                     | wz_session_core::wire_const::FLAG_T_FRAME_R,
                 sn,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ]
+            ];
+            wire.extend_from_slice(&TWO_OAM_RECORDS);
+            wire
         };
         let mut d = Dissection::new();
         let mut at = 0usize;
@@ -15558,15 +15603,13 @@ mod datagram_tests {
     #[test]
     fn an_evicted_datagram_flows_sequence_stays_in_the_datagram_total() {
         let frame = |sn: u8| {
-            alloc::vec![
+            let mut wire = alloc::vec![
                 wz_session_core::wire_const::T_MID_FRAME
                     | wz_session_core::wire_const::FLAG_T_FRAME_R,
                 sn,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ]
+            ];
+            wire.extend_from_slice(&TWO_OAM_RECORDS);
+            wire
         };
         let mut d = Dissection::with_limits(DissectionLimits {
             max_flows_per_table: Some(1),
@@ -15648,7 +15691,7 @@ mod datagram_tests {
                 wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R
             ];
             wire.extend_from_slice(&vle_bytes(sn));
-            wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+            wire.extend_from_slice(&TWO_OAM_RECORDS);
             wire
         };
         let mut d = Dissection::new();
@@ -16720,15 +16763,13 @@ mod datagram_tests {
     #[test]
     fn an_evicted_datagram_flows_sequence_accounting_stays_in_the_total() {
         let frame = |sn: u8| {
-            alloc::vec![
+            let mut wire = alloc::vec![
                 wz_session_core::wire_const::T_MID_FRAME
                     | wz_session_core::wire_const::FLAG_T_FRAME_R,
                 sn,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ]
+            ];
+            wire.extend_from_slice(&TWO_OAM_RECORDS);
+            wire
         };
         let mut d = Dissection::with_limits(DissectionLimits {
             max_flows_per_table: Some(1),
@@ -17717,13 +17758,13 @@ mod datagram_tests {
     /// silence was not a strict reading of a lax wire — it was messages both
     /// peers process and this observer dropped.
     ///
-    /// # Why the second message is a KEEPALIVE and not a FRAME
+    /// # Why both messages are KEEPALIVES
     ///
-    /// A `Frame` consumes the remainder of its unit by construction, so a real
-    /// batch ends with one and a fixture that put a Frame first could never
-    /// have a second message at all. Two KeepAlives is the smallest batch that
-    /// can exist, which is what makes it the discriminator: one byte each, no
-    /// body to get wrong, and the count is the whole assertion.
+    /// Two KeepAlives is the smallest batch that can exist, which is what
+    /// makes it the discriminator: one byte each, no body to get wrong, and the
+    /// count is the whole assertion. A `Frame` first would make the count hang
+    /// on where its records end, which is the walk of its body and not the
+    /// batch loop this test is about.
     #[test]
     fn a_datagram_carrying_two_messages_yields_both() {
         let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
@@ -18319,7 +18360,7 @@ mod ws_flow_tests {
             wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
             2,
         ];
-        payload.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+        payload.extend_from_slice(&crate::datagram_tests::TWO_OAM_RECORDS);
         let (front, back) = payload.split_at(3);
         let fragment_one = crate::ws::tests::frame(false, 0x2, front, None);
         let fragment_two = crate::ws::tests::frame(true, 0x0, back, None);
@@ -18365,16 +18406,15 @@ mod ws_flow_tests {
         //
         // It was a KeepAlive followed by three copies of `n` as filler, and
         // filler is exactly what a batch walk reads as further messages —
-        // `n == 1` is `T_MID_INIT`. A `Frame` consumes the remainder of its
-        // framing unit by construction
-        // (`zenoh-codec-1.5.0/src/transport/frame.rs:173`), so this shape holds
-        // one message whatever the body is, which keeps this test about ws
-        // RECOVERY instead of quietly becoming a test about batching.
+        // `n == 1` is `T_MID_INIT`. A `Frame` whose records reach the end of
+        // the message is one message, which keeps this test about ws RECOVERY
+        // instead of quietly becoming a test about batching. Its body is
+        // records only (see `datagram_tests::TWO_OAM_RECORDS`).
         let mut payload = alloc::vec![
             wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
             n, // sn, the one-byte VLE arm
         ];
-        payload.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+        payload.extend_from_slice(&crate::datagram_tests::TWO_OAM_RECORDS);
         crate::ws::tests::frame(true, 0x2, &payload, None)
     }
 

@@ -199,15 +199,29 @@ pub const RX_MAX_MESSAGE_SIZE: usize = 1 << 30;
 /// The reassembly pool a host is built with is a second bound beside this one,
 /// and the smaller of the two is what holds: a value above the pool's slot can
 /// only be read as the slot.
+///
+/// `buffer_size` is the read storage each stream link pools, in bytes: the
+/// link keeps `buffer_size / mtu` buffers of one frame each, and at least one,
+/// as upstream's RX task does
+/// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `let mut n = rx_buffer_size / mtu;`).
+/// A frame read while every pooled buffer is still held gets storage of its
+/// own, so the value bounds what is reused and never what is received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkRxConf {
+    /// `transport/link/rx/buffer_size`, in bytes.
+    pub buffer_size: usize,
     /// `transport/link/rx/max_message_size`, in bytes.
     pub max_message_size: usize,
 }
 
+/// Upstream's default `transport/link/rx/buffer_size`, one batch of the
+/// widest size (`commons/zenoh-config/src/defaults.rs` @ `buffer_size: BatchSize::MAX as usize,`).
+pub const RX_BUFFER_SIZE: usize = u16::MAX as usize;
+
 impl Default for LinkRxConf {
     fn default() -> Self {
         Self {
+            buffer_size: RX_BUFFER_SIZE,
             max_message_size: RX_MAX_MESSAGE_SIZE,
         }
     }
@@ -363,6 +377,22 @@ pub struct TxQueueConf {
     /// ([`crate::tx_deadline::ExpiryRun`]). `0` never closes it. Read only when
     /// [`Self::expiry_keeps_session`] is `true`.
     pub expiry_close_after: u16,
+    /// `batching/enabled`: whether the session stages its messages into an open frame per
+    /// conduit that the link's writer flushes when it falls idle, so that a burst leaves in few
+    /// large frames. `false` sends every message as a frame of its own as soon as it is staged,
+    /// which is what upstream's pipeline does with batching off: it moves each serialized
+    /// batch out at once (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `if !self.batching || $msg.is_express() {`). Upstream's default is `true`.
+    pub batching: bool,
+    /// `batching/time_limit`, in microseconds (the key states milliseconds): the longest a link's
+    /// writer holds an open batch back while producers keep adding to it
+    /// ([`crate::link::TxPipeline::batching_time_limit_us`]). The writer's own bound,
+    /// [`crate::link::BATCHING_TIME_LIMIT_US`], when the configuration states none.
+    pub batching_time_limit_us: u64,
+    /// `allocation/mode`: whether a link's queue allocates the batches its lanes may hold when
+    /// it is shaped at Established, or the first time each is wanted. Upstream's default is the
+    /// second.
+    pub allocation: crate::link::QueueAllocation,
 }
 
 /// R2926 — upstream's default
@@ -419,6 +449,9 @@ impl Default for TxQueueConf {
             expiry_keeps_session: crate::policy::SessionPolicy::from_build()
                 .tx_expiry_keeps_session,
             expiry_close_after: build_expiry_close_after(),
+            batching: true,
+            batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
+            allocation: crate::link::QueueAllocation::Lazy,
         }
     }
 }
@@ -482,6 +515,9 @@ impl TxQueueConf {
             expiry_keeps_session: crate::policy::SessionPolicy::from_build()
                 .tx_expiry_keeps_session,
             expiry_close_after: build_expiry_close_after(),
+            batching: true,
+            batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
+            allocation: crate::link::QueueAllocation::Lazy,
         }
     }
 
@@ -529,6 +565,10 @@ impl TxQueueConf {
             } else {
                 batch_bytes
             },
+            pipeline: crate::link::TxPipeline {
+                batching_time_limit_us: self.batching_time_limit_us,
+                allocation: self.allocation,
+            },
         }
     }
 }
@@ -570,6 +610,26 @@ mod shape_tests {
         assert_eq!((udp.batch_bytes, udp.queue_unit_bytes), (1450, 65535));
         let small = conf.shape(true, 2048, 1024);
         assert_eq!((small.batch_bytes, small.queue_unit_bytes), (2048, 2048));
+    }
+
+    /// The batching bound a session is configured with is the one its links' writers are
+    /// handed at Established, and a session configured with none hands them the writer's own.
+    #[test]
+    fn the_batching_bound_reaches_the_shape_a_link_takes() {
+        let bare = TxQueueConf::default().shape(true, 65535, 65535);
+        assert_eq!(bare.pipeline, crate::link::TxPipeline::DEFAULT);
+        assert_eq!(
+            bare.pipeline.batching_time_limit_us,
+            crate::link::BATCHING_TIME_LIMIT_US
+        );
+        let configured = TxQueueConf {
+            batching_time_limit_us: 3_000,
+            allocation: crate::link::QueueAllocation::Init,
+            ..TxQueueConf::default()
+        };
+        let shaped = configured.shape(true, 65535, 65535).pipeline;
+        assert_eq!(shaped.batching_time_limit_us, 3_000);
+        assert_eq!(shaped.allocation, crate::link::QueueAllocation::Init);
     }
 }
 

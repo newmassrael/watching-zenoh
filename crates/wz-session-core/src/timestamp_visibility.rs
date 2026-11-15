@@ -120,7 +120,7 @@ impl SampleView for HiddenTimestamp<'_> {
     fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
         None
     }
-    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         self.0.encoding_parts()
     }
     #[cfg(feature = "alloc")]
@@ -151,7 +151,7 @@ impl SampleView for HiddenTimestamp<'_> {
 pub struct HiddenReplyTimestamp<'a>(pub &'a dyn crate::reply_sink::ReplyView);
 
 impl crate::reply_sink::ReplyView for HiddenReplyTimestamp<'_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.0.rid()
     }
     fn keyexpr(&self) -> &str {
@@ -163,13 +163,13 @@ impl crate::reply_sink::ReplyView for HiddenReplyTimestamp<'_> {
     fn payload(&self) -> &[u8] {
         self.0.payload()
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.0.err_encoding()
     }
     fn attachment(&self) -> Option<&[u8]> {
         self.0.attachment()
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.0.put_encoding()
     }
     #[cfg(feature = "storage-profile")]

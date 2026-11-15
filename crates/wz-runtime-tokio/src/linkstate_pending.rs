@@ -97,7 +97,7 @@ pub struct QueryFan {
     /// The inbound face the forward Query arrived on — where replies route back.
     inbound: FaceId,
     /// The upstream rid to rewrite each reply's `request_id` back to.
-    inbound_rid: u64,
+    inbound_rid: wz_session_core::wire_id::RequestId,
     /// R2595 — the QoS the querier's Request arrived with: zenoh's
     /// `Query::src_qos`, which its `finalize_pending_query` stamps on the
     /// closing `ResponseFinal` and its `QueryCleanup` on the timeout reply.
@@ -112,7 +112,7 @@ impl QueryFan {
     /// the fan until it calls [`release`](Self::release) (see the type docs).
     pub fn new(
         inbound: FaceId,
-        inbound_rid: u64,
+        inbound_rid: wz_session_core::wire_id::RequestId,
         src_qos: wz_session_core::sample::QosLevel,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -164,7 +164,7 @@ pub struct QueryReturn {
     /// The face the Query arrived on — where every reply routes back.
     pub face: FaceId,
     /// The querier's own rid, stamped on every reply in place of the branch qid.
-    pub rid: u64,
+    pub rid: wz_session_core::wire_id::RequestId,
     /// The QoS the querier's Request arrived with: upstream's `Query::src_qos`,
     /// stamped on every reply, final and timeout Err.
     pub qos: wz_session_core::sample::QosLevel,
@@ -204,11 +204,11 @@ struct FacePending {
     /// sentinel). Resetting it on a drain would let a stale in-flight reply
     /// (e.g. from a queryable still answering a timed-out query) alias the NEXT
     /// query's qid and misroute into — or prematurely close — that query.
-    next_qid: u64,
+    next_qid: wz_session_core::wire_id::RequestId,
     /// local qid -> the return mapping + expiry to rewrite a Response /
     /// ResponseFinal carrying that qid back toward (and to time out if no final
     /// ever arrives).
-    returns: HashMap<u64, PendingReturn>,
+    returns: HashMap<wz_session_core::wire_id::RequestId, PendingReturn>,
 }
 
 /// One live return mapping: the fan's shared return target (the `Arc` clone whose
@@ -235,7 +235,7 @@ pub struct ExpiredQuery {
     /// The out face the timed-out branch had been forwarded on (its local key).
     pub out_face: FaceId,
     /// The local qid that timed out on `out_face`.
-    pub qid: u64,
+    pub qid: wz_session_core::wire_id::RequestId,
     /// Where the timeout messages go and as what: the querier's face, rid and
     /// QoS (R2595 carried the QoS; R2906 made it the shared [`QueryReturn`]).
     pub to: QueryReturn,
@@ -260,7 +260,12 @@ impl PendingQueries {
     /// `pending_queries.insert(qid, (query.clone(), ..))` followed by
     /// `QueryCleanup::spawn_query_clean_up_task` arming the timeout — the `Arc`
     /// clone here IS zenoh's per-branch `Arc<Query>` clone.
-    pub fn allocate(&mut self, out_face: FaceId, fan: &Arc<QueryFan>, deadline: Instant) -> u64 {
+    pub fn allocate(
+        &mut self,
+        out_face: FaceId,
+        fan: &Arc<QueryFan>,
+        deadline: Instant,
+    ) -> wz_session_core::wire_id::RequestId {
         // Counted before the branch can be answered: a final that finds the entry
         // finds the branch counted.
         fan.branch_started();
@@ -282,7 +287,11 @@ impl PendingQueries {
     /// `ResponseFinal`, so the entry stays alive (zenoh `route_send_response`
     /// reads `pending_queries.get`, it does not remove). `None` for an unknown
     /// qid (no such pending query — already finalized, timed out, or never sent).
-    pub fn peek(&self, out_face: FaceId, qid: u64) -> Option<QueryReturn> {
+    pub fn peek(
+        &self,
+        out_face: FaceId,
+        qid: wz_session_core::wire_id::RequestId,
+    ) -> Option<QueryReturn> {
         self.by_face
             .get(&out_face)
             .and_then(|fp| fp.returns.get(&qid))
@@ -302,7 +311,11 @@ impl PendingQueries {
     /// freed only by [`remove_face`](Self::remove_face) — so a later query on
     /// this face can never reuse a qid a stale in-flight reply still carries.
     /// `None` for an unknown qid (already closed / never sent).
-    pub fn take(&mut self, out_face: FaceId, qid: u64) -> Option<(QueryReturn, bool)> {
+    pub fn take(
+        &mut self,
+        out_face: FaceId,
+        qid: wz_session_core::wire_id::RequestId,
+    ) -> Option<(QueryReturn, bool)> {
         let fp = self.by_face.get_mut(&out_face)?;
         let entry = fp.returns.remove(&qid);
         entry.map(|r| {
@@ -355,7 +368,7 @@ impl PendingQueries {
     pub fn expired(&mut self, now: Instant) -> Vec<ExpiredQuery> {
         // Phase 1: collect the victims under a shared borrow (the `Arc::into_inner`
         // last-out accounting needs owned removal, which `retain` cannot express).
-        let mut victims: Vec<(FaceId, u64)> = Vec::new();
+        let mut victims: Vec<(FaceId, wz_session_core::wire_id::RequestId)> = Vec::new();
         for (&out_face, fp) in &self.by_face {
             for (&qid, ret) in &fp.returns {
                 if ret.deadline <= now {
@@ -417,14 +430,14 @@ mod tests {
     /// `the_fan_carries_its_querys_qos_out_through_every_exit` is the case that
     /// varies it, and `a_fan_the_routing_call_still_holds_*` the cases that keep
     /// the hold.
-    fn fan(inbound: FaceId, rid: u64) -> Arc<QueryFan> {
+    fn fan(inbound: FaceId, rid: wz_session_core::wire_id::RequestId) -> Arc<QueryFan> {
         let fan = QueryFan::new(inbound, rid, wz_session_core::sample::QosLevel::DEFAULT);
         assert!(fan.release(), "a fan with no branch is over when let go");
         fan
     }
 
     /// The [`QueryReturn`] a [`fan`] at the DEFAULT query QoS answers with.
-    fn to(face: FaceId, rid: u64) -> QueryReturn {
+    fn to(face: FaceId, rid: wz_session_core::wire_id::RequestId) -> QueryReturn {
         QueryReturn {
             face,
             rid,
@@ -792,7 +805,7 @@ mod tests {
         use wz_session_core::sample::QosLevel;
         let asked = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
         assert_ne!(asked, QosLevel::DEFAULT);
-        let owed = |face: FaceId, rid: u64| QueryReturn {
+        let owed = |face: FaceId, rid: wz_session_core::wire_id::RequestId| QueryReturn {
             face,
             rid,
             qos: asked,

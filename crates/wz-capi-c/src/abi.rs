@@ -1627,7 +1627,20 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// It moves to 14 for the sender of a declared segment profile (`crate::segment_sender`): ten new
 /// symbols (seven `wz_capi_c_segment_sender_*`, `wz_capi_c_segment_put_options_default` and the two
 /// internal doors) and the structs they take, in a build with `segment-sender` (off by default).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 14;
+///
+/// It moves to 15 with no new symbol: [`wz_capi_c_config_disposition`] has a fourth answer,
+/// [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`], and [`wz_capi_c_config_honoured`] lists the keys THIS
+/// library honours, which leaves out the keys of a capability it was built without (the traffic
+/// policy's in a build without `interceptors`, for one).
+///
+/// It moves to 16 with no new symbol: the rule `wz_capi_c.h` states for the clock a program
+/// registers changed. `z_timestamp_new` gives a program the node clock's time (the registered
+/// clock where one is), whatever the clock's standing, and the `clock-quality-stamping` policy
+/// holds back only the data the node stamps; before it, `z_timestamp_new` read the system clock.
+/// Under that policy an advanced publisher, every sample of which carries a time, refuses its put
+/// (`Z_EGENERIC`) and its delete until the clock is reported synchronised, and sends nothing;
+/// before it, the sample went out stamped with the system clock.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 16;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;
@@ -1719,18 +1732,31 @@ pub unsafe extern "C" fn wz_capi_c_layout(out: *mut usize, cap: usize) -> usize 
 /// word — the alternative is a second copy of the list in the tool, which is the
 /// drift hazard the exported form was introduced to remove.
 ///
+/// # The surface of THIS build
+///
+/// The list is what this library honours, which is `HONOURED_CONFIG_KEYS` less the keys whose
+/// reader is a capability the library was built without
+/// ([`wz_runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS`]): the traffic policy's keys in
+/// a build without `interceptors`, `transport/link/tls` in one with neither a `tls/` nor a `quic/`
+/// link, `gateway/south` in one without `router-node`. Two libraries built with different
+/// capabilities answer different lists, and that difference is the one the door exists to
+/// report. For such a key
+/// [`wz_capi_c_config_disposition`] answers [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`].
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_capi_c_config_honoured_count() -> usize {
-    wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS.len()
+    wz_runtime_tokio::zenoh_config::honoured_config_keys_in_build().count()
 }
 
 /// R2172 (open-debt item 548) — the NUL-terminated name of honoured config key
 /// `index`, or NULL past the end.
 ///
-/// Indexed straight into `HONOURED_CONFIG_KEYS`, which is that list's SSOT and
-/// is what keeps this door from becoming its SECOND WRITER: a door that spelled
+/// Indexed straight into the build's part of `HONOURED_CONFIG_KEYS`
+/// ([`wz_runtime_tokio::zenoh_config::honoured_config_keys_in_build`]), which
+/// keeps that list as its SSOT and is what keeps this door from becoming its
+/// SECOND WRITER: a door that spelled
 /// its own list would answer this call happily and drift the moment a key was
 /// added. `the_config_surface_door_reports_the_constant_and_not_a_second_copy`
 /// is where that is held, and it compares against the constant as a VALUE rather
@@ -1752,12 +1778,11 @@ pub unsafe extern "C" fn wz_capi_c_config_honoured(index: usize) -> *const std::
     use std::sync::OnceLock;
     static NUL_TERMINATED: OnceLock<Vec<std::ffi::CString>> = OnceLock::new();
     let table = NUL_TERMINATED.get_or_init(|| {
-        wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS
-            .iter()
+        wz_runtime_tokio::zenoh_config::honoured_config_keys_in_build()
             // The keys are ASCII path literals, so the only way this could fail
             // is an embedded NUL nobody can write by accident.
             .map(|key| {
-                std::ffi::CString::new(*key).expect("a honoured config key has no interior NUL")
+                std::ffi::CString::new(key).expect("a honoured config key has no interior NUL")
             })
             .collect()
     });
@@ -1766,11 +1791,12 @@ pub unsafe extern "C" fn wz_capi_c_config_honoured(index: usize) -> *const std::
         .map_or(std::ptr::null(), |key| key.as_ptr())
 }
 
-/// The three answers [`wz_capi_c_config_disposition`] writes through `out`.
+/// The four answers [`wz_capi_c_config_disposition`] writes through `out`.
 ///
 /// The numbers are ABI: they are what a consumer in another language compares
-/// against, so adding a fourth is a `WZ_CAPI_C_ABI_REVISION` event and
-/// renumbering these three is a breaking one.
+/// against, so adding one is a `WZ_CAPI_C_ABI_REVISION` event (the fourth,
+/// [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`], moved it to 15) and renumbering them is a
+/// breaking one.
 pub const WZ_CAPI_C_CONFIG_HONOURED: i32 = 0;
 /// See [`WZ_CAPI_C_CONFIG_HONOURED`]. This build does not act on the key AND
 /// SAYS SO ON PURPOSE.
@@ -1778,6 +1804,11 @@ pub const WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED: i32 = 1;
 /// See [`WZ_CAPI_C_CONFIG_HONOURED`]. This build has NO STATEMENT about the
 /// key — a misspelling, or surface upstream grew after this build was cut.
 pub const WZ_CAPI_C_CONFIG_UNKNOWN: i32 = 2;
+/// See [`WZ_CAPI_C_CONFIG_HONOURED`]. wz honours the key in a library built with the capability
+/// its reader belongs to, and THIS library was built without it: a configuration that states an
+/// instruction there does not open, and one that states upstream's default opens and applies
+/// nothing.
+pub const WZ_CAPI_C_CONFIG_NOT_IN_BUILD: i32 = 3;
 
 /// R2797 — WHAT THIS BUILD SAYS ABOUT ONE CONFIG KEY, ASKED BY NAME.
 ///
@@ -1799,13 +1830,17 @@ pub const WZ_CAPI_C_CONFIG_UNKNOWN: i32 = 2;
 /// predicate over five organs, and a door that mirrored one organ was always
 /// going to answer for a fifth of it.
 ///
-/// # Why three answers
+/// # Why more than two answers
 ///
 /// A bool would merge "wz has looked at this key and does not read it" with
 /// "nobody here has ever classified this", and those are opposite advice to the
 /// operator who wrote the key: the first is a supported deployment, the second
 /// is a typo. Merging them is the loss the consumer refused to take, which is
 /// why handing them a bool would only have moved it back across the door.
+///
+/// The fourth, [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`], keeps a key this library was
+/// built without the reader of apart from both: wz honours it, and a library
+/// built with the capability would act on it.
 ///
 /// # The key's spelling
 ///
@@ -1845,15 +1880,38 @@ pub unsafe extern "C" fn wz_capi_c_config_disposition(
         let Ok(path) = (unsafe { std::ffi::CStr::from_ptr(path) }).to_str() else {
             return Z_EPARSE;
         };
-        let answer = match wz_runtime_tokio::zenoh_config::config_key_disposition(path) {
-            D::Honoured => WZ_CAPI_C_CONFIG_HONOURED,
-            D::DeclaredUnhonoured => WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED,
-            D::Unknown => WZ_CAPI_C_CONFIG_UNKNOWN,
+        let answer = match session_key_answer(path) {
+            Some(answer) => answer,
+            None => match wz_runtime_tokio::zenoh_config::config_key_disposition(path) {
+                D::Honoured => WZ_CAPI_C_CONFIG_HONOURED,
+                D::DeclaredUnhonoured => WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED,
+                D::Unknown => WZ_CAPI_C_CONFIG_UNKNOWN,
+                D::NotInBuild => WZ_CAPI_C_CONFIG_NOT_IN_BUILD,
+            },
         };
         // SAFETY: checked non-null above.
         unsafe { *out = answer };
         Z_OK
     })
+}
+
+/// What [`wz_capi_c_config_disposition`] answers for a key only a session applies
+/// (`wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS`), which the reader's disposition
+/// cannot answer for this library: whether THIS library's session acts on it is a fact of its
+/// build ([`crate::session::SESSION_REACH`]). Acted on is honoured; a key this library has
+/// looked at and does not act on, though its build carries shared memory, is declared
+/// unhonoured; a shared-memory key in a library built without shared memory is not in the
+/// build, and a configuration that states it opens and applies nothing, as upstream's library
+/// built so does. `None` for any other key.
+fn session_key_answer(path: &str) -> Option<i32> {
+    use wz_capi_core::open_plan::{session_key_state, KeyState};
+    Some(
+        match session_key_state(path, crate::session::SESSION_REACH)? {
+            KeyState::Mapped => WZ_CAPI_C_CONFIG_HONOURED,
+            KeyState::Unmapped => WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED,
+            KeyState::Inert => WZ_CAPI_C_CONFIG_NOT_IN_BUILD,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1898,6 +1956,85 @@ mod config_disposition_tests {
         );
     }
 
+    /// A key only a session applies is answered for THIS library's session: the per-key
+    /// publication QoS is honoured in every build, the shared-memory subsystem where the library
+    /// has shared memory, the copy's threshold where it also has the session's provider, and the
+    /// list of messages, whose query and reply this library sends as bytes, never. A
+    /// shared-memory key in a library without shared memory is out of its build.
+    #[test]
+    fn a_session_key_is_answered_for_this_librarys_session() {
+        let shm = cfg!(feature = "zenoh-c-shared-memory");
+        let provider = cfg!(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ));
+        let not_acted_on = if shm {
+            WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED
+        } else {
+            WZ_CAPI_C_CONFIG_NOT_IN_BUILD
+        };
+        assert_eq!(ask("qos/publication"), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED));
+        assert_eq!(
+            ask("transport/shared_memory/mode"),
+            (
+                Z_OK,
+                if shm {
+                    WZ_CAPI_C_CONFIG_HONOURED
+                } else {
+                    WZ_CAPI_C_CONFIG_NOT_IN_BUILD
+                }
+            )
+        );
+        assert_eq!(
+            ask("transport/shared_memory/transport_optimization/message_size_threshold"),
+            (
+                Z_OK,
+                if provider {
+                    WZ_CAPI_C_CONFIG_HONOURED
+                } else {
+                    not_acted_on
+                }
+            )
+        );
+        assert_eq!(
+            ask("transport/shared_memory/transport_optimization/messages"),
+            (Z_OK, not_acted_on)
+        );
+        // CONTROL: a key that is not a session's is answered by the reader, as before, in both
+        // of the reader's answers. The keys are taken from the reader's own lists, so a key
+        // moving from one list to the other moves the control with it.
+        use wz_runtime_tokio::zenoh_config::{
+            honoured_config_keys_in_build, SESSION_HONOURED_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
+        };
+        match UNHONOURED_UPSTREAM_CONFIG_KEYS
+            .iter()
+            .copied()
+            .find(|key| !SESSION_HONOURED_KEYS.contains(key))
+        {
+            Some(key) => assert_eq!(
+                ask(key),
+                (Z_OK, WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED),
+                "{key}"
+            ),
+            // The day the last such key is honoured the list holds a session's keys at most,
+            // and the reader has no unhonoured answer left to give for any other.
+            None => assert!(
+                UNHONOURED_UPSTREAM_CONFIG_KEYS
+                    .iter()
+                    .all(|key| SESSION_HONOURED_KEYS.contains(key)),
+                "the reader declares no key unhonoured outside a session's"
+            ),
+        }
+        let honoured = honoured_config_keys_in_build()
+            .find(|key| !SESSION_HONOURED_KEYS.contains(key))
+            .expect("the reader honours a key that is not a session's in every build");
+        assert_eq!(
+            ask(honoured),
+            (Z_OK, WZ_CAPI_C_CONFIG_HONOURED),
+            "{honoured}"
+        );
+    }
+
     #[test]
     fn the_door_separates_a_declared_decision_from_a_typo() {
         assert_eq!(
@@ -1933,6 +2070,41 @@ mod config_disposition_tests {
             checked += 1;
         }
         assert!(checked > 50, "only {checked} keys carried the comparison");
+    }
+
+    /// A key whose reader is a capability is honoured and enumerated by a library built with the
+    /// capability, and by one built without it answered `NOT_IN_BUILD` and left out of the list.
+    #[test]
+    fn a_capability_key_is_answered_for_the_library_asked() {
+        let enumerated: Vec<String> = (0..)
+            .map(|index| {
+                // SAFETY: the door is documented to return NULL past the end.
+                unsafe { wz_capi_c_config_honoured(index) }
+            })
+            .take_while(|p| !p.is_null())
+            .map(|p| {
+                // SAFETY: a non-NULL return is a 'static NUL-terminated string.
+                unsafe { std::ffi::CStr::from_ptr(p) }
+                    .to_str()
+                    .expect("a config key is UTF-8")
+                    .to_owned()
+            })
+            .collect();
+        let table = wz_runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS;
+        assert!(
+            !table.is_empty(),
+            "no capability key, so this proves nothing"
+        );
+        for (key, _, built) in table {
+            let listed = enumerated.iter().any(|name| name == key);
+            if *built {
+                assert_eq!(ask(key), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED), "{key}");
+                assert!(listed, "{key} is honoured here and not enumerated");
+            } else {
+                assert_eq!(ask(key), (Z_OK, WZ_CAPI_C_CONFIG_NOT_IN_BUILD), "{key}");
+                assert!(!listed, "{key} is out of this library and enumerated");
+            }
+        }
     }
 
     #[test]
@@ -2057,12 +2229,15 @@ mod layout_tests {
     /// non-zero and every key to be non-empty.
     #[test]
     fn the_config_surface_door_reports_the_constant_and_not_a_second_copy() {
-        use wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS;
+        // The build's part of the constant: the constant itself less the keys of a capability this
+        // library was built without.
+        let in_build: Vec<&str> =
+            wz_runtime_tokio::zenoh_config::honoured_config_keys_in_build().collect();
 
         let count = wz_capi_c_config_honoured_count();
         assert_eq!(
             count,
-            HONOURED_CONFIG_KEYS.len(),
+            in_build.len(),
             "the door's count and the constant it reports must be one fact"
         );
         assert!(
@@ -2071,7 +2246,7 @@ mod layout_tests {
              'the key is there' assertion vacuously"
         );
 
-        for (index, expected) in HONOURED_CONFIG_KEYS.iter().enumerate() {
+        for (index, expected) in in_build.iter().enumerate() {
             // SAFETY: `index` is below the reported count, and the returned
             // pointer is `'static` and NUL-terminated by construction.
             let got = unsafe {

@@ -58,7 +58,7 @@ impl<'f, S: WireexprNonlocalStorage + ::sce_forge_runtime::codec::StoresStr<'f, 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireexprNonlocalIn<S: WireexprNonlocalStorage> {
-    pub id: u64,
+    pub id: u16,
     pub suffix_len: Option<u64>,
     pub suffix: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsStr<WireexprNonlocalSuffixField>>::Str, 65535>>,
 }
@@ -141,7 +141,7 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let id = cursor.read_vle_u64()?;
+        let id = cursor.read_vle_u16()?;
         let suffix_len = if (n & 0x01u8) != 0 {
             let _v = cursor.read_vle_u64()?;
             Some(_v)
@@ -177,7 +177,7 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 65553;
+    pub const MAX_ENCODED_BYTES: usize = 65547;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -214,13 +214,13 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
 /// encode computes those from what is ([`WireexprNonlocalWire::encode_source`]).
 pub trait WireexprNonlocalSource {
     /// The `id` field.
-    fn id(&self) -> u64;
+    fn id(&self) -> u16;
     /// The `suffix` field.
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>>;
 }
 
 impl<T: WireexprNonlocalSource + ?Sized> WireexprNonlocalSource for &T {
-    fn id(&self) -> u64 {
+    fn id(&self) -> u16 {
         (**self).id()
     }
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
@@ -235,13 +235,13 @@ impl<T: WireexprNonlocalSource + ?Sized> WireexprNonlocalSource for &T {
 #[derive(Debug, Clone, Copy)]
 pub struct WireexprNonlocalParts<'a> {
     /// The `id` field.
-    pub id: u64,
+    pub id: u16,
     /// The `suffix` field.
     pub suffix: Option<::sce_forge_runtime::codec::Text<'a, 65535>>,
 }
 
 impl<'a> WireexprNonlocalSource for WireexprNonlocalParts<'a> {
-    fn id(&self) -> u64 {
+    fn id(&self) -> u16 {
         self.id
     }
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
@@ -250,7 +250,7 @@ impl<'a> WireexprNonlocalSource for WireexprNonlocalParts<'a> {
 }
 
 impl<S: WireexprNonlocalStorage> WireexprNonlocalSource for WireexprNonlocalOwned<S> {
-    fn id(&self) -> u64 {
+    fn id(&self) -> u16 {
         self.id
     }
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
@@ -293,7 +293,7 @@ impl WireexprNonlocalWire {
         };
         let _f_d_suffix_len: Option<usize> = if src.suffix().is_some() { Some(_n_d_suffix_len_0) } else { None };
         let _d_suffix_len: u64 = ::sce_forge_runtime::codec::widen_usize(_f_d_suffix_len.unwrap_or(0));
-        w.write_vle_u64(src.id())?;
+        w.write_vle_u16(src.id())?;
         if (n & 0x1) != 0 {
             w.write_vle_u64(_d_suffix_len)?;
         }
@@ -479,24 +479,33 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalOwned<S> {
     }
 }
 
+/// What the origin projection of `WireexprNonlocal` asks of a storage profile
+/// beside WireexprNonlocalStorage: that it is an origin profile, and
+/// that each byte string and text of `WireexprNonlocal` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait WireexprNonlocalOrigin: WireexprNonlocalStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginStr<WireexprNonlocalSuffixField> {}
+
+impl<S: WireexprNonlocalStorage + ::sce_forge_runtime::codec::OriginStorage + ::sce_forge_runtime::codec::OriginStr<WireexprNonlocalSuffixField>> WireexprNonlocalOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> WireexprNonlocalIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprNonlocalLentStorage {
     /// Project this borrowed view into an owned [`WireexprNonlocalOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: WireexprNonlocalStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprNonlocalOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: WireexprNonlocalOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprNonlocalOwned<S>, CodecError> {
         Ok(WireexprNonlocalOwned {
             id: self.id,
             suffix_len: self.suffix_len,
-            suffix: self.suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<WireexprNonlocalSuffixField>(origin, _v.into_inner()))).transpose()?,
+            suffix: self.suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::from_built_text(<S as ::sce_forge_runtime::codec::OriginStr<WireexprNonlocalSuffixField>>::str_from(origin, _v.into_inner()))).transpose()?,
         })
     }
 }

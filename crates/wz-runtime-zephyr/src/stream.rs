@@ -23,26 +23,31 @@
 use core::cell::Cell;
 use core::ffi::{c_int, c_void};
 use core::mem::size_of;
+use core::net::SocketAddr;
 
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use zephyr_sys::socket::{
-    accept, bind, close, connect, getpeername, getsockname, listen, poll, recv, send, setsockopt,
-    shutdown, socket, PollFd, SockLen, SockaddrIn, AF_INET, IPPROTO_TCP, POLLIN, SHUT_RDWR,
-    SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, TCP_NODELAY,
+    accept, bind, connect, getpeername, getsockname, listen, poll, recv, send, setsockopt,
+    shutdown, PollFd, SockLen, IPPROTO_TCP, POLLIN, SHUT_RDWR, SOCK_STREAM, SOL_SOCKET,
+    SO_REUSEADDR, TCP_NODELAY,
 };
 
-use crate::net::{sockaddr, ZephyrNetError};
+use crate::net::{name_of, open_socket, RawAddr, ZephyrNetError};
 
-/// One connected IPv4 TCP socket on Zephyr's net stack.
+/// One connected TCP socket on Zephyr's net stack, of the family of the address it connected to
+/// (an IPv6 one on an image built with `CONFIG_NET_IPV6`).
 pub struct ZephyrTcpSocket {
     fd: c_int,
-    local: ([u8; 4], u16),
-    peer: ([u8; 4], u16),
+    local: SocketAddr,
+    peer: SocketAddr,
     /// The last [`StreamSocket::wait_readable`] returned with bytes queued, and no read has taken
     /// them since: the next read needs no second `poll`. Only the one thread that drives the
     /// link touches the socket.
     readable: Cell<bool>,
+    /// The descriptor's close, shared with every wait made on it from another thread
+    /// (`crate::fd`).
+    _close: crate::fd::FdClose,
 }
 
 /// `TCP_NODELAY` on `fd`, as zenoh and zenoh-pico set it on every TCP link.
@@ -84,40 +89,27 @@ fn set_reuseaddr(fd: c_int) -> Result<(), ZephyrNetError> {
     Ok(())
 }
 
-/// The `(address, port)` a `getsockname` or `getpeername` of `fd` reports.
-fn name_of(
-    fd: c_int,
-    call: unsafe extern "C" fn(c_int, *mut SockaddrIn, *mut SockLen) -> c_int,
-) -> Result<([u8; 4], u16), c_int> {
-    let mut name = SockaddrIn::default();
-    let mut len = size_of::<SockaddrIn>() as SockLen;
-    // SAFETY: `name` and `len` are live and writable, and `len` is `name`'s size.
-    let rc = unsafe { call(fd, &mut name, &mut len) };
-    if rc != 0 {
-        return Err(rc);
-    }
-    Ok((name.sin_addr.to_ne_bytes(), u16::from_be(name.sin_port)))
+/// A TCP socket of `at`'s family: the descriptor, or the stack's refusal.
+fn stream_socket(at: &SocketAddr) -> Result<c_int, ZephyrNetError> {
+    open_socket(at, SOCK_STREAM, IPPROTO_TCP)
 }
 
 impl ZephyrTcpSocket {
-    /// Connect to `addr:port`, blocking until the connection is made or refused.
-    pub fn connect(addr: [u8; 4], port: u16) -> Result<Self, ZephyrNetError> {
-        // SAFETY: plain FFI with value arguments.
-        let fd = unsafe { socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) };
-        if fd < 0 {
-            return Err(ZephyrNetError::Socket(fd));
-        }
+    /// Connect to `to`, blocking until the connection is made or refused.
+    pub fn connect(to: SocketAddr) -> Result<Self, ZephyrNetError> {
+        let peer = RawAddr::of(to)?;
+        let fd = stream_socket(&to)?;
         // Owned from here, so an early return closes it.
         let mut this = Self {
             fd,
-            local: ([0; 4], 0),
-            peer: (addr, port),
+            local: to,
+            peer: to,
             readable: Cell::new(false),
+            _close: crate::fd::FdClose::new(fd),
         };
         set_nodelay(fd)?;
-        let peer = sockaddr(addr, port);
-        // SAFETY: `peer` is a live `sockaddr_in` of the length passed.
-        let rc = unsafe { connect(fd, &peer, size_of::<SockaddrIn>() as SockLen) };
+        // SAFETY: `peer` is a live socket address of the length passed.
+        let rc = unsafe { connect(fd, peer.as_ptr(), peer.size()) };
         if rc != 0 {
             return Err(ZephyrNetError::Connect(rc));
         }
@@ -129,15 +121,25 @@ impl ZephyrTcpSocket {
     /// The socket of a connection a listener took: `fd` is its own descriptor, which this owns
     /// from here (an early return closes it), and the peer is the one `accept` named. The same
     /// stream a connect gives, because a connection is the same thing from either end.
-    fn accepted(fd: c_int, peer: ([u8; 4], u16)) -> Result<Self, ZephyrNetError> {
+    /// A peer `accept` wrote in a form this crate does not read is asked of `getpeername`.
+    fn accepted(fd: c_int, peer: Option<SocketAddr>) -> Result<Self, ZephyrNetError> {
+        const UNNAMED: SocketAddr = SocketAddr::V4(core::net::SocketAddrV4::new(
+            core::net::Ipv4Addr::UNSPECIFIED,
+            0,
+        ));
         let mut this = Self {
             fd,
-            local: ([0; 4], 0),
-            peer,
+            local: UNNAMED,
+            peer: UNNAMED,
             readable: Cell::new(false),
+            _close: crate::fd::FdClose::new(fd),
         };
         set_nodelay(fd)?;
         this.local = name_of(fd, getsockname).map_err(ZephyrNetError::SockName)?;
+        this.peer = match peer {
+            Some(peer) => peer,
+            None => name_of(fd, getpeername).map_err(ZephyrNetError::PeerName)?,
+        };
         Ok(this)
     }
 
@@ -167,11 +169,11 @@ fn poll_in(fd: c_int, timeout_ms: c_int) -> Result<bool, ZephyrNetError> {
 impl StreamSocket for ZephyrTcpSocket {
     type Error = ZephyrNetError;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         self.local
     }
 
-    fn peer(&self) -> ([u8; 4], u16) {
+    fn peer(&self) -> SocketAddr {
         self.peer
     }
 
@@ -214,12 +216,20 @@ impl StreamSocket for ZephyrTcpSocket {
         // error worth reporting: the link is ending either way.
         unsafe { shutdown(self.fd, SHUT_RDWR) };
     }
-}
 
-impl Drop for ZephyrTcpSocket {
-    fn drop(&mut self) {
-        // SAFETY: `fd` is this socket's own descriptor, closed exactly once.
-        unsafe { close(self.fd) };
+    // Any thread may `poll` a descriptor, so the session's owner waits for this stream outside its
+    // lock, as it waits for a datagram socket.
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(all(
+            feature = "alloc",
+            not(feature = "session-slot"),
+            target_has_atomic = "ptr"
+        ))]
+        fn readiness(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
+            Some(self._close.readiness())
+        }
     }
 }
 
@@ -231,10 +241,14 @@ pub struct ZephyrTcpDial;
 impl StreamDial for ZephyrTcpDial {
     type Stream = ZephyrTcpSocket;
 
-    fn dial(&self, addr: [u8; 4], port: u16) -> Result<ZephyrTcpSocket, LinkOpenError> {
-        ZephyrTcpSocket::connect(addr, port).map_err(|e| match e {
+    fn dial(&self, to: SocketAddr) -> Result<ZephyrTcpSocket, LinkOpenError> {
+        ZephyrTcpSocket::connect(to).map_err(|e| match e {
             // The stack had no socket to give: worth a later try, as a full table is.
             ZephyrNetError::Socket(_) => LinkOpenError::Exhausted,
+            // A family the image was built without, and an end the stack cannot name, stay so.
+            ZephyrNetError::NoFamily | ZephyrNetError::ScopeTooWide(_) => {
+                LinkOpenError::Unsupported
+            }
             _ => LinkOpenError::Refused,
         })
     }
@@ -250,32 +264,33 @@ impl StreamDial for ZephyrTcpDial {
 /// cannot be told from a failure by the return value alone.
 pub struct ZephyrTcpListener {
     fd: c_int,
-    local: ([u8; 4], u16),
+    local: SocketAddr,
     /// The last `accept` that failed although `poll` reported a connection waiting, for the deploy
     /// to report (the way `StreamDriver::error` keeps a link's last failure). Only the one thread
     /// that drives the node touches the listener.
     failed: Cell<Option<ZephyrNetError>>,
+    /// The descriptor's close, shared with every wait made on it from another thread
+    /// (`crate::fd`).
+    _close: crate::fd::FdClose,
 }
 
 impl ZephyrTcpListener {
-    /// Listen on `addr:port` for connections, up to `backlog` of them queued before one is
-    /// taken; port 0 has the stack choose one, which [`StreamListen::local`] then names.
-    pub fn listen(addr: [u8; 4], port: u16, backlog: u8) -> Result<Self, ZephyrNetError> {
-        // SAFETY: plain FFI with value arguments.
-        let fd = unsafe { socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) };
-        if fd < 0 {
-            return Err(ZephyrNetError::Socket(fd));
-        }
+    /// Listen on `at`, over a socket of its family, for connections, up to `backlog` of them
+    /// queued before one is taken; port 0 has the stack choose one, which
+    /// [`StreamListen::local`] then names.
+    pub fn listen(at: SocketAddr, backlog: u8) -> Result<Self, ZephyrNetError> {
+        let local = RawAddr::of(at)?;
+        let fd = stream_socket(&at)?;
         // Owned from here, so an early return closes it.
         let mut this = Self {
             fd,
-            local: (addr, port),
+            local: at,
             failed: Cell::new(None),
+            _close: crate::fd::FdClose::new(fd),
         };
         set_reuseaddr(fd)?;
-        let local = sockaddr(addr, port);
-        // SAFETY: `local` is a live `sockaddr_in` of the length passed.
-        let rc = unsafe { bind(fd, &local, size_of::<SockaddrIn>() as SockLen) };
+        // SAFETY: `local` is a live socket address of the length passed.
+        let rc = unsafe { bind(fd, local.as_ptr(), local.size()) };
         if rc != 0 {
             return Err(ZephyrNetError::Bind(rc));
         }
@@ -285,7 +300,7 @@ impl ZephyrTcpListener {
             return Err(ZephyrNetError::Listen(rc));
         }
         this.local = name_of(fd, getsockname).map_err(ZephyrNetError::SockName)?;
-        if this.local.1 == 0 {
+        if this.local.port() == 0 {
             return Err(ZephyrNetError::NoPortChosen);
         }
         Ok(this)
@@ -300,7 +315,7 @@ impl ZephyrTcpListener {
 impl StreamListen for ZephyrTcpListener {
     type Stream = ZephyrTcpSocket;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         self.local
     }
 
@@ -318,17 +333,15 @@ impl StreamListen for ZephyrTcpListener {
                 return Err(LinkOpenError::Unsupported);
             }
         }
-        let mut name = SockaddrIn::default();
-        let mut len = size_of::<SockaddrIn>() as SockLen;
-        // SAFETY: `name` and `len` are live and writable, and `len` is `name`'s size. `poll` said a
-        // connection waits, so the call does not block.
-        let fd = unsafe { accept(self.fd, &mut name, &mut len) };
+        let mut name = RawAddr::empty();
+        // SAFETY: `name`'s storage and length are live and writable, and the length is its size.
+        // `poll` said a connection waits, so the call does not block.
+        let fd = unsafe { accept(self.fd, name.as_mut_ptr(), name.size_mut()) };
         if fd < 0 {
             self.failed.set(Some(ZephyrNetError::Accept(fd)));
             return Err(LinkOpenError::Exhausted);
         }
-        let peer = (name.sin_addr.to_ne_bytes(), u16::from_be(name.sin_port));
-        match ZephyrTcpSocket::accepted(fd, peer) {
+        match ZephyrTcpSocket::accepted(fd, name.to_socket_addr()) {
             Ok(socket) => Ok(Some(socket)),
             // The socket owns the descriptor from `accepted`'s first line, so it is closed.
             Err(e) => {
@@ -337,11 +350,18 @@ impl StreamListen for ZephyrTcpListener {
             }
         }
     }
-}
 
-impl Drop for ZephyrTcpListener {
-    fn drop(&mut self) {
-        // SAFETY: `fd` is this listener's own descriptor, closed exactly once.
-        unsafe { close(self.fd) };
+    // A listening descriptor polls readable while a connection is queued on it.
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(all(
+            feature = "alloc",
+            not(feature = "session-slot"),
+            target_has_atomic = "ptr"
+        ))]
+        fn readiness(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
+            Some(self._close.readiness())
+        }
     }
 }

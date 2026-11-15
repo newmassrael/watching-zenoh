@@ -375,6 +375,11 @@ where
             compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: LinkRxConf::default(),
+            // The MCU session is zenoh-pico's.
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+            // zenoh-pico states no cap on a group's members; the table the image declares
+            // (`MEMBERS`) is the bound.
+            max_sessions: None,
         }
     }
 

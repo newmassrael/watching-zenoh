@@ -44,7 +44,7 @@
 //! bytes that decode as garbage on a real peer, so the wire shape is pinned
 //! against `libzenohpico.so` rather than against this crate's own reader.
 
-use std::ffi::{c_char, c_void, CStr};
+use core::ffi::{c_char, c_void, CStr};
 
 use crate::abi::{
     impl_handle_ownership7, z_loaned_bytes_t, z_moved_bytes_t, z_owned_bytes_t, z_owned_slice_t,
@@ -53,6 +53,7 @@ use crate::abi::{
 use crate::bytes::{bytes_ref, store_owned_bytes, store_owned_slice, store_owned_string, ByteBuf};
 use crate::codec::{decode_zint, encode_zint, VLE_LEN};
 use crate::ffi::{guard_val, guarded};
+use crate::prelude::*;
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
 
 /// Behind a `z_owned_bytes_writer_t` / `ze_owned_serializer_t`: the accumulating
@@ -88,8 +89,8 @@ impl z_owned_bytes_writer_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 4],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 4],
         }
     }
 }
@@ -141,8 +142,8 @@ impl ze_owned_serializer_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 4],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 4],
         }
     }
 }
@@ -193,7 +194,7 @@ pub unsafe extern "C" fn z_bytes_writer_empty(writer: *mut z_owned_bytes_writer_
         }
         *writer = z_owned_bytes_writer_t {
             handle: Box::into_raw(Box::new(WriterState::new())) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 4],
+            _pad: [core::ptr::null_mut(); 4],
         };
         Z_OK
     })
@@ -217,7 +218,7 @@ pub unsafe extern "C" fn z_bytes_writer_write_all(
         if src.is_null() {
             return Z_ERR_NULL;
         }
-        buf.write_all(std::slice::from_raw_parts(src, len));
+        buf.write_all(core::slice::from_raw_parts(src, len));
         Z_OK
     })
 }
@@ -288,7 +289,7 @@ unsafe fn take_writer_handle(moved: *mut c_void) -> Option<WriterState> {
     if handle.is_null() {
         return None;
     }
-    *slot = std::ptr::null_mut();
+    *slot = core::ptr::null_mut();
     Some(*Box::from_raw(handle as *mut WriterState))
 }
 
@@ -303,7 +304,7 @@ pub unsafe extern "C" fn ze_serializer_empty(serializer: *mut ze_owned_serialize
         }
         *serializer = ze_owned_serializer_t {
             handle: Box::into_raw(Box::new(WriterState::new())) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 4],
+            _pad: [core::ptr::null_mut(); 4],
         };
         Z_OK
     })
@@ -367,7 +368,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_buf(
             None => return Z_ERR_NULL,
         };
         if len != 0 {
-            buf.write_all(std::slice::from_raw_parts(val, len));
+            buf.write_all(core::slice::from_raw_parts(val, len));
         }
         Z_OK
     })
@@ -402,7 +403,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_str(
     val: *const c_char,
 ) -> ZResult {
     if val.is_null() {
-        return ze_serializer_serialize_buf(serializer, std::ptr::null(), 0);
+        return ze_serializer_serialize_buf(serializer, core::ptr::null(), 0);
     }
     let bytes = CStr::from_ptr(val).to_bytes();
     ze_serializer_serialize_buf(serializer, bytes.as_ptr(), bytes.len())
@@ -439,7 +440,7 @@ pub struct z_bytes_reader_t {
 impl z_bytes_reader_t {
     fn empty() -> Self {
         Self {
-            data: std::ptr::null(),
+            data: core::ptr::null(),
             len: 0,
             pos: 0,
             _reserved: 0,
@@ -454,7 +455,7 @@ impl z_bytes_reader_t {
         if self.data.is_null() || self.pos >= self.len {
             return &[];
         }
-        std::slice::from_raw_parts(self.data.add(self.pos), self.len - self.pos)
+        core::slice::from_raw_parts(self.data.add(self.pos), self.len - self.pos)
     }
 }
 
@@ -487,7 +488,7 @@ pub unsafe extern "C" fn z_bytes_reader_read(
         let available = (*reader).remaining();
         let n = len.min(available.len());
         if n != 0 {
-            std::ptr::copy_nonoverlapping(available.as_ptr(), dst, n);
+            core::ptr::copy_nonoverlapping(available.as_ptr(), dst, n);
             (*reader).pos += n;
         }
         n
@@ -511,7 +512,7 @@ pub unsafe extern "C" fn z_bytes_reader_remaining(reader: *const z_bytes_reader_
 pub unsafe extern "C" fn z_bytes_reader_seek(
     reader: *mut z_bytes_reader_t,
     offset: i64,
-    origin: std::ffi::c_int,
+    origin: core::ffi::c_int,
 ) -> ZResult {
     guarded(|| {
         if reader.is_null() {
@@ -703,7 +704,7 @@ macro_rules! impl_arithmetic {
                     Some(b) => b,
                     None => return Z_ERR_NULL,
                 };
-                const N: usize = std::mem::size_of::<$ty>();
+                const N: usize = core::mem::size_of::<$ty>();
                 // Exactly N bytes: a longer payload is an ERROR, mirroring
                 // pico's is-done check, not a prefix read.
                 if buf.len() != N {
@@ -755,8 +756,8 @@ pub unsafe extern "C" fn z_bytes_writer_take_from_loaned(
             handle: (*src).handle,
             _pad: (*src)._pad,
         };
-        (*src).handle = std::ptr::null_mut();
-        (*src)._pad = [std::ptr::null_mut(); 4];
+        (*src).handle = core::ptr::null_mut();
+        (*src)._pad = [core::ptr::null_mut(); 4];
         Z_OK
     })
 }
@@ -812,7 +813,7 @@ pub unsafe extern "C" fn ze_serialize_slice(
 #[no_mangle]
 pub unsafe extern "C" fn ze_serialize_str(
     bytes: *mut z_owned_bytes_t,
-    value: *const std::ffi::c_char,
+    value: *const core::ffi::c_char,
 ) -> ZResult {
     one_shot(bytes, |serializer| {
         ze_serializer_serialize_str(serializer, value)
@@ -828,7 +829,7 @@ pub unsafe extern "C" fn ze_serialize_str(
 #[no_mangle]
 pub unsafe extern "C" fn ze_serialize_substr(
     bytes: *mut z_owned_bytes_t,
-    start: *const std::ffi::c_char,
+    start: *const core::ffi::c_char,
     len: usize,
 ) -> ZResult {
     one_shot(bytes, |serializer| {
@@ -996,8 +997,8 @@ pub unsafe extern "C" fn ze_serializer_take_from_loaned(
             handle: (*src).handle,
             _pad: (*src)._pad,
         };
-        (*src).handle = std::ptr::null_mut();
-        (*src)._pad = [std::ptr::null_mut(); 4];
+        (*src).handle = core::ptr::null_mut();
+        (*src)._pad = [core::ptr::null_mut(); 4];
         Z_OK
     })
 }
@@ -1013,12 +1014,12 @@ mod tests {
     /// than a link error.
     #[test]
     fn serde_abi_matches_pico() {
-        assert_eq!(std::mem::size_of::<z_owned_bytes_writer_t>(), 40);
-        assert_eq!(std::mem::size_of::<z_moved_bytes_writer_t>(), 40);
-        assert_eq!(std::mem::size_of::<ze_owned_serializer_t>(), 40);
-        assert_eq!(std::mem::size_of::<ze_moved_serializer_t>(), 40);
-        assert_eq!(std::mem::size_of::<z_bytes_reader_t>(), 32);
-        assert_eq!(std::mem::size_of::<ze_deserializer_t>(), 32);
+        assert_eq!(core::mem::size_of::<z_owned_bytes_writer_t>(), 40);
+        assert_eq!(core::mem::size_of::<z_moved_bytes_writer_t>(), 40);
+        assert_eq!(core::mem::size_of::<ze_owned_serializer_t>(), 40);
+        assert_eq!(core::mem::size_of::<ze_moved_serializer_t>(), 40);
+        assert_eq!(core::mem::size_of::<z_bytes_reader_t>(), 32);
+        assert_eq!(core::mem::size_of::<ze_deserializer_t>(), 32);
 
         let d = ze_deserializer_t {
             _reader: z_bytes_reader_t::empty(),
@@ -1046,7 +1047,7 @@ mod tests {
                 z_bytes_writer_write_all(as_writer, payload.as_ptr(), payload.len()),
                 Z_OK
             );
-            let mut bytes = std::mem::zeroed();
+            let mut bytes = core::mem::zeroed();
             ze_serializer_finish(
                 &mut serializer as *mut _ as *mut ze_moved_serializer_t,
                 &mut bytes,
@@ -1068,7 +1069,7 @@ mod tests {
             assert_eq!(ze_serializer_serialize_str(loaned, c"alpha".as_ptr()), Z_OK);
             assert_eq!(ze_serializer_serialize_str(loaned, c"beta".as_ptr()), Z_OK);
 
-            let mut bytes = std::mem::zeroed();
+            let mut bytes = core::mem::zeroed();
             ze_serializer_finish(
                 &mut serializer as *mut _ as *mut ze_moved_serializer_t,
                 &mut bytes,
@@ -1086,12 +1087,12 @@ mod tests {
             );
             assert_eq!(count, 2);
             for expected in ["alpha", "beta"] {
-                let mut s = std::mem::zeroed();
+                let mut s = core::mem::zeroed();
                 assert_eq!(ze_deserializer_deserialize_string(&mut d, &mut s), Z_OK);
                 let ls = crate::bytes::z_string_loan(&s);
                 let data = crate::bytes::z_string_data(ls);
                 let len = crate::bytes::z_string_len(ls);
-                let got = std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len))
+                let got = core::str::from_utf8(core::slice::from_raw_parts(data as *const u8, len))
                     .unwrap();
                 assert_eq!(got, expected);
             }
@@ -1108,11 +1109,11 @@ mod tests {
     fn a_truncated_record_leaves_the_reader_where_it_was() {
         unsafe {
             // `<len=9>` followed by only 2 bytes.
-            let mut bytes = std::mem::zeroed();
+            let mut bytes = core::mem::zeroed();
             store_owned_bytes(&mut bytes, ByteBuf::from(vec![9u8, 0xAA, 0xBB]));
             let mut d = ze_deserializer_from_bytes(crate::bytes::z_bytes_loan(&bytes));
             let before = d._reader.pos;
-            let mut s = std::mem::zeroed();
+            let mut s = core::mem::zeroed();
             assert_ne!(
                 ze_deserializer_deserialize_string(&mut d, &mut s),
                 Z_OK,
@@ -1127,7 +1128,7 @@ mod tests {
     #[test]
     fn arithmetic_is_fixed_width_little_endian() {
         unsafe {
-            let mut bytes = std::mem::zeroed();
+            let mut bytes = core::mem::zeroed();
             assert_eq!(ze_serialize_uint32(&mut bytes, 0x0403_0201), Z_OK);
             let buf = bytes_ref(crate::bytes::z_bytes_loan(&bytes)).expect("payload");
             assert_eq!(
@@ -1143,7 +1144,7 @@ mod tests {
             );
             assert_eq!(out, 0x0403_0201);
 
-            let mut longer = std::mem::zeroed();
+            let mut longer = core::mem::zeroed();
             store_owned_bytes(&mut longer, ByteBuf::from(vec![1u8, 2, 3, 4, 5]));
             assert_ne!(
                 ze_deserialize_uint32(crate::bytes::z_bytes_loan(&longer), &mut out),

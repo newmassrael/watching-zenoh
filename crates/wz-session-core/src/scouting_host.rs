@@ -51,10 +51,11 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::SceCursor;
+use sce_forge_runtime::codec::{SceCursor, VecSink};
 use sce_rust_runtime::Engine;
-use wz_codecs::lent::Hello;
-use wz_codecs::scout::Scout;
+use wz_codecs::scout::{Scout, ScoutParts};
+use wz_codecs::scouting_hello::ScoutingHelloView;
+use wz_codecs::scouting_scout::{ScoutingScoutParts, ScoutingScoutWire};
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 use wz_runtime_core::Runtime;
@@ -163,14 +164,13 @@ pub struct ScoutedHello {
 /// that fails to decode is `continue`d, never reaches the MID switch, is never recorded and never
 /// ends the window.
 ///
-/// `bytes` is the whole datagram: the header byte carries the MID in its low 5 bits and the
-/// locators-present flag in bit 5, which the Hello body codec wants projected to its 1-bit `l`.
-/// The caller has already matched the MID.
+/// `bytes` is the whole datagram, read by the message's document
+/// (`sources/codecs/scouting_hello.scxml`): the header byte, whose locators-present flag the
+/// document binds to the body's list, the body, and the extension chain the header's Z flag
+/// announces. The caller has already matched the MID.
 pub fn decode_scouted_hello(bytes: &[u8]) -> Option<ScoutedHello> {
-    let (&header, body) = bytes.split_first()?;
-    let l = (header >> 5) & 1;
-    let mut cursor = SceCursor::new(body);
-    let hello = Hello::decode(&mut cursor, l).ok()?;
+    let view = ScoutingHelloView::decode(&mut SceCursor::new(bytes)).ok()?;
+    let hello = view.body;
     Some(ScoutedHello {
         version: hello.version,
         whatami: WhatAmI::from_wire(hello.cbyte),
@@ -178,7 +178,7 @@ pub fn decode_scouted_hello(bytes: &[u8]) -> Option<ScoutedHello> {
         locators: hello
             .locators
             .as_ref()
-            .map(|locs| locs.iter().map(|l| l.locator.to_string()).collect())
+            .map(|locs| locs.inner().iter().map(|l| l.locator.to_string()).collect())
             .unwrap_or_default(),
     })
 }
@@ -276,25 +276,29 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
         let a = &self.inner;
         R::with_mutex_mut(&a.trace, |trace| trace.scout_emit += 1);
         let zid = &a.params.zid;
-        let mut scout = Scout::new();
-        scout.version = wz_codecs::wire_const::PROTOCOL_VERSION;
-        scout.set_what(a.params.what);
-        if !zid.is_empty() {
-            // I=1 and zid_len_m1 packed into cbyte, then the id bytes (the scout.scxml
-            // present-if gate; zenoh-pico `message.c` writes the same).
-            scout.set_i(true);
-            scout.set_zid_len_m1((zid.len() - 1) as u8);
+        // `what` in the flags byte's low three bits; the I flag and the zid's length
+        // above them are the document's, from whether a zid is presented. An empty
+        // zid is the Scout that names no asker (I clear), as zenoh's own is.
+        let mut flags = Scout::new();
+        flags.set_what(a.params.what);
+        let body = ScoutParts {
+            version: wz_codecs::wire_const::PROTOCOL_VERSION,
+            cbyte: flags.cbyte,
             // The id is at most the codec's own bound (`zid_len_m1` is four bits).
-            scout.zid = Some(
+            zid: (!zid.is_empty()).then(|| {
                 sce_forge_runtime::codec::Bounded::new(zid.as_slice())
-                    .expect("a scouting zid is 1..=16 bytes, the codec's bounds"),
-            );
-        }
-        let body = scout.encode_to_vec();
-        let mut datagram = Vec::with_capacity(1 + body.len());
-        // The scouting-message envelope: the MID header byte the body codec omits.
-        datagram.push(wire_const::S_MID_SCOUT);
-        datagram.extend_from_slice(&body);
+                    .expect("a scouting zid is 1..=16 bytes, the codec's bounds")
+            }),
+        };
+        // The whole message, header and chain included, by its document
+        // (`sources/codecs/scouting_scout.scxml`).
+        let message = ScoutingScoutParts {
+            header: wire_const::S_MID_SCOUT,
+            body: &body,
+            extensions: None,
+        };
+        let mut datagram = Vec::with_capacity(ScoutingScoutWire::measure(&message).len());
+        let Ok(()) = ScoutingScoutWire::encode_source(&message, &mut VecSink::new(&mut datagram));
         R::with_mutex_mut(&a.pending_scout, |slot| *slot = Some(datagram));
     }
 
@@ -428,7 +432,7 @@ pub fn open_window<R: Runtime>(
     actions: &Arc<ScoutingActions<R>>,
     engine: &mut ScoutEngine<R>,
 ) -> Option<Vec<u8>> {
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     // Idle -> Sending: `scout_emit` fires on the entering transition and stages the datagram.
     engine.process_event(ScoutingEvent::SessionOpenRequested);
     R::with_mutex_mut(&actions.pending_scout, |slot| slot.take())

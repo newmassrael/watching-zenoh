@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The whole transport OAM message: the header byte, the id, the extension
+     chain, and the body whose encoding the header names.
+
+     Upstream writes header, id, chain, body
+     (`commons/zenoh-codec/src/transport/oam.rs` @
+     `impl<W> WCodec<&Oam, &mut W> for Zenoh080`) and reads them in that
+     order, with the header of
+     `commons/zenoh-protocol/src/transport/oam.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x00
+       bit 5..6 : enc  the body's encoding, `iext::ENC_MASK`: unit, z64, zbuf
+       bit 7    : Z    an extension chain follows the id
+
+     The layout is the network OAM's (`oam.scxml`) under the transport
+     message id; the two are different messages of different layers, so each
+     has its own document. The id is a VLE read whole; upstream's `OamId` is
+     a u16, and the projection of a wider wire value onto it is the reader's
+     (`wire_const::oam_id_from_wire`), not a layout.
+
+     The variant reads the reserved encoding `0b11` as a unit body through
+     the default arm, where upstream refuses the message
+     (`_ => return Err(DidntRead)`); the refusal is made one layer up, by the
+     reader that names the encoding (L2, an exact refusal no variant states).
+     The chain is the generic transport chain; see `transport_init.scxml`. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="transport_oam">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <sce:import src="ext_unit.scxml" kind="codec" as="codec_zenoh_ext_unit"/>
+  <sce:import src="ext_zint.scxml" kind="codec" as="codec_zenoh_ext_zint"/>
+  <sce:import src="ext_zbuf.scxml" kind="codec" as="codec_zenoh_ext_zbuf"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x00"/>
+      <sce:flag name="enc" bit="5" width="2"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+    <sce:variant tag="header.enc">
+      <sce:arm value="0x00" type="codec_zenoh_ext_unit" default="true"/>
+      <sce:arm value="0x01" type="codec_zenoh_ext_zint"/>
+      <sce:arm value="0x02" type="codec_zenoh_ext_zbuf"/>
+      <sce:default type="codec_zenoh_ext_unit"/>
+    </sce:variant>
+  </datamodel>
+</scxml>

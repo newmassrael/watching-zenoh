@@ -303,6 +303,13 @@ config WZ_CAP_E2E_SENDER
 	  The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it.
 	  Exported by: c.
 
+config WZ_CAP_CONFIG_VERDICT
+	bool "config-verdict"
+	default y
+	help
+	  A configuration judged, emitted and costed without opening it: the defects of one node and of a topology, the config a stock node would start with, the link schemes of the build, and what an open of it asks of the operating system (wz_capi_c_config_validate*, wz_capi_c_config_to_json5, wz_capi_c_config_*link_scheme*, wz_capi_c_config_verdict_*, wz_capi_c_config_device_requires, wz-own doors).
+	  Exported by: c.
+
 config WZ_CAP_IDENTITY_MAKE
 	bool "identity-make"
 	default n
@@ -353,7 +360,7 @@ config WZ_CAP_INTERCEPTORS
 	bool "interceptors"
 	default y
 	help
-	  The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face.
+	  The traffic policy a node's config states: access_control, low_pass_filter, downsampling and the qos/network overwrite, enforced on every face; a build without it refuses a config that states one, by its key.
 	  Exported by: c.
 
 endmenu

@@ -58,7 +58,7 @@ import elf_facts  # noqa: E402
 #   declared-node    deploy/host-slot-node/src/bin/declared_node.rs   SURFACE_REVISION
 EXPECTED = {
     "capi-pico": {
-        "revision": 1,
+        "revision": 2,
         "layout": {
             "multi_thread": True,
             "unstable_api": True,

@@ -104,7 +104,7 @@ const QUERY_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 /// [`query_task`] emits on the wire. Keeping the constant single-
 /// sourced here means a future round that changes the rid (e.g. to
 /// a per-process counter) lands one edit and both sides follow.
-pub(crate) const QUERY_RID: u64 = 1;
+pub(crate) const QUERY_RID: u32 = 1;
 
 /// R254 — `clock: T` generic + 1 sleep site migrated to
 /// [`TimeSource::sleep`], continuing the R253 leaf-first cadence.
@@ -605,7 +605,7 @@ where
                 reply.keyexpr(),
             );
         },
-        move |interest_id: u64| {
+        move |interest_id| {
             log::info!("wz-ap-demo: LIVELINESS GET FINAL interest_id={interest_id}");
         },
     );
@@ -907,7 +907,7 @@ fn emit_one_push(
     session: &TokioSession,
     keyexpr: &str,
     operation: &PushOperation,
-    declare_id: Option<u64>,
+    declare_id: Option<u16>,
     idx: usize,
 ) {
     let mut opts = PublishOptions::default().with_reliability(Reliability::Reliable);
@@ -952,7 +952,14 @@ fn emit_one_push(
         }
         // W3 — the publish build can reject when caller data overflows the
         // declared codec capacity (a no-emit reject); log and skip.
-        Err(e @ PublishAliasError::ExceedsCapacity) => {
+        // A sample the session can give no time (its last time is the greatest one), or whose node
+        // withholds its stamps until its clock is trusted: refused before anything is sent, as
+        // the oversize case is; log and skip.
+        Err(
+            e @ (PublishAliasError::ExceedsCapacity
+            | PublishAliasError::TimestampExhausted
+            | PublishAliasError::ClockUntrusted),
+        ) => {
             log::error!(
                 "wz-ap-demo: publisher_task publish rejected on idx={idx}: {e}; \
                  skipping this iteration"
@@ -1014,7 +1021,7 @@ async fn publish_cycle<T>(
     session: &TokioSession,
     keyexpr: &str,
     operation: &PushOperation,
-    declare_id: Option<u64>,
+    declare_id: Option<u16>,
     declared: &mut bool,
     idx: usize,
     clock: &T,

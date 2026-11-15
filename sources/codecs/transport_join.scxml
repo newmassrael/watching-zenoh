@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The whole transport Join message, the multicast peer announcement: the
+     header byte, the body `join.scxml` reads, and the extension chain.
+
+     Upstream writes it header, body, chain
+     (`commons/zenoh-codec/src/transport/join.rs` @
+     `impl<W> WCodec<&Join, &mut W> for Zenoh080`), with the flags of
+     `commons/zenoh-protocol/src/transport/join.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x07
+       bit 5    : T    the lease is in seconds, not milliseconds
+       bit 6    : S    the body carries the resolution and the batch size
+       bit 7    : Z    an extension chain follows the body
+
+     S is the body's input (`join.scxml` `S`), bound here to the header bit,
+     so an encode derives it from the body it presents. T is presented by the
+     value: which unit the lease is in is a projection of the reader
+     (`crate::lease` in wz-session-core), not a layout. Z is derived from
+     whether the chain is present.
+
+     The chain is the generic transport chain; see `transport_init.scxml`.
+     The typed body of the QoS extension (eight SN pairs) is read one layer
+     up, by identity (L1). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="little" name="transport_join">
+  <sce:import src="join.scxml" kind="codec" as="codec_zenoh_join">
+    <sce:flag-bind input="S" source="header.S"/>
+  </sce:import>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x07"/>
+      <sce:flag name="T"   bit="5"/>
+      <sce:flag name="S"   bit="6"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:embed id="body" type="codec_zenoh_join" sce:byte="1"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>

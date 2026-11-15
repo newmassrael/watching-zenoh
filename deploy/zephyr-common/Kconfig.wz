@@ -131,10 +131,10 @@ config WZ_OS
 	select THREAD_NAME
 	help
 	  An image whose Rust half builds `wz-capi-port` without `std` (the pico C ABI on the
-	  cooperative engine, docs/upstream-parity.md section 5a) links the mutex, the thread
-	  identity, the threads and the sleep its `os` module names from
-	  deploy/zephyr-common/wz_os_zephyr.c: a `k_mutex` from the kernel heap, `k_current_get`,
-	  a dynamic thread, `k_msleep`.
+	  cooperative engine, docs/upstream-parity.md section 5a) links the mutex, the condition
+	  variable, the thread identity, the threads and the sleep its `os` module names from
+	  deploy/zephyr-common/wz_os_zephyr.c: a `k_mutex` and a `k_condvar` from the kernel heap,
+	  `k_current_get`, a dynamic thread, `k_msleep`.
 
 config WZ_OS_THREAD_STACK_SIZE
 	int "The stack of a thread the engine starts, in bytes"
@@ -148,6 +148,19 @@ config WZ_OS_THREAD_PRIORITY
 	int "The priority of a thread the engine starts"
 	depends on WZ_OS
 	default 5
+
+config WZ_PICO_OS
+	bool "The kernel answers the pico C ABI's host layer (wz_pico_*)"
+	depends on WZ_OS && POSIX_API
+	help
+	  An image whose Rust half is `wz-capi-pico` with `os-zephyr` (the pico C ABI on the
+	  cooperative engine, docs/upstream-parity.md section 5a) links the platform exports'
+	  host layer (crates/wz-capi-pico/src/os/zephyr.rs), which calls the kernel heap, Zephyr's
+	  POSIX clocks, mutexes, condition variables and threads, and the C library's local time,
+	  as zenoh-pico's own Zephyr backend does. What the kernel has only as a system call or an
+	  inline (its sleeps, its random source, a condition variable on the monotonic clock) is
+	  answered by deploy/zephyr-common/wz_pico_os_zephyr.c, which also pins each size and
+	  constant the Rust half states against the headers the image compiles.
 
 config WZ_MEMORY_REPORT
 	bool "Report the kernel heap's peak and every thread's stack (a compare build)"
@@ -176,3 +189,37 @@ config WZ_MEMORY_REPORT_STACK_SIZE
 	default 1024
 
 endmenu
+
+# IPv6 links. A wz image opens a socket of the family its locator's address is, as zenoh-pico's
+# Zephyr links do, so `udp/[x:y::z]:port` and `tcp/[x:y::z]:port` work wherever Zephyr's stack has
+# IPv6. The images are IPv4 alone by default; Zephyr's own default of NET_IPV6 is y, so the default
+# is stated here, as a default and not as an assignment in each prj.conf, and an image takes IPv6
+# with CONFIG_NET_IPV6=y in a board conf, an extra conf file or a -D on the west command line.
+# An IPv6 image also states its address (CONFIG_NET_CONFIG_MY_IPV6_ADDR, or autoconfiguration).
+config NET_IPV6
+	default n
+
+# The family of the node's own address: the one it binds its links on, advertises as its
+# locators and derives its zenoh id's interface from. The board's build hands the choice to
+# cargo (WZ_NODE_IPV6 in wz_zephyr_board.cmake), and `wz_runtime_zephyr::net::board_ip` reads the
+# board's address of that family. A node of one family still dials a locator of the other where
+# the stack has both.
+choice WZ_NODE_FAMILY
+	prompt "The family of the node's own address"
+	depends on NETWORKING
+	default WZ_NODE_IPV4 if NET_IPV4
+	default WZ_NODE_IPV6
+
+config WZ_NODE_IPV4
+	bool "IPv4: the interface's IPv4 address (DHCP or CONFIG_NET_CONFIG_MY_IPV4_ADDR)"
+	depends on NET_IPV4
+
+config WZ_NODE_IPV6
+	bool "IPv6: the interface's preferred global IPv6 address"
+	depends on NET_IPV6
+	help
+	  The board answers the address with wzApplicationGetIpv6Address
+	  (deploy/zephyr-common/wz_board_hooks.c), the first preferred global address any
+	  interface holds: one that autoconfiguration or CONFIG_NET_CONFIG_MY_IPV6_ADDR gave it.
+
+endchoice

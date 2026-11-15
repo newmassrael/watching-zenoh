@@ -134,8 +134,9 @@ def population(
     `pairs` maps (atom, file) to how many times the reason cites that file. A
     citation pins only when it resolves to exactly ONE tracked file: several
     candidates is ambiguity (counted, never guessed at -- the reason citation
-    gate ratchets those), none reads as upstream, which this tree holds no
-    oracle for.
+    gate ratchets those), none is not a wz file and has no blob to pin: the
+    census tells an upstream claim the store citation gate resolves at the pin
+    from a path no oracle reads.
     """
     pairs: dict[tuple[str, str], int] = {}
     citations = ambiguous = upstream = 0

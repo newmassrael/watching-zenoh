@@ -307,11 +307,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # R3494 -- a member of the zenoh compatibility family (`api-compat-rust`): its features are
     # the arms of upstream's own surface. Held to `FAMILY_GRADED` below.
     "zenoh-keyexpr": (
-        "a crate of the zenoh compatibility family: `unstable` is an arm of upstream's own public "
-        "surface that `scripts/lib/rust_api_surface.py` emits the wz crate with and holds it to, "
-        "and `internal` is the doc-hidden set zenoh's own crates use, which the arm list leaves out "
-        "and `conformance/differential` enables on both crates. Held to `FAMILY_GRADED` below "
-        "rather than to this sentence",
+        "a crate of the zenoh compatibility family: `unstable` and `internal` are arms of upstream's "
+        "own public surface that `scripts/lib/rust_api_surface.py` emits the wz crate with and "
+        "holds it to (`internal`, the doc-hidden set upstream's `zenoh` turns on for this crate in "
+        "every build, read with its hidden items), and `conformance/differential` enables both on "
+        "both crates. Held to `FAMILY_GRADED` below rather than to this sentence",
         frozenset({"internal", "unstable"}),
     ),
     # R3525 -- the second family member with features of its own.

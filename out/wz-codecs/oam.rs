@@ -1021,11 +1021,20 @@ impl<S: OamStorage> OamOwned<S> {
     }
 }
 
+/// What the origin projection of `Oam` asks of a storage profile
+/// beside OamStorage: that it is an origin profile, and
+/// that each byte string and text of `Oam` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait OamOrigin: OamStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::ext_zbuf::ExtZbufOrigin {}
+
+impl<S: OamStorage + ::sce_forge_runtime::codec::OriginStorage + super::ext_entry::ExtEntryOrigin + super::ext_zbuf::ExtZbufOrigin> OamOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> OamVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: OamLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: OamStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<OamOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: OamOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<OamOwnedVariant<S>, CodecError> {
         Ok(match self {
             Self::CodecZenohExtUnit(_b) => OamOwnedVariant::CodecZenohExtUnit(_b),
             Self::CodecZenohExtZint(_b) => OamOwnedVariant::CodecZenohExtZint(_b),
@@ -1038,17 +1047,17 @@ impl<'a, D> OamVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: OamLe
 #[allow(dead_code)]
 impl<'a, D> OamIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: OamLentStorage {
     /// Project this borrowed view into an owned [`OamOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: OamStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<OamOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: OamOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<OamOwned<S>, CodecError> {
         Ok(OamOwned {
             header: self.header,
             id: self.id,

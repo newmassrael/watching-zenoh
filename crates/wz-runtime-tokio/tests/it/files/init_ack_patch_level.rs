@@ -93,7 +93,7 @@ async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (u8, u8) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
 
     let mut queue = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn_wire))]);

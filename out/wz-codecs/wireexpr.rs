@@ -194,7 +194,7 @@ impl<S: WireexprStorage> WireexprIn<S> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 65553;
+    pub const MAX_ENCODED_BYTES: usize = 65547;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -506,7 +506,7 @@ impl<'a> WireexprView<'a> {
 
     /// Worst-case encoded byte count for this codec, as
     /// [`WireexprIn::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 65553;
+    pub const MAX_ENCODED_BYTES: usize = 65547;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`WireexprIn::encode`] writes for the value [`Self::into_builder`]
@@ -691,11 +691,20 @@ impl<S: WireexprStorage> WireexprOwned<S> {
     }
 }
 
+/// What the origin projection of `Wireexpr` asks of a storage profile
+/// beside WireexprStorage: that it is an origin profile, and
+/// that each byte string and text of `Wireexpr` and of the codecs it
+/// holds is built from the origin by the container the profile holds it in.
+#[allow(dead_code)]
+pub trait WireexprOrigin: WireexprStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr_local::WireexprLocalOrigin + super::wireexpr_nonlocal::WireexprNonlocalOrigin {}
+
+impl<S: WireexprStorage + ::sce_forge_runtime::codec::OriginStorage + super::wireexpr_local::WireexprLocalOrigin + super::wireexpr_nonlocal::WireexprNonlocalOrigin> WireexprOrigin for S {}
+
 #[allow(dead_code)]
 impl<'a, D> WireexprVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprLentStorage {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: WireexprStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: WireexprOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprOwnedVariant<S>, CodecError> {
         Ok(match self {
             Self::WireexprNonlocal(_b) => WireexprOwnedVariant::WireexprNonlocal(_b.try_into_owned_in_origin::<S>(origin)?),
             Self::WireexprLocal(_b) => WireexprOwnedVariant::WireexprLocal(_b.try_into_owned_in_origin::<S>(origin)?),
@@ -706,17 +715,17 @@ impl<'a, D> WireexprVariantIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: 
 #[allow(dead_code)]
 impl<'a, D> WireexprIn<::sce_forge_runtime::codec::Lent<'a, D>> where D: WireexprLentStorage {
     /// Project this borrowed view into an owned [`WireexprOwned`]
-    /// whose byte and text containers are made by the profile's
-    /// `OriginStorage` from each slice AND `origin`, the buffer the
-    /// view was decoded from. A profile that shares that buffer builds
-    /// containers that refer back to it instead of copying out of it; what the
+    /// whose byte and text containers are each built from the slice AND
+    /// `origin`, the buffer the view was decoded from, by the
+    /// container the profile holds that field in. A container that shares
+    /// that buffer refers back to it instead of copying out of it; what the
     /// origin is, and what to do with a slice that does not come from it, is
-    /// the profile's to say.
+    /// the profile's to say, field by field.
     ///
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: WireexprStorage + ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprOwned<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: WireexprOrigin>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<WireexprOwned<S>, CodecError> {
         Ok(WireexprOwned {
             body: self.body.try_into_owned_in_origin::<S>(origin)?,
         })
