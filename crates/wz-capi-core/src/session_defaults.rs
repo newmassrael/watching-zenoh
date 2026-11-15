@@ -331,8 +331,9 @@ impl wz_session_core::extshm::ShmSendBuffer for TransportCopy {
     fn reserve_for_receiver(
         self: std::sync::Arc<Self>,
     ) -> Box<dyn wz_session_core::extshm::ShmReservation> {
-        use wz_session_core::extshm::ShmSendBuffer as _;
-        std::sync::Arc::clone(&self.0).reserve_for_receiver()
+        // Named by its trait: a build that brings the trait into scope another way would find
+        // this file's own `use` unused, and a build that does not would not find the method.
+        wz_session_core::extshm::ShmSendBuffer::reserve_for_receiver(std::sync::Arc::clone(&self.0))
     }
 }
 
