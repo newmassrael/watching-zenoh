@@ -545,6 +545,68 @@ pub enum NotDecrypted {
     },
 }
 
+/// Where the secrets a decryption pass opened a flow with came from.
+///
+/// Named by the opener when it accepts a flow ([`RecordOpener::begin_flow`]),
+/// because the opener is the only party that still holds the secrets and
+/// knows how each one arrived. A reader acts on the answer: secrets the
+/// capture carried travel with the file, and secrets a caller handed in have
+/// to be handed in again the next time the file is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// Every secret came from the capture's own Decryption Secrets Blocks.
+    Capture,
+    /// Every secret came from a key log a caller handed in.
+    KeyLog,
+    /// Some secrets came from each.
+    Both,
+}
+
+impl KeySource {
+    /// The word this source is written as.
+    pub const fn name(self) -> &'static str {
+        match self {
+            KeySource::Capture => "capture",
+            KeySource::KeyLog => "key_log",
+            KeySource::Both => "both",
+        }
+    }
+
+    /// Every source, from an exhaustive match so the array cannot fall behind
+    /// the enum.
+    pub fn all() -> [KeySource; 3] {
+        let one = |s: KeySource| match s {
+            KeySource::Capture => KeySource::Capture,
+            KeySource::KeyLog => KeySource::KeyLog,
+            KeySource::Both => KeySource::Both,
+        };
+        [
+            one(KeySource::Capture),
+            one(KeySource::KeyLog),
+            one(KeySource::Both),
+        ]
+    }
+
+    /// Every word, sorted, which is the form a document declares a family in.
+    pub fn names() -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = Self::all().iter().map(|s| s.name()).collect();
+        words.sort_unstable();
+        words
+    }
+}
+
+/// The cipher suites a decryption pass behind [`RecordOpener`] opens, as the
+/// 2-byte registry values a ServerHello names: `TLS_AES_128_GCM_SHA256`,
+/// `TLS_AES_256_GCM_SHA384` and `TLS_CHACHA20_POLY1305_SHA256`.
+///
+/// Declared here, where no cipher lives, so the session table can say that a
+/// flow is one no pass will open without asking for keys first: a ServerHello
+/// that negotiated a TLS 1.2 suite or one of the two CCM suites names a record
+/// layer the opener does not hold, and a reader who fetched the key log for it
+/// would be sent after the wrong remedy. The opener's own list is held to this
+/// one by a test where both crates meet (`wz-tls-record`).
+pub const OPENABLE_SUITES: [u16; 3] = [0x1301, 0x1302, 0x1303];
+
 /// An encrypted flow, as the report shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedFlow {
@@ -885,11 +947,14 @@ pub trait RecordOpener {
     /// an implementation that needs to pick between the client's and the
     /// server's traffic secret cannot serve such a flow and should say so with
     /// [`NotDecrypted::NoSessionIdentity`].
+    ///
+    /// A flow it accepts is answered with where the secrets it will open the
+    /// flow with came from, which only the opener can say.
     fn begin_flow(
         &mut self,
         client_random: Option<&[u8; 32]>,
         client_direction: Option<Direction>,
-    ) -> Result<(), NotDecrypted>;
+    ) -> Result<KeySource, NotDecrypted>;
 
     /// Open one record of the flow most recently announced.
     ///
@@ -1038,6 +1103,10 @@ pub struct TlsFlowState {
     /// `Ok`), so a later pass may continue it with the same opener. `false` for
     /// a flow no pass has reached and for one the opener declined.
     pub(crate) accepted: bool,
+    /// Where the secrets the opener accepted this flow with came from, as it
+    /// answered [`RecordOpener::begin_flow`]. `None` while no opener accepted
+    /// the flow.
+    pub(crate) key_source: Option<KeySource>,
     /// Per direction, `[A, B]`, how far the passes have opened this flow.
     pub(crate) opened_records: [OpenedRecords; 2],
 }

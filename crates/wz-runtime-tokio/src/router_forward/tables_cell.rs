@@ -197,6 +197,7 @@ impl TablesCell {
     /// design (`docs/router-table-snapshots.md`, section 6.3): with no writer the readers route
     /// within 2.6 % of what they route under `rwlock`, inside the spread of either, so the counts
     /// stay rather than a nested read borrowing a guard of the load that its thread must keep.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn read(&self) -> TablesRead<'_> {
         TablesRead(match &self.form {
             Form::Locked(lock) => Read::Locked(lock.read()),
@@ -210,6 +211,7 @@ impl TablesCell {
     /// writer that has waited `longer_than`, so that the faces' reads cannot keep a writer out for
     /// as long as they route. Under `snapshot` no reader keeps a writer out, and this is
     /// [`Self::read`].
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn read_behind_a_writer_waiting(&self, longer_than: Duration) -> TablesRead<'_> {
         TablesRead(match &self.form {
             Form::Locked(lock) => Read::Locked(lock.read_behind_a_writer_waiting(longer_than)),
@@ -222,6 +224,7 @@ impl TablesCell {
     /// Under `rwlock` the write guard, which waits for every reader. Under `snapshot` the writers'
     /// lock and a draft copied from the published version; the readers go on routing by the
     /// published version, and see the write once it is published.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn write(&self) -> TablesWrite<'_> {
         let write = match &self.form {
             Form::Locked(lock) => Write::Locked(lock.write()),

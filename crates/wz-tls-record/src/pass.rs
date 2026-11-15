@@ -40,8 +40,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use wz_capture::link::FlowKey;
-use wz_capture::quic::{QuicDecryption, QuicStreamFeed};
-use wz_capture::tls::{Direction, FlowOpeners, RecordOpener, MAX_KEPT_RECORDS_PER_DIRECTION};
+use wz_capture::quic::{QuicDecryption, QuicKeyFinding, QuicStreamFeed};
+use wz_capture::tls::{
+    Direction, FlowOpeners, KeySource, RecordOpener, MAX_KEPT_RECORDS_PER_DIRECTION,
+};
 use wz_capture::{CapturedFrame, DecryptionSummary, Dissection, PacketTap, PlaintextSink};
 
 use crate::capture::CaptureOpener;
@@ -82,6 +84,7 @@ pub fn open_tls<S: PlaintextSink>(
     let summary = if opener.log().is_empty() {
         DecryptionSummary::default()
     } else {
+        dissection.note_decryption_keys();
         dissection.decrypt_with_sink(&mut opener, sink)
     };
     TlsPass {
@@ -119,6 +122,12 @@ pub struct QuicFlowOutcome {
     pub sequences: Vec<(Direction, SequenceKey, usize)>,
     /// Sequences the table's bound refused, `[A, B]`.
     pub sequences_dropped: [usize; 2],
+    /// Where the secrets installed for the connection came from; `None` while
+    /// none were installed.
+    pub key_source: Option<KeySource>,
+    /// The first nonzero version a long header declared that the opener does
+    /// not open, if one did.
+    pub refused_version: Option<u32>,
 }
 
 /// R311y698 (§1.2a) — open every QUIC flow the dissection found, from the
@@ -156,6 +165,9 @@ pub fn open_quic<S: PlaintextSink>(
     if keys.is_empty() {
         return (summary, Vec::new());
     }
+    if !log.is_empty() {
+        dissection.note_decryption_keys();
+    }
     let mut passes: Vec<QuicFlowPass> = keys
         .iter()
         .map(|flow| QuicFlowPass::new(*flow, log, cid_len))
@@ -182,6 +194,8 @@ pub fn open_quic<S: PlaintextSink>(
     for mut pass in passes {
         pass.tally(&mut summary);
         summary.framing.absorb(pass.feed(dissection, sink));
+        // A file has every packet in: nothing this pass found is pending.
+        dissection.set_quic_key_finding(&pass.flow, pass.key_finding(false));
         flows.push(pass.outcome());
     }
     // R311y718 — the stall, measured from the FINISHED dissection rather than
@@ -385,6 +399,28 @@ impl QuicFlowPass {
             identity_adopted: opener.identity_adopted(),
             sequences,
             sequences_dropped: opener.sequences_dropped(),
+            key_source: opener.key_source(),
+            refused_version: opener.refused_version(),
+        }
+    }
+
+    /// What the pass has found about this flow's keys, in the facts the
+    /// dissector's session table reads its `decryption` cell from. `pending`
+    /// says the flow's feed has not ended, so a flow whose identity is not
+    /// known yet may still learn it.
+    fn key_finding(&self, pending: bool) -> QuicKeyFinding {
+        let opener = &self.opener;
+        let census = opener.census();
+        let initial = PacketSpace::Initial.index();
+        QuicKeyFinding {
+            version_refused: opener.version().is_none() && opener.refused_version().is_some(),
+            identity: opener.client_hello_seen() || opener.identity_adopted(),
+            keys_installed: opener.keys_installed(),
+            refused_under_keys: census.map(|c| c.refused_under_keys > 0),
+            no_keys: census.map(|c| c.no_keys > 0),
+            opened_past_initial: census.map(|c| c.opened > c.opened_per_space[initial]),
+            key_source: opener.key_source(),
+            pending,
         }
     }
 }
@@ -698,9 +734,13 @@ impl LiveDecryptor {
     }
 
     /// Frame what the QUIC openers recovered since the last call, in the
-    /// dissection's order of its flows, and let go of the flows it no longer
-    /// holds.
-    fn feed_quic(&mut self, dissection: &mut Dissection) {
+    /// dissection's order of its flows, leave each flow's key finding on it,
+    /// and let go of the flows it no longer holds.
+    ///
+    /// `ended` says the feed has ended: a flow's finding then holds what the
+    /// file pass would leave on the same packets, and until then one that has
+    /// not opened its application data says its verdict may still move.
+    fn feed_quic(&mut self, dissection: &mut Dissection, ended: bool) {
         if self.quic.is_empty() {
             return;
         }
@@ -724,6 +764,8 @@ impl LiveDecryptor {
             if let Some(live) = self.quic.get_mut(flow) {
                 self.quic_framing
                     .absorb(live.pass.feed(dissection, &mut ()));
+                let pending = !ended && !live.settled;
+                dissection.set_quic_key_finding(flow, live.pass.key_finding(pending));
             }
         }
     }
@@ -746,13 +788,28 @@ impl LiveDecryptor {
     /// TLS first, as [`decrypt_capture`] runs it. The summary is the TLS
     /// pass's; all zeros where no key is held.
     pub fn run(&mut self, dissection: &mut Dissection) -> DecryptionSummary {
+        self.run_as(dissection, false)
+    }
+
+    /// [`Self::run`] for a feed that has ended (the end of a file, or a feed
+    /// whose caller says no more packets are coming): every QUIC flow's key
+    /// finding is left as the file pass leaves it on the same packets, so the
+    /// session table of an ended feed and of the file read whole agree. A
+    /// later [`Self::run`] makes the findings of the flows still unopened
+    /// pending again.
+    pub fn end(&mut self, dissection: &mut Dissection) -> DecryptionSummary {
+        self.run_as(dissection, true)
+    }
+
+    fn run_as(&mut self, dissection: &mut Dissection, ended: bool) -> DecryptionSummary {
         self.absorb_secrets_blocks(dissection);
         let summary = if self.log.is_empty() {
             DecryptionSummary::default()
         } else {
+            dissection.note_decryption_keys();
             self.continue_tls(dissection)
         };
-        self.feed_quic(dissection);
+        self.feed_quic(dissection, ended);
         summary
     }
 
@@ -806,7 +863,9 @@ mod tests {
     use crate::quic::QuicKeys;
     use crate::Suite;
     use wz_capture::link::LINKTYPE_ETHERNET;
-    use wz_capture::session_table::{session_table, Encryption};
+    use wz_capture::session_table::{
+        session_table, DecryptionOutcome, Encryption, Stated, Unstated,
+    };
 
     /// The ClientHello random the key log names.
     const RANDOM: [u8; 32] = [0x4d; 32];
@@ -989,6 +1048,97 @@ mod tests {
         let rows = session_table(d).rows;
         assert_eq!(rows.len(), 1, "one connection, one row");
         rows[0].encryption
+    }
+
+    /// The one flow's `decryption` and `key_source` cells.
+    fn opening(d: &Dissection) -> (Stated<DecryptionOutcome>, Stated<KeySource>) {
+        let rows = session_table(d).rows;
+        assert_eq!(rows.len(), 1, "one connection, one row");
+        assert_eq!(rows[0].links.len(), 1, "one flow");
+        let link = &rows[0].links[0];
+        (link.decryption, link.key_source)
+    }
+
+    /// THE FILE PASS LEAVES EACH QUIC FLOW'S FINDING ON IT: with the key log
+    /// the flow reads `opened` from the key log, with none `no_keys` and no
+    /// source, and only the first says key material reached a pass.
+    #[test]
+    fn the_file_pass_leaves_each_quic_flows_key_finding_on_it() {
+        let capture = file(&connection());
+        let keys = log_text(&RANDOM, 1);
+
+        let keyed = read_whole(&capture, Some(&keys));
+        assert!(keyed.decryption_keys_reached());
+        let finding = keyed.datagram_flows()[0]
+            .quic_key_finding()
+            .expect("the pass left a finding");
+        assert!(finding.identity && finding.keys_installed && !finding.pending);
+        assert_eq!(finding.key_source, Some(KeySource::KeyLog));
+        assert_eq!(
+            opening(&keyed),
+            (Ok(DecryptionOutcome::Opened), Ok(KeySource::KeyLog))
+        );
+
+        let bare = read_whole(&capture, None);
+        assert!(!bare.decryption_keys_reached());
+        assert_eq!(
+            opening(&bare),
+            (Ok(DecryptionOutcome::NoKeys), Err(Unstated::NotOpened)),
+            "the ClientHello was read, and no key reached the pass"
+        );
+    }
+
+    /// A CONNECTION JOINED AFTER ITS CLIENTHELLO: the file pass reads
+    /// `handshake_not_seen`; a feed of the same packets says the verdict is
+    /// pending while it goes on, and reads what the file pass reads once it
+    /// has ended.
+    #[test]
+    fn a_fed_quic_flow_with_no_handshake_is_pending_until_its_feed_ends() {
+        let packets: Vec<Vec<u8>> = connection().into_iter().skip(1).collect();
+        let whole = read_whole(&file(&packets), None);
+        assert!(
+            whole.datagram_flows()[0].quic.is_some(),
+            "the server's Initial must mark the flow QUIC, or this proves nothing"
+        );
+        assert_eq!(
+            opening(&whole),
+            (
+                Ok(DecryptionOutcome::HandshakeNotSeen),
+                Err(Unstated::NotOpened)
+            )
+        );
+
+        let (mut d, mut live) = fed(&packets, None);
+        assert_eq!(
+            opening(&d),
+            (Err(Unstated::NotYetKnown), Err(Unstated::NotYetKnown)),
+            "a feed that goes on may still bring the ClientHello"
+        );
+        live.end(&mut d);
+        assert_eq!(opening(&d), opening(&whole));
+    }
+
+    /// KEYS AFTER THE PACKETS, on a feed: `no_keys` before the key log, then
+    /// `opened` from it, as the file pass with the key log reads.
+    #[test]
+    fn a_fed_quic_flow_reads_no_keys_and_then_opened_when_its_keys_arrive() {
+        let packets = connection();
+        let keys = log_text(&RANDOM, 1);
+        let (mut d, mut live) = fed(&packets, None);
+        assert_eq!(
+            opening(&d),
+            (Ok(DecryptionOutcome::NoKeys), Err(Unstated::NotOpened))
+        );
+        live.absorb(keys.as_bytes());
+        live.run(&mut d);
+        assert_eq!(
+            opening(&d),
+            (Ok(DecryptionOutcome::Opened), Ok(KeySource::KeyLog))
+        );
+        assert_eq!(
+            opening(&d),
+            opening(&read_whole(&file(&packets), Some(&keys)))
+        );
     }
 
     /// KEYS FIRST: a flow fed packet by packet recovers what the file pass

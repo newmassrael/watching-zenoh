@@ -3354,6 +3354,11 @@ pub unsafe extern "C" fn wz_dissect_pcap_session_table(
 /// otherwise: no key material at all, no ClientHello to match one by, or a
 /// record that did not open under the keys that matched.
 ///
+/// Each flow's `decryption` cell names which of those it was, and for a flow
+/// the keys opened its `key_source` says whether its secrets came from this
+/// key log, the capture's own Decryption Secrets Blocks, or both
+/// (session_table revision 13).
+///
 /// # The keys go nowhere
 ///
 /// They are parsed in this call and dropped with it. No document, refusal or

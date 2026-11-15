@@ -1759,8 +1759,9 @@ impl LiveDissection {
     /// Releasing the handle is still [`crate::wz_dissect_live_close`]'s job.
     pub fn end(&mut self) {
         self.dissection.finish();
-        // The end can hand the TLS walk the records a held gap kept back.
-        self.keys.run(&mut self.dissection);
+        // The end can hand the TLS walk the records a held gap kept back, and
+        // it settles each QUIC flow's key finding as the file pass leaves it.
+        self.keys.end(&mut self.dissection);
     }
 
     /// The lists this handle is currently tracking a watermark for. Used by the

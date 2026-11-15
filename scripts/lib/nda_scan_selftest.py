@@ -96,6 +96,30 @@ def scan_files(terms: str, first: dict[str, str], second: dict[str, str | None])
         return run.returncode, run.stdout + run.stderr
 
 
+def scan_located(in_repo: str | None, in_home: str | None, added: str) -> tuple[int, str]:
+    """`wz_nda_scan base..head` with no `WZ_NDA_TERMS`: the list is found where the
+    resolver looks, in the repository's `.git/` and in the account's home."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        commit(repo, "a\n", "base")
+        git(repo, "tag", "base")
+        commit(repo, "a\n" + added, "change")
+        if in_repo is not None:
+            (repo / ".git" / "wz-nda-terms.txt").write_text(in_repo, encoding="utf-8")
+        home = Path(tmp) / "home"
+        if in_home is not None:
+            listing = home / ".config" / "watching-zenoh" / "nda-terms.txt"
+            listing.parent.mkdir(parents=True)
+            listing.write_text(in_home, encoding="utf-8")
+        run = subprocess.run(
+            ["bash", "-c", 'source "$1" && wz_nda_scan base..HEAD', "_", str(SCAN)],
+            cwd=repo, env={"PATH": "/usr/bin:/bin", "HOME": str(home)},
+            capture_output=True, text=True)
+        return run.returncode, run.stdout + run.stderr
+
+
 def message_scan(terms: str, message: str) -> tuple[int, str]:
     """Run `wz_nda_scan_message <file>` over one commit message."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -138,6 +162,17 @@ def main() -> int:
     expect("shape: prefix alone passes", scan(shape, "a\n", "a\nthe TKT- prefix\n"), 0)
     expect("shape: glued prefix passes", scan(shape, "a\n", "a\nXTKT-12 is not one\n"), 0)
     expect("shape: other prefix passes", scan(shape, "a\n", "a\nABC-1234\n"), 0)
+
+    # Where the list is found. An integrator account receives it in its home (the fleet
+    # registry's hook_files); the repository's own list wins where both exist; neither is
+    # the refusal, and it names both places. The control: the home list is read at all.
+    expect("home list blocks", scan_located(None, word, "has secretword here\n"), 1, "BLOCKED")
+    expect("repo list wins over the home list",
+           scan_located("!acknowledged-empty\n", word, "has secretword here\n"), 0)
+    expect("repo list blocks beside a home list",
+           scan_located(word, "!acknowledged-empty\n", "has secretword here\n"), 1, "BLOCKED")
+    expect("no list refuses and names the home place",
+           scan_located(None, None, "plain\n"), 1, ".config/watching-zenoh/nda-terms.txt")
 
     # A diff that only DELETES the vocabulary is a scrub and must go through.
     expect("deleting an id passes", scan(shape, "a\nsee TKT-1234\n", "a\nsee the round\n"), 0)

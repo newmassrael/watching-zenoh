@@ -1032,6 +1032,9 @@ pub struct DatagramDissection {
     /// and not handed to the zenoh observer — which is the whole correction, as
     /// the alternative measured as four decoded messages that did not exist.
     pub quic: Option<quic::QuicCensus>,
+    /// What a decryption pass found about this QUIC flow's keys, or `None`
+    /// while no pass has said. See [`quic::QuicKeyFinding`].
+    quic_keys: Option<quic::QuicKeyFinding>,
     /// R311y709 (§1.2a) — bytes recovered for this flow against bytes handed on.
     ///
     /// On a QUIC flow `fed` stays zero for the life of the capture, which is
@@ -1864,6 +1867,7 @@ impl DatagramDissection {
             scouting: ScoutingList::default(),
             last_activity: 0,
             quic: None,
+            quic_keys: None,
             residue: ByteResidue::default(),
             chain_loss: ChainLoss::default(),
             last_seen_ms: None,
@@ -1874,6 +1878,12 @@ impl DatagramDissection {
             keep,
             lent,
         }
+    }
+
+    /// What a decryption pass found about this QUIC flow's keys, or `None`
+    /// while no pass has said ([`Dissection::set_quic_key_finding`]).
+    pub fn quic_key_finding(&self) -> Option<quic::QuicKeyFinding> {
+        self.quic_keys
     }
 
     /// Item 252 — the distinct carrier chains this flow was seen arriving
@@ -4466,10 +4476,13 @@ impl FlowDissection {
         if first {
             summary.flows += 1;
             let client_direction = state.client_direction.map(idx_direction);
-            if let Err(reason) = opener.begin_flow(state.client_random.as_ref(), client_direction) {
-                state.outcome = Some(Some(reason));
-                summary.refused += 1;
-                return true;
+            match opener.begin_flow(state.client_random.as_ref(), client_direction) {
+                Err(reason) => {
+                    state.outcome = Some(Some(reason));
+                    summary.refused += 1;
+                    return true;
+                }
+                Ok(source) => state.key_source = Some(source),
             }
             state.outcome = Some(None);
             state.accepted = true;
@@ -5164,6 +5177,8 @@ mod message_list_census {
             touched: _,
             // Whether a decryption pass has work waiting: one flag.
             decryption_wanted: _,
+            // Whether key material ever reached a decryption pass: one flag.
+            decryption_keys_reached: _,
             // Whether any flow was read as QUIC: one flag.
             quic_seen: _,
             next_row_link: _,
@@ -5238,6 +5253,8 @@ mod message_list_census {
             scouting: _,
             last_activity: _,
             quic: _,
+            // A decryption pass's finding about the flow's keys: flags.
+            quic_keys: _,
             residue: _,
             chain_loss: _,
             last_seen_ms: _,
@@ -6497,6 +6514,9 @@ pub struct Dissection {
     /// visits the flows only when this is set or the last packet touched such a
     /// flow, and clears it.
     decryption_wanted: bool,
+    /// Key material reached a decryption pass over this dissection
+    /// ([`Self::decryption_keys_reached`]).
+    decryption_keys_reached: bool,
     /// A datagram flow has been read as QUIC ([`Self::quic_seen`]).
     quic_seen: bool,
     /// The next number a flow's link is known by in a row's evidence.
@@ -6551,6 +6571,7 @@ impl Default for Dissection {
             row_evidence: alloc::collections::BTreeMap::new(),
             touched: Vec::new(),
             decryption_wanted: false,
+            decryption_keys_reached: false,
             quic_seen: false,
             next_row_link: 0,
         }
@@ -7761,6 +7782,37 @@ impl Dissection {
         &self.decryption_secrets
     }
 
+    /// Record that a decryption pass over this dissection held key material:
+    /// a key log naming at least one connection, from the capture's own
+    /// Decryption Secrets Blocks or from a caller. A pass calls it whenever it
+    /// runs with such keys, so it never goes back to `false`.
+    pub fn note_decryption_keys(&mut self) {
+        self.decryption_keys_reached = true;
+    }
+
+    /// Whether key material ever reached a decryption pass over this
+    /// dissection ([`Self::note_decryption_keys`]).
+    ///
+    /// What tells a flow no pass has judged yet from a flow no key could have
+    /// opened: an encrypted flow with no finding is waiting for its verdict
+    /// where keys reached a pass, and was offered none where they did not.
+    pub fn decryption_keys_reached(&self) -> bool {
+        self.decryption_keys_reached
+    }
+
+    /// Leave what a decryption pass found about the QUIC flow `flow`'s keys on
+    /// that flow, replacing what an earlier pass left. A flow this dissection
+    /// does not hold (evicted, or never QUIC) takes nothing.
+    ///
+    /// The QUIC twin of the finding a TLS pass leaves on the flow it opens
+    /// ([`Self::decrypt_with`]): a QUIC pass opens packets this crate never
+    /// kept, so it hands its finding over here.
+    pub fn set_quic_key_finding(&mut self, flow: &FlowKey, finding: quic::QuicKeyFinding) {
+        if let Some(dg) = self.datagram_flows.find_mut(flow) {
+            dg.quic_keys = Some(finding);
+        }
+    }
+
     /// R311y661 (§1.2a) — open every encrypted flow's kept records with
     /// `opener`, and feed the plaintext to the zenoh reader.
     ///
@@ -7928,6 +7980,7 @@ impl Dissection {
                 state.outcome = None;
                 state.outcome_per_direction = [None, None];
                 state.accepted = false;
+                state.key_source = None;
                 state.opened_records = Default::default();
                 reopened += 1;
             }
@@ -20310,11 +20363,11 @@ mod tls_flow_tests {
             &mut self,
             client_random: Option<&[u8; 32]>,
             client_direction: Option<Direction>,
-        ) -> Result<(), crate::tls::NotDecrypted> {
+        ) -> Result<crate::tls::KeySource, crate::tls::NotDecrypted> {
             self.seen.push((client_random.copied(), client_direction));
             match self.decline {
                 Some(reason) => Err(reason),
-                None => Ok(()),
+                None => Ok(crate::tls::KeySource::KeyLog),
             }
         }
 
@@ -20969,9 +21022,9 @@ mod tls_flow_tests {
                 &mut self,
                 client_random: Option<&[u8; 32]>,
                 _client_direction: Option<Direction>,
-            ) -> Result<(), crate::tls::NotDecrypted> {
+            ) -> Result<crate::tls::KeySource, crate::tls::NotDecrypted> {
                 match client_random {
-                    Some(_) => Ok(()),
+                    Some(_) => Ok(crate::tls::KeySource::KeyLog),
                     None => Err(crate::tls::NotDecrypted::NoSessionIdentity),
                 }
             }
@@ -21034,7 +21087,7 @@ mod tls_flow_tests {
                 &mut self,
                 _client_random: Option<&[u8; 32]>,
                 _client_direction: Option<Direction>,
-            ) -> Result<(), crate::tls::NotDecrypted> {
+            ) -> Result<crate::tls::KeySource, crate::tls::NotDecrypted> {
                 Err(crate::tls::NotDecrypted::NoKeyForSession)
             }
             fn open(

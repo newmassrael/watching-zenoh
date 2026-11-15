@@ -957,8 +957,8 @@ impl crate::tls::RecordOpener for PlainOpener {
         &mut self,
         _: Option<&[u8; 32]>,
         _: Option<Direction>,
-    ) -> Result<(), crate::tls::NotDecrypted> {
-        Ok(())
+    ) -> Result<crate::tls::KeySource, crate::tls::NotDecrypted> {
+        Ok(crate::tls::KeySource::KeyLog)
     }
 
     fn open(

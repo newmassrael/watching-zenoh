@@ -832,12 +832,13 @@ pub(super) trait NodeSession: FaceForwarder {
 }
 
 impl NodeSession for RouterForwarder {
+    // The node's own publish, which hands the hosted subscribers their samples once the tables are
+    // let go, as the node's session does: a hosted callback never runs under the routing tables.
     fn publish(&self, keyexpr: &str, payload: &[u8], priority: Priority, express: bool) {
-        let tables = self.on_tables();
         let _ = if priority == Priority::DEFAULT && !express {
-            tables.publish(keyexpr, payload)
+            RouterForwarder::publish(self, keyexpr, payload)
         } else {
-            tables.publish_qos(keyexpr, payload, priority, express)
+            RouterForwarder::publish_qos(self, keyexpr, payload, priority, express)
         };
     }
     fn set_self_locators(&self, locators: Vec<String>) {
@@ -883,7 +884,7 @@ impl NodeSession for RouterForwarder {
     }
     #[cfg(feature = "pubsub-delete")]
     fn publish_delete(&self, keyexpr: &str) {
-        let _ = self.on_tables().publish_delete(keyexpr);
+        let _ = RouterForwarder::publish_delete(self, keyexpr);
     }
     fn counters(&self) -> Vec<usize> {
         let tables = self.on_tables();
@@ -1883,9 +1884,7 @@ fn a_peer_with_a_subscriber_that_echoes(
             heard_by.lock().unwrap().push(heard(sample));
             if echoes() {
                 if let Some(fwd) = weak.upgrade() {
-                    fwd.on_tables()
-                        .publish("demo/data", b"echo")
-                        .expect("publish");
+                    fwd.publish("demo/data", b"echo").expect("publish");
                 }
             }
         }),
@@ -1903,9 +1902,9 @@ fn a_hosted_subscriber_hears_what_it_published_into_itself_after_the_delivery() 
     let (fwd, log) = a_peer_with_a_subscriber_that_echoes(move || {
         !once.swap(true, std::sync::atomic::Ordering::SeqCst)
     });
-    fwd.on_tables()
-        .publish("demo/data", b"first")
-        .expect("publish");
+    // Through the node's own publish, which delivers to the hosted subscribers once the tables
+    // are let go: a hosted callback never runs under the routing tables.
+    fwd.publish("demo/data", b"first").expect("publish");
     let heard: Vec<String> = log.lock().unwrap().clone();
     assert_eq!(
         heard.len(),
@@ -1921,9 +1920,7 @@ fn a_hosted_subscriber_hears_what_it_published_into_itself_after_the_delivery() 
 #[test]
 fn a_hosted_subscriber_that_always_echoes_is_given_a_bounded_number_of_deliveries() {
     let (fwd, log) = a_peer_with_a_subscriber_that_echoes(|| true);
-    fwd.on_tables()
-        .publish("demo/data", b"first")
-        .expect("publish");
+    fwd.publish("demo/data", b"first").expect("publish");
     assert_eq!(
         log.lock().unwrap().len(),
         1 + SELF_ECHO_QUEUE_CAP,
@@ -1936,9 +1933,7 @@ fn a_hosted_subscriber_that_always_echoes_is_given_a_bounded_number_of_deliverie
 #[test]
 fn a_retracted_subscriber_is_not_given_what_was_queued_for_it() {
     let (fwd, log) = a_peer_with_a_subscriber_that_echoes(|| true);
-    fwd.on_tables()
-        .publish("demo/data", b"first")
-        .expect("publish");
+    fwd.publish("demo/data", b"first").expect("publish");
     let before = log.lock().unwrap().len();
     // One echo is still queued: the budget ran out first.
     assert!(fwd.on_tables_mut().unregister_local_subscriber("demo/**"));
@@ -1949,9 +1944,7 @@ fn a_retracted_subscriber_is_not_given_what_was_queued_for_it() {
         "other/**",
         Box::new(move |sample| other_log.lock().unwrap().push(heard(sample))),
     );
-    fwd.on_tables()
-        .publish("other/x", b"next")
-        .expect("publish");
+    fwd.publish("other/x", b"next").expect("publish");
     assert_eq!(
         other.lock().unwrap().len(),
         1,

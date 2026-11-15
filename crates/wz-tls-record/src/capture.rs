@@ -24,7 +24,8 @@ use alloc::vec::Vec;
 extern crate alloc;
 
 use wz_capture::tls::{
-    Direction, EncryptedRecord, NotDecrypted, OpenedRecord, RecordOpener, MIN_PROTECTED_RECORD,
+    Direction, EncryptedRecord, KeySource, NotDecrypted, OpenedRecord, RecordOpener,
+    MIN_PROTECTED_RECORD,
 };
 
 use crate::keylog::{KeyLog, SecretLabel, SecretsBlockError};
@@ -898,7 +899,7 @@ impl RecordOpener for CaptureOpener {
         &mut self,
         client_random: Option<&[u8; 32]>,
         client_direction: Option<Direction>,
-    ) -> Result<(), NotDecrypted> {
+    ) -> Result<KeySource, NotDecrypted> {
         // R311y692 — the outgoing flow's WITNESS and any handshake tail it is
         // still holding are carried off BEFORE this, and this line is why the
         // carry has to happen there: it drops both directions, so anything read
@@ -974,6 +975,12 @@ impl RecordOpener for CaptureOpener {
             // The entry exists and carries nothing this crate can act on.
             return Err(NotDecrypted::NoKeyForSession);
         }
+        // Over every secret the connection holds: each one the log kept is an
+        // epoch secret, and the epochs above are built from them.
+        let source = secrets
+            .origins()
+            .key_source()
+            .ok_or(NotDecrypted::NoKeyForSession)?;
         let client_index = match client_direction {
             Direction::A => 0,
             Direction::B => 1,
@@ -983,7 +990,7 @@ impl RecordOpener for CaptureOpener {
         // the value being replaced.
         self.directions[client_index] = DirectionState::new(&client);
         self.directions[1 - client_index] = DirectionState::new(&server);
-        Ok(())
+        Ok(source)
     }
 
     fn open(
@@ -1288,7 +1295,7 @@ mod tests {
         let mut opener = CaptureOpener::new(log);
         assert_eq!(
             opener.begin_flow(Some(&random), Some(Direction::A)),
-            Ok(()),
+            Ok(KeySource::KeyLog),
             "the handshake flight IS kept -- its records read application_data \
              on the outside"
         );
@@ -1392,6 +1399,56 @@ mod tests {
             )
             .as_bytes(),
         )
+    }
+
+    /// AN ACCEPTED FLOW NAMES WHERE ITS SECRETS CAME FROM: the key log a caller
+    /// handed in, the capture's own block, or both when the connection's
+    /// labels came by the two routes.
+    #[test]
+    fn an_accepted_flow_is_answered_with_where_its_secrets_came_from() {
+        let random = [3u8; 32];
+        let line = |label: &str| {
+            alloc::format!("{label} {} {}\n", hex(&random), hex(&[9u8; 48])).into_bytes()
+        };
+        let block = |label: &str| wz_capture::pcapng::DecryptionSecrets {
+            secrets_type: crate::keylog::SECRETS_TYPE_TLS_KEY_LOG,
+            secrets: line(label),
+            truncated: false,
+        };
+
+        let mut handed = CaptureOpener::new(KeyLog::parse(&line("CLIENT_TRAFFIC_SECRET_0")));
+        assert_eq!(
+            handed.begin_flow(Some(&random), Some(Direction::A)),
+            Ok(KeySource::KeyLog)
+        );
+
+        let (mut carried, _) =
+            CaptureOpener::from_secrets_blocks(&[block("CLIENT_TRAFFIC_SECRET_0")]);
+        assert_eq!(
+            carried.begin_flow(Some(&random), Some(Direction::A)),
+            Ok(KeySource::Capture)
+        );
+
+        let (mut both, _) = CaptureOpener::from_secrets_blocks(&[block("CLIENT_TRAFFIC_SECRET_0")]);
+        both.absorb(KeyLog::parse(&line("SERVER_TRAFFIC_SECRET_0")));
+        assert_eq!(
+            both.begin_flow(Some(&random), Some(Direction::A)),
+            Ok(KeySource::Both)
+        );
+    }
+
+    /// THE SESSION TABLE'S LIST OF SUITES IS THIS OPENER'S: every code point
+    /// `Suite::from_code_point` accepts, and no other, is in
+    /// `wz_capture::tls::OPENABLE_SUITES`. The dissector cannot depend on this
+    /// crate, so its copy is held here, where the two meet.
+    #[test]
+    fn the_dissectors_openable_suites_are_the_ones_this_crate_opens() {
+        let accepted: Vec<u16> = (0..=u16::MAX)
+            .filter(|code| Suite::from_code_point(*code).is_some())
+            .collect();
+        let mut declared = wz_capture::tls::OPENABLE_SUITES.to_vec();
+        declared.sort_unstable();
+        assert_eq!(declared, accepted);
     }
 
     /// An opener that began a flow holds that flow's secrets, and its `Debug`

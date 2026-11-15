@@ -2709,7 +2709,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":13},"ok":true,
+ *     {"document":{"name":"session_table","revision":14},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -2737,7 +2737,8 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                                    "undecoded":{"units":0,"bytes":0}},
  *                   "unstated":[],
  *                   "flows":[{"flow":{"low":{...},"high":{...},"link":"tcp"},
- *                             "encrypted":"clear","bytes":64,
+ *                             "encrypted":"clear","decryption":null,
+ *                             "key_source":null,"bytes":64,
  *                             "zenoh":"yes","announced_version":"own",
  *                             "zenoh_evidence":{...},
  *                             "unit_readings":{...},
@@ -2746,7 +2747,10 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                                 "out_of_order":0,"partial_overlaps":0},
  *                               "high_to_low":{"retransmits":0,
  *                                 "out_of_order":0,"partial_overlaps":0}},
- *                             "unstated":[]}]}],
+ *                             "unstated":[{"cell":"decryption",
+ *                                          "reason":"not_encrypted"},
+ *                                         {"cell":"key_source",
+ *                                          "reason":"not_encrypted"}]}]}],
  *      "excluded":[{"why":"multicast_group","count":0},
  *                  {"why":"scouting_only","count":0}],
  *      "dropped_by_limits":{...},
@@ -2818,10 +2822,13 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                below.
  *   `flows`      the flows the row is made of, each with the flow object every
  *                other document carries (so a consumer can join), its `encrypted`
- *                finding, its own `bytes`, its own three zenoh keys, its own
- *                `unit_readings`, its `stream_anomalies` (session_table revision
- *                11; see STREAM ANOMALIES below) and its own `unstated`, which
- *                names a null cell of the flow as the row's names one of the row.
+ *                finding, its `decryption` and `key_source` (session_table
+ *                revision 13; see WHAT THE PASS MADE OF A FLOW below), its
+ *                own `bytes`, its own three zenoh keys, its own
+ *                `unit_readings`, its `stream_anomalies` (session_table
+ *                revision 11; see STREAM ANOMALIES below) and its own
+ *                `unstated`, which names a null cell of the flow as the row's
+ *                names one of the row.
  *
  * STREAM ANOMALIES. A TCP flow's `stream_anomalies` holds, for each direction
  * of its flow key, what that direction's reassembler counted:
@@ -3037,6 +3044,16 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                     flow's own Inits do (two InitSyns and no InitAck);
  *   `no_sequence`     the link numbers no bytes on the wire (session_table
  *                     revision 11): see STREAM ANOMALIES.
+ *   `not_encrypted`   the flow is not TLS or QUIC (its `encrypted` is `clear`
+ *                     or `unknown`; the serial line's always is), so there is
+ *                     nothing to decrypt (session_table revision 13). Nothing
+ *                     to do.
+ *   `not_yet_known`   the decryption verdict is still pending (session_table
+ *                     revision 13): see WHAT THE PASS MADE OF A FLOW. Ask again
+ *                     after more of the capture, or after the handle has ended.
+ *   `not_opened`      the pass did not open the flow, so no secret opened it
+ *                     from anywhere (session_table revision 13); its
+ *                     `decryption` says why.
  *
  * The reasons a cell can carry:
  *   `initiator`, `acceptor`            `not_in_capture`, `encrypted`,
@@ -3045,6 +3062,9 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *   `phase`, `frames`                  `encrypted`, `no_matching_key`
  *   `first_seen_ts_ns`, `last_seen_ts_ns`   `no_clock`
  *   `stream_anomalies` (a flow's)      `no_sequence`
+ *   `decryption` (a flow's)            `not_encrypted`, `not_yet_known`
+ *   `key_source` (a flow's)            `not_encrypted`, `not_opened`,
+ *                                      `not_yet_known`
  * An `evicted` reason does not exist: a flow the table's ceiling evicted has no
  * row, so no cell could say it. That loss is stated for the whole document, by
  * dropped_by_limits, and its anomaly counts by `evicted_stream_anomalies`.
@@ -3094,16 +3114,116 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                      covers, a record that did not open under the matching
  *                      keys (most often a key change the log does not cover),
  *                      or a record the stream no longer held. Those finer
- *                      findings are the command line's (`wz-analyze --keylog`)
- *                      and reach no document of this library, so a matched key
- *                      that failed reads `encrypted` and not a second new word.
+ *                      findings reach the flow's own `decryption` cell from
+ *                      session_table revision 13 (see WHAT THE PASS MADE OF A
+ *                      FLOW); the role cells keep the coarse reason.
  *
- * A QUIC flow the keys did not open always gives `encrypted`: its pass keeps no
- * per-flow finding in what the documents are read from. A row whose flows give
+ * A QUIC flow the keys did not open gives `encrypted` for those cells; its
+ * finer finding is likewise its `decryption` cell. A row whose flows give
  * different reasons gives `encrypted` for `phase`, and `mixed` for the role
  * cells as for any disagreement. The count of connections
  * wz_dissect_live_add_keylog returns says the other thing a consumer tells a
  * user: zero means the bytes held no key log at all.
+ *
+ * (session_table revision 13) WHAT THE PASS MADE OF A FLOW. Every flow object
+ * carries two more cells, null where they cannot be stated and then named in
+ * the flow's `unstated` like any other cell:
+ *
+ *   `decryption`  what the decryption pass made of a TLS or QUIC flow, a finer
+ *                 verdict than `encrypted`;
+ *   `key_source`  for a flow the pass opened, where the secrets that opened it
+ *                 came from.
+ *
+ * `encrypted` and `decryption` answer different questions. `encrypted` =
+ * `decrypted_tls` means the opener ACCEPTED the flow's keys; `decryption` says
+ * whether anything has opened yet, so a flow whose keys were accepted and whose
+ * first protected record has not arrived reads `decrypted_tls` beside a null
+ * `decryption` with the reason `not_yet_known`. A consumer showing why a flow
+ * is unread reads `decryption`. Its words, each with the remedy it names:
+ *
+ *   `opened`                 the pass opened the flow: for TLS the keys were
+ *                            accepted and at least one record opened, for QUIC
+ *                            a stream or a datagram was recovered (the test
+ *                            `decrypted_quic` is read by). Nothing to do.
+ *   `no_keys`                no key material reached the pass at all, neither
+ *                            the capture's own Decryption Secrets Blocks nor a
+ *                            key log handed in. Hand in a key log.
+ *   `no_matching_key`        key material reached the pass and none of it names
+ *                            this connection. Fetch the key log of THIS
+ *                            connection.
+ *   `keys_refused`           this connection's keys were found and a record
+ *                            (TLS) or a packet (QUIC) did not open under them,
+ *                            most often a key change the log does not cover.
+ *                            Fetch a key log that holds the later secrets.
+ *   `key_for_one_direction`  this connection's keys were found and cover one
+ *                            of its two directions (a key log written by one
+ *                            peer). Fetch the other peer's key log.
+ *   `handshake_not_seen`     the capture holds no handshake to match a key
+ *                            by: a TLS flow with no ClientHello random or no
+ *                            client direction, a QUIC flow with no ClientHello
+ *                            read and no identity adopted. Capture from the
+ *                            connection's start.
+ *   `not_supported`          the flow uses a protocol this pass does not
+ *                            open: a TLS ServerHello that negotiated a suite
+ *                            other than TLS_AES_128_GCM_SHA256 (0x1301),
+ *                            TLS_AES_256_GCM_SHA384 (0x1302) or
+ *                            TLS_CHACHA20_POLY1305_SHA256 (0x1303) -- the
+ *                            TLS 1.2 suites and the two CCM suites -- or a
+ *                            QUIC version the opener has no key schedule for.
+ *                            Decided before any key is asked about; no key
+ *                            log helps.
+ *   `record_not_held`        a TLS record the pass had to open was no longer
+ *                            held. A reading of a bound, not of the keys.
+ *
+ * `key_source` is `capture` (every secret of the connection came from the
+ * capture's own Decryption Secrets Blocks), `key_log` (every one came from a
+ * key log handed in: a keyed door, or wz_dissect_live_add_keylog) or `both`. A
+ * secret given twice for one connection and label is the later one's, with its
+ * route; a document door reads the capture's blocks first and the key log
+ * after them. It is read when the pass takes the connection's secrets, so a
+ * handle that opened a flow keeps the answer it gave then.
+ *
+ * An outcome this library cannot know yet is never folded into a word: it is
+ * null with `not_yet_known`. `key_source` is null with `not_opened` where
+ * `decryption` is stated and is not `opened`, with `not_yet_known` where
+ * `decryption` is, and both are null with `not_encrypted` on a flow that is not
+ * TLS or QUIC.
+ *
+ * A TLS flow takes the FIRST of these that holds:
+ *
+ *   1. its ServerHello negotiated a suite outside the three: `not_supported`;
+ *   2. no pass has judged it: `not_yet_known` where key material reached a pass
+ *      (a pass over a live handle judges it in the call that brings its next
+ *      packet), `no_keys` where none ever did;
+ *   3. the pass refused it: the word of its first refusal -- no key material
+ *      `no_keys`, no ClientHello random or client direction
+ *      `handshake_not_seen`, no key for its random `no_matching_key`, a record
+ *      that did not open `keys_refused`, a direction no key covers
+ *      `key_for_one_direction`, a record no longer held `record_not_held`;
+ *   4. its keys were accepted: `opened` once a record of either direction
+ *      opened, `not_yet_known` until then.
+ *
+ * A QUIC flow takes the FIRST of these that holds:
+ *
+ *   1. a long header declared a version the opener does not open, and none
+ *      declared one it does (a Version Negotiation packet's version 0 chooses
+ *      nothing and does not count): `not_supported`;
+ *   2. a stream or a datagram was recovered: `opened`;
+ *   3. no ClientHello was read and no identity adopted: `not_yet_known` on a
+ *      live handle that has not ended, `handshake_not_seen` otherwise;
+ *   4. no key material reached the pass: `no_keys`;
+ *   5. the key log holds no secret for the connection's random:
+ *      `no_matching_key`;
+ *   6. a packet of a space whose keys came from the key log (0-RTT, Handshake,
+ *      1-RTT) did not open under them: `keys_refused`;
+ *   7. one direction lacked a key for a packet's space while the other opened
+ *      a packet past its Initial space: `key_for_one_direction`;
+ *   8. otherwise: `not_yet_known`.
+ *
+ * A live handle and a document door write the same two cells for the same
+ * packets once the handle has ended (wz_dissect_live_end, or a replay door,
+ * which ends what it reads): rule 3 of QUIC is the one place a handle still
+ * being fed says less than the file does, and it says `not_yet_known` there.
  *
  * An encrypted flow is a row because zenoh over TLS or QUIC cannot be told from
  * other TLS or QUIC without keys, so a capture of a whole network lists every
@@ -3138,8 +3258,10 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * retained between calls and no callback runs.
  *
  * @values session_table cell
+ * @values session_table decryption
  * @values session_table encrypted
  * @values session_table family
+ * @values session_table key_source
  * @values session_table link
  * @values session_table phase
  * @values session_table reason
@@ -3154,9 +3276,11 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @carries session_table announced_version passenger
  * @carries session_table cell passenger
  * @carries session_table check passenger
+ * @carries session_table decryption passenger
  * @carries session_table encrypted passenger
  * @carries session_table eps_basis passenger
  * @carries session_table family passenger
+ * @carries session_table key_source passenger
  * @carries session_table link passenger
  * @carries session_table phase passenger
  * @carries session_table q_basis passenger
@@ -3181,6 +3305,11 @@ int wz_dissect_pcap_session_table(const unsigned char *bytes, size_t len,
  * described there has opened every TLS and QUIC flow the keys reach: a flow
  * the keys opened reads `decrypted_tls` or `decrypted_quic` and states the
  * session inside it, and one they do not reach reads `encrypted_unreadable`.
+ * Each flow's `decryption` says what the pass made of it and, where it opened
+ * the flow, `key_source` says whether the secrets came from this key log
+ * (`key_log`), from the capture's own Decryption Secrets Blocks (`capture`) or
+ * from both (session_table revision 13; see WHAT THE PASS MADE OF A FLOW
+ * there).
  *
  * `keylog` is the BYTES of an NSS key log, the text an SSLKEYLOGFILE holds,
  * `keylog_len` long: read the file the user picked and hand its contents over.
@@ -6388,6 +6517,13 @@ int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
  * or a record, and returns none through any door. wz_dissect_live_memory does
  * not count them. The words a row's `encrypted` cell says are listed at
  * wz_dissect_pcap_session_table.
+ *
+ * What the pass made of each flow, after this call, is the flow's `decryption`
+ * cell in wz_dissect_live_session_table (session_table revision 13): a flow
+ * that read `no_keys` before the call reads `opened` with `key_source`
+ * `key_log` once the text named its connection, `no_matching_key` where the
+ * text named only others, and the other words of WHAT THE PASS MADE OF A FLOW
+ * at wz_dissect_pcap_session_table where the keys matched and did not open it.
  *
  * A null `h` or `connections`, or a null `keylog` with a `len` other than 0, is
  * WZ_DISSECT_ERR_INVALID_ARG and changes nothing. */

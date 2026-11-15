@@ -154,18 +154,86 @@ fn is_keylog_label(label: &str) -> bool {
     false
 }
 
-/// One connection's secrets, as a key log carried them.
+/// Where one secret of a key log came from.
+///
+/// Kept beside each secret because the two arrive by different routes and a
+/// reader acts on which: a secret in the capture's own Decryption Secrets
+/// Block travels with the file, and one from a key log a caller handed in has
+/// to be handed in again the next time the file is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOrigin {
+    /// A pcapng Decryption Secrets Block of the capture itself
+    /// ([`KeyLog::from_secrets_block`]).
+    CaptureSecretsBlock,
+    /// An NSS key log a caller handed in ([`KeyLog::parse`]).
+    KeyLog,
+}
+
+/// The origins of a set of secrets: which of the two routes any of them came
+/// by. Empty for a set holding no secret.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyOrigins {
+    capture: bool,
+    key_log: bool,
+}
+
+impl KeyOrigins {
+    /// Whether some secret came by `origin`.
+    pub fn contains(self, origin: KeyOrigin) -> bool {
+        match origin {
+            KeyOrigin::CaptureSecretsBlock => self.capture,
+            KeyOrigin::KeyLog => self.key_log,
+        }
+    }
+
+    /// Whether no secret is in the set at all.
+    pub fn is_empty(self) -> bool {
+        !self.capture && !self.key_log
+    }
+
+    /// The set with `origin` in it too.
+    fn with(self, origin: KeyOrigin) -> Self {
+        match origin {
+            KeyOrigin::CaptureSecretsBlock => Self {
+                capture: true,
+                ..self
+            },
+            KeyOrigin::KeyLog => Self {
+                key_log: true,
+                ..self
+            },
+        }
+    }
+
+    /// The set in the words the dissector's session table states it in, or
+    /// `None` for an empty set, which no flow can have been opened with.
+    pub fn key_source(self) -> Option<wz_capture::tls::KeySource> {
+        use wz_capture::tls::KeySource;
+        match (self.capture, self.key_log) {
+            (true, true) => Some(KeySource::Both),
+            (true, false) => Some(KeySource::Capture),
+            (false, true) => Some(KeySource::KeyLog),
+            (false, false) => None,
+        }
+    }
+}
+
+/// One connection's secrets, as a key log carried them, each with the route
+/// it came by.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ConnectionSecrets {
-    entries: Vec<(SecretLabel, Vec<u8>)>,
+    entries: Vec<(SecretLabel, Vec<u8>, KeyOrigin)>,
 }
 
 impl core::fmt::Debug for ConnectionSecrets {
-    /// The labels and the lengths, never the bytes.
+    /// The labels, the lengths and the origins, never the bytes.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut list = f.debug_list();
-        for (label, secret) in &self.entries {
-            list.entry(&format_args!("{label:?}: <{} byte(s)>", secret.len()));
+        for (label, secret, origin) in &self.entries {
+            list.entry(&format_args!(
+                "{label:?}: <{} byte(s)> from {origin:?}",
+                secret.len()
+            ));
         }
         list.finish()
     }
@@ -176,14 +244,38 @@ impl ConnectionSecrets {
     pub fn get(&self, label: SecretLabel) -> Option<&[u8]> {
         self.entries
             .iter()
-            .find(|(l, _)| *l == label)
-            .map(|(_, s)| s.as_slice())
+            .find(|(l, _, _)| *l == label)
+            .map(|(_, s, _)| s.as_slice())
     }
 
     /// Every label this connection has a secret for, in the order the log gave
     /// them.
     pub fn labels(&self) -> impl Iterator<Item = SecretLabel> + '_ {
-        self.entries.iter().map(|(l, _)| *l)
+        self.entries.iter().map(|(l, _, _)| *l)
+    }
+
+    /// The routes this connection's secrets came by, over every secret it
+    /// holds.
+    pub fn origins(&self) -> KeyOrigins {
+        self.entries
+            .iter()
+            .fold(KeyOrigins::default(), |set, (_, _, origin)| {
+                set.with(*origin)
+            })
+    }
+
+    /// Hold `secret` under `label`, from `origin`. A label already held is
+    /// REPLACED, secret and origin together: a key log appended to across a
+    /// re-handshake carries the newer line last, and two secrets under one
+    /// label would make which one a caller gets depend on iteration order.
+    fn put(&mut self, label: SecretLabel, secret: Vec<u8>, origin: KeyOrigin) {
+        match self.entries.iter_mut().find(|(l, _, _)| *l == label) {
+            Some((_, held, from)) => {
+                *held = secret;
+                *from = origin;
+            }
+            None => self.entries.push((label, secret, origin)),
+        }
     }
 
     /// `true` when both directions have a generation-zero APPLICATION secret,
@@ -212,7 +304,7 @@ impl ConnectionSecrets {
         let mut out: Vec<(u32, &[u8])> = self
             .entries
             .iter()
-            .filter_map(|(label, secret)| match (label, server) {
+            .filter_map(|(label, secret, _)| match (label, server) {
                 (SecretLabel::ClientApplication(n), false)
                 | (SecretLabel::ServerApplication(n), true) => Some((*n, secret.as_slice())),
                 _ => None,
@@ -269,16 +361,24 @@ impl KeyLog {
         if secrets_type != SECRETS_TYPE_TLS_KEY_LOG {
             return Err(SecretsBlockError::UnknownSecretsType(secrets_type));
         }
-        Ok(Self::parse(secrets))
+        Ok(Self::parse_from(secrets, KeyOrigin::CaptureSecretsBlock))
     }
 
-    /// Parse an NSS key log.
+    /// Parse an NSS key log a caller handed in.
     ///
     /// Never fails: a key log is a growing text file that a capture may hold a
     /// truncated or interleaved copy of, so a line this reader cannot use is
     /// COUNTED rather than fatal. What it must not do is lose the count —
     /// see [`Self::refused`] and [`Self::unparsed`].
+    ///
+    /// Every secret it holds is marked [`KeyOrigin::KeyLog`]; the same text
+    /// read out of a capture's own block is [`Self::from_secrets_block`]'s.
     pub fn parse(text: &[u8]) -> Self {
+        Self::parse_from(text, KeyOrigin::KeyLog)
+    }
+
+    /// [`Self::parse`], marking every secret as having come by `origin`.
+    fn parse_from(text: &[u8], origin: KeyOrigin) -> Self {
         let mut out = Self::default();
         for line in text.split(|b| *b == b'\n') {
             let line = core::str::from_utf8(line).unwrap_or("").trim();
@@ -318,14 +418,7 @@ impl KeyLog {
                     &mut out.connections.last_mut().expect("just pushed").1
                 }
             };
-            // A repeated label for one connection REPLACES rather than appends:
-            // a key log appended to across a re-handshake carries the newer
-            // line last, and two secrets under one label would make which one a
-            // caller gets depend on iteration order.
-            match slot.entries.iter_mut().find(|(l, _)| *l == label) {
-                Some((_, existing)) => *existing = secret,
-                None => slot.entries.push((label, secret)),
-            }
+            slot.put(label, secret, origin);
         }
         out
     }
@@ -339,9 +432,9 @@ impl KeyLog {
     /// report fewer connections than the file described.
     ///
     /// The merge rule is `parse`'s own, applied one layer up: a repeated label
-    /// for a connection REPLACES, so the later block wins, and the refused and
-    /// unparsed tallies ADD, because they count lines and the lines are all
-    /// still there.
+    /// for a connection REPLACES, so the later block wins and brings its
+    /// origin with it, and the refused and unparsed tallies ADD, because they
+    /// count lines and the lines are all still there.
     pub fn absorb(&mut self, other: Self) {
         for (random, secrets) in other.connections {
             let slot = match self.connections.iter_mut().find(|(r, _)| *r == random) {
@@ -352,11 +445,8 @@ impl KeyLog {
                     &mut self.connections.last_mut().expect("just pushed").1
                 }
             };
-            for (label, secret) in secrets.entries {
-                match slot.entries.iter_mut().find(|(l, _)| *l == label) {
-                    Some((_, existing)) => *existing = secret,
-                    None => slot.entries.push((label, secret)),
-                }
+            for (label, secret, origin) in secrets.entries {
+                slot.put(label, secret, origin);
             }
         }
         self.refused.extend(other.refused);
@@ -740,6 +830,55 @@ mod tests {
         let log = KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, text.as_bytes())
             .expect("the registered type");
         assert_eq!(log.len(), 1);
+    }
+
+    /// EVERY SECRET REMEMBERS ITS ROUTE: a parsed key log's are the key log's,
+    /// a capture's block's are the capture's, a merge of the two holds both,
+    /// and a label given again replaces its origin with its secret.
+    #[test]
+    fn a_secret_remembers_whether_the_capture_or_a_key_log_carried_it() {
+        use wz_capture::tls::KeySource;
+        let client = format!("CLIENT_TRAFFIC_SECRET_0 {RANDOM_A} 01020304\n");
+        let server = format!("SERVER_TRAFFIC_SECRET_0 {RANDOM_A} 05060708\n");
+
+        let handed = KeyLog::parse(client.as_bytes());
+        let origins = handed
+            .get(&random(RANDOM_A))
+            .expect("the connection")
+            .origins();
+        assert!(origins.contains(KeyOrigin::KeyLog));
+        assert!(!origins.contains(KeyOrigin::CaptureSecretsBlock));
+        assert_eq!(origins.key_source(), Some(KeySource::KeyLog));
+
+        let carried = KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, client.as_bytes())
+            .expect("the registered type");
+        let origins = carried
+            .get(&random(RANDOM_A))
+            .expect("the connection")
+            .origins();
+        assert_eq!(origins.key_source(), Some(KeySource::Capture));
+
+        // Two labels, one by each route.
+        let mut merged = KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, client.as_bytes())
+            .expect("the registered type");
+        merged.absorb(KeyLog::parse(server.as_bytes()));
+        let origins = merged
+            .get(&random(RANDOM_A))
+            .expect("the connection")
+            .origins();
+        assert_eq!(origins.key_source(), Some(KeySource::Both));
+
+        // The same label by the other route: it replaces, origin and all.
+        let mut replaced = KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, client.as_bytes())
+            .expect("the registered type");
+        replaced.absorb(KeyLog::parse(client.as_bytes()));
+        let conn = replaced.get(&random(RANDOM_A)).expect("the connection");
+        assert_eq!(conn.labels().count(), 1, "one label, not two");
+        assert_eq!(conn.origins().key_source(), Some(KeySource::KeyLog));
+
+        // A set with nothing in it names no source.
+        assert!(KeyOrigins::default().is_empty());
+        assert_eq!(KeyOrigins::default().key_source(), None);
     }
 
     /// Hex is accepted in either case, because stacks differ and a log written

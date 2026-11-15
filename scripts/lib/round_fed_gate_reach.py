@@ -205,12 +205,12 @@ DEFERRED: dict[str, str] = {
     ),
     "round_descriptor.py": (
         "R4392 -- its subject is a round descriptor (docs/rounds/pending), and "
-        "a descriptor never reaches the hook: land.sh and the queue's "
-        "file-round action read it through this module, refuse one that is "
-        "no round, file it and delete it before anything is pushed, so the "
-        "hook would find nothing to read. `file-round.sh --check` is the "
-        "author's run at commit time, and hosted Layer C0i runs the "
-        "selftest."
+        "a descriptor never reaches main: land.sh writes it through this "
+        "module and refuses one that is no round before the item is "
+        "submitted, and the queue's file-round action files it and deletes "
+        "it on the candidate before the push to main, so the hook would find "
+        "nothing to read. `file-round.sh --check` is the author's run before "
+        "submitting, and hosted Layer C0i runs the selftest."
     ),
     "verdict_leg_mutation.py": (
         "565.63s, more than SEVEN TIMES what the hook's whole 62-member block "

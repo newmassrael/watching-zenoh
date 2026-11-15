@@ -10788,7 +10788,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 96] = [
+        let live: [(&str, &str, Vec<&'static str>); 98] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11234,7 +11234,7 @@ mod tests {
                 "relative_to",
                 crate::transport_layout::RelativeTo::names(),
             ),
-            // The session table's eight. `link`, `family` and `phase` are the
+            // The session table's ten. `link`, `family` and `phase` are the
             // walks the census and the field document are held to, on a third
             // document that renders the same flow object and the same phase;
             // `cell` and `reason` are the two keys of an `unstated` entry, held
@@ -11250,6 +11250,18 @@ mod tests {
                 rev::SESSION_TABLE,
                 "encrypted",
                 crate::session_table::Encryption::names(),
+            ),
+            // What the decryption pass made of a flow, and where the secrets
+            // that opened it came from: each held to the enum that writes it.
+            (
+                rev::SESSION_TABLE,
+                "decryption",
+                crate::session_table::DecryptionOutcome::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "key_source",
+                crate::tls::KeySource::names(),
             ),
             (
                 rev::SESSION_TABLE,

@@ -6,12 +6,12 @@
 # changed-crate builds. The previous push spent over 16 minutes in static
 # checks alone; a prior push took about 90 minutes across the whole hook.
 #
-# Owner decision, 2026-10-27: a push to main goes through `scripts/land.sh`,
-# which holds the clone's push lock (gate 0p refuses one that does not), and
-# the ordinary push keeps only the checks that refuse often; hosted CI judges
-# the rest.
+# Owner decision, 2026-10-27: a session lands on main through `scripts/land.sh`,
+# which submits to the landing queue whose integrator is main's one writer
+# (gate 0p refuses any other push to main), and the ordinary push keeps only
+# the checks that refuse often; hosted CI judges the rest.
 #
-# Default: gates 0p (push lock), 0/0b/0b2/0c (publication), 1 (schema and tool
+# Default: gates 0p (one writer), 0/0b/0b2/0c (publication), 1 (schema and tool
 # pin), 2 (SSOT), 2b (claim-scoped proof audit), 2c (previous hosted verdict,
 # no waiting), 2f (upstream citation form, about 11s), 2c2 (doc-link lane C0d,
 # about 5s) and 2c3 (item 898: the count guards the push reaches, judged from
@@ -96,10 +96,10 @@ fi
 # repository content. A ref whose range cannot be bounded is refused, because an
 # ungraded public push is what these gates exist to stop.
 #
-# bx records the submitting worktree's absolute path in the log, so gate 0b2 refuses a
-# submit from this machine until bx records something that is not a path (or the owner
-# accepts publishing it). That is this repository's rule applied to the record, not a
-# defect of the gate.
+# bx writes no value of an installation into the log (bx RFC 0024, 4.3a): a machine is a
+# random queue id, and the submitting worktree, branch and session stay on the machine
+# that submitted. A log commit naming a home directory is therefore bx breaking its own
+# rule, and the push that would publish it is refused all the same.
 if [[ ${#queue_pushes[@]} -gt 0 ]]; then
     # shellcheck disable=SC1091  # constant paths, resolved at run time
     if ! source scripts/lib/nda-scan.sh || ! source scripts/lib/home-path-scan.sh \
@@ -125,7 +125,7 @@ if [[ ${#queue_pushes[@]} -gt 0 ]]; then
         if ! wz_home_path_range 'pre-push' "$q_range"; then
             echo "pre-push: [gate 0q]$q_kind $q_range adds a line naming a home directory." >&2
             echo "          Origin is public and a push does not un-publish. For the queue's" >&2
-            echo "          log this means bx recorded the submitting worktree's path." >&2
+            echo "          log this means bx wrote an installation's path (RFC 0024 4.3a)." >&2
             exit 1
         fi
         # The queue's own records are written by bx's fixed identity, which is no person's;
@@ -147,43 +147,35 @@ if [[ ${#queue_pushes[@]} -gt 0 ]]; then
     fi
 fi
 
-# ─── gate 0p — a push to main holds the clone's push lock (2026-10-27) ─
+# ─── gate 0p — main has one writer: the landing queue's integrator ─
 # grades: not-a-file
-# Owner decision, 2026-10-27. Sessions in several worktrees of this clone push
-# to main, and the window between one push's rebase and its arrival is this
-# hook, about a minute. A push that filed ledger round N lost that window to
-# another that filed N too, and origin refused it AFTER this hook had passed;
-# one batch went round six times. `scripts/land.sh` holds an exclusive flock on
-# the file below from its fetch to the end of its push and records a token for
-# the run. This gate refuses a push to main unless the lock is held AND the push
-# carries the holder's token, so a push goes through the lock or does not go.
-# A push to another ref (a branch) does not race the ledger and is not held.
+# Sessions in worktrees of several clones land on main, and the window between
+# one push's rebase and its arrival is this hook, about a minute. A push that
+# filed ledger round N lost that window to another that filed N too, and origin
+# refused it AFTER this hook had passed; one batch went round six times. A lock
+# in one clone serialised that clone's pushes only. The landing queue (`bx
+# --land`, bx RFC 0024; `[land]` in bx.toml) serialises every clone's: a session
+# submits its commit (`bash scripts/land.sh`), and the branch's one integrator
+# puts it on the tip, files its round with the number the store gives it there
+# (scripts/file-round.sh), judges it with this hook and pushes. So a push to
+# main is refused here unless it is the integrator's.
 #
-# The queue integrator (`bx --land`, bx RFC 0024) is the other way to main. It orders
-# the pushes itself, one integrator per branch, and a round's number is taken on the
-# tree it lands on (scripts/file-round.sh), so it neither needs nor can hold this lock.
-# Its clone says so in its own git config (`wz.land-integrator`, set when the owner
-# installs the service), which is state of the clone and not of an environment: the
-# integrator runs this hook with `git hook run` for its judgement and again through the
-# real push, and only the clone is there both times. A local marker is not a wall (a
-# session could set it in its own clone); the wall is the server's rule that only the
-# integrator's identity moves main (RFC 4.12), and this gate is the convenience in
-# front of it, as it always was.
+# The integrator's clone says so in its own git config (`wz.land-integrator`,
+# set when its service is installed), which is state of the clone and not of an
+# environment: the integrator runs this hook with `git hook run` for its
+# judgement and again for the landing push, and only the clone is there both
+# times. A local marker is not a wall (anyone can set it in a clone); the wall is
+# the server's rule that only the integrator's identity moves main (RFC 4.12),
+# and this gate is the early refusal in front of it. A push to another ref (a
+# branch) does not move main and is not held.
 if [[ $pushes_main -eq 1 ]]; then
-    push_lock="$(git rev-parse --path-format=absolute --git-common-dir)/wz-push.lock"
-    lock_token="$(cut -d' ' -f1 "$push_lock.owner" 2>/dev/null || true)"
     if [[ "$(git config --type=bool --get wz.land-integrator 2>/dev/null || true)" == "true" ]]; then
-        echo "pre-push: [gate 0p] this clone is the queue integrator's; the queue orders its pushes."
-    elif flock -n "$push_lock" true 2>/dev/null; then
-        echo "pre-push: [gate 0p] a push to main must hold the push lock." >&2
-        echo "          Push with \`bash scripts/land.sh\`: it rebases, numbers the" >&2
-        echo "          ledger round and pushes under the lock. A tree based before" >&2
-        echo "          it existed rebases onto origin/main first." >&2
-        exit 1
-    elif [[ -z "${WZ_LAND_TOKEN:-}" || "$WZ_LAND_TOKEN" != "$lock_token" ]]; then
-        echo "pre-push: [gate 0p] the push lock is held by another push:" >&2
-        echo "          $(cat "$push_lock.owner" 2>/dev/null || echo unknown)" >&2
-        echo "          Push with \`bash scripts/land.sh\`; it waits for the lock." >&2
+        echo "pre-push: [gate 0p] this clone is the queue integrator's, main's one writer."
+    else
+        echo "pre-push: [gate 0p] main is moved only by the landing queue's integrator." >&2
+        echo "          Land with \`bash scripts/land.sh\`: it submits HEAD to the queue" >&2
+        echo "          (\`bx --land\`), whose integrator puts it on the tip, files its" >&2
+        echo "          ledger round, judges it with this hook and pushes it." >&2
         exit 1
     fi
 fi

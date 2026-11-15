@@ -37,12 +37,14 @@ capacity this tree's owner decides.
 The fleet already holds the parts, each decided in bx under the same
 instruction:
 
-| Part | bx RFC | State on 2026-11-05 |
+| Part | bx RFC | State on 2026-11-14, read from bx's code |
 |---|---|---|
 | A set of checks spread over the machines, unit by unit | 0004 | built |
 | A unit's pass kept under the content of its inputs, so an unchanged unit is not run again | 0020 | stages 1-6 built |
-| The image a unit runs in, declared by the tree and part of the key | 0034 | adopted; its stage 2 waits on 0032 (the record store) and 0033 (signing), neither built |
-| One integrator per branch that lands only what its gates judged, in queue order, speculatively | 0024 | proposed, not built |
+| The image a unit runs in, declared by the tree and part of the key | 0034 | adopted, its stage 2 not built: a `bx.toml` has no `[image]` and a check set or unit no `image` |
+| The record store the image lives in | 0032 | its primary built (`bx-fleet` `store.rs`), with `[records]` for a tree whose locks it keeps (0058) |
+| The image accepted only under a key the tree pins | 0033 | its signing stage (3, `[image] trust`) not built |
+| One integrator per branch that lands only what its gates judged, in queue order, speculatively | 0024 | built; this tree's integrator runs and `scripts/land.sh` submits to it |
 
 The integrator is serial and lands in queue order. Taken together, these give
 two properties: a unit whose inputs did not change costs a cache hit, and a red
@@ -74,7 +76,10 @@ Each stage is its own round and lands on its own.
      input of a verdict is in the key, either inside the image or read from
      the tree. A unit that still needs a machine-only layer declares
      `image = "none"` and keeps no verdict.
-   - This waits on RFCs 0032 and 0033, which are not built.
+   - This waits on bx: RFC 0034's stage 2 (the `[image]` declaration, a unit
+     run in the image's root filesystem, the digest in the key) and RFC
+     0033's stage 3 (the signature checked against the pinned key). The
+     record store it pushes to (RFC 0032) has its primary.
 3. **The whole set, green, in the fleet.** `bx --checks ci` passes all lanes.
    Wall clock and machine time are measured against the hosted run.
    - First run (2026-11-06): 180 units, 160 pass. The tree reds were repaid
@@ -94,14 +99,33 @@ Each stage is its own round and lands on its own.
      schedule in `upstream-watch.yml`, outside the check set.
    - Left, fleet provisioning: C1cc needs valgrind beyond the one machine that
      has it.
-4. **Judged before landing.** `scripts/land.sh` already holds the clone's push
-   lock, so it is already a serial integrator for this machine. It runs
-   `bx --checks ci` on the rebased candidate and pushes only a pass, which is
-   RFC 0024's interim `gate` form. When RFC 0024 is built, `bx --land` takes
-   over the queue, adds speculation and the recovery rules, and land.sh becomes
-   its client. The declaration it will read is `[land] checks = "ci"`. Its
-   saving (an unchanged lane is not run again on a re-land) comes from the
-   kept verdicts of stage 2.
+4. **Judged before landing.** RFC 0024 is built and is `main`'s one writer:
+   `scripts/land.sh` submits to the queue, and its integrator judges each
+   candidate with this tree's pre-push hook, run for the landing push's own
+   line. RFC 0024 spells "judged by the whole gate" two ways: `[land] checks
+   = "ci"`, or the hook itself asking `bx --checks ci` for a push to `main`.
+   Its 4.11 dropped the first draft's `gate` command, which this stage once
+   named. Neither is declared yet, for two reasons that stage 2 removes:
+   - **The queue would not drain.** With nothing kept, every candidate runs
+     the whole set. Stage 3 measured 13,074 s and 26,303 s of wall clock for
+     it over the whole fleet. From 2026-11-07 to 2026-11-14 about 98 landings
+     filed a round on `main`, 3 to 37 a day (the ledger commits there). That
+     is a load λT of about 2 to 4 on an average day and up to about 11 on the
+     busiest, and a queue with λT above 1 grows without end; speculation does
+     not help, since each speculative candidate runs the whole set again.
+     `bx --land-queue --stats` reports the measured value.
+   - **One question, asked twice.** With `checks` set the hook does not judge
+     the candidate and still runs on the landing push, so a candidate the set
+     passed can come back `hook-refused` after hours. With the hook asking
+     `bx --checks ci`, the set runs for the judgement and again for the
+     landing push, unless the second run finds the first one's verdicts
+     kept. RFC 0024 3.6 chooses the hook form for that reason: the judgement
+     and the push ask one question under one key.
+   So the hook form needs kept verdicts (stage 2), and a load below 1 also
+   needs each lane to declare the files its verdict reads (`inputs`), so that
+   a candidate which does not reach a lane finds its verdict kept. Then the
+   hook's push to `main` asks `bx --checks ci`, `[land]` keeps judging by the
+   hook, and the queue's measured load decides the window.
 5. **Hosted CI narrowed.** The per-push Linux jobs of `ci.yml` give way to the
    scheduled clean-room run. `platform.yml` stays.
 
@@ -109,5 +133,9 @@ Each stage is its own round and lands on its own.
 
 - How the account's hosted slots are shared between repositories. Once stage 5
   lands, this tree no longer needs them for its verdict.
-- RFC 0024 section 13: the integrator's server-enforced status, the queue's
-  place in the fleet, and the speculation depth. Those are bx's decisions.
+- The server's rule that only the integrator's identity moves `main` (RFC
+  0024 4.12 and 10.4). The owner sets it once the queue has been the only
+  writer for a week with its load below 1; until then gate 0p is the only
+  thing that keeps a second writer out.
+- Where the integrator runs and with which identity (RFC 0024 13a.2 and
+  13a.3). Those are bx's and the fleet's.

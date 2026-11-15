@@ -46,41 +46,48 @@ git config core.hooksPath .githooks
   One push spent over 16 minutes in static checks; the previous full hook took
   about 90 minutes. Historical warm timings are not a current runtime budget.
 
-  **Push through `bash scripts/land.sh`** (owner, 2026-10-27). Several
-  sessions push to `main` from worktrees of one clone, and a push that filed
-  ledger round N used to lose the hook's minute to another push that filed N,
-  then be refused by origin after its hook passed. `land.sh` holds an exclusive
-  `flock` on `<git common dir>/wz-push.lock` from its fetch to the end of its
-  push: it rebases HEAD onto `origin/main`, files the ledger round with the
-  next number when append-round arguments follow `--` (without `--entry-id`),
-  and pushes `HEAD:main` through the hooks. Gate 0p refuses a push to `main`
-  that does not hold the lock, unless the clone is the queue integrator's
-  (`git config wz.land-integrator true`, set once where `bx --land` runs).
-  Refs of the queue (`refs/bx-land/<branch>/...`) get only the public gates
-  (confidential vocabulary, home paths, identities) over what they add
+  **Land through `bash scripts/land.sh`** (owner, 2026-10-27). Several
+  sessions land on `main` from worktrees of several clones, and a push that
+  filed ledger round N used to lose the hook's minute to another push that
+  filed N, then be refused by origin after its hook passed. `main` therefore
+  has one writer, the bx landing queue (`bx --land`, bx RFC 0024; `[land]` in
+  `bx.toml`). `land.sh` submits HEAD as `refs/bx-land/main/items/<id>` and
+  waits; one integrator, a systemd user unit `bx-land@<key>.service` over its
+  own clone, cherry-picks it onto `main`, files the ledger round its descriptor
+  carries (`file-round`, placed on a machine that holds the pinned ledger CLI,
+  with the number the store gives it on that tree), judges the result with
+  this repository's pre-push hook and pushes. Once it landed, `land.sh` moves
+  the branch onto `origin/main`. Append-round arguments after `--` (without
+  `--entry-id`) are written as a descriptor under `docs/rounds/pending/`
+  (`round_descriptor.py write`), checked with `file-round.sh --check` and
+  committed into the item; a returned item keeps that commit, and
+  `bash scripts/land.sh` alone submits it again. `--status` shows the queue
+  (`bx --land-queue`). Exit codes: 0 landed, 1 returned or a step refused,
+  2 usage or a dirty tree, 3 not submitted, cancelled or not known, 4 landed but the move
+  onto `origin/main` conflicted.
+
+  Gate 0p refuses a push to `main` from any clone that is not the
+  integrator's (`git config wz.land-integrator true`). Refs of the queue
+  (`refs/bx-land/<branch>/...`) get only the public gates (confidential
+  vocabulary, home paths, identities) over what they add
   (`scripts/lib/push-refs.sh`); the repository's own gates judge the candidate
-  after the integrator has put it on the tip. A red previous run is acknowledged by a row in
-  `docs/hosted-red-acks.md` that the pushed range adds, naming the run
-  (`scripts/lib/hosted_red_ack.py`); `--ack-red` and `WZ_ACK_RED` are gone, since
-  a verdict that depends on the pusher's environment cannot be reproduced by a
-  queue integrator. A round can be a descriptor under `docs/rounds/pending/`,
-  filed by `scripts/file-round.sh`. `--status` names the holder; a second
-  session waits for the lock.
+  after the integrator has put it on the tip. bx writes no installation's path
+  into the queue's public log (bx RFC 0024, 4.3a). A red previous run is
+  acknowledged by a row in `docs/hosted-red-acks.md` that the pushed range
+  adds, naming the run (`scripts/lib/hosted_red_ack.py`); `--ack-red` and
+  `WZ_ACK_RED` are gone, since a verdict that depends on the pusher's
+  environment cannot be reproduced by a queue integrator.
 
-  The same push can go through the bx landing queue (`bx --land`, bx RFC 0024;
-  `[land]` in `bx.toml`): the commit is submitted as `refs/bx-land/main/items/<id>`
-  and one integrator, a systemd user unit `bx-land@<key>.service` over its own
-  clone, cherry-picks it onto `main`, files the descriptor's ledger round
-  (`file-round`, placed on a machine that holds the pinned ledger CLI), judges
-  the result with this repository's pre-push hook and pushes. `land.sh` stays
-  the other way in until the queue has landed a week of rounds. The integrator's
-  clone has to be a directory named `watching-zenoh`, hold the six submodules
-  (`validate-workspace` fails without `vendor/`), read the clone-local term list
-  (`.git/wz-nda-terms.txt`, linked to the main checkout's), carry an identity gate
-  0c accepts, and be marked `git config wz.land-integrator true`; mark no other
-  clone, since the marker lifts the lock requirement for every push it makes.
+  The integrator's clone has to be a directory named `watching-zenoh`, hold the
+  six submodules (`validate-workspace` fails without `vendor/`), read the
+  clone-local term list (`.git/wz-nda-terms.txt`, linked to the main
+  checkout's), carry an identity gate 0c accepts, set `core.hooksPath
+  .githooks`, and be marked `git config wz.land-integrator true`; mark no other
+  clone, since the marker admits every push to `main` it makes. Until the
+  server's rule admits only the integrator's identity to `main` (RFC 4.12, the
+  owner's step), the marker is the only thing that keeps a second writer out.
 
-  Mandatory gates remain: the push lock (0p), confidential vocabulary, home
+  Mandatory gates remain: the one writer of main (0p), confidential vocabulary, home
   paths and identities (0/0b/0c), schema and tool pins (1), workspace SSOT
   validation (2), the claim-scoped proof audit (2b), and the previous hosted
   verdict (2c, without waiting for a running job). The owner's 2026-10-27
@@ -110,8 +117,10 @@ git config core.hooksPath .githooks
   do not repeat a broad CI sweep just because a push is about to happen.
 
   To explicitly request the preserved extended local sweep, use
-  `WZ_PREPUSH_EXTENDED=1 bash scripts/land.sh`. This does not bypass mandatory
-  checks. Count-guard builds remain separately opt-in with
+  `WZ_PREPUSH_EXTENDED=1 bash scripts/land.sh`: before it submits, `land.sh`
+  runs the hook over `origin/main..HEAD` as a branch push would be judged, with
+  the sweep on, and submits nothing when it refuses. The integrator's verdict
+  does not see the variable. This does not bypass mandatory checks. Count-guard builds remain separately opt-in with
   `WZ_PREPUSH_COUNT_GUARD=1` inside that extended sweep. The scripts and hosted
   lane assertions are unchanged; hosted failures are diagnosed next round.
   Run `bash scripts/run-ci.sh` manually when a full local CI run is wanted.

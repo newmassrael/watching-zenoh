@@ -13736,6 +13736,100 @@
         "Open: the next steps the owner chose, in order: machine-checked lock order (deadlock detection in test builds, a lock hierarchy, model tests), then no wait under the tables or on the loop's thread, then the snapshot tables as default after measurement.",
         "Open: the peer loop of the demo and the C ABI node have no host heartbeat of their own; their face loops beat."
       ]
+    },
+    "Round 4492": {
+      "decision_summary": "The round that gave each node loop a heartbeat and one watcher thread per process went red on the hosted run, and every red was that round's. The watcher thread was started once and never ended, and its registry was leaked on purpose, so the C ABI's leak programs under valgrind found 45,484 bytes in 50 blocks still reachable at exit. The thread now lives exactly as long as some loop is watched: the first heartbeat starts it, and the drop of the heartbeat that leaves it empty tells it to end, wakes it and joins it, which takes at most one look at the loops. The watcher is a static, not an allocation. A heartbeat registered between that end and the join starts a new thread; a generation count keeps the thread told to end from reading for it. The bound on the threads one report names is used only on Linux, so it was dead code on macOS and Windows and stopped both builds; it now lives in the Linux branch. The C ABI builds grew by 22 to 53 KB over their budgets. The symbol diff of the pico peer against the previous main put 19 KB of that in the float formatter that a report's seconds linked in, and 3 KB in a sort of thread ids. Seconds are now written in whole milliseconds and the threads in the order the kernel lists them. What remains (the thread and its look, the reading of /proc, the start and join of the thread and the face loop's beat) is the capability, and a node that accepts reports its own stop. So each of the five budgets moves to the hosted reading at the previous main plus the growth measured on one build host against that main, and 3,500. The module's seven doc links did not resolve, because rustdoc reads the links of a module documented both in lib.rs and in itself from the parent's scope; they now name their targets from the crate root. Moving the face loop changed accept_loop.rs, which one atom's reason cites. Both of its clauses (the connect reconcile enum and its passive variant) were re-read against the file and still hold, so the pin moves.",
+      "changes_bullets": [
+        "`wz_runtime_tokio::liveness`: the watcher is a static whose thread the first heartbeat starts and the drop of the last heartbeat ends and joins, with a generation count against a successor started between the end and the join.",
+        "The report writes seconds in whole milliseconds (`Seconds`, also used by the lock's contention text) and lists threads in the kernel's order; the bound on reported threads lives in the Linux branch.",
+        "The module's doc links name their targets from the crate root.",
+        "Layer C1cs budgets: pico-peer 3,023,600, pico-default 4,458,200, capic-router-node 6,083,200, capic-default 10,890,600, capic-default-lean 9,311,300.",
+        "The reason pin of `session-close-ingress` on accept_loop.rs moves to that file's present blob."
+      ],
+      "verification_bullets": [
+        "On pc2: the liveness and sync unit tests 11 of 11, including the new tests of the watcher thread's end and restart and of the seconds text; cargo doc of wz-runtime-tokio with every feature finishes with no error; clippy -D warnings clean for wz-runtime-tokio with transport-link-ws, with and without its default features.",
+        "On pc2: the zenoh-c leak programs (pub/sub and queryable/get) under valgrind pass, 2 of 2, against wz-capi-c built with the features the oracle's header selects. The previous head failed both on the hosted run.",
+        "On pc2: the five C ABI builds read 3,016,571 / 4,451,052 / 6,075,734 / 10,881,977 / 9,302,557. The previous main read 2,985,705 / 4,420,270 / 6,048,928 / 10,856,404 / 9,278,968 there, and the budgets are its hosted readings plus that growth and 3,500.",
+        "The cost gate's selftest 24 of 24; the reason pin gate OK.",
+        "Not run: the macOS and Windows builds, which only the hosted run builds (the dead constant that stopped them now sits in the Linux branch)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Open: the consumer's stall is still not reproduced; the self-report waits for a recurrence.",
+        "Open: a consumer claim, accepted this round, for the per-flow decryption outcome and key source in the dissect session document; it comes next.",
+        "Open: the owner's next steps for the node's locks, in order: a machine-checked lock order, then no waiting under the tables or on the loop's thread, then the snapshot tables as default after measurement."
+      ]
+    },
+    "Round 4493": {
+      "decision_summary": "This is the second of the four steps the owner chose for the node's locks: make the order they are taken in a thing a machine checks. A deadlock between two locks needs two threads taking them in opposite orders at the same moment, which a test that runs each order once never lines up; what a test does see is the order. So every acquisition of the runtime's own locks (the plain mutex, the plain reader-writer lock and the plain cell, through which every lock of the router path is taken) goes through a checker in a debug build, as the kernel's lockdep and the debug-build deadlock detection of Abseil's mutex do. A lock's class is the place it was made. The first time any thread waits for a lock of class B while it holds one of class A the order A then B is recorded, with where each was taken and the waiting thread's stack, and the first order that closes a cycle is refused before its wait begins, naming every order of the cycle and the stacks that first took them: a test that reaches the second order fails at once and says why. Only a wait orders: a try that does not wait records nothing. The recursive read of the reader-writer lock waits only for a writer that holds the lock, so a cycle that enters a lock by a recursive read and leaves it held shared is broken there and not reported, which is lockdep's rule for recursive reads and what keeps the router's nested table reads from reading as deadlocks; the read that queues behind a waiting writer is ordered as the read it may become. A lock taken again by its holder is refused unless it is a recursive read under a read. Two locks of one class nested by one thread (two faces' locks) are ordered by instance, by a number each lock is given on first use, which moves with the lock and is never given again, and is forgotten when the lock is dropped. WZ_LOCK_ORDER=log reports without stopping and off does not check; a release build carries none of it. Its first measurement found one cycle in the router: the program's callbacks hosted by the router (the node's own subscribers and queryables) were called inside the routing tables' read when the route that reached them opened no delivery span, and a callback may declare, which writes the tables. Every production route opens the span; five tests did not, by publishing through the tables directly. The fallback is now asserted unreachable in a debug build and the tests publish as the node's session does. The router's table accessors and the hosted call carry the caller's place, so an order names the router code that took it. The suites of the runtime crate in two configurations, its integration tests, the demo's and the workspace's integration tests, and the router tests in the eight feature combinations their lanes run all pass with the checker on and report no other cycle.",
+      "changes_bullets": [
+        "New `sync::lock_order` (debug builds only): the per-thread list of held locks, the process's graph of orders by class with first witnesses and stacks, a cycle search that lets a recursive read into a shared hold break a cycle, per-instance ordering of one class's locks by a number given on first use, and `WZ_LOCK_ORDER=log|off`.",
+        "`PlainMutex`, `PlainRwLock` and `PlainCell` carry where they were made and report each wait and each hold; their guards are now types of this crate that carry the hold, with the same `Deref`/`DerefMut` as before. Release builds compile the bookkeeping out.",
+        "The router's table accessors (`on_tables`, `on_tables_for_a_frame`, `on_tables_mut`, `TablesCell::read`, `read_behind_a_writer_waiting`, `write`) and the hosted handler's call carry the caller's place in debug builds.",
+        "A debug assertion that a hosted subscriber or queryable is never called under the routing tables (the route must have opened its delivery span); the differential tests' node session and the self-echo tests publish through the node's own publish."
+      ],
+      "verification_bullets": [
+        "On a build host, debug, the checker on: wz-runtime-tokio's unit tests with default features (689) and with routing-router-hat, routing-peer and transport-link-ws (1157), its integration tests, wz-ap-demo's tests and wz-integration-tests' tests all pass, and no lock-order report or hosted-callback assertion is printed.",
+        "The router_forward tests in the eight feature combinations their lanes run (router-hat alone and with transport-qos, router-multicast-faces, access-acl, interceptor hot reload, token tables, transport-multicast, router link-state) pass, 310 to 368 each, with no report; 310 under router-hat alone is the count Layer C1AY holds.",
+        "The checker's own tests: two orders of two locks refused at the second with both places; a self wait refused, a recursive read under a read let through, a write and a queued read under a read refused; a try orders nothing; a recursive read into a shared hold breaks the cycle and a queued read does not; one class's two locks ordered by instance; a lock that moves keeps its number; a class is its construction site.",
+        "The first run reported the cycle through the hosted callbacks, with the stacks of both orders; after the change no test reaches the fallback.",
+        "The allocation count of the fragment chain over a lending link is unchanged in a debug build (the checker's records are kept per thread after a warm-up).",
+        "clippy -D warnings clean for wz-runtime-tokio with transport-link-ws (all targets, and without default features), with routing-router-hat and routing-peer (all targets), and in a release build; the reason pin and prose-name gates pass.",
+        "Not run: the ignored end-to-end legs that need external binaries, which hosted lanes run in debug and where a production order the unit suites do not reach would now fail with its stacks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Open: the consumer's stall is still not reproduced; the self-report and now the lock-order checker wait for a recurrence or a debug run that reaches it.",
+        "Open: the locks of the router path still taken through std's mutex (node statistics, the host's configuration, membership) are not checked; moving them to the plain locks puts them under the checker.",
+        "Open: the next steps of the owner's plan: no waiting under the tables or on the loop's thread, enforced by types (the hosted-callback assertion of this round is its first instance), then the snapshot tables as default after measurement.",
+        "Open: a consumer claim for the per-flow decryption outcome and key source, implemented on its own branch and under verification."
+      ]
+    },
+    "Round 4494": {
+      "decision_summary": "main has one writer: land.sh submits a session's commits to the bx --land queue (bx RFC 0024), the queue's integrator files the round and judges with the repository's own pre-push hook, and gate 0p admits only an integrator clone to main. The NDA gate reads an integrator account's term list from ~/.config/watching-zenoh/nda-terms.txt when the clone has no .git list, so integrators on other machines can judge (fleet registry hook_files). Owner decisions 2026-11-14 (one writer, no --no-verify) and 2026-11-15 (install the second integrator now).",
+      "changes_bullets": [
+        "scripts/land.sh submits HEAD with bx --land and waits; descriptor written from append-round args",
+        ".githooks/pre-push gate 0p admits only a clone with wz.land-integrator true to main",
+        "scripts/lib/nda-scan.sh reads ~/.config/watching-zenoh/nda-terms.txt second; the repository list wins; neither refuses naming both",
+        "nda_scan_selftest.py holds the three placements; round_descriptor, file-round, ledger-round, hook gates follow",
+        "CLAUDE.md, docs/agent-reference.md, docs/verdicts-in-the-fleet.md describe the one writer"
+      ],
+      "verification_bullets": [
+        "Local, at the c2-land tip merged with origin/main: nda_scan_selftest OK (includes the home-list control and the refusal naming both places); hook_default_region_gate --selftest and run rc 0; round_fed_gate_reach --selftest and run rc 0; round_descriptor --selftest rc 0; run-ci --layer C0i rc 0; bash -n and shellcheck -S warning over land.sh, pre-push, file-round.sh, ledger-round.sh, nda-scan.sh rc 0. The integrator's hook run judges this item."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Install the queue on hkl002 and pc4 (fleet registry [[queue]] watching-zenoh, hook_files the term list), then drain and uninstall the workbench integrator. Owner step if doctor reports it: add watching-zenoh to the bx-land-newmassrael App's repository access."
+      ]
+    },
+    "Round 4495": {
+      "decision_summary": "A consumer of the dissect library asked why a TLS or QUIC flow of the session document was not read, and where a read flow's keys came from. Until now the document said only `encrypted_unreadable`, with the reason `no_matching_key` or `encrypted`. The second reason held every other case: no key material at all, a capture joined after the ClientHello, a record that did not open under the matching keys, a key log of one peer, a QUIC flow. The decryption pass already told these apart (the TLS opener's refusals, the QUIC flow's census), but only the command line printed them. The QUIC per-flow outcomes were computed and then dropped before any document was written, and nothing recorded which route a secret arrived by. Session table revision 13 gives every flow two cells. `decryption` says what the pass made of a TLS or QUIC flow, in eight words, each naming its remedy: `opened`, `no_keys`, `no_matching_key`, `keys_refused`, `key_for_one_direction`, `handshake_not_seen`, `not_supported` (a suite or version this pass has no schedule for, decided before any key) and `record_not_held`. `key_source` says, for a flow the pass opened, whether its secrets came from the capture's own Decryption Secrets Blocks, from a key log handed in, or from both. An outcome the library cannot know yet is never folded into a word. A flow whose keys were accepted and that has opened nothing, a flow a pass has not judged although keys reached one, and a live QUIC flow that has not settled are null with the new reason `not_yet_known`. Clear flows are null with `not_encrypted`, and a source is null with `not_opened` where nothing opened. To make that answerable, each secret of a key log remembers its route; the TLS opener answers an accepted flow with the route of the connection's secrets; the QUIC opener records the route of the keys it installed, the version it refused, and the packets refused under held keys apart from those refused for the capture's own shape; and the dissection records whether any key material ever reached a pass, so that a flow no pass has judged is `no_keys` only when none did. The file doors and the live handle write the cells from the same facts, so an ended handle and a door write the same bytes. The `encrypted` cell and the row's role cells keep their meaning: `decrypted_tls` still says the keys were accepted, and `decryption` says whether anything has opened yet.",
+      "changes_bullets": [
+        "session_table revision 13: each flow object gains `decryption` (value family `decryption`, eight words) and `key_source` (`capture`, `key_log`, `both`), and the reason family gains `not_encrypted`, `not_yet_known` and `not_opened`; the header documents every word with its remedy and the TLS and QUIC rules in order.",
+        "wz-tls-record: a key log's secrets carry their route; `CaptureOpener::begin_flow` answers the connection's key source; the QUIC opener records the installed keys' source, a refused version and the refusals under held keys; `QuicFlowOutcome` carries them; the live decryptor sets each QUIC flow's finding and settles it at the handle's end.",
+        "wz-capture: `KeySource`, the openable suite set, `TlsFlowState::key_source`, the per-flow `QuicKeyFinding` and the dissection's record that key material reached a pass; `RecordOpener::begin_flow` returns the key source.",
+        "The C consumer, the document pins and the vocabulary tests move to revision 13; the ABI symbol set does not move (57)."
+      ],
+      "verification_bullets": [
+        "On a build host: the tests of wz-tls-record, wz-capture and wz-capi-dissect, 1708 passing (the handle memory gate among them, unchanged ceilings), with new tests for each decryption word and each key source on keyed doors, on a handle before and after a key log arrives, on a capture joined mid-session, on a TLS 1.2 suite, on a half key log, and on QUIC at the door and on a handle.",
+        "Layer C1bo: the C consumer compiled against the header, linked the release cdylib and read the tree, including the new cells of an unread TLS flow without keys and with another connection's key log; the header compiles as C++; the ABI pin holds at 57.",
+        "The document-revision consumer pin, the reason pin and the prose-name gates pass; clippy -D warnings clean for the three crates; their docs build; the whole workspace checks with all targets."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Open: a live handle fixes a flow's key source when the pass takes the connection's secrets, so a label that arrives by both routes in another order than a document door reads them (capture blocks, then the key log) can read differently on the handle; the header says so.",
+        "Open: the row's role cells of an unread QUIC flow keep the coarse reason; the flow's `decryption` holds the finer one.",
+        "Open: the consumer's router stall (no lock-order cycle found on its path; the std locks of the router path and the waits that are not locks remain), and the owner's next steps for the node's locks."
+      ]
     }
   },
   "inventory_entries": {

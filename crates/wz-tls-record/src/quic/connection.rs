@@ -43,7 +43,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use wz_capture::tls::Direction;
+use wz_capture::tls::{Direction, KeySource};
 
 use super::frames::{self, PieceOf, StreamReassembler};
 use super::{LongHeader, PacketSpace, QuicKeys, QuicOpenError, QuicVersion};
@@ -105,6 +105,12 @@ pub struct DirectionCensus {
     pub no_keys: usize,
     /// Packets refused for any other reason.
     pub refused: usize,
+    /// Of [`Self::refused`], packets of a space whose keys came from the key
+    /// log (0-RTT, Handshake, 1-RTT) that did not open under them. Apart from
+    /// the rest because the rest are about the capture (a Retry, a truncated
+    /// header, a version not opened, a short header with no known connection
+    /// id length) and these are about the keys.
+    pub refused_under_keys: usize,
     /// Opened packets per space, indexed by [`PacketSpace::index`].
     pub opened_per_space: [usize; 4],
     /// Frames walked.
@@ -261,6 +267,12 @@ pub struct QuicFlowOpener {
     /// R311y709 (Y2) — this flow's identity was ADOPTED from a key log holding
     /// exactly one connection, rather than read from a ClientHello it saw.
     identity_adopted: bool,
+    /// Where the secrets installed for this connection came from, once any
+    /// were ([`Self::key_source`]).
+    key_source: Option<KeySource>,
+    /// The first nonzero version a long header declared that this reader
+    /// does not open ([`Self::refused_version`]).
+    refused_version: Option<u32>,
 }
 
 impl core::fmt::Debug for QuicFlowOpener {
@@ -309,6 +321,8 @@ impl QuicFlowOpener {
             frame_types: [Vec::new(), Vec::new()],
             census: [DirectionCensus::default(); 2],
             identity_adopted: false,
+            key_source: None,
+            refused_version: None,
         }
     }
 
@@ -387,6 +401,7 @@ impl QuicFlowOpener {
         let Some(secrets) = self.log.get(&only) else {
             return;
         };
+        let source = secrets.origins().key_source();
         // Both parties' application secrets, as candidates in BOTH directions.
         let mut derived: Vec<QuicKeys> = Vec::new();
         for is_server in [false, true] {
@@ -442,6 +457,7 @@ impl QuicFlowOpener {
         self.client_random = Some(only);
         self.identity_adopted = true;
         self.keys_installed = true;
+        self.key_source = source;
     }
 
     /// Offer one UDP payload, in capture order.
@@ -481,6 +497,11 @@ impl QuicFlowOpener {
             };
             let raw = u32::from_be_bytes(raw.try_into().expect("four bytes"));
             let Some(version) = QuicVersion::from_wire(raw) else {
+                // Version 0 is a Version Negotiation packet, which answers a
+                // version rather than choosing one.
+                if raw != 0 {
+                    self.refused_version.get_or_insert(raw);
+                }
                 out.push(self.refuse(d, None, QuicOpenError::UnsupportedVersion(raw)));
                 break;
             };
@@ -649,6 +670,11 @@ impl QuicFlowOpener {
                 self.one_rtt_at[d] = next;
                 return self.deliver(direction, space, opened);
             }
+        }
+        // Only the Initial space's keys come from the wire; every other
+        // space's came from the key log.
+        if space != PacketSpace::Initial {
+            self.census[d].refused_under_keys += 1;
         }
         self.refuse(d, Some(space), last)
     }
@@ -837,6 +863,7 @@ impl QuicFlowOpener {
             // where everybody typed it.
             return;
         };
+        let source = secrets.origins().key_source();
         let c = dir_index(client);
         let s = 1 - c;
         let mut plan: Vec<(usize, PacketSpace, Vec<u8>)> = Vec::new();
@@ -881,6 +908,7 @@ impl QuicFlowOpener {
                 .collect();
         }
         self.keys_installed = true;
+        self.key_source = source;
     }
 
     /// Count a refusal and describe it.
@@ -991,6 +1019,19 @@ impl QuicFlowOpener {
     /// Whether the key log held this connection's secrets.
     pub fn keys_installed(&self) -> bool {
         self.keys_installed
+    }
+
+    /// Where the secrets installed for this connection came from, over every
+    /// secret the key log held for it: `None` while none were installed.
+    pub fn key_source(&self) -> Option<KeySource> {
+        self.key_source
+    }
+
+    /// The first nonzero version a long header declared that this reader does
+    /// not open, if one did. A Version Negotiation packet's version 0 is not
+    /// one: it answers a version rather than choosing it.
+    pub fn refused_version(&self) -> Option<u32> {
+        self.refused_version
     }
 }
 
@@ -1790,5 +1831,56 @@ mod tests {
             }]
         );
         assert_eq!(opener.census()[0].refused, 1);
+        assert_eq!(
+            opener.refused_version(),
+            None,
+            "a Version Negotiation packet answers a version and refuses none"
+        );
+    }
+
+    /// A VERSION THIS READER DOES NOT OPEN is remembered, the first one, and
+    /// is a refusal about the capture and not about keys.
+    #[test]
+    fn a_version_this_reader_does_not_open_is_remembered() {
+        const V2: u32 = 0x6b33_43cf;
+        let mut packet = alloc::vec![0xc3u8];
+        packet.extend_from_slice(&V2.to_be_bytes());
+        packet.push(SCID.len() as u8);
+        packet.extend_from_slice(&SCID);
+        packet.push(0);
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+
+        let mut opener = QuicFlowOpener::new(KeyLog::default());
+        assert_eq!(
+            opener.push_datagram(Direction::A, 0, &packet),
+            alloc::vec![PacketOutcome::Refused {
+                space: None,
+                why: QuicOpenError::UnsupportedVersion(V2),
+            }]
+        );
+        assert_eq!(opener.refused_version(), Some(V2));
+        assert_eq!(opener.version(), None);
+        assert_eq!(opener.census()[0].refused_under_keys, 0);
+    }
+
+    /// THE INSTALLED KEYS' SOURCE is the key log's when a caller handed it
+    /// in, and none is named before any key is installed.
+    #[test]
+    fn the_installed_keys_name_where_they_came_from() {
+        let random: [u8; 32] = [0x21; 32];
+        let hello = client_hello(&random);
+        let payload = crypto_frame(0, &hello);
+        let (packet, _) = super::super::tests::protected_initial(0, &payload);
+
+        let mut keyless = QuicFlowOpener::new(KeyLog::default());
+        keyless.push_datagram(Direction::A, 0, &packet);
+        assert_eq!(keyless.client_random(), Some(random));
+        assert!(!keyless.keys_installed());
+        assert_eq!(keyless.key_source(), None);
+
+        let mut opener = QuicFlowOpener::new(log_for(&random, 1));
+        opener.push_datagram(Direction::A, 0, &packet);
+        assert!(opener.keys_installed());
+        assert_eq!(opener.key_source(), Some(KeySource::KeyLog));
     }
 }

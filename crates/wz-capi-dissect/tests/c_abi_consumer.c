@@ -2988,7 +2988,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":13},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":14},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
@@ -3037,9 +3037,18 @@ static int check_session_table_doors(void) {
                             "\"count\":0}]") != NULL,
           "both exclusions are always named: %s", from_file);
     /* A UDP flow numbers no bytes: its stream anomalies are null, and its own
-     * `unstated` says why. Nothing was evicted, and that is stated too. */
+     * `unstated` says why. It is clear, so it has nothing to decrypt: its two
+     * decryption cells are null and named `not_encrypted` (session_table
+     * revision 13). Nothing was evicted, and that is stated too. */
+    CHECK(strstr(from_file, "\"encrypted\":\"clear\",\"decryption\":null,"
+                            "\"key_source\":null,\"bytes\":") != NULL,
+          "a clear flow states no decryption: %s", from_file);
     CHECK(strstr(from_file, "\"stream_anomalies\":null,\"unstated\":"
-                            "[{\"cell\":\"stream_anomalies\","
+                            "[{\"cell\":\"decryption\","
+                            "\"reason\":\"not_encrypted\"},"
+                            "{\"cell\":\"key_source\","
+                            "\"reason\":\"not_encrypted\"},"
+                            "{\"cell\":\"stream_anomalies\","
                             "\"reason\":\"no_sequence\"}]") != NULL,
           "a udp flow states no stream anomalies: %s", from_file);
     CHECK(strstr(from_file, "\"evicted_stream_anomalies\":{\"retransmits\":0,"
@@ -3144,6 +3153,79 @@ static int check_session_table_doors(void) {
         CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle add_keylog rc=%d", rc);
         rc = wz_dissect_live_add_keylog(h, NULL, 4, &named);
         CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null key bytes with a length rc=%d", rc);
+    }
+
+    /* (session_table revision 13) -- what the pass made of a TLS flow, read
+     * off its flow object. One segment carries a ClientHello and two
+     * protected records. With no key anywhere the flow reads `no_keys` and
+     * has no source; with a key log naming only another connection it reads
+     * `no_matching_key`. Opening a record needs a cipher this file does not
+     * carry, so the `opened` words are held in Rust, against records rustls
+     * sealed. */
+    {
+        static const char other_keys[] =
+            "CLIENT_TRAFFIC_SECRET_0 "
+            "3333333333333333333333333333333333333333333333333333333333333333 "
+            "000102030405060708090a0b0c0d0e0f"
+            "101112131415161718191a1b1c1d1e1f\n";
+        unsigned char tls[5 + 4 + 48 + 2 * (5 + 24)];
+        unsigned char tls_frame[34 + 20 + sizeof tls];
+        unsigned char tls_file[24 + 16 + sizeof tls_frame];
+        char *unread = NULL;
+        char *unmatched = NULL;
+        size_t at = 0;
+        size_t tls_frame_len;
+        size_t tls_file_len;
+        int r;
+
+        tls[at++] = 0x16; /* handshake */
+        tls[at++] = 0x03;
+        tls[at++] = 0x01;
+        tls[at++] = 0x00;
+        tls[at++] = 4 + 48;
+        tls[at++] = 0x01; /* ClientHello */
+        tls[at++] = 0x00;
+        tls[at++] = 0x00;
+        tls[at++] = 48;
+        tls[at++] = 0x03; /* legacy_version */
+        tls[at++] = 0x03;
+        memset(tls + at, 0x5a, 32); /* the random */
+        at += 32;
+        memset(tls + at, 0, 48 - 2 - 32);
+        at += 48 - 2 - 32;
+        for (r = 0; r < 2; r++) {
+            tls[at++] = 0x17; /* application_data */
+            tls[at++] = 0x03;
+            tls[at++] = 0x03;
+            tls[at++] = 0x00;
+            tls[at++] = 24;
+            memset(tls + at, 0xab, 24);
+            at += 24;
+        }
+        tls_frame_len = tcp_frame_with(tls_frame, 1000, tls, at);
+        tls_file_len = pcap_of_frames(tls_file, tls_frame, tls_frame_len, 1);
+
+        rc = wz_dissect_pcap_session_table(tls_file, tls_file_len,
+                                           WZ_DISSECT_LIMITS_NONE, &unread);
+        CHECK(rc == WZ_DISSECT_OK && unread != NULL, "tls session table rc=%d", rc);
+        CHECK(strstr(unread, "\"encrypted\":\"encrypted_unreadable\","
+                             "\"decryption\":\"no_keys\",\"key_source\":null,"
+                             "\"bytes\":") != NULL,
+              "a TLS flow no key reached reads no_keys: %s", unread);
+        CHECK(strstr(unread, "{\"cell\":\"key_source\","
+                             "\"reason\":\"not_opened\"}") != NULL,
+              "and names why it has no source: %s", unread);
+        wz_dissect_string_free(unread);
+
+        rc = wz_dissect_pcap_session_table_keyed(
+            tls_file, tls_file_len, WZ_DISSECT_LIMITS_NONE,
+            (const unsigned char *)other_keys, sizeof other_keys - 1, &unmatched);
+        CHECK(rc == WZ_DISSECT_OK && unmatched != NULL,
+              "keyed tls session table rc=%d", rc);
+        CHECK(strstr(unmatched, "\"decryption\":\"no_matching_key\","
+                                "\"key_source\":null,") != NULL,
+              "keys for another connection read no_matching_key: %s", unmatched);
+        wz_dissect_string_free(unmatched);
     }
     wz_dissect_live_close(h);
     return 0;
@@ -4653,9 +4735,14 @@ int main(void) {
      * 12: `no_matching_key`, the reason a row's cells are unstated when key
      * material was handed in and named no secret of this flow's connection.
      * One family gains a word; nothing retires.
-     * 13: model 7, as the field document's 68. */
+     * 13: every flow of a row carries `decryption` (what the decryption pass
+     * made of a TLS or QUIC flow) and `key_source` (where the secrets that
+     * opened it came from), and `reason` gains `not_encrypted`,
+     * `not_yet_known` and `not_opened`. Keys and two families arrive, two
+     * families gain words; nothing retires.
+     * 14: model 7, as the field document's 68. No key moves. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 13;
+    revisioned[12].revision = 14;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
