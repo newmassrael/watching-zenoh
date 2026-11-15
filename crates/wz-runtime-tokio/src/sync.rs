@@ -71,7 +71,22 @@ impl<T> PlainMutex<T> {
     pub const fn new(value: T) -> Self {
         Self {
             lock: parking_lot::const_mutex(value),
-            made: Made::here(),
+            made: Made::here(false),
+        }
+    }
+
+    /// A lock over `value` that its holder keeps across a wait for an event, as a sender keeps its
+    /// conduit while it waits for room on its link (`Runtime::new_mutex_held_across_waits`).
+    /// The lock-order checker of a debug build lets a condition variable be waited on under it.
+    /// The other half of the rule (a thread that holds another lock takes it only with a `try_*`,
+    /// since waiting for it would hold that one for as long as the event takes) is not checked
+    /// yet: the router and the session still wait for a conduit under their own locks, and making
+    /// them not is the next step of the node's locks.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub const fn held_across_waits(value: T) -> Self {
+        Self {
+            lock: parking_lot::const_mutex(value),
+            made: Made::here(true),
         }
     }
 
@@ -89,7 +104,7 @@ impl<T> PlainMutex<T> {
         let guard = self.lock.lock();
         PlainGuard {
             guard,
-            _holds: self.made.taken(Held::Exclusive),
+            holds: self.made.taken(Held::Exclusive),
         }
     }
 
@@ -116,7 +131,7 @@ impl<T> PlainMutex<T> {
         let guard = self.lock.try_lock()?;
         Some(PlainGuard {
             guard,
-            _holds: self.made.taken(Held::Exclusive),
+            holds: self.made.taken(Held::Exclusive),
         })
     }
 
@@ -130,7 +145,88 @@ impl<T> PlainMutex<T> {
 /// What [`PlainMutex::lock`] holds the lock with.
 pub struct PlainGuard<'a, T> {
     guard: parking_lot::MutexGuard<'a, T>,
-    _holds: Holds,
+    holds: Holds,
+}
+
+/// A condition variable over a [`PlainMutex`], in the shape of `std::sync::Condvar` (a wait
+/// takes the guard and answers it), so that a caller of `std`'s reads the same: `parking_lot`'s,
+/// which pairs with the mutex, and whose wait makes no system call when nobody is to be woken.
+///
+/// In a debug build a wait is checked like a lock ([`lock_order`]): the guard's lock leaves the
+/// thread's held locks for as long as the wait lasts, and a thread that waits while it holds
+/// any OTHER lock is reported. A condition variable waits for an event another thread makes,
+/// and that thread may need the lock the waiter holds; no order of locks shows it, which is why
+/// it is checked here.
+pub struct PlainCondvar(parking_lot::Condvar);
+
+/// Whether [`PlainCondvar::wait_timeout`] ended because its time ran out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaitTimeoutResult(bool);
+
+impl WaitTimeoutResult {
+    /// The time ran out before a notice came.
+    pub fn timed_out(&self) -> bool {
+        self.0
+    }
+}
+
+impl PlainCondvar {
+    /// A condition variable nobody waits on.
+    pub const fn new() -> Self {
+        Self(parking_lot::Condvar::new())
+    }
+
+    /// Give up `guard`'s lock and wait for a notice, then take the lock again and answer the
+    /// guard. The error arm is never taken, as [`PlainMutex::lock`]'s is not.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn wait<'a, T>(
+        &self,
+        mut guard: PlainGuard<'a, T>,
+    ) -> Result<PlainGuard<'a, T>, NeverPoisoned<PlainGuard<'a, T>>> {
+        let suspended = guard.holds.suspend();
+        self.0.wait(&mut guard.guard);
+        guard.holds.resume(suspended);
+        Ok(guard)
+    }
+
+    /// [`Self::wait`] for at most `limit`.
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[allow(clippy::type_complexity)]
+    pub fn wait_timeout<'a, T>(
+        &self,
+        mut guard: PlainGuard<'a, T>,
+        limit: std::time::Duration,
+    ) -> Result<
+        (PlainGuard<'a, T>, WaitTimeoutResult),
+        NeverPoisoned<(PlainGuard<'a, T>, WaitTimeoutResult)>,
+    > {
+        let suspended = guard.holds.suspend();
+        let result = self.0.wait_for(&mut guard.guard, limit);
+        guard.holds.resume(suspended);
+        Ok((guard, WaitTimeoutResult(result.timed_out())))
+    }
+
+    /// Wake one waiter, if there is one.
+    pub fn notify_one(&self) {
+        self.0.notify_one();
+    }
+
+    /// Wake every waiter.
+    pub fn notify_all(&self) {
+        self.0.notify_all();
+    }
+}
+
+impl Default for PlainCondvar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Debug for PlainCondvar {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PlainCondvar")
+    }
 }
 
 impl<T> core::ops::Deref for PlainGuard<'_, T> {
@@ -175,23 +271,58 @@ struct Made {
     at: &'static core::panic::Location<'static>,
     #[cfg(debug_assertions)]
     id: core::sync::atomic::AtomicU64,
+    /// Whether its holder may keep it across a wait for an event
+    /// ([`PlainMutex::held_across_waits`]).
+    #[cfg(debug_assertions)]
+    across_waits: bool,
 }
 
 /// A held lock's entry in its thread's list of held locks, carried by the guard: the checker's
 /// token in a debug build, nothing in a release build.
 struct Holds {
-    /// Read by nothing: what it does, it does when it is dropped with the guard.
+    /// Dropped with the guard, it takes the lock off the thread's list; a condition variable's
+    /// wait takes it off and puts it back around the wait.
     #[cfg(debug_assertions)]
-    _token: lock_order::Token,
+    token: lock_order::Token,
+}
+
+/// What a condition variable's wait took off the thread's list, to put back after it.
+#[cfg(debug_assertions)]
+struct Suspended(Option<lock_order::Holding>);
+#[cfg(not(debug_assertions))]
+struct Suspended;
+
+#[cfg(debug_assertions)]
+impl Holds {
+    #[track_caller]
+    fn suspend(&self) -> Suspended {
+        Suspended(self.token.suspend(core::panic::Location::caller()))
+    }
+
+    fn resume(&self, suspended: Suspended) {
+        self.token.resume(suspended.0);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+impl Holds {
+    #[inline(always)]
+    fn suspend(&self) -> Suspended {
+        Suspended
+    }
+
+    #[inline(always)]
+    fn resume(&self, _suspended: Suspended) {}
 }
 
 #[cfg(debug_assertions)]
 impl Made {
     #[track_caller]
-    const fn here() -> Self {
+    const fn here(across_waits: bool) -> Self {
         Self {
             at: core::panic::Location::caller(),
             id: core::sync::atomic::AtomicU64::new(0),
+            across_waits,
         }
     }
 
@@ -218,7 +349,13 @@ impl Made {
     #[track_caller]
     fn taken(&self, held: Held) -> Holds {
         Holds {
-            _token: lock_order::acquired(self.at, self.id(), held, core::panic::Location::caller()),
+            token: lock_order::acquired(
+                self.at,
+                self.id(),
+                held,
+                self.across_waits,
+                core::panic::Location::caller(),
+            ),
         }
     }
 }
@@ -236,7 +373,7 @@ impl Drop for Made {
 
 #[cfg(not(debug_assertions))]
 impl Made {
-    const fn here() -> Self {
+    const fn here(_across_waits: bool) -> Self {
         Self {}
     }
 
@@ -399,7 +536,7 @@ impl<T> PlainRwLock<T> {
             lock: parking_lot::const_rwlock(value),
             oldest_writer_since: core::sync::atomic::AtomicU64::new(0),
             waiting: parking_lot::const_mutex(Vec::new()),
-            made: Made::here(),
+            made: Made::here(false),
         }
     }
 

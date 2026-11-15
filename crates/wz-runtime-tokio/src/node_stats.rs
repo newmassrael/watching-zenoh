@@ -41,7 +41,9 @@
     all(feature = "transport-multicast", feature = "transport-stats")
 ))]
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use crate::sync::PlainMutex;
 use std::time::Instant;
 
 use wz_session_core::stats_registry::StatsRegistry;
@@ -60,7 +62,7 @@ use crate::session_glue::SessionLinkActions;
 /// snapshot of it per GET.
 #[derive(Clone)]
 pub struct NodeStats {
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<PlainMutex<Inner>>,
 }
 
 /// The registry and the keys of the open transports — what a reader of a
@@ -162,7 +164,7 @@ impl NodeStats {
     /// `build_version` in its build-info block.
     pub fn new(zid_hex: &str, whatami: WhatAmI, build_version: &str) -> Self {
         NodeStats {
-            inner: Arc::new(Mutex::new(Inner {
+            inner: Arc::new(PlainMutex::new(Inner {
                 registry: StatsRegistry::new(zid_hex, whatami, build_version),
                 origin: Instant::now(),
                 #[cfg(feature = "transport-unicast")]
@@ -192,14 +194,11 @@ impl NodeStats {
         }
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
     fn with<T>(&self, f: impl FnOnce(&mut Inner) -> T) -> T {
-        // A poisoned lock means a panic mid-record; the counts are still the
+        // The runtime's own lock is not poisoned by a panic mid-record: the counts are still the
         // best this node has, so they are served rather than lost.
-        let mut guard = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        f(&mut guard)
+        self.inner.with(f)
     }
 
     /// The session behind `actions` was established as this node's transport

@@ -34,17 +34,26 @@ pub(super) struct FaceRuntime {
     /// The ids this node gave the declarations it sent to the face, when the face keeps them by
     /// id ([`declaration_ids`](super::declaration_ids)).
     pub(super) declaration_ids: PlainMutex<DeclarationIds>,
+    /// Whether a chain of fragments is being sent to this face, as a DESTINATION, off the
+    /// router's threads, in each lane ([`egress`](super::egress), indexed by `Lane::index`):
+    /// while it is, what is routed to the face in that lane is held behind it, so that it keeps
+    /// its place in the order.
+    pub(super) chain_in_flight: Arc<[core::sync::atomic::AtomicBool; 2]>,
 }
 
 impl FaceRuntime {
     /// The runtime of a face that has just registered: nothing held, no gate, no declaration
-    /// numbered yet.
+    /// numbered yet, no chain being sent.
     pub(super) fn new(actions: Arc<SessionLinkActions>) -> Self {
         Self {
             actions,
             held: Queues::default(),
             gate_wake: Arc::new(tokio::sync::Notify::new()),
             declaration_ids: PlainMutex::new(DeclarationIds::default()),
+            chain_in_flight: Arc::new([
+                core::sync::atomic::AtomicBool::new(false),
+                core::sync::atomic::AtomicBool::new(false),
+            ]),
         }
     }
 }

@@ -28,7 +28,9 @@
 //! that was refused is no worse off than one admitted a moment before the load came.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+
+use crate::sync::{PlainGuard, PlainMutex};
 
 use crate::accept_loop::FaceId;
 use crate::session_glue::SessionLinkActions;
@@ -42,14 +44,16 @@ struct Held {
 /// The sessions a router holds, as far as shedding needs them.
 #[derive(Default)]
 pub struct ShedRegistry {
-    held: Mutex<BTreeMap<FaceId, Held>>,
+    held: PlainMutex<BTreeMap<FaceId, Held>>,
     shed: std::sync::atomic::AtomicUsize,
 }
 
 impl ShedRegistry {
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<FaceId, Held>> {
-        // A panic while the lock was held left a map of handles, which is still a map of handles.
-        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The registry's map. The runtime's own lock, not poisoned by a panic in a holder: a panic
+    /// while it was held left a map of handles, which is still a map of handles.
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn lock(&self) -> PlainGuard<'_, BTreeMap<FaceId, Held>> {
+        self.held.guard()
     }
 
     /// A session of the router, held from now.

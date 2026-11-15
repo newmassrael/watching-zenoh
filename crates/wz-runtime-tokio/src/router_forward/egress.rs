@@ -82,9 +82,22 @@
 //!
 //! A put of the node's own session is not held either: its publisher is the one to slow down,
 //! and waits for room outside the tables ([`super::local_publish`]).
+//!
+//! ## A chain of fragments
+//!
+//! A message longer than the link's batch leaves as a chain of fragments, and a chain needs room
+//! for each fragment in turn: its send waits between them. It used to wait where it was routed,
+//! with the tables held for reading (or, from a pass of the held messages, on the loop), and a
+//! destination that did not read then stopped the router for up to `wait_before_close` per chain:
+//! every writer of the tables waited for that read, and every face's reader that queues behind a
+//! waiting writer with them. The lock-order checker of a debug build (`crate::sync`) reports
+//! such a wait, a condition variable waited on with the tables held. A chain is now sent off the
+//! router's threads ([`RouterForwarder::send_chain_off_thread`]) and its destination's lane is
+//! marked while it goes, so that what follows it there is held behind it and keeps its order.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -240,6 +253,14 @@ impl Lane {
         match msg {
             NetworkMessage::Oam(_) => Self::Control,
             _ => Self::Data,
+        }
+    }
+
+    /// The lane's place in a destination's per-lane state (`FaceRuntime::chain_in_flight`).
+    fn index(self) -> usize {
+        match self {
+            Self::Data => 0,
+            Self::Control => 1,
         }
     }
 }
@@ -529,10 +550,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         express: bool,
         priority: Priority,
     ) -> Credited {
-        // Behind what the destination already holds in the message's lane, whatever room it has
-        // now: a message that went past its predecessors would put one source's messages out of
-        // order.
-        if !state.runtime.held.lane(Lane::of(&msg)).guard().is_empty() {
+        // Behind what the destination already holds in the message's lane, or a chain it is
+        // being sent in that lane, whatever room it has now: a message that went past its
+        // predecessors would put one source's messages out of order.
+        let lane = Lane::of(&msg);
+        if !state.runtime.held.lane(lane).guard().is_empty()
+            || state.runtime.chain_in_flight[lane.index()].load(Ordering::SeqCst)
+        {
             self.hold_and_recheck(dest, state, msg, reliable, express, priority);
             return Credited::Held;
         }
@@ -547,20 +571,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 Credited::Held
             }
             // A chain of fragments cannot be sent without waiting for room between its
-            // fragments, so it is sent as it was before anything was held back: waiting inside
-            // the send. This is the one message the stage does not isolate a stopped reader from.
+            // fragments: it is sent off the router's threads, and what follows it to this
+            // destination in its lane is held behind it until it has gone.
             Err(Unsent::Chain(msg)) => {
-                if self.send_to_face_actions(
-                    &state.runtime.actions,
-                    msg,
-                    reliable,
-                    express,
-                    priority,
-                ) {
-                    Credited::Sent
-                } else {
-                    Credited::Refused
-                }
+                self.send_chain_off_thread(state, msg, reliable, express, priority);
+                Credited::Sent
             }
             Err(Unsent::Failed(_)) => Credited::Refused,
         }
@@ -590,6 +605,83 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 }
 
 impl RouterForwarder {
+    /// Send a chain of fragments to the destination of `state` off the router's threads.
+    ///
+    /// A chain needs room for each of its fragments in turn, so its send waits between them, up
+    /// to the message's `wait_before_close` for one that may not be dropped. Made where it was
+    /// routed, that wait held the routing tables (a face's frame, a pass of the held messages) or
+    /// the loop that serves every face (the tick), and a destination that did not read stopped the
+    /// router: every writer of the tables waited for the read, and every reader that queues
+    /// behind a waiting writer with it. So the send is made on a blocking thread of the runtime
+    /// (a thread of its own where there is no runtime) that holds nothing of the router's, and the
+    /// destination's lane is marked meanwhile: what is routed to it there is held behind the
+    /// chain, and the mark is taken away and the loop woken to send what was held once the chain
+    /// has gone. One chain at a time per destination and lane, so the threads are bounded by the
+    /// faces.
+    pub(super) fn send_chain_off_thread(
+        &self,
+        state: &RouterFaceState,
+        msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) {
+        /// Takes the mark away and wakes the loop however the send ends, including a send that
+        /// never starts because its thread could not.
+        struct Gone {
+            in_flight: Arc<[std::sync::atomic::AtomicBool; 2]>,
+            lane: usize,
+            wake: Arc<dyn Fn() + Send + Sync>,
+        }
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                self.in_flight[self.lane].store(false, Ordering::SeqCst);
+                (self.wake)();
+            }
+        }
+        let lane = Lane::of(&msg).index();
+        state.runtime.chain_in_flight[lane].store(true, Ordering::SeqCst);
+        let gone = Gone {
+            in_flight: Arc::clone(&state.runtime.chain_in_flight),
+            lane,
+            wake: Arc::clone(&self.credit.room_waker),
+        };
+        let actions = Arc::clone(&state.runtime.actions);
+        let own_zid = self.own_zid;
+        let kind = super::kind_label(&msg);
+        let send = move || {
+            let _gone = gone;
+            let began = Instant::now();
+            let sent = actions
+                .send_network_message_qos(msg, reliable, express, priority)
+                .is_ok();
+            let took = began.elapsed();
+            if took >= super::SLOW_TABLES_WAIT || !sent {
+                log::debug!(
+                    "router: node={own_zid} a {kind} chain waited {took:?} for room on its \
+                     destination's link, off the router's threads, and was {}",
+                    if sent { "sent" } else { "refused" }
+                );
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(send);
+            }
+            Err(_) => {
+                if let Err(e) = std::thread::Builder::new()
+                    .name(String::from("wz-chain-send"))
+                    .spawn(send)
+                {
+                    log::warn!(
+                        "router: node={own_zid} could not start the thread that sends a {kind} \
+                         chain ({e}); it is dropped"
+                    );
+                }
+            }
+        }
+    }
+
     /// Hold `msg` for `dest`, and gate the face being routed when that fills a budget. Whether a
     /// gate was asserted that was not there before, which the caller must check against the
     /// destination again ([`OnTables::credited_send`]).
@@ -717,8 +809,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // would otherwise find the face gone from `holding` and never be offered room.
             let mut data = state.runtime.held.data.guard();
             let mut control = state.runtime.held.control.guard();
-            took |= self.drain_queue(state, &mut data);
-            took |= self.drain_queue(state, &mut control);
+            took |= self.drain_queue(state, Lane::Data, &mut data);
+            took |= self.drain_queue(state, Lane::Control, &mut control);
             if data.is_empty() && control.is_empty() {
                 log::debug!(
                     "router: node={} destination={} peer={} drained: its link has room again",
@@ -738,9 +830,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Offer one lane of a destination the room it may have now, oldest first, until it has none.
-    /// Whether anything left.
-    fn drain_queue(&self, state: &RouterFaceState, queue: &mut EgressQueue) -> bool {
+    /// Whether anything left. A lane whose chain is still being sent is not offered anything:
+    /// what it holds waits behind the chain, and the chain's end wakes the loop for it.
+    fn drain_queue(&self, state: &RouterFaceState, lane: Lane, queue: &mut EgressQueue) -> bool {
         let mut took = false;
+        if state.runtime.chain_in_flight[lane.index()].load(Ordering::SeqCst) {
+            return took;
+        }
         while let Some(held) = queue.pop_front() {
             let Held {
                 msg,
@@ -775,25 +871,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     break;
                 }
                 // A message held behind others, and so not probed when it came, turns out to be
-                // a chain. It is the head of its destination's queue, so sending it now, waiting
-                // inside the send, keeps the order; what it costs the loop is what it cost
-                // before anything was held back.
+                // a chain. It is the head of its destination's queue: it is sent off the router's
+                // threads, and the rest of the lane waits behind it, which keeps the order.
                 Err(Unsent::Chain(msg)) => {
                     self.credit.held.sub(1);
                     self.credit.held_bytes.sub(cost);
-                    if self.send_to_face_actions(
-                        &state.runtime.actions,
-                        msg,
-                        reliable,
-                        express,
-                        priority,
-                    ) {
-                        self.credit.released.bump();
-                        self.note_sent(was_push);
-                        took = true;
-                    } else {
-                        self.credit.abandoned.bump();
-                    }
+                    self.send_chain_off_thread(state, msg, reliable, express, priority);
+                    self.credit.released.bump();
+                    self.note_sent(was_push);
+                    took = true;
+                    break;
                 }
                 Err(Unsent::Failed(e)) => {
                     log::debug!(

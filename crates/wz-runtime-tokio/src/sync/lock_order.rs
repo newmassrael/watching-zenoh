@@ -194,11 +194,13 @@ fn mode() -> Mode {
 }
 
 /// A lock the thread holds.
-struct Holding {
+pub(crate) struct Holding {
     class: Class,
     instance: u64,
     held: Held,
     taken_at: &'static Location<'static>,
+    /// A lock its holder may keep across a wait for an event (`PlainMutex::held_across_waits`).
+    across_waits: bool,
 }
 
 thread_local! {
@@ -358,6 +360,7 @@ pub(crate) fn acquired(
     made_at: &'static Location<'static>,
     instance: u64,
     held: Held,
+    across_waits: bool,
     taken_at: &'static Location<'static>,
 ) -> Token {
     if mode() != Mode::Off {
@@ -368,6 +371,7 @@ pub(crate) fn acquired(
                     instance,
                     held,
                     taken_at,
+                    across_waits,
                 });
             }
         });
@@ -383,6 +387,67 @@ pub(crate) fn acquired(
 pub(crate) struct Token {
     instance: u64,
     _not_send: core::marker::PhantomData<*const ()>,
+}
+
+impl Token {
+    /// The thread is about to wait on a condition variable with this lock's guard: the wait gives
+    /// the lock up until it is woken, so the lock leaves the thread's list for the wait. A thread
+    /// that waits for an EVENT while it holds any other lock is reported: the thread that would
+    /// make the event happen may need that lock, and then neither goes on. This is the waits
+    /// that are not locks (a sender waiting for room on a link), which no order of locks shows.
+    /// Returns what [`Self::resume`] puts back.
+    pub(crate) fn suspend(&self, waited_at: &'static Location<'static>) -> Option<Holding> {
+        if mode() == Mode::Off {
+            return None;
+        }
+        let mut findings = Vec::new();
+        let taken = HOLDING
+            .try_with(|holding| {
+                let mut holding = holding.try_borrow_mut().ok()?;
+                let at = holding
+                    .iter()
+                    .rposition(|one| one.instance == self.instance)?;
+                let mine = holding.remove(at);
+                // A lock its holders keep across waits for events is the one place a wait is
+                // made under a lock: whoever waits for it holds nothing else (checked when it is
+                // waited for), and whoever must not wait takes it with a try.
+                for other in holding.iter().filter(|other| !other.across_waits) {
+                    findings.push(format!(
+                        "lock order: the thread waits at {waited_at} for an event (a condition \
+                         variable of the lock made at {}) while it holds the lock made at {} \
+                         ({:?}, taken at {}): the thread that would make the event happen may \
+                         need that lock{}",
+                        mine.class,
+                        other.class,
+                        other.held,
+                        other.taken_at,
+                        stack_text(
+                            "this thread",
+                            Some(&std::backtrace::Backtrace::force_capture())
+                        )
+                    ));
+                }
+                Some(mine)
+            })
+            .ok()
+            .flatten();
+        for finding in findings {
+            report(&finding);
+        }
+        taken
+    }
+
+    /// The wait is over and the lock is held again: back on the thread's list.
+    pub(crate) fn resume(&self, taken: Option<Holding>) {
+        let Some(taken) = taken else {
+            return;
+        };
+        let _ = HOLDING.try_with(|holding| {
+            if let Ok(mut holding) = holding.try_borrow_mut() {
+                holding.push(taken);
+            }
+        });
+    }
 }
 
 impl Drop for Token {
@@ -638,6 +703,49 @@ mod tests {
         first.with(|_| second.with(|_| ()));
         let refused = refusal(|| second.with(|_| first.with(|_| ()))).expect("the other order");
         assert!(refused.contains("nested in both orders"), "{refused}");
+    }
+
+    /// A wait on a condition variable gives its own lock up and is not refused for it; a wait
+    /// made while another lock is held is refused, naming that lock. After a wait the lock is
+    /// held again as before: the order of what is waited for under it is still checked.
+    #[test]
+    fn a_condition_wait_under_another_lock_is_refused_and_under_its_own_is_not() {
+        if !checking() {
+            return;
+        }
+        let room = super::super::PlainCondvar::new();
+        let lanes = super::super::PlainMutex::new(0u8);
+        let (guard, waited) = room
+            .wait_timeout(lanes.guard(), Duration::from_millis(1))
+            .expect("never poisoned");
+        assert!(waited.timed_out());
+        drop(guard);
+
+        let tables = super::super::PlainRwLock::new(0u8);
+        let read = tables.read();
+        let refused = refusal(|| {
+            let _ = room.wait_timeout(lanes.guard(), Duration::from_millis(1));
+        })
+        .expect("a wait for an event under the tables");
+        assert!(refused.contains("for an event"), "{refused}");
+        drop(read);
+    }
+
+    /// A lock held across waits (a sender's conduit) may have a condition variable waited on
+    /// under it: the one place a wait for an event is made under a lock.
+    #[test]
+    fn a_lock_held_across_waits_may_have_an_event_waited_on_under_it() {
+        if !checking() {
+            return;
+        }
+        let conduit = super::super::PlainMutex::held_across_waits(0u8);
+        let room = super::super::PlainCondvar::new();
+        let lanes = super::super::PlainMutex::new(0u8);
+        let _sending = conduit.guard();
+        let (_lanes, waited) = room
+            .wait_timeout(lanes.guard(), Duration::from_millis(1))
+            .expect("never poisoned");
+        assert!(waited.timed_out(), "the wait was made, not refused");
     }
 
     /// A lock keeps its number when it moves (a vector that grows moves every lock it holds), so
