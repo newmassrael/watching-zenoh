@@ -523,7 +523,7 @@ unsafe extern "C" fn mirror_sink(ctx: *mut c_void, entry: *const StoredEntry) {
         Some(EncodingHint {
             packed_id: e.encoding_packed_id,
             // SAFETY: NUL-terminated or null per the ABI.
-            schema: unsafe { cstr_to_owned(e.encoding_schema) },
+            schema: unsafe { cstr_to_bytes(e.encoding_schema) },
         })
     } else {
         None
@@ -554,6 +554,21 @@ unsafe fn cstr_to_owned(ptr: *const c_char) -> Option<String> {
     // SAFETY: the caller's contract.
     let raw = unsafe { CStr::from_ptr(ptr) };
     Some(raw.to_string_lossy().into_owned())
+}
+
+/// The bytes of a C string from the volume, or `None` for a null pointer.
+///
+/// An encoding's schema is bytes on the wire, so it comes back exactly as the
+/// volume holds it: nothing is replaced, unlike a key, which must be text.
+///
+/// # Safety
+/// `ptr` is null or a valid NUL-terminated string for this call.
+unsafe fn cstr_to_bytes(ptr: *const c_char) -> Option<Vec<u8>> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    Some(unsafe { CStr::from_ptr(ptr) }.to_bytes().to_vec())
 }
 
 /// Build the `StoredEntry` for a mutation and run `f` on it.

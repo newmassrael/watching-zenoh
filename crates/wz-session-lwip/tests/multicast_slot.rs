@@ -37,6 +37,7 @@ use wz_session_core::multicast_params::{zid_vec, MulticastOutcome, MulticastPara
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::sample::QosLevel;
 use wz_session_core::sn::{self, MulticastTxConduits};
+use wz_session_core::wire_id::RequestId;
 use wz_session_core::WhatAmI;
 use wz_session_lwip::multicast_drive::{
     spawn_multicast_pump, LwipMulticastDriver, MulticastReplyQueue, MulticastSession,
@@ -78,14 +79,14 @@ fn params(zid: &[u8]) -> MulticastParams {
     }
 }
 
-fn final_for(request_id: u64) -> MulticastTxItem {
+fn final_for(request_id: RequestId) -> MulticastTxItem {
     MulticastTxItem::ResponseFinal {
         request_id,
         qos: QosLevel::default(),
     }
 }
 
-fn id_of(item: MulticastTxItem) -> u64 {
+fn id_of(item: MulticastTxItem) -> RequestId {
     match item {
         MulticastTxItem::ResponseFinal { request_id, .. } => request_id,
         other => panic!("only finals were queued, got {other:?}"),
@@ -128,7 +129,7 @@ fn the_reply_queue_refuses_the_reply_it_has_no_room_for_and_counts_it() {
     );
 
     let (order, n) = m.count("drain", || {
-        let mut order = [0u64; 3];
+        let mut order: [RequestId; 3] = [0; 3];
         for slot in &mut order {
             *slot = id_of(REPLIES.pop().expect("a queued reply"));
         }

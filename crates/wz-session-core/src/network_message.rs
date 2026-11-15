@@ -3241,7 +3241,7 @@ mod record_walk_tests {
                     other => panic!("an unexpected declaration {other:?}"),
                 },
                 WalkedRecord::Interest(i) => ('i', i.interest_id),
-                WalkedRecord::ResponseFinal(r) => ('r', r.request_id),
+                WalkedRecord::ResponseFinal(r) => ('r', u64::from(r.request_id)),
                 WalkedRecord::Skipped => ('-', 0),
                 WalkedRecord::Owned(_) => panic!("the control walk owns nothing"),
                 #[allow(unreachable_patterns)]
@@ -3270,7 +3270,7 @@ mod record_walk_tests {
                             other => panic!("an unexpected declaration {other:?}"),
                         },
                         NetworkMessage::Interest(i) => ('i', i.interest_id),
-                        NetworkMessage::ResponseFinal(r) => ('r', r.request_id),
+                        NetworkMessage::ResponseFinal(r) => ('r', u64::from(r.request_id)),
                         NetworkMessage::Oam(_) | NetworkMessage::Unknown { .. } => ('-', 0),
                         // The data kinds, in a build that selects their codecs.
                         #[allow(unreachable_patterns)]

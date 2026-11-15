@@ -191,9 +191,12 @@ fn queryable_table_refuses_the_entry_past_max_queryables_without_allocating() {
 fn pending_query_table_refuses_the_entry_past_max_pending_queries_without_allocating() {
     use wz_session_core::reply::ReplyRegistry;
     use wz_session_core::reply_acceptance::ReplyAcceptance;
+    use wz_session_core::wire_id::RequestId;
     let mut reg: ReplyRegistry<NoopReplySink> = ReplyRegistry::with_sink_backing();
+    let past_rid =
+        RequestId::try_from(caps::MAX_PENDING_QUERIES).expect("the table's bound is a wire id");
     let (filled, allocations) = allocations_during(|| {
-        (0..caps::MAX_PENDING_QUERIES as u64).all(|rid| {
+        (0..past_rid).all(|rid| {
             reg.register_sink(
                 rid,
                 1,
@@ -204,13 +207,7 @@ fn pending_query_table_refuses_the_entry_past_max_pending_queries_without_alloca
             .is_ok()
         })
     });
-    let past = reg.register_sink(
-        caps::MAX_PENDING_QUERIES as u64,
-        1,
-        None,
-        ReplyAcceptance::Any,
-        NoopReplySink,
-    );
+    let past = reg.register_sink(past_rid, 1, None, ReplyAcceptance::Any, NoopReplySink);
     assert_eq!(
         (filled, allocations, past.err(), reg.len()),
         (

@@ -760,15 +760,16 @@ fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
 mod query_and_reply {
     use super::*;
     use wz_session_core::reply_sink::ReplyView;
+    use wz_session_core::wire_id::RequestId;
 
     /// Rids the pending get waits on and the queries carry.
-    const RID: u64 = 0x31;
+    const RID: RequestId = 0x31;
 
     /// What a get or a queryable was handed, in fixed storage: the payload (a
     /// reply's; a query carries none here), the keyexpr, and the rid.
-    type Handed = ([u8; 8], [u8; 16], usize, u64);
+    type Handed = ([u8; 8], [u8; 16], usize, RequestId);
 
-    fn handed_of((payload, key, len, rid): &Handed) -> (Vec<u8>, String, u64) {
+    fn handed_of((payload, key, len, rid): &Handed) -> (Vec<u8>, String, RequestId) {
         (
             payload.to_vec(),
             String::from_utf8(key[..*len].to_vec()).expect("a UTF-8 keyexpr"),
@@ -776,7 +777,7 @@ mod query_and_reply {
         )
     }
 
-    fn record(payload: &[u8], keyexpr: &str, rid: u64) -> Handed {
+    fn record(payload: &[u8], keyexpr: &str, rid: RequestId) -> Handed {
         let mut bytes = [0u8; 8];
         bytes[..payload.len()].copy_from_slice(payload);
         let mut key = [0u8; 16];
@@ -804,7 +805,7 @@ mod query_and_reply {
         .encode_to_vec()
     }
 
-    fn request(rid: u64) -> Vec<u8> {
+    fn request(rid: RequestId) -> Vec<u8> {
         wz_session_core::request_build::RequestQueryBuilder::new(rid, 0, Some(KEY))
             .build()
             .expect("a query")
@@ -815,7 +816,7 @@ mod query_and_reply {
 
     /// What the shared batch decoder reads out of a payload of Responses: each
     /// one's payload, keyexpr and rid.
-    fn decoded_replies(payload: &[u8]) -> Vec<(Vec<u8>, String, u64)> {
+    fn decoded_replies(payload: &[u8]) -> Vec<(Vec<u8>, String, RequestId)> {
         parse_frame_payload(payload)
             .expect("the frame decodes")
             .iter()
@@ -944,10 +945,11 @@ mod query_and_reply {
         let (wire, _) = frame_of_records(pair.next_sn(), &warm);
         let _ = pair.turn(&wire);
         let mut costs = Vec::new();
-        for n in [1u64, 2, 8] {
+        let sizes: [RequestId; 3] = [1, 2, 8];
+        for n in sizes {
             let records: Vec<Vec<u8>> = (0..n).map(|i| request(RID + i)).collect();
             let (wire, _) = frame_of_records(pair.next_sn(), &records);
-            let expected: Vec<(Vec<u8>, String, u64)> = (0..n)
+            let expected: Vec<(Vec<u8>, String, RequestId)> = (0..n)
                 .map(|i| (vec![0u8; 8], String::from(KEY), RID + i))
                 .collect();
             got.lock().expect("not poisoned").clear();

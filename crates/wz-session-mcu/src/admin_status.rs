@@ -478,7 +478,7 @@ mod tests {
         );
     }
 
-    fn get(key: &str, rid: u64) -> DriverLoopOutcome {
+    fn get(key: &str, rid: wz_session_core::wire_id::RequestId) -> DriverLoopOutcome {
         let request = Request {
             rid,
             keyexpr: Wireexpr {
@@ -690,7 +690,7 @@ mod tests {
     fn a_get_is_answered_with_exactly_the_legs_it_names() {
         static STATUS: NodeStatus = NodeStatus::new(true);
         let (mut on_event, peer) = rig(&STATUS);
-        let mut wire = |key: &str, rid: u64| {
+        let mut wire = |key: &str, rid: wz_session_core::wire_id::RequestId| {
             on_event(IterationEvent::Poll(&get(key, rid)));
             let mut seen = Vec::new();
             while let Some(frame) = peer.try_recv() {
@@ -746,7 +746,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let mut document_of = |rid: u64| {
+        let mut document_of = |rid: wz_session_core::wire_id::RequestId| {
             on_event(IterationEvent::Poll(&get(
                 "@/b2a1/peer/status/connect",
                 rid,
@@ -780,7 +780,7 @@ mod tests {
         static STATUS: NodeStatus = NodeStatus::new(true);
         let (mut on_event, peer) = rig(&STATUS);
         let mut answered = 0u32;
-        for rid in 0..2000u64 {
+        for rid in 0..2000 {
             on_event(IterationEvent::Poll(&get(
                 "@/b2a1/peer/status/connect",
                 rid,

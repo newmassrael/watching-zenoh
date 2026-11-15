@@ -108,7 +108,7 @@ fn peer_row() -> AdminSession {
     }
 }
 
-fn get(rid: u64, keyexpr: &str) -> NetworkMessage {
+fn get(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
         RequestQueryBuilder::new(rid, 0, Some(keyexpr))
             .build()

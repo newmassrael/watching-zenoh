@@ -418,13 +418,13 @@ where
         self.plan.reply(reply);
     }
 
-    fn on_final(&mut self, _rid: u64) {
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {
         self.plan.end(self.slot, false);
     }
 
     /// An expired query ends with a timeout, which is counted and not delivered as a reply: the
     /// default would hand the sink a synthetic error first.
-    fn on_timeout(&mut self, _rid: u64) {
+    fn on_timeout(&mut self, _rid: wz_session_core::wire_id::RequestId) {
         self.plan.end(self.slot, true);
     }
 }

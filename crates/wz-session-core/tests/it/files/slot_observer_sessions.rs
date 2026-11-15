@@ -31,6 +31,7 @@ use wz_session_core::push_build::build_push_aliased;
 use wz_session_core::reply_sink::BoxedReplySink;
 use wz_session_core::sink::{BoxedSink, SampleView};
 use wz_session_core::slot_observer::{Requesters, SlotObserver};
+use wz_session_core::wire_id::ExprId;
 use wz_session_core_test_support as fx;
 
 type Req = Requesters<BoxedReplySink, BoxedReplySink>;
@@ -46,13 +47,14 @@ fn frame(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
     }
 }
 
-fn declare_alias(id: u64, keyexpr: &str) -> NetworkMessage {
+fn declare_alias(id: ExprId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Declare(Box::new(fx::declare_envelope_decl_kexpr(fx::decl_kexpr(
-        id, keyexpr,
+        u64::from(id),
+        keyexpr,
     ))))
 }
 
-fn push_on(id: u64) -> NetworkMessage {
+fn push_on(id: ExprId) -> NetworkMessage {
     NetworkMessage::Push(Box::new(
         build_push_aliased(id, None, b"v").expect("build the push"),
     ))
@@ -130,7 +132,12 @@ fn a_session_that_filled_its_alias_table_loses_its_own_pushes_and_no_one_elses()
     let (mut observer, seen) = observer();
     let (mut flooded, mut quiet) = (PeerTables::new(), PeerTables::new());
     let (mut rf, mut rq) = (Req::new(), Req::new());
-    let n = caps::MAX_PEER_KEYEXPR_ALIASES as u64;
+    // An alias id is an `ExprId` on the wire, so the table's bound plus one must
+    // be one too.
+    let n = ExprId::try_from(caps::MAX_PEER_KEYEXPR_ALIASES)
+        .ok()
+        .filter(|n| *n < ExprId::MAX)
+        .expect("the alias table's bound leaves room for one more wire id");
 
     // The flooded peer declares one alias more than its table holds.
     let declares: Vec<NetworkMessage> = (1..=n + 1)

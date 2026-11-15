@@ -158,7 +158,9 @@ fn each_session_has_peer_tables_of_its_own_and_a_flood_stays_with_the_flooded() 
         for id in 1..=(caps::MAX_INBOUND_SUB_INTERESTS as u64 + 5) {
             interest(&mut subscribers, &mut peers, id);
         }
-        for rid in 0..caps::MAX_PENDING_FINALS as u64 {
+        let finals = wz_session_core::wire_id::RequestId::try_from(caps::MAX_PENDING_FINALS)
+            .expect("the finals table's bound is a wire id");
+        for rid in 0..finals {
             assert!(peers.finals.has_room());
             peers.finals.owe(rid, QosLevel::DEFAULT);
         }

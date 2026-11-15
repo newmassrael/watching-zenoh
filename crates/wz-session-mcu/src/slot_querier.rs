@@ -183,13 +183,13 @@ impl ReplySink for ReplyLatest {
             .reply(self.query, reply.keyexpr(), reply.payload(), reply.kind());
     }
 
-    fn on_final(&mut self, _rid: u64) {
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {
         self.target.finished(self.query, false);
     }
 
     /// A deadline is one event here, a timeout, and not an error reply and then a final: a query
     /// that timed out is counted once.
-    fn on_timeout(&mut self, _rid: u64) {
+    fn on_timeout(&mut self, _rid: wz_session_core::wire_id::RequestId) {
         self.target.finished(self.query, true);
     }
 }

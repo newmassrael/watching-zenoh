@@ -260,7 +260,7 @@ mod tests {
         }
     }
 
-    fn get(key: &str, rid: u64) -> DriverLoopOutcome {
+    fn get(key: &str, rid: wz_session_core::wire_id::RequestId) -> DriverLoopOutcome {
         let request = Request {
             rid,
             keyexpr: Wireexpr {

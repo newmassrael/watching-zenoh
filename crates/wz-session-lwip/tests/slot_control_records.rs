@@ -332,6 +332,7 @@ mod record {
     use wz_session_core::interest_build::{build_interest_final, build_interest_subscribers};
     use wz_session_core::response_final_build::build_response_final;
     use wz_session_core::sample::QosLevel;
+    use wz_session_core::wire_id::{ExprId, RequestId};
 
     /// The bytes of an owned `Declare`, through the borrowed view that owns the
     /// encoder.
@@ -353,7 +354,7 @@ mod record {
     }
 
     /// A `DeclKexpr` binding `id` to `suffix`.
-    pub fn alias(id: u64, suffix: &str) -> Vec<u8> {
+    pub fn alias(id: ExprId, suffix: &str) -> Vec<u8> {
         declare_bytes(&build_declare_kexpr(id, suffix).expect("a DeclKexpr"))
     }
 
@@ -363,7 +364,7 @@ mod record {
     }
 
     /// A `DeclSubscriber` of `id` on `suffix` under the alias `mapping`.
-    pub fn subscriber_on_alias(id: u64, mapping: u64, suffix: &str) -> Vec<u8> {
+    pub fn subscriber_on_alias(id: u64, mapping: ExprId, suffix: &str) -> Vec<u8> {
         declare_bytes(
             &build_declare_subscriber(id, mapping, Some(suffix)).expect("a DeclSubscriber"),
         )
@@ -393,7 +394,7 @@ mod record {
     }
 
     /// A `ResponseFinal` of request `rid`.
-    pub fn response_final(rid: u64) -> Vec<u8> {
+    pub fn response_final(rid: RequestId) -> Vec<u8> {
         fn bytes(done: &wz_session_core::transport_profile::owned::ResponseFinalOwned) -> Vec<u8> {
             done.try_as_borrowed()
                 .expect("a borrowed view")

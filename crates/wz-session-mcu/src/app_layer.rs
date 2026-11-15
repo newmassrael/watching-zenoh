@@ -101,7 +101,7 @@ pub struct NoReplies;
 impl ReplySink for NoReplies {
     fn on_reply(&mut self, _reply: &dyn ReplyView) {}
 
-    fn on_final(&mut self, _rid: u64) {}
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {}
 }
 
 /// What the application registered on the slot profile, in a place the sessions'
