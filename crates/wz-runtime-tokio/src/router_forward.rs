@@ -1502,7 +1502,66 @@ impl DeclPlane for TokenPlane {
 /// mechanisms for the pin's one rule, each with its own correctness argument.
 struct Snapshot<P: DeclPlane> {
     keyexpr: String,
-    before: Vec<(Region, Option<P::Value>)>,
+    before: RegionValues<P::Value>,
+}
+
+/// How many regions a [`RegionValues`] holds with no allocation: a node's mesh regions are its
+/// north and the few south regions it serves.
+const INLINE_REGIONS: usize = 4;
+
+/// A value for each of some regions, in the order they were pushed: inline up to
+/// [`INLINE_REGIONS`], on the heap past them. Every declaration takes a snapshot of its plane's
+/// fold per mesh region, and on a node of a few mesh regions that allocates nothing.
+enum RegionValues<V> {
+    Inline {
+        len: usize,
+        slots: [(Region, Option<V>); INLINE_REGIONS],
+    },
+    Heap(Vec<(Region, Option<V>)>),
+}
+
+impl<V: Copy> Default for RegionValues<V> {
+    fn default() -> Self {
+        Self::Inline {
+            len: 0,
+            slots: [(Region::North, None); INLINE_REGIONS],
+        }
+    }
+}
+
+impl<V: Copy> RegionValues<V> {
+    fn push(&mut self, entry: (Region, Option<V>)) {
+        match self {
+            Self::Inline { len, slots } if *len < INLINE_REGIONS => {
+                slots[*len] = entry;
+                *len += 1;
+            }
+            Self::Inline { len, slots } => {
+                let mut heap = Vec::with_capacity(2 * INLINE_REGIONS);
+                heap.extend_from_slice(&slots[..*len]);
+                heap.push(entry);
+                *self = Self::Heap(heap);
+            }
+            Self::Heap(heap) => heap.push(entry),
+        }
+    }
+
+    fn as_slice(&self) -> &[(Region, Option<V>)] {
+        match self {
+            Self::Inline { len, slots } => &slots[..*len],
+            Self::Heap(heap) => heap,
+        }
+    }
+}
+
+impl<V: Copy> FromIterator<(Region, Option<V>)> for RegionValues<V> {
+    fn from_iter<I: IntoIterator<Item = (Region, Option<V>)>>(entries: I) -> Self {
+        let mut values = Self::default();
+        for entry in entries {
+            values.push(entry);
+        }
+        values
+    }
 }
 
 /// A [`Snapshot`] of a change that moves the contribution of one hat alone, the `owner`'s, as a
@@ -1517,7 +1576,7 @@ struct OwnedSnapshot<'k, P: DeclPlane> {
     keyexpr: &'k str,
     owner: Region,
     owner_before: Option<P::Value>,
-    rest: Vec<(Region, Option<P::Value>)>,
+    rest: RegionValues<P::Value>,
 }
 
 /// The set of keyexprs one face holds on a plane, per face — the shape the
@@ -9377,7 +9436,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if owner_after == owner_before {
             return;
         }
-        for (target, rest) in rest {
+        for &(target, rest) in rest.as_slice() {
             let before = fold_parts(rest, owner_before, P::merge);
             let after = fold_parts(rest, owner_after, P::merge);
             if after != before {
@@ -9428,9 +9487,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let keyexpr = snapshot.keyexpr.clone();
-        for (target, after) in self.advertisement_changes(snapshot) {
-            self.advertise_change::<P>(target, &keyexpr, after);
+        let changed = self.advertisement_changes(&snapshot);
+        for &(target, after) in changed.as_slice() {
+            self.advertise_change::<P>(target, &snapshot.keyexpr, after);
         }
     }
 
@@ -9438,14 +9497,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// advertises into each (`None` for a retraction), after recording it.
     fn advertisement_changes<P: DeclPlane>(
         &mut self,
-        snapshot: Snapshot<P>,
-    ) -> Vec<(Region, Option<P::Value>)>
+        snapshot: &Snapshot<P>,
+    ) -> RegionValues<P::Value>
     where
         T: std::ops::DerefMut,
     {
         let keyexpr = snapshot.keyexpr.as_str();
-        let mut changed = Vec::new();
-        for (target, derived_before) in snapshot.before {
+        let mut changed = RegionValues::default();
+        for &(target, derived_before) in snapshot.before.as_slice() {
             let after = P::fold_outside(self, target, keyexpr);
             let before = P::advertised(self, target, keyexpr, derived_before);
             P::remember(self, target, keyexpr, after);
@@ -22446,6 +22505,35 @@ mod tests {
                  the fold from {before:?} to {after:?}"
             );
         }
+    }
+
+    /// The values of a few regions stay inline and the ones past them move to the heap, in the
+    /// order they were pushed either way.
+    #[test]
+    fn region_values_keep_their_order_inline_and_past_it() {
+        let entry = |n: usize| {
+            let region = if n % 2 == 0 {
+                Region::North
+            } else {
+                Region::Local
+            };
+            (region, (n % 3 != 0).then_some(n as u32))
+        };
+        let mut values: RegionValues<u32> = RegionValues::default();
+        assert!(values.as_slice().is_empty());
+        for n in 0..3 * INLINE_REGIONS {
+            values.push(entry(n));
+            assert_eq!(
+                matches!(values, RegionValues::Inline { .. }),
+                n < INLINE_REGIONS,
+                "inline while it fits, after {n}"
+            );
+            let expected: Vec<(Region, Option<u32>)> = (0..=n).map(entry).collect();
+            assert_eq!(values.as_slice(), expected.as_slice(), "after {n}");
+        }
+        let collected: RegionValues<u32> = (0..INLINE_REGIONS + 1).map(entry).collect();
+        let expected: Vec<(Region, Option<u32>)> = (0..INLINE_REGIONS + 1).map(entry).collect();
+        assert_eq!(collected.as_slice(), expected.as_slice());
     }
 
     #[test]
