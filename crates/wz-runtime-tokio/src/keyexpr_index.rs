@@ -31,6 +31,17 @@
 //! when it would change nothing. An insertion finds or makes its path in the one walk: a member
 //! already there adds nothing, though that walk copies its path out of a version that shares it,
 //! and no caller inserts a member it holds.
+//!
+//! A removal that leaves its node with no member and no child keeps the node, for a member that
+//! comes back to the same key: a key declared and withdrawn again and again is the common churn,
+//! and dropping its path each time made the next declaration build it again. Such nodes are
+//! counted, and once there are more of them than [`dead_bound`] allows for the members held, one
+//! sweep prunes every empty branch. So the nodes past what the members need are at most that
+//! bound times a key's depth, and the sweep's cost, a read of the index and a write of the
+//! branches it prunes, is spread over the removals that filled the bound. An index left with no
+//! member drops every node at once. Upstream drops a resource as its last holder goes, by count
+//! (`zenoh/src/net/routing/dispatcher/resource.rs` @ `if Arc::strong_count(res) <= 3 && res.children.is_empty() {`);
+//! a persistent index pays a path copy for every node it drops, which is what the sweep spreads.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -47,6 +58,19 @@ const ANY_CHUNKS: &str = "**";
 pub(crate) struct KeyexprIndex<M> {
     root: IndexNode<M>,
     len: usize,
+    /// The nodes a removal left with no member and no child, kept for a member that comes back
+    /// (see the module documentation): exactly the empty leaves of the tree.
+    dead: usize,
+}
+
+/// The fewest empty leaves an index keeps before it sweeps, whatever the members it holds.
+const DEAD_FLOOR: usize = 64;
+
+/// How many empty leaves an index of `len` members keeps before one sweep prunes them all: as
+/// many as its members, and [`DEAD_FLOOR`] at the least, so that the nodes kept for nothing are
+/// bounded by the members held and a sweep comes once per that many removals.
+fn dead_bound(len: usize) -> usize {
+    len.max(DEAD_FLOOR)
 }
 
 /// A node: the members stored under the keyexpr its path spells, and its children by chunk.
@@ -83,6 +107,11 @@ impl<M> IndexNode<M> {
         self.members.is_empty() && self.literal.is_empty() && self.wild.is_empty()
     }
 
+    /// Whether an empty node is in this subtree, this node included: what a sweep has to prune.
+    fn holds_empty(&self) -> bool {
+        self.is_empty() || self.children().any(IndexNode::holds_empty)
+    }
+
     fn children(&self) -> impl Iterator<Item = &IndexNode<M>> + '_ {
         self.literal.values().chain(self.wild.values())
     }
@@ -106,24 +135,43 @@ impl<M: Hash + Eq + Clone> IndexNode<M> {
         }
     }
 
-    /// Take `member` out of the node `chunks` lead to, which holds it, and drop every node the
-    /// removal leaves empty on the way back.
-    fn remove_below(&mut self, chunks: &[&str], member: &M) {
+    /// Take `member` out of the node `chunks` lead to, which holds it, keeping every node, and say
+    /// whether that node is left an empty leaf.
+    fn remove_below(&mut self, chunks: &[&str], member: &M) -> bool {
         let Some((head, rest)) = chunks.split_first() else {
             let removed = self.members.remove(member);
             debug_assert!(removed, "the read found the member here");
-            return;
+            return self.is_empty();
         };
-        let children = self.children_mut(head);
-        let emptied = {
-            let child = children
-                .get_mut(*head)
-                .expect("the read found the path to the member");
-            child.remove_below(rest, member);
-            child.is_empty()
-        };
-        if emptied {
-            children.remove(*head);
+        self.children_mut(head)
+            .get_mut(*head)
+            .expect("the read found the path to the member")
+            .remove_below(rest, member)
+    }
+
+    /// Drop every empty node below this one, children first, so that a node left with nothing
+    /// once its children went goes too. Only the branches that hold an empty node are written,
+    /// so a sweep copies those paths out of a shared version and no other.
+    fn prune(&mut self) {
+        let chunks: Vec<Box<str>> = self
+            .literal
+            .iter()
+            .chain(self.wild.iter())
+            .filter(|(_, child)| child.holds_empty())
+            .map(|(chunk, _)| chunk.clone())
+            .collect();
+        for chunk in chunks {
+            let children = self.children_mut(&chunk);
+            let emptied = {
+                let child = children
+                    .get_mut(&*chunk)
+                    .expect("the chunk was read off this node");
+                child.prune();
+                child.is_empty()
+            };
+            if emptied {
+                children.remove(&*chunk);
+            }
         }
     }
 }
@@ -134,6 +182,7 @@ impl<M> KeyexprIndex<M> {
         Self {
             root: IndexNode::default(),
             len: 0,
+            dead: 0,
         }
     }
 
@@ -198,30 +247,59 @@ impl<M: Hash + Eq + Clone> KeyexprIndex<M> {
     /// finds or makes the path (see the module documentation).
     pub(crate) fn insert(&mut self, keyexpr: &str, member: M) -> bool {
         let mut node = &mut self.root;
+        // An empty leaf the path passes through or ends at takes a child or the member, and is
+        // empty no more. A path holds at most one, as an empty leaf has no child to go on to.
+        let mut revives = false;
+        let mut made = false;
+        let mut below_root = false;
         for chunk in keyexpr.split('/') {
+            // A node this walk made a step ago is empty too, and is no empty leaf of the tree.
+            revives |= below_root && !made && node.is_empty();
+            below_root = true;
+            made = false;
             // Found by the chunk's text: a chunk some key already holds allocates nothing.
             node = node.children_mut(chunk).get_mut_or_insert_by(
                 chunk,
                 || Box::from(chunk),
-                IndexNode::default,
+                || {
+                    made = true;
+                    IndexNode::default()
+                },
             );
         }
+        revives |= !made && node.is_empty();
         let added = node.members.insert(member);
         if added {
             self.len += 1;
+        }
+        if revives {
+            debug_assert!(self.dead > 0, "an empty leaf of the tree is counted");
+            self.dead = self.dead.saturating_sub(1);
         }
         added
     }
 
     /// Take `member` out from under `keyexpr`, saying whether it was there. A member not there
-    /// writes nothing. The keyexpr is split once, for the read and the removal.
+    /// writes nothing. The keyexpr is split once, for the read and the removal. The node it leaves
+    /// empty is kept, and swept with the others past [`dead_bound`] (see the module
+    /// documentation).
     pub(crate) fn remove(&mut self, keyexpr: &str, member: &M) -> bool {
         let chunks: Vec<&str> = keyexpr.split('/').collect();
         if !self.holds_at(chunks.iter().copied(), member) {
             return false;
         }
-        self.root.remove_below(&chunks, member);
+        let left_empty = self.root.remove_below(&chunks, member);
         self.len -= 1;
+        if self.len == 0 {
+            self.root = IndexNode::default();
+            self.dead = 0;
+        } else if left_empty {
+            self.dead += 1;
+            if self.dead > dead_bound(self.len) {
+                self.root.prune();
+                self.dead = 0;
+            }
+        }
         true
     }
 }
@@ -237,6 +315,7 @@ impl<M> Clone for KeyexprIndex<M> {
         Self {
             root: self.root.clone(),
             len: self.len,
+            dead: self.dead,
         }
     }
 }
@@ -334,6 +413,51 @@ mod tests {
         keyexpr_intersects_target(query, &chunks)
     }
 
+    /// The nodes from `node` down, `node` included.
+    fn nodes(node: &IndexNode<u32>) -> usize {
+        1 + node.children().map(nodes).sum::<usize>()
+    }
+
+    /// The empty nodes below `node`. Each is a leaf, as a node with a child is not empty.
+    fn empty_leaves(node: &IndexNode<u32>) -> usize {
+        node.children()
+            .map(|child| usize::from(child.is_empty()) + empty_leaves(child))
+            .sum()
+    }
+
+    /// A key declared and withdrawn again and again keeps its path and counts one empty leaf at
+    /// the most; many keys withdrawn leave no more empty leaves than the bound allows, and the
+    /// nodes held for nothing stay within it, where a node per key withdrawn would pile up.
+    #[test]
+    fn the_nodes_kept_for_nothing_stay_within_the_bound() {
+        let mut index: KeyexprIndex<u32> = KeyexprIndex::new();
+        assert!(index.insert("keep/me", 0));
+        for _ in 0..1_000 {
+            assert!(index.insert("demo/beside/admin", 1));
+            assert!(index.remove("demo/beside/admin", &1));
+            assert!(index.dead <= 1, "the one key's leaf is counted once");
+        }
+        for i in 0..10_000u32 {
+            let keyexpr = format!("churn/{i}/x");
+            assert!(index.insert(&keyexpr, i + 10));
+            assert!(index.remove(&keyexpr, &(i + 10)));
+            assert!(index.dead <= dead_bound(index.len()));
+            assert_eq!(empty_leaves(&index.root), index.dead);
+            assert!(
+                nodes(&index.root) <= 16 + 3 * dead_bound(index.len()),
+                "{} nodes after {i} keys withdrawn",
+                nodes(&index.root)
+            );
+        }
+        assert_eq!(index.intersecting("**"), [&0], "the member kept is found");
+        assert!(index.remove("keep/me", &0));
+        assert_eq!(
+            nodes(&index.root),
+            1,
+            "an index left with no member keeps no node"
+        );
+    }
+
     /// Every `(keyexpr, member)` the index holds, read off its nodes.
     fn stored(index: &KeyexprIndex<u32>) -> BTreeSet<(String, u32)> {
         fn collect(
@@ -345,7 +469,6 @@ mod tests {
                 out.insert((path.join("/"), *member));
             }
             for (chunk, child) in node.literal.iter().chain(node.wild.iter()) {
-                assert!(!child.is_empty(), "an empty node is kept below {path:?}");
                 assert_eq!(is_wild(chunk), node.wild.contains_key(&**chunk));
                 path.push(chunk.to_string());
                 collect(child, path, out);
@@ -387,6 +510,15 @@ mod tests {
                 let want: BTreeSet<(String, u32)> =
                     model.iter().map(|(m, k)| (k.clone(), *m)).collect();
                 assert_eq!(stored(&index), want, "seed {seed} step {step}");
+                assert_eq!(
+                    empty_leaves(&index.root),
+                    index.dead,
+                    "every empty leaf is counted, seed {seed} step {step}"
+                );
+                assert!(
+                    index.dead <= dead_bound(index.len()),
+                    "the empty leaves stay within the bound, seed {seed} step {step}"
+                );
                 for _ in 0..6 {
                     let query = draw.keyexpr();
                     let found = index.intersecting(&query);
