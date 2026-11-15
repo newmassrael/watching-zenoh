@@ -13736,6 +13736,31 @@
         "Open: the next steps the owner chose, in order: machine-checked lock order (deadlock detection in test builds, a lock hierarchy, model tests), then no wait under the tables or on the loop's thread, then the snapshot tables as default after measurement.",
         "Open: the peer loop of the demo and the C ABI node have no host heartbeat of their own; their face loops beat."
       ]
+    },
+    "Round 4492": {
+      "decision_summary": "The round that gave each node loop a heartbeat and one watcher thread per process went red on the hosted run, and every red was that round's. The watcher thread was started once and never ended, and its registry was leaked on purpose, so the C ABI's leak programs under valgrind found 45,484 bytes in 50 blocks still reachable at exit. The thread now lives exactly as long as some loop is watched: the first heartbeat starts it, and the drop of the heartbeat that leaves it empty tells it to end, wakes it and joins it, which takes at most one look at the loops. The watcher is a static, not an allocation. A heartbeat registered between that end and the join starts a new thread; a generation count keeps the thread told to end from reading for it. The bound on the threads one report names is used only on Linux, so it was dead code on macOS and Windows and stopped both builds; it now lives in the Linux branch. The C ABI builds grew by 22 to 53 KB over their budgets. The symbol diff of the pico peer against the previous main put 19 KB of that in the float formatter that a report's seconds linked in, and 3 KB in a sort of thread ids. Seconds are now written in whole milliseconds and the threads in the order the kernel lists them. What remains (the thread and its look, the reading of /proc, the start and join of the thread and the face loop's beat) is the capability, and a node that accepts reports its own stop. So each of the five budgets moves to the hosted reading at the previous main plus the growth measured on one build host against that main, and 3,500. The module's seven doc links did not resolve, because rustdoc reads the links of a module documented both in lib.rs and in itself from the parent's scope; they now name their targets from the crate root. Moving the face loop changed accept_loop.rs, which one atom's reason cites. Both of its clauses (the connect reconcile enum and its passive variant) were re-read against the file and still hold, so the pin moves.",
+      "changes_bullets": [
+        "`wz_runtime_tokio::liveness`: the watcher is a static whose thread the first heartbeat starts and the drop of the last heartbeat ends and joins, with a generation count against a successor started between the end and the join.",
+        "The report writes seconds in whole milliseconds (`Seconds`, also used by the lock's contention text) and lists threads in the kernel's order; the bound on reported threads lives in the Linux branch.",
+        "The module's doc links name their targets from the crate root.",
+        "Layer C1cs budgets: pico-peer 3,023,600, pico-default 4,458,200, capic-router-node 6,083,200, capic-default 10,890,600, capic-default-lean 9,311,300.",
+        "The reason pin of `session-close-ingress` on accept_loop.rs moves to that file's present blob."
+      ],
+      "verification_bullets": [
+        "On pc2: the liveness and sync unit tests 11 of 11, including the new tests of the watcher thread's end and restart and of the seconds text; cargo doc of wz-runtime-tokio with every feature finishes with no error; clippy -D warnings clean for wz-runtime-tokio with transport-link-ws, with and without its default features.",
+        "On pc2: the zenoh-c leak programs (pub/sub and queryable/get) under valgrind pass, 2 of 2, against wz-capi-c built with the features the oracle's header selects. The previous head failed both on the hosted run.",
+        "On pc2: the five C ABI builds read 3,016,571 / 4,451,052 / 6,075,734 / 10,881,977 / 9,302,557. The previous main read 2,985,705 / 4,420,270 / 6,048,928 / 10,856,404 / 9,278,968 there, and the budgets are its hosted readings plus that growth and 3,500.",
+        "The cost gate's selftest 24 of 24; the reason pin gate OK.",
+        "Not run: the macOS and Windows builds, which only the hosted run builds (the dead constant that stopped them now sits in the Linux branch)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Open: the consumer's stall is still not reproduced; the self-report waits for a recurrence.",
+        "Open: a consumer claim, accepted this round, for the per-flow decryption outcome and key source in the dissect session document; it comes next.",
+        "Open: the owner's next steps for the node's locks, in order: a machine-checked lock order, then no waiting under the tables or on the loop's thread, then the snapshot tables as default after measurement."
+      ]
     }
   },
   "inventory_entries": {
