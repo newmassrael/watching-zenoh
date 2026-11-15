@@ -384,8 +384,8 @@ impl core::fmt::Display for LockContention {
         match self.oldest_writer_waiting {
             Some(waited) => write!(
                 f,
-                "{held}, a writer has waited {:.3} s",
-                waited.as_secs_f64()
+                "{held}, a writer has waited {}",
+                crate::liveness::Seconds(waited)
             ),
             None => write!(f, "{held}, no writer waits"),
         }

@@ -9,15 +9,17 @@
 //! log that ends. What a stop is made of (a lock, a wait for room on a link, a call that does not
 //! return) can be read only while the process is still stopped, from outside the loop.
 //!
-//! So each such loop holds a [`Heartbeat`]. It says when the loop enters a step of work
-//! ([`Heartbeat::turn`]) and when it rests, waiting for an event with nothing to do
-//! ([`Heartbeat::rest`]); a loop that awaits its sources wraps that await in
-//! [`Heartbeat::polled`], which is busy while a source is polled and resting once the poll has
+//! So each such loop holds a [`Heartbeat`](crate::liveness::Heartbeat). It says when the loop
+//! enters a step of work ([`Heartbeat::turn`](crate::liveness::Heartbeat::turn)) and when it
+//! rests, waiting for an event with nothing to do
+//! ([`Heartbeat::rest`](crate::liveness::Heartbeat::rest)); a loop that awaits its sources wraps
+//! that await in [`Heartbeat::polled`](crate::liveness::Heartbeat::polled), which is busy while a
+//! source is polled and resting once the poll has
 //! returned pending. A stop is time spent busy: a loop that rests for an hour because nothing
 //! happens is not stopped, and a loop that is inside one poll of one source for a minute is. One
 //! watcher thread per process, a plain thread outside every async runtime so that it runs when
 //! every worker of a runtime is blocked, reads the heartbeats. A loop that has been busy in one
-//! step for [`stall_after`] is reported once, at WARN, with:
+//! step for [`stall_after`](crate::liveness::stall_after) is reported once, at WARN, with:
 //!
 //! - the step it last entered;
 //! - what its owner's probe says (a router's probe reads its routing tables' lock: who holds it
@@ -26,16 +28,28 @@
 //!   sleeps in (`/proc/self/task/<tid>/wchan`), which is what tells a lock from a socket from a
 //!   sleep without a debugger.
 //!
-//! The report is repeated, at the same level, every four [`stall_after`] for as long as the stop
+//! The report is repeated, at the same level, every four
+//! [`stall_after`](crate::liveness::stall_after) for as long as the stop
 //! lasts, and a loop that turns again is reported at INFO with how long it did not. A loop that
 //! keeps turning is never reported, so a quiet node logs nothing.
+//!
+//! The watcher's thread lives exactly as long as some loop is watched: the first heartbeat starts
+//! it, and the heartbeat that leaves the watcher empty ends it and joins it before its drop
+//! returns. A process that has closed its nodes therefore holds no thread and no allocation of
+//! this module, which is what a host that checks its process for leaks at exit (the C ABI's
+//! own tests under valgrind) asks of it.
 //!
 //! The judgement is a pure function of the clock (`Watched::judge`), tested without sleeping;
 //! the thread only feeds it the time.
 //!
-//! The threshold is process-wide and set by the host ([`set_stall_after`]). A host that runs
-//! sessions sets it to half the lease, so that a stop is reported while the sessions it holds can
-//! still be told apart from the ones it has already lost.
+//! The threshold is process-wide and set by the host
+//! ([`set_stall_after`](crate::liveness::set_stall_after)). A host that runs sessions sets it to
+//! half the lease, so that a stop is reported while the sessions it holds can still be told apart
+//! from the ones it has already lost.
+//!
+//! The links above name their targets from the crate's root: this module is documented in
+//! `lib.rs` as well, and rustdoc reads the links of a module documented in both places from the
+//! parent's scope.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -57,10 +71,6 @@ pub const MIN_STALL_AFTER: Duration = Duration::from_millis(50);
 /// What a loop's owner can say about the loop when it stops, called on the watcher's thread. It
 /// must not wait for anything the loop may hold: read atomics and lock states, never take a lock.
 pub type Probe = Arc<dyn Fn() -> String + Send + Sync>;
-
-/// The most threads one report names. A node has a few dozen; a process that has many more
-/// is reported by the first ones and the count of the others.
-const MAX_THREADS_REPORTED: usize = 128;
 
 /// The process's monotonic origin of the turn times, so that a turn time is a number that an
 /// atomic holds.
@@ -100,21 +110,35 @@ impl Beat {
 }
 
 /// A loop's heartbeat: [`turn`](Self::turn) it once per pass. Dropping it takes the loop off the
-/// watcher, as a loop that has ended is not one that stopped.
-pub struct Heartbeat(Arc<Beat>);
+/// watcher, as a loop that has ended is not one that stopped; the drop of the last one waits for
+/// the watcher's thread to end, which is at most one look at the loops.
+pub struct Heartbeat {
+    beat: Arc<Beat>,
+    /// The watcher that reads it, which its drop takes it off.
+    watcher: Option<&'static Watcher>,
+}
 
 impl Heartbeat {
     /// A heartbeat for the loop `name`, whose passes enter one of `steps`, watched by the
-    /// process's watcher (started by the first heartbeat). `probe` is what the report adds about
-    /// the loop's owner.
+    /// process's watcher (whose thread the first heartbeat starts). `probe` is what the report
+    /// adds about the loop's owner.
     pub fn register(
         name: impl Into<String>,
         steps: &'static [&'static str],
         probe: Option<Probe>,
     ) -> Self {
-        let heartbeat = Self::unwatched(name, steps, probe);
-        if let Some(watcher) = Watcher::process() {
-            watcher.watch(&heartbeat);
+        Self::watched_by(&WATCHER, name, steps, probe)
+    }
+
+    fn watched_by(
+        watcher: &'static Watcher,
+        name: impl Into<String>,
+        steps: &'static [&'static str],
+        probe: Option<Probe>,
+    ) -> Self {
+        let mut heartbeat = Self::unwatched(name, steps, probe);
+        if watcher.watch_with_a_thread(&heartbeat) {
+            heartbeat.watcher = Some(watcher);
         }
         heartbeat
     }
@@ -124,13 +148,16 @@ impl Heartbeat {
         steps: &'static [&'static str],
         probe: Option<Probe>,
     ) -> Self {
-        Self(Arc::new(Beat {
-            name: name.into(),
-            steps,
-            step: AtomicUsize::new(RESTING),
-            turned_at: AtomicU64::new(now_ns()),
-            probe,
-        }))
+        Self {
+            beat: Arc::new(Beat {
+                name: name.into(),
+                steps,
+                step: AtomicUsize::new(RESTING),
+                turned_at: AtomicU64::new(now_ns()),
+                probe,
+            }),
+            watcher: None,
+        }
     }
 
     /// The loop is entering `step` (an index in the steps it was registered with) and is busy
@@ -138,17 +165,17 @@ impl Heartbeat {
     /// one the loop wrote, not the two to be from the same pass.
     pub fn turn(&self, step: usize) {
         debug_assert!(
-            step < self.0.steps.len(),
+            step < self.beat.steps.len(),
             "step {step} is not one of the loop's"
         );
-        self.0.step.store(step, Ordering::Relaxed);
-        self.0.turned_at.store(now_ns(), Ordering::Relaxed);
+        self.beat.step.store(step, Ordering::Relaxed);
+        self.beat.turned_at.store(now_ns(), Ordering::Relaxed);
     }
 
     /// The loop waits for an event and does no work: however long it rests, it is not stopped.
     pub fn rest(&self) {
-        self.0.step.store(RESTING, Ordering::Relaxed);
-        self.0.turned_at.store(now_ns(), Ordering::Relaxed);
+        self.beat.step.store(RESTING, Ordering::Relaxed);
+        self.beat.turned_at.store(now_ns(), Ordering::Relaxed);
     }
 
     /// `future`, with the loop busy in `step` while it is polled and resting once a poll has
@@ -161,6 +188,23 @@ impl Heartbeat {
             heartbeat: self,
             step,
             future,
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    /// Take the loop off its watcher; when it was the last, end the watcher's thread and wait
+    /// for it, so that nothing of the watcher outlives the loops it read.
+    fn drop(&mut self) {
+        let Some(watcher) = self.watcher else {
+            return;
+        };
+        if let Some(thread) = watcher.unwatch(&self.beat) {
+            thread.thread().unpark();
+            // The thread ends at its next wake, which the unpark makes now; it holds no lock of
+            // the caller's while it looks, so the wait is at most one look. A thread that panicked
+            // has already said so on stderr, and its end is all that is waited for here.
+            let _ = thread.join();
         }
     }
 }
@@ -210,6 +254,15 @@ enum Verdict {
 }
 
 impl Watched {
+    /// A loop not yet seen stopped.
+    fn of(beat: &Arc<Beat>) -> Self {
+        Self {
+            beat: Arc::downgrade(beat),
+            stalled_from: None,
+            reported_at: 0,
+        }
+    }
+
     /// Look at a loop that last entered a step or began to rest at `turned_at`, at time `now`,
     /// against `stall_after`; `resting` when it rests. A loop busy in one step for the threshold is
     /// stopped: reported when it reaches it and again every four thresholds after that report.
@@ -272,55 +325,103 @@ pub fn set_stall_after(after: Duration) {
     );
 }
 
-/// The loops a watcher reads.
+/// The process's watcher. A `static` rather than an allocation, so that a process whose loops
+/// have all ended holds nothing of it.
+static WATCHER: Watcher = Watcher::new();
+
+/// The loops a watcher reads, and the thread that reads them while there are any.
 struct Watcher {
-    watched: PlainMutex<Vec<Watched>>,
+    state: PlainMutex<WatcherState>,
+}
+
+struct WatcherState {
+    watched: Vec<Watched>,
+    /// The thread that reads `watched`, while it is not empty.
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// Counts the threads told to end. A thread reads the loops only while this is the value it
+    /// was started with, so a thread told to end never reads for the one started after it, which
+    /// a heartbeat registered between the end and the join would otherwise start beside it.
+    generation: u64,
+    /// The thread could not be started and that was said; said once, not at every heartbeat.
+    said_unstarted: bool,
 }
 
 impl Watcher {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
-            watched: PlainMutex::new(Vec::new()),
+            state: PlainMutex::new(WatcherState {
+                watched: Vec::new(),
+                thread: None,
+                generation: 0,
+                said_unstarted: false,
+            }),
         }
     }
 
-    /// The process's watcher, its thread started on the first call; `None` when the thread could
-    /// not be started, which is said once and leaves the loops unwatched rather than the node
-    /// unstarted.
-    fn process() -> Option<&'static Watcher> {
-        static WATCHER: OnceLock<Option<&'static Watcher>> = OnceLock::new();
-        *WATCHER.get_or_init(|| {
-            let watcher: &'static Watcher = Box::leak(Box::new(Watcher::new()));
-            let started = std::thread::Builder::new()
-                .name(String::from("wz-liveness"))
-                .spawn(move || loop {
-                    let after = stall_after();
-                    std::thread::sleep((after / 4).max(MIN_STALL_AFTER / 4));
-                    for line in watcher.look(now_ns(), after) {
-                        line.log();
+    /// Watch `heartbeat`, starting the thread that reads the loops when there is none. False
+    /// when the thread could not be started, which is said once and leaves the loop unwatched
+    /// rather than the node unstarted.
+    fn watch_with_a_thread(&'static self, heartbeat: &Heartbeat) -> bool {
+        self.state.with(|state| {
+            if state.thread.is_none() {
+                let generation = state.generation;
+                let started = std::thread::Builder::new()
+                    .name(String::from("wz-liveness"))
+                    .spawn(move || self.run(generation));
+                match started {
+                    Ok(thread) => state.thread = Some(thread),
+                    Err(e) => {
+                        if !state.said_unstarted {
+                            state.said_unstarted = true;
+                            log::warn!(
+                                "liveness: the watcher thread did not start ({e}); a loop of this \
+                                 process that stops will not be reported"
+                            );
+                        }
+                        return false;
                     }
-                });
-            match started {
-                Ok(_) => Some(watcher),
-                Err(e) => {
-                    log::warn!(
-                        "liveness: the watcher thread did not start ({e}); a loop of this \
-                         process that stops will not be reported"
-                    );
-                    None
                 }
+            }
+            state.watched.push(Watched::of(&heartbeat.beat));
+            true
+        })
+    }
+
+    /// The watcher's thread: look at the loops a quarter of the threshold apart, until it is told
+    /// to end.
+    fn run(&self, generation: u64) {
+        loop {
+            let after = stall_after();
+            std::thread::park_timeout((after / 4).max(MIN_STALL_AFTER / 4));
+            if self.state.with(|state| state.generation != generation) {
+                return;
+            }
+            for line in self.look(now_ns(), after) {
+                line.log();
+            }
+        }
+    }
+
+    /// Stop watching `beat`. When no loop is left, the thread is told to end and handed back to
+    /// be woken and joined, which the caller does once this lock is let go.
+    fn unwatch(&self, beat: &Arc<Beat>) -> Option<std::thread::JoinHandle<()>> {
+        let gone = Arc::as_ptr(beat);
+        self.state.with(|state| {
+            state.watched.retain(|one| one.beat.as_ptr() != gone);
+            if state.watched.is_empty() {
+                state.generation = state.generation.wrapping_add(1);
+                state.thread.take()
+            } else {
+                None
             }
         })
     }
 
+    /// Watch `heartbeat` with no thread: a test's own watcher, which the test looks through.
+    #[cfg(test)]
     fn watch(&self, heartbeat: &Heartbeat) {
-        self.watched.with(|watched| {
-            watched.push(Watched {
-                beat: Arc::downgrade(&heartbeat.0),
-                stalled_from: None,
-                reported_at: 0,
-            });
-        });
+        self.state
+            .with(|state| state.watched.push(Watched::of(&heartbeat.beat)));
     }
 
     /// Look at every loop at `now` and say what is to be said, forgetting the loops that ended.
@@ -328,9 +429,9 @@ impl Watcher {
     /// is slow holds no registration up.
     fn look(&self, now: u64, stall_after: Duration) -> Vec<Report> {
         let stall_after = u64::try_from(stall_after.as_nanos()).unwrap_or(u64::MAX);
-        let found: Vec<(Arc<Beat>, Verdict)> = self.watched.with(|watched| {
+        let found: Vec<(Arc<Beat>, Verdict)> = self.state.with(|state| {
             let mut found = Vec::new();
-            watched.retain_mut(|one| {
+            state.watched.retain_mut(|one| {
                 let Some(beat) = one.beat.upgrade() else {
                     return false;
                 };
@@ -377,10 +478,10 @@ impl Report {
                 Self {
                     warn: true,
                     text: format!(
-                        "liveness: loop '{}' has not turned for {:.3} s{}; it is in step '{}'{probe}; \
+                        "liveness: loop '{}' has not turned for {}{}; it is in step '{}'{probe}; \
                          threads: {threads}",
                         beat.name,
-                        Duration::from_nanos(for_ns).as_secs_f64(),
+                        Seconds(Duration::from_nanos(for_ns)),
                         if first { "" } else { " and is still stopped" },
                         beat.step_name(),
                     ),
@@ -389,9 +490,9 @@ impl Report {
             Verdict::TurnedAgain { after_ns } => Self {
                 warn: false,
                 text: format!(
-                    "liveness: loop '{}' turned again after {:.3} s without turning",
+                    "liveness: loop '{}' turned again after {} without turning",
                     beat.name,
-                    Duration::from_nanos(after_ns).as_secs_f64(),
+                    Seconds(Duration::from_nanos(after_ns)),
                 ),
             },
             Verdict::Turning | Verdict::StillStalled => Self {
@@ -410,47 +511,67 @@ impl Report {
     }
 }
 
-/// The process's threads as one line: `tid name state wchan` for each, from `/proc/self/task`.
-/// On a system without it, says so.
+/// A duration as seconds to the millisecond (`1.250 s`), in integers. A report is read by a
+/// person, for whom a millisecond is fine enough, and formatting a float would link the float
+/// formatter into every build that carries a heartbeat (measured: 19 KB of the C ABI pico peer's
+/// text).
+pub(crate) struct Seconds(pub(crate) Duration);
+
+impl core::fmt::Display for Seconds {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let millis = self.0.as_millis();
+        write!(f, "{}.{:03} s", millis / 1000, millis % 1000)
+    }
+}
+
+/// The process's threads as one line: `[tid name state wchan]` for each, from `/proc/self/task`,
+/// in the order the kernel lists them. On a system without it, says so.
 fn threads_now() -> String {
     #[cfg(target_os = "linux")]
     {
+        use core::fmt::Write as _;
+        // The most threads one report names. A node has a few dozen; a process that has many
+        // more is reported by the first ones and the count of the others.
+        const MAX_THREADS_REPORTED: usize = 128;
         let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
             return String::from("(unreadable: /proc/self/task)");
         };
-        let mut tids: Vec<u64> = tasks
+        let mut line = String::new();
+        let mut total = 0usize;
+        for tid in tasks
             .filter_map(Result::ok)
-            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-            .collect();
-        tids.sort_unstable();
-        let total = tids.len();
-        let mut line: Vec<String> = tids
-            .into_iter()
-            .take(MAX_THREADS_REPORTED)
-            .map(|tid| {
-                let read = |file: &str| {
-                    std::fs::read_to_string(format!("/proc/self/task/{tid}/{file}"))
-                        .map(|text| text.trim().to_owned())
-                        .unwrap_or_else(|_| String::from("?"))
-                };
-                let name = read("comm");
-                // `stat` is `tid (comm) state ...`; the name may hold spaces and parentheses, so
-                // the state is the first field after the last ')'.
-                let state = read("stat")
-                    .rsplit_once(')')
-                    .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
-                    .unwrap_or_else(|| String::from("?"));
-                let wchan = match read("wchan").as_str() {
-                    "" | "0" => String::from("-"),
-                    other => other.to_owned(),
-                };
-                format!("[{tid} {name} {state} {wchan}]")
-            })
-            .collect();
-        if total > MAX_THREADS_REPORTED {
-            line.push(format!("(and {} more)", total - MAX_THREADS_REPORTED));
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u64>().ok())
+        {
+            total += 1;
+            if total > MAX_THREADS_REPORTED {
+                continue;
+            }
+            let read = |file: &str| {
+                std::fs::read_to_string(format!("/proc/self/task/{tid}/{file}"))
+                    .unwrap_or_else(|_| String::from("?"))
+            };
+            let name = read("comm");
+            // `stat` is `tid (comm) state ...`; the name may hold spaces and parentheses, so the
+            // state is the first field after the last ')'.
+            let stat = read("stat");
+            let state = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .unwrap_or("?");
+            let wchan = read("wchan");
+            let wchan = match wchan.trim() {
+                "" | "0" => "-",
+                other => other,
+            };
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            let _ = write!(line, "[{tid} {} {state} {wchan}]", name.trim());
         }
-        line.join(" ")
+        if total > MAX_THREADS_REPORTED {
+            let _ = write!(line, " (and {} more)", total - MAX_THREADS_REPORTED);
+        }
+        line
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -461,12 +582,10 @@ fn threads_now() -> String {
 /// What every live loop of the process is doing now, for a host that answers a question about
 /// it and for a test: the loop's name, the step it last entered, and how long ago it turned.
 pub fn loops_now() -> Vec<(String, &'static str, Duration)> {
-    let Some(watcher) = Watcher::process() else {
-        return Vec::new();
-    };
     let now = now_ns();
-    watcher.watched.with(|watched| {
-        watched
+    WATCHER.state.with(|state| {
+        state
+            .watched
             .iter()
             .filter_map(|one| one.beat.upgrade())
             .map(|beat| {
@@ -593,7 +712,7 @@ mod tests {
         let after = Duration::from_millis(100);
 
         heartbeat.turn(1);
-        let turned = heartbeat.0.turned_at.load(Ordering::Relaxed);
+        let turned = heartbeat.beat.turned_at.load(Ordering::Relaxed);
         assert!(watcher.look(turned + 50 * MS, after).is_empty());
 
         let reports = watcher.look(turned + 150 * MS, after);
@@ -625,7 +744,7 @@ mod tests {
         );
 
         heartbeat.turn(0);
-        let again = heartbeat.0.turned_at.load(Ordering::Relaxed);
+        let again = heartbeat.beat.turned_at.load(Ordering::Relaxed);
         let reports = watcher.look(again + MS, after);
         assert_eq!(reports.len(), 1, "{reports:?}");
         assert!(!reports[0].warn);
@@ -639,7 +758,41 @@ mod tests {
 
         drop(heartbeat);
         assert!(watcher.look(again + 10_000 * MS, after).is_empty());
-        assert!(watcher.watched.with(|watched| watched.is_empty()));
+        assert!(watcher.state.with(|state| state.watched.is_empty()));
+    }
+
+    /// The watcher's thread starts with the first loop, lives while any loop is watched, and has
+    /// ended when the drop of the last loop returns (the drop joins it, so a thread that did not
+    /// end would hang this test); the next loop starts a new one. A watcher of its own, so that
+    /// the loops of the tests that run beside this one do not keep its thread alive.
+    #[test]
+    fn the_watchers_thread_ends_with_its_last_loop_and_starts_again_with_the_next() {
+        static OWN: Watcher = Watcher::new();
+        let thread_of = || {
+            OWN.state
+                .with(|state| state.thread.as_ref().map(|thread| thread.thread().id()))
+        };
+        assert_eq!(thread_of(), None);
+
+        let first = Heartbeat::watched_by(&OWN, "first", STEPS, None);
+        let second = Heartbeat::watched_by(&OWN, "second", STEPS, None);
+        let started = thread_of().expect("the first loop starts the thread");
+        drop(first);
+        assert_eq!(
+            thread_of(),
+            Some(started),
+            "the second loop is still watched"
+        );
+
+        drop(second);
+        assert_eq!(thread_of(), None, "the last loop ended the thread");
+        assert!(OWN.state.with(|state| state.watched.is_empty()));
+
+        let third = Heartbeat::watched_by(&OWN, "third", STEPS, None);
+        let again = thread_of().expect("the next loop starts a thread again");
+        assert_ne!(again, started);
+        drop(third);
+        assert_eq!(thread_of(), None);
     }
 
     /// A polled future keeps the loop in its step while its poll runs, and the loop rests once the
@@ -657,7 +810,7 @@ mod tests {
         let heartbeat = Heartbeat::unwatched("polled", STEPS, None);
         let step_seen_inside = Arc::new(AtomicUsize::new(RESTING));
         let mut polls = 0;
-        let beat = Arc::clone(&heartbeat.0);
+        let beat = Arc::clone(&heartbeat.beat);
         let seen = Arc::clone(&step_seen_inside);
         let source = std::future::poll_fn(move |_| {
             seen.store(beat.step.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -678,17 +831,28 @@ mod tests {
             "busy inside the poll"
         );
         assert_eq!(
-            heartbeat.0.step.load(Ordering::Relaxed),
+            heartbeat.beat.step.load(Ordering::Relaxed),
             RESTING,
             "resting once pending"
         );
 
         assert_eq!(Pin::new(&mut polled).poll(&mut cx), Poll::Ready(7));
         assert_eq!(
-            heartbeat.0.step.load(Ordering::Relaxed),
+            heartbeat.beat.step.load(Ordering::Relaxed),
             0,
             "busy past a ready poll"
         );
+    }
+
+    /// Seconds are written to the millisecond in integers: a whole part, three digits, never a
+    /// rounding up past what was measured.
+    #[test]
+    fn seconds_are_written_to_the_millisecond() {
+        let text = |d: Duration| Seconds(d).to_string();
+        assert_eq!(text(Duration::from_millis(150)), "0.150 s");
+        assert_eq!(text(Duration::from_millis(61_250)), "61.250 s");
+        assert_eq!(text(Duration::from_micros(999)), "0.000 s");
+        assert_eq!(text(Duration::from_secs(31)), "31.000 s");
     }
 
     /// The threshold never goes under its floor, so a host that passes zero (a lease of zero, a
