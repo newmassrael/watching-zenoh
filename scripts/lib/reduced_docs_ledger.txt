@@ -54,6 +54,7 @@ wz-capi-core	wz-capi-core/src/faces.rs	1	error: unresolved link to `CApiForwarde
 wz-capi-core	wz-capi-core/src/scouting_node.rs	1	error: unresolved link to `crate::scouting_responder`: no item named `scouting_responder` in module `wz_capi_core`
 wz-capi-pico	wz-capi-pico/src/cancellation.rs	1	error: unresolved link to `crate::sync`: no item named `sync` in module `wz_capi_pico`
 wz-capi-pico	wz-capi-pico/src/get.rs	1	error: unresolved link to `crate::query`: no item named `query` in module `wz_capi_pico`
+wz-capi-pico	wz-capi-pico/src/lib.rs	1	refused: wz-capi-pico: the tokio engine scouts on the host's sockets: a build with it names `scout`, and `scout-mcu` is the cooperative engine's window over one datagram socket
 wz-capi-pico	wz-capi-pico/src/matching.rs	1	error: unresolved link to `wz_capi_core::faces::SharedSession::declare_matching_listener`: no item named `wz_capi_core` in scope
 wz-capi-pico	wz-capi-pico/src/pubsub.rs	1	error: unresolved link to `crate::advanced::ze_advanced_publisher_options_t`: no item named `advanced` in module `wz_capi_pico`
 wz-capi-pico	wz-capi-pico/src/query.rs	1	error: unresolved link to `crate::pubsub::z_sample_source_info`: no item named `z_sample_source_info` in module `pubsub`
@@ -567,5 +568,6 @@ wz-session-mcu	wz-session-mcu/src/get_mailbox.rs	1	error: unresolved link to `cr
 wz-session-mcu	wz-session-mcu/src/group_drive.rs	1	error: unresolved link to `MulticastReplyEnqueue`: no item named `MulticastReplyEnqueue` in scope
 wz-session-mcu	wz-session-mcu/src/group_drive.rs	1	error: unresolved link to `MulticastReplyQueue::pop`: no item named `MulticastReplyQueue` in scope
 wz-session-mcu	wz-session-mcu/src/group_drive.rs	1	error: unresolved link to `MulticastReplyQueue`: no item named `MulticastReplyQueue` in scope
+wz-tls-mbedtls	wz-runtime-coop/src/lib.rs	1	refused: wz-runtime-coop: `runtime` (and `session-unicast`, which implies it) needs a form of the task pool: `alloc` for the heap form, `session-slot` for the static one
 zenoh-protocol	wz-zenoh-buffers/src/bbuf.rs	1	error[E0425]: cannot find function `thread_rng` in crate `rand`: not found in `rand`
 zenoh-protocol	wz-zenoh-buffers/src/zslice.rs	1	error[E0425]: cannot find function `thread_rng` in crate `rand`: not found in `rand`

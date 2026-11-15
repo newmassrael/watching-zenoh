@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -62,6 +63,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import doc_feature_sets  # noqa: E402
+from no_allocator_link_gate import ZEPHYR_BUILD_VALUES  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 CRATES = REPO / "crates"
@@ -95,10 +97,16 @@ def parse_findings(output: str) -> list[tuple[str, str, str]]:
 
 
 def document(crate: str, arguments: list[str]) -> list[tuple[str, str, str]]:
-    """The findings of one `cargo doc` of `crate`; a failure with none readable is one itself."""
+    """The findings of one `cargo doc` of `crate`; a failure with none readable is one itself.
+
+    A configuration that is a Zephyr image's (`wz-capi-pico` without `std` keeps only
+    `os-zephyr`) reads values `west build` passes from Kconfig, a tick rate among them, and is
+    documented with the stand-ins the no-allocator census builds those images with: they set
+    constants, and no item or link of the docs depends on them."""
     out = subprocess.run(
         ["cargo", "doc", "-p", crate, "--no-deps", "--quiet", "--message-format=short", *arguments],
         cwd=CRATES,
+        env={**os.environ, **dict(ZEPHYR_BUILD_VALUES)},
         capture_output=True,
         text=True,
         check=False,
