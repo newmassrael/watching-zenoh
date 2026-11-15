@@ -6,3 +6,9 @@ commit = "b46bfec64f52bc4c02eb174705ec018a82debcda"
 base = "af087dd4efde4f7835a02ae3e3cf9f7d99e7b349"
 machine = "mf977c53d872e"
 at = 1794723739
+
+[return]
+reason = "refused"
+detail = "the item has merge commits (1) and the queue rebases"
+report = "mf977c53d872e:0000000003-c89a55958eb5/attempt-1.log"
+at = 1794723758
