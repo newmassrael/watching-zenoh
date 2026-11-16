@@ -438,11 +438,11 @@ impl ReplySink for AskSink {
         answer.len.set(payload.len().min(REPLY_BYTES));
     }
 
-    fn on_final(&mut self, _rid: u64) {
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {
         ASKING.ended.set(ASKING.ended.get() + 1);
     }
 
-    fn on_timeout(&mut self, _rid: u64) {
+    fn on_timeout(&mut self, _rid: wz_session_core::wire_id::RequestId) {
         ASKING.answers[self.index].failed.set(true);
         ASKING.ended.set(ASKING.ended.get() + 1);
     }

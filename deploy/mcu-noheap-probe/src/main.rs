@@ -201,7 +201,7 @@ struct NoopReplyOut;
 impl ReplyOut for NoopReplyOut {
     fn reply(&mut self, _payload: &[u8]) {}
     fn reply_del(&mut self) {}
-    fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {}
+    fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
     fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
     fn clear_responder(&mut self) {}
     fn responder(&self) -> Option<(&[u8], u32)> {
@@ -214,7 +214,7 @@ impl ReplySink for ReplyCounter {
     fn on_reply(&mut self, _reply: &dyn ReplyView) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
-    fn on_final(&mut self, _rid: u64) {}
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {}
 }
 
 struct DeclCounter(&'static AtomicU32);
