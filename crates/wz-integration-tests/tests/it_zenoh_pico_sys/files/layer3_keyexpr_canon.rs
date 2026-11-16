@@ -7,7 +7,7 @@
 //! `wz_runtime_tokio::keyexpr_canon::canonize_keyexpr` is functionally
 //! equivalent to zenoh-pico's `_z_keyexpr_canonize`
 //! (`vendor/zenoh-pico/src/session/keyexpr.c:313-433`). The wz module
-//! doc-comment (`crates/wz-runtime-tokio/src/keyexpr_canon.rs:64-65`)
+//! doc-comment (`crates/wz-session-core/src/keyexpr_canon.rs:72-74`)
 //! asserts the variant-name 1:1 mapping; this fixture closes the
 //! empirical loop by calling **both** implementations on the same
 //! input and asserting:

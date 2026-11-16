@@ -43,7 +43,13 @@
 #   domain-bundles-gate.sh            # every domain-* bundle of the wz facade
 set -uo pipefail
 
+# shellcheck source=scripts/lib/build-evidence.sh
+source "$(dirname "${BASH_SOURCE[0]}")/build-evidence.sh"
 cd "$(dirname "${BASH_SOURCE[0]}")/../../crates" || exit 2
+# Each bundle's check is kept, so a bundle that should compile and does not
+# prints what cargo said.
+logs="$(mktemp -d)"
+trap 'rm -rf "$logs"' EXIT
 
 # bundle -> the reason the facade refuses it. Pinned SET.
 excluded="domain-api domain-platform"
@@ -66,7 +72,8 @@ n=0
 fail=0
 for b in $bundles; do
     n=$((n + 1))
-    if cargo check -p wz --features "$b" >/dev/null 2>&1; then
+    log="$logs/$b.log"
+    if cargo check -p wz --features "$b" >"$log" 2>&1; then
         built=1
     else
         built=0
@@ -81,6 +88,7 @@ for b in $bundles; do
     *)
         if [ "$built" -eq 0 ]; then
             echo "  FAIL $b does not compile (cargo check -p wz --features $b)" >&2
+            wz_build_evidence "$log" 30 >&2
             fail=1
         fi
         ;;

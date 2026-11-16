@@ -167,7 +167,8 @@ measure() {
         echo "SKIP" > "$TARGET_DIR_BASE/.${label}.size"
         return 0
     fi
-    tail -3 /tmp/measure-build-$$.log
+    # The build succeeded: its summary line is what is worth printing.
+    grep -E '^ *Finished ' /tmp/measure-build-$$.log || true
     rm -f /tmp/measure-build-$$.log
     local bin="$subdir/release/$BIN_NAME"
     # R311y822 — capture the DEFINED-SYMBOL SET, and strip a COPY rather than

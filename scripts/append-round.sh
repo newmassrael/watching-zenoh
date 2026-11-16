@@ -80,16 +80,21 @@ passthrough=()
 # is: off THIS invocation's argv, never a list written down here. They are the
 # population of the home-path precondition below.
 prose_files=()
+# The three files the CLI reads as one bullet per line; the decision file is
+# prose and is not among them.
+bullet_files=()
 for arg in "$@"; do
     case "$prev" in
         --impact) impact="$arg"; saw_impact=1 ;;
-        --decision-file|--changes-file|--verification-file|--carry-file)
-            prose_files+=("$arg") ;;
+        --decision-file) prose_files+=("$arg") ;;
+        --changes-file|--verification-file|--carry-file)
+            prose_files+=("$arg"); bullet_files+=("$arg") ;;
     esac
     case "$arg" in
         --impact=*) impact="${arg#--impact=}"; saw_impact=1 ;;
-        --decision-file=*|--changes-file=*|--verification-file=*|--carry-file=*)
-            prose_files+=("${arg#*=}") ;;
+        --decision-file=*) prose_files+=("${arg#*=}") ;;
+        --changes-file=*|--verification-file=*|--carry-file=*)
+            prose_files+=("${arg#*=}"); bullet_files+=("${arg#*=}") ;;
         --check-only) check_only=1; prev="$arg"; continue ;;
     esac
     passthrough+=("$arg")
@@ -227,6 +232,26 @@ if (( check_only == 0 )) || (( ${#prose_files[@]} > 0 )); then
         echo "  Fix the citation in the prose file and re-run: this is the last" >&2
         echo "  moment it is editable, which is the whole reason the check is" >&2
         echo "  here rather than at push time." >&2
+        exit 1
+    fi
+
+    # Item 221 -- a citation of THIS tree (`crates/x/src/y.rs:N`) in the
+    # round's prose must name a line the tree has; a carry that points the
+    # next round at a range that is not the code it means sends it to do work
+    # that is not there.
+    if ! python3 "$repo_root/scripts/lib/tree_citation_gate.py" --prose \
+        ${prose_files[@]+"${prose_files[@]}"}; then
+        echo "" >&2
+        echo "append-round: the entry was NOT appended; fix the citation in the prose file." >&2
+        exit 1
+    fi
+
+    # Item 182 -- the CLI reads each line of a bullet file as one bullet, so a
+    # hard-wrapped paragraph freezes as dozens of fragments.
+    if (( ${#bullet_files[@]} > 0 )) \
+        && ! python3 "$repo_root/scripts/lib/round_prose_shape.py" --bullets "${bullet_files[@]}"; then
+        echo "" >&2
+        echo "append-round: the entry was NOT appended; unwrap the bullet file." >&2
         exit 1
     fi
 fi

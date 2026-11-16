@@ -249,6 +249,19 @@ It also does not decide a RANKING. `critical` and `ordinary` are the operator's
 words in the register; this file reads them, counts what carries neither, and
 refuses to guess.
 
+## `--same-file`: the open items that name one file (R4500, open-debt item 418)
+
+An item's "the material is already there" can be refuted by a fact another item
+recorded about the same file: both true, and the second voids the first's plan
+(an item said a capture already held the traffic, two items away another said
+this tree writes the half of that capture the plan needed foreign). Nothing set
+them side by side, and a round found it only after starting the design. This
+mode lists, per file name, the OPEN items whose text names it, for a person to
+read together before starting either. It groups and does not judge: telling a
+contradiction from agreement is the reader's part. A name named by more items
+than `--max-group` (default 8) is ubiquitous (`run-ci.sh`) rather than a shared
+subject, and is counted on one line instead of listed.
+
 ## Why it is NOT wired into a CI layer
 
 Its input is machine-local: the register lives in the agent-memory directory,
@@ -529,6 +542,57 @@ def read_items(text: str) -> list[Item]:
             )
         )
     return out
+
+
+#: A file an item names, by path or bare name, with a suffix this tree uses.
+FILE_NAME = re.compile(
+    r"(?<![\w.-])((?:[\w.-]+/)*[\w-]+\.(?:rs|py|sh|c|h|toml|md|scxml|ya?ml|json5?|cmake))\b"
+)
+
+
+def same_file_groups(
+    text: str, max_group: int = 8
+) -> tuple[list[tuple[str, list[int]]], list[tuple[str, int]]]:
+    """`(groups, ubiquitous)`: each file name named by two to `max_group` OPEN,
+    live items with those items; and each name named by more, with its count.
+
+    A name is a file's last path segment, so `tests/x.rs` and `x.rs` meet."""
+    by_name: dict[str, set[int]] = {}
+    for item in read_items(text):
+        if item.archived or not is_open(item.header):
+            continue
+        for m in FILE_NAME.finditer(item.header + "\n" + item.tail):
+            by_name.setdefault(m.group(1).rsplit("/", 1)[-1], set()).add(item.number)
+    groups = sorted(
+        ((name, sorted(nums)) for name, nums in by_name.items() if 2 <= len(nums) <= max_group),
+        key=lambda g: (-len(g[1]), g[0]),
+    )
+    ubiquitous = sorted(
+        ((name, len(nums)) for name, nums in by_name.items() if len(nums) > max_group),
+        key=lambda g: (-g[1], g[0]),
+    )
+    return groups, ubiquitous
+
+
+SAME_FILE_FIXTURE = """\
+- **30. open: the traffic is already in `a_interop.rs`.**
+  It sits at crates/x/tests/a_interop.rs:12 and only the bridge is missing.
+- **31. open: this tree writes one half of a_interop.rs itself.**
+- **32. ✅ CLOSED -- also named a_interop.rs.**
+- **33. open, naming only b.rs.**
+"""
+
+
+def same_file_selftest() -> list[str]:
+    """Failures of the `--same-file` grouping over a fixture."""
+    failures = []
+    groups, ubiquitous = same_file_groups(SAME_FILE_FIXTURE)
+    if groups != [("a_interop.rs", [30, 31])] or ubiquitous:
+        failures.append(f"same-file: groups {groups} ubiquitous {ubiquitous}, want a_interop.rs: 30 31")
+    groups, ubiquitous = same_file_groups(SAME_FILE_FIXTURE, max_group=1)
+    if groups or ubiquitous != [("a_interop.rs", 2)]:
+        failures.append(f"same-file: max_group=1 gave {groups} / {ubiquitous}")
+    return failures
 
 
 def item_headers(text: str) -> tuple[dict[int, str], dict[int, str], list[int]]:
@@ -915,6 +979,10 @@ def selftest() -> int:
     """
     import subprocess
     import tempfile
+
+    same_file_failures = same_file_selftest()
+    for line in same_file_failures:
+        print(f"  FAIL  {line}")
 
     cases: list[tuple[str, dict[str, str], int, str]] = [
         # (label, roster fields, expected exit, a substring the output must carry)
@@ -1465,7 +1533,7 @@ def selftest() -> int:
         pathlib.Path(fixture).unlink()
 
     print(f"debt-plane-census selftest: {len(cases) - failures}/{len(cases)} arm(s) pass")
-    return 1 if failures else 0
+    return 1 if failures or same_file_failures else 0
 
 
 class Ranking(typing.NamedTuple):
@@ -1924,6 +1992,24 @@ def main() -> int:
     text = path.read_text(encoding="utf-8")
     live, archived = item_lines(text)
     found = {**archived, **live}
+
+    if "--same-file" in sys.argv:
+        max_group = 8
+        if "--max-group" in sys.argv:
+            at = sys.argv.index("--max-group")
+            if at + 1 >= len(sys.argv) or not sys.argv[at + 1].isdigit():
+                print("debt-plane-census: --max-group takes a number", file=sys.stderr)
+                return 2
+            max_group = int(sys.argv[at + 1])
+        groups, ubiquitous = same_file_groups(text, max_group)
+        for name, nums in groups:
+            print(f"  same file `{name}`: items {' '.join(str(n) for n in nums)}")
+        print(
+            f"  debt-plane-census: {len(groups)} file name(s) shared by 2-{max_group} open "
+            f"item(s); {len(ubiquitous)} named by more"
+            + (": " + ", ".join(f"{n} ({c})" for n, c in ubiquitous[:12]) if ubiquitous else "")
+        )
+        return 0
 
     if "--count" in sys.argv:
         # R2250b (open-debt item 603), the OTHER consumer. The only reader of

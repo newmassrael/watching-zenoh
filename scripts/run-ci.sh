@@ -435,6 +435,10 @@ source scripts/lib/sce-codegen-oracle.sh
 # executable): a command writes `"${WZ_TEST_ARGS[@]}"` where it wrote `--test <file>`.
 # shellcheck source=scripts/lib/test_target.sh
 source scripts/lib/test_target.sh
+# `wz_build_evidence <log> <lines>` is what a failed build prints: its first error lines, then its
+# tail. `build_evidence_lint.py` refuses a bare `tail` of a build's log.
+# shellcheck source=scripts/lib/build-evidence.sh
+source scripts/lib/build-evidence.sh
 
 # ─── Artefact collection (R311y736, N28) ────────────────────────────
 #
@@ -1964,22 +1968,32 @@ layer_b_verify_codegen() {
         encoding locator ext_zbuf open_body hello ext_envelope msg_del ext_entry)
 
     local fail=0
+    # Each stem's verification is kept, so a failure prints what the run said
+    # instead of running it again; the divergent stems' second run, without the
+    # upstream fixture, used to fail with nothing printed at all.
+    local verify_logs="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/b-verify-codegen"
+    mkdir -p "$verify_logs"
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
         local stem
         stem="$(basename "$scxml" .scxml)"
         local upstream="${SCE_UPSTREAM[$stem]:-}"
         local extra=()
         [[ -n "$upstream" && -f "$upstream" ]] && extra=("$upstream")
+        local vlog="$verify_logs/$stem.log"
 
-        if bash scripts/verify-codegen.sh "$scxml" "${extra[@]}" >/dev/null 2>&1; then
+        if bash scripts/verify-codegen.sh "$scxml" "${extra[@]}" >"$vlog" 2>&1; then
             echo "  $stem OK"
         else
             if [[ " ${LAYER2_KNOWN_DIVERGENCE[*]} " == *" $stem "* ]]; then
                 echo "  $stem L2 MISMATCH (audit-traced KNOWN_DIVERGENCE)"
-                bash scripts/verify-codegen.sh "$scxml" >/dev/null 2>&1 || fail=1
+                if ! bash scripts/verify-codegen.sh "$scxml" >"$vlog" 2>&1; then
+                    echo "  $stem FAIL without the upstream fixture as well" >&2
+                    cat "$vlog" >&2
+                    fail=1
+                fi
             else
                 echo "  $stem FAIL" >&2
-                bash scripts/verify-codegen.sh "$scxml" "${extra[@]}" || true
+                cat "$vlog" >&2
                 fail=1
             fi
         fi
@@ -2069,9 +2083,8 @@ layer_b2_regen_diff() {
     mkdir -p "$(dirname "$xtask_log")"
     if ! cargo build --manifest-path xtask/Cargo.toml --quiet >"$xtask_log" 2>&1; then
         echo "Layer B2 SKIP (xtask build failed — libxml2/sce-build toolchain absent?)"
-        echo "  ── the build's last 20 line(s), so the guess above can be checked ──"
-        tail -20 "$xtask_log"
-        echo "  ── full log: $xtask_log ──"
+        echo "  ── what the build said, so the guess above can be checked ──"
+        wz_build_evidence "$xtask_log" 20
         return 0
     fi
     # R311y756 — KEEP WHAT IT SAID. This discarded both streams and printed four
@@ -2084,8 +2097,7 @@ layer_b2_regen_diff() {
     if ! cargo run --manifest-path xtask/Cargo.toml --quiet -- regen \
         >"$regen_log" 2>&1; then
         echo "Layer B2 FAIL: xtask regen errored — its output follows" >&2
-        tail -40 "$regen_log" >&2
-        echo "  full: $regen_log" >&2
+        wz_build_evidence "$regen_log" 40 >&2
         return 1
     fi
     # R311y911 (open-debt item 424) — ASK WHETHER REGEN'S OUTPUT IS RECORDED,
@@ -3449,6 +3461,10 @@ layer_c0_test_discipline() {
     # knew. Three sites were in that state and R311y756 had repaired a fourth,
     # which is what makes this a rule rather than a habit.
     _runci_leg build_evidence_lint -- python3 scripts/lib/build_evidence_lint.py
+    # Item 427 -- a footprint attribution by SIZE as well as delta, which tags
+    # growth that vanished callees explain as absorbed. An instrument run by
+    # hand on two ELFs; its matcher is held here by the selftest.
+    _runci_leg footprint_attribution.selftest -- python3 scripts/lib/footprint_attribution.py --selftest
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks
@@ -3691,6 +3707,13 @@ layer_c0_test_discipline() {
     # never execute.
     _runci_leg reason_citation_gate.selftest -- python3 scripts/lib/reason_citation_gate.py --selftest
     _runci_leg reason_citation_gate --after reason_citation_gate.selftest -- python3 scripts/lib/reason_citation_gate.py
+    # Items 221 and 255 -- a `path:LINE` citation of this tree in a source or
+    # script comment resolves; append-round.sh runs the --prose half on a
+    # round's ledger prose, and round_prose_shape.py refuses a hard-wrapped
+    # bullet file there (item 182).
+    _runci_leg tree_citation_gate.selftest -- python3 scripts/lib/tree_citation_gate.py --selftest
+    _runci_leg tree_citation_gate --after tree_citation_gate.selftest -- python3 scripts/lib/tree_citation_gate.py --check
+    _runci_leg round_prose_shape.selftest -- python3 scripts/lib/round_prose_shape.py --selftest
     # R3182 (open-debt item 756) -- the citation gate above says a cited file
     # still resolves, not that the sentence citing it is still true. This pins
     # each file a remaining atom's reason cites to the blob a round last read the
@@ -4661,6 +4684,29 @@ layer_c0i_impact_ref_gate() {
         echo "  C0i prose precondition: home-path refusal NOT ARMED here" \
             "(\$HOME is $HOME, which the check skips by design)"
     fi
+    # Items 182 and 221 -- the bullet-shape and tree-citation preconditions
+    # refuse on every host (neither skips), so their refusal is the witness. A
+    # hard-wrapped changes file and a carry citing a line past the end of
+    # run-ci.sh must each be refused, by that precondition and not another.
+    printf 'The gate reads every line and\nrefuses the ones that continue a sentence.\n' >"$c0i_prose"
+    if bash scripts/append-round.sh --check-only --impact "$real" \
+        --changes-file "$c0i_prose" >"$c0i_out" 2>&1 \
+        || ! grep -q 'round-prose-shape: FAIL' "$c0i_out"; then
+        echo "  Layer C0i FAIL: a hard-wrapped bullet file was not refused by its shape (item 182):" >&2
+        sed 's/^/    /' "$c0i_out" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    printf 'Carry: see scripts/run-ci.sh:99999999 for the next step.\n' >"$c0i_prose"
+    if bash scripts/append-round.sh --check-only --impact "$real" \
+        --carry-file "$c0i_prose" >"$c0i_out" 2>&1 \
+        || ! grep -q 'tree-citation: FAIL' "$c0i_out"; then
+        echo "  Layer C0i FAIL: a carry citing a line past the end of run-ci.sh was not refused by the citation check (item 221):" >&2
+        sed 's/^/    /' "$c0i_out" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    echo "  C0i prose precondition: a wrapped bullet file and an unresolved tree citation are refused"
     rm -f "$c0i_prose" "$c0i_out"
 
     # A ROUND CARRIED AS A DESCRIPTOR (`scripts/file-round.sh`, the script the queue
@@ -11525,7 +11571,7 @@ _c1e_neg_set() {
         echo "  C1e FAIL: the subset build broke while listing \`$module\` (exit $rc)." >&2
         echo "            This is NOT a drift verdict, and the fault is not necessarily" >&2
         echo "            in \`$module\` — the compiler output names the real site:" >&2
-        printf '%s\n' "$out" | tail -20 | sed 's/^/      /' >&2
+        wz_build_evidence - 20 <<<"$out" | sed 's/^/      /' >&2
         return 1
     fi
     printf '%s' "$out" | sed -n "s/^${module}::\(.*\): test\$/\1/p" | sort
@@ -17880,7 +17926,7 @@ layer_c1j_runtime_tokio_subset_behavior() {
                 --features "$feats" --lib -- --list 2>&1); rc=$?
             if [ "$rc" -ne 0 ]; then
                 echo "  C1j FAIL: subset $name did not BUILD (exit $rc) — not a drift verdict:"
-                printf '%s\n' "$out" | tail -20 | sed 's/^/      /'
+                wz_build_evidence - 20 <<<"$out" | sed 's/^/      /'
                 return 1
             fi
             got=$(printf '%s' "$out" \
@@ -27463,9 +27509,7 @@ _qz_west_build() {
         return 0
     fi
     echo "  $label build $app (west) FAIL" >&2
-    echo "  ── the build's last 60 line(s) ──" >&2
-    tail -60 "$west_log" >&2
-    echo "  ── full log: $west_log ──" >&2
+    wz_build_evidence "$west_log" 60 >&2
     return 1
 }
 

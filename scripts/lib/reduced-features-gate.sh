@@ -146,6 +146,13 @@ if [[ $list_members -eq 1 ]]; then
     exit 0
 fi
 
+# shellcheck source=scripts/lib/build-evidence.sh
+source "$lib_dir/build-evidence.sh"
+# Each crate's clippy is kept, so a crate that does not build clean prints the
+# lint or error that made it fail.
+logs="$(mktemp -d)"
+trap 'rm -rf "$logs"' EXIT
+
 fail=0
 checked=0
 for pkg in "${members[@]}"; do
@@ -165,12 +172,13 @@ for pkg in "${members[@]}"; do
         args=(clippy -p "$pkg" --no-default-features --all-targets --quiet)
     fi
     checked=$((checked + 1))
-    if ! cargo "${args[@]}" -- -D warnings >/dev/null 2>&1; then
+    if ! cargo "${args[@]}" -- -D warnings >"$logs/$pkg.log" 2>&1; then
         echo "  reduced-features FAIL: $pkg does not build clean under" \
              "--no-default-features ($mode). Either fix the reduced combination —" \
              "usually a cfg-gated import behind an ungated signature, or a test" \
              "module whose every member is gated — or move the crate to a named" \
              "tier in scripts/lib/reduced-features-gate.sh and say why."
+        wz_build_evidence "$logs/$pkg.log" 30
         fail=1
     fi
 done

@@ -749,11 +749,12 @@ if ! python3 scripts/lib/count_guard_lint.py; then
     _prepush_refuse
 fi
 # Item 858 — a cargo test piped into `grep -q`, with or without a `tee`, races a
-# SIGPIPE under pipefail; the lint derives the shape from run-ci.sh (0.1s).
+# SIGPIPE under pipefail. Items 369, 370 and 372 widened it to every tracked
+# shell script and hook, every build spelling, and a bare `tail` of a build log.
 if ! python3 scripts/lib/build_evidence_lint.py; then
     echo "" >&2
-    echo "pre-push: [gate 2c2x] run-ci.sh pipes a build into grep -q or discards its output." >&2
-    echo "          Use _runci_guarded_test <label> <N> cargo test ...; the line above names it." >&2
+    echo "pre-push: [gate 2c2x] a script pipes a build into grep -q, discards its output," >&2
+    echo "          or dumps only its tail. The line above names it and the remedy." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     _prepush_refuse
 fi
@@ -1205,6 +1206,10 @@ round_fed_gates=(
     "family_notice_gate.py --check"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
+    # Items 221 and 255 -- a `path:LINE` citation of this tree in a source or script
+    # comment names a tracked file and a line it has. Fed by every comment a round
+    # edits and every file it moves; a text read, no build.
+    "tree_citation_gate.py --check"
     # R3182 -- a file a standing atom reason cites moved while its review pin did
     # not (open-debt item 756). Round-fed by the store and the tracked tree, a
     # text read and one `git hash-object`, no build.

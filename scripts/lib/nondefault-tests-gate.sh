@@ -119,6 +119,8 @@ repo="$(cd "$here/../.." && pwd)"
 # shellcheck source=scripts/lib/artifact-root.sh
 source "$here/artifact-root.sh"
 wz_artifact_root_init "$repo" || exit 2
+# shellcheck source=scripts/lib/build-evidence.sh
+source "$here/build-evidence.sh"
 
 # package|scope|features|test-name-filter|handed-off-tests
 #
@@ -1695,7 +1697,7 @@ if [[ "${1:-}" == "--census" ]]; then
         if ! out="$(cd "$repo/crates" && cargo "${argv[@]}" -- --list 2>"$tmp/list.err")"; then
             echo "nondefault-tests: FAIL -- cargo ${argv[*]} -- --list did not list:" >&2
             echo "  a census that cannot list a build cannot say what it holds." >&2
-            tail -n 15 "$tmp/list.err" | sed 's/^/    /' >&2
+            wz_build_evidence "$tmp/list.err" 15 | sed 's/^/    /' >&2
             return 1
         fi
         grep -E ': test$' <<<"$out" | sed 's/: test$//' | sort -u

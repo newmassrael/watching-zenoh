@@ -35,6 +35,8 @@
 #   lifecycle-channel-guard-gate.sh
 set -uo pipefail
 
+# shellcheck source=scripts/lib/build-evidence.sh
+source "$(dirname "${BASH_SOURCE[0]}")/build-evidence.sh"
 cd "$(dirname "${BASH_SOURCE[0]}")/../../crates" || exit 2
 
 # The guard's own words, backticks included: escaped, so the text is data and never a command.
@@ -56,8 +58,8 @@ refused() {
         echo "lifecycle-channel-guard: FAIL -- $pkg --features $feats BUILT; the lifecycle verbs compiled with no secure channel (decision D2)" >&2
         fail=1
     elif ! grep -qF "$GUARD" "$log"; then
-        echo "lifecycle-channel-guard: FAIL -- $pkg --features $feats failed, but not by the D2 guard; its last lines:" >&2
-        tail -n 15 "$log" >&2
+        echo "lifecycle-channel-guard: FAIL -- $pkg --features $feats failed, but not by the D2 guard; what it said:" >&2
+        wz_build_evidence "$log" 15 >&2
         fail=1
     else
         echo "  lifecycle-channel-guard: $pkg --features $feats refused by the D2 guard"
@@ -70,8 +72,8 @@ admitted() {
     if cargo check -p "$pkg" --features "$feats" --quiet >"$log" 2>&1; then
         echo "  lifecycle-channel-guard: $pkg --features $feats builds"
     else
-        echo "lifecycle-channel-guard: FAIL -- $pkg --features $feats did not build, so the refusals above prove nothing; its last lines:" >&2
-        tail -n 15 "$log" >&2
+        echo "lifecycle-channel-guard: FAIL -- $pkg --features $feats did not build, so the refusals above prove nothing; what it said:" >&2
+        wz_build_evidence "$log" 15 >&2
         fail=1
     fi
 }
