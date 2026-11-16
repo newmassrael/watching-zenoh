@@ -73,7 +73,9 @@ use wz_session_core::auth_dispatch::AuthDispatch;
 // set unchanged.
 #[cfg(feature = "transport-multilink")]
 use wz_session_core::qos::Priority;
-use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
+use wz_session_core::session_timeouts::{
+    HandshakeDeadlineTracker, SessionTimeouts, OPEN_TIMEOUT_MS,
+};
 // R311y435 — re-exported so a caller of the `*_with_offer` entrypoints imports
 // the offer type from the same module as the function that consumes it.
 pub use wz_session_core::transport_mode::{SessionOffer, TransportMode};
@@ -250,10 +252,11 @@ use crate::unixpipe_pipeline::{
 /// bounds only the *precision* of the open-deadline (a handshake timeout
 /// fires within `[deadline, deadline + DEFAULT_OPEN_TICK_MS]`), never the
 /// deadline itself — the window durations are the §2.5 single source of
-/// truth carried in [`SessionTimeouts`] (`link.open_timeout` /
-/// `init_ack.timeout` / `open_ack.timeout`). 50ms keeps the 2s/5s windows
-/// accurate to <3% while the inbound `poll_event` races the tick so a frame
-/// still resolves the instant it arrives.
+/// truth carried in [`SessionTimeouts`] (`link.open_timeout` and the
+/// handshake's one bound, raised as `init_ack.timeout` / `open_ack.timeout`).
+/// 50ms keeps the 5s/10s windows accurate to <1% while the inbound
+/// `poll_event` races the tick so a frame still resolves the instant it
+/// arrives.
 pub const DEFAULT_OPEN_TICK_MS: u64 = 50;
 
 /// Host-tier dial configuration threaded through the locator dial seam — the
@@ -329,15 +332,17 @@ impl Default for DialConfig {
 }
 
 /// Upstream's `transport/unicast/open_timeout`, ten seconds
-/// (`commons/zenoh-config/src/defaults.rs` @ `open_timeout: 10_000,`).
-pub const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10_000);
+/// (`commons/zenoh-config/src/defaults.rs` @ `open_timeout: 10_000,`): the session core's
+/// [`OPEN_TIMEOUT_MS`], so a dial config and a handshake that states no bound agree.
+pub const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(OPEN_TIMEOUT_MS);
 
 /// Run `open`, the dial of one endpoint and the handshake over the link it makes, within
 /// `open_timeout`, and answer [`OpenError::OpenTimeout`] when the bound passes first. Upstream
 /// bounds one open of an endpoint this way, the link's creation and its establishment on the
 /// one clock (`io/zenoh-transport/src/unicast/manager.rs` @
-/// `tokio::time::timeout(self.config.unicast.open_timeout, async {`); the handshake's own
-/// windows still end it sooner where they are shorter.
+/// `tokio::time::timeout(self.config.unicast.open_timeout, async {`), and has no shorter
+/// window for a step of the handshake; the handshake inside is held to the same bound
+/// ([`DialConfig::handshake_timeouts`]), so this is the clock that ends it.
 pub async fn open_within<T, F>(open_timeout: std::time::Duration, open: F) -> Result<T, OpenError>
 where
     F: core::future::Future<Output = Result<T, OpenError>>,
@@ -354,6 +359,13 @@ impl DialConfig {
     pub fn with_open_timeout(mut self, open_timeout: std::time::Duration) -> Self {
         self.open_timeout = open_timeout;
         self
+    }
+
+    /// The handshake deadlines of an open dialled with this config: the initiator's whole
+    /// handshake held to [`Self::open_timeout`], so no step of it ends the open sooner than the
+    /// bound the node states.
+    pub fn handshake_timeouts(&self) -> SessionTimeouts {
+        SessionTimeouts::from_build().with_open_timeout(self.open_timeout)
     }
     /// R2592 — supply the per-link-kind socket configuration every dial layers
     /// its locator's options over. Ungated, like the layer itself.
@@ -4447,11 +4459,13 @@ pub enum OpenError {
     /// Close during the handshake.
     Terminal,
     /// A handshake timeout fired before Established: the peer did not
-    /// complete the handshake within the §2.5 window (`init_ack.timeout` /
-    /// `open_ack.timeout`, 2s each; `link.open_timeout` 5s). The host
-    /// deadline-sweep raises the timeout event once
-    /// [`connect_and_open_session`]'s tick advances past the deadline,
-    /// driving the FSM to `Closing`.
+    /// complete the handshake within its bound (`SessionTimeouts::opening_ms`,
+    /// raised as `init_ack.timeout` / `open_ack.timeout`; `link.open_timeout`
+    /// 5s). The host
+    /// deadline-sweep raises the timeout event once the open loop's tick
+    /// advances past the deadline, driving the FSM to `Closing`. An open run
+    /// within its node's bound ([`open_within`]) ends at that bound first, as
+    /// [`Self::OpenTimeout`]; this is the answer for a link handed in alone.
     /// Distinguished from [`Self::Terminal`] via the close-reason trace: a
     /// timeout transition runs `set_close_reason_generic` (so
     /// `set_close_reason_count >= 1` with `CloseReason::Generic`), whereas a
@@ -4624,9 +4638,9 @@ fn wire_session_engine(
 /// dispatches the role-start event, then this races the cancel-safe inbound
 /// poll against a `tick_interval_ms` cadence; on each tick the
 /// [`HandshakeDeadlineTracker`] raises the elapsed timeout event — the
-/// Initiator's `init_ack.timeout` / `open_ack.timeout` (2s) /
-/// `link.open_timeout` (5s), and the Accepting side's
-/// `accepting.inactivity_timeout` (1s, R311fb). A frame that arrives
+/// Initiator's one handshake bound (10s unless stated, raised as
+/// `init_ack.timeout` / `open_ack.timeout`) / `link.open_timeout` (5s), and
+/// the Accepting side's `accepting.inactivity_timeout` (1s, R311fb). A frame that arrives
 /// first resolves the handshake without waiting for the next tick; the losing
 /// `select!` branch is cancelled, safe because `poll_and_dispatch_one`'s only
 /// await is `poll_event`, whose partial-read state lives in the driver's
@@ -4641,9 +4655,11 @@ fn wire_session_engine(
 /// per §2.7 anti-amplification). So a timed-out accept is reported as
 /// `Terminal`, intentionally indistinguishable from a peer close: the silent
 /// drop spends no Close frame on a possibly-spoofed peer.
-/// pub(crate) for the A4b reconnect supervisor (`crate::reconnect`), which
-/// re-runs this same open loop over a re-dialed link with the surviving
-/// actions bundle.
+///
+/// The accept entry points that state no deadlines of their own drive through
+/// here; an initiator states its open bound and drives through
+/// `drive_open_loop_within`, so this is compiled with the accepting role only.
+#[cfg(feature = "session-unicast-accept")]
 pub(crate) async fn drive_open_loop(
     inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
@@ -4666,9 +4682,10 @@ pub(crate) async fn drive_open_loop(
     .await
 }
 
-/// [`drive_open_loop`] with the handshake deadlines the host states, in place of the §2.5
+/// `drive_open_loop` with the handshake deadlines the host states, in place of the §2.5
 /// baseline: the node's accept bound (`transport/unicast/accept_timeout`), which zenoh keeps at
-/// ten seconds and zenoh-pico at one, is the `Accepting` window of `timeouts`.
+/// ten seconds and zenoh-pico at one, is the `Accepting` window of `timeouts`, and its open
+/// bound (`transport/unicast/open_timeout`) is the `Opening` window.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drive_open_loop_within(
     mut inbound: InboundLink,
@@ -4735,7 +4752,8 @@ pub(crate) async fn drive_open_loop_within(
         }
         // R311fa / R311il — the tracker (re-)arms the host handshake
         // deadline for the current state (per-phase keys re-arm on entry;
-        // the Accepting children share one whole-handshake bound).
+        // the Opening children share one whole-handshake bound, as do the
+        // Accepting children).
         let armed_deadline =
             deadline_tracker.poll(engine.get_current_state(), clock.now_monotonic_ms());
         // R311il — race the cancel-safe inbound poll against a `tick_interval_ms`
@@ -4827,18 +4845,15 @@ pub(crate) async fn drive_open_loop_within(
 /// one message per datagram (boundary == frame), and both decode through the
 /// same `handle_inbound` path.
 ///
-/// Wall-clock bounded by the host handshake deadline-sweep (R311fa /
-/// R311il). The inbound poll is raced in a `tokio::select!` against a
-/// `tick_interval_ms` cadence; once the [`HandshakeDeadlineTracker`]
-/// reports the deadline armed by the current handshake state has elapsed
-/// (`init_ack.timeout` / `open_ack.timeout`, 2s; `link.open_timeout`, 5s),
-/// the loop raises the timeout event and the FSM transitions to `Closing` —
-/// surfaced here as [`OpenError::HandshakeTimeout`]. So a peer that never
-/// answers no longer hangs the loop (the prior `max_iters`-only bound was a
-/// test guard, not a wall-clock deadline). The window durations are the
-/// §2.5 single source of truth in [`SessionTimeouts`]; `tick_interval_ms`
-/// only sets how finely the host samples the clock (see
-/// [`DEFAULT_OPEN_TICK_MS`]). `poll_and_dispatch_one`
+/// Wall-clock bounded by `cfg`'s `transport/unicast/open_timeout`, the dial
+/// and the handshake on one clock as upstream bounds one open
+/// ([`open_within`]): a peer that never answers ends the open at that bound
+/// with [`OpenError::OpenTimeout`]. The handshake inside is held to the same
+/// bound ([`DialConfig::handshake_timeouts`]) by the host deadline-sweep
+/// (R311fa / R311il), which raises the FSM's timeout event once the
+/// [`HandshakeDeadlineTracker`] reports it elapsed; armed after the dial, it
+/// never ends the open first. `tick_interval_ms` only sets how finely the
+/// host samples the clock (see [`DEFAULT_OPEN_TICK_MS`]). `poll_and_dispatch_one`
 /// is cancel-safe (partial reads live in `TcpReadDriver`'s `ReadState`), so
 /// the tick branch can cancel an in-flight read without losing wire bytes.
 ///
@@ -4853,8 +4868,8 @@ pub(crate) async fn drive_open_loop_within(
 /// helper does not depend on the generated FSM state-enum shape.
 ///
 /// `max_iters` bounds the inbound poll loop for test determinism;
-/// production passes `None` and relies on the handshake-timer deadline
-/// above. `tick_interval_ms` is the SCE-scheduler pump cadence
+/// production passes `None` and relies on the open's bound above.
+/// `tick_interval_ms` is the SCE-scheduler pump cadence
 /// ([`DEFAULT_OPEN_TICK_MS`] for production).
 pub async fn connect_and_open_session(
     locator: AnyLocator,
@@ -4864,8 +4879,37 @@ pub async fn connect_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session(dialed, params, clock, max_iters, tick_interval_ms).await
+    connect_within(locator, cfg, move |dialed, timeouts| {
+        initiate_installing(
+            dialed,
+            params,
+            |_actions| {},
+            clock,
+            max_iters,
+            tick_interval_ms,
+            timeouts,
+        )
+    })
+    .await
+}
+
+/// One open of `locator` as upstream makes it: the dial and `open`, the handshake over the link
+/// the dial made, on the one clock of `cfg.open_timeout` ([`open_within`]), with `open` handed the
+/// handshake deadlines that hold it to the same bound.
+async fn connect_within<O, Fut>(
+    locator: AnyLocator,
+    cfg: &DialConfig,
+    open: O,
+) -> Result<OpenedSession, OpenError>
+where
+    O: FnOnce(DialedLink, SessionTimeouts) -> Fut,
+    Fut: core::future::Future<Output = Result<OpenedSession, OpenError>>,
+{
+    open_within(cfg.open_timeout, async move {
+        let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
+        open(dialed, cfg.handshake_timeouts()).await
+    })
+    .await
 }
 
 /// R3b — [`connect_and_open_session`] with a Z_EXT_AUTH dispatch installed: it
@@ -4883,9 +4927,18 @@ pub async fn connect_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session_with_auth(dialed, params, auth, clock, max_iters, tick_interval_ms)
-        .await
+    connect_within(locator, cfg, move |dialed, timeouts| {
+        initiate_installing(
+            dialed,
+            params,
+            move |actions| actions.install_auth_dispatch(auth),
+            clock,
+            max_iters,
+            tick_interval_ms,
+            timeouts,
+        )
+    })
+    .await
 }
 
 /// transport-lowlatency — [`connect_and_open_session`] that OFFERS the
@@ -4938,9 +4991,19 @@ pub async fn connect_and_open_session_with_offer(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let offer = offer_for_endpoint(offer, &locator)?;
-    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session_with_offer(dialed, params, offer, clock, max_iters, tick_interval_ms)
-        .await
+    connect_within(locator, cfg, move |dialed, timeouts| {
+        initiator_open_offering(
+            dialed,
+            params,
+            offer,
+            |_actions| Ok(()),
+            clock,
+            max_iters,
+            tick_interval_ms,
+            timeouts,
+        )
+    })
+    .await
 }
 
 /// R2944 — the offer a dial of `locator` makes: `offer`, with the link's QoS
@@ -5119,15 +5182,17 @@ pub async fn connect_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session_with_namespace(
-        dialed,
-        params,
-        namespace,
-        clock,
-        max_iters,
-        tick_interval_ms,
-    )
+    connect_within(locator, cfg, move |dialed, timeouts| {
+        initiate_installing(
+            dialed,
+            params,
+            move |actions| actions.set_namespace(namespace),
+            clock,
+            max_iters,
+            tick_interval_ms,
+            timeouts,
+        )
+    })
     .await
 }
 
@@ -5145,7 +5210,9 @@ pub async fn connect_and_open_session_with_namespace(
 /// connected, then `link.opened` -> SentInitSyn fires `send_init_syn`, the
 /// first wire byte) and drives the inbound handshake (peer InitAck -> OpenSyn
 /// -> peer OpenAck) to Established. Wall-clock bounded by the FSM's handshake
-/// timers exactly as [`connect_and_open_session`] (see `drive_open_loop`).
+/// bound (see `drive_open_loop`), upstream's ten seconds: a caller that holds
+/// the bound its node states dials through [`connect_and_open_session`], or
+/// passes that bound to [`initiate_and_open_session_with_staging`].
 pub async fn initiate_and_open_session(
     connected: DialedLink,
     params: SessionInitParams,
@@ -5153,8 +5220,37 @@ pub async fn initiate_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    initiate_installing(
+        connected,
+        params,
+        |_actions| {},
+        clock,
+        max_iters,
+        tick_interval_ms,
+        SessionTimeouts::from_build(),
+    )
+    .await
+}
+
+/// The Initiator open over an already-connected link with `install` run on the fresh actions
+/// before any wire byte, held to `timeouts`: the one body of the bare, auth-on and namespaced
+/// opens, so a dial that holds its node's open bound and one that does not differ in nothing
+/// else.
+async fn initiate_installing<I>(
+    connected: DialedLink,
+    params: SessionInitParams,
+    install: I,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
+) -> Result<OpenedSession, OpenError>
+where
+    I: FnOnce(&Arc<SessionLinkActions>),
+{
     let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
     let actions = new_session_actions(outbound, params, clock);
+    install(&actions);
     initiator_open(
         inbound,
         actions,
@@ -5162,6 +5258,7 @@ pub async fn initiate_and_open_session(
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await
 }
@@ -5183,16 +5280,14 @@ pub async fn initiate_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
-    let actions = new_session_actions(outbound, params, clock);
-    actions.install_auth_dispatch(auth);
-    initiator_open(
-        inbound,
-        actions,
-        writer_handle,
+    initiate_installing(
+        connected,
+        params,
+        move |actions| actions.install_auth_dispatch(auth),
         clock,
         max_iters,
         tick_interval_ms,
+        SessionTimeouts::from_build(),
     )
     .await
 }
@@ -5242,6 +5337,7 @@ pub async fn initiate_and_open_session_with_multilink(
         clock,
         max_iters,
         tick_interval_ms,
+        SessionTimeouts::from_build(),
     )
     .await
 }
@@ -5249,7 +5345,8 @@ pub async fn initiate_and_open_session_with_multilink(
 /// Item 751 — [`initiate_and_open_session_with_multilink`] with the caller's
 /// own staging run after the link's: the mesh loop installs its node's south
 /// partition on every link it dials this way, as it does on a single-link dial
-/// through [`initiate_and_open_session_with_staging`].
+/// through [`initiate_and_open_session_with_staging`], and holds the handshake
+/// to its node's open bound through `timeouts` as that dial does.
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn initiate_multilink_with_staging<S>(
@@ -5261,6 +5358,7 @@ pub(crate) async fn initiate_multilink_with_staging<S>(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError>
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
@@ -5277,6 +5375,7 @@ where
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await
 }
@@ -5417,6 +5516,7 @@ pub async fn initiate_and_open_session_with_offer(
         clock,
         max_iters,
         tick_interval_ms,
+        SessionTimeouts::from_build(),
     )
     .await
 }
@@ -5449,6 +5549,14 @@ pub async fn initiate_and_open_session_with_offer(
 /// `set_max_reassembly_bytes`. Nothing here widens that surface; it makes the
 /// EXISTING surface reachable at the one instant when installing on it still
 /// changes the wire.
+///
+/// `timeouts` are the handshake deadlines of this open, as on the accept-side
+/// twin `accept_and_open_session_with_staging`: a caller that holds its
+/// node's `transport/unicast/open_timeout` passes
+/// [`DialConfig::handshake_timeouts`], so the handshake is held to that bound
+/// and to no shorter one; [`SessionTimeouts::from_build`] is upstream's ten
+/// seconds.
+#[allow(clippy::too_many_arguments)]
 pub async fn initiate_and_open_session_with_staging<S>(
     connected: DialedLink,
     params: SessionInitParams,
@@ -5457,6 +5565,7 @@ pub async fn initiate_and_open_session_with_staging<S>(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError>
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
@@ -5469,6 +5578,7 @@ where
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await
 }
@@ -5498,7 +5608,8 @@ where
 /// `stage` runs after `apply_offer` and BEFORE the handshake drives, so
 /// everything it installs is on the wire from the InitSyn onward. It returns
 /// [`OpenError`] because the accept-side twin's staging draws OS entropy, which
-/// can fail.
+/// can fail. `timeouts` are the handshake deadlines of this open.
+#[allow(clippy::too_many_arguments)]
 async fn initiator_open_offering<S>(
     connected: DialedLink,
     params: SessionInitParams,
@@ -5507,6 +5618,7 @@ async fn initiator_open_offering<S>(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError>
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
@@ -5548,6 +5660,7 @@ where
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await?;
     // At Established: if the peer mirrored the ext (`is_lowlatency()`), switch the
@@ -5648,16 +5761,14 @@ pub async fn initiate_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
-    let actions = new_session_actions(outbound, params, clock);
-    actions.set_namespace(namespace);
-    initiator_open(
-        inbound,
-        actions,
-        writer_handle,
+    initiate_installing(
+        connected,
+        params,
+        move |actions| actions.set_namespace(namespace),
         clock,
         max_iters,
         tick_interval_ms,
+        SessionTimeouts::from_build(),
     )
     .await
 }
@@ -5676,6 +5787,10 @@ pub async fn initiate_and_open_session_with_namespace(
 /// three now route here; the engine is built INSIDE so a reopen attempt
 /// over a surviving actions bundle and a first open over a fresh one share
 /// the exact same body.
+///
+/// `timeouts` are the handshake deadlines: a caller that holds its node's
+/// open bound passes [`DialConfig::handshake_timeouts`], so the handshake is
+/// not ended sooner than that bound.
 pub(crate) async fn initiator_open(
     inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
@@ -5683,13 +5798,14 @@ pub(crate) async fn initiator_open(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError> {
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     // Initiator activation -> SentInitSyn (send_init_syn enqueues InitSyn).
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
-    drive_open_loop(
+    drive_open_loop_within(
         inbound,
         actions,
         engine,
@@ -5697,6 +5813,7 @@ pub(crate) async fn initiator_open(
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await
 }

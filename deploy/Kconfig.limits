@@ -332,26 +332,6 @@ config WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES
 	  still owed its final. 0 sets no bound, which is how a node behaved before this
 	  limit.
 
-config WZ_LIMIT_HANDSHAKE_INIT_MS
-	int "HANDSHAKE_INIT_MS"
-	default 2000
-	help
-	  How long, in milliseconds, a node that has sent its INIT waits for the peer's
-	  INIT acknowledgement before it gives the link up. It is the INIT phase of the
-	  unicast handshake, and its default is the 2 seconds the session machine's
-	  reference values state. At least 1: a build with 0 does not compile, since a
-	  deadline of 0 would fire as the phase begins.
-
-config WZ_LIMIT_HANDSHAKE_OPEN_MS
-	int "HANDSHAKE_OPEN_MS"
-	default 2000
-	help
-	  How long, in milliseconds, a node that has sent its OPEN waits for the peer's
-	  OPEN acknowledgement before it gives the link up. It is the OPEN phase of the
-	  unicast handshake, and its default is the 2 seconds the session machine's
-	  reference values state. At least 1: a build with 0 does not compile, since a
-	  deadline of 0 would fire as the phase begins.
-
 config WZ_LIMIT_HANDSHAKE_COOKIE_BYTES
 	int "HANDSHAKE_COOKIE_BYTES"
 	default 128

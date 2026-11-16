@@ -370,6 +370,7 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
+        SessionTimeouts::from_build(),
     )
     .await;
 

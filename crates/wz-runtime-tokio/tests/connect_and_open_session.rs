@@ -21,6 +21,8 @@
 //! bounded by an iteration cap so a handshake regression fails fast instead
 //! of hanging.
 
+use std::time::{Duration, Instant};
+
 use tokio::net::TcpListener;
 
 use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
@@ -31,7 +33,7 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::session_open::{
     connect_and_open_session, dial_locator, initiate_and_open_session, open_within, DialConfig,
-    OpenError, DEFAULT_OPEN_TICK_MS, OPEN_TIMEOUT,
+    OpenError, OpenedSession, DEFAULT_OPEN_TICK_MS, OPEN_TIMEOUT,
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
@@ -109,59 +111,124 @@ async fn connect_and_open_reaches_established_against_wz_acceptor() {
     assert!(acc_established >= 1, "acceptor also reached Established");
 }
 
-/// R311fa — real wall-clock open-deadline end-to-end. A peer that completes
-/// the TCP connection but never answers InitSyn must surface
-/// [`OpenError::HandshakeTimeout`] rather than hang: the open loop's tick
-/// pump advances the SCE scheduler past the SCXML `init_ack.timeout` (2s)
-/// window, the FSM transitions to Closing, and the loop maps that to the
-/// typed error.
-///
-/// Opt-in (`#[ignore]`): the assertion waits out the real 2s timer, so it is
-/// excluded from the default fast lane. The deterministic FSM half is in
-/// `session_fsm_handshake_timeout.rs`; this confirms the tick wiring drives
-/// it end-to-end against a real socket.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "real-time: waits out the 2s init_ack.timeout; opt-in lane"]
-async fn silent_peer_surfaces_handshake_timeout() {
+/// A far end that accepts one connection and never answers the InitSyn. It holds the stream past
+/// every bound the tests below set, so what ends an open is a bound and not a peer-closed link.
+async fn silent_acceptor() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
-
-    // Accept the connection and stay silent — never answer InitSyn. Hold the
-    // stream alive past the 2s window so the initiator sees a handshake
-    // timeout, not a peer-closed link.
-    let acceptor = tokio::spawn(async move {
+    let held = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
-        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        tokio::time::sleep(Duration::from_secs(6)).await;
         drop(stream);
     });
+    (addr, held)
+}
 
+/// Drive `open` and require that it has not ended at `pending_at`, then that it has ended by
+/// `given_up_by`, both read from the first poll; the answer it gave.
+async fn ended_between<F>(
+    open: F,
+    pending_at: Duration,
+    given_up_by: Duration,
+) -> Result<OpenedSession, OpenError>
+where
+    F: std::future::Future<Output = Result<OpenedSession, OpenError>>,
+{
+    let started = Instant::now();
+    tokio::pin!(open);
+    tokio::select! {
+        ended = &mut open => panic!(
+            "the open ended after {:?}, before {pending_at:?}: {:?}",
+            started.elapsed(),
+            ended.err()
+        ),
+        _ = tokio::time::sleep(pending_at) => {}
+    }
+    tokio::time::timeout(given_up_by.saturating_sub(started.elapsed()), &mut open)
+        .await
+        .unwrap_or_else(|_| panic!("the open was still pending at {given_up_by:?}"))
+}
+
+/// `transport/unicast/open_timeout` above two seconds: an open held to three seconds against a
+/// far end that never answers is still waiting at two and a half, and has been given up, naming
+/// its bound, by three and a half. Upstream holds one open, its dial and its handshake, to that
+/// bound and to no shorter window (`io/zenoh-transport/src/unicast/manager.rs` @
+/// `tokio::time::timeout(self.config.unicast.open_timeout, async {`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_held_to_three_seconds_waits_past_two_and_ends_at_its_bound() {
+    let bound = Duration::from_secs(3);
+    let (addr, held) = silent_acceptor().await;
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
-    let params = fixture_session_init_params();
-    let result = connect_and_open_session(
-        locator,
-        params,
-        &DialConfig::default(),
-        TokioTime::new(),
-        None, // production wall-clock path: no iteration cap
-        DEFAULT_OPEN_TICK_MS,
+    let config = DialConfig::default().with_open_timeout(bound);
+
+    let result = ended_between(
+        connect_and_open_session(
+            locator,
+            fixture_session_init_params(),
+            &config,
+            TokioTime::new(),
+            None,
+            DEFAULT_OPEN_TICK_MS,
+        ),
+        Duration::from_millis(2_500),
+        Duration::from_millis(3_500),
     )
     .await;
 
-    // OpenedSession is not Debug (it owns the engine), so match instead of
-    // matches! + {result:?}.
+    match result {
+        Err(OpenError::OpenTimeout(stated)) => assert_eq!(stated, bound),
+        Err(other) => panic!("expected the open's bound to end it, got {other:?}"),
+        Ok(_) => panic!("a silent peer must not reach Established"),
+    }
+    held.abort();
+}
+
+/// The handshake's own bound is the one its node states: a link handed in with a three-second
+/// bound (`DialConfig::handshake_timeouts`) and no clock around it is still in its handshake at
+/// two and a half seconds, and the session machine gives it up by three and a half, as a
+/// handshake timeout. The InitAck and the OpenAck wait on that one bound, as zenoh-pico's two
+/// receives wait on one deadline (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+/// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handshake_held_to_its_stated_bound_waits_past_two_seconds() {
+    use wz_runtime_tokio::session_open::{initiate_and_open_session_with_staging, SessionOffer};
+
+    let bound = Duration::from_secs(3);
+    let (addr, held) = silent_acceptor().await;
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let config = DialConfig::default().with_open_timeout(bound);
+    assert_eq!(config.handshake_timeouts().opening_ms, 3_000);
+    let link = dial_locator(locator, &config).await.expect("dial loopback");
+
+    let result = ended_between(
+        initiate_and_open_session_with_staging(
+            link,
+            fixture_session_init_params(),
+            SessionOffer::universal(),
+            |_actions| Ok(()),
+            TokioTime::new(),
+            None,
+            DEFAULT_OPEN_TICK_MS,
+            config.handshake_timeouts(),
+        ),
+        Duration::from_millis(2_500),
+        Duration::from_millis(3_500),
+    )
+    .await;
+
     match result {
         Err(OpenError::HandshakeTimeout) => {}
-        Err(other) => panic!("expected HandshakeTimeout, got {other:?}"),
-        Ok(_) => panic!("silent peer must not reach Established"),
+        Err(other) => panic!("expected the handshake's bound to end it, got {other:?}"),
+        Ok(_) => panic!("a silent peer must not reach Established"),
     }
-    acceptor.abort();
+    held.abort();
 }
 
 /// `transport/unicast/open_timeout`, read off the clock: one open of an endpoint, its dial and
 /// its handshake, ends at the open's bound. Against a peer that accepts the connection and never
 /// answers the InitSyn, an open bounded at 300 ms gives up then, naming the bound, well before
-/// the handshake's own 2 s window would end it (`silent_peer_surfaces_handshake_timeout` above
-/// is that window). A dial config states upstream's ten seconds until a node states another.
+/// the ten seconds a handshake handed in with no bound of its own waits. A dial config states
+/// upstream's ten seconds until a node states another.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_open_that_does_not_complete_ends_at_the_open_bound() {
     assert_eq!(DialConfig::default().open_timeout, OPEN_TIMEOUT);
@@ -322,6 +389,7 @@ async fn first_frame_after_the_init_ack(
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
+        DialConfig::default().handshake_timeouts(),
     )
     .await;
     let next = tokio::time::timeout(std::time::Duration::from_secs(5), far_end)

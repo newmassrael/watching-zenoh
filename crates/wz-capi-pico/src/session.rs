@@ -1148,9 +1148,13 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             tx_queue: TxQueueConf::pico(),
             // How long an inbound link may take to complete its handshake is pico's
             // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
-            // `PICO_ACCEPT` says.
+            // `PICO_ACCEPT` says; how long a dialled one may take is its
+            // `Z_TRANSPORT_CONNECT_TIMEOUT`, one deadline over both of its receives, so the
+            // session machine holds the handshake to the bound `open_timeout_ms` holds the
+            // endpoint to and to no shorter one.
             timeouts: wz_session_core::session_timeouts::SessionTimeouts {
                 accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+                opening_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
                 ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
             },
             open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
