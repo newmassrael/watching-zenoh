@@ -31,6 +31,10 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+pub mod spawn;
+
+pub use spawn::{judge, SceCodegen, SceResources, SpawnRefusal};
+
 /// The variable that moves every product of this checkout out of it -- the
 /// Rust reading of the rule `scripts/lib/artifact-root.sh` states (and
 /// `scripts/lib/artifact_root.py` reads for Python). Unset or empty: a product
@@ -87,7 +91,7 @@ pub fn artifact_dir_in(root: Option<&OsStr>, checkout: &Path, path: &Path) -> Pa
 
 /// Where the product of the checkout path `path` (absolute) lives under the
 /// rule [`ARTIFACT_ROOT_ENV`] states, read from this process's environment.
-/// A build script that calls this through [`locate_sce_codegen`] is told to
+/// A build script that calls this through [`SceCodegen::locate`] is told to
 /// rerun when the variable changes.
 pub fn artifact_dir(path: &Path) -> PathBuf {
     artifact_dir_in(
@@ -119,9 +123,11 @@ pub fn artifact(rel: impl AsRef<Path>) -> PathBuf {
 /// The binary is a PRODUCT of `sce_workspace`, so it is looked for where
 /// [`artifact_dir`] puts that workspace's products (`build-sce.sh` builds it
 /// there under the same rule); the provenance is still read from the source.
-pub fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
-    let release = artifact_dir(sce_workspace).join("target/release");
-    let bin = release.join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX));
+///
+/// Crate-private: a caller that holds the binary's path can spawn it past the
+/// door that names its resources, so the public entry is [`SceCodegen`].
+pub(crate) fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
+    let bin = sce_codegen_binary(sce_workspace);
     if !bin.exists() {
         panic!(
             "sce-codegen binary not found at {}\n\
@@ -132,6 +138,12 @@ pub fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
     }
     assert_sce_codegen_provenance(sce_workspace);
     bin
+}
+
+/// Where the vendored `sce-codegen` of `sce_workspace` is, built or not.
+pub(crate) fn sce_codegen_binary(sce_workspace: &Path) -> PathBuf {
+    let release = artifact_dir(sce_workspace).join("target/release");
+    release.join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Path of the provenance stamp `scripts/build-sce.sh` writes beside the
@@ -472,29 +484,25 @@ fn git_hash_object(dir: &Path, input: &[u8]) -> Option<String> {
 /// A located `sce-codegen` binary + its SCE workspace root, ready to
 /// drive one or more emits into `$OUT_DIR`.
 pub struct Codegen {
-    sce_codegen: PathBuf,
-    sce_workspace: PathBuf,
+    codegen: SceCodegen,
 }
 
 impl Codegen {
     /// Locate the vendored `sce-codegen` from a crate's manifest dir
-    /// (`<manifest>/../../vendor/sce/target/release/sce-codegen`),
-    /// panicking with the `build-sce.sh` directive if absent. Emits the
-    /// binary's `rerun-if-changed` so a vendor/sce pin bump + rebuild
-    /// re-triggers codegen even when the crate sources are unchanged.
+    /// (`<manifest>/../../vendor/sce`), panicking with the `build-sce.sh`
+    /// directive if absent. Emits the binary's `rerun-if-changed` so a
+    /// vendor/sce pin bump + rebuild re-triggers codegen even when the crate
+    /// sources are unchanged.
     pub fn from_manifest(manifest_dir: &Path) -> Self {
         let sce_workspace = manifest_dir
             .join("../../vendor/sce")
             .canonicalize()
             .expect("canonicalize vendor/sce");
 
-        let sce_codegen = locate_sce_codegen(&sce_workspace);
-        println!("cargo:rerun-if-changed={}", sce_codegen.display());
+        let codegen = SceCodegen::locate(&sce_workspace);
+        println!("cargo:rerun-if-changed={}", codegen.binary().display());
 
-        Self {
-            sce_codegen,
-            sce_workspace,
-        }
+        Self { codegen }
     }
 
     /// Codegen one `sce:kind="statechart"` document into
@@ -535,51 +543,17 @@ impl Codegen {
     /// serves both the std (AP) and heapless (MCU) runtimes.
     fn run_generate(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
         let scxml_path = resource_dir.join(format!("{stem}.scxml"));
-        let status = Command::new(&self.sce_codegen)
-            // R311y756 — the RESOURCE directories too, not only the root.
-            //
-            // `--workspace-root` tells sce-codegen where the workspace is; it
-            // does NOT tell it where its Jinja2 templates and XSD schemas live,
-            // and those are resolved separately against wherever the binary
-            // thinks it was installed. On a build host every one of those
-            // guesses missed and every emit died with `Cannot find Jinja2
-            // templates`, taking Layers B2 and C1 with it — while the identical
-            // tree passed here, which is the signature of a resolution that
-            // depends on the machine rather than on the repository.
-            //
-            // The paths are derived from the workspace this struct already
-            // holds, so nothing new has to be configured or kept in step. Set
-            // rather than overridden: a caller with a reason to point elsewhere
-            // keeps it.
-            .env(
-                "SCE_TEMPLATE_DIR",
-                std::env::var_os("SCE_TEMPLATE_DIR").unwrap_or_else(|| {
-                    self.sce_workspace
-                        .join("tools")
-                        .join("codegen")
-                        .join("templates")
-                        .into_os_string()
-                }),
-            )
-            .env(
-                "SCE_SCHEMAS_DIR",
-                std::env::var_os("SCE_SCHEMAS_DIR")
-                    .unwrap_or_else(|| self.sce_workspace.join("schemas").into_os_string()),
-            )
-            .arg("--workspace-root")
-            .arg(&self.sce_workspace)
-            .arg("generate")
-            .arg("--language")
-            .arg("rust")
-            .arg("--no-std")
-            .arg("--output-dir")
-            .arg(out_dir)
-            .arg(&scxml_path)
-            .status()
-            .unwrap_or_else(|e| panic!("invoke sce-codegen for {stem}: {e}"));
-
-        if !status.success() {
-            panic!("sce-codegen generate failed for {stem} (exit {status:?})");
+        let args = [
+            OsStr::new("generate"),
+            OsStr::new("--language"),
+            OsStr::new("rust"),
+            OsStr::new("--no-std"),
+            OsStr::new("--output-dir"),
+            out_dir.as_os_str(),
+            scxml_path.as_os_str(),
+        ];
+        if let Err(refusal) = self.codegen.run(args) {
+            panic!("sce-codegen generate for {stem}: {refusal}");
         }
     }
 }

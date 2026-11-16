@@ -37,9 +37,9 @@
 //! Usage: `cargo run --manifest-path xtask/Cargo.toml -- codecs`
 //! (or `regen` / no arg = regenerate everything wired so far).
 
-use std::path::{Path, PathBuf};
 #[cfg(feature = "switchboards")]
-use std::process::Command;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use sce_build::{
     compile_forge_with_imports, generator::Language, DocumentLabel, ForgeCompileOptions,
@@ -575,7 +575,7 @@ fn regen_switchboards(root: &Path) {
         .join("vendor/sce")
         .canonicalize()
         .expect("canonicalize vendor/sce");
-    let sce_codegen = wz_codegen_build::locate_sce_codegen(&sce_workspace);
+    let sce_codegen = wz_codegen_build::SceCodegen::locate(&sce_workspace);
 
     for sb in SWITCHBOARDS {
         let manifest = root.join(sb.manifest);
@@ -591,25 +591,18 @@ fn regen_switchboards(root: &Path) {
 
         // Stage 1 — --emit-ast each doc. Machine + codecs also emit a consumed
         // .rs (stripped for mid-module include!); schemas contribute only AST.
-        let machine_ast = emit_ast(
-            sb.machine,
-            &src,
-            &tmp,
-            &sce_codegen,
-            &sce_workspace,
-            sb.no_std,
-        );
+        let machine_ast = emit_ast(sb.machine, &src, &tmp, &sce_codegen, sb.no_std);
         wz_codegen_build::strip_inner_attrs_file(&tmp.join(format!("{}_sm.rs", sb.machine)));
         let schema_asts: Vec<PathBuf> = sb
             .schemas
             .iter()
-            .map(|s| emit_ast(s, &src, &tmp, &sce_codegen, &sce_workspace, sb.no_std))
+            .map(|s| emit_ast(s, &src, &tmp, &sce_codegen, sb.no_std))
             .collect();
         let codec_asts: Vec<PathBuf> = sb
             .codecs
             .iter()
             .map(|c| {
-                let ast = emit_ast(c, &src, &tmp, &sce_codegen, &sce_workspace, sb.no_std);
+                let ast = emit_ast(c, &src, &tmp, &sce_codegen, sb.no_std);
                 wz_codegen_build::strip_inner_attrs_file(&tmp.join(format!("{c}.rs")));
                 ast
             })
@@ -646,14 +639,7 @@ fn regen_switchboards(root: &Path) {
             None
         } else {
             let session_src = repo_relative(root, &root.join("sources/session"));
-            let ast = emit_ast(
-                SESSION_MACHINE,
-                &session_src,
-                &tmp,
-                &sce_codegen,
-                &sce_workspace,
-                sb.no_std,
-            );
+            let ast = emit_ast(SESSION_MACHINE, &session_src, &tmp, &sce_codegen, sb.no_std);
             Some(parse_machine_facts(&read(&ast)).expect("parse session machine facts"))
         };
 
@@ -692,54 +678,28 @@ fn emit_ast(
     stem: &str,
     src: &Path,
     out_dir: &Path,
-    bin: &Path,
-    workspace: &Path,
+    codegen: &wz_codegen_build::SceCodegen,
     no_std: bool,
 ) -> PathBuf {
     let scxml = src.join(format!("{stem}.scxml"));
     let ast = out_dir.join(format!("{stem}.ast.json"));
-    let mut cmd = Command::new(bin);
-    // R311y756 — the THIRD call site that needed the resource directories named,
-    // and the reason to state it here rather than once somewhere central: each of
-    // these spawns sce-codegen itself, so each inherits whatever the ambient
-    // environment happens to hold. `--workspace-root` was already passed here and
-    // was NOT enough — templates and schemas resolve on their own path — so this
-    // one still died with `Cannot find Jinja2 templates` on a build host after
-    // the other two were fixed. Derived from the workspace this function is
-    // already given; an explicit setting by the caller still wins.
-    cmd.env(
-        "SCE_TEMPLATE_DIR",
-        std::env::var_os("SCE_TEMPLATE_DIR").unwrap_or_else(|| {
-            workspace
-                .join("tools")
-                .join("codegen")
-                .join("templates")
-                .into_os_string()
-        }),
-    )
-    .env(
-        "SCE_SCHEMAS_DIR",
-        std::env::var_os("SCE_SCHEMAS_DIR")
-            .unwrap_or_else(|| workspace.join("schemas").into_os_string()),
-    );
-    cmd.arg("--workspace-root")
-        .arg(workspace)
-        .arg("generate")
-        .arg("--language")
-        .arg("rust");
+    let mut args = vec![
+        OsStr::new("generate"),
+        OsStr::new("--language"),
+        OsStr::new("rust"),
+    ];
     if no_std {
-        cmd.arg("--no-std");
+        args.push(OsStr::new("--no-std"));
     }
-    cmd.arg("--emit-ast")
-        .arg(&ast)
-        .arg("--output-dir")
-        .arg(out_dir)
-        .arg(&scxml);
-    let status = cmd
-        .status()
-        .unwrap_or_else(|e| panic!("invoke sce-codegen --emit-ast for {stem}: {e}"));
-    if !status.success() {
-        panic!("sce-codegen --emit-ast failed for {stem} (exit {status:?})");
+    args.extend([
+        OsStr::new("--emit-ast"),
+        ast.as_os_str(),
+        OsStr::new("--output-dir"),
+        out_dir.as_os_str(),
+        scxml.as_os_str(),
+    ]);
+    if let Err(refusal) = codegen.run(args) {
+        panic!("sce-codegen --emit-ast for {stem}: {refusal}");
     }
     ast
 }

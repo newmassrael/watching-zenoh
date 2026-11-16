@@ -125,64 +125,51 @@ size_kb() {
 
 human() { numfmt --to=iec --suffix=B --format='%.1f' $((${1:-0} * 1024)) 2>/dev/null || echo "${1:-0} KB"; }
 
+# WHAT EACH REAP DID, one line per attempt, so how often the reap fires -- and
+# how often it declines -- is a count rather than an impression. The automation
+# in round-runner.sh reaps only after a FULL gate, and whether that cadence keeps
+# the tree bounded can only be read off a record like this one. `report` prints
+# it. Columns: UTC time, outcome, mode, tree KB before, tree KB after, reason.
+HISTORY="$TARGET/.reap-history"
+
+record() {
+    local outcome="$1" mode="$2" before="${3:-}" after="${4:-}" why="${5:-}"
+    [ -d "$TARGET" ] || return 0
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$outcome" "$mode" \
+        "$before" "$after" "$why" >>"$HISTORY" 2>/dev/null || true
+}
+
 # The exact reap, as its own function so the caller can choose the path before
 # paying for either. Takes the tree size and the caller's `--apply`.
+#
+# EXACT when cargo's own declaration is available, mtime otherwise, and it says
+# which. R311y736 (N28) -- `cargo --message-format=json` names every artefact of
+# a build INCLUDING cached ones, so a gate run with WZ_ARTIFACT_LOG set leaves a
+# keep-set that needs no approximation. scripts/lib/artifact_reap.py turns the
+# declared files into the UNITS they belong to and reaps, in every profile
+# directory, what belongs to no declared unit: `deps/` files, `build/`
+# directories and `.fingerprint/` directories alike, by set lookup. It measures
+# before it deletes and refuses a reap over the share limit, because an
+# artefact log from one lane condemns everything the others built; its selftest
+# drives that path on a fabricated target, from cargo's messages to the delete.
 exact_reap() {
-    local before="$1" apply="$2"
-    # EXACT when cargo's own declaration is available, mtime otherwise, and it
-    # says which. R311y736 (N28) -- `cargo --message-format=json` names every
-    # artefact of a build INCLUDING cached ones, so a gate run with
-    # WZ_ARTIFACT_LOG set leaves a keep-set that needs no approximation. Without
-    # that log this falls back to cargo-sweep's mtime comparison, which is what
-    # the tool did before and is still better than nothing.
-    declared=$(sort -u "$ARTIFACTS" | grep -c "^$TARGET/debug/deps/" || true)
-    if [ "${declared:-0}" -lt 1 ]; then
-        echo "sweep-target: FAIL — $ARTIFACTS names no artefact under" >&2
-        echo "  $TARGET/debug/deps, so an exact reap would delete all of" >&2
-        echo "  them. Collect with WZ_ARTIFACT_LOG during a FULL gate." >&2
-        exit 1
+    local before="$1" apply="$2" rc=0
+    local -a flag=()
+    if [ "$apply" = "--apply" ]; then
+        flag=(--apply)
     fi
-    echo "  exact mode: $declared declared artefact(s) under debug/deps"
-    keep=$(mktemp)
-    doomed=$(mktemp)
-    sort -u "$ARTIFACTS" >"$keep"
-    # MEASURE FIRST. The exact path used to delete straight away, which
-    # walked around the share limit entirely: an artefact log from ONE lane
-    # names a few hundred files and would condemn every other file in
-    # deps/. Probed with a single-lane log, which is exactly how it was
-    # found -- the collection log's SIZE is not evidence of its coverage.
-    : >"$doomed"
-    while IFS= read -r f; do
-        grep -qxF "$f" "$keep" || echo "$f" >>"$doomed"
-    done < <(find "$TARGET/debug/deps" -maxdepth 1 -type f 2>/dev/null)
-    dkb=$(xargs -r stat -c %s <"$doomed" 2>/dev/null |
-        awk '{s+=$1} END {printf "%d", s/1024}')
-    dshare=$((before > 0 ? dkb * 100 / before : 100))
-    echo "  would remove $(wc -l <"$doomed") file(s), $(human "${dkb:-0}") — ${dshare}% of the tree"
-    if [ "$dshare" -gt "$MAX_SHARE" ]; then
-        rm -f "$keep" "$doomed"
-        echo "sweep-target: REFUSING — ${dshare}% is over the ${MAX_SHARE}% limit." >&2
-        echo "  An artefact log that covers only part of the gate condemns" >&2
-        echo "  everything the rest of it built. Collect with" >&2
-        echo "  WZ_ARTIFACT_LOG across a FULL run-ci run." >&2
+    python3 "$ROOT/scripts/lib/artifact_reap.py" --target "$TARGET" --log "$ARTIFACTS" \
+        --tree-kb "$before" --max-share "$MAX_SHARE" "${flag[@]}" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        record refused exact "$before" "" "artifact_reap.py exited $rc"
         exit 1
     fi
     if [ "$apply" != "--apply" ]; then
-        rm -f "$keep" "$doomed"
-        echo "  (dry run; pass --apply to remove)"
+        record dry-run exact "$before"
         return 0
     fi
-    removed=0
-    freed=0
-    while IFS= read -r f; do
-        sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
-        rm -f "$f"
-        removed=$((removed + 1))
-        freed=$((freed + sz / 1024))
-    done <"$doomed"
-    rm -f "$keep" "$doomed"
     after=$(size_kb "$TARGET")
-    echo "sweep-target: exact reap removed $removed file(s), $(human "$freed")"
+    record reaped exact "$before" "$after"
     echo "sweep-target: $(human "$before") -> $(human "$after")"
     return 0
 }
@@ -200,6 +187,7 @@ reap)
         echo "sweep-target: FAIL — no stamp at $STAMP." >&2
         echo "  A reap without a stamp has nothing to compare against. Run" >&2
         echo "  'sweep-target.sh stamp' BEFORE the gate run, not after." >&2
+        record declined - "" "" "no stamp"
         exit 1
     fi
     # THE PRECONDITION, checked rather than trusted: a full gate run, finished
@@ -225,6 +213,7 @@ reap)
         echo "  which that many passed, finished after the stamp. A partial run" >&2
         echo "  ('--layer X') leaves everything it did not touch looking unused," >&2
         echo "  which is what this refuses to act on." >&2
+        record declined - "" "" "no full gate since the stamp"
         exit 1
     fi
     echo "sweep-target: proof of a full gate — $(basename "$proof") ($registered lanes)"
@@ -267,15 +256,18 @@ PY
         echo "  A reap this large is the shape of a reap after a PARTIAL build:" >&2
         echo "  everything the partial build did not touch looks unused. Re-run" >&2
         echo "  the FULL gate, or delete the stamp and start again." >&2
+        record refused mtime "$before" "" "${share}% over ${MAX_SHARE}%"
         exit 1
     fi
     if [ "${2:-}" != "--apply" ]; then
         echo "  (dry run; pass --apply to remove)"
+        record dry-run mtime "$before"
         exit 0
     fi
 
     cargo sweep --file "$PROJECT" >/dev/null
     after=$(size_kb "$TARGET")
+    record reaped mtime "$before" "$after"
     echo "sweep-target: $(human "$before") -> $(human "$after")"
     ;;
 
@@ -294,6 +286,13 @@ report)
         [ "$bins" -gt 0 ] && echo "  duplicates: $((bins - names)) ($(( (bins - names) * 100 / bins ))%)"
     fi
     [ -f "$STAMP" ] && echo "stamp: $(date -r "$STAMP" '+%F %T')" || echo "stamp: none"
+    if [ -s "$HISTORY" ]; then
+        echo "reap attempts recorded: $(wc -l <"$HISTORY")"
+        awk -F'\t' '{n[$2]++} END {for (o in n) printf "  %s: %d\n", o, n[o]}' "$HISTORY" | sort
+        echo "  last: $(tail -1 "$HISTORY" | tr '\t' ' ')"
+    else
+        echo "reap attempts recorded: none ($HISTORY)"
+    fi
     ;;
 
 *) usage ;;

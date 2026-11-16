@@ -2300,6 +2300,16 @@ layer_c0_test_discipline() {
     # which turns four correct bare arms into false positives, so that term is
     # doing the work rather than sitting there.
     _runci_leg census_arm_gate_lint -- python3 scripts/lib/census_arm_gate_lint.py
+    # Carries N58 and N62 -- sce-codegen is SPAWNED through one door per
+    # language (wz_codegen_build::SceCodegen, sce_codegen_spawn in
+    # scripts/lib/sce-codegen-oracle.sh), which names the workspace, the
+    # templates and the schemas and refuses a run that did not validate against
+    # the XSD. A site that names fewer of them inherits the machine's answer and
+    # reds only where that answer is wrong, which is never where it was written.
+    # The selftest holds each spawn shape and the doors' agreement on the
+    # warning text, then the lint reads every tracked script and crate.
+    _runci_leg sce_codegen_spawn_lint.selftest -- python3 scripts/lib/sce_codegen_spawn_lint.py --selftest
+    _runci_leg sce_codegen_spawn_lint --after sce_codegen_spawn_lint.selftest -- python3 scripts/lib/sce_codegen_spawn_lint.py
     # R311y616 (§7.13) — the LITERAL-WIRE-FLAG lint, scoped to wz-capture.
     # R311y615 named `wire_const::FLAG_N_N` for the network `N` bit and shipped
     # it with ONE consumer while four fixtures beside it kept writing `0x20`;
@@ -2413,6 +2423,13 @@ layer_c0_test_discipline() {
     # the rule on one lane; this reads every tracked script, gate and crate for the
     # spellings that bypass it.
     _runci_leg artifact_root.selftest -- python3 scripts/lib/artifact_root.py --selftest
+    # Carries N30, N31 and N32 -- the exact reap of scripts/sweep-target.sh. It
+    # runs only after a full gate with WZ_ARTIFACT_LOG set, which no lane does,
+    # so these selftests are where its path from cargo's messages to the delete
+    # is graded: the collector's reading of both message kinds, then a reap of a
+    # fabricated target by unit (deps, build, fingerprint, every profile).
+    _runci_leg artifact_filenames.selftest -- python3 scripts/lib/artifact_filenames.py --selftest
+    _runci_leg artifact_reap.selftest --after artifact_filenames.selftest -- python3 scripts/lib/artifact_reap.py --selftest
     _runci_leg artifact_root_lint.selftest -- python3 scripts/lib/artifact_root_lint.py --selftest >/dev/null
     _runci_leg artifact_root_lint --after artifact_root_lint.selftest -- python3 scripts/lib/artifact_root_lint.py
     # R2343 (no register item) — WHO CAN ATTACH A MULTICAST EGRESS GROUP. This

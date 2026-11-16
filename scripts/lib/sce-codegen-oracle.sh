@@ -98,6 +98,58 @@ source "$(dirname "${BASH_SOURCE[0]}")/artifact-root.sh"
 WZ_SCE_DIR="vendor/sce"
 WZ_SCE_CODEGEN_BIN="vendor/sce/target/release/sce-codegen"
 WZ_SCE_CODEGEN_STAMP="vendor/sce/target/release/.sce-codegen.pin"
+# What sce-codegen prints on stderr when it parsed a document without validating
+# it. The Rust door carries the same text (XSD_NOT_VALIDATED in
+# crates/wz-codegen-build/src/spawn.rs); scripts/lib/sce_codegen_spawn_lint.py
+# holds the two and the generator's own wording to one another.
+WZ_SCE_XSD_NOT_VALIDATED="XSD schema validation did not run"
+
+# sce_codegen_spawn <binary> <sce-dir> <stderr-file> <arg>...
+#
+# THE ONE SHELL DOOR THROUGH WHICH THIS TREE RUNS sce-codegen; the Rust door is
+# `SceCodegen` in crates/wz-codegen-build. sce-codegen finds its workspace, its
+# Jinja2 templates and its XSD schemas by looking around the machine when it is
+# not told, and each guess has missed on some build host while the tree passed
+# where it was written. So all three are named here, derived from <sce-dir>, and
+# scripts/lib/sce_codegen_spawn_lint.py refuses a spawn written anywhere else.
+# A caller that sets SCE_TEMPLATE_DIR or SCE_SCHEMAS_DIR still points elsewhere;
+# an empty value counts as unset, as it does in the Rust door.
+#
+# The XSD half is why this returns codes of its own. When the schema is missing,
+# or the binary was built without the `xsd` feature, sce-codegen warns, emits
+# from a document whose sce: attributes nobody checked, and exits 0. A warning
+# in a log is not a verdict, so that run is refused here.
+#
+# Standard output is the caller's; standard error goes to <stderr-file>, which
+# also receives the reason for a refusal.
+#
+#   n    sce-codegen's own exit status, when it ran and failed
+#   0    it ran, succeeded and validated
+#   125  refused before running: the template directory or the schema is not
+#        where it is named
+#   126  it exited 0 but said that XSD validation did not run
+sce_codegen_spawn() {
+    local bin="$1" sce="$2" errf="$3"
+    shift 3
+    local templates="${SCE_TEMPLATE_DIR:-$sce/tools/codegen/templates}"
+    local schemas="${SCE_SCHEMAS_DIR:-$sce/schemas}"
+    if [[ ! -d "$templates" ]]; then
+        echo "sce_codegen_spawn: no template directory at $templates" >"$errf"
+        return 125
+    fi
+    if [[ ! -f "$schemas/sce-forge.xsd" ]]; then
+        echo "sce_codegen_spawn: no XSD schema at $schemas/sce-forge.xsd; sce-codegen would emit without validating" >"$errf"
+        return 125
+    fi
+    local rc=0
+    SCE_TEMPLATE_DIR="$templates" SCE_SCHEMAS_DIR="$schemas" \
+        "$bin" --workspace-root "$sce" "$@" 2>"$errf" || rc=$?
+    if [[ $rc -eq 0 ]] && grep -qF "$WZ_SCE_XSD_NOT_VALIDATED" "$errf"; then
+        echo "sce_codegen_spawn: sce-codegen exited 0 without validating against the XSD" >>"$errf"
+        return 126
+    fi
+    return "$rc"
+}
 
 # sce_codegen_source_token <sce-dir>
 #

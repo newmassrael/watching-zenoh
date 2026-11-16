@@ -54,16 +54,10 @@
 // a remediation hint and passes, and `skip_or_fail` turns the same absence into
 // a failure wherever `WZ_SCE_ORACLE_REQUIRE` is set.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::process::Command;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
-
-/// A product of the SCE workspace, so it is where `build-sce.sh` put it under
-/// the artifact root rule, as `wz_codegen_build::locate_sce_codegen` finds it.
-fn sce_codegen_bin() -> PathBuf {
-    wz_codegen_build::artifact_dir(&sce_workspace()).join("target/release/sce-codegen")
-}
 
 fn sce_workspace() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -91,13 +85,16 @@ fn skip_or_fail(why: &str) -> Option<String> {
 }
 
 fn emit_link_c11(scxml_name: &str) -> Option<String> {
-    let bin = sce_codegen_bin();
-    if !bin.exists() {
-        return skip_or_fail(&format!(
-            "sce-codegen binary missing at {}; run scripts/build-sce.sh from the workspace root",
-            bin.display()
-        ));
-    }
+    let codegen = match wz_codegen_build::SceCodegen::find(&sce_workspace()) {
+        Ok(codegen) => codegen,
+        Err(bin) => {
+            return skip_or_fail(&format!(
+                "sce-codegen binary missing at {}; run scripts/build-sce.sh \
+                 from the workspace root",
+                bin.display()
+            ))
+        }
+    };
 
     // ABSENT may skip; FOREIGN may not. The two are not the same answer, and
     // the existence test above cannot tell them apart. A binary built from
@@ -116,46 +113,18 @@ fn emit_link_c11(scxml_name: &str) -> Option<String> {
     }
 
     let out_dir = tempfile::tempdir().expect("create tempdir");
-    let status = Command::new(&bin)
-        // R311y756 — the FOURTH site that spawns sce-codegen and therefore the
-        // fourth that had to name its resource directories. `--workspace-root`
-        // does not carry the Jinja2 templates or the XSD schemas; those resolve
-        // against wherever the binary believes it lives, which is a fact about
-        // the machine. On a build host this test died with `Cannot find Jinja2
-        // templates` while passing here — the shape this workspace calls "a gate
-        // verified here may not run there".
-        .env(
-            "SCE_TEMPLATE_DIR",
-            std::env::var_os("SCE_TEMPLATE_DIR").unwrap_or_else(|| {
-                sce_workspace()
-                    .join("tools")
-                    .join("codegen")
-                    .join("templates")
-                    .into_os_string()
-            }),
-        )
-        .env(
-            "SCE_SCHEMAS_DIR",
-            std::env::var_os("SCE_SCHEMAS_DIR")
-                .unwrap_or_else(|| sce_workspace().join("schemas").into_os_string()),
-        )
-        .arg("--workspace-root")
-        .arg(sce_workspace())
-        .arg("generate")
-        .arg("--language")
-        .arg("c11")
-        .arg("--output-dir")
-        .arg(out_dir.path())
-        .arg(link_scxml(scxml_name))
-        .output_bounded()
-        .expect("invoke sce-codegen");
-
-    assert!(
-        status.status.success(),
-        "sce-codegen failed for {scxml_name} (exit {:?}):\nstderr: {}",
-        status.status,
-        String::from_utf8_lossy(&status.stderr)
-    );
+    let scxml = link_scxml(scxml_name);
+    let args = [
+        OsStr::new("generate"),
+        OsStr::new("--language"),
+        OsStr::new("c11"),
+        OsStr::new("--output-dir"),
+        out_dir.path().as_os_str(),
+        scxml.as_os_str(),
+    ];
+    if let Err(refusal) = codegen.run_with(args, |cmd| cmd.output_bounded()) {
+        panic!("sce-codegen for {scxml_name}: {refusal}");
+    }
 
     let entries: Vec<_> = std::fs::read_dir(out_dir.path())
         .expect("read_dir tempdir")
