@@ -121,7 +121,7 @@
 //!   congestion drop after the send call returned) is never released, which is
 //!   upstream's behaviour too.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -129,7 +129,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use wz_session_core::extshm::{ShmDescriptor, ShmReservation, ShmResolver, ShmSendBuffer};
 use wz_session_core::link::{RxBytes, RxStorage, ShmChunkView};
 
-use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
+use crate::posix_shm::{
+    next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw, SegmentObject,
+};
 use crate::shm_backend::{
     AllocError, AllocatedChunk, ChunkDescriptor, LayoutAllocError, LayoutError, MemoryLayout,
     PtrInSegment, ShmProviderBackend,
@@ -1433,21 +1435,53 @@ fn peer_metadata_cache() -> &'static Mutex<HashMap<u64, Arc<PeerSegmentRw>>> {
 }
 
 /// The provider's metadata segment named `id`, mapped WRITABLE (a release is a
-/// write), from the cache when its entry is still the object the name names.
+/// write), from the cache while the provider of its entry is live.
 fn peer_metadata(id: u16) -> Option<Arc<PeerSegmentRw>> {
     let id = u64::from(id);
     let mut cache = peer_metadata_cache().lock().ok()?;
+    // Kept to the end, so this process's mapping of the old object is not the last
+    // holder of its name while the open below looks for it.
+    let mut evicted = None;
     if let Some(segment) = cache.get(&id) {
-        if segment.is_current() {
+        if segment.provider_is_live() {
             return Some(segment.clone());
         }
         // The provider is gone, or another process has made a segment under its
         // name: a mapping of the old object would read a dead header as live.
-        cache.remove(&id);
+        note_gone(segment.object());
+        evicted = cache.remove(&id);
     }
     let segment = Arc::new(PeerSegmentRw::open(id).ok()?);
-    cache.insert(id, segment.clone());
+    if !was_gone(segment.object()) {
+        cache.insert(id, segment.clone());
+    }
+    drop(evicted);
     Some(segment)
+}
+
+/// The objects whose provider this process saw go, while their names still name them.
+///
+/// Such an object can be opened again under its id, for a payload still in flight whose
+/// holders keep the name. Opened after the provider's liveness lock is gone it carries no
+/// liveness to judge, so it would be judged by its name, and a cache entry would itself keep
+/// that name alive: a dead provider's segment mapped for good. An object in this set is served
+/// and never cached.
+fn gone_objects() -> &'static Mutex<HashSet<SegmentObject>> {
+    static GONE: OnceLock<Mutex<HashSet<SegmentObject>>> = OnceLock::new();
+    GONE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn note_gone(object: SegmentObject) {
+    if let Ok(mut gone) = gone_objects().lock() {
+        gone.insert(object);
+    }
+}
+
+fn was_gone(object: SegmentObject) -> bool {
+    gone_objects()
+        .lock()
+        .map(|gone| gone.contains(&object))
+        .unwrap_or(false)
 }
 
 /// The data segments this process has mounted as a reader, by id, so a receiver maps a pool's
@@ -1469,33 +1503,58 @@ pub fn data_segment_maps() -> usize {
     DATA_SEGMENT_MAPS.load(Ordering::SeqCst)
 }
 
-/// The data segment named `id`, mapped read-only, from the cache when its entry is still the
-/// object the name names. The same trust as [`peer_metadata`]: a mapping of an object the name no
-/// longer names would serve a dead pool's bytes as a live chunk's.
+/// The data segment named `id`, mapped read-only, from the cache while the provider of its entry
+/// is live. The same trust as [`peer_metadata`]: a mapping of a dead provider's pool would serve
+/// its bytes as a live chunk's.
+///
+/// A dead provider's object opened again under its id is served and not cached (see
+/// [`gone_objects`]).
 fn peer_data(id: u64) -> Option<Arc<PeerSegment>> {
     let mut cache = peer_data_cache().lock().ok()?;
+    let mut evicted = None;
     if let Some(segment) = cache.get(&id) {
-        if segment.is_current() {
+        if segment.provider_is_live() {
             return Some(segment.clone());
         }
-        cache.remove(&id);
+        note_gone(segment.object());
+        evicted = cache.remove(&id);
     }
     let segment = Arc::new(PeerSegment::open(id).ok()?);
     DATA_SEGMENT_MAPS.fetch_add(1, Ordering::SeqCst);
-    cache.insert(id, segment.clone());
+    if !was_gone(segment.object()) {
+        cache.insert(id, segment.clone());
+    }
+    drop(evicted);
     Some(segment)
 }
 
-/// Let go of cached mappings whose segment no longer exists, so a provider that
-/// exited does not stay mapped and locked in this process until it does. Run by
-/// the watchdog thread; a hold in use keeps its own reference to its mapping.
-/// Metadata segments and data segments alike.
+/// Let go of cached mappings whose provider is gone, so a provider that exited does not stay
+/// mapped and locked in this process: the name lives for as long as anyone maps the object,
+/// so the name alone would keep a dead provider's segment here for good. Run by the watchdog
+/// thread; a hold in use keeps its own reference to its mapping, and the last holder to let go
+/// removes the name. Metadata segments and data segments alike. The remembered dead objects
+/// are forgotten once their names no longer name them.
 pub(crate) fn sweep_peer_segments() {
     if let Ok(mut cache) = peer_metadata_cache().lock() {
-        cache.retain(|_, segment| segment.is_current());
+        cache.retain(|_, segment| {
+            let live = segment.provider_is_live();
+            if !live {
+                note_gone(segment.object());
+            }
+            live
+        });
     }
     if let Ok(mut cache) = peer_data_cache().lock() {
-        cache.retain(|_, segment| segment.is_current());
+        cache.retain(|_, segment| {
+            let live = segment.provider_is_live();
+            if !live {
+                note_gone(segment.object());
+            }
+            live
+        });
+    }
+    if let Ok(mut gone) = gone_objects().lock() {
+        gone.retain(SegmentObject::is_named);
     }
 }
 
@@ -3032,10 +3091,12 @@ mod tests {
         );
     }
 
-    /// The reader's cache is trusted only while a segment's name names the object it mapped: a
-    /// segment made again under the same id is mapped again, and the stale mapping is not served.
+    /// The reader's cache is trusted only while the provider of its mapping is live. Once the
+    /// provider is gone the cached mapping is not served: the object, opened again for a payload
+    /// still in flight, is served once and not kept. And a segment made again under the id once
+    /// every holder has let go is mapped as the new object it is.
     #[test]
-    fn a_cached_data_segment_is_not_served_after_its_name_names_another_object() {
+    fn a_cached_data_segment_is_not_served_after_its_provider_is_gone() {
         let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
         let id = owner.id();
         let first = peer_data(id).expect("the owner's segment maps");
@@ -3044,22 +3105,41 @@ mod tests {
             Arc::ptr_eq(&first, &again),
             "the second ask is served from the cache"
         );
+        drop(again);
 
         drop(owner);
-        // A real segment rather than a file written by hand, so no sweep can take it.
-        let successor = OwnedSegment::create(64, || id).expect("make another segment of that id");
-        let other = peer_data(id).expect("the new object maps");
+        let late = peer_data(id).expect("the dead provider's object, for a payload in flight");
         assert!(
-            !Arc::ptr_eq(&first, &other),
-            "the cache served the mapping of an object the name no longer names"
+            !Arc::ptr_eq(&first, &late),
+            "the cache served the mapping of a provider that is gone"
         );
+        assert!(
+            !is_cached_data_segment(id),
+            "a dead provider's object was kept in the cache"
+        );
+
+        drop(first);
+        drop(late);
+        assert!(
+            !crate::posix_shm::segment_path(id).exists(),
+            "the last holder to let go left the name"
+        );
+        let successor = OwnedSegment::create(32, || id).expect("make another segment of that id");
+        let other = peer_data(id).expect("the new object maps");
+        assert_eq!(
+            other.bytes().len(),
+            32,
+            "the mapping is not of the new object"
+        );
+        drop(other);
         drop(successor);
     }
 
-    /// A mapping whose segment is gone is let go by the sweep, so a pool that exited does not stay
-    /// mapped and locked in a reader that outlives it.
+    /// A reader that maps a segment keeps its name after the provider lets go, and lets go itself
+    /// when the provider's liveness lapses: the sweep drops the mapping, and the last holder out
+    /// removes the name.
     #[test]
-    fn the_sweep_lets_go_of_a_data_segment_that_no_longer_exists() {
+    fn the_sweep_lets_go_of_a_data_segment_whose_provider_is_gone() {
         let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
         let id = owner.id();
         let held = peer_data(id).expect("the owner's segment maps");
@@ -3068,16 +3148,28 @@ mod tests {
         sweep_peer_segments();
         assert!(
             is_cached_data_segment(id),
-            "a segment that still exists is kept"
+            "a segment whose provider lives is kept"
         );
 
         drop(owner);
+        assert!(
+            crate::posix_shm::segment_path(id).exists(),
+            "the provider's drop removed a name a reader still maps"
+        );
         sweep_peer_segments();
         assert!(
             !is_cached_data_segment(id),
-            "a segment its owner unlinked stays mapped and locked in the reader"
+            "a segment whose provider is gone stays mapped and locked in the reader"
+        );
+        assert!(
+            crate::posix_shm::segment_path(id).exists(),
+            "the hold still in use keeps the name"
         );
         drop(held);
+        assert!(
+            !crate::posix_shm::segment_path(id).exists(),
+            "the last holder to let go left the name"
+        );
     }
 
     /// A chunk goes back to the pool when its holders have let go AND the provider is asked

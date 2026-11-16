@@ -241,6 +241,23 @@ impl OwnedSegment {
     }
 }
 
+/// One segment object, the Unix twin's type. A holder remembers an object by it
+/// once it saw the object's provider go, which [`PeerSegment::provider_is_live`]
+/// never reports here, so no value of it is ever remembered and it carries
+/// nothing to tell two apart.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SegmentObject {
+    _private: (),
+}
+
+impl SegmentObject {
+    /// Whether the object's id still names it. Never asked of a remembered value
+    /// here (see the type), and false so that one would be forgotten at once.
+    pub fn is_named(&self) -> bool {
+        false
+    }
+}
+
 /// A segment ANOTHER process created, opened by id and mapped read-only.
 pub struct PeerSegment {
     view: View,
@@ -270,6 +287,19 @@ impl PeerSegment {
     pub fn is_current(&self) -> bool {
         true
     }
+
+    /// Whether the provider of this segment is still there. Always true here: the
+    /// Unix twin learns it from a lock the provider holds, and a named mapping has
+    /// no such lock, so a reader keeps what it mapped for its own life, as
+    /// upstream's readers do.
+    pub fn provider_is_live(&self) -> bool {
+        true
+    }
+
+    /// The object this maps.
+    pub fn object(&self) -> SegmentObject {
+        SegmentObject { _private: () }
+    }
 }
 
 /// A segment ANOTHER process created, opened by id and mapped READ-WRITE, for a
@@ -295,6 +325,17 @@ impl PeerSegmentRw {
     /// Always true, for the reason [`PeerSegment::is_current`] gives.
     pub fn is_current(&self) -> bool {
         true
+    }
+
+    /// Whether the provider of this segment is still there. Always true, for the
+    /// reason [`PeerSegment::provider_is_live`] gives.
+    pub fn provider_is_live(&self) -> bool {
+        true
+    }
+
+    /// The object this maps.
+    pub fn object(&self) -> SegmentObject {
+        SegmentObject { _private: () }
     }
 
     /// The segment's size in bytes.
