@@ -11258,6 +11258,21 @@ layer_c1d_cargo_test_pubsub() {
         env WZ_LIMIT_MATCH_MEMO_SLOTS=0 \
         cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp \
         --lib --quiet -- match_mem repeated_key || return 1
+    # The wildcard-addressed delivery witnesses of the receive paths that match by intersection:
+    # the subscriber table's one, the switchboard's one and the liveliness subscriber's three
+    # (a declared token, a replayed one, and the token outside the subscriber's space). No module
+    # filter pins them, so they are named. 5 = the names below, each counted from the source: the
+    # pubsub one needs the seven features of `pubsub::tests`, the switchboard one `switchboard`,
+    # and the liveliness three `codec-declare`, all in this set.
+    _runci_guarded_test "C1d intersection witnesses" 5 \
+        cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,switchboard \
+        --lib --quiet -- --exact \
+        pubsub::tests::dispatch_fires_a_concrete_subscriber_on_a_wildcard_addressed_put \
+        switchboard::tests::a_wildcard_addressed_sample_fires_a_concrete_row \
+        declare::liveliness_subscriber::tests::decl_token_on_a_wildcard_reaches_a_concrete_subscriber \
+        declare::liveliness_subscriber::tests::a_history_subscriber_is_replayed_a_wildcard_token_it_intersects \
+        declare::liveliness_subscriber::tests::a_wildcard_token_outside_the_subscribers_space_reaches_nobody \
+        || return 1
 }
 
 # ─── Layer C1bi — pubsub-qos: the merged QoS-byte gate (R311y307) ───────
