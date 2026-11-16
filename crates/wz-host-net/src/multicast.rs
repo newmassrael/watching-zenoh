@@ -438,8 +438,16 @@ impl Plan {
     /// link-local address carries its interface as its scope. Two cases keep the egress
     /// [`Self::pin_egress`] sets, because there is no address to derive one from: a host whose
     /// interface table cannot be read, and the IPv6 wildcard a host with no IPv6 address to fill
-    /// it with is left on. Upstream refuses the second (no interface carries `::`); wz opens the
-    /// link on the kernel's interface, as it does for the IPv4 wildcard.
+    /// it with is left on.
+    ///
+    /// The second is a deliberate divergence. Upstream refuses that link: no interface carries
+    /// `::` (`commons/zenoh-util/src/net/mod.rs` @
+    /// `.ok_or_else(|| zerror!("No interface found with address {addr}").into())`), and its link
+    /// bails on the lookup (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+    /// `Err(e) => bail!("{}: {}", mcast_addr, e),`). wz opens it on the kernel's interface, as it
+    /// does for the IPv4 wildcard: a link upstream cannot open at all is one no upstream peer
+    /// depends on being refused, and `multicast-link-requires-iface` is the policy that refuses an
+    /// unchosen interface where a deployment wants that.
     fn pin_link_egress(&self, raw: &Socket, local: SocketAddr) -> io::Result<()> {
         match local {
             SocketAddr::V4(local) => raw.set_multicast_if_v4(local.ip()),
