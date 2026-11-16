@@ -40,6 +40,8 @@ Usage:
     allfeat_clippy_plan.py plan [--shard I --shards N]   one `<crate> <label> <cargo argument>...`
                                                          line per configuration of shard I, the
                                                          target arguments first
+    allfeat_clippy_plan.py --check                       the whole plan's refusals, one line
+                                                         when there are none (pre-push gate 2z)
     allfeat_clippy_plan.py --selftest
 Exit: 0 printed; 1 usage or the workspace could not be read; 2 a manifest's sets or the cost
 table are wrong.
@@ -306,9 +308,26 @@ def selftest() -> int:
     return 0
 
 
+def workspace_plan(shard: int, shards: int) -> tuple[list[Configuration], list[Configuration]]:
+    """`(every configuration, the ones of shard I)` for this tree's manifests and cost table."""
+    listed = configurations(workspace_packages())
+    return listed, plan(listed, parse_costs(COSTS.read_text(encoding="utf-8")), shard, shards)
+
+
 def main(argv: list[str]) -> int:
     if argv == ["--selftest"]:
         return selftest()
+    if argv == ["--check"]:
+        # The plan's refusals without its listing: a manifest whose sets leave a feature out
+        # and a cost row naming a configuration the workspace no longer has are both made by
+        # what a round changes, so the push that makes them is refused, not the next C1bf.
+        try:
+            listed, _ = workspace_plan(0, 1)
+        except PlanError as error:
+            print(f"allfeat-clippy: {error}", file=sys.stderr)
+            return 2
+        print(f"allfeat-clippy: OK -- {len(listed)} configuration(s) planned")
+        return 0
     if not argv or argv[0] != "plan":
         print(__doc__, file=sys.stderr)
         return 1
@@ -327,8 +346,7 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 1
     try:
-        listed = configurations(workspace_packages())
-        mine = plan(listed, parse_costs(COSTS.read_text(encoding="utf-8")), shard, shards)
+        listed, mine = workspace_plan(shard, shards)
     except PlanError as error:
         print(f"allfeat-clippy: {error}", file=sys.stderr)
         return 2

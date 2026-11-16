@@ -1421,6 +1421,12 @@ round_fed_gates=(
     # regenerate the golden. MEASURED: well under a second, a parse with no build.
     "zenoh_stats_golden.py --header-selftest"
     "zenoh_stats_golden.py --header"
+    # Layer C1bf's plan of every member's largest configurations. Round-fed: it reads every
+    # manifest (a feature a declared set leaves out) and the cost table (a row naming a
+    # configuration the workspace no longer has), and refuses both before any clippy runs.
+    # ESTIMATED under a second: `cargo metadata --no-deps`, measured at 0.09-0.23s, and a parse.
+    "allfeat_clippy_plan.py --selftest"
+    "allfeat_clippy_plan.py --check"
     # R3194 (item 776) — a test that runs by default must not pass by skipping a
     # fixture its lane owes. It enumerates the tracked Rust corpus and reads
     # `run-ci.sh` and the workflows, so a round that adds a skip, or removes the

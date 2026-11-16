@@ -193,6 +193,20 @@ DEFERRED: dict[str, str] = {
         "(`diff` or a join on the symbol name), and it grades nothing, so a "
         "round that moves its subject loses no verdict by not running it."
     ),
+    "sce_autoroll.py": (
+        "R4167 -- an instrument that plans the next landing of the vendor/sce "
+        "pin and changes nothing. It is round-fed only because it names wz's "
+        "compile lock file and the submodule, which tell it which SCE packages "
+        "wz builds; its subject is SCE's history AFTER the pin, read in the SCE "
+        "checkout, and a push carries no plan to grade: a round that edits the "
+        "lock file changes the answer to a question nobody has asked yet, and "
+        "the plan is asked again when a pin move starts. Its refusals (a pin "
+        "off the target's first-parent line) are about SCE's history, not this "
+        "tree. Cost is not the reason (unmeasured: a git log and ls-tree over "
+        "the landings after the pin, no build). Run by hand before a pin move; "
+        "hosted Layer C0 runs its --selftest, over a history it makes in a "
+        "scratch directory."
+    ),
     "rocksdb_engine.py": (
         "R2806 -- verifies a provisioned native Linux engine. Measured "
         "--verify at 2.79s warm; an absent cache fails, while provisioning "
@@ -549,6 +563,80 @@ def hook_sourced(hook_src: str) -> list[str]:
     return out
 
 
+#: A `scripts/lib` shell library RUN with bash rather than sourced: gate 6 runs
+#: `reduced-features-gate.sh`, which runs `reduced_points_gate.py`.
+HOOK_RUN = re.compile(r"\bbash\s+\"?(" + LIB_REL + r"/[A-Za-z0-9_.-]+\.sh)\b")
+
+#: A shell variable bound to the library's OWN directory, the spelling a library
+#: that may be run from any directory reaches its siblings by
+#: (`lib_dir="$(cd "$(dirname "$0")" && pwd)"`). A binding that walks out of the
+#: directory (`.../../..`) is not one: its `/` stands between `dirname` and `)"`.
+OWN_DIR_BINDING = re.compile(
+    r"^\s*(?:local\s+|readonly\s+)?([A-Za-z_][A-Za-z0-9_]*)="
+    r"\"\$\((?:cd\s+\"\$\(dirname\s+\"\$(?:0|\{BASH_SOURCE\[0\]\})\"\)\"\s*&&\s*pwd"
+    r"|dirname\s+\"\$(?:0|\{BASH_SOURCE\[0\]\})\")\)\"",
+    re.M,
+)
+
+
+def hook_libraries(hook_src: str) -> list[str]:
+    """The `scripts/lib` shell libraries a text sources or runs with bash, in order.
+
+    A library the hook RUNS is the hook's own text by another file as much as one
+    it sources: what it runs, every push that reaches it runs. Gate 6 runs
+    `reduced-features-gate.sh`, which runs `reduced_points_gate.py`, and a reader
+    following `source` alone reported that gate unreached while gate 6 ran it.
+    """
+    out = hook_sourced(hook_src)
+    for line in hook_src.split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in HOOK_RUN.finditer(line):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
+
+
+def own_dir_resolved(lib_src: str) -> str:
+    """`lib_src` with each use of its own-directory variable spelled `scripts/lib/`.
+
+    The library lives in `scripts/lib`, so `"$lib_dir/x.py"` IS `scripts/lib/x.py`;
+    written that way, `hook_invocations` and `hook_sourced` read it as they read
+    the hook's own lines.
+    """
+    for name in dict.fromkeys(OWN_DIR_BINDING.findall(lib_src)):
+        lib_src = re.sub(
+            r"\"?\$(?:" + name + r"|\{" + name + r"\})/", LIB_REL + "/", lib_src
+        )
+    return lib_src
+
+
+def library_closure(hook_src: str, read) -> str:
+    """The text of every library the hook reaches, and every library those reach.
+
+    `read(rel)` is the library's text, or None when it is not there: a library
+    the hook names and the tree lacks is the hook's own failure to report, not a
+    reach this gate can grade. Each text is `own_dir_resolved` before it is read
+    for the libraries IT reaches, so a library that sources a sibling through
+    its own-directory variable is followed too.
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+    frontier = hook_libraries(hook_src)
+    while frontier:
+        rel = frontier.pop(0)
+        if rel in seen:
+            continue
+        seen.add(rel)
+        src = read(rel)
+        if src is None:
+            continue
+        src = own_dir_resolved(src)
+        parts.append(src)
+        frontier.extend(hook_libraries(src))
+    return "\n".join(parts)
+
+
 def module_invocations(src: str, population: set[str]) -> set[str]:
     """Which population modules THIS module names as a string constant in code.
 
@@ -755,12 +843,13 @@ def run(root: Path) -> int:
         return 1
     population = round_fed(sources, corpus_dirs, corpus_files)
     hook_src = (root / HOOK_REL).read_text()
-    # What the hook sources is read as the hook's own text (`hook_sourced`). A sourced path that
-    # is not there is the hook's own failure to report, not a reach this gate can grade.
-    for rel in hook_sourced(hook_src):
+    # What the hook sources or runs is read as the hook's own text, and so is what THAT sources
+    # or runs (`library_closure`).
+    def read(rel: str) -> str | None:
         path = root / rel
-        if path.is_file():
-            hook_src += "\n" + path.read_text()
+        return path.read_text() if path.is_file() else None
+
+    hook_src += "\n" + library_closure(hook_src, read)
     invoked, indirect = reachable_from_hook(hook_src, sources, population)
     findings, size = findings_from(population, invoked, DEFERRED)
     report(population, invoked, DEFERRED, indirect)
@@ -1005,6 +1094,52 @@ def selftest() -> int:
         if not ok:
             failed += 1
 
+    # Gate 6's shape: the hook RUNS a library, which reaches its sibling module
+    # through a variable bound to its own directory.
+    run_lib = (
+        'lib_dir="$(cd "$(dirname "$0")" && pwd)" || exit 1\n'
+        'python3 "$lib_dir/r.py" check\n'
+    )
+    sourcing_lib = (
+        'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'source "$here/s.sh"\n'
+        'm="$(bash "$here/t.sh" --list)"\n'
+    )
+    libs = {
+        "scripts/lib/g.sh": run_lib,
+        "scripts/lib/n.sh": sourcing_lib,
+        "scripts/lib/s.sh": "python3 scripts/lib/u.py\n",
+        "scripts/lib/t.sh": "python3 scripts/lib/v.py\n",
+        "scripts/lib/w.sh": (
+            'root="$(cd "$(dirname "$0")/../.." && pwd)"\npython3 "$root/x.py"\n'
+        ),
+    }
+    library_cases: list[tuple[str, str, set[str]]] = [
+        (
+            "a library the hook RUNS is followed, and its own-directory variable read",
+            "if ! bash scripts/lib/g.sh \"$range\"; then\n",
+            {"r.py"},
+        ),
+        (
+            "a library a library sources or runs is followed too",
+            "nd=(bash scripts/lib/n.sh)\n",
+            {"u.py", "v.py"},
+        ),
+        ("a COMMENTED run is not", "# bash scripts/lib/g.sh\n", set()),
+        (
+            "a variable that walks out of the directory is not the directory",
+            "bash scripts/lib/w.sh\n",
+            set(),
+        ),
+        ("a library the tree lacks reaches nothing", "bash scripts/lib/gone.sh\n", set()),
+    ]
+    for name, src, want in library_cases:
+        got = hook_invocations(src + "\n" + library_closure(src, libs.get))
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] library -- {name}: {sorted(got)}")
+        if not ok:
+            failed += 1
+
     rule_cases: list[tuple[str, set[str], set[str], dict[str, str], int]] = [
         ("every member runs -> clean", {"a.py"}, {"a.py"}, {}, 0),
         ("a member the hook does not run -> the R2572 shape", {"a.py"}, set(), {}, 1),
@@ -1024,7 +1159,10 @@ def selftest() -> int:
 
     # +1 for the starved-directory-set arm, which is not in a case table
     # because its input is the one the tables hold fixed.
-    total = len(closure_cases) + len(hook_cases) + len(source_cases) + len(rule_cases) + 1
+    total = (
+        len(closure_cases) + len(hook_cases) + len(source_cases) + len(library_cases)
+        + len(rule_cases) + 1
+    )
     if failed:
         print(f"round-fed-gate-reach selftest: {failed} of {total} arm(s) FAILED")
         return 1
