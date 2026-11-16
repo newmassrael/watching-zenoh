@@ -58,9 +58,13 @@ WHY IT MUTATES THE TREE IN PLACE. The alternative is a copy, and the copy is
 worse than it looks: this workspace's cargo root is `crates/` with path
 dependencies reaching `../vendor/`, so a hermetic copy is most of the repository.
 Instead the original bytes are held, every exit path restores them, and the
-restore is verified BYTE FOR BYTE before this reports anything. A backup left
-behind is a previous run that died, and the next run REFUSES rather than guessing
-which of the two files on disk is the real one.
+restore is verified BYTE FOR BYTE before this reports anything. A signal is an
+exit path too: SIGTERM and SIGHUP end a Python process without running a
+`finally`, so `InterruptGuard` turns them into an exception for the restore and
+the process then dies of the same signal (open-debt item 725, where a `timeout`
+around this gate left a mutant in the tree). SIGKILL cannot be caught. A backup
+left behind is a previous run that died that way, and the next run REFUSES
+rather than guessing which of the two files on disk is the real one.
 
 THE BASELINE IS CHECKED FIRST, and that is not a formality: over a red tree every
 mutant is red and this gate would report every leg load-bearing while measuring
@@ -73,6 +77,7 @@ import importlib.util
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -81,6 +86,89 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
+#: What ends this process from outside while a mutant is on disk: a `timeout`
+#: or a cancelled job (SIGTERM), a closed session (SIGHUP), a terminal
+#: (SIGINT). Python makes only SIGINT an exception by default.
+INTERRUPTS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+class Interrupted(BaseException):
+    """A signal in `INTERRUPTS`, raised so the restore in `finally` runs.
+
+    A `BaseException`, so no `except Exception` between the signal and the
+    restore can swallow it and carry on sweeping a tree that should stop.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+class InterruptGuard:
+    """While installed, a signal in `INTERRUPTS` raises `Interrupted`.
+
+    Once `restoring` is set -- by the first signal, or by the `finally` that
+    puts the pristine bytes back -- a signal is only recorded in `pending`:
+    raising there would stop the restore half way, which is the damage this
+    exists to prevent. The caller ends with `pending` once the tree is whole.
+    """
+
+    def __init__(self) -> None:
+        self.restoring = False
+        self.pending: int | None = None
+        self._saved: dict[int, typing.Any] = {}
+
+    def _on_signal(self, signum: int, _frame: object) -> None:
+        if self.pending is None:
+            self.pending = signum
+        if not self.restoring:
+            self.restoring = True
+            raise Interrupted(signum)
+
+    def install(self) -> None:
+        for sig in INTERRUPTS:
+            self._saved[sig] = signal.signal(sig, self._on_signal)
+
+    def uninstall(self) -> None:
+        for sig, handler in self._saved.items():
+            signal.signal(sig, handler)
+        self._saved.clear()
+
+
+def die_of(signum: int) -> typing.NoReturn:
+    """End this process by `signum` itself, so a caller reading the exit status
+    sees the signal it sent rather than an ordinary failure."""
+    signal.signal(signum, signal.SIG_DFL)
+    signal.raise_signal(signum)
+    # Reached only if the default action did not end the process.
+    sys.exit(128 + signum)
+
+
+def interrupt_probe(path: Path, signame: str, guarded: bool) -> int:
+    """The selftest's child: mutate `path`, take `signame`, restore in `finally`.
+
+    The same shape as `main`'s sweep, reduced to one file. A second signal is
+    sent from inside the restore, which must be recorded and not raised.
+    """
+    signum = getattr(signal, signame)
+    pristine = path.read_text(encoding="utf-8")
+    guard = InterruptGuard()
+    if guarded:
+        guard.install()
+    # `raise_signal` runs the Python handler before it returns, so the probe
+    # does not depend on where the interpreter next checks for signals.
+    try:
+        path.write_text("mutant\n", encoding="utf-8")
+        signal.raise_signal(signum)
+    finally:
+        guard.restoring = True
+        signal.raise_signal(signum)
+        path.write_text(pristine, encoding="utf-8")
+        guard.uninstall()
+    if guard.pending is not None:
+        raise Interrupted(guard.pending)
+    return 0
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LINT = Path(__file__).resolve().parent / "verdict_reason_lint.py"
@@ -1318,6 +1406,36 @@ def selftest() -> int:
                 f"  impl header `{header}`: expected [{ty!r}], got {IMPL_FOR.findall(header)}"
             )
 
+    # Open-debt item 725 -- a signal is an exit path, driven in a child process
+    # because the process under test has to die of it. The unguarded arm is the
+    # control: it must leave the mutant behind, or this probe cannot see the
+    # damage the guarded arms claim to prevent.
+    import tempfile
+
+    interrupt_arms = (
+        ("SIGTERM", "guarded", "pristine\n"),
+        ("SIGHUP", "guarded", "pristine\n"),
+        ("SIGTERM", "bare", "mutant\n"),
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        for signame, mode, left in interrupt_arms:
+            probe = Path(scratch) / f"{signame}-{mode}.rs"
+            probe.write_text("pristine\n", encoding="utf-8")
+            child = subprocess.run(
+                [sys.executable, __file__, "--interrupt-probe", str(probe), signame, mode],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            want_rc = -getattr(signal, signame)
+            got = probe.read_text(encoding="utf-8")
+            if child.returncode != want_rc or got != left:
+                failures.append(
+                    f"  interrupt, {signame} {mode}: expected rc {want_rc} leaving "
+                    f"{left!r}, got rc {child.returncode} leaving {got!r}"
+                    f"\n{child.stderr[-800:]}"
+                )
+
     if failures:
         print("verdict-leg mutation selftest: FAIL", file=sys.stderr)
         for f in failures:
@@ -1332,7 +1450,8 @@ def selftest() -> int:
         "`orphan` reached from the directory rather than from `PREDICATES`; "
         f"and {len(_spellings)} backup-name spelling(s) in "
         f"{len(_encoders)} encoder(s), so no guard can read a name nothing writes; "
-        f"and {len(narrowing)} accessor-type narrowing case(s)"
+        f"and {len(narrowing)} accessor-type narrowing case(s); and "
+        f"{len(interrupt_arms)} signal arm(s), the unguarded one leaving its mutant"
     )
     return 0
 
@@ -1564,6 +1683,10 @@ def main() -> int:
             # rather than about the tree. Cheap, needs no build, and it is what
             # would have caught this gate reaching one predicate out of six.
             return selftest()
+        elif arg == "--interrupt-probe" and len(argv) == 3:
+            # The selftest's child (`interrupt_probe`); not an operator mode.
+            path, signame, mode = argv
+            return interrupt_probe(Path(path), signame, mode == "guarded")
         else:
             print(
                 f"usage: {Path(sys.argv[0]).name} [--only VARIANT] [--selftest]",
@@ -1809,6 +1932,8 @@ def main() -> int:
     unasked: list[tuple[str, str]] = []
     registered: list[tuple[str, str]] = []
     evidence: dict[tuple[str, str], list[str]] = {}
+    guard = InterruptGuard()
+    guard.install()
     try:
         print(
             ("verdict-leg mutation PROBE: " if only else "verdict-leg mutation: ")
@@ -1989,6 +2114,7 @@ def main() -> int:
                 )
 
     finally:
+        guard.restoring = True
         for rel, text in pristine_of.items():
             at = REPO_ROOT / rel
             at.write_text(text, encoding="utf-8")
@@ -2002,6 +2128,11 @@ def main() -> int:
                 return 1
         for bk in backup_of.values():
             bk.unlink(missing_ok=True)
+        guard.uninstall()
+    if guard.pending is not None:
+        # A signal that arrived during the restore was held for it; the tree
+        # is whole now, so the process ends the way it was asked to.
+        raise Interrupted(guard.pending)
 
     stale = sorted(set(UNWITNESSED) - {lbl for lbl, _r, *_x in PREDICATES})
     if stale:
@@ -2102,4 +2233,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Interrupted as stop:
+        die_of(stop.signum)
