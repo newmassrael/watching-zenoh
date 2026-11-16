@@ -6759,7 +6759,7 @@ layer_c1ac_cargo_test_quic() {
     (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
         || return 1
     wz_test_args wz-runtime-tokio quic_e2e
-    _runci_guarded_test C1ac 5 cargo test -p wz-runtime-tokio --features transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1ac 9 cargo test -p wz-runtime-tokio --features transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \

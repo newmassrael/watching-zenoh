@@ -1095,7 +1095,10 @@ transport-link-unixpipe = ["transport-link-tcp", "dep:libc", "dep:rand"]
 # `dial_locator` returns Unsupported for `quic/...` without it. NOT default.
 # `futures-util` reads a multistream link's streams in the one read driver
 # (`SelectAll`) and opens its priority streams without waiting (`now_or_never`).
-transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:wz-tls-pem", "dep:x509-parser", "dep:webpki-roots", "dep:futures-util", "wz-session-core/secure-channel"]
+# `bytes` carries the best-effort batches of a mixed-reliability link
+# (`zenoh-mr` / `zenoh-ms-mr`) on the connection's datagrams, which quinn takes
+# and hands back as `Bytes`; upstream's QUIC link always carries that companion.
+transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:wz-tls-pem", "dep:x509-parser", "dep:webpki-roots", "dep:futures-util", "dep:bytes", "wz-session-core/secure-channel"]
 # R311y8 — host QUIC unreliable-DATAGRAM link backend (RFC9221). IMPLIES
 # `transport-link-quic`: it reuses that backend's `quic_config` TLS-1.3 + ALPN
 # builders + the quinn/rustls stack, swapping the bidi stream for the

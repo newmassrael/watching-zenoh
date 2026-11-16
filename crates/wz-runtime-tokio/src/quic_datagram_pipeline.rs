@@ -49,7 +49,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use quinn::{Connection, Endpoint};
 use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
@@ -60,31 +59,15 @@ use tokio_rustls::rustls::{
 // delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::quic_config::{client_offering, datagram_alpn, server_offering};
+// R2971 — a received datagram is handed up as the buffer quinn gave it; the
+// one conversion lives with the stream link, whose mixed-reliability companion
+// reads datagrams too.
 use crate::quic_pipeline::{
-    accept_quic_connection, connect_quic_client, quic_server_endpoint, tls_client_crypto,
-    tls_server_crypto, StreamAllowance,
+    accept_quic_connection, connect_quic_client, frame_of_datagram, quic_server_endpoint,
+    tls_client_crypto, tls_server_crypto, StreamAllowance,
 };
 use crate::writer_queue::{OutboundQueue, WriterHandle};
-use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, RxStorage, TxFrame};
-
-/// R2971 — a received datagram as frame storage: quinn hands it over as a
-/// refcounted `Bytes`, so the frame can be that buffer instead of a copy.
-struct Datagram(Bytes);
-
-impl RxStorage for Datagram {
-    fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-/// R2971 — a received datagram as a frame: the refcounted buffer quinn already
-/// gave it, handed up whole rather than copied out (`bytes.to_vec()` until
-/// this round).
-fn frame_of_datagram(bytes: Bytes) -> RxFrame {
-    let len = bytes.len();
-    let storage: Arc<dyn RxStorage> = Arc::new(Datagram(bytes));
-    RxFrame::new(RxBytes::shared(storage, 0..len).expect("a datagram is a range of itself"))
-}
+use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
@@ -115,7 +98,7 @@ pub struct QuicDatagramLink {
 /// Inbound read driver of a QUIC datagram link — owns a [`Connection`] clone for
 /// `read_datagram`, PLUS the keep-alive [`Endpoint`] the link must outlive (see
 /// the module doc). Impls [`LinkDriver`] with `poll_event` receiving one datagram
-/// as one [`RxFrame`] (datagram boundary == message boundary, no StreamEnvelope
+/// as one [`crate::RxFrame`] (datagram boundary == message boundary, no StreamEnvelope
 /// reassembly — the UDP shape, not the [`crate::quic_pipeline`] stream shape).
 pub struct QuicDatagramReadDriver {
     connection: Connection,
@@ -581,26 +564,6 @@ mod tests {
     #[test]
     fn quic_datagram_mtu_floor_binds_below_stream_default() {
         const _: () = assert!(QUIC_DATAGRAM_LINK_MTU < DEFAULT_LINK_MTU);
-    }
-
-    /// R2971 — A RECEIVED DATAGRAM IS QUINN'S BUFFER, not a copy of it.
-    ///
-    /// An address is a sound witness here where it is not for a freed buffer:
-    /// the `Bytes` is alive inside the frame for the whole assertion, so no
-    /// allocation can have reused its storage. Under the `to_vec` this replaced
-    /// the frame's bytes were a second allocation and the addresses differ.
-    #[test]
-    fn a_received_datagram_is_the_buffer_quinn_gave_it() {
-        let datagram = Bytes::from(b"one datagram, one frame".to_vec());
-        let at = datagram.as_ptr();
-        let frame = frame_of_datagram(datagram);
-        assert_eq!(frame.bytes, b"one datagram, one frame");
-        assert!(frame.bytes.is_shared());
-        assert_eq!(
-            frame.bytes.as_ptr(),
-            at,
-            "the frame IS the datagram's storage"
-        );
     }
 
     /// The driver's reservation is its own queue's: a lane of one batch gives one permit that
