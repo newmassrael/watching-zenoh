@@ -2853,6 +2853,30 @@ sessions come and go while it routes: a change waits for no message being
 routed, and a message costs what it costs under `rwlock`.
 '''
 
+[[policy]]
+id = "reassembly-pool-overflow"
+kind = "choice"
+kconfig = "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW"
+choices = ["reject", "diagnostic-event", "oldest-wins"]
+default = "reject"
+upstream = "Keeps one defragmentation buffer for each peer and channel, so a new fragmented message never waits on another peer's and there is no shared pool to fill. None of the three values is upstream's, since upstream has no such moment; `reject` is what wz did before the policy existed."
+since = 2
+help = '''
+What a node does with the first fragment of a new fragmented message when every
+slot of its reassembly pool holds a message still arriving. The pool is shared
+by all the node's peers and bounded, where upstream gives each peer and channel
+a buffer of its own; sizing the pool at twice the peer table keeps the moment
+from arising. `reject` drops the new message's fragments and keeps the messages
+already arriving, which is what wz did before this policy. `diagnostic-event`
+does the same and logs a warning, reassembly/slot-pool-full, at each such drop.
+`oldest-wins` ends the message whose first fragment came earliest, of whichever
+peer, and gives its slot to the new one: the ended message is reported as
+evicted and its later fragments are not joined to it, so the newest traffic is kept
+and a peer that stalls mid-message loses that message before its deadline.
+A peer already holding its quota of messages is refused before the pool is
+looked at, whatever the value.
+'''
+
 # ─── Protocol facts (docs/build-configuration.md, decision C15) ──────────────────────────────
 #
 # A protocol fact is something a session of an ABI states on the wire that no switch of this

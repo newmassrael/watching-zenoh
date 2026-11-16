@@ -374,6 +374,21 @@ pub enum PoolOverflow {
     OldestWins,
 }
 
+impl PoolOverflow {
+    /// The value a build's `reassembly-pool-overflow` policy
+    /// ([`crate::policy::SessionPolicy::reassembly_pool_overflow`]) names. The
+    /// hosts that build a Router from their buffer-pool constants pass the
+    /// build's policy through this.
+    pub const fn of_policy(policy: crate::policy::ReassemblyPoolOverflow) -> Self {
+        use crate::policy::ReassemblyPoolOverflow;
+        match policy {
+            ReassemblyPoolOverflow::Reject => Self::Reject,
+            ReassemblyPoolOverflow::DiagnosticEvent => Self::DiagnosticEvent,
+            ReassemblyPoolOverflow::OldestWins => Self::OldestWins,
+        }
+    }
+}
+
 /// An open chain that an ingest ended for a fragment that was not of it.
 ///
 /// The ingest's [`IngestOutcome`] is the fragment's own; this is the other
@@ -1758,6 +1773,33 @@ mod tests {
             ReassemblyConfig::new(2, 5_000).pool_overflow,
             PoolOverflow::Reject
         );
+    }
+
+    /// Each value of the build's `reassembly-pool-overflow` policy names the
+    /// Router's own value of the same word.
+    #[test]
+    fn each_pool_overflow_policy_value_names_the_routers_own() {
+        use crate::policy::ReassemblyPoolOverflow;
+        for (policy, word, router) in [
+            (
+                ReassemblyPoolOverflow::Reject,
+                "reject",
+                PoolOverflow::Reject,
+            ),
+            (
+                ReassemblyPoolOverflow::DiagnosticEvent,
+                "diagnostic-event",
+                PoolOverflow::DiagnosticEvent,
+            ),
+            (
+                ReassemblyPoolOverflow::OldestWins,
+                "oldest-wins",
+                PoolOverflow::OldestWins,
+            ),
+        ] {
+            assert_eq!(policy.id(), word);
+            assert_eq!(PoolOverflow::of_policy(policy), router, "{word}");
+        }
     }
 
     /// `Reject` and `DiagnosticEvent` both refuse the new chain and leave the

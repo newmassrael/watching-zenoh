@@ -23,7 +23,10 @@ use wz_session_core::reassembly_dispatch::ReassemblyDispatcher;
 // Follows `reassembly_config`'s gate, not the module's — same G7 rule, and an
 // import is where that rule is easiest to forget.
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
-use wz_session_core::reassembly_dispatch::ReassemblyConfig;
+use wz_session_core::{
+    policy::SessionPolicy,
+    reassembly_dispatch::{PoolOverflow, ReassemblyConfig},
+};
 
 /// Reassembly slot-pool dimensions for the AP tokio host. R311in — sourced
 /// from the SCE-codegen'd AP buffer-pool constants
@@ -108,4 +111,32 @@ pub(crate) fn reassembly_config() -> ReassemblyConfig {
         crate::reassembly_pool_ap::PER_PEER_QUOTA as u16,
         crate::reassembly_pool_ap::REASSEMBLY_TIMEOUT_MS as u64,
     )
+    // What a full pool does is the build's `reassembly-pool-overflow` policy.
+    .with_pool_overflow(PoolOverflow::of_policy(
+        SessionPolicy::default().reassembly_pool_overflow,
+    ))
+}
+
+#[cfg(all(
+    test,
+    any(feature = "transport-unicast", feature = "transport-multicast")
+))]
+mod tests {
+    use super::*;
+
+    /// The AP config takes its quota from the AP buffer-pool constants and
+    /// what a full pool does from the build's `reassembly-pool-overflow`
+    /// policy, not from the constructor's default.
+    #[test]
+    fn the_ap_pool_overflow_is_the_builds_policy() {
+        let cfg = reassembly_config();
+        assert_eq!(
+            cfg.per_peer_quota,
+            crate::reassembly_pool_ap::PER_PEER_QUOTA as u16
+        );
+        assert_eq!(
+            cfg.pool_overflow,
+            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow)
+        );
+    }
 }
