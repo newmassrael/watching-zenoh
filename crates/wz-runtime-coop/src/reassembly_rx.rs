@@ -49,7 +49,8 @@
 //! [`ReassemblyDispatcher`]: wz_session_core::reassembly_dispatch::ReassemblyDispatcher
 //! [`BoundedVec`]: wz_session_core::bounded::BoundedVec
 
-use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+use wz_session_core::policy::SessionPolicy;
+use wz_session_core::reassembly_dispatch::{PoolOverflow, ReassemblyConfig, ReassemblyDispatcher};
 
 // Re-export the types the MCU loop needs to drive the dispatcher, so a
 // consumer reaches them through the seam without naming wz-session-core
@@ -74,12 +75,16 @@ pub type CoopReassembly = ReassemblyDispatcher<MCU_REASSEMBLY_SLOTS, MCU_REASSEM
 /// Reassembly config (`per_peer_quota` / `reassembly_timeout_ms`) from
 /// the MCU buffer-pool SSOT. The emit types them as `u32`;
 /// [`ReassemblyConfig`] takes `u16` / `u64`, so the two widening casts
-/// are the only adaptation.
+/// are the only adaptation. What a full pool does is the build's
+/// `reassembly-pool-overflow` policy.
 pub fn mcu_reassembly_config() -> ReassemblyConfig {
     ReassemblyConfig::new(
         crate::reassembly_pool_mcu::PER_PEER_QUOTA as u16,
         crate::reassembly_pool_mcu::REASSEMBLY_TIMEOUT_MS as u64,
     )
+    .with_pool_overflow(PoolOverflow::of_policy(
+        SessionPolicy::default().reassembly_pool_overflow,
+    ))
 }
 
 /// Construct the MCU reassembly Router with the deploy-sourced MCU pool
@@ -659,6 +664,16 @@ mod tests {
         let cfg = mcu_reassembly_config();
         assert_eq!(cfg.per_peer_quota, 2);
         assert_eq!(cfg.reassembly_timeout_ms, 500);
+    }
+
+    /// What a full pool does is the build's policy, not the constructor's
+    /// default: the config carries the value `reassembly-pool-overflow` states.
+    #[test]
+    fn the_mcu_pool_overflow_is_the_builds_policy() {
+        assert_eq!(
+            mcu_reassembly_config().pool_overflow,
+            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow)
+        );
     }
 
     /// Driving the MCU seam exactly as the main loop will: a two-fragment

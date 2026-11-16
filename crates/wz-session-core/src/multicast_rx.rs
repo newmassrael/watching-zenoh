@@ -161,6 +161,7 @@ where
         src,
         now_ms,
         on_event,
+        &mut |_: usize| {},
         stats,
     )
 }
@@ -200,6 +201,7 @@ where
         src,
         now_ms,
         on_event,
+        &mut |_: usize| {},
         stats,
     )
 }
@@ -208,8 +210,11 @@ where
 /// [`dispatch_multicast_inbound_in`]: the datagram's batch, un-wrapped first when the group
 /// compresses ([`unwrap_batch`]), then walked message by message
 /// ([`walk_multicast_batch`]).
-#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin
-fn walk_multicast_inbound<F, R, const MAX_PEERS: usize>(
+///
+/// `on_evict` is handed the pool-slot index of a member the walk drops, before
+/// the slot recycles; see [`dispatch_multicast_message`].
+#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin and the eviction observer
+fn walk_multicast_inbound<F, R, E, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -217,10 +222,12 @@ fn walk_multicast_inbound<F, R, const MAX_PEERS: usize>(
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
+    on_evict: &mut E,
     stats: &R,
 ) -> MulticastRxNext
 where
     F: FnMut(IterationEvent<'_, '_>),
+    E: FnMut(usize),
     R: MulticastStatsRecorder + ?Sized,
 {
     #[cfg(feature = "transport-compression")]
@@ -240,6 +247,7 @@ where
             src,
             now_ms,
             on_event,
+            on_evict,
             stats,
         );
     }
@@ -252,6 +260,7 @@ where
         src,
         now_ms,
         on_event,
+        on_evict,
         stats,
     )
 }
@@ -273,8 +282,8 @@ fn unwrap_batch(params: &MulticastParams, datagram: &[u8]) -> Option<alloc::vec:
 /// [`RxBytes`] that `bytes` was taken from; each message of the batch is handed
 /// to [`dispatch_multicast_message`] with the range of it that starts at that
 /// message.
-#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin
-fn walk_multicast_batch<F, R, const MAX_PEERS: usize>(
+#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin and the eviction observer
+fn walk_multicast_batch<F, R, E, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -282,10 +291,12 @@ fn walk_multicast_batch<F, R, const MAX_PEERS: usize>(
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
+    on_evict: &mut E,
     stats: &R,
 ) -> MulticastRxNext
 where
     F: FnMut(IterationEvent<'_, '_>),
+    E: FnMut(usize),
     R: MulticastStatsRecorder + ?Sized,
 {
     let mut pos = 0usize;
@@ -302,6 +313,7 @@ where
             src,
             now_ms,
             on_event,
+            on_evict,
             stats,
         );
         if !matches!(next, MulticastRxNext::Done) {
@@ -330,8 +342,15 @@ where
 /// A KeepAlive, a Close and a Fragment are counted off their MID, which is all
 /// of them this arm reads; a JOIN or a Frame that does not decode is not
 /// counted, as upstream's walk stops at a decoding error.
-#[allow(clippy::too_many_arguments)] // the walk's seven plus the range of the datagram the message is
-fn dispatch_multicast_message<F, R, const MAX_PEERS: usize>(
+///
+/// A member whose JOIN changed the group's terms is dropped here under
+/// zenoh-pico's rule, and `on_evict` is handed its pool-slot index first, as
+/// the Close tail and the lease sweep hand theirs: the reassembly chains are
+/// keyed by that index, so the reassembly-running caller aborts them before
+/// the index can be issued to the next member. A caller with no Router passes
+/// an observer that does nothing.
+#[allow(clippy::too_many_arguments)] // the walk's seven plus the range of the datagram the message is and the eviction observer
+fn dispatch_multicast_message<F, R, E, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -339,10 +358,12 @@ fn dispatch_multicast_message<F, R, const MAX_PEERS: usize>(
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
+    on_evict: &mut E,
     stats: &R,
 ) -> MulticastRxNext
 where
     F: FnMut(IterationEvent<'_, '_>),
+    E: FnMut(usize),
     R: MulticastStatsRecorder + ?Sized,
 {
     match bytes.first().map(|h| h & 0x1f) {
@@ -465,9 +486,10 @@ where
                                     JoinMismatch::Resolution | JoinMismatch::BatchSize
                                 )
                             {
-                                dispatcher.drop_by_src_with(
+                                dispatcher.drop_by_src_evicting(
                                     src,
                                     MulticastPeerLostReason::CapabilitiesChanged,
+                                    on_evict,
                                     |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
                                 );
                                 // Open-debt item 913 — and what it declared goes with it.
@@ -704,8 +726,9 @@ where
 /// non-reassembly loop calls the plain [`dispatch_multicast_inbound`] and acts
 /// only on [`MulticastRxNext::Close`] (FrameOutOfOrder / Fragment are no-ops
 /// without a Router). zenoh-pico parity: the Close tail aborts the peer's
-/// chains BEFORE `close_by_src`, so a recycled slot index can never continue a
-/// dead peer's chain.
+/// chains BEFORE `close_by_src`, and a member dropped for a JOIN that changed
+/// the group's terms has its chains aborted before its slot is freed, so a
+/// recycled slot index can never continue a dead peer's chain.
 #[cfg(feature = "reassembly")]
 #[allow(clippy::too_many_arguments)] // the plain entry point's seven plus the caller's Router
 pub fn dispatch_multicast_inbound_reassembling<
@@ -877,7 +900,9 @@ fn walk_multicast_batch_reassembling<
         let msg = &bytes[pos..];
         #[cfg(feature = "alloc")]
         let msg_unit = origin.and_then(|unit| unit.subslice(pos..bytes.len()));
-        match dispatch_multicast_message(
+        // A member the message drops takes its chains with it, aborted before
+        // its slot index can be issued again, as the Close arm below does.
+        let next = dispatch_multicast_message(
             dispatcher,
             params,
             msg,
@@ -886,8 +911,10 @@ fn walk_multicast_batch_reassembling<
             src,
             now_ms,
             on_event,
+            &mut |idx: usize| abort_peer_chains(reasm, idx),
             stats,
-        ) {
+        );
+        match next {
             MulticastRxNext::Done => match multicast_message_len(msg) {
                 Some(consumed) => {
                     pos += consumed;
@@ -1571,6 +1598,186 @@ mod batch_walk_tests {
             payloads, 1,
             "the marked chain reassembles into exactly one FramePayload"
         );
+    }
+
+    /// A member that restarts a chain reaches the observer as ONE dropped
+    /// chain, `Superseded`, beside the new chain it then completes.
+    ///
+    /// The member announces the marker contract and sends wz's own marked
+    /// chains: the first fragment of one chain, then the whole of another
+    /// whose `0x2 First` ends the first. The restart's own fragment is a chain
+    /// start, so before the router reported what it evicted, the stranded
+    /// chain ended without a word.
+    #[test]
+    #[cfg(all(
+        feature = "reassembly",
+        feature = "transport-fragmentation",
+        feature = "codec-push"
+    ))]
+    fn a_restarted_member_chain_is_reported_dropped_once_as_superseded() {
+        use crate::driver_loop::ReassemblyDropReason;
+        use crate::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        let local = params(&[0x11; 4]);
+        let mut d = running::<4>();
+        let mut r: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        dispatch_multicast_inbound_reassembling(
+            &mut d,
+            &mut r,
+            &local,
+            &peer_join(&[0x22; 4]),
+            PEER,
+            0,
+            &mut |_| {},
+            &(),
+        );
+        assert!(d.peer_index_by_src(PEER).is_some());
+
+        // Two marked chains at consecutive sequence numbers: the first starts
+        // at 0, the second at 1, so the member's SN gate admits both.
+        let chain_at = |first_sn: u64| {
+            let frame = crate::frame_encode::encode_frame_with_push(
+                first_sn,
+                crate::push_build::build_push_literal("demo/mc", b"restarted-chain-from-wire")
+                    .expect("push fixture"),
+                true,
+            );
+            let mtu = frame.len() / 2 + 8;
+            let mut tx = MulticastTxConduits::new(sn::mask_from_res(local.seq_num_res));
+            crate::frame_encode::multicast_frame_or_fragments(
+                frame, first_sn, true, mtu, &mut tx, None,
+            )
+        };
+        let stranded = chain_at(0);
+        let restart = chain_at(1);
+        assert!(
+            stranded.len() > 1 && restart.len() > 1,
+            "the fixture must fragment, or no chain is left open to strand"
+        );
+
+        let mut drops: Vec<ReassemblyDropReason> = Vec::new();
+        let mut payloads = 0usize;
+        for (i, dgram) in core::iter::once(&stranded[0])
+            .chain(restart.iter())
+            .enumerate()
+        {
+            dispatch_multicast_inbound_reassembling(
+                &mut d,
+                &mut r,
+                &local,
+                dgram,
+                PEER,
+                1 + i as u64,
+                &mut |event| match event {
+                    IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
+                        ..
+                    }) => payloads += 1,
+                    IterationEvent::ReassemblyDropped(reason) => drops.push(reason),
+                    _ => {}
+                },
+                &(),
+            );
+        }
+        assert_eq!(
+            drops,
+            [ReassemblyDropReason::Superseded],
+            "the stranded chain is reported once, and nothing else is dropped"
+        );
+        assert_eq!(payloads, 1, "the restarted chain reassembles whole");
+        assert_eq!(r.active_chains(), 0);
+    }
+
+    /// A member dropped because its JOIN changed the group's terms takes its
+    /// open chains with it, as a member that closes or lapses does: the chains
+    /// are keyed by its slot index, and the next member given that index must
+    /// not find them open.
+    ///
+    /// zenoh's rule keeps the member on such a JOIN (it refuses the JOIN), so
+    /// its chain stays open there; that leg is the control that the chain was
+    /// open to be aborted at all.
+    #[test]
+    #[cfg(all(feature = "reassembly", feature = "transport-fragmentation"))]
+    fn a_member_dropped_for_changed_terms_takes_its_open_chains_with_it() {
+        use crate::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        /// The member's beacon at `batch_size`, announcing no patch level, so
+        /// a fragment without markers starts its chain.
+        fn silent_join(batch_size: u16) -> Vec<u8> {
+            let mut p = params(&[0x22; 4]);
+            p.batch_size = batch_size;
+            let beacon = encode_join(
+                &p,
+                &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
+            );
+            crate::multicast_join::join_without_chain(&beacon)
+        }
+
+        /// Feed one datagram from the member, returning the departures it
+        /// caused.
+        fn feed(
+            d: &mut MulticastDispatcher<4>,
+            r: &mut ReassemblyDispatcher<4, 4096>,
+            local: &MulticastParams,
+            unit: &[u8],
+            now_ms: u64,
+        ) -> Vec<MulticastPeerLostReason> {
+            let mut lost = Vec::new();
+            dispatch_multicast_inbound_reassembling(
+                d,
+                r,
+                local,
+                unit,
+                PEER,
+                now_ms,
+                &mut |event| {
+                    if let IterationEvent::MulticastPeerLost(departure) = event {
+                        lost.push(departure.reason);
+                    }
+                },
+                &(),
+            );
+            lost
+        }
+
+        // A chain start with no markers: `R` and `M` set, sn 0, two bytes.
+        let first_fragment = alloc::vec![
+            wire_const::T_MID_FRAGMENT
+                | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                | wz_codecs::wire_const::FLAG_T_FRAGMENT_M,
+            0x00,
+            0xAB,
+            0xCD,
+        ];
+
+        for (rule, dropped) in [(GroupJoinRule::Pico, true), (GroupJoinRule::Zenoh, false)] {
+            let mut local = params(&[0x11; 4]);
+            local.join_rule = rule;
+            let mut d = running::<4>();
+            let mut r: ReassemblyDispatcher<4, 4096> =
+                ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+
+            assert!(feed(&mut d, &mut r, &local, &silent_join(2_048), 0).is_empty());
+            assert!(d.peer_index_by_src(PEER).is_some(), "{rule:?}: admitted");
+            feed(&mut d, &mut r, &local, &first_fragment, 1);
+            assert_eq!(r.active_chains(), 1, "{rule:?}: the member's chain is open");
+
+            let lost = feed(&mut d, &mut r, &local, &silent_join(1_024), 2);
+            if dropped {
+                assert_eq!(lost, [MulticastPeerLostReason::CapabilitiesChanged]);
+                assert!(d.peer_index_by_src(PEER).is_none(), "{rule:?}: dropped");
+                assert_eq!(
+                    r.active_chains(),
+                    0,
+                    "{rule:?}: the dropped member's chain went with it"
+                );
+                assert_eq!(r.staging_available(), 4);
+            } else {
+                assert!(lost.is_empty(), "{rule:?}: {lost:?}");
+                assert!(d.peer_index_by_src(PEER).is_some(), "{rule:?}: kept");
+                assert_eq!(r.active_chains(), 1, "{rule:?}: the chain stays open");
+            }
+        }
     }
 
     /// R311y633 (§17.6) — and the walk stops where the extent is unknown

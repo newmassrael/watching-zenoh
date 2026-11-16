@@ -47,9 +47,9 @@
 //!
 //! | duty | the Router's act |
 //! |---|---|
-//! | `begin_chain` | bind the reserved staging, arm key / SN / deadline, stage the first payload |
+//! | `begin_chain` | bind the reserved staging, arm key / SN / deadline, stage the first payload (unless `finalize_message` of the same transition does) |
 //! | `append_fragment_payload` | stage the payload, advance the chain's SN |
-//! | `finalize_message` | stage the final payload (unless `begin_chain` of the same transition did), deliver, then raise `slot.release` |
+//! | `finalize_message` | stage the final payload, deliver, then raise `slot.release` |
 //! | `abort_ooo` / `abort_peer_drop` / `abort_evicted` / `abort_codec` | raise `slot.release` |
 //! | `reset_slot` | return the staging to the arena, clear key / SN / deadline |
 //!
@@ -58,11 +58,23 @@
 //!
 //! What the Router checks before it drives the machine is only what decides
 //! which event to send: the per-peer quota and a free slot (refusals that
-//! never reach a slot), the arena's reservation for a chain that would start
-//! (`acquire`, refused as [`RefuseReason::PoolExhausted`]), and whether the
-//! payload fits the chain ([`ChainStaging::fits`]): a continuation that would
-//! not fit is sent as `codec.error`, a first fragment that would not fit is
+//! never reach a slot, unless the pool's [`PoolOverflow`] policy makes room),
+//! the arena's reservation for a chain that would start (`acquire`, refused
+//! as [`RefuseReason::PoolExhausted`]), and whether the payload fits the
+//! chain ([`ChainStaging::fits`]): a continuation that would not fit is sent
+//! as `codec.error`, a first fragment that would not fit is
 //! [`AbortReason::CapacityOverflow`] with the machine untouched.
+//!
+//! ## When the machine or the arena answers outside its contract
+//!
+//! Nothing the Router does after driving a slot is asserted. A slot machine
+//! that does not answer an event as `reassembly_slot.scxml` does, or an arena
+//! whose `append` refuses bytes its `fits` admitted, ends the chain it was
+//! serving with an [`IngestOutcome`] the caller already handles (the cases
+//! are on [`AbortReason::CapacityOverflow`] and [`RefuseReason::PoolExhausted`])
+//! and puts the slot back in service with a fresh machine. A panic there would
+//! end the process on an MCU, and its message and location would sit in every
+//! image for a path no chart transition reaches.
 //!
 //! The outbox is an `AtomicU8` because the generated policy hands its host
 //! back by shared reference only, so draining it is a store through `&`. The
@@ -205,6 +217,11 @@ pub struct ReassemblyConfig {
     /// two holds, so a value above `CAP` is read as `CAP`. `usize::MAX`, what
     /// [`Self::new`] sets, leaves `CAP` the only bound.
     pub max_message_bytes: usize,
+    /// What a chain start does when every slot holds an open chain
+    /// (docs/reassembly-fsm.md §2.3 `on_overflow`). Consulted only after the
+    /// per-peer quota admitted the start: quota refusal takes precedence over
+    /// pool pressure (§5.M quota-first).
+    pub pool_overflow: PoolOverflow,
 }
 
 impl ReassemblyConfig {
@@ -213,14 +230,22 @@ impl ReassemblyConfig {
     /// negotiated patch level is not known until the handshake completes,
     /// and the dispatcher is built before it (see
     /// [`Self::with_fragmentation_markers`] /
-    /// [`ReassemblyDispatcher::set_fragmentation_markers`]).
+    /// [`ReassemblyDispatcher::set_fragmentation_markers`]). A full pool
+    /// refuses a new chain ([`PoolOverflow::Reject`]).
     pub const fn new(per_peer_quota: u16, reassembly_timeout_ms: u64) -> Self {
         Self {
             per_peer_quota,
             reassembly_timeout_ms,
             fragmentation_markers: false,
             max_message_bytes: usize::MAX,
+            pool_overflow: PoolOverflow::Reject,
         }
+    }
+
+    /// Builder form of [`Self::pool_overflow`].
+    pub const fn with_pool_overflow(mut self, policy: PoolOverflow) -> Self {
+        self.pool_overflow = policy;
+        self
     }
 
     /// Builder form of [`Self::max_message_bytes`].
@@ -248,6 +273,13 @@ pub enum AbortReason {
     OutOfOrder,
     /// Staging the fragment would exceed the slot's `CAP` (`slot_size`) —
     /// the §7.1 reassembly-capacity hard error (`codec.error`).
+    ///
+    /// Also the word for a fragment the slot could not take at all: an arena
+    /// that refused bytes its `fits` admitted, or a slot machine that did not
+    /// answer the fragment as its chart does. Either is the slot failing to
+    /// hold the chain, and neither moves
+    /// [`ReassemblyDispatcher::capacity_refusals`], which counts the configured
+    /// bound only.
     CapacityOverflow,
     /// R311y578 — the SENDER announced it abandoned the chain: a fragment
     /// carrying the `0x3 Drop` marker ([`crate::extfragment`]). The slot
@@ -271,7 +303,8 @@ pub enum AbortReason {
     /// The `duplicate-first` reason of docs/reassembly-fsm.md §2.4.6, taken
     /// through the slot FSM's `slot.evict` arm (`abort_evicted`). It names
     /// the chain that was evicted, not the fragment that evicted it, whose
-    /// ingest reports its own admission.
+    /// ingest reports its own admission; the Router reports the evicted chain
+    /// beside that admission as [`DisplacedChain::Superseded`].
     Superseded,
     /// A continuation arrived whose SN is not the chain's last SN plus one, and
     /// the caller does not know the SN ring ([`SnRing::Unknown`]), so the router
@@ -293,7 +326,13 @@ pub enum RefuseReason {
     /// The peer already holds `per_peer_quota` open chains (§5.M
     /// quota-first; the pool-exhaustion defence).
     PeerQuota,
-    /// Every slot is occupied by another peer's in-progress chain.
+    /// Every slot is occupied by another peer's in-progress chain, and the
+    /// pool's [`PoolOverflow`] policy refuses rather than evicts.
+    ///
+    /// Also the word for a start the free slot it found could not take: the
+    /// arena had no reservation left for it, or the slot's machine did not
+    /// begin the chain as its chart does (the slot is then given a fresh
+    /// machine and serves the next start).
     PoolExhausted,
     /// R311y578 — the fragment would START a chain but carries no `0x2
     /// First` marker, on a session whose negotiated patch level demands
@@ -308,6 +347,63 @@ pub enum RefuseReason {
     /// the headless tail would hand the upstream decoder a message that
     /// begins in the middle of a network message.
     MissingStartMarker,
+}
+
+/// What a chain start does when every slot of the pool holds an open chain:
+/// the `on_overflow` policy of docs/reassembly-fsm.md §2.3.
+///
+/// Upstream has no such branch: zenoh and zenoh-pico keep one defragmentation
+/// buffer per peer and channel, so a new chain never waits on another peer's.
+/// wz shares a bounded pool of `SLOTS` among all peers, and this is what the
+/// deploy chooses for the moment it is full. Setting `SLOTS` to twice the peer
+/// table's capacity keeps the moment from arising.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolOverflow {
+    /// Refuse the new chain ([`RefuseReason::PoolExhausted`]); the open chains
+    /// are untouched. What the Router has always done, and the default.
+    Reject,
+    /// Refuse the new chain as [`Self::Reject`] does, and log each refusal as
+    /// a warning naming the policy (`reassembly/slot-pool-full`), for a deploy
+    /// that wants the pressure in its log and not only in its counters.
+    DiagnosticEvent,
+    /// End the open chain that began earliest through its slot's `slot.evict`
+    /// arm and begin the new chain in that slot. The ended chain is reported
+    /// beside the new chain's outcome as [`DisplacedChain::Evicted`]. Favours
+    /// the newest traffic: a chain that stalls is the one evicted first,
+    /// before its deadline would have ended it.
+    OldestWins,
+}
+
+impl PoolOverflow {
+    /// The value a build's `reassembly-pool-overflow` policy
+    /// ([`crate::policy::SessionPolicy::reassembly_pool_overflow`]) names. The
+    /// hosts that build a Router from their buffer-pool constants pass the
+    /// build's policy through this.
+    pub const fn of_policy(policy: crate::policy::ReassemblyPoolOverflow) -> Self {
+        use crate::policy::ReassemblyPoolOverflow;
+        match policy {
+            ReassemblyPoolOverflow::Reject => Self::Reject,
+            ReassemblyPoolOverflow::DiagnosticEvent => Self::DiagnosticEvent,
+            ReassemblyPoolOverflow::OldestWins => Self::OldestWins,
+        }
+    }
+}
+
+/// An open chain that an ingest ended for a fragment that was not of it.
+///
+/// The ingest's [`IngestOutcome`] is the fragment's own; this is the other
+/// chain the same fragment ended, read with
+/// [`ReassemblyDispatcher::displaced_by_last_ingest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplacedChain {
+    /// A `0x2 First` restarted the chain open on its own key, whose staged
+    /// prefix is discarded ([`AbortReason::Superseded`], §2.4.6
+    /// duplicate-first).
+    Superseded,
+    /// The pool was full and its [`PoolOverflow::OldestWins`] policy ended
+    /// the oldest open chain, of whichever peer, to take its slot (§2.4.6
+    /// oldest-wins eviction).
+    Evicted,
 }
 
 /// Outcome of one [`ReassemblyDispatcher::ingest`] call.
@@ -526,15 +622,17 @@ impl ChainKey {
         let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
         self.peer_key_len as usize == n && self.peer_key[..n] == peer_key[..n]
     }
+
+    fn matches(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> bool {
+        self.reliable == reliable && self.priority == priority && self.same_peer(peer_key)
+    }
 }
 
-/// One reassembly slot: the engine-free protocol FSM plus the Router-owned
-/// chain state (key / expected next SN / deadline / staging buffer).
-struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
-    engine: Engine<ReassemblySlotPolicy<SlotBinding>>,
-    /// `Some` while the slot holds an in-progress chain (FSM == Receiving);
-    /// `None` when free (FSM == Empty).
-    key: Option<ChainKey>,
+/// The Router's half of the chain a slot holds: everything that exists only
+/// while the slot's machine is out of `Empty`, held as one value so a slot
+/// cannot hold a key without its staging, or the reverse.
+struct OpenChain<C> {
+    key: ChainKey,
     /// The last in-order SN staged into this chain. A continuation is
     /// admitted iff it is consecutive to this on the caller's [`SnRing`]
     /// ([`crate::sn::consecutive`] at the caller-passed mask when the ring is
@@ -543,19 +641,31 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
     /// `_z_sn_consecutive` against it), replacing the R311ka F-5 unmasked
     /// `next_sn` `==` that diverged at the ring seam.
     last_sn: u64,
-    /// Absolute monotonic-ms instant this chain times out (valid iff
-    /// `key.is_some()`).
+    /// Absolute monotonic-ms instant this chain times out.
     deadline_ms: u64,
+    /// How many chains the Router had begun before this one: the order
+    /// [`PoolOverflow::OldestWins`] picks its victim by. A count and not the
+    /// deadline, which chains begun on the same millisecond share.
+    opened: u64,
     /// R311y589 — this chain's staging handle, vended by the Router's arena
-    /// ([`crate::chain_staging::ChainStaging`]). `Some` exactly while `key` is
-    /// `Some`; the two are armed and cleared together, and
+    /// ([`crate::chain_staging::ChainStaging`]);
     /// [`ChainStaging::available`](crate::chain_staging::ChainStaging::available)
-    /// is what catches them drifting apart.
+    /// is what catches a handle leaked or released twice.
     ///
     /// It used to be a `BoundedVec<u8, CAP>` inline. The bytes still land in a
     /// growable heap buffer under the default arena — what moved is WHO decides
     /// that, so a deterministic deploy can reserve the arena up front instead.
-    chain: Option<S::Chain>,
+    chain: C,
+}
+
+/// One reassembly slot: the engine-free protocol FSM plus the Router-owned
+/// chain state.
+struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
+    engine: Engine<ReassemblySlotPolicy<SlotBinding>>,
+    /// `Some` while the slot holds a chain (FSM in `Receiving`, or in
+    /// `Complete` until the delivery's release); `None` when free (FSM ==
+    /// Empty).
+    open: Option<OpenChain<S::Chain>>,
 }
 
 impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
@@ -566,17 +676,11 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
         ));
         // W3C SCXML 3.3: enter the initial `Empty` leaf.
         engine.initialize().unwrap_or_else(|never| match never {});
-        Self {
-            engine,
-            key: None,
-            last_sn: 0,
-            deadline_ms: 0,
-            chain: None,
-        }
+        Self { engine, open: None }
     }
 
     fn is_free(&self) -> bool {
-        self.key.is_none()
+        self.open.is_none()
     }
 
     /// Send `event` to the slot engine and drain the duties its transition
@@ -607,13 +711,34 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
         if self.drive(ReassemblySlotEvent::SlotRelease) & duty::RESET == 0 {
             return false;
         }
-        self.key = None;
-        self.last_sn = 0;
-        self.deadline_ms = 0;
-        if let Some(chain) = self.chain.take() {
-            staging.release(chain);
+        if let Some(open) = self.open.take() {
+            staging.release(open.chain);
         }
         true
+    }
+
+    /// Put the slot back in service when its machine answered an event outside
+    /// its chart: the chain's staging goes back to the arena and the machine is
+    /// replaced by a fresh one at `Empty`.
+    ///
+    /// No transition of `reassembly_slot.scxml` leads here; `duty_tests` checks
+    /// every answer the Router relies on, transition by transition. The path
+    /// exists so that a machine and a Router that disagree cost the chain they
+    /// were serving, not the process and not the slot for the rest of the
+    /// session.
+    fn replace(&mut self, staging: &mut S) {
+        if let Some(open) = self.open.take() {
+            staging.release(open.chain);
+        }
+        *self = Self::new();
+    }
+
+    /// [`Self::release`] from a state the chart makes terminal, and
+    /// [`Self::replace`] if the machine was not in one after all.
+    fn release_or_replace(&mut self, staging: &mut S) {
+        if !self.release(staging) {
+            self.replace(staging);
+        }
     }
 }
 
@@ -636,6 +761,11 @@ where
     /// Chains ended because a fragment would have taken them past the bound
     /// ([`AbortReason::CapacityOverflow`]); see [`Self::capacity_refusals`].
     capacity_refusals: u64,
+    /// How many chains this Router has begun: the next chain's `opened`.
+    opened: u64,
+    /// The chain the current ingest ended for a fragment not of it; see
+    /// [`Self::displaced_by_last_ingest`].
+    displaced: Option<DisplacedChain>,
 }
 
 impl<const SLOTS: usize, const CAP: usize, S> ReassemblyDispatcher<SLOTS, CAP, S>
@@ -662,7 +792,27 @@ where
             config,
             staging,
             capacity_refusals: 0,
+            opened: 0,
+            displaced: None,
         }
+    }
+
+    /// The open chain the last ingest ended for a fragment that was not of
+    /// it, if it ended one.
+    ///
+    /// One fragment can end a second chain besides deciding its own: a `0x2
+    /// First` restart ends the chain open on its key before it begins its own
+    /// ([`DisplacedChain::Superseded`]), and under [`PoolOverflow::OldestWins`]
+    /// a chain start on a full pool ends the oldest open chain to take its
+    /// slot ([`DisplacedChain::Evicted`]). The ingest returns the fragment's
+    /// [`IngestOutcome`]; this is the other chain's ending, which a caller
+    /// that reports the one reports beside it (the drive loops raise both as
+    /// `IterationEvent::ReassemblyDropped`).
+    ///
+    /// Every ingest clears it first, so it never speaks of an earlier call;
+    /// [`Self::abort_channel`] and the sweeps leave it as it is.
+    pub fn displaced_by_last_ingest(&self) -> Option<DisplacedChain> {
+        self.displaced
     }
 
     /// The largest message a chain may reach here: the smaller of the
@@ -824,53 +974,80 @@ where
         lend: bool,
         deliver: F,
     ) -> IngestOutcome {
+        self.displaced = None;
         if self.config.fragmentation_markers {
             if let Some(outcome) = self.apply_chain_boundary_markers(&frag) {
                 return outcome;
             }
         }
         match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
-            Some(idx) => self.ingest_continuation(idx, frag, ring, lend, deliver),
+            Some(idx) => self.ingest_continuation(idx, frag, ring, now_ms, lend, deliver),
             None => self.ingest_chain_start(frag, now_ms, lend, deliver),
         }
     }
 
-    /// The `finalize_message` duty's delivery: hand the completed chain in
-    /// `idx` to `deliver` and raise `slot.release`, whose `reset_slot`
-    /// reclaims the slot.
+    /// The `finalize_message` duty: stage the final payload onto the chain in
+    /// `idx`, hand the completed chain to `deliver` and raise `slot.release`,
+    /// whose `reset_slot` reclaims the slot.
     ///
     /// Lent when `lend` and the arena can: the Router slot is released first
     /// (the chain's staging is no longer the Router's), then the shared bytes
     /// are delivered. Otherwise borrowed: delivered while the staging is still
     /// held, and released after, which is the only order a borrow allows.
-    fn complete<F: FnOnce(ChainBytes<'_>)>(&mut self, idx: usize, lend: bool, deliver: F) {
+    ///
+    /// An arena that refuses the final payload ends the chain undelivered as
+    /// [`AbortReason::CapacityOverflow`]; the release is raised all the same,
+    /// since the machine is already in `Complete`.
+    fn finish<F: FnOnce(ChainBytes<'_>)>(
+        &mut self,
+        idx: usize,
+        sn: u64,
+        payload: &[u8],
+        lend: bool,
+        deliver: F,
+    ) -> IngestOutcome {
+        let staged = self.stage(idx, sn, payload);
+        let Self { slots, staging, .. } = self;
+        let slot = &mut slots[idx];
+        if !staged {
+            slot.release_or_replace(staging);
+            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
+        }
         #[cfg(feature = "rx-shared-bytes")]
         if lend {
-            let chain = self.slots[idx]
-                .chain
-                .take()
-                .expect("a completed chain has staging");
-            match self.staging.lend(chain) {
-                Ok(bytes) => {
-                    let Self { slots, staging, .. } = self;
-                    slots[idx].release(staging);
-                    deliver(ChainBytes::Lent(bytes));
-                    return;
+            if let Some(OpenChain {
+                key,
+                last_sn,
+                deadline_ms,
+                opened,
+                chain,
+            }) = slot.open.take()
+            {
+                match staging.lend(chain) {
+                    Ok(bytes) => {
+                        slot.release_or_replace(staging);
+                        deliver(ChainBytes::Lent(bytes));
+                        return IngestOutcome::Reassembled;
+                    }
+                    Err(chain) => {
+                        slot.open = Some(OpenChain {
+                            key,
+                            last_sn,
+                            deadline_ms,
+                            opened,
+                            chain,
+                        })
+                    }
                 }
-                Err(chain) => self.slots[idx].chain = Some(chain),
             }
         }
         #[cfg(not(feature = "rx-shared-bytes"))]
         let _ = lend;
-        {
-            let chain = self.slots[idx]
-                .chain
-                .as_ref()
-                .expect("a completed chain has staging");
-            deliver(ChainBytes::Borrowed(self.staging.bytes(chain)));
+        if let Some(open) = slot.open.as_ref() {
+            deliver(ChainBytes::Borrowed(staging.bytes(&open.chain)));
         }
-        let Self { slots, staging, .. } = self;
-        slots[idx].release(staging);
+        slot.release_or_replace(staging);
+        IngestOutcome::Reassembled
     }
 
     /// R311y578 — the `0x2 First` / `0x3 Drop` chain-boundary rules, run
@@ -906,13 +1083,12 @@ where
             // Fall through: the marked fragment itself now starts a chain.
             return None;
         }
-        if active.is_none() {
+        let Some(idx) = active else {
             // No marker and no chain in progress: this is not a chain
             // start, whatever its SN says.
             return Some(IngestOutcome::Refused(RefuseReason::MissingStartMarker));
-        }
+        };
         if frag.markers.dropped {
-            let idx = active.expect("active is Some on this path");
             return Some(self.abort_peer_drop(idx));
         }
         None
@@ -936,19 +1112,29 @@ where
         )
     }
 
-    /// The SINGLE producer of the slot FSM's `slot.evict` -> `Aborted` arm
-    /// (`abort_evicted`): docs/reassembly-fsm.md §2.4.6 duplicate-first. A
-    /// `0x2 First` arrived on a key whose chain is open, so by the
-    /// one-active-per-key rule (§2.1) the open chain is aborted and its key
-    /// freed before the new First is admitted, which is zenoh's
-    /// `defrag.clear()` on `ext_first`. The evicted chain's reason is
-    /// [`AbortReason::Superseded`]; the fragment's own outcome is the one its
-    /// admission then gives.
+    /// docs/reassembly-fsm.md §2.4.6 duplicate-first. A `0x2 First` arrived
+    /// on a key whose chain is open, so by the one-active-per-key rule (§2.1)
+    /// the open chain is evicted and its key freed before the new First is
+    /// admitted, which is zenoh's `defrag.clear()` on `ext_first`. The evicted
+    /// chain is reported as [`DisplacedChain::Superseded`]; the fragment's own
+    /// outcome is the one its admission then gives.
     ///
     /// Only the marker rules can tell a duplicate First from a continuation,
     /// so without them a fragment on an open key is judged as a continuation.
     fn evict_duplicate_first(&mut self, idx: usize) {
-        self.abort(idx, ReassemblySlotEvent::SlotEvict, AbortReason::Superseded);
+        self.evict(idx, DisplacedChain::Superseded);
+    }
+
+    /// The SINGLE producer of the slot FSM's `slot.evict` -> `Aborted` arm
+    /// (`abort_evicted`), docs/reassembly-fsm.md §2.4.6: the open chain in
+    /// `idx` is ended for a fragment that is not of it, either a restart on
+    /// its own key ([`Self::evict_duplicate_first`]) or a start that needs its
+    /// slot ([`PoolOverflow::OldestWins`]). The ending is recorded for
+    /// [`Self::displaced_by_last_ingest`], since the ingest's own outcome is
+    /// the fragment's.
+    fn evict(&mut self, idx: usize, why: DisplacedChain) {
+        self.end_chain(idx, ReassemblySlotEvent::SlotEvict);
+        self.displaced = Some(why);
     }
 
     /// R311y578 — push the negotiated protocol patch level's verdict into
@@ -1021,43 +1207,42 @@ where
         // arena, and both live behind `&mut self`.
         let Self { slots, staging, .. } = self;
         for slot in slots.iter_mut() {
-            if slot.is_free() || now_ms < slot.deadline_ms {
-                continue;
-            }
+            // Read BEFORE the release, which is what makes the number takeable
+            // at all: the handle is the arena's again the moment after.
+            let (staged, reliable, priority) = match slot.open.as_ref() {
+                Some(open) if now_ms >= open.deadline_ms => (
+                    staging.bytes(&open.chain).len() as u64,
+                    open.key.reliable,
+                    open.key.priority,
+                ),
+                _ => continue,
+            };
             // `record_timeout` is a notice and posts no duty; the release
             // below is the sweep's own act on its own clock.
             slot.drive(ReassemblySlotEvent::ReassemblyTimeout);
-            // BEFORE the release, which is what makes the number takeable at
-            // all: the handle is the arena's again the moment after.
-            let staged = slot
-                .chain
-                .as_ref()
-                .map_or(0, |chain| staging.bytes(chain).len() as u64);
-            let key = slot.key.as_ref().map(|k| (k.reliable, k.priority));
-            if slot.release(staging) {
-                if let Some((reliable, priority)) = key {
-                    released(reliable, priority);
-                }
-                loss.bytes += staged;
-                loss.chains += 1;
-            }
+            slot.release_or_replace(staging);
+            released(reliable, priority);
+            loss.bytes += staged;
+            loss.chains += 1;
         }
         loss
     }
 
     fn find_active(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> Option<usize> {
-        self.slots.iter().position(|s| match &s.key {
-            Some(k) => k.reliable == reliable && k.priority == priority && k.same_peer(peer_key),
-            None => false,
+        self.slots.iter().position(|s| {
+            s.open
+                .as_ref()
+                .is_some_and(|open| open.key.matches(peer_key, reliable, priority))
         })
     }
 
     fn peer_chain_count(&self, peer_key: &[u8]) -> u16 {
         self.slots
             .iter()
-            .filter(|s| match &s.key {
-                Some(k) => k.same_peer(peer_key),
-                None => false,
+            .filter(|s| {
+                s.open
+                    .as_ref()
+                    .is_some_and(|open| open.key.same_peer(peer_key))
             })
             .count() as u16
     }
@@ -1077,7 +1262,10 @@ where
         }
         let idx = match self.slots.iter().position(Slot::is_free) {
             Some(i) => i,
-            None => return IngestOutcome::Refused(RefuseReason::PoolExhausted),
+            None => match self.make_room() {
+                Some(i) => i,
+                None => return IngestOutcome::Refused(RefuseReason::PoolExhausted),
+            },
         };
 
         // Reserve this chain's staging before the machine is told of it, since
@@ -1087,21 +1275,19 @@ where
         // the two dims are an invariant between two numbers, and reporting
         // exhaustion is the honest answer if they ever disagree.
         // `PoolExhausted` is already the Router's word for it. The reservation
-        // waits on the slot, whose key stays clear until `begin_chain` binds it.
+        // is held here until `begin_chain` binds it to the slot.
         let deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
         let max_message_bytes = self.config.max_message_bytes;
+        let opened = self.opened;
         let Self { slots, staging, .. } = self;
         let slot = &mut slots[idx];
-        slot.chain = staging.acquire();
-        let Some(chain) = slot.chain.as_ref() else {
+        let Some(chain) = staging.acquire() else {
             return IngestOutcome::Refused(RefuseReason::PoolExhausted);
         };
         // A first fragment wider than the bound never reaches the machine: no
         // transition of `Empty` refuses a chunk, so the chain ends here.
-        if !Self::chain_admits(staging, chain, frag.payload.len(), max_message_bytes) {
-            if let Some(chain) = slot.chain.take() {
-                staging.release(chain);
-            }
+        if !Self::chain_admits(staging, &chain, frag.payload.len(), max_message_bytes) {
+            staging.release(chain);
             self.note_capacity_overflow(frag.payload.len());
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         }
@@ -1121,36 +1307,83 @@ where
         // delivered lone tail is a chain remnant, not a whole frame, so the
         // upstream frame decode drops it — exactly pico's outcome.
         let duties = slot.drive_chunk(frag.more);
-        assert!(
-            duties & duty::BEGIN != 0,
-            "an Empty slot answers fragment.chunk with begin_chain"
-        );
-        slot.key = Some(ChainKey::new(frag.peer_key, frag.reliable, frag.priority));
-        slot.last_sn = frag.sn;
-        slot.deadline_ms = deadline_ms;
-        self.stage(idx, frag.payload);
-        // On `more == 0` the same transition also ran `finalize_message`; its
-        // payload is the one `begin_chain` just staged.
+        if duties & duty::BEGIN == 0 {
+            // `Empty` answers every chunk with `begin_chain`, so this machine
+            // was not in `Empty` while the Router held its slot free: the two
+            // disagree, and the slot is given a fresh machine for the next
+            // start rather than this one bound to a chain it never began.
+            staging.release(chain);
+            slot.replace(staging);
+            return IngestOutcome::Refused(RefuseReason::PoolExhausted);
+        }
+        slot.open = Some(OpenChain {
+            key: ChainKey::new(frag.peer_key, frag.reliable, frag.priority),
+            last_sn: frag.sn,
+            deadline_ms,
+            opened,
+            chain,
+        });
+        self.opened = self.opened.wrapping_add(1);
+        // On `more == 0` the same transition also ran `finalize_message`,
+        // which stages the one payload this chain has.
         if duties & duty::FINALIZE != 0 {
-            self.complete(idx, lend, deliver);
-            return IngestOutcome::Reassembled;
+            return self.finish(idx, frag.sn, frag.payload, lend, deliver);
+        }
+        if !self.stage(idx, frag.sn, frag.payload) {
+            return self.abort(
+                idx,
+                ReassemblySlotEvent::CodecError,
+                AbortReason::CapacityOverflow,
+            );
         }
         IngestOutcome::Begun
     }
 
-    /// Stage `payload` onto the open chain in `idx`: the staging half of the
-    /// `begin_chain`, `append_fragment_payload` and `finalize_message` duties.
-    /// The arena said the bytes fit before the machine was driven, so a
-    /// refusal here is an arena whose `fits` and `append` disagree.
-    fn stage(&mut self, idx: usize, payload: &[u8]) {
+    /// A slot for a chain start that found none free, by the pool's
+    /// [`PoolOverflow`] policy: the slot of the oldest open chain, evicted,
+    /// under [`PoolOverflow::OldestWins`]; none otherwise, and the start is
+    /// refused.
+    fn make_room(&mut self) -> Option<usize> {
+        match self.config.pool_overflow {
+            PoolOverflow::Reject => None,
+            PoolOverflow::DiagnosticEvent => {
+                log::warn!(
+                    "reassembly/slot-pool-full: all {SLOTS} reassembly slots hold an open \
+                     chain, so a new chain is refused (pool overflow policy diagnostic-event)"
+                );
+                None
+            }
+            PoolOverflow::OldestWins => {
+                let victim = self
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, slot)| slot.open.as_ref().map(|open| (open.opened, idx)))
+                    .min()
+                    .map(|(_, idx)| idx)?;
+                self.evict(victim, DisplacedChain::Evicted);
+                Some(victim)
+            }
+        }
+    }
+
+    /// Stage `payload` onto the open chain in `idx` and take `sn` as its last:
+    /// the staging half of the `begin_chain`, `append_fragment_payload` and
+    /// `finalize_message` duties.
+    ///
+    /// `false` when the arena refuses the bytes, which it said would fit
+    /// before the machine was driven: an arena whose `fits` and `append`
+    /// disagree. The caller ends the chain.
+    fn stage(&mut self, idx: usize, sn: u64, payload: &[u8]) -> bool {
         let Self { slots, staging, .. } = self;
-        let chain = slots[idx]
-            .chain
-            .as_mut()
-            .expect("an open chain has staging");
-        staging
-            .append(chain, payload)
-            .expect("the arena admitted these bytes before the slot was driven");
+        let Some(open) = slots[idx].open.as_mut() else {
+            return false;
+        };
+        if staging.append(&mut open.chain, payload).is_err() {
+            return false;
+        }
+        open.last_sn = sn;
+        true
     }
 
     fn ingest_continuation<F: FnOnce(ChainBytes<'_>)>(
@@ -1158,9 +1391,27 @@ where
         idx: usize,
         frag: Fragment<'_>,
         ring: SnRing,
+        now_ms: u64,
         lend: bool,
         deliver: F,
     ) -> IngestOutcome {
+        // The slot was found by its open chain; one that holds none has no
+        // chain for this fragment to continue, which makes it a start.
+        let Some(open) = self.slots[idx].open.as_ref() else {
+            return self.ingest_chain_start(frag, now_ms, lend, deliver);
+        };
+        let last_sn = open.last_sn;
+        // A payload the chain cannot hold is a codec error for the machine,
+        // decided before the chunk is sent: once a final chunk has driven the
+        // slot to `Complete` no abort arm is left to take.
+        let staged = self.staging.bytes(&open.chain).len();
+        let fits = Self::chain_admits(
+            &self.staging,
+            &open.chain,
+            frag.payload.len(),
+            self.config.max_message_bytes,
+        );
+
         // Strict in-order (§2.5): a non-consecutive continuation (a
         // duplicate, a gap, or a backward step — all ring distances != 1)
         // aborts the chain via `fragment.ooo`. Ring compare, not `==` on
@@ -1170,28 +1421,9 @@ where
         // admitted, and any other step ends the chain as `Unresolvable` rather
         // than as the judgement it cannot make; the slot FSM's one abort arm for
         // "this continuation cannot be admitted" serves both words.
-        if let Err(reason) = ring.admits(self.slots[idx].last_sn, frag.sn) {
+        if let Err(reason) = ring.admits(last_sn, frag.sn) {
             return self.abort(idx, ReassemblySlotEvent::FragmentOoo, reason);
         }
-
-        // A payload the chain cannot hold is a codec error for the machine,
-        // decided before the chunk is sent: once a final chunk has driven the
-        // slot to `Complete` no abort arm is left to take.
-        let (fits, staged) = {
-            let chain = self.slots[idx]
-                .chain
-                .as_ref()
-                .expect("an open chain has staging");
-            (
-                Self::chain_admits(
-                    &self.staging,
-                    chain,
-                    frag.payload.len(),
-                    self.config.max_message_bytes,
-                ),
-                self.staging.bytes(chain).len(),
-            )
-        };
         if !fits {
             self.note_capacity_overflow(staged.saturating_add(frag.payload.len()));
             return self.abort(
@@ -1204,37 +1436,50 @@ where
         // The slot FSM's `more` guard decides Continue vs Final.
         let duties = self.slots[idx].drive_chunk(frag.more);
         if duties & duty::APPEND != 0 {
-            self.stage(idx, frag.payload);
-            self.slots[idx].last_sn = frag.sn;
+            if !self.stage(idx, frag.sn, frag.payload) {
+                return self.abort(
+                    idx,
+                    ReassemblySlotEvent::CodecError,
+                    AbortReason::CapacityOverflow,
+                );
+            }
             return IngestOutcome::Continued;
         }
-        assert!(
-            duties & duty::FINALIZE != 0,
-            "a Receiving slot answers fragment.chunk with append or finalize"
-        );
-        self.stage(idx, frag.payload);
-        self.complete(idx, lend, deliver);
-        IngestOutcome::Reassembled
+        if duties & duty::FINALIZE != 0 {
+            return self.finish(idx, frag.sn, frag.payload, lend, deliver);
+        }
+        // `Receiving` answers every chunk with one of the two, so this machine
+        // was not in `Receiving` while the Router held its chain open: the
+        // chain is given up and the slot gets a fresh machine.
+        let Self { slots, staging, .. } = self;
+        slots[idx].replace(staging);
+        IngestOutcome::Aborted(AbortReason::CapacityOverflow)
     }
 
-    /// Send the open chain in `idx` an abort `event` and perform the abort
-    /// duty its arm runs: raise `slot.release`, whose `reset_slot` reclaims
-    /// the slot. `reason` is the Router's own word for why it sent `event`.
+    /// Send the open chain in `idx` an abort `event` and report it ended for
+    /// `reason`, the Router's own word for why it sent `event`.
     fn abort(
         &mut self,
         idx: usize,
         event: ReassemblySlotEvent,
         reason: AbortReason,
     ) -> IngestOutcome {
+        self.end_chain(idx, event);
+        IngestOutcome::Aborted(reason)
+    }
+
+    /// Send the open chain in `idx` an abort `event` and perform the abort
+    /// duty its arm runs: raise `slot.release`, whose `reset_slot` reclaims
+    /// the slot. A machine that does not take the arm, or does not reset after
+    /// it, is replaced, so the chain the Router ended is ended either way.
+    fn end_chain(&mut self, idx: usize, event: ReassemblySlotEvent) {
         let Self { slots, staging, .. } = self;
         let slot = &mut slots[idx];
-        let duties = slot.drive(event);
-        assert!(
-            duties & duty::ABORT != 0,
-            "a Receiving slot answers every abort event with an abort duty"
-        );
-        slot.release(staging);
-        IngestOutcome::Aborted(reason)
+        if slot.drive(event) & duty::ABORT != 0 {
+            slot.release_or_replace(staging);
+        } else {
+            slot.replace(staging);
+        }
     }
 
     /// R311ke — abort the in-progress chain on (`peer_key`, `priority`,
@@ -1509,6 +1754,145 @@ mod tests {
             d.ingest(frag(third, true, 1, 1, b"c"), MASK, 0, |_| {}),
             IngestOutcome::Refused(RefuseReason::PoolExhausted)
         );
+        assert_eq!(d.displaced_by_last_ingest(), None);
+    }
+
+    const PEER_C: &[u8] = &[0xCC; 16];
+    const PEER_D: &[u8] = &[0xDD; 16];
+
+    /// Two slots under `policy`, with a quota no test here reaches.
+    fn two_slots(policy: PoolOverflow) -> ReassemblyDispatcher<2, 64> {
+        ReassemblyDispatcher::new(ReassemblyConfig::new(8, 5_000).with_pool_overflow(policy))
+    }
+
+    /// A config states `Reject` unless told otherwise: the Router's behaviour
+    /// before the policy existed.
+    #[test]
+    fn a_full_pool_rejects_unless_the_config_says_otherwise() {
+        assert_eq!(
+            ReassemblyConfig::new(2, 5_000).pool_overflow,
+            PoolOverflow::Reject
+        );
+    }
+
+    /// Each value of the build's `reassembly-pool-overflow` policy names the
+    /// Router's own value of the same word.
+    #[test]
+    fn each_pool_overflow_policy_value_names_the_routers_own() {
+        use crate::policy::ReassemblyPoolOverflow;
+        for (policy, word, router) in [
+            (
+                ReassemblyPoolOverflow::Reject,
+                "reject",
+                PoolOverflow::Reject,
+            ),
+            (
+                ReassemblyPoolOverflow::DiagnosticEvent,
+                "diagnostic-event",
+                PoolOverflow::DiagnosticEvent,
+            ),
+            (
+                ReassemblyPoolOverflow::OldestWins,
+                "oldest-wins",
+                PoolOverflow::OldestWins,
+            ),
+        ] {
+            assert_eq!(policy.id(), word);
+            assert_eq!(PoolOverflow::of_policy(policy), router, "{word}");
+        }
+    }
+
+    /// `Reject` and `DiagnosticEvent` both refuse the new chain and leave the
+    /// open ones as they were; the second differs only in the warning it logs.
+    #[test]
+    fn reject_and_diagnostic_event_refuse_the_new_chain_and_keep_the_open_ones() {
+        for policy in [PoolOverflow::Reject, PoolOverflow::DiagnosticEvent] {
+            let mut d = two_slots(policy);
+            d.ingest(frag(PEER_A, true, 1, 1, b"a"), MASK, 0, |_| {});
+            d.ingest(frag(PEER_B, true, 1, 1, b"b"), MASK, 0, |_| {});
+            assert_eq!(
+                d.ingest(frag(PEER_C, true, 1, 1, b"c"), MASK, 0, |_| {}),
+                IngestOutcome::Refused(RefuseReason::PoolExhausted),
+                "{policy:?}"
+            );
+            assert_eq!(d.displaced_by_last_ingest(), None, "{policy:?}");
+            assert_eq!(d.peer_chain_count(PEER_A), 1, "{policy:?}");
+            assert_eq!(d.peer_chain_count(PEER_B), 1, "{policy:?}");
+        }
+    }
+
+    /// `OldestWins` ends the chain that began first and begins the new one in
+    /// its slot, reporting the ended chain as evicted. The evicted peer's next
+    /// fragment finds no chain of its own: it starts one, and its bytes are
+    /// not joined to the evicted prefix.
+    #[test]
+    fn oldest_wins_evicts_the_chain_that_began_first() {
+        let mut d = two_slots(PoolOverflow::OldestWins);
+        d.ingest(frag(PEER_A, true, 1, 1, b"a1"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_B, true, 1, 1, b"b1"), MASK, 0, |_| {});
+        assert_eq!(
+            d.ingest(frag(PEER_C, true, 1, 1, b"c1"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(d.displaced_by_last_ingest(), Some(DisplacedChain::Evicted));
+        assert_eq!(d.peer_chain_count(PEER_A), 0, "the oldest chain is gone");
+        assert_eq!(d.peer_chain_count(PEER_B), 1);
+        assert_eq!(d.peer_chain_count(PEER_C), 1);
+        assert_eq!(d.active_chains() + d.staging_available(), 2);
+
+        let mut got: Option<Vec<u8>> = None;
+        assert_eq!(
+            d.ingest(frag(PEER_C, true, 2, 0, b"c2"), MASK, 0, |m| got =
+                Some(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(got.as_deref(), Some(&b"c1c2"[..]), "the new chain is whole");
+    }
+
+    /// "Oldest" is the order chains began in, not the order of the slots: a
+    /// chain begun later in a lower slot outlives an older one in a higher
+    /// slot.
+    #[test]
+    fn oldest_wins_picks_by_when_a_chain_began_not_by_its_slot() {
+        let mut d = two_slots(PoolOverflow::OldestWins);
+        // A in slot 0, B in slot 1; A completes and C takes slot 0.
+        d.ingest(frag(PEER_A, true, 1, 1, b"a1"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_B, true, 1, 1, b"b1"), MASK, 0, |_| {});
+        assert_eq!(
+            d.ingest(frag(PEER_A, true, 2, 0, b"a2"), MASK, 0, |_| {}),
+            IngestOutcome::Reassembled
+        );
+        d.ingest(frag(PEER_C, true, 1, 1, b"c1"), MASK, 0, |_| {});
+        assert!(d.slots[0]
+            .open
+            .as_ref()
+            .is_some_and(|open| open.key.same_peer(PEER_C)));
+
+        assert_eq!(
+            d.ingest(frag(PEER_D, true, 1, 1, b"d1"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(d.peer_chain_count(PEER_B), 0, "B began before C");
+        assert_eq!(d.peer_chain_count(PEER_C), 1);
+        assert_eq!(d.peer_chain_count(PEER_D), 1);
+    }
+
+    /// The quota is judged before the pool: a peer at its quota is refused on
+    /// it, and no other peer's chain is evicted for a start that was never
+    /// going to be admitted.
+    #[test]
+    fn oldest_wins_answers_to_the_peer_quota_first() {
+        let mut d: ReassemblyDispatcher<2, 64> = ReassemblyDispatcher::new(
+            ReassemblyConfig::new(1, 5_000).with_pool_overflow(PoolOverflow::OldestWins),
+        );
+        d.ingest(frag(PEER_A, true, 1, 1, b"a"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_B, true, 1, 1, b"b"), MASK, 0, |_| {});
+        assert_eq!(
+            d.ingest(frag(PEER_A, false, 1, 1, b"a"), MASK, 0, |_| {}),
+            IngestOutcome::Refused(RefuseReason::PeerQuota)
+        );
+        assert_eq!(d.displaced_by_last_ingest(), None);
+        assert_eq!(d.peer_chain_count(PEER_B), 1, "B's chain was not evicted");
     }
 
     /// Staging beyond the slot capacity aborts on the §7.1 hard error —
@@ -1838,7 +2222,9 @@ mod duty_tests {
         }
     }
 
-    fn assert_drained<const S: usize, const C: usize>(d: &ReassemblyDispatcher<S, C>) {
+    fn assert_drained<const S: usize, const C: usize, A: ChainStaging<S, C>>(
+        d: &ReassemblyDispatcher<S, C, A>,
+    ) {
         for slot in &d.slots {
             assert_eq!(
                 slot.engine.policy().actions().pending(),
@@ -2026,6 +2412,198 @@ mod duty_tests {
         assert_eq!(d.staging_available(), 1);
         assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
         assert_eq!(d.sweep_counting(1_000), ChainLoss::default());
+    }
+
+    /// A slot whose machine is not at `Empty` while the Router holds it free
+    /// does not begin a chain: the start is refused, the reservation goes back
+    /// and the slot gets a fresh machine that serves the next start.
+    #[test]
+    fn a_slot_machine_that_does_not_begin_the_chain_is_replaced() {
+        let mut d: ReassemblyDispatcher<1, 64> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        // Behind the Router's back: the machine opens a chain the Router never
+        // bound, so it answers the next chunk with `append`, not `begin`.
+        d.slots[0].drive_chunk(1);
+        assert_eq!(d.slots[0].engine.get_current_state(), State::Receiving);
+
+        assert_eq!(
+            d.ingest(frag(1, 1, b"aa"), MASK, 0, |_| {}),
+            IngestOutcome::Refused(RefuseReason::PoolExhausted)
+        );
+        assert_drained(&d);
+        assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 1, "the reservation went back");
+        assert_eq!(
+            d.ingest(frag(2, 1, b"bb"), MASK, 0, |_| {}),
+            IngestOutcome::Begun,
+            "the slot serves the next start"
+        );
+    }
+
+    /// A continuation the slot's machine does not take ends the chain: the
+    /// machine left `Receiving` behind the Router's back, so neither `append`
+    /// nor `finalize` runs, and the slot is freed with a fresh machine.
+    #[test]
+    fn a_continuation_the_slot_machine_does_not_take_ends_the_chain() {
+        let mut d: ReassemblyDispatcher<1, 64> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        d.ingest(frag(1, 1, b"aa"), MASK, 0, |_| {});
+        d.slots[0].drive(Event::ReassemblyTimeout);
+        assert_eq!(d.slots[0].engine.get_current_state(), State::TimedOut);
+
+        assert_eq!(
+            d.ingest(frag(2, 0, b"bb"), MASK, 0, |_| panic!(
+                "a chain the machine gave up is not delivered"
+            )),
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+        );
+        assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 1);
+        assert_eq!(
+            d.capacity_refusals(),
+            0,
+            "the configured bound refused nothing"
+        );
+    }
+
+    /// An abort the slot's machine does not take still ends the chain the
+    /// Router gave up on.
+    #[test]
+    fn an_abort_the_slot_machine_does_not_take_still_frees_the_slot() {
+        let mut d: ReassemblyDispatcher<1, 64> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        d.ingest(frag(1, 1, b"aa"), MASK, 0, |_| {});
+        // `TimedOut` answers `slot.release` only, so `fragment.ooo` posts
+        // nothing.
+        d.slots[0].drive(Event::ReassemblyTimeout);
+        assert!(d.abort_channel(PEER, Priority::DEFAULT, true));
+        assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 1);
+    }
+
+    /// An arena that admits bytes with `fits` and refuses them in `append`:
+    /// the heap arena with its `append` switched off by `refuse`.
+    struct RefusingStaging<const SLOTS: usize, const CAP: usize> {
+        inner: HeapStaging<SLOTS, CAP>,
+        refuse: bool,
+    }
+
+    impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
+        for RefusingStaging<SLOTS, CAP>
+    {
+        fn new() -> Self {
+            Self {
+                inner: <HeapStaging<SLOTS, CAP> as BuildsOwnStorage<SLOTS, CAP>>::new(),
+                refuse: false,
+            }
+        }
+    }
+
+    impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP>
+        for RefusingStaging<SLOTS, CAP>
+    {
+        type Chain = crate::chain_staging::HeapChain<CAP>;
+
+        fn acquire(&mut self) -> Option<Self::Chain> {
+            self.inner.acquire()
+        }
+
+        fn release(&mut self, chain: Self::Chain) {
+            self.inner.release(chain)
+        }
+
+        fn append(
+            &mut self,
+            chain: &mut Self::Chain,
+            payload: &[u8],
+        ) -> Result<(), crate::chain_staging::StagingError> {
+            if self.refuse {
+                return Err(crate::chain_staging::StagingError::ChainCapExceeded);
+            }
+            self.inner.append(chain, payload)
+        }
+
+        fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
+            self.inner.bytes(chain)
+        }
+
+        fn buf<'a>(
+            &'a mut self,
+            chain: &'a mut Self::Chain,
+            want: usize,
+        ) -> Result<&'a mut [u8], crate::chain_staging::StagingError> {
+            self.inner.buf(chain, want)
+        }
+
+        fn commit(
+            &mut self,
+            chain: &mut Self::Chain,
+            filled: usize,
+        ) -> Result<(), crate::chain_staging::StagingError> {
+            self.inner.commit(chain, filled)
+        }
+
+        fn available(&self) -> usize {
+            self.inner.available()
+        }
+    }
+
+    type Refusing = ReassemblyDispatcher<1, 64, RefusingStaging<1, 64>>;
+
+    /// The arena refuses a first fragment it said would fit: the chain ends as
+    /// a capacity overflow, its staging back in the arena and its machine at
+    /// `Empty`, and the next start is served.
+    #[test]
+    fn an_arena_that_refuses_a_first_fragment_it_admitted_ends_the_chain() {
+        let mut d = Refusing::new(ReassemblyConfig::new(2, 5_000));
+        d.staging.refuse = true;
+        assert_eq!(
+            d.ingest(frag(1, 1, b"aa"), MASK, 0, |_| {}),
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+        );
+        assert_drained(&d);
+        assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 1);
+        assert_eq!(d.capacity_refusals(), 0);
+
+        d.staging.refuse = false;
+        assert_eq!(
+            d.ingest(frag(2, 1, b"bb"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+    }
+
+    /// The arena refuses a continuation and, on another chain, a final
+    /// fragment: each chain ends undelivered and frees its slot.
+    #[test]
+    fn an_arena_that_refuses_a_later_fragment_it_admitted_ends_the_chain() {
+        for more in [1u8, 0] {
+            let mut d = Refusing::new(ReassemblyConfig::new(2, 5_000));
+            assert_eq!(
+                d.ingest(frag(1, 1, b"aa"), MASK, 0, |_| {}),
+                IngestOutcome::Begun
+            );
+            d.staging.refuse = true;
+            assert_eq!(
+                d.ingest(frag(2, more, b"bb"), MASK, 0, |_| panic!(
+                    "a chain whose bytes were refused is not delivered"
+                )),
+                IngestOutcome::Aborted(AbortReason::CapacityOverflow),
+                "more = {more}"
+            );
+            assert_drained(&d);
+            assert_eq!(
+                d.slots[0].engine.get_current_state(),
+                State::Empty,
+                "more = {more}"
+            );
+            assert_eq!(d.active_chains(), 0, "more = {more}");
+            assert_eq!(d.staging_available(), 1, "more = {more}");
+        }
     }
 }
 
@@ -2268,7 +2846,7 @@ mod chain_boundary_marker_tests {
     /// Each marker abort raises its own arm of the slot FSM, and each arm has
     /// one producer: `fragment.drop` (§2.4.7a peer-drop) in
     /// [`ReassemblyDispatcher::abort_peer_drop`], `slot.evict` (§2.4.6
-    /// duplicate-first) in [`ReassemblyDispatcher::evict_duplicate_first`].
+    /// duplicate-first and oldest-wins) in [`ReassemblyDispatcher::evict`].
     ///
     /// Asserted on the source because both arms post the same abort duty and
     /// the Router releases the slot the same way after either, so which arm
@@ -2330,6 +2908,66 @@ mod chain_boundary_marker_tests {
             d.slots[0].engine.get_current_state(),
             ReassemblySlotState::Empty
         );
+    }
+
+    /// The chain a restart evicts is reported beside the restart's own
+    /// admission, for that ingest only: the fragment's outcome is `Begun`, and
+    /// the stranded chain is the ingest's displaced one.
+    ///
+    /// Two keys, so the restart on the reliable key is seen not to report the
+    /// best-effort chain that stays open beside it.
+    #[test]
+    fn a_restart_reports_the_chain_it_superseded_beside_its_own_admission() {
+        let mut d = armed::<4, 256>();
+        assert_eq!(
+            d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.displaced_by_last_ingest(),
+            None,
+            "a start on an idle key ends nothing"
+        );
+        let best_effort = Fragment {
+            reliable: false,
+            ..marked(1, 1, b"bbb", FIRST)
+        };
+        assert_eq!(d.ingest(best_effort, MASK, 0, |_| {}), IngestOutcome::Begun);
+
+        assert_eq!(
+            d.ingest(marked(2, 1, b"BBB", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.displaced_by_last_ingest(),
+            Some(DisplacedChain::Superseded),
+            "the restart ended the chain open on its key"
+        );
+        assert_eq!(d.active_chains(), 2, "the other key's chain is untouched");
+
+        assert_eq!(
+            d.ingest(marked(3, 1, b"CCC", NONE), MASK, 0, |_| {}),
+            IngestOutcome::Continued
+        );
+        assert_eq!(
+            d.displaced_by_last_ingest(),
+            None,
+            "the next ingest speaks only of itself"
+        );
+    }
+
+    /// The same two fragments with the rules disarmed continue one chain, and
+    /// nothing is reported displaced: only the `First` rule supersedes.
+    #[test]
+    fn without_the_rules_nothing_is_reported_superseded() {
+        let mut d: ReassemblyDispatcher<4, 256> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {});
+        assert_eq!(
+            d.ingest(marked(2, 1, b"BBB", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Continued
+        );
+        assert_eq!(d.displaced_by_last_ingest(), None);
     }
 
     /// zenoh's ORDER, which is load-bearing: the missing-start-marker rule
@@ -2397,6 +3035,22 @@ mod chain_boundary_marker_tests {
         assert_ne!(
             ReassemblyDropReason::SenderDropped,
             ReassemblyDropReason::OutOfOrder
+        );
+    }
+
+    /// A chain an ingest displaced reaches the observer mirror under the word
+    /// for how it was displaced, the restart's apart from the eviction's.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_displaced_chain_maps_to_its_own_observer_reason() {
+        use crate::driver_loop::ReassemblyDropReason;
+        assert_eq!(
+            ReassemblyDropReason::from_displaced(DisplacedChain::Superseded),
+            ReassemblyDropReason::Superseded
+        );
+        assert_eq!(
+            ReassemblyDropReason::from_displaced(DisplacedChain::Evicted),
+            ReassemblyDropReason::Evicted
         );
     }
 }

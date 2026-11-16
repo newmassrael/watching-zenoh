@@ -2027,10 +2027,11 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// multicast reassembly chain key ([`multicast_chain_key`]). `None` if
     /// no live peer is keyed there. The index is stable for the peer's
     /// lifetime; the caller aborts the slot's chains at eviction
-    /// ([`close_by_src`] / [`sweep_with`]) so a recycled index can never
-    /// continue a dead peer's chain.
+    /// ([`close_by_src`] / [`drop_by_src_evicting`] / [`sweep_with`]) so a
+    /// recycled index can never continue a dead peer's chain.
     ///
     /// [`close_by_src`]: MulticastDispatcher::close_by_src
+    /// [`drop_by_src_evicting`]: MulticastDispatcher::drop_by_src_evicting
     /// [`sweep_with`]: MulticastDispatcher::sweep_with
     pub fn peer_index_by_src(&self, src: SocketAddr) -> Option<usize> {
         self.find_by_src(src)
@@ -2105,8 +2106,24 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         reason: MulticastPeerLostReason,
         on_lost: impl FnOnce(MulticastPeerLost),
     ) -> bool {
+        self.drop_by_src_evicting(src, reason, |_| {}, on_lost)
+    }
+
+    /// [`drop_by_src_with`](MulticastDispatcher::drop_by_src_with) with the
+    /// peer's pool-slot index handed to `on_evict` before the slot recycles,
+    /// as [`sweep_with`](MulticastDispatcher::sweep_with) hands it for an
+    /// expired peer: the reassembly-running host aborts that index's chains
+    /// there, so the next peer given the index cannot continue them.
+    pub fn drop_by_src_evicting(
+        &mut self,
+        src: SocketAddr,
+        reason: MulticastPeerLostReason,
+        on_evict: impl FnOnce(usize),
+        on_lost: impl FnOnce(MulticastPeerLost),
+    ) -> bool {
         match self.find_by_src(src) {
             Some(idx) => {
+                on_evict(idx);
                 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
                 self.retire_member(idx);
                 self.peers[idx].evict(reason, on_lost);
@@ -2437,6 +2454,14 @@ pub(crate) fn ingest_multicast_fragment_counted<
             completed = Some(reassembled_chain_outcome(reliable, sn, priority, chain));
         },
     );
+    // The chain this fragment ended besides its own (a `0x2 First` restart, or
+    // an eviction from a full pool), reported before the fragment's own chain is
+    // delivered, as it ended first.
+    if let Some(displaced) = reasm.displaced_by_last_ingest() {
+        on_event(IterationEvent::ReassemblyDropped(
+            ReassemblyDropReason::from_displaced(displaced),
+        ));
+    }
     if let Some(o) = completed {
         // §5.21 router-multicast-faces (I3a) — resolve this peer's aliased Push
         // keyexprs on the REASSEMBLED batch too (per-peer via `src`), symmetric
@@ -2581,6 +2606,13 @@ pub(crate) fn ingest_multicast_fragment_in_place<
             let _ = crate::driver_loop::walk_lent_payload(chain, reliable, sn, priority, on_event);
         },
     );
+    // The chain this fragment ended besides its own, which the records lent
+    // above have already walked past.
+    if let Some(displaced) = reasm.displaced_by_last_ingest() {
+        on_event(IterationEvent::ReassemblyDropped(
+            ReassemblyDropReason::from_displaced(displaced),
+        ));
+    }
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
         on_event(IterationEvent::ReassemblyDropped(reason));
     }
@@ -4136,6 +4168,42 @@ mod tests {
             MulticastPeerLostReason::LeaseExpired,
             "a lapsed lease is silence, not an announcement",
         );
+    }
+
+    /// A peer dropped by address hands its slot index to the eviction observer
+    /// while the slot is still its own, with the departure beside it; an
+    /// address that holds no peer reports neither.
+    #[test]
+    fn drop_by_src_evicting_reports_the_dropped_slot_index() {
+        let mut d = running_dispatcher::<4>(5_000);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0); // slot 0
+        d.ingest_join(ZID_B, SRC_B, sn0(), 0); // slot 1
+        let mut evicted = std::vec::Vec::new();
+        let mut departed = std::vec::Vec::new();
+        assert!(d.drop_by_src_evicting(
+            SRC_B,
+            MulticastPeerLostReason::CapabilitiesChanged,
+            |idx| evicted.push(idx),
+            |lost| departed.push(lost),
+        ));
+        assert_eq!(evicted, [1], "B's slot, reported before it was freed");
+        assert_eq!(d.peer_index_by_src(SRC_B), None);
+        assert_eq!(d.peer_index_by_src(SRC_A), Some(0));
+        assert_eq!(departed.len(), 1);
+        assert_eq!(departed[0].peer.as_slice(), ZID_B);
+        assert_eq!(
+            departed[0].reason,
+            MulticastPeerLostReason::CapabilitiesChanged
+        );
+
+        assert!(!d.drop_by_src_evicting(
+            SRC_B,
+            MulticastPeerLostReason::CapabilitiesChanged,
+            |idx| evicted.push(idx),
+            |lost| departed.push(lost),
+        ));
+        assert_eq!(evicted, [1], "no peer at the address, no index");
+        assert_eq!(departed.len(), 1);
     }
 
     /// R311y784 — the announced-departure twin: an explicit Close reports the
