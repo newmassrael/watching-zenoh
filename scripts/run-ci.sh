@@ -6359,8 +6359,10 @@ layer_c1u_cargo_test_tls() {
     # trapped behind either link feature: both sets compile and run it.
     # f0676600a -- 7 -> 9: two cases of the declaration replay's pacing of a reconnect, in the file
     # both transports' legs run (C1v counts the same file, and moves with this one). PRINTED.
+    # 9 -> 11: the two cases of `drive_against_peer`, the bound on a reconnect's peer wait, in
+    # the same file and under no link feature, so C1v moves with it.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1u 9 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1u 11 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3463 — 6 -> 8. The two witnesses of decision D9 of
     # docs/session-lifecycle-intent.md: over mutual TLS a peer that claims the zid its
@@ -6424,8 +6426,9 @@ layer_c1v_cargo_test_ws() {
         || return 1
     # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
     # f0676600a -- 7 -> 9, with C1u, same commit, same reason. PRINTED.
+    # 9 -> 11, with C1u, same commit, same reason.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1v 9 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1v 11 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R2355 — the MULTI-PEER ws accept, which no lane ran until now. The
     # `transport-link-ws` registry entry carried "the multi-peer `--router ws/`
