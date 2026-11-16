@@ -9246,7 +9246,11 @@ layer_c1am_cargo_test_adminspace() {
     # 53 -> 54: the snapshot answerer's test (`f04bb6ec`, serve a hosted node's snapshot), which
     # the filter selects; the hosted run of 017e3c71 printed 54.
     # 54 -> 57: the null-meaning list's three tests (see C1ak).
-    _runci_guarded_test "C1AM adminspace 57" 57 \
+    # 57 -> 59: one answerer for every role and a client's manifest, two tests no feature of this
+    # crate gates, so every `--lib adminspace` leg below moves by two (by three under
+    # `adminspace-router-linkstate`, whose region tests replaced two and added one). The hosted
+    # run of 3148fdfc84 printed 59 here; the others are counted from the source.
+    _runci_guarded_test "C1AM adminspace 59" 59 \
         cargo test -p wz-admin --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
@@ -9266,7 +9270,10 @@ layer_c1am_cargo_test_adminspace() {
     # crate's since the server-layer split (step 4).
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
         cargo test -p wz-storage --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 4" 4 \
+    # 4 -> 6, and the two legs below by two, counted from the source: a client is answered under
+    # its own role, and its queryable is announced on the wire (`session/tests.rs`, both under
+    # `adminspace-core` with the queryable features the default build carries).
+    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
     # R2827 — the `adminspace-core`-only `admin_write_permit` leg is GONE, not
     # renumbered. It pinned the compiled-out arm (the resolver returning `true`
@@ -9274,7 +9281,7 @@ layer_c1am_cargo_test_adminspace() {
     # test module now exist only under `adminspace-write`, so this build selects
     # no test, which is how hosted run 35951692857 redded here. The gated arm
     # is still pinned by the `adminspace-write,query-get` leg below.
-    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
+    _runci_guarded_test "C1AM declare_adminspace 8" 8 \
         cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     # 6 -> 7: the LIVE-permit witness
     # (declare_adminspace_live_permit_source_flips_the_gate_at_runtime). It drives
@@ -9284,7 +9291,7 @@ layer_c1am_cargo_test_adminspace() {
     # atom recorded (zenoh re-reads the live config inside its admin handler,
     # net/runtime/adminspace.rs:456-457). Falsified by hoisting the permit read out
     # of the closure: that arm alone reds, the other six stay green.
-    _runci_guarded_test "C1AM declare_adminspace 8" 8 \
+    _runci_guarded_test "C1AM declare_adminspace 10" 10 \
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM admin_write_permit 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet || return 1
@@ -9328,9 +9335,12 @@ layer_c1am_cargo_test_adminspace() {
     # `51 passed`); re-derived on the build host.
     # 51 -> 54 here and on the next four commands: the null-meaning list's three tests (see C1ak),
     # each count PRINTED on the build machine.
-    _runci_guarded_test "C1AM adminspace introspection 54" 54 \
+    # 54 -> 56 and 54 -> 57, counted from the source: the two role tests of the first guard of
+    # this layer, and under `adminspace-router-linkstate` its peer's region answer, with the two
+    # region tests that replaced the both-dots and routers-leg ones.
+    _runci_guarded_test "C1AM adminspace introspection 56" 56 \
         cargo test -p wz-admin --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 54" 54 \
+    _runci_guarded_test "C1AM adminspace 57" 57 \
         cargo test -p wz-admin --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
@@ -9338,9 +9348,10 @@ layer_c1am_cargo_test_adminspace() {
     # guard below because `wz-admin`'s own `adminspace-config-hotreload`
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
-    _runci_guarded_test "C1AM adminspace 62" 62 \
+    # 62 -> 64 and 4 -> 6, counted from the source: the role tests here and in the runtime crate.
+    _runci_guarded_test "C1AM adminspace 64" 64 \
         cargo test -p wz-admin --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 4" 4 \
+    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM compiled_plugins 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib compiled_plugins --quiet || return 1
@@ -9365,7 +9376,8 @@ layer_c1am_cargo_test_adminspace() {
     # by `guarded_count_gate.py --range 69a8d5da..715e936a`.
     # 66 -> 67: the one more `adminspace` test the lib gained (the other four commands of this
     # layer moved with it); re-derived on the build host, which printed 67.
-    _runci_guarded_test "C1AM adminspace 70" 70 \
+    # 70 -> 72, counted from the source: the two role tests of the first guard of this layer.
+    _runci_guarded_test "C1AM adminspace 72" 72 \
         cargo test -p wz-admin --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -9460,7 +9472,10 @@ layer_c1am_cargo_test_adminspace() {
     # for the same reason as the peer leg above.
     # Item 751 step 7c -- 16 -> 11: the single-net peer forwarder's `admin_` tests (five) left
     # with it. Read off this command: `11 passed`.
-    _runci_guarded_test "C1AM router introspection admin_ 11" 11 \
+    # 11 -> 13, counted from the source: `admin_session_of_peer_files_the_row_under_the_named_peer`
+    # and `the_admin_queryable_is_declared_incomplete` (`session/tests.rs`), whose names carry the
+    # filter and whose features this build has.
+    _runci_guarded_test "C1AM router introspection admin_ 13" 13 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     # Server-layer split, step 7: the admin space is the wz-admin crate's, so its every leg is
     # linted there, with every admin feature on (the MCU write surface among them).
@@ -9508,20 +9523,24 @@ layer_c1am_cargo_test_adminspace() {
 layer_c1an_cargo_test_adminspace_nodefault() {
     # R2859 — both +2, as the C1AM guards (see there).
     # 46 -> 49 and 51 -> 54: the null-meaning list's three tests (see C1ak), PRINTED on the build machine.
-    _runci_guarded_test "C1AN adminspace 49" 49 \
+    # 49 -> 51 and 54 -> 57, counted from the source: the same role and region tests as C1AM's.
+    _runci_guarded_test "C1AN adminspace 51" 51 \
         cargo test -p wz-admin --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
     # The one more `adminspace` test the lib gained is in each of these four commands (C1AM 51
     # and 59 above, C1AN 46 and 51), re-derived on the build host.
-    _runci_guarded_test "C1AN adminspace 54" 54 \
+    _runci_guarded_test "C1AN adminspace 57" 57 \
         cargo test -p wz-admin --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AN declare_adminspace 4" 4 \
+    # +1 on each of the three, counted from the source: a client answered under its own role. The
+    # other of C1AM's two (its queryable announced on the wire) needs `declare-queryable`, which
+    # none of these builds selects.
+    _runci_guarded_test "C1AN declare_adminspace 5" 5 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
-    _runci_guarded_test "C1AN declare_adminspace 6" 6 \
+    _runci_guarded_test "C1AN declare_adminspace 7" 7 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     # 6 -> 7, the same live-permit witness C1AM pins — here on the slim build, so
     # the source-taking declare and its per-GET resolve compose without the default
     # feature set too.
-    _runci_guarded_test "C1AN declare_adminspace 8" 8 \
+    _runci_guarded_test "C1AN declare_adminspace 9" 9 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-admin --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
