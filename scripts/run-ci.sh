@@ -24462,9 +24462,12 @@ layer_e6h_adminspace_config_hotreload() {
         _pico_cli_unavailable "Layer E6h (pico config-hotreload z_put/z_get)" || return 1
         return 0
     fi
+    # Two legs: the storage lifecycle and (open-debt item 781) the volume lifecycle with its
+    # cascade. Count-guarded, because both are `#[ignore]` and a rename would select zero.
     wz_test_args wz-integration-tests wz_storage_host_config_hotreload_pico
-    (cd crates && cargo test -p wz-integration-tests \
-        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
+    _runci_guarded_test "E6h config-hotreload storage and volume lifecycles" 2 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2787 — the storage manager's DECLARATIVE document, written by a pico client
     # below `@/<zid>/peer/config/plugins/storage_manager/`. A SECOND build, and it
     # must come after the test above: the storage host applies a config-key write

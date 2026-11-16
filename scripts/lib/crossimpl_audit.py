@@ -1175,7 +1175,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # (CURRENT) are each answered by a wz acceptor whose InitAck is read off the relayed wire
 # (`session-unicast-accept pico->wz partial`): 2 tests x 1 atom = 2. Counted from the diff, not
 # yet measured.
-FOREIGN_ADJUDICATOR_LINKS = 1093
+# Open-debt item 781 -- 1093 -> 1094: the volume leg of `wz_storage_host_config_hotreload_pico.rs`,
+# where a stock pico client adds a volume, mounts a storage on it and deletes the volume, and
+# reads the cascade back through the status sub-tree (`adminspace-config-hotreload wz->pico`):
+# 1 test x 1 atom = 1. Counted from the diff, not yet measured.
+FOREIGN_ADJUDICATOR_LINKS = 1094
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
