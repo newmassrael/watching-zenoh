@@ -78,20 +78,43 @@ _wz_grade_earlier() {
     local sha="$1"
     local context="$2"
     local why="$3"
-    local anc_file fallback fb_kind runs
+    local anc_file fallback fb_kind runs answer backlog pushes nruns scope
     anc_file="$(mktemp)"
     if git rev-list --max-count=400 "$sha" > "$anc_file" 2>/dev/null \
         && runs="$(gh run list --limit 40 \
             --json databaseId,status,conclusion,workflowName,headSha,createdAt \
             2>/dev/null)" \
         && [[ -n "$runs" ]]; then
-        fallback="$(printf '%s' "$runs" | python3 \
+        answer="$(printf '%s' "$runs" | python3 \
             scripts/lib/newest_completed_ancestor_run.py \
-            --ancestors-file "$anc_file" --resolve-cancelled 2>/dev/null)"
+            --ancestors-file "$anc_file" --resolve-cancelled --backlog 2>/dev/null)"
     else
-        fallback=""
+        answer=""
     fi
     rm -f "$anc_file"
+    fallback="${answer%%$'\n'*}"
+    backlog=""
+    if [[ "$answer" == *$'\n'BACKLOG$'\t'* ]]; then
+        backlog="${answer#*$'\n'}"
+    fi
+    # Open-debt item 670: the length of the history no verdict has reached,
+    # printed every time this arm runs. A refusal threshold on it is the
+    # owner's decision; until one is made it is a measurement, not a gate.
+    if [[ -n "$backlog" ]]; then
+        pushes="$(printf '%s' "$backlog" | cut -f2)"
+        nruns="$(printf '%s' "$backlog" | cut -f3)"
+        scope="$(printf '%s' "$backlog" | cut -f4)"
+        if [[ "$scope" == "whole-window" ]]; then
+            echo "          unverified backlog: at least $pushes push(es), $nruns run(s) on this"
+            echo "          history; none of the 40 runs read has graded anything."
+        else
+            echo "          unverified backlog: $pushes push(es), $nruns run(s) on this history"
+            echo "          since the newest run that graded something."
+        fi
+    else
+        echo "          unverified backlog: NOT MEASURED (no gh, no python3, or an" >&2
+        echo "          unreadable payload)." >&2
+    fi
     fb_kind="${fallback%%$'\t'*}"
     case "$fb_kind" in
         GREEN)

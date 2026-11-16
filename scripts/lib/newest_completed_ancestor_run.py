@@ -64,6 +64,10 @@ Output (one TSV line):
     AMBER   <workflow>  <run id>  <conclusion>  <head sha>
     NONE    <number of runs considered>
     UNREAD  <run id>  <why its jobs could not be read>
+
+With `--backlog`, a second line (see `backlog`; absent when the payload could
+not be read):
+    BACKLOG <pushes>  <runs>  since-graded | whole-window
 """
 from __future__ import annotations
 
@@ -121,8 +125,52 @@ def newest_completed(runs, ancestors, resolve=None):
     return None
 
 
+def backlog(runs, ancestors, graded):
+    """`(pushes, runs, scope)` on this history NEWER than `graded`.
+
+    Open-debt item 670. Gate 2c passes a pending predecessor because the next
+    push grades it, which assumes runs finish; when they do not, the number of
+    pushes no verdict has reached grows and nothing said how long it was. This
+    counts it: every run on the history newer than the one that graded
+    something is pending or was stepped over, so each is a push without a
+    verdict. `pushes` counts distinct head commits, `runs` every workflow run.
+
+    The order is `newest_completed`'s (`createdAt`, then input order). `scope`
+    is `since-graded`, or `whole-window` when nothing in `runs` graded anything,
+    in which case the count is a LOWER bound: the backlog reaches past the runs
+    gh was asked for. Whether a length should refuse a push is the owner's
+    decision; this only measures it.
+    """
+    keyed = []
+    for i, r in enumerate(runs):
+        if isinstance(r, dict) and (r.get("headSha") or "") in ancestors:
+            keyed.append(((r.get("createdAt") or "", -i), r))
+    floor = None
+    if graded is not None:
+        for key, r in keyed:
+            if r.get("databaseId") == graded.get("databaseId"):
+                floor = key
+                break
+    newer = [r for key, r in keyed if floor is None or key > floor]
+    if graded is not None and floor is None:
+        # The graded run is not among those read; nothing can be ordered
+        # against it, so nothing is counted rather than everything.
+        newer = []
+    heads = {r.get("headSha") for r in newer}
+    scope = "since-graded" if graded is not None else "whole-window"
+    return len(heads), len(newer), scope
+
+
+def backlog_line(runs, ancestors, graded):
+    pushes, count, scope = backlog(runs, ancestors, graded)
+    return "BACKLOG\t%d\t%d\t%s" % (pushes, count, scope)
+
+
 def verdict_line(runs, ancestors, resolve=None):
-    r = newest_completed(runs, ancestors, resolve)
+    return format_verdict(newest_completed(runs, ancestors, resolve), runs)
+
+
+def format_verdict(r, runs):
     if r is None:
         return "NONE\t%d" % len(runs)
     if r.get("conclusion") == "cancelled_unread":
@@ -228,6 +276,45 @@ def selftest() -> int:
         run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
     ], anc, "UNREAD\t7", resolve))
 
+    # Item 670: the length of the history no verdict has reached. Each arm
+    # states the line; the controls are the graded tip (zero) and a foreign
+    # run (not counted), so a counter that answered one number fails here.
+    def backlog_case(label, runs, ancestors, want, resolve=None):
+        nonlocal ok
+        graded = newest_completed(runs, ancestors, resolve)
+        got = backlog_line(runs, ancestors, graded)
+        if got != want:
+            ok = False
+            print("selftest FAIL: backlog, %s: want %r, got %r" % (label, want, got),
+                  file=sys.stderr)
+
+    backlog_case("two pushes queued behind a red", [
+        run(3, "queued", None, C, "2026-09-15T09:00:00Z"),
+        run(2, "in_progress", None, B, "2026-09-15T08:00:00Z"),
+        run(1, "completed", "failure", A, "2026-09-15T02:00:00Z"),
+    ], anc, "BACKLOG\t2\t2\tsince-graded")
+    backlog_case("two workflows of one push are one push", [
+        run(4, "queued", None, C, "2026-09-15T09:00:00Z", wf="Other"),
+        run(3, "queued", None, C, "2026-09-15T09:00:00Z"),
+        run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
+    ], anc, "BACKLOG\t1\t2\tsince-graded")
+    backlog_case("a stepped-over cancellation is a push without a verdict", [
+        run(4, "completed", "cancelled", B, "2026-09-15T07:00:00Z"),
+        run(1, "completed", "failure", A, "2026-09-15T02:00:00Z"),
+    ], anc, "BACKLOG\t1\t1\tsince-graded")
+    backlog_case("a run on another history is not this backlog", [
+        run(9, "queued", None, "d" * 40, "2026-09-15T09:00:00Z"),
+        run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
+    ], anc, "BACKLOG\t0\t0\tsince-graded")
+    backlog_case("a graded tip has no backlog", [
+        run(5, "completed", "success", B, "2026-09-15T07:00:00Z"),
+        run(1, "completed", "failure", A, "2026-09-15T02:00:00Z"),
+    ], anc, "BACKLOG\t0\t0\tsince-graded")
+    backlog_case("nothing graded: the whole window, a lower bound", [
+        run(3, "queued", None, C, "2026-09-15T09:00:00Z"),
+        run(2, "queued", None, B, "2026-09-15T08:00:00Z"),
+    ], anc, "BACKLOG\t2\t2\twhole-window")
+
     # Anti-vacuity: a classifier that answered one word for everything would
     # pass a case list that happened to expect only that word.
     if seen != {"GREEN", "RED", "AMBER", "NONE", "UNREAD"}:
@@ -246,6 +333,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--resolve-cancelled", action="store_true",
                    help="read each cancelled candidate by its jobs (gh api) "
                         "before stepping over it")
+    p.add_argument("--backlog", action="store_true",
+                   help="print a second line, BACKLOG <pushes> <runs> <scope>: "
+                        "the runs on this history newer than the graded one")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args(argv)
     if args.selftest:
@@ -263,7 +353,10 @@ def main(argv: list[str]) -> int:
         print("NONE\t0")
         return 0
     resolve = hosted_cancelled_kind.resolve_run if args.resolve_cancelled else None
-    print(verdict_line(runs, ancestors, resolve))
+    graded = newest_completed(runs, ancestors, resolve)
+    print(format_verdict(graded, runs))
+    if args.backlog:
+        print(backlog_line(runs, ancestors, graded))
     return 0
 
 
