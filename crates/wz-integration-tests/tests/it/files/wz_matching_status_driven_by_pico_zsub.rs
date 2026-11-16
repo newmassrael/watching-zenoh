@@ -40,13 +40,15 @@
 //!
 //! ## Why the assertions are ORDERED, and why the listener line comes first
 //!
-//! `declare_matching_listener` is TRANSITION-only (pico parity: registration
-//! never fires). Two consequences this test is built around:
+//! `declare_matching_listener` fires on every matching TRANSITION, and at
+//! registration fires `true` only when the publisher already matches (pico's
+//! fire-before-insert). Two consequences this test is built around:
 //!
-//! 1. The listener MUST be installed before pico's DeclSubscriber is dispatched,
-//!    or the `true` edge is simply missed. The demo installs it pre-drive; the
+//! 1. The listener is installed before pico's DeclSubscriber is dispatched, so
+//!    the `true` it waits for is the edge pico's declare drives, not a
+//!    registration-time fire. The demo installs it pre-drive; the
 //!    "DECLARED MATCHING LISTENER" line is this test's proof that it did, and it
-//!    is asserted FIRST (R311y338's fixture rule: a fixture owns its own
+//!    is asserted FIRST (a fixture owns its own
 //!    precondition). With `session-matching` off, `declare_matching_listener`
 //!    returns a typed reject and the demo logs a WARN instead — so this assertion
 //!    is also the anti-vacuity arm. Without it, a build with the feature off

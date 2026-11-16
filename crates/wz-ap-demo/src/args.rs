@@ -7642,15 +7642,11 @@ mod stock_config_tests {
     /// WHY AN OMISSION IS A DEFECT AND NOT A SILENCE -- this file already makes
     /// the argument, about its other list: "an omission does not read as
     /// silence; it reads as 'that flag is off'". An operator reaching for wz in
-    /// place of zenoh reads `--help` as the set of things this binary can do,
-    /// and 48 of the 106 flags it accepts are not in it -- including, until this
-    /// round, the ONLY run mode that announces the zenoh router role.
+    /// place of zenoh reads `--help` as the set of things this binary can do.
     ///
-    /// A RATCHET, NOT A FIX. Documenting all 48 is a separate piece of work and
-    /// some may deserve to stay hidden; what must not happen is a 49th joining
-    /// them unnoticed. So the set is PINNED, not the count: a new undocumented
-    /// flag fails here, and documenting one fails here too, telling the author
-    /// to shrink the list in the same commit.
+    /// The omissions are a set PINNED with a reason, not a count: a new
+    /// undocumented flag fails here, and documenting a listed one fails here
+    /// too, telling the author to shrink the list in the same commit.
     #[test]
     fn every_flag_the_parser_accepts_is_printed_or_declared_absent() {
         const MAIN: &str = include_str!("main.rs");
@@ -7673,76 +7669,15 @@ mod stock_config_tests {
         // a silent failure -- an illustration written that way fails this test
         // by name, which is how this very comment got rewritten.
         const UNDOCUMENTED: &[&str] = &[
-            "acl-deny",
-            "advanced-publish-heartbeat",
-            "batch",
-            "config",
-            "config-queryable",
-            "config-writable",
-            "config-write-permit",
-            "connect-after",
-            // R2159 (open-debt item 229) — `connect-retry` LEFT this list, and
-            // the ratchet is what asked: R2158 made the flag ungated and gave it
-            // a third sink in every build, so "it only paces a mesh arm nobody
-            // types" had stopped being true, and this round's own `--listen-retry`
-            // could not be documented without naming its twin.
-            "declare-id",
-            // R2655 — the DELETE twin of `put-key` below, and it is undocumented
-            // for that flag's reason rather than for one of its own: both are
-            // wire DRIVERS for an admin config write, typed by a test harness
-            // and by nobody else. An operator writing another node's config uses
-            // a zenoh client, not this binary's tick loop. If `put-key` is ever
-            // printed, this goes with it -- they are one capability with two
-            // halves, and printing one would read as the other being absent.
+            // The three are wire DRIVERS for an admin config write on another
+            // node (a Put with a chosen payload, and its Delete twin), typed by a
+            // test harness and by nobody else: an operator writing another
+            // node's config uses a zenoh client, not this binary's tick loop.
+            // They are one capability, so they are printed together or not at
+            // all -- printing one would read as the others being absent.
             "del-key",
-            "downsample",
-            "downsample-freq",
-            "downsample-interface",
-            "downsample-link-protocol",
-            "express-high",
-            "group-join",
-            "group-lease-secs",
-            "group-member-id",
-            "interest-timeout",
-            "low",
-            "max-links",
-            "max-payload",
-            "multicast-locator",
-            "multicast-qos",
-            "namespace",
-            "no-admin-read",
-            "plugin",
-            // R2788 — the storage host's `plugins` section, undocumented with
-            // the rest of that run-mode's flags (`storage-host` itself is): it
-            // is what a `--config` file's `plugins` key expands to, and prints
-            // when that run-mode's flags do.
-            "plugins",
-            // The storage host's `plugins_loading/enabled`, undocumented with its
-            // `plugins` sibling above and for the same reason.
-            "plugins-loading",
-            "publish-after-ms",
             "put-key",
             "put-payload",
-            // R2087 — `qos` LEFT this list. It became an operator-facing flag on
-            // the ordinary `--connect` path (open-debt item 506), so the reason
-            // it was undocumented — it only selected the aggregated multilink
-            // arm — stopped being true, and the ratchet said so before this
-            // round noticed.
-            "quic-ca",
-            "quic-cert",
-            "quic-key",
-            "shm",
-            "storage-gc-lifespan-ms",
-            "storage-gc-period-ms",
-            "storage-host",
-            "storage-host-dir",
-            "storage-volume",
-            "storage-volume-config",
-            "subscribe",
-            "tls-ca",
-            "tls-cert",
-            "tls-key",
-            "unsubscribe-after-data",
         ];
 
         fn is_flag_name(name: &str) -> bool {
@@ -11634,7 +11569,7 @@ mod aggregation_flag_tests {
             ("--aggregation-publishers", "[ \"a\""),
         ] {
             let err = declaration_aggregation_flags(&argv(&[(flag, bad)])).expect_err(bad);
-            assert!(err.starts_with("--aggregation-"), "{bad} -> {err}");
+            assert!(err.contains(flag), "{bad} -> {err}");
         }
     }
 }
