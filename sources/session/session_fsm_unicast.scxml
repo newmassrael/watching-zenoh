@@ -49,17 +49,22 @@
     `open_ack.timeout`, `accepting.inactivity_timeout`, `closing.timeout`),
     and the host drive loop owns the CLOCK, raising each event when its
     deadline elapses. The deadline VALUES stay spec-sourced (§2.5:
-    link.open 5s, init_ack 2s, open_ack 2s, accepting.inactivity 1s,
-    closing 100ms), carried host-side; SSOT is preserved — value = spec,
+    link.open 5s, the initiator's whole handshake 10s unless the host
+    states its node's open bound, accepting.inactivity 1s, closing
+    100ms), carried host-side; SSOT is preserved — value = spec,
     transition = statechart, clock = runtime.
 
     Deadline scoping (host sweep must preserve the R311fa/R311fb shape):
-    - The per-phase handshake deadlines (init_ack / open_ack) are armed
-      and handled within their arming child (SentInitSyn / GotInitAck). A
-      stale deadline that elapses after the phase advanced has no handler
-      in scope in the sibling and is discarded. The host sweep therefore
-      arms each per-phase deadline keyed to the arming child and cancels
-      it when that child is exited.
+    - The initiator's handshake deadline is a SINGLE whole-handshake
+      bound armed once on entry to `Opening` and NOT re-armed when the
+      InitAck moves SentInitSyn to GotInitAck: neither zenoh
+      (`transport/unicast/open_timeout`) nor zenoh-pico
+      (`Z_TRANSPORT_CONNECT_TIMEOUT`) gives one step a shorter window
+      than the whole open. When it elapses the host raises the event the
+      CURRENT child handles — `init_ack.timeout` in SentInitSyn,
+      `open_ack.timeout` in GotInitAck — so the raised event always has
+      a handler in scope and the staleness hazard cannot arise. Both
+      target `Closing` with a GENERIC close reason.
     - The accept deadline (`accepting.inactivity_timeout`) is a SINGLE
       whole-handshake bound armed once on accept entry and handled on the
       parent `Accepting`, so it is caught from whichever child is current
@@ -140,10 +145,11 @@
   </state>
 
   <!--
-    Per-phase handshake deadlines (init_ack / open_ack) are handled in
-    their arming child so a stale host-raised deadline arriving in a later
-    sibling has no handler in scope and is discarded (R311fa). The host
-    sweep arms each deadline on entry to the child and cancels it on exit.
+    The initiator's handshake has ONE deadline, armed by the host on entry
+    to `Opening` and held across both children (see the header "Deadline
+    scoping"). Each child handles the event the host raises while it is
+    current: `init_ack.timeout` in SentInitSyn, `open_ack.timeout` in
+    GotInitAck.
   -->
   <state id="Opening" initial="SentInitSyn">
     <state id="SentInitSyn">
