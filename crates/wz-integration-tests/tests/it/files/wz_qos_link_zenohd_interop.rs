@@ -337,11 +337,12 @@ fn zenohd_accepts_the_qoslink_wz_encodes_when_wz_dials() {
 /// connect endpoint, and return the wz capture once a band is negotiated.
 fn wz_dials_zenohd_with(metadata: &str) -> String {
     let zenohd = zenohd_binary();
-    // TWO ports under ONE lock acquisition. `pick()` twice on this thread
-    // re-enters the process-global port mutex and DEADLOCKS — which is what the
-    // first draft of this leg did, hanging past every timeout instead of
-    // failing. `pick_pair` is the documented seam for exactly this.
-    let (zd_port, wz_raw_port) = PortReservation::pick_pair();
+    // TWO ports under ONE reservation. `pick()` twice on this thread re-enters
+    // the process-global port mutex — which is what the first draft of this leg
+    // did, hanging past every timeout instead of failing. The reservation hands
+    // out the second port itself.
+    let zd_port = PortReservation::pick();
+    let wz_raw_port = zd_port.next_port();
     let zd_addr = format!("127.0.0.1:{}", zd_port.port());
     let wz_addr = format!("127.0.0.1:{wz_raw_port}");
 

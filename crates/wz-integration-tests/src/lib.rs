@@ -134,15 +134,18 @@ pub mod common {
     //
     // `port_lock` is a plain `std::sync::Mutex`, which is NOT reentrant, so a
     // second `PortReservation::pick` on a thread that already holds one blocks
-    // FOREVER. `pick_pair`'s doc has named that hazard since R311pk, and naming
-    // it was not enough: R2049 wrote a witness that called `pick` twice, and it
-    // printed `running 1 test` followed by NOTHING until it was killed. libtest
-    // has no per-test timeout, so a hang and a slow lane are the same
-    // observation — which is why the gate belongs on the CONDITION rather than
-    // in a static lint. The precise hazard is an OVERLAPPING reservation, and a
-    // grep for two `pick()` calls cannot see whether the first is still alive:
-    // 164 call sites, ten files with two or more, and almost all of them are
-    // one-per-test and correct.
+    // FOREVER. A doc naming the hazard was not enough: R2049 wrote a witness
+    // that called `pick` twice, and it printed `running 1 test` followed by
+    // NOTHING until it was killed. libtest has no per-test timeout, so a hang
+    // and a slow lane are the same observation — which is why the guard sits on
+    // the CONDITION rather than in a static lint. The precise hazard is an
+    // OVERLAPPING reservation, and a grep for two `pick()` calls cannot see
+    // whether the first is still alive.
+    //
+    // The API no longer gives a reason to overlap: a reservation hands out
+    // every further port itself (`next_port`), so the two-port and many-port
+    // pickers that sat beside `pick` are gone. The guard stays as the report
+    // for a call that overlaps anyway.
     //
     // A thread-local rather than a global because the hazard is re-entry by ONE
     // thread: libtest runs tests on many threads and two of them each holding a
@@ -168,9 +171,9 @@ pub mod common {
                      ALREADY holds a reservation. `port_lock` is a \
                      non-reentrant mutex, so this call would block forever and \
                      libtest would print nothing until the job was killed.\n  \
-                     If you need two ports, use \
-                     `PortReservation::pick_pair()`, which reserves both under \
-                     ONE acquisition and guarantees they differ.\n  \
+                     If you need more than one port, ask the reservation \
+                     you hold: `next_port()` hands out another under the \
+                     SAME acquisition and guarantees it differs.\n  \
                      If the first reservation is genuinely finished, drop it \
                      first -- the guard must live only until the child has \
                      bound its port."
@@ -261,9 +264,9 @@ pub mod common {
             let guard = port_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // Ordering is fixed: intra-process mutex FIRST, then the file lock.
-            // Both `pick` and `pick_pair` take them in this order, so two threads
-            // of one process can never hold them crosswise.
+            // Ordering is fixed: intra-process mutex FIRST, then the file lock,
+            // and this is the one place either is taken, so two threads of one
+            // process can never hold them crosswise.
             let cross_process = CrossProcessPortLock::acquire();
             let port = Self::unbound_port();
             Self {
@@ -280,73 +283,24 @@ pub mod common {
             self.port
         }
 
-        /// Reserve TWO distinct ephemeral ports under a SINGLE lock
-        /// acquisition, returning the guard (carrying port #1) plus a bare
-        /// second port. R311pk — the WS dual-listen Layer Z legs need a
-        /// `tcp_port` (pico dials TCP) + `ws_port` (wz dials WS) pair on one
-        /// zenohd; calling [`pick`](Self::pick) twice on the same thread would
-        /// re-enter the process-global mutex and deadlock. Both listeners are
-        /// bound while the lock is held — so the two ports are guaranteed
-        /// distinct — then dropped to the free pool. The returned guard holds
-        /// the lock until dropped, exactly like [`pick`](Self::pick): drop it
-        /// once the child has bound both ports.
-        pub fn pick_pair() -> (Self, u16) {
-            let reentry = ReentryGuard::arm("pick_pair");
-            let guard = port_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let cross_process = CrossProcessPortLock::acquire();
-            // Distinct by construction: a number picked is claimed by this process
-            // for its life, so the second pick cannot be the first.
-            let p1 = Self::unbound_port();
-            let p2 = Self::unbound_port();
-            (
-                Self {
-                    port: p1,
-                    _guard: guard,
-                    _cross_process: cross_process,
-                    _reentry: reentry,
-                },
-                p2,
-            )
-        }
-
-        /// Reserve `count` distinct ephemeral ports under a SINGLE lock acquisition,
-        /// for a program that listens on several at once (a chain of sessions, one
-        /// endpoint each). The guard carries the first port and the returned vector
-        /// holds all of them, the first included, in the order they were bound.
+        /// One more port under THIS reservation, distinct from [`Self::port`]
+        /// and from every other one it handed out. A test that needs several
+        /// ports (a TCP and a WS listener on one zenohd, a chain of sessions)
+        /// takes one reservation and asks it for each: the reservation is the
+        /// scope, and the ports are what it hands out, so a second
+        /// reservation on the same thread is never needed.
         ///
-        /// [`pick_pair`](Self::pick_pair) is the two-port case and calling
-        /// [`pick`](Self::pick) `count` times on one thread deadlocks on the same
-        /// non-reentrant mutex, so this is the only way to hold more than two. Every
-        /// listener is bound before any is dropped, which is what keeps the ports
-        /// distinct: the OS cannot hand a bound port out twice.
-        ///
-        /// # Panics
-        /// If `count` is zero: a reservation with no port is not a reservation.
-        pub fn pick_many(count: usize) -> (Self, Vec<u16>) {
-            assert!(count > 0, "pick_many needs at least one port");
-            let reentry = ReentryGuard::arm("pick_many");
-            let guard = port_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let cross_process = CrossProcessPortLock::acquire();
-            // Distinct by construction, as in [`pick_pair`](Self::pick_pair).
-            let ports: Vec<u16> = (0..count).map(|_| Self::unbound_port()).collect();
-            (
-                Self {
-                    port: ports[0],
-                    _guard: guard,
-                    _cross_process: cross_process,
-                    _reentry: reentry,
-                },
-                ports,
-            )
+        /// Distinct by construction: a number handed out is claimed by this
+        /// process for its life, so no later one can repeat it. Every port is
+        /// covered by the same lock window: drop the reservation once the
+        /// children have bound all of them.
+        pub fn next_port(&self) -> u16 {
+            Self::unbound_port()
         }
 
         /// A loopback port number for a program that is started a moment later,
-        /// chosen WITHOUT a socket ever existing on it — the pick the single, dual
-        /// and many reservations share (R311pp).
+        /// chosen WITHOUT a socket ever existing on it — the pick [`Self::pick`]
+        /// and [`Self::next_port`] share (R311pp).
         ///
         /// It used to bind a listener, read its port and drop it. That leaves the
         /// number bound from the bind to the close, and every `fork` another thread
@@ -8997,6 +8951,29 @@ mod tests {
     /// `33763`), and the caller would then probe a port nobody is listening on and
     /// blame the child. The parser therefore demands a terminating non-digit; this
     /// pins that, since a torn read is exactly the case a live run does not produce.
+    /// One reservation hands out as many ports as a test needs, all distinct,
+    /// and a reservation taken after it is dropped on the same thread is
+    /// granted (only an OVERLAPPING one is refused).
+    #[test]
+    fn one_reservation_hands_out_distinct_ports() {
+        use super::common::PortReservation;
+        let reservation = PortReservation::pick();
+        let ports = [
+            reservation.port(),
+            reservation.next_port(),
+            reservation.next_port(),
+        ];
+        assert_ne!(ports[0], ports[1]);
+        assert_ne!(ports[0], ports[2]);
+        assert_ne!(ports[1], ports[2]);
+        drop(reservation);
+        let again = PortReservation::pick();
+        assert!(
+            !ports.contains(&again.port()),
+            "a number is handed out once"
+        );
+    }
+
     /// The id is read off the `QUERY EMITTED` line only, whole: another line's
     /// `rid=` is not it, and a line torn inside its digits is not yet readable.
     #[test]

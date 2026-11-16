@@ -1036,7 +1036,8 @@ fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
 #[ignore = "binary-dep e2e (zenohd router, WS); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_reaches_established_against_zenohd_over_ws() {
     let demo = wz_ap_demo_binary();
-    let (tcp_res, ws_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let ws_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let mut zenohd = spawn_zenohd_tcp_ws(tcp_port, ws_port, || {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
@@ -1117,7 +1118,8 @@ fn wz_client_reaches_established_against_zenohd_over_ws() {
 fn wz_publish_routes_through_zenohd_to_pico_zsub_over_ws() {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let (tcp_res, ws_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let ws_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let publish_key = "demo/zenohd";
@@ -1854,7 +1856,8 @@ fn cleanup_cert_files(cert_path: &str, key_path: &str) {
 #[ignore = "binary-dep e2e (zenohd router, tls); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_reaches_established_against_zenohd_over_tls() {
     let demo = wz_ap_demo_binary();
-    let (tcp_res, tls_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let tls_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let (cert_path, key_path) = zenohd_tls_cert_paths(tcp_port);
     let (cert_pem, key_pem) = localhost_cert_key_pem();
@@ -1943,7 +1946,8 @@ fn wz_client_reaches_established_against_zenohd_over_tls() {
 fn wz_publish_routes_through_zenohd_to_pico_zsub_over_tls() {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let (tcp_res, tls_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let tls_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let (cert_path, key_path) = zenohd_tls_cert_paths(tcp_port);
@@ -2093,7 +2097,8 @@ fn zenohd_quic_cert_paths(tcp_port: u16) -> (String, String) {
 #[ignore = "binary-dep e2e (zenohd router, quic); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_reaches_established_against_zenohd_over_quic() {
     let demo = wz_ap_demo_binary();
-    let (tcp_res, quic_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let quic_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let (cert_path, key_path) = zenohd_quic_cert_paths(tcp_port);
     let (cert_pem, key_pem) = localhost_cert_key_pem();
@@ -2182,7 +2187,8 @@ fn wz_client_reaches_established_against_zenohd_over_quic() {
 fn wz_publish_routes_through_zenohd_to_pico_zsub_over_quic() {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let (tcp_res, quic_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let quic_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let (cert_path, key_path) = zenohd_quic_cert_paths(tcp_port);
@@ -2309,7 +2315,8 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_quic() {
 #[ignore = "binary-dep e2e (zenohd router, udp); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_reaches_established_against_zenohd_over_udp() {
     let demo = wz_ap_demo_binary();
-    let (tcp_res, udp_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let udp_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let mut zenohd = spawn_zenohd_tcp_udp(tcp_port, udp_port, || {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
@@ -2391,7 +2398,8 @@ fn wz_client_reaches_established_against_zenohd_over_udp() {
 fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp() {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let (tcp_res, udp_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let udp_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let publish_key = "demo/zenohd";

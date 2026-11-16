@@ -5054,7 +5054,8 @@ fn wz_subscriber_hears_a_real_pico_put_through_zenohd(example: &str, over_tls: b
     let z_pub = zenoh_pico_cli_binary("z_pub");
     let pems = pico_example_tls_files(dir.path());
 
-    let (tcp_reservation, tls_port) = PortReservation::pick_pair();
+    let tcp_reservation = PortReservation::pick();
+    let tls_port = tcp_reservation.next_port();
     let tcp_port = tcp_reservation.port();
     let mut zenohd = spawn_zenohd_tcp_tls(tcp_port, tls_port, &pems.cert, &pems.key, || {
         tempfile::tempfile().expect("tempfile for the readiness probe stderr")

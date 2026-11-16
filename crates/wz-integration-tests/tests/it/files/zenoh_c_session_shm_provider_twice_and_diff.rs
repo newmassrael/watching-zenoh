@@ -197,7 +197,8 @@ fn run_both_arms(include: &Path) -> (String, String) {
 
     let run = |exe: &Path, libdir: &Path| -> (bool, String) {
         // Two ports under ONE reservation, as the harness requires.
-        let (reservation, second) = PortReservation::pick_pair();
+        let reservation = PortReservation::pick();
+        let second = reservation.next_port();
         let out = Command::new(exe)
             .arg(format!("tcp/127.0.0.1:{}", reservation.port()))
             .arg(format!("tcp/127.0.0.1:{second}"))

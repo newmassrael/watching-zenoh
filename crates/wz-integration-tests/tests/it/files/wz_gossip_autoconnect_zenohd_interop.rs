@@ -395,7 +395,8 @@ fn gossip_dial_line(dials: u32) -> String {
 #[ignore = "binary-dep e2e (2x zenohd + wz-ap-demo --features routing-peer); Layer Z runs via --ignored"]
 fn wz_peer_gossip_autoconnects_to_a_zenohd_peer_discovered_through_a_zenohd_router() {
     let demo = wz_ap_demo_binary();
-    let (port_res, peer_port) = PortReservation::pick_pair();
+    let port_res = PortReservation::pick();
+    let peer_port = port_res.next_port();
     let router_port = port_res.port();
 
     let (mut router, mut router_log) = spawn_router(router_port);
@@ -480,7 +481,8 @@ fn wz_peer_gossip_autoconnects_to_a_zenohd_peer_discovered_through_a_zenohd_rout
 #[ignore = "binary-dep e2e (2x zenohd + wz-ap-demo --features routing-peer); Layer Z runs via --ignored"]
 fn wz_peer_without_autoconnect_discovers_the_same_peer_and_dials_nothing() {
     let demo = wz_ap_demo_binary();
-    let (port_res, peer_port) = PortReservation::pick_pair();
+    let port_res = PortReservation::pick();
+    let peer_port = port_res.next_port();
     let router_port = port_res.port();
 
     let (mut router, mut router_log) = spawn_router(router_port);
@@ -606,7 +608,8 @@ fn wz_peer_with_autoconnect_and_no_third_party_dials_nothing() {
 /// Returns the wz peer's captured stderr.
 fn run_strategy_leg(strategy: &'static str, expects_a_dial: bool) -> String {
     let demo = wz_ap_demo_binary();
-    let (port_res, peer_port) = PortReservation::pick_pair();
+    let port_res = PortReservation::pick();
+    let peer_port = port_res.next_port();
     let router_port = port_res.port();
 
     let (mut router, _router_log) = spawn_router(router_port);
@@ -701,7 +704,8 @@ fn wz_peer_greater_zid_strategy_declines_a_peer_with_a_greater_zid() {
 /// passes it, and the only thing still varying here is wz's own flag.
 fn run_subsystem_leg(wz_peer_mode: &'static str, expects_a_dial: bool) -> (String, String) {
     let demo = wz_ap_demo_binary();
-    let (port_res, peer_port) = PortReservation::pick_pair();
+    let port_res = PortReservation::pick();
+    let peer_port = port_res.next_port();
     let router_port = port_res.port();
 
     let (mut router, mut router_log) = spawn_router(router_port);

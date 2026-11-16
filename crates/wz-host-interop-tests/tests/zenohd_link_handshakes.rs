@@ -308,7 +308,8 @@ struct Rig {
 /// Start the router a row needs: reserve its ports, write the certificate pair a
 /// certificate link reads, and bring the router up on the link and on TCP.
 fn bring_up(link: &Link) -> Rig {
-    let (tcp_res, link_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let link_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
 
     // Named for every link and written only by the two that carry a certificate; the

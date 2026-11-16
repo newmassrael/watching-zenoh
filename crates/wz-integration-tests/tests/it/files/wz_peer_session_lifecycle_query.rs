@@ -128,7 +128,8 @@ fn peer_face(log: &str) -> u64 {
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,session-close-ingress); Layer E6 runs via --ignored"]
 fn wz_peer_session_lifecycle_close_query_closes_the_session_and_answers() {
-    let (port_res, port_d) = PortReservation::pick_pair();
+    let port_res = PortReservation::pick();
+    let port_d = port_res.next_port();
     let addr_a = format!("127.0.0.1:{}", port_res.port());
     let addr_d = format!("127.0.0.1:{port_d}");
 

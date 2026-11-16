@@ -178,8 +178,9 @@ fn record_group(port: u16, want: usize, budget: Duration) -> Vec<Vec<u8>> {
 #[ignore = "binary-dep e2e (zenohd on a multicast endpoint); Layer Ewirez runs via --ignored"]
 fn the_join_qos_walker_reads_what_a_stock_zenohd_broadcast() {
     // ONE reservation, and the port is used for the multicast group rather than
-    // for a TCP listener -- see `pick_pair`'s doc for why a second `pick` on
-    // this thread would deadlock (R2049 paid for that).
+    // for a TCP listener; a second `pick` on this thread would wait on this
+    // one (R2049 paid for that), so a further port would come from
+    // `reservation.next_port()`.
     let reservation = PortReservation::pick();
     let port = reservation.port();
 
