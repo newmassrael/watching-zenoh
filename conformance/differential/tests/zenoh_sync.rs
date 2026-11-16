@@ -44,12 +44,18 @@ macro_rules! wait_run {
         let state = std::sync::Arc::new(tokio::sync::Mutex::new(false));
         let condition = std::sync::Arc::new($sync::Condition::new());
         let (seen, waited) = (state.clone(), condition.clone());
+        // The guard is held across the check and given up only by `wait` or by the end of the
+        // task: a waiter that found the flag already set and then locked again would wait on its
+        // own guard, which is what happens whenever the notifier takes the lock first. The
+        // crate's own unit test of the same shape (`crates/wz-zenoh-sync/src/condition.rs`) was
+        // repaired the same way.
         let waiter = tokio::spawn(async move {
-            let guard = seen.lock().await;
-            if !*guard {
+            let mut guard = seen.lock().await;
+            while !*guard {
                 waited.wait(guard).await;
+                guard = seen.lock().await;
             }
-            *seen.lock().await
+            *guard
         });
         *state.lock().await = true;
         condition.notify_all();
