@@ -320,6 +320,44 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
     );
 }
 
+/// A group joined on a node whose event subscriber takes the last entity id is refused when its
+/// queryable finds none left, and the subscriber it had declared is retracted with the refusal.
+#[cfg(feature = "group")]
+#[test]
+fn a_group_whose_queryable_is_refused_retracts_its_event_subscriber() {
+    let router = open_node();
+    router
+        .engine
+        .next_entity_id
+        .store(u64::from(u32::MAX), Ordering::Relaxed);
+
+    let joined = crate::group::NodeGroup::join(
+        &router,
+        "wz/port/group".to_owned(),
+        wz_session_core::group_membership::Member::new("one"),
+        wz_runtime_tokio::qos::Priority::DEFAULT,
+    );
+    assert!(
+        matches!(
+            joined,
+            Err(crate::group::NodeGroupError::Refused(
+                "the member's queryable was refused"
+            ))
+        ),
+        "the join is refused at its queryable"
+    );
+    assert_eq!(
+        router.engine.entity_id(),
+        None,
+        "the event subscriber took the last id"
+    );
+    assert!(
+        router.engine.subscriptions.lock().unwrap().is_empty(),
+        "the event subscriber is retracted with the refusal"
+    );
+    assert!(router.engine.queryables.lock().unwrap().is_empty());
+}
+
 /// A token declared through the port is told to a liveliness subscription made through the port
 /// on the other node and on the node itself, and its retraction is told as a delete.
 #[test]
