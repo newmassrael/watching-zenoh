@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311xt / R311xw — §5.18 time: the AP-side wall-clock NTP64 source
+//! §5.18 time: the AP-side wall-clock NTP64 source
 //! ([`wall_clock_ntp64`]), the timestamp source-selection seam
 //! ([`FallbackStamp`]), and the optional Hybrid Logical Clock source
 //! (`time-hlc`).
@@ -21,15 +21,18 @@
 //! ## What this realizes (two §5.18 atoms)
 //!
 //! - `time-timestamp-source` (FOUNDATIONAL): [`FallbackStamp`] is the
-//!   source-selection seam. The storage capture leg stamps an
-//!   un-timestamped sample through it (the only auto-stamp site in wz
-//!   today — wz publishers carry a timestamp only when the caller sets one,
-//!   so there is no publish auto-stamp to feed yet), which makes swapping
-//!   the source a one-type change rather than a scattered edit. zenoh has
-//!   no pluggable-source config knob (its source is a plain
-//!   `Option<Arc<HLC>>` on the Runtime), so a general `TimestampSource`
-//!   trait would be superset gold-plating until a 2nd consumer (a publish
-//!   auto-stamp) lands; the seam is realized minimally as this stamper.
+//!   source-selection seam of the storage capture leg, which stamps an
+//!   un-timestamped sample through it, so swapping that leg's source is a
+//!   one-type change rather than a scattered edit. It is not the only
+//!   auto-stamp site: the tokio runtime's session stamps an un-timestamped
+//!   publication from the node's [`NodeHlc`](crate::node_clock::NodeHlc)
+//!   (`pubsub-timestamp`, a default feature; zenoh's `resolve_put`), and the
+//!   router forwarder stamps a Put it relays from its node's `NodeHlc`. Every
+//!   site reads a node clock, which is zenoh's shape: zenoh has no
+//!   pluggable-source config knob (its source is a plain `Option<Arc<HLC>>`
+//!   on the Runtime), so the shared source is the clock itself and a general
+//!   `TimestampSource` trait over it would add a choice upstream does not
+//!   offer.
 //! - `time-hlc` (active, the `time-hlc` feature): the `uhlc::HLC` variant
 //!   of the stamper, the wz mirror of zenoh's `Option<Arc<HLC>>`
 //!   (`zenoh/src/net/runtime/mod.rs:147`, an HLC created when `timestamping`
@@ -55,30 +58,22 @@
 //! TIME word is upgraded; the stamp's `zid` stays the storage identity (so a
 //! source switch never changes the tie-breaker, only the ordering word).
 //!
-//! ## Scope: the HLC is node-wide (R311y450 — the R311xw disclosure, CLOSED)
+//! ## Scope: the HLC is node-wide
 //!
-//! Until R311y450 [`FallbackStamp::new`] built a FRESH HLC per consumer, and the
-//! disclosure that stood here recorded the resulting collision window as
-//! hypothetical ("two storages on the SAME node could…") while deferring the fix
-//! until a second auto-stamp consumer landed. It had already landed: R311y69 gave
-//! `ext-pubsub-advanced-publisher` its own `FallbackStamp`, so a build with
-//! `time-hlc,ext-pubsub-advanced-publisher` really did hold TWO independent
+//! A stamper does not construct an HLC of its own: two consumers on one node
+//! (a storage and an advanced publisher, say) would then hold two independent
 //! `uhlc::HLC`s deriving the SAME `uhlc::ID` from the same node zid with
-//! SEPARATE `last_time` — the reachable form of that hazard, and uhlc's
-//! "unique across the system" premise does not survive it.
-//!
-//! The promotion the disclosure prescribed is now done, in zenoh's shape: ONE
+//! SEPARATE `last_time`, and uhlc's "unique across the system" premise does not
+//! survive that. So, in zenoh's shape, there is ONE
 //! [`NodeHlc`](crate::node_clock::NodeHlc) per node (`Option<Arc<HLC>>`,
 //! role-gated — `zenoh/src/net/runtime/mod.rs:147`), and this stamper BORROWS it
 //! rather than constructing anything. `None` — a node whose role does not
 //! timestamp, or a build without `time-hlc` — resolves to [`wall_clock_ntp64`],
 //! which is precisely zenoh's own `None` arm for the same decision
-//! (`Session::new_timestamp`, `zenoh/src/api/session.rs:833-843`).
-//!
-//! Still OUT of scope, and still for the R311xw reason: a publish auto-stamp on
-//! the plain `Session::publish` path of the tokio runtime
-//! (`zenoh api/session.rs:2129`). wz publishers carry a timestamp only when the
-//! caller sets one, so there is no un-timestamped publish to feed.
+//! (`Session::new_timestamp`, `zenoh/src/api/session.rs:833-843`). The
+//! session's publish auto-stamp follows the same role gate, so under zenoh's
+//! shipped map a router stamps a bare publication and a peer or client does
+//! not.
 
 use wz_session_core::ntp64::Ntp64;
 use wz_session_core::sample::TimestampHint;

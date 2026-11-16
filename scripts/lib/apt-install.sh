@@ -145,8 +145,14 @@
 # own `ImageOS` when that is set, and a mismatch fails by name.
 #
 # ENVIRONMENT
-#   WZ_APT_UPDATE_DEADLINE    ceiling on `apt-get update`, seconds (default 300)
-#   WZ_APT_INSTALL_DEADLINE   ceiling on `apt-get install`, seconds (default 900)
+#   WZ_APT_UPDATE_DEADLINE    ceiling on `apt-get update`, seconds (default 300).
+#                             NOT fatal: an update past it is killed, annotated
+#                             as a warning, and the install still runs against
+#                             the index the image shipped; it bounds the time
+#                             lost, not the step's verdict
+#   WZ_APT_INSTALL_DEADLINE   ceiling on `apt-get install`, seconds (default 900);
+#                             an install past it fails the step and is never
+#                             retried
 #   WZ_APT_DEADLINE           sets BOTH, for the test lane and for a caller that
 #                             wants one number
 #   WZ_APT_KILL_AFTER         grace between TERM and KILL, seconds (default 30)

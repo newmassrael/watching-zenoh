@@ -559,7 +559,11 @@ BARE_BUDGET = 54
 # the doc of the deleted election function cited the router hat's election by
 # line number with no root, twice, and the text that replaced it cites nothing
 # upstream. Read off the gate at the red tip, not chosen.
-ROOTLESS_LINE_BUDGET = 76
+# 76 -> 74, DOWNWARD by two removals: the last stale line (the audit note on
+# the router answering a second history subscriber, now anchored with its root
+# in the broker hat), and the time crate's note that denied a publish auto-stamp
+# while citing the session's publish path by number, deleted with the denial.
+ROOTLESS_LINE_BUDGET = 74
 # R2862 — 36 -> 35. The auth segment's helpers moved into the shared POSIX
 # segment module, and the retry-count note that named the upstream segment file
 # with no root went with them; its replacement is anchored.
@@ -570,12 +574,9 @@ ROOTLESS_BARE_BUDGET = 26
 #: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
 #: See `_rootless_finding` for why this is a ratchet and the gone-path case is
 #: a finding.
-#: R2321 repaid 45 of the 46 this started at. The ONE that remains is in
-#: `scripts/lib/crossimpl_audit.py`, which has been another session's in-flight
-#: file since R2317 (open debt 515, and 646 for the red it causes): editing it
-#: would either publish their unreviewed constant change or red their gate. The
-#: ratchet is why leaving it is safe -- it can only shrink from here.
-ROOTLESS_STALE_LINE_BUDGET = 1
+#: Zero: every such citation has been re-anchored with its root, and a new one
+#: reds. Cite a line as `path` @ `needle` with its root instead.
+ROOTLESS_STALE_LINE_BUDGET = 0
 #: Occurrences under a DERIVED candidate segment this axis does not yet grade.
 #: This is the residue of open debt 647 made monotone rather than argued: it
 #: can only shrink, so declaring a segment forces it down in the same commit,
@@ -826,7 +827,8 @@ def rootless_undeclared_budget() -> int:
 # 483 -> 482, the `unicast` row 77 -> 76 with it: the config reader's note on the acceptor's
 # handshake sizes, a line-form citation at an old release, left with the rewrite that offers the
 # frame SN width the file names (ef13546679).
-ROOTLESS_TOTAL_BUDGET = 482
+# 482 -> 480, the same two line-form removals as ROOTLESS_LINE_BUDGET.
+ROOTLESS_TOTAL_BUDGET = 480
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
