@@ -136,6 +136,28 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
         "fixture to the workspace and its `--features` would then have to name a "
         "real feature of that package too"
     ),
+    # The four rows below are the same shape again: the `--selftest` of the lane build-restore
+    # gate parses a made-up lane script whose builds name an invented package (`demo`) with
+    # invented features, and what it asserts is how those statements are grouped, so a real
+    # package would couple the fixture to the workspace for nothing.
+    ("scripts/lib/lane_build_restore_gate.py", "a"): (
+        "a FIXTURE lane script in that gate's `--selftest`, invented package `demo`"
+    ),
+    ("scripts/lib/lane_build_restore_gate.py", "b"): (
+        "the same fixture, the second invented feature of `demo`"
+    ),
+    ("scripts/lib/lane_build_restore_gate.py", "nope"): (
+        "the same fixture's commented-out build, which the selftest asserts is not read as one"
+    ),
+    ("scripts/lib/lane_build_restore_gate.py", "q"): (
+        "the same fixture, a build of `demo` stating another feature"
+    ),
+    ("scripts/lib/sce_codegen_spawn_lint.py", "cli"): (
+        "a FIXTURE shell file in that lint's `--selftest`: the build of SCE's own `sce-codegen` "
+        "it must not mistake for a spawn, the command `scripts/build-sce.sh` runs inside the "
+        "vendored SCE workspace (the row of that script above), which this workspace's "
+        "metadata cannot adjudicate"
+    ),
     # R2551 — the `("scripts/run-ci.sh", "transport-link-vsock")` row is GONE,
     # and its deletion is the whole repair for a hosted red. It excused one
     # sentence: Layer C1ab's old comment quoting `cargo test --features
