@@ -1190,7 +1190,7 @@ impl Engine {
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
                 // The registry's own door, not the port's: the port has no operation that takes
                 // a set of links, and for no restriction the two declare the same.
-                let id = state
+                state
                     .shared
                     .declare_subscriber_on_links(
                         key.to_owned(),
@@ -1205,11 +1205,9 @@ impl Engine {
                             timestamps,
                         ),
                     )
-                    .ok_or_else(|| zerror!("the engine has no entity id left for a subscriber"))?;
-                Id::try_from(id).map_err(|_| {
-                    zerror!("the engine numbered a subscriber {id}, which is more than an id holds")
-                        .into()
-                })
+                    .ok_or_else(|| {
+                        zerror!("the engine has no entity id left for a subscriber").into()
+                    })
             }
         }
     }
@@ -1217,7 +1215,7 @@ impl Engine {
     /// Stop the delivery to the subscription `id` and let go of what it keeps.
     fn undeclare_subscriber(&self, id: Id) {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(u64::from(id)),
+            Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(id),
             Engine::Router(router) => {
                 if id & RouterEngine::LIVELINESS_ID != 0 {
                     router
@@ -1303,7 +1301,7 @@ impl Engine {
     /// Answer the queries for what `queryable` says, until [`Engine::undeclare_queryable`] is
     /// called with the id returned. The queries are those of the session itself and of every
     /// peer, as the origin allows.
-    fn declare_queryable(&self, queryable: QueryableDeclaration<'_>) -> ZResult<u64> {
+    fn declare_queryable(&self, queryable: QueryableDeclaration<'_>) -> ZResult<Id> {
         match self {
             Engine::Router(router) => {
                 let QueryableDeclaration {
@@ -1343,12 +1341,16 @@ impl Engine {
                     promotion,
                 );
                 let handler = sink(router.node.query_holder());
-                Ok(router.node.forwarder().host_queryable_from(
+                let id = router.node.forwarder().host_queryable_from(
                     key,
                     complete,
                     tokio_engine::engine_locality(origin),
                     handler,
-                ))
+                );
+                Id::try_from(id).map_err(|_| {
+                    zerror!("the router numbered a queryable {id}, which is more than an id holds")
+                        .into()
+                })
             }
             Engine::Tokio(state) => {
                 let QueryableDeclaration {
@@ -1407,11 +1409,11 @@ impl Engine {
     }
 
     /// Stop the queries to the queryable `id` and let go of what it keeps.
-    fn undeclare_queryable(&self, id: u64) {
+    fn undeclare_queryable(&self, id: Id) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_queryable(id),
             Engine::Router(router) => {
-                router.node.forwarder().unhost_queryable(id);
+                router.node.forwarder().unhost_queryable(u64::from(id));
             }
         }
     }
@@ -1585,7 +1587,7 @@ impl Engine {
                 // The retraction names its token by id alone, as upstream's does. The registry's
                 // own door, not the port's: the port has no operation that takes a set of links,
                 // and for no restriction the two declare the same.
-                let id = state
+                state
                     .shared
                     .declare_liveliness_token_on_links(
                         key.to_owned(),
@@ -1593,14 +1595,9 @@ impl Engine {
                         wz_capi_core::runtime::session::LivelinessOptions::new(),
                         links,
                     )
-                    .ok_or_else(|| zerror!("this engine declares no liveliness token"))?;
-                Id::try_from(id).map_err(|_| {
-                    zerror!(
-                        "the engine numbered a liveliness token {id}, which is more than an id \
-                         holds"
-                    )
-                    .into()
-                })
+                    .ok_or_else(|| {
+                        zerror!("the engine has no entity id left for a liveliness token").into()
+                    })
             }
         }
     }
@@ -1609,10 +1606,7 @@ impl Engine {
     fn undeclare_liveliness_token(&self, id: Id) {
         match self {
             Engine::Router(router) => router.node.undeclare_token(u64::from(id)),
-            Engine::Tokio(state) => state
-                .shared
-                .as_engine()
-                .undeclare_liveliness_token(u64::from(id)),
+            Engine::Tokio(state) => state.shared.as_engine().undeclare_liveliness_token(id),
         }
     }
 
@@ -1667,7 +1661,7 @@ impl Engine {
                 let mut options =
                     wz_capi_core::runtime::session::LivelinessSubscriberOptions::default();
                 options.history = history;
-                let id = state
+                state
                     .shared
                     .declare_liveliness_subscriber_on_links(
                         key.to_owned(),
@@ -1678,14 +1672,8 @@ impl Engine {
                     )
                     .ok_or_else(|| {
                         zerror!("the engine has no entity id left for a liveliness subscriber")
-                    })?;
-                Id::try_from(id).map_err(|_| {
-                    zerror!(
-                        "the engine numbered a liveliness subscriber {id}, which is more than an \
-                         id holds"
-                    )
-                    .into()
-                })
+                            .into()
+                    })
             }
         }
     }
@@ -1848,11 +1836,11 @@ impl Engine {
         match *self {}
     }
 
-    fn declare_queryable(&self, _queryable: QueryableDeclaration<'_>) -> ZResult<u64> {
+    fn declare_queryable(&self, _queryable: QueryableDeclaration<'_>) -> ZResult<Id> {
         match *self {}
     }
 
-    fn undeclare_queryable(&self, _id: u64) {
+    fn undeclare_queryable(&self, _id: Id) {
         match *self {}
     }
 
@@ -4302,7 +4290,7 @@ pub(crate) struct SessionInner {
     publishers: std::sync::Mutex<Vec<Id>>,
     /// The queryables declared on the session and not undeclared, the entity id of each beside the
     /// engine's id for it, which a close lets go of.
-    queryables: std::sync::Mutex<Vec<(Id, u64)>>,
+    queryables: std::sync::Mutex<Vec<(Id, Id)>>,
     /// The queriers declared on the session and not undeclared, which a close lets go of, each
     /// with the queries it has asked that may still be under way.
     queriers: std::sync::Mutex<Vec<QuerierEntry>>,
@@ -4741,7 +4729,7 @@ impl SessionInner {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn queryables(&self) -> std::sync::MutexGuard<'_, Vec<(Id, u64)>> {
+    fn queryables(&self) -> std::sync::MutexGuard<'_, Vec<(Id, Id)>> {
         self.queryables
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

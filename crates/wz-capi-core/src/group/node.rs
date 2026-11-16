@@ -207,21 +207,31 @@ impl NodeGroup {
                 let _ = out.reply_keyed(&served, &record);
             }) as QueryCallback
         });
-        let queryable = engine
-            .declare_queryable_on_wire(
-                record_key,
-                WireKey::literal(),
-                true,
-                Locality::Any,
-                None,
-                answer,
-            )
-            .ok_or(NodeGroupError::Refused(
+        let Some(queryable) = engine.declare_queryable_on_wire(
+            record_key,
+            WireKey::literal(),
+            true,
+            Locality::Any,
+            None,
+            answer,
+        ) else {
+            engine.undeclare_subscriber(subscriber);
+            return Err(NodeGroupError::Refused(
                 "the member's queryable was refused",
-            ))?;
+            ));
+        };
+        // From here on what the group is made of is held, so a step refused below retracts it
+        // as a leave does.
+        let mut held = Held {
+            engine: Arc::clone(&engine),
+            keep_alive: None,
+            watchdog: None,
+            subscriber,
+            queryable,
+        };
 
         // The keep-alive beacon, for a member that asserts its liveliness on its own.
-        let keep_alive = matches!(member.liveliness, MemberLiveliness::Auto)
+        held.keep_alive = matches!(member.liveliness, MemberLiveliness::Auto)
             .then(|| {
                 let beacon = encode_net_event(&GroupNetEvent::KeepAlive(member.mid.clone()));
                 let sender = Arc::clone(&engine);
@@ -243,8 +253,7 @@ impl NodeGroup {
                 )
             })
             .flatten();
-        let watchdog = {
-            let copy = Arc::clone(&copy);
+        held.watchdog = Some(
             Ticker::start(
                 &engine,
                 WATCHDOG_PERIOD_MS,
@@ -253,17 +262,11 @@ impl NodeGroup {
                     true
                 }),
             )
-            .ok_or(NodeGroupError::Refused("the watchdog could not be started"))?
-        };
+            .ok_or(NodeGroupError::Refused("the watchdog could not be started"))?,
+        );
 
         Ok(Self {
-            held: Some(Held {
-                engine,
-                keep_alive,
-                watchdog: Some(watchdog),
-                subscriber,
-                queryable,
-            }),
+            held: Some(held),
             agg,
         })
     }

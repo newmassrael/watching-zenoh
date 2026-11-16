@@ -227,7 +227,7 @@ pub(crate) struct QuerierState {
     /// allocated once at declare. See `PublisherState::eid`. Only with
     /// `unstable-api`, which is what reports it.
     #[cfg(feature = "unstable-api")]
-    eid: u64,
+    eid: wz_session_core::wire_id::EntityId,
     /// R311y559 — cached loan of `key` for `z_querier_keyexpr`; bound after
     /// boxing, as everywhere else here.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
@@ -272,7 +272,7 @@ impl QuerierState {
 
     /// The `eid` half of the global id `z_querier_id` reports.
     #[cfg(feature = "unstable-api")]
-    pub(crate) fn entity_id(&self) -> u64 {
+    pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
         self.eid
     }
 
@@ -413,7 +413,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // `querier->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before the filter is made. A
         // session that has handed out every id refuses the querier with the code a refused
         // declaration gets here.
-        let Some(eid) = engine.next_entity_id().map(u64::from) else {
+        let Some(eid) = engine.next_entity_id() else {
             return Z_ERR_GENERIC;
         };
         #[cfg(not(feature = "unstable-api"))]

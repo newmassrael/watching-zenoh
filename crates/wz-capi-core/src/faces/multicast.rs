@@ -77,6 +77,7 @@ use super::{
 };
 use crate::drive::GroupDeclarations;
 use wz_runtime_tokio::session::{GroupDeclaration, GroupKey, InterestKinds, RetractionKey};
+use wz_session_core::wire_id::EntityId;
 
 /// One member of a group as the transport both upstreams report it as: its zid and role,
 /// shared memory as the calling ABI says (`is_shm`), and one link from this node's locator on
@@ -307,10 +308,12 @@ fn retraction_key<'a>(
 /// nothing of `what`: zenoh announces its subscribers alone, each as id 0, and zenoh-pico every
 /// subscriber, queryable and token by its entity id. An entity that takes its own session's
 /// traffic alone is told to no group: neither upstream declares it to the network.
+///
+/// The id is answered as the group's session takes a declaration's, which is 64 bits wide.
 fn announced_id(
     declarations: GroupDeclarations,
     what: GroupDeclaration,
-    id: u64,
+    id: EntityId,
     allowed_origin: wz_runtime_tokio::locality::Locality,
 ) -> Option<u64> {
     if allowed_origin == wz_runtime_tokio::locality::Locality::SessionLocal {
@@ -318,7 +321,7 @@ fn announced_id(
     }
     match (declarations, what) {
         (GroupDeclarations::Subscribers, GroupDeclaration::Subscriber) => Some(0),
-        (GroupDeclarations::Entities | GroupDeclarations::Mapped, _) => Some(id),
+        (GroupDeclarations::Entities | GroupDeclarations::Mapped, _) => Some(u64::from(id)),
         _ => None,
     }
 }
@@ -327,7 +330,7 @@ fn announced_id(
 /// that key is named to the peers, the key its retraction names, and the traffic it takes.
 struct Told<'a> {
     what: GroupDeclaration,
-    id: u64,
+    id: EntityId,
     keyexpr: &'a str,
     wire: &'a WireKey,
     retraction: Option<&'a RetractionKey>,
@@ -451,14 +454,14 @@ fn listen_on(
     declarations: GroupDeclarations,
 ) -> GroupLivelinessSubscriber {
     let subscriber = session.declare_group_liveliness_subscriber(
-        id,
+        u64::from(id),
         keyexpr,
         LivelinessSubscriberOptions::default().with_history(history),
         sink(),
     );
     if declarations.asks_for_liveliness() {
         let _ = session.ask(
-            id,
+            u64::from(id),
             InterestKinds::TOKENS,
             history,
             /*future=*/ true,
@@ -832,7 +835,7 @@ impl SharedSession {
             .filter_map(|face| {
                 let sub = face.live_subs.remove(&id)?;
                 if face.declarations.asks_for_liveliness() {
-                    let _ = face.session.ask_final(id);
+                    let _ = face.session.ask_final(u64::from(id));
                 }
                 Some(sub)
             })

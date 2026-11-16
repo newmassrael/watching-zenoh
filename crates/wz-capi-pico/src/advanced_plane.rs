@@ -144,7 +144,7 @@ impl AdvancedPublisherPlane for PicoPlane {
             PlainPublisher::declare(&self.session, keyexpr, None, self.declared.clone())
                 .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
-            eid: publisher.entity_id() as u32,
+            eid: publisher.entity_id(),
             handle: publisher,
         })
     }

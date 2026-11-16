@@ -1674,11 +1674,11 @@ pub unsafe extern "C" fn ze_advanced_subscriber_declare_background_sample_miss_l
 /// `pub_` must be null or a live loaned advanced publisher.
 pub(crate) unsafe fn advanced_publisher_identity(
     pub_: *const ze_loaned_advanced_publisher_t,
-) -> Option<([u8; 16], u64)> {
+) -> Option<([u8; 16], wz_session_core::wire_id::EntityId)> {
     // The wrapped publisher's entity id, as pico's `ze_advanced_publisher_id` is
     // `z_publisher_id` of the publisher it wraps.
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| (state.engine.zid(), u64::from(state.publisher.eid())))
+        .map(|state| (state.engine.zid(), state.publisher.eid()))
 }
 
 /// The cached keyexpr borrow behind a loaned advanced publisher.
@@ -1701,9 +1701,9 @@ pub(crate) unsafe fn advanced_publisher_keyexpr(
 /// `sub` must be null or a live loaned advanced subscriber.
 pub(crate) unsafe fn advanced_subscriber_identity(
     sub: *const ze_loaned_advanced_subscriber_t,
-) -> Option<([u8; 16], u64)> {
+) -> Option<([u8; 16], wz_session_core::wire_id::EntityId)> {
     crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub)
-        .map(|state| (state.engine.zid(), u64::from(state.subscriber.id().eid())))
+        .map(|state| (state.engine.zid(), state.subscriber.id().eid()))
 }
 
 /// The cached keyexpr borrow behind a loaned advanced subscriber.

@@ -102,7 +102,13 @@ pub(super) struct EngineState {
     /// filters and its periodic jobs. A space of their own, so they are not refused when the
     /// entity ids are spent.
     next_local_id: AtomicU64,
-    subscriptions: Mutex<HashMap<u64, Held>>,
+    subscriptions: Mutex<HashMap<SubId, Held>>,
+    /// The program's queryables, each by the id the node's data plane holds it under. That id is
+    /// the data plane's key for its own face's declaration, which no peer reads; the program is
+    /// given an entity id, as every other declaration of its session.
+    queryables: Mutex<HashMap<QblId, u64>>,
+    /// The program's liveliness tokens, as `queryables` holds its queryables.
+    tokens: Mutex<HashMap<TokenId, u64>>,
     jobs: Mutex<HashMap<u64, PeriodicJob>>,
 }
 
@@ -113,6 +119,8 @@ impl EngineState {
             next_entity_id: AtomicU64::new(1),
             next_local_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
+            queryables: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
         }
     }
@@ -245,7 +253,7 @@ impl SessionEngine for RouterState {
         sink: SubscriberSink,
     ) -> Option<SubId> {
         // The id first, so a session with none left hosts nothing.
-        let id = SubId::from(self.engine.entity_id()?);
+        let id = self.engine.entity_id()?;
         // One callback for the node's one data plane, where a registry mints one for each face.
         let host = self
             .forwarder
@@ -394,16 +402,32 @@ impl SessionEngine for RouterState {
         _retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> Option<QblId> {
-        Some(self.forwarder.host_queryable_from(
+        // The id first, so a session with none left hosts nothing.
+        let id = self.engine.entity_id()?;
+        let host = self.forwarder.host_queryable_from(
             &keyexpr,
             complete,
             allowed_origin,
             Box::new(sink(self.query_holder())),
-        ))
+        );
+        self.engine
+            .queryables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, host);
+        Some(id)
     }
 
     fn undeclare_queryable(&self, id: QblId) {
-        self.forwarder.unhost_queryable(id);
+        let host = self
+            .engine
+            .queryables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        if let Some(host) = host {
+            self.forwarder.unhost_queryable(host);
+        }
     }
 
     fn declare_liveliness_token_on_wire(
@@ -412,11 +436,27 @@ impl SessionEngine for RouterState {
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
-        Some(self.declare_token(&keyexpr))
+        // The id first, so a session with none left declares nothing.
+        let id = self.engine.entity_id()?;
+        let host = self.declare_token(&keyexpr);
+        self.engine
+            .tokens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, host);
+        Some(id)
     }
 
     fn undeclare_liveliness_token(&self, id: TokenId) {
-        self.undeclare_token(id);
+        let host = self
+            .engine
+            .tokens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        if let Some(host) = host {
+            self.undeclare_token(host);
+        }
     }
 
     fn declare_liveliness_subscriber_on_wire(
@@ -427,7 +467,7 @@ impl SessionEngine for RouterState {
         sink: LivelinessSink,
     ) -> Option<SubId> {
         // The id first, so a session with none left subscribes nothing.
-        let id = SubId::from(self.engine.entity_id()?);
+        let id = self.engine.entity_id()?;
         let face = self.liveliness.subscribe(&keyexpr, history, sink());
         self.engine
             .subscriptions

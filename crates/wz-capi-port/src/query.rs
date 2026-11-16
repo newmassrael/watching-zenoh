@@ -17,8 +17,9 @@ use alloc::sync::Arc;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
 
-/// A C-level queryable id, keying what an engine holds for one C declaration.
-pub type QblId = u64;
+/// A C-level queryable id, keying what an engine holds for one C declaration: the entity id the
+/// queryable is declared under, of the width [`crate::SubId`] has for the same reason.
+pub type QblId = wz_session_core::wire_id::EntityId;
 
 /// A query kept past its handler. It answers on the route the query came in on, and the query's
 /// `ResponseFinal` is owed until every hold of it has been dropped; dropping this releases one.
