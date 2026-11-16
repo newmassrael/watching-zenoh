@@ -157,12 +157,11 @@ impl ConsolidationMode {
     /// BOTH UPSTREAMS CARRY THE SAME RULE, which is what makes it the protocol's
     /// and not one implementation's habit: zenoh-pico resolves AUTO on the client
     /// before encoding — `_time=` in the selector yields NONE, otherwise LATEST
-    /// (`vendor/zenoh-pico/src/net/primitives.c:567-573`). wz-capi-pico has
-    /// mirrored pico's copy since R311y321 (`wz-capi-pico/src/get.rs:945-953`) and
-    /// KEEPS it rather than delegating here: it must resolve BEFORE the wire,
-    /// because pico's get always emits Q_C with the resolved byte and never
-    /// elides it. Of the three request paths wz owns, the native Rust one was the
-    /// only one without this rule until R311y836.
+    /// (`vendor/zenoh-pico/src/net/primitives.c:567-573`). wz-capi-pico resolves
+    /// BEFORE the wire, because pico's get always emits Q_C with the resolved
+    /// byte and never elides it, and it does so through
+    /// [`Self::resolve_auto_on`] with pico's reading of the time range: the rule
+    /// is this one, and only the reading differs.
     ///
     /// `None` IS wz's spelling of zenoh's `Auto`. wz deliberately has no `Auto`
     /// VARIANT — this enum only names the three modes that are transmitted, and
@@ -184,15 +183,27 @@ impl ConsolidationMode {
     /// actually said. Converging the two readings is this atom's residual and
     /// it is blocked on the byte, not on this function.
     pub fn resolve_auto(requested: Option<Self>, parameters: &str) -> Self {
+        Self::resolve_auto_on(
+            requested,
+            crate::selector_params::has_param(parameters, crate::selector_params::TIME_RANGE_PARAM),
+        )
+    }
+
+    /// The rule of [`Self::resolve_auto`] with the time range already read:
+    /// a named mode is kept, an unnamed one is NONE for a time-ranged query and
+    /// LATEST otherwise.
+    ///
+    /// The two upstreams share this rule and differ only in how they RECOGNISE a
+    /// time range. zenoh asks `parameters.time_range().is_some()`, a key match
+    /// ([`Self::resolve_auto`] reads it so); zenoh-pico searches the selector for
+    /// the substring `_time=` (`_z_strstr`, `src/net/primitives.c:568`), which
+    /// also matches `xx_time=1` and misses a valueless `_time`. A surface that
+    /// presents pico's API reads the range pico's way and resolves here, so the
+    /// rule has one definition and only the reading is the preset's.
+    pub fn resolve_auto_on(requested: Option<Self>, time_ranged: bool) -> Self {
         match requested {
             Some(mode) => mode,
-            None if crate::selector_params::has_param(
-                parameters,
-                crate::selector_params::TIME_RANGE_PARAM,
-            ) =>
-            {
-                Self::None
-            }
+            None if time_ranged => Self::None,
             None => Self::Latest,
         }
     }
@@ -401,6 +412,33 @@ mod tests {
         );
         assert_eq!(
             ConsolidationMode::resolve_auto(None, "no_time=1"),
+            ConsolidationMode::Latest
+        );
+    }
+
+    /// The rule apart from the reading: a named mode is kept whatever the range
+    /// says, and an unnamed one follows the range. `resolve_auto` is this rule
+    /// over zenoh's reading, so the two agree on every input above.
+    #[test]
+    fn the_rule_keeps_a_named_mode_and_follows_the_range_for_an_unnamed_one() {
+        for time_ranged in [false, true] {
+            for mode in [
+                ConsolidationMode::None,
+                ConsolidationMode::Monotonic,
+                ConsolidationMode::Latest,
+            ] {
+                assert_eq!(
+                    ConsolidationMode::resolve_auto_on(Some(mode), time_ranged),
+                    mode
+                );
+            }
+        }
+        assert_eq!(
+            ConsolidationMode::resolve_auto_on(None, true),
+            ConsolidationMode::None
+        );
+        assert_eq!(
+            ConsolidationMode::resolve_auto_on(None, false),
             ConsolidationMode::Latest
         );
     }

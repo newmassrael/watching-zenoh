@@ -508,6 +508,9 @@ fn wz_router_routes_a_pico_get_to_a_pico_queryable() {
         )),
     };
     let final_after = query_sent.elapsed();
+    // The pico queryable is asserted on below, so it is waited on for its own
+    // line before it is stopped.
+    let _qabl_heard = wait_for_substring(&mut qabl_reader, QABL_RECEIVED, Duration::from_secs(15));
 
     if let Some(child) = get_child.as_mut() {
         let _ = child.child_mut().kill();

@@ -456,6 +456,13 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
     );
     let reply = wait_for_substring(&mut iss_reader, "REPLY RECEIVED", Duration::from_secs(15));
     let final_recv = wait_for_substring(&mut iss_reader, "FINAL RECEIVED", Duration::from_secs(10));
+    // Both routers are asserted on below for routing the query, so R1 is waited
+    // on for its own line too, not only the issuer for the reply.
+    let _r1_routed = wait_for_substring(
+        &mut r1_reader,
+        "router-hat: routed a query",
+        Duration::from_secs(15),
+    );
 
     graceful_terminate(iss_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(sub_at_r2_guard.child_mut(), Duration::from_secs(5));

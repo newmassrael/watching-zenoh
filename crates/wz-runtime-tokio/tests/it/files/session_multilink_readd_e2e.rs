@@ -30,9 +30,14 @@
 //!      registered face — a re-JOIN, not a new session).
 //!   4. The re-added link CARRIES traffic: a Put sent by B over the re-added link
 //!      is delivered at A.
+//!
+//! `a_readded_link_lost_again_waits_the_initial_period`: a re-add that opened
+//! ends its address's outage, so the same link lost again is re-added after the
+//! initial wait and not after the wait the first outage grew to.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -207,6 +212,43 @@ fn spawn_b_acceptor(listener: TcpListener, b_links: BLinks) -> tokio::task::Join
     })
 }
 
+/// Node A's sources: listening on `a_listener`, `max_links = 2`, dialing B once
+/// at each of its two endpoints, with its re-dials paced by `retry`.
+fn a_dials_b_twice(
+    a_listener: TcpListener,
+    b_addr: SocketAddr,
+    b_addr_2: SocketAddr,
+    retry: RetryPolicy,
+) -> FaceSources {
+    FaceSources {
+        listeners: vec![BoundListener::Tcp(a_listener)],
+        // R2233 (open-debt item 585) — LOCATORS, built through the locator
+        // SSOT so the fixture reads the grammar a configured `--connect` does.
+        dial_targets: vec![
+            wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr}"))
+                .expect("tcp/<addr> locator"),
+            wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr_2}"))
+                .expect("tcp/<addr> locator"),
+        ],
+        // Plain tcp dials — no client trust material.
+        dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
+        dial_intents: None,
+        mcast_ingress: None,
+        mcast_members: None,
+        mcast_group_subs: None,
+        reconcile: None,
+        offer: SessionOffer::universal(),
+        retry,
+        stats: None,
+        max_links: 2,
+        // R2758 — unbounded: this suite's subject is per-link re-add.
+        max_sessions: usize::MAX,
+        accept: wz_runtime_tokio::accept_loop::AcceptBounds::default(),
+        ceiling: None,
+        peer_board: None,
+    }
+}
+
 /// The core slice-2 gate: A's production loop auto-re-adds a dropped dialed link.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
@@ -238,36 +280,10 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
     let a_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind A");
     let (a_shut_tx, a_shut_rx) = watch::channel(false);
     let a_loop = peer_loop(
-        FaceSources {
-            listeners: vec![BoundListener::Tcp(a_listener)],
-            // R2233 (open-debt item 585) — LOCATORS, built through the locator
-            // SSOT so the fixture reads the grammar a configured `--connect` does.
-            dial_targets: vec![
-                wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr}"))
-                    .expect("tcp/<addr> locator"),
-                wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr_2}"))
-                    .expect("tcp/<addr> locator"),
-            ],
-            // Plain tcp dials — no client trust material.
-            dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
-            dial_intents: None,
-            mcast_ingress: None,
-            mcast_members: None,
-            mcast_group_subs: None,
-            reconcile: None,
-            offer: SessionOffer::universal(),
-            // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth): this suite
-            // asserts the re-add lands, and its comment relies on "the 1s backoff
-            // means the del_link always lands first". The growth has its own witnesses.
-            retry: RetryPolicy::constant(1000),
-            stats: None,
-            max_links: 2,
-            // R2758 — unbounded: this test's subject is per-link re-add.
-            max_sessions: usize::MAX,
-            accept: wz_runtime_tokio::accept_loop::AcceptBounds::default(),
-            ceiling: None,
-            peer_board: None,
-        },
+        // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth): this test
+        // asserts the re-add lands, and its comment relies on "the 1s backoff
+        // means the del_link always lands first". The growth has its own witnesses.
+        a_dials_b_twice(a_listener, b_addr, b_addr_2, RetryPolicy::constant(1000)),
         fixture_params_with_zid(0x0A),
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
@@ -384,4 +400,164 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
     })
     .await
     .expect("the multilink per-link auto-re-add gate completes within 40s");
+}
+
+/// Poll `pred` until it holds or `budget` elapses.
+async fn wait_until(budget: Duration, pred: impl Fn() -> bool) -> bool {
+    let step = Duration::from_millis(10);
+    let mut waited = Duration::ZERO;
+    loop {
+        if pred() {
+            return true;
+        }
+        if waited >= budget {
+            return false;
+        }
+        tokio::time::sleep(step).await;
+        waited += step;
+    }
+}
+
+/// Kill B's newest link, the one A dialed last, and time A's re-add of it:
+/// from the kill to the join (the `joined_before`-th entry of `joins`, counted
+/// from 0) that brings the session back to two links.
+async fn kill_newest_and_time_readd(
+    b_links: &BLinks,
+    joins: &StdMutex<Vec<Instant>>,
+    joined_before: usize,
+) -> Duration {
+    let killed_at = {
+        let mut v = b_links.lock().unwrap();
+        let (task, actions) = v.pop().expect("B holds a link to kill");
+        task.abort();
+        drop(actions);
+        Instant::now()
+    };
+    assert!(
+        wait_until(Duration::from_secs(12), || joins.lock().unwrap().len()
+            > joined_before)
+        .await,
+        "A re-added the killed link onto its session"
+    );
+    let joined_at = joins.lock().unwrap()[joined_before];
+    joined_at.duration_since(killed_at)
+}
+
+/// The re-add's wait before its re-dial, and its growth after each one: wide
+/// enough apart that the second re-add of an address that kept its grown wait
+/// (`INIT_MS * FACTOR`) is told from one that started again (`INIT_MS`) by
+/// seconds, not by scheduler noise.
+const INIT_MS: u64 = 600;
+const FACTOR: u64 = 8;
+
+/// A re-added link that SUCCEEDED ends its address's outage: when the same
+/// link is lost again, its re-add waits the initial period, not the period the
+/// previous outage grew to. zenoh's `period` is a local of the connector that
+/// dies with the successful connect; the loop forgets the address's schedule
+/// when a dial to it opens.
+///
+/// Both losses kill the link to the SAME address (the re-added one is B's
+/// newest), so the second re-add reads the schedule the first one grew. The
+/// two re-adds are timed from the kill to the join, and the second may not
+/// exceed the first by half the growth: with the schedule forgotten the two
+/// are equal, kept they differ by `INIT_MS * (FACTOR - 1)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_readded_link_lost_again_waits_the_initial_period() {
+    let b_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind B");
+    let b_addr = b_listener.local_addr().expect("B addr");
+    let b_listener_2 = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind B again");
+    let b_addr_2 = b_listener_2.local_addr().expect("B's second addr");
+    let b_links: BLinks = Arc::new(StdMutex::new(Vec::new()));
+    let b_accept = spawn_b_acceptor(b_listener, b_links.clone());
+    let b_accept_2 = spawn_b_acceptor(b_listener_2, b_links.clone());
+
+    let a_state: Arc<StdMutex<CapState>> = Arc::new(StdMutex::new(CapState::default()));
+    let a_fwd = CapturingForwarder {
+        state: a_state.clone(),
+    };
+    // The instant of each join A reports: the first is the initial aggregation,
+    // each later one a re-add.
+    let joins: Arc<StdMutex<Vec<Instant>>> = Arc::new(StdMutex::new(Vec::new()));
+    let joins_sink = joins.clone();
+    let a_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind A");
+    let (a_shut_tx, a_shut_rx) = watch::channel(false);
+    let a_loop = peer_loop(
+        a_dials_b_twice(
+            a_listener,
+            b_addr,
+            b_addr_2,
+            RetryPolicy {
+                period_init_ms: INIT_MS,
+                period_max_ms: 0,
+                period_increase_factor: FACTOR as f64,
+            },
+        ),
+        fixture_params_with_zid(0x0A),
+        TokioTime::new(),
+        DEFAULT_OPEN_TICK_MS,
+        shutdown_on(a_shut_rx.clone()),
+        move |e: &AcceptEvent| {
+            if let AcceptEvent::LinkAggregated { live_links: 2, .. } = e {
+                joins_sink.lock().unwrap().push(Instant::now());
+            }
+        },
+        &a_fwd,
+    );
+
+    let harness = async move {
+        assert!(
+            wait_until(Duration::from_secs(12), || !joins
+                .lock()
+                .unwrap()
+                .is_empty())
+            .await,
+            "A aggregated its two dialed links into one session"
+        );
+        assert!(
+            wait_until(Duration::from_secs(6), || b_links.lock().unwrap().len()
+                >= 2)
+            .await,
+            "B accepted both of A's dialed links"
+        );
+
+        let first = kill_newest_and_time_readd(&b_links, &joins, 1).await;
+        assert!(
+            first >= Duration::from_millis(INIT_MS),
+            "the first re-add waits the initial period; it took {first:?}"
+        );
+        assert!(
+            wait_until(Duration::from_secs(6), || b_links.lock().unwrap().len()
+                >= 2)
+            .await,
+            "B accepted A's re-added link"
+        );
+        assert_eq!(
+            a_state.lock().unwrap().registered,
+            1,
+            "the re-add joined the same session"
+        );
+
+        let second = kill_newest_and_time_readd(&b_links, &joins, 2).await;
+        let half_growth = Duration::from_millis(INIT_MS * (FACTOR - 1) / 2);
+        assert!(
+            second < first + half_growth,
+            "the second loss of the same link must wait the initial period again \
+             (first re-add {first:?}, second {second:?}); a second re-add that \
+             waited the grown period ({} ms) kept the outage the successful \
+             re-add ended",
+            INIT_MS * FACTOR
+        );
+
+        let _ = a_shut_tx.send(true);
+        b_accept.abort();
+        b_accept_2.abort();
+    };
+
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let (_summary, _) = tokio::join!(a_loop, harness);
+    })
+    .await
+    .expect("the re-add schedule test completes within 40s");
 }

@@ -158,6 +158,13 @@ fn wz_peer_hosts_a_pico_client_queryable_across_the_mesh() {
     let received = z_querier_pair.as_mut().map(|(_, reader)| {
         wait_for_substring(reader, ">> Received ('demo/key'", Duration::from_secs(20))
     });
+    // The pico queryable is asserted on below, so it is waited on for its own
+    // line before it is stopped.
+    let _qabl_heard = wait_for_substring(
+        &mut z_qabl_reader,
+        "[Queryable handler] Received Query",
+        Duration::from_secs(15),
+    );
 
     // Teardown: kill the pico one-shots directly; graceful_terminate the wz peers. The
     // client-queryable witness is IN-TICK (already flushed to peer-A's stderr), so it

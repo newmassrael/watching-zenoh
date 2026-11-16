@@ -5660,6 +5660,8 @@ async fn run_peer_until(
     // floods a NODE-only link-state (a gossip `peer_to_peer` peer: `ingested`
     // rises but no reciprocal edge forms, so `announced_reciprocal` never trips).
     let mut announced_ingest = false;
+    // Fires the in-run future-push witness once, on the first proactive push.
+    let mut announced_future_push = false;
     // R311y48 (§5.23 Phase 3b) — config-write apply state: the deny keyexpr last
     // applied (so a repeated PUT of the same value reconfigures + logs ONCE, not
     // per tick — idempotent), and the high-water interceptor-drop count for the
@@ -5715,8 +5717,24 @@ async fn run_peer_until(
                         if all_up { "met (every dialled peer up)" } else { "passed" }
                     );
                 }
-                peak_nodes = peak_nodes.max(forwarder.north_net_node_count());
+                // The graph's growth, logged at each new peak: the in-run twin of the
+                // summary's peak, which a test waits on before it stops a neighbour
+                // this peer has not yet counted.
+                let nodes_now = forwarder.north_net_node_count();
+                if nodes_now > peak_nodes {
+                    log::info!("wz-ap-demo peer: topology graph reached {nodes_now} node(s)");
+                }
+                peak_nodes = peak_nodes.max(nodes_now);
                 peak_edges = peak_edges.max(forwarder.north_net_edge_count());
+                // The in-run twin of the summary's future-push witness, for the same
+                // reason; the count only grows, so the first push is the event.
+                if !announced_future_push && forwarder.future_pushes_seen() > 0 {
+                    announced_future_push = true;
+                    log::info!(
+                        "wz-ap-demo peer: pushed a future subscriber ({} push(es) so far)",
+                        forwarder.future_pushes_seen()
+                    );
+                }
                 // Ingest witness: this peer decoded a neighbour's link-state flood
                 // (the wire control-plane arrived). Logged once, on the positive
                 // edge — the post-ingest settle a topology e2e waits on regardless

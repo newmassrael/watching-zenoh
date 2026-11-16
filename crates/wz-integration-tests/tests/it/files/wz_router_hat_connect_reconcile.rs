@@ -108,6 +108,14 @@ fn wz_router_hat_reconcile_dials_new_endpoint() {
         "router-hat: routers-net converged (2 node(s))",
         Duration::from_secs(15),
     );
+    // R2's peak is asserted on below, so R2 is waited on for its own line:
+    // R1's convergence does not say R2 has taken R1's link-state in, and R1 is
+    // stopped first.
+    let _r2_converged = wait_for_substring(
+        &mut r2_reader,
+        "router-hat: routers-net converged (2 node(s))",
+        Duration::from_secs(15),
+    );
 
     graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));

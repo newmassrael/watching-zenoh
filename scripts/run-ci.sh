@@ -2232,6 +2232,11 @@ layer_c0_test_discipline() {
     # arm's history; its populations must all be non-zero or it exits 2.
     _runci_leg test_discipline_gate.selftest -- python3 scripts/lib/test_discipline_gate.py --selftest
     _runci_leg test_discipline_gate --after test_discipline_gate.selftest -- python3 scripts/lib/test_discipline_gate.py --check
+    # A multi-process test asserts only on a process it has waited on: one
+    # process's line stopped every process and another's log was graded, which
+    # redded a hosted mesh leg. A text scan of the test corpus, no build.
+    _runci_leg one_sided_wait_lint.selftest -- python3 scripts/lib/one_sided_wait_lint.py --selftest
+    _runci_leg one_sided_wait_lint --after one_sided_wait_lint.selftest -- python3 scripts/lib/one_sided_wait_lint.py --check
     # R2222 (open-debt items 568 + 569) — the MIRROR of the obligation above.
     # That one keeps Layer E from running a fixture another lane owns; this one
     # asks whether ANY lane runs it. Nothing had, four times: R311y528's drop-in
@@ -6876,6 +6881,13 @@ layer_c1bb_cargo_test_qos() {
     wz_test_args wz-runtime-tokio init_qos_link_reject
     _runci_guarded_test C1bb 2 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
+    # The multilink arm of the same rejects, on the same build: the Close reason an
+    # acceptor sends for an initiator key it cannot read, and the control that the
+    # key a wz initiator offers is answered. Gated on `transport-multilink`, which no
+    # default run builds. 2 = the file's two cases, counted from the source.
+    wz_test_args wz-runtime-tokio init_multilink_reject
+    _runci_guarded_test C1bb 2 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast "${WZ_TEST_ARGS[@]}" --quiet \
+        || return 1
     # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
     # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
     # default feature of wz-runtime-tokio: the three cases this round adds are
@@ -8401,6 +8413,13 @@ layer_c1af_cargo_test_shm() {
     wz_test_args wz-runtime-tokio shm_e2e
     _runci_guarded_test C1af 6 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
+    # The shared-memory arm of the establishment-extension rejects, on the same build:
+    # the Close reason an initiator sends for an OpenAck commitment it cannot honour,
+    # and the control that the same OpenAck with no offer behind it is ignored.
+    # 2 = the file's two cases, counted from the source.
+    wz_test_args wz-runtime-tokio open_shm_reject
+    _runci_guarded_test C1af 2 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
+        || return 1
     # R3122 -- the last two clippy runs are builds the lines before them do not reach: the runtime
     # with multilink, where the three tests of the leg above compile, and the core with the
     # extension and a codec that carries no buffer, where R3111's wrapper once named a function
@@ -9002,8 +9021,11 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # on B, so a dropped dialed link comes back onto the SAME session. The count
     # guard reddens the lane if a feature-set edit ever cfg-outs the
     # '#![cfg(all(...))]'-gated file to 0 tests (silent green).
+    # 1 -> 2: the same link lost again after a re-add that opened waits the
+    # initial period, the witness of the schedule's reset on a successful dial.
+    # 2 = the file's two cases, counted from the source.
     wz_test_args wz-runtime-tokio session_multilink_readd_e2e
-    _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
         || return 1
@@ -23512,9 +23534,12 @@ layer_e4i_demo_inert_flags() {
 # it here does not invalidate E3's assertions.
 layer_e5_router_forward() {
     (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
+    # Count-guarded: the file's three ignored legs, the two Push forwards and the
+    # wz querier reaching a wz queryable across the router (the query plane's leg
+    # that needs no foreign oracle). Counted from the source.
     wz_test_args wz-integration-tests wz_router_forward
-    (cd crates && cargo test -p wz-integration-tests \
-        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
+    _runci_guarded_test E5 3 cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R311y373 — the CROSS-IMPL half of routing-routes forwarding: real pico
     # z_pub / z_put -> wz --router (the router hat) -> real pico z_sub, the
     # §5.15 forwarding atom's foreign<->foreign witness (incl the pico publisher's
