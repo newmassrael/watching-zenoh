@@ -1279,9 +1279,9 @@ def stall_report(root: int, why: str) -> str:
     """Every process and thread of the tree under `root`: state, CPU, kernel wait channel and
     name, read from `/proc` without any privilege; then each process but cargo's own as `gdb`
     sees its threads. `gdb` attaches only where the host lets a non-ancestor trace
-    (`kernel.yama.ptrace_scope` 0): a refusal is written as it comes, and bx's own record of a run
-    that stays idle (`BX_RUN_STALL_BEGIN`, ten minutes) holds the stacks then, since bx's first
-    process of a run is an ancestor of the test."""
+    (`kernel.yama.ptrace_scope` 0): a refusal is written as it comes, and the record bx itself
+    takes of a run that stays idle for ten minutes holds the stacks then, since bx's first process
+    of a run is an ancestor of the test."""
     scope = read_text(pathlib.Path("/proc/sys/kernel/yama/ptrace_scope")).strip() or "?"
     lines = [f"z8-stall: {why}; root pid={root} ptrace_scope={scope}"]
     pids = process_tree(root)
