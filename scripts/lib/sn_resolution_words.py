@@ -85,6 +85,7 @@ import re
 import sys
 
 import test_sources
+import upstream_citation_anchor_gate as anchor
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -214,7 +215,16 @@ def upstream_mapping(path: pathlib.Path) -> dict[int, str]:
 
 
 def upstream_source() -> pathlib.Path | None:
-    """Upstream's `resolution.rs`, wherever this machine keeps it."""
+    """Upstream's `resolution.rs` AT `PIN`, wherever this machine keeps it.
+
+    Open-debt item 718: a hand-kept checkout (`WZ_ZENOH_SRC`, `~/zenoh-ref`) is
+    taken only when it declares `PIN`. It came first in this order and carried
+    no version, so a checkout left at an older release won over every
+    version-keyed root after it -- R2534's first derivation read 1.10.0 that
+    way. After the hand roots come the pinned checkout `upstream_root` resolves
+    (it checks the version too) and the registry crate keyed by `PIN`; a cargo
+    git checkout is reached only through `upstream_root`, which judges it.
+    """
     env = os.environ.get("WZ_ZENOH_SRC")
     roots: list[pathlib.Path] = []
     if env:
@@ -222,13 +232,13 @@ def upstream_source() -> pathlib.Path | None:
     roots.append(pathlib.Path.home() / "zenoh-ref")
     for root in roots:
         cand = root / UPSTREAM_REL
-        if cand.is_file():
+        if cand.is_file() and anchor.checkout_at_pin(root, PIN):
             return cand
+    pinned = anchor.upstream_root()
+    if pinned is not None and (pinned / UPSTREAM_REL).is_file():
+        return pinned / UPSTREAM_REL
     reg = pathlib.Path.home() / ".cargo" / "registry" / "src"
     for cand in sorted(reg.glob(f"*/zenoh-protocol-{PIN}/src/core/resolution.rs")):
-        return cand
-    checkouts = pathlib.Path.home() / ".cargo" / "git" / "checkouts"
-    for cand in sorted(checkouts.glob(f"zenoh-*/*/{UPSTREAM_REL}")):
         return cand
     return None
 
@@ -338,8 +348,9 @@ def cmd_derive(require: bool) -> int:
     src = upstream_source()
     if src is None:
         if require:
-            print("  sn-res-words FAIL -- required, and no zenoh-protocol source was\n"
-                  "    found (set WZ_ZENOH_SRC, or keep a checkout at ~/zenoh-ref).",
+            print(f"  sn-res-words FAIL -- required, and no zenoh-protocol source at\n"
+                  f"    {PIN} was found (set WZ_ZENOH_SRC to a checkout of {PIN}; a\n"
+                  f"    checkout of another release is passed over).",
                   file=sys.stderr)
             return 1
         print("  sn-res-words SKIP -- no zenoh-protocol source on this machine; "
@@ -516,6 +527,28 @@ def selftest(tmp: pathlib.Path) -> int:
                                    "ZENOHD_VERSION:-9.9.9"))
     case("a router pin that moved without re-deriving reds",
          rc5 == 1 and "and move PIN in the same commit" in why)
+
+    # Open-debt item 718 -- the resolver takes a hand-kept checkout only when
+    # it declares PIN. Both arms, since one arm cannot place the boundary: the
+    # same tree at PIN is taken, and at another release it is passed over.
+    for version, taken in ((PIN, True), ("9.9.8", False)):
+        root = tmp / f"zenoh-checkout-{version}"
+        (root / UPSTREAM_REL).parent.mkdir(parents=True, exist_ok=True)
+        (root / UPSTREAM_REL).write_text("// fixture\n")
+        (root / "Cargo.toml").write_text(
+            f'[workspace.package]\nversion = "{version}"\n')
+        saved = os.environ.get("WZ_ZENOH_SRC")
+        os.environ["WZ_ZENOH_SRC"] = str(root)
+        try:
+            got = upstream_source()
+        finally:
+            if saved is None:
+                os.environ.pop("WZ_ZENOH_SRC", None)
+            else:
+                os.environ["WZ_ZENOH_SRC"] = saved
+        case(f"a hand-kept checkout at {'PIN' if taken else 'another release'} "
+             f"is {'taken' if taken else 'passed over'}",
+             (got == root / UPSTREAM_REL) == taken)
 
     if failed == 0:
         print(f"  sn-res-words: selftest passed ({passed} cases, both verdicts)")

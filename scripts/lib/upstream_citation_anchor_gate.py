@@ -1298,21 +1298,36 @@ def upstream_root() -> pathlib.Path | None:
         root = path.parent.parent
         if not (root / "commons" / "zenoh-protocol" / "src" / "lib.rs").is_file():
             continue
+        if checkout_at_pin(root, want):
+            return root
+    return None
+
+
+def checkout_at_pin(root: pathlib.Path, want: str | None = None) -> bool:
+    """Whether a zenoh checkout declares the pinned version (`want`, by default
+    `UPSTREAM_VERSION`), read the way `upstream_root` reads it: the `zenoh`
+    crate's manifest, else the workspace manifest it inherits from.
+
+    The one answer for every reader that keeps a checkout of its own (open-debt
+    item 718): a hand-kept root that came before the version-keyed ones in a
+    resolver's order won whatever release it held. A root whose version cannot
+    be read is not at the pin.
+    """
+    if want is None:
+        try:
+            import upstream_feature_census as ufc
+        except ImportError:
+            return False
+        want = ufc.UPSTREAM_VERSION
+    for manifest in (root / "zenoh" / "Cargo.toml", root / "Cargo.toml"):
+        if not manifest.is_file():
+            continue
         m = re.search(
-            r'^version\s*=\s*"([^"]+)"', path.read_text(errors="replace"), re.M
+            r'^version\s*=\s*"([^"]+)"', manifest.read_text(errors="replace"), re.M
         )
         if m and m.group(1) == want:
-            return root
-        # A workspace member inherits its version; fall back to the workspace
-        # manifest beside it, which is where `zenoh` declares the real number.
-        ws = root / "Cargo.toml"
-        if ws.is_file():
-            m = re.search(
-                r'^version\s*=\s*"([^"]+)"', ws.read_text(errors="replace"), re.M
-            )
-            if m and m.group(1) == want:
-                return root
-    return None
+            return True
+    return False
 
 
 def scan(
