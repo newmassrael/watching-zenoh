@@ -1038,10 +1038,14 @@ reads both shapes with a multishot receive over buffers it provides
 to the kernel, which its push model needs (a read is armed at all
 times, so the buffer is chosen when data arrives); in the pull model
 the destination is known when the read is armed, so the datagram
-needs only its framing rule and not that submission shape. The
-trade: a datagram's size is not known when its read is armed, so
-each lands in a slot sized for the largest, as upstream's provided
-buffers are sized at one and a half batches. An unconnected UDP
+needs only its framing rule and not that submission shape. A
+datagram's size is not known when its read is armed, so each lands
+in a slot sized for the largest, as upstream's provided buffers are
+sized at one and a half batches; the datagram receive pool's size
+rule then holds anyway, by a receive copy-break: a datagram the rule
+calls small is copied into a small slot and the wide slot goes home
+at once, so a kept sample holds the slot the socket read would have
+given it. An unconnected UDP
 socket (an accepted face behind the source demux) stays off the
 ring on both sides.
 
