@@ -470,6 +470,58 @@ impl Default for RoutingTableSharing {
     }
 }
 
+/// `reassembly-pool-overflow`: What a node does with the first fragment of a new fragmented
+/// message when every slot of its reassembly pool holds a message still arriving. The pool
+/// is shared by all the node's peers and bounded, where upstream gives each peer and
+/// channel a buffer of its own; sizing the pool at twice the peer table keeps the moment
+/// from arising. `reject` drops the new message's fragments and keeps the messages already
+/// arriving, which is what wz did before this policy. `diagnostic-event` does the same and
+/// logs a warning, reassembly/slot-pool-full, at each such drop. `oldest-wins` ends the
+/// message whose first fragment came earliest, of whichever peer, and gives its slot to the
+/// new one: the ended message is reported as evicted and its later fragments are not joined
+/// to it, so the newest traffic is kept and a peer that stalls mid-message loses that
+/// message before its deadline. A peer already holding its quota of messages is refused
+/// before the pool is looked at, whatever the value.
+/// Upstream: Keeps one defragmentation buffer for each peer and channel, so a new
+/// fragmented message never waits on another peer's and there is no shared pool to fill.
+/// None of the three values is upstream's, since upstream has no such moment; `reject` is
+/// what wz did before the policy existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReassemblyPoolOverflow {
+    /// `reject`.
+    Reject,
+    /// `diagnostic-event`.
+    DiagnosticEvent,
+    /// `oldest-wins`.
+    OldestWins,
+}
+
+impl ReassemblyPoolOverflow {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::DiagnosticEvent => "diagnostic-event",
+            Self::OldestWins => "oldest-wins",
+        }
+    }
+
+    const CHOICES: [&str; 3] = ["reject", "diagnostic-event", "oldest-wins"];
+    const ALL: [Self; 3] = [Self::Reject, Self::DiagnosticEvent, Self::OldestWins];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_REASSEMBLY_POOL_OVERFLOW");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for ReassemblyPoolOverflow {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -558,6 +610,11 @@ pub struct SessionPolicy {
     /// reader-writer lock (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face
     /// coming up or one leaving waits for the messages being routed, and they wait for it.
     pub routing_table_sharing: RoutingTableSharing,
+    /// `reassembly-pool-overflow`. Upstream: Keeps one defragmentation buffer for each peer
+    /// and channel, so a new fragmented message never waits on another peer's and there is
+    /// no shared pool to fill. None of the three values is upstream's, since upstream has
+    /// no such moment; `reject` is what wz did before the policy existed.
+    pub reassembly_pool_overflow: ReassemblyPoolOverflow,
 }
 
 impl SessionPolicy {
@@ -587,6 +644,7 @@ impl SessionPolicy {
         let clock_quality_stamping = ClockQualityStamping::stated();
         let routing_face_drive = RoutingFaceDrive::stated();
         let routing_table_sharing = RoutingTableSharing::stated();
+        let reassembly_pool_overflow = ReassemblyPoolOverflow::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
@@ -609,6 +667,7 @@ impl SessionPolicy {
             clock_quality_stamping,
             routing_face_drive,
             routing_table_sharing,
+            reassembly_pool_overflow,
         }
     }
 }

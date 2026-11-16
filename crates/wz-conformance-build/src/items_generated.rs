@@ -374,4 +374,10 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         &["rwlock", "snapshot"],
         "rwlock",
     ),
+    (
+        "reassembly-pool-overflow",
+        "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW",
+        &["reject", "diagnostic-event", "oldest-wins"],
+        "reject",
+    ),
 ];
