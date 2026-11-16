@@ -1202,6 +1202,10 @@ round_fed_gates=(
     "family_notice_gate.py --check"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
+    # Items 221 and 255 -- a `path:LINE` citation of this tree in a source or script
+    # comment names a tracked file and a line it has. Fed by every comment a round
+    # edits and every file it moves; a text read, no build.
+    "tree_citation_gate.py --check"
     # R3182 -- a file a standing atom reason cites moved while its review pin did
     # not (open-debt item 756). Round-fed by the store and the tracked tree, a
     # text read and one `git hash-object`, no build.

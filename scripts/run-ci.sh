@@ -3707,6 +3707,13 @@ layer_c0_test_discipline() {
     # never execute.
     _runci_leg reason_citation_gate.selftest -- python3 scripts/lib/reason_citation_gate.py --selftest
     _runci_leg reason_citation_gate --after reason_citation_gate.selftest -- python3 scripts/lib/reason_citation_gate.py
+    # Items 221 and 255 -- a `path:LINE` citation of this tree in a source or
+    # script comment resolves; append-round.sh runs the --prose half on a
+    # round's ledger prose, and round_prose_shape.py refuses a hard-wrapped
+    # bullet file there (item 182).
+    _runci_leg tree_citation_gate.selftest -- python3 scripts/lib/tree_citation_gate.py --selftest
+    _runci_leg tree_citation_gate --after tree_citation_gate.selftest -- python3 scripts/lib/tree_citation_gate.py --check
+    _runci_leg round_prose_shape.selftest -- python3 scripts/lib/round_prose_shape.py --selftest
     # R3182 (open-debt item 756) -- the citation gate above says a cited file
     # still resolves, not that the sentence citing it is still true. This pins
     # each file a remaining atom's reason cites to the blob a round last read the

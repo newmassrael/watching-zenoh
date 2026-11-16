@@ -402,7 +402,7 @@ fn main() {
         // `_z_keyexpr_canonize`. The status enum
         // `zp_keyexpr_canon_status_t` maps 1:1 to wz's
         // `KeyexprCanonError` variants per the wz module doc-comment
-        // (`crates/wz-runtime-tokio/src/keyexpr_canon.rs:64-65`); the
+        // (`crates/wz-session-core/src/keyexpr_canon.rs:72-74`); the
         // Layer 3 fixture pins both the success-side output strings
         // and the failure-side status codes for byte-equal /
         // discriminant-equal agreement.
