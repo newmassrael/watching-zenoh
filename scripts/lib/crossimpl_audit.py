@@ -1185,7 +1185,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # subscriber, so wz's companion keepalives are adjudicated by zenohd's own companion lease
 # (`transport-link-quic zenohd->wz`): 1 test x 1 atom = 1. Measured by
 # `audit-crossimpl-proof.sh` (`measured 1095, declared 1094`).
-FOREIGN_ADJUDICATOR_LINKS = 1095
+# Config-key effect witnesses -- 1095 -> 1101, RISING by six: one config document handed to an
+# upstream implementation and to wz for six keys. `zenoh_c_shm_session_keys_twice_and_diff.rs`
+# (three tests: the promotion threshold, the promoted messages list, the shared-memory mode) and
+# `zenoh_c_multicast_max_sessions_twice_and_diff.rs` (one), each `api-compat-c zenoh-c->wz
+# partial`; `wz_tls_close_on_expiry_zenohd_interop.rs` (`transport-link-tls zenohd->wz partial`)
+# and `wz_unixpipe_file_mask_zenohd_interop.rs` (`transport-link-unixpipe zenohd->wz partial`):
+# 6 tests x 1 atom = 6. Counted from the diff, not yet measured.
+FOREIGN_ADJUDICATOR_LINKS = 1101
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

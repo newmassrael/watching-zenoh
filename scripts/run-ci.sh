@@ -21003,6 +21003,13 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         _runci_guarded_test "M zenoh-c multicast group on wz" 4 \
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
+        # `transport/multicast/max_sessions` from one config document: upstream's `z_sub.c`
+        # held to one member hears the first `z_pub.c` on its group and not the second, on
+        # libzenohc first and on wz, and the same document without the cap hears both.
+        wz_test_args wz-integration-tests zenoh_c_multicast_max_sessions_twice_and_diff
+        _runci_guarded_test "M zenoh-c multicast member cap" 1 \
+            cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     fi
     # R2586 — the `#join=` key with a FOREIGN sender: pico `z_pub` in its own
     # network namespace publishes to a group wz reaches only through `#join=` on
@@ -23261,6 +23268,15 @@ layer_z_zenohd_interop() {
     _runci_guarded_test "Z link socket options" 2 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    # `transport/link/tls/close_link_on_expiration` from one config document: zenohd as the
+    # dialer first, then the demo, against a stock zenohd listening under a certificate that
+    # expires seconds later, whose own adminspace says whether the `tls/` link outlived it.
+    # Without the key it does on both, with it on both it does not. The demo needs `tls` and
+    # `zenoh-config`, both in the build above.
+    wz_test_args wz-integration-tests wz_tls_close_on_expiry_zenohd_interop
+    _runci_guarded_test "Z tls close on expiry" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2594 — the QoS a queryable's REPLY carries, adjudicated by a stock zenoh
     # queryable answering the same stock `z_get` through the same zenohd. The
     # expected byte is not written in the test: each run records the stock
@@ -23576,6 +23592,13 @@ layer_z_zenohd_interop() {
         # reddens instead of silently passing.
         wz_test_args wz-integration-tests wz_unixpipe_zenohd_dataplane
         _runci_guarded_test "Z unixpipe dataplane" 4 \
+            env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+        # `transport/link/unixpipe/file_access_mask` from one config document: the mode of the
+        # request FIFO a unixpipe listener creates, zenohd's first and then the demo's, read
+        # with `stat`. Same oracle, same demo build.
+        wz_test_args wz-integration-tests wz_unixpipe_file_mask_zenohd_interop
+        _runci_guarded_test "Z unixpipe file mask" 1 \
             env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     elif [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
@@ -26022,6 +26045,36 @@ layer_c1cc_api_compat_c() {
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc" \
+        || return 1
+    # The shared-memory keys a SESSION applies, one config document to the real library's
+    # program and to the same program on wz: a put's copy into the session's provider by
+    # `message_size_threshold` and by the `messages` list, read off a real receiver's
+    # `z_bytes_as_loaned_shm`, and the subsystem an `init` open maps where a `lazy` one does
+    # not, read off the program's own `/proc/self/maps`. SKIPs on an oracle without the
+    # SHM+unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
+    _runci_guarded_test \
+        "C1cc the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc" \
+        || return 1
+    wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
+    _runci_guarded_test \
+        "C1cc the_promoted_messages_list_decides_whether_a_put_travels_as_shared_memory_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}the_promoted_messages_list_decides_whether_a_put_travels_as_shared_memory_on_wz_and_libzenohc" \
+        || return 1
+    wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
+    _runci_guarded_test \
+        "C1cc the_shared_memory_mode_decides_whether_the_open_maps_the_subsystem_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}the_shared_memory_mode_decides_whether_the_open_maps_the_subsystem_on_wz_and_libzenohc" \
         || return 1
     # R3067 -- the ROLES of a session: what `z_open` makes of the endpoints a config states. A
     # peer or router with none opens alone (wz answered -1), a client with none, or with only a
