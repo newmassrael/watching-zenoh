@@ -7802,10 +7802,12 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @values row_facts check
  * @values row_facts counter_reason
  * @values row_facts direction
+ * @values row_facts displaced
  * @values row_facts ended_by
  * @values row_facts eps_basis
  * @values row_facts family
  * @values row_facts ending
+ * @values row_facts initial_sn_derivation
  * @values row_facts keyexpr_carriage
  * @values row_facts keyexpr_cause
  * @values row_facts keyexpr_source
@@ -7839,10 +7841,12 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @carries row_facts check passenger
  * @carries row_facts counter_reason passenger
  * @carries row_facts direction passenger
+ * @carries row_facts displaced passenger
  * @carries row_facts ended_by passenger
  * @carries row_facts eps_basis passenger
  * @carries row_facts family passenger
  * @carries row_facts ending passenger
+ * @carries row_facts initial_sn_derivation passenger
  * @carries row_facts keyexpr_carriage passenger
  * @carries row_facts keyexpr_cause passenger
  * @carries row_facts keyexpr_source passenger
