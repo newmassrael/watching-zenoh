@@ -46,7 +46,11 @@ so the population can never be silently empty:
   * `bound`    — a code-read literal in a file that also READS a pin SSOT
                  (directly, or through the shared deriver). The tripwire works.
   * `unbound`  — a code-read literal in a file that reads no pin at all. FAIL.
-  * `fixture`  — a literal inside a test/selftest/fixture function.
+  * `fixture`  — a literal inside a test/selftest/fixture function whose value
+                 is self-contained there. Counted.
+  * `coupled`  — a fixture literal used to READ OR CHANGE tree content: an
+                 argument of a text operation (`.replace`, `re.sub`, `in`, ...)
+                 on text the same function read from the tree. FAIL.
   * `prose`    — a comment or docstring. It rots without breaking anything,
                  which is a different defect with a different prescription
                  (R2333 class), so it is counted and not failed.
@@ -60,17 +64,22 @@ is covered by construction. Item 690's hand list named two pins; the derived
 population is six, across four distinct ref literals, and the third shell SSOT
 (`install-mbedtls.sh`) was in none of the item's notes.
 
-## ⚠ WHAT THIS DOES NOT REACH, stated rather than discovered
+## A fixture holding a live pin: coincidence or coupling (open-debt item 719)
 
-`fixture` is COUNTED, not graded. Item 690 asks that a selftest fixture spell a
-FAKE version, so that a fixture cannot silently stop exercising its claim when
-the pin moves — R2535 measured that exact loss. Both fixture sites carrying a
-current pin today (`upstream_release_distance.py:904`, `:943`) were opened and
-are NOT that defect: their values are self-contained arithmetic cases whose
-literals merely happen to equal a live pin, with nothing coupling them to the
-tree. Failing them would be a false positive, and the discriminator that would
-separate a coincidence from a coupling is not derived yet. Counting the kind
-keeps the axis visible and countable instead of absent.
+Item 690 asks that a selftest fixture spell a FAKE version, so that a fixture
+cannot silently stop exercising its claim when the pin moves — R2535 measured
+that exact loss: `sn_resolution_words.py` mutated the build script with
+`.replace("ZENOHD_VERSION:-<pin>", ...)`, and once the pin moved the replace
+matched nothing and the mutation arm proved nothing. The fixture sites that
+carry a current pin otherwise are self-contained cases (a tuple of versions, a
+captured log line) whose literal merely EQUALS the pin; failing them would be a
+false positive.
+
+The discriminator is read from the function's structure (`coupled_lines`): a
+name is TREE TEXT when it is bound from a read whose expression names the repo
+root or a pin SSOT, or from another tree-text name, and a literal is COUPLED
+when it is an argument of a text operation on tree text, or the left side of an
+`in` against it. Everything else in a fixture stays `fixture`.
 """
 
 from __future__ import annotations
@@ -106,7 +115,20 @@ READERS = frozenset({"read_text", "open"})
 FIXTURE_WORDS = ("test", "fixture")
 
 SSOT, BOUND, UNBOUND, FIXTURE, PROSE = "ssot", "bound", "unbound", "fixture", "prose"
-KINDS = (SSOT, BOUND, UNBOUND, FIXTURE, PROSE)
+COUPLED = "coupled"
+KINDS = (SSOT, BOUND, UNBOUND, FIXTURE, COUPLED, PROSE)
+
+#: The operations that compare a literal to text or change text by it. A method
+#: is called on the text (`text.replace(lit, ..)`); an `re` function takes the
+#: text as an argument (`re.sub(lit, .., text)`).
+TEXT_METHODS = frozenset(
+    {"replace", "find", "rfind", "index", "rindex", "count", "startswith",
+     "endswith", "split", "rsplit", "partition", "rpartition"}
+)
+RE_FUNCTIONS = frozenset({"sub", "subn", "search", "match", "fullmatch", "findall", "finditer"})
+
+#: The repo root as this tree's scripts name it (`ROOT`, `REPO_ROOT`).
+ROOT_NAME_RE = re.compile(r"\b[A-Z_]*ROOT\b")
 
 
 class Site:
@@ -195,6 +217,108 @@ def reads_a_pin(text: str, ssots: set[str]) -> bool:
     return False
 
 
+def _bindings(tree: ast.AST) -> dict[str, str]:
+    """`NAME -> the strings and names its assigned expression is built from`,
+    so a read spelled through a constant (`BUILD.read_text()`) resolves to the
+    path and root it was built from."""
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        parts = [
+            n.value if isinstance(n, ast.Constant) else n.id
+            for n in ast.walk(node.value)
+            if (isinstance(n, ast.Constant) and isinstance(n.value, str))
+            or isinstance(n, ast.Name)
+        ]
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                out[t.id] = " ".join(parts)
+    return out
+
+
+def _names_in(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _is_tree_read(node: ast.AST, bindings: dict[str, str], ssots: set[str]) -> bool:
+    """A `read_text`/`open` call whose expression names the repo root or a pin
+    SSOT, directly or through a binding. A read of a scratch file is not one."""
+    if not isinstance(node, ast.Call):
+        return False
+    fn = node.func
+    name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+    if name not in READERS:
+        return False
+    words: list[str] = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            words += [n.id, bindings.get(n.id, "")]
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            words.append(n.value)
+    blob = " ".join(words)
+    return bool(ROOT_NAME_RE.search(blob)) or any(s in blob for s in ssots)
+
+
+def coupled_lines(
+    fn: ast.AST, bindings: dict[str, str], ssots: set[str], literals: list[str]
+) -> set[int]:
+    """Lines of `fn` where a pin literal is used on text read from the tree.
+
+    Open-debt item 719. Tree text is a read (`_is_tree_read`) or a name bound,
+    in `fn`, from an expression holding one or holding another tree-text name.
+    A literal is coupled when it is an argument of a `TEXT_METHODS` call on
+    tree text, of an `re` function given tree text, or the left side of `in` /
+    `not in` against tree text: those are the uses that stop doing anything,
+    silently, when the pin moves and the tree no longer holds the old literal.
+    """
+    assigns = [
+        n for n in ast.walk(fn)
+        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and n.value is not None
+    ]
+    tainted: set[str] = set()
+
+    def tree_text(expr: ast.AST) -> bool:
+        return bool(_names_in(expr) & tainted) or any(
+            _is_tree_read(c, bindings, ssots) for c in ast.walk(expr)
+        )
+
+    changed = True
+    while changed:
+        changed = False
+        for a in assigns:
+            if not tree_text(a.value):
+                continue
+            targets = a.targets if isinstance(a, ast.Assign) else [a.target]
+            for name in set().union(*(_names_in(t) for t in targets)) - tainted:
+                tainted.add(name)
+                changed = True
+
+    def literal_lines(nodes: list[ast.AST]) -> set[int]:
+        return {
+            c.lineno
+            for node in nodes
+            for c in ast.walk(node)
+            if isinstance(c, ast.Constant) and isinstance(c.value, str)
+            and any(lit in c.value for lit in literals)
+        }
+
+    out: set[int] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            attr, owner = node.func.attr, node.func.value
+            if attr in TEXT_METHODS and tree_text(owner):
+                out |= literal_lines(node.args)
+            elif (attr in RE_FUNCTIONS and isinstance(owner, ast.Name) and owner.id == "re"
+                  and any(tree_text(a) for a in node.args)):
+                out |= literal_lines([a for a in node.args if not tree_text(a)])
+        elif isinstance(node, ast.Compare):
+            for op, right in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)) and tree_text(right):
+                    out |= literal_lines([node.left])
+    return out
+
+
 def _code_before_comment(line: str, literals: list[str]) -> bool:
     """Is the literal on the CODE side of a trailing `#`, not inside it?
 
@@ -225,12 +349,16 @@ def classify_py(path: str, text: str, literals: list[str], ssots: set[str]) -> l
         if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)):
             docs.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-    fixtures = [
-        (n.lineno, n.end_lineno or n.lineno)
-        for n in ast.walk(tree)
+    fixture_fns = [
+        n for n in ast.walk(tree)
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         and any(w in n.name.lower() for w in FIXTURE_WORDS)
     ]
+    fixtures = [(n.lineno, n.end_lineno or n.lineno) for n in fixture_fns]
+    bindings = _bindings(tree)
+    coupled: set[int] = set()
+    for fn in fixture_fns:
+        coupled |= coupled_lines(fn, bindings, ssots, literals)
     bound = reads_a_pin(text, ssots)
     out: list[Site] = []
     for n, ln in hits:
@@ -239,7 +367,7 @@ def classify_py(path: str, text: str, literals: list[str], ssots: set[str]) -> l
         elif n in comments and not _code_before_comment(ln, literals):
             kind = PROSE
         elif any(a <= n <= b for a, b in fixtures):
-            kind = FIXTURE
+            kind = COUPLED if n in coupled else FIXTURE
         else:
             kind = BOUND if bound else UNBOUND
         out.append(Site(path, n, kind, ln))
@@ -321,9 +449,22 @@ def report(sites: list[Site], literals: list[str], files: int) -> tuple[int, lis
                 f"checkout."
             )
         return 1, lines
+    tied = [s for s in sites if s.kind == COUPLED]
+    if tied:
+        for s in tied:
+            lines.append(
+                f"  pin-constant-binding: FAIL -- {s.path}:{s.line} is a fixture "
+                f"that spells a current pin and uses it on text read from the "
+                f"tree.\n    {s.text[:88]}\n"
+                f"    When the pin moves the tree stops holding that literal and "
+                f"the operation matches\n    nothing, so the fixture stops "
+                f"exercising its claim without failing (R2535). Build\n    the "
+                f"literal from the pin the file reads, not from a copy of it."
+            )
+        return 1, lines
     lines.append(
         "  pin-constant-binding: OK -- every code-read pin literal is in a file "
-        "that reads a pin."
+        "that reads a pin, and no fixture uses one on tree text."
     )
     return 0, lines
 
@@ -423,6 +564,48 @@ def selftest() -> int:
     want("prose is prose", set(kinds("prose.py", prose)), {PROSE})
     fx = f'N = 1\ndef selftest():\n    return ["{FAKE}"]\n'
     want("a selftest literal is a fixture", kinds("fx.py", fx), [FIXTURE])
+
+    # Open-debt item 719 -- a fixture literal used on TREE text is coupled; the
+    # same operation on text the fixture made is not. The first arm is R2535's
+    # shape: a mutation of the build script by a replace that names the pin.
+    coupled_replace = (
+        'BUILD = ROOT / "scripts" / "build-zenohd.sh"\n'
+        "def selftest():\n"
+        "    text = BUILD.read_text()\n"
+        f'    return text.replace("ZENOHD_VERSION:-{FAKE}", "ZENOHD_VERSION:-9.9.9")\n'
+    )
+    want("a replace on the read build script is coupled",
+         kinds("coupled_replace.py", coupled_replace), [COUPLED])
+    coupled_in = (
+        "def selftest():\n"
+        '    text = (ROOT / "deploy" / "x.toml").read_text()\n'
+        f'    return "{FAKE}" in text\n'
+    )
+    want("a membership test against a tree read is coupled",
+         kinds("coupled_in.py", coupled_in), [COUPLED])
+    coupled_re = (
+        "def selftest():\n"
+        f'    return re.sub("{FAKE}", "x", (REPO_ROOT / "x.sh").read_text())\n'
+    )
+    want("an re substitution over a tree read is coupled",
+         kinds("coupled_re.py", coupled_re), [COUPLED])
+    local_replace = (
+        "def selftest():\n"
+        f'    text = "ZENOHD_VERSION:-{FAKE}"\n'
+        f'    return text.replace("ZENOHD_VERSION:-{FAKE}", "x")\n'
+    )
+    want("the same replace on text the fixture made is not coupled",
+         kinds("local_replace.py", local_replace), [FIXTURE, FIXTURE])
+    scratch_replace = (
+        "def selftest(tmp):\n"
+        '    text = (tmp / "x.sh").read_text()\n'
+        f'    return text.replace("{FAKE}", "x")\n'
+    )
+    want("a replace on a scratch file the fixture wrote is not coupled",
+         kinds("scratch_replace.py", scratch_replace), [FIXTURE])
+    want("a coupled fixture fails",
+         report(classify({**base, "scripts/lib/c.py": coupled_replace}, [FAKE]),
+                [FAKE], 2)[0], 1)
 
     # A trailing comment must not launder the assignment on the same line.
     want("a trailing comment does not launder an assignment",
