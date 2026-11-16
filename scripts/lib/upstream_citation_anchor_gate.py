@@ -700,8 +700,8 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "auth": 5,
     "codec": 4,
     "dispatcher": 48,
-    "establishment": 34,
-    "ext": 14,
+    "establishment": 33,
+    "ext": 13,
     "lowlatency": 4,
     "memory_backend": 11,
     "protocol": 7,
@@ -828,7 +828,12 @@ def rootless_undeclared_budget() -> int:
 # handshake sizes, a line-form citation at an old release, left with the rewrite that offers the
 # frame SN width the file names (ef13546679).
 # 482 -> 480, the same two line-form removals as ROOTLESS_LINE_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 480
+# 480 -> 478, the `establishment` row 34 -> 33 and the `ext` row 14 -> 13: the
+# driver loop's note on the refused shared-memory extension was rewritten
+# without its two root-less citations, and the four root-less `unicast` tokens
+# the establishment-reject tests that came with it were written with now carry
+# their root and a needle.
+ROOTLESS_TOTAL_BUDGET = 478
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

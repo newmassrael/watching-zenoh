@@ -6,8 +6,10 @@
 //!
 //! A `QoSLink` body upstream cannot read (`State::try_from_u64`'s `zerror!`)
 //! aborts the handshake, and zenoh closes every extension handler's failure
-//! GENERIC (`unicast/establishment/accept.rs` maps the error to
-//! `close::reason::GENERIC`), keeping INVALID for the body's size parameters.
+//! GENERIC (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+//! `(init_syn.ext_qos, init_syn.ext_qos_link),` is mapped by the
+//! `map_err` after it to `close::reason::GENERIC`), keeping INVALID for the
+//! body's size parameters.
 //! wz takes the `establishment.ext_rejected` arm for it. The reason value is
 //! asserted here, as the auth arm's is in `usrpwd_handshake_e2e`: an arm that
 //! set the wrong reason would otherwise still tear the session down and pass

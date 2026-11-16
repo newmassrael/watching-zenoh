@@ -7,8 +7,9 @@
 //! An acceptor that negotiates multilink requires the initiator's ephemeral
 //! public key in the InitSyn's `0x4` extension; a key it cannot read aborts
 //! the handshake, and zenoh closes every extension handler's failure GENERIC
-//! (`unicast/establishment/accept.rs` maps the error to
-//! `close::reason::GENERIC`). wz takes the `establishment.ext_rejected` arm for
+//! (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+//! `.recv_init_syn((&mut state.transport.ext_mlink, init_syn.ext_mlink))` is
+//! mapped by the `map_err` after it to `close::reason::GENERIC`). wz takes the `establishment.ext_rejected` arm for
 //! it. The reason value is asserted here, as the auth arm's is in
 //! `usrpwd_handshake_e2e` and the `QoSLink` arm's in `init_qos_link_reject`:
 //! an arm that set the wrong reason would otherwise still tear the session

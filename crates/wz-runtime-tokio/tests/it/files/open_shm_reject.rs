@@ -8,10 +8,12 @@
 //! OpenAck. An initiator that could not use the offer (it mapped no segment, so
 //! it proposed nothing on its OpenSyn) cannot honour that commitment, and zenoh
 //! 1.10.2 refuses the link rather than run with shared memory on one side only
-//! (`unicast/establishment/ext/shm/auth.rs` @ `SHM acknowledgement without a
-//! local proposal`); the error leaves the establishment through the extension
-//! handler's `map_err`, which closes GENERIC
-//! (`unicast/establishment/open.rs`). wz takes the
+//! (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @
+//! `SHM acknowledgement without a local proposal`); the error leaves the
+//! establishment through the extension handler's `map_err`, which closes
+//! GENERIC (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+//! `ext.recv_open_ack(open_ack.ext_shm)`, then
+//! `.map_err(|e| (e, Some(close::reason::GENERIC)))?`). wz takes the
 //! `establishment.ext_rejected` arm for it. The reason value is asserted here,
 //! as the auth arm's is in `usrpwd_handshake_e2e`: an arm that set the wrong
 //! reason would otherwise still tear the session down and pass every test that
