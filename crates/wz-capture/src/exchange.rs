@@ -707,7 +707,7 @@ impl ExchangeTable {
             Carried::FragmentWithoutResolution => self.unread.unresolvable_fragments += 1,
             Carried::Nothing => {}
             #[cfg(feature = "reassembly")]
-            Carried::Fragment(_) => {}
+            Carried::Fragment { .. } => {}
         }
     }
 

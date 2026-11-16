@@ -290,9 +290,10 @@ pub type ChainKey = (crate::passive::Direction, bool, crate::qos::Priority);
 ///
 /// The fold follows the router's OWN outcome rather than re-judging anything:
 ///
-/// * `Begun` opens a new identity. A chain already open on the key was ended by
-///   the router without a row (a `First` restart, or a deadline sweep), so
-///   minting unconditionally is what keeps the two in step.
+/// * A fragment the router says displaced the chain open on its key (a `First`
+///   restart, [`crate::passive::Carried::displaced`]) ends that chain first,
+///   whatever its own outcome.
+/// * `Begun` opens a new identity.
 /// * `Continued` takes the key's open identity, or none when the chain began
 ///   before the first message the fold has seen.
 /// * `Reassembled` and `Aborted` take it and close it, or mint one for a chain
@@ -313,7 +314,8 @@ pub type ChainKey = (crate::passive::Direction, bool, crate::qos::Priority);
 ///
 /// A chain that ends without being reassembled is kept as an [`EndedChain`]
 /// until [`Self::take_ended`] hands it on: one an `Aborted` row ended, one a
-/// `Begun` on its key replaced (the router's restart), and one the caller ends
+/// restart on its key displaced (the router's word on the restarting row), and
+/// one the caller ends
 /// with [`Self::end`] because the router's sweep did (its deadline passed, or
 /// the capture ended). Each says what it had staged and, when its first
 /// fragment began a message, what that message's head shows.
@@ -359,7 +361,9 @@ pub enum ChainEnding {
     /// A fragment row ended it, for the reason given; that row reads `aborted`.
     Aborted(crate::reassembly_dispatch::AbortReason),
     /// A fragment that began a new chain on its key ended it (the router's
-    /// restart on a `First` marker); the new chain's first row reads `begun`.
+    /// restart on a `First` marker); the new chain's first row reads `begun`,
+    /// or `reassembled` when it is its whole chain, and carries the router's
+    /// `displaced` word.
     Superseded,
     /// Its deadline passed with no fragment to continue it.
     Expired,
@@ -445,7 +449,7 @@ impl ChainFold {
         let (sn, length) = (*sn, payload.len() as u64);
         let key = (frame.direction, *reliable, *priority);
         let outcome = match &frame.carried {
-            Carried::Fragment(outcome) => *outcome,
+            Carried::Fragment { outcome, .. } => *outcome,
             // The joiner handed a payload back on this fragment.
             Carried::Reassembled { .. } => IngestOutcome::Reassembled,
             // The router ran on a flow with no SN resolution and ended the chain
@@ -467,12 +471,21 @@ impl ChainFold {
         };
         // Whether a chain beginning on this fragment begins at a message.
         let starts = markers.first || self.at_boundary(key);
+        // The chain the router ended for this fragment before deciding the
+        // fragment's own: a restart ends the chain open on the fragment's own
+        // key. Named by the router rather than inferred here, so a restart
+        // that completes on its own fragment (`Reassembled`) ends the old chain
+        // too instead of being joined to it. The observer's routers refuse a
+        // start on a full pool rather than evict (`ReassemblyConfig::new`), so
+        // `Evicted`, which names no key, does not reach this fold.
+        if frame.carried.displaced() == Some(crate::reassembly_dispatch::DisplacedChain::Superseded)
+        {
+            if let Some(replaced) = self.take_open(key) {
+                self.record_ended(key, replaced, ChainEnding::Superseded);
+            }
+        }
         match outcome {
             IngestOutcome::Begun => {
-                // A chain still open here was ended by the router's restart.
-                if let Some(replaced) = self.take_open(key) {
-                    self.record_ended(key, replaced, ChainEnding::Superseded);
-                }
                 let mut open = self.begin(sn, starts, payload);
                 fact.chain_id = Some(open.id);
                 fact.placed = Some(open.held.take(length, sn));
@@ -2105,11 +2118,18 @@ struct Sparse {
     sn_verdict: Option<SnVerdict>,
     /// The resynchronisation a unit's first row carried.
     resync: Option<StreamResync>,
+    /// The other open chain a fragment row ended ([`MessageFacts::displaced`]).
+    #[cfg(feature = "reassembly")]
+    displaced: Option<crate::reassembly_dispatch::DisplacedChain>,
 }
 
 impl Sparse {
     fn has_any(&self) -> bool {
-        self.sn_verdict.is_some() || self.resync.is_some()
+        #[cfg(feature = "reassembly")]
+        let displaced = self.displaced.is_some();
+        #[cfg(not(feature = "reassembly"))]
+        let displaced = false;
+        self.sn_verdict.is_some() || self.resync.is_some() || displaced
     }
 }
 
@@ -2437,6 +2457,10 @@ impl UnitRow {
         let (class, gap) = sn_class(facts.sn_verdict);
         flags |= class << SN_SHIFT;
         sparse.sn_verdict = gap;
+        #[cfg(feature = "reassembly")]
+        {
+            sparse.displaced = facts.displaced;
+        }
         if sparse.has_any() {
             flags |= SPARSE;
         }
@@ -2556,6 +2580,8 @@ impl UnitRow {
             ),
             #[cfg(feature = "reassembly")]
             fragment: fate,
+            #[cfg(feature = "reassembly")]
+            displaced: sparse.and_then(|s| s.displaced),
         }
     }
 }

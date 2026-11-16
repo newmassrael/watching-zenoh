@@ -1306,7 +1306,8 @@
  *   "chain":{"outcome":..,"reason":..|null,"chain_id":N|null,
  *            "index":N|null,"offset":N|null,"length":N|null,
  *            "expected_sn":N|null,"received_sn":N|null,
- *            "held_fragments":N|null,"held_bytes":N|null}
+ *            "held_fragments":N|null,"held_bytes":N|null,
+ *            "displaced":"superseded"|"evicted"|null}
  *
  *     What the reassembly router did with a Fragment row, and an identity
  *     shared by every row of one chain (unique within the flow, counted from 0
@@ -1335,9 +1336,20 @@
  *     a flow read before any InitAck, where no router ran: the router runs on
  *     those now, and `carried_state: fragment_without_resolution` is the
  *     fragment that ended a chain as `unresolvable`.) `superseded` is declared
- *     and not emitted today: the router
- *     reports a restart as `begun` for the new chain, so the stranded chain
- *     ends WITHOUT a row.
+ *     under `reason` and not emitted there: a restart's own outcome is its NEW
+ *     chain's (`begun`, or `reassembled` when it is its whole chain), and the
+ *     chain it stranded is named by `displaced` below.
+ *
+ *     THE OTHER CHAIN A FRAGMENT ENDED, at field-document revision 69. One
+ *     fragment can decide two chains, and `outcome` is its own. `displaced` is
+ *     the router's word for the other: `superseded` on a `First` that
+ *     restarted the chain open on its key, whose stranded chain is the flow's
+ *     `ended_chains` entry with `ending` `superseded`; `evicted` on a start
+ *     that took the slot of the oldest open chain, which a router built to
+ *     evict says and this library's capture readers, whose routers refuse
+ *     such a start instead, do not produce. `null` on a fragment that ended no
+ *     other chain. The census's `fragment_chains.aborted_superseded` counts
+ *     the same restarts (census revision 24).
  *
  *     `outcome` is one of `begun`, `continued`, `reassembled`, `aborted`,
  *     `refused`. `reason` is one of `out_of_order`, `capacity_overflow`,
@@ -1349,6 +1361,7 @@
  *
  * @values fields outcome
  * @values fields reason
+ * @values fields displaced
  *
  *   "first_byte":{"packet":N,"payload_offset":N,"frame_offset":N|null}
  *   "l2":{"src":"aa:bb:cc:dd:ee:ff","dst":"..","frame_offset":0,"length":14}|null
@@ -1648,7 +1661,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":23,
+ *     {"document":{"name":"census","revision":24,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1694,13 +1707,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":68,"key":"kind","values":[...],
+ *     {"name":"fields","revision":69,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":23,"key":"mode","values":[...],
+ *     {"name":"census","revision":24,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1734,6 +1747,7 @@
  * @carries fields check passenger
  * @carries fields counter_reason passenger
  * @carries fields direction passenger
+ * @carries fields displaced passenger
  * @carries fields ended_by passenger
  * @carries fields eps_basis passenger
  * @carries fields family passenger
@@ -6110,7 +6124,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":68,"key":"state",
+ *     "value_families":[{"name":"fields","revision":69,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

@@ -60,8 +60,8 @@ use crate::parse_error::InboundParseError;
 use crate::peer_init_caps::PeerInitCaps;
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::{
-    AbortReason, Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
-    SnRing,
+    AbortReason, DisplacedChain, Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig,
+    ReassemblyDispatcher, SnRing,
 };
 use wz_codecs::ext_entry::ExtEntryOwned;
 
@@ -1718,7 +1718,15 @@ pub enum Carried {
     /// made of it — including the refusals and aborts, which are exactly the
     /// events a loss-tracking view wants.
     #[cfg(feature = "reassembly")]
-    Fragment(IngestOutcome),
+    Fragment {
+        /// The router's outcome for the fragment's own chain.
+        outcome: IngestOutcome,
+        /// The other open chain the same fragment ended, as the router named
+        /// it ([`crate::reassembly_dispatch::ReassemblyDispatcher::displaced_by_last_ingest`]):
+        /// a `First` that restarted its key's chain, or a start that took the
+        /// slot of the oldest chain. `None` when it ended no other chain.
+        displaced: Option<DisplacedChain>,
+    },
     /// A fragment that COMPLETED a chain, and the batch reassembled out of it.
     ///
     /// R2706 — WITH THE BUFFER THE PARSE REFERS TO. [`BatchParse::spans`] is
@@ -1743,6 +1751,10 @@ pub enum Carried {
         batch: BatchParse,
         /// The joined payload — the buffer `batch.spans` index into.
         joined: alloc::vec::Vec<u8>,
+        /// The other open chain the same fragment ended, as on
+        /// [`Self::Fragment`]: a `First` with no more to follow restarts its key
+        /// and completes on itself.
+        displaced: Option<DisplacedChain>,
     },
     /// A fragment that ended its chain because only the session's SN
     /// resolution could have judged the step to it, and this observer never saw
@@ -1764,6 +1776,22 @@ pub enum Carried {
     /// keep the outcomes they were given when they arrived.
     #[cfg(feature = "reassembly")]
     FragmentWithoutResolution,
+}
+
+#[cfg(feature = "reassembly")]
+impl Carried {
+    /// The other open chain this message's fragment ended, as the router named
+    /// it; `None` for a message that is not a fragment and for a fragment that
+    /// ended no other chain.
+    pub fn displaced(&self) -> Option<DisplacedChain> {
+        match self {
+            Self::Fragment { displaced, .. } | Self::Reassembled { displaced, .. } => *displaced,
+            Self::Nothing
+            | Self::Batch(_)
+            | Self::Undecompressible
+            | Self::FragmentWithoutResolution => None,
+        }
+    }
 }
 
 /// Why the observer cannot produce the next frame yet, or at all.
@@ -3406,7 +3434,7 @@ impl PassiveSession {
         &mut self,
         direction: Direction,
         fragment: FragmentView<'_>,
-    ) -> FragmentFate {
+    ) -> FragmentReading {
         let FragmentView {
             reliable,
             sn,
@@ -3454,7 +3482,7 @@ impl PassiveSession {
             now_ms,
             |bytes| joined = Some(bytes.to_vec()),
         );
-        match joined {
+        let fate = match joined {
             Some(bytes) => FragmentFate::Joined(bytes),
             // The one outcome that is not a chain's progress or a loss the
             // router judged: the fragment it could not place.
@@ -3462,6 +3490,10 @@ impl PassiveSession {
                 FragmentFate::WithoutResolution
             }
             None => FragmentFate::Pending(outcome),
+        };
+        FragmentReading {
+            fate,
+            displaced: router.displaced_by_last_ingest(),
         }
     }
 
@@ -3721,6 +3753,20 @@ pub enum FragmentFate {
     Pending(IngestOutcome),
 }
 
+/// What the chain router made of one `Fragment`: the fragment's own fate, and
+/// the other open chain the same ingest ended.
+///
+/// Two facts because one fragment can decide two chains: its own, and one it
+/// displaced (a restart on its key, or the oldest chain under an oldest-wins
+/// pool). Both depend on the fragments before it, so a re-read is handed both
+/// ([`MessageFacts::fragment`], [`MessageFacts::displaced`]).
+#[cfg(feature = "reassembly")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FragmentReading {
+    fate: FragmentFate,
+    displaced: Option<DisplacedChain>,
+}
+
 /// The parts of a decoded `Fragment` the chain router reads.
 #[cfg(feature = "reassembly")]
 #[derive(Debug, Clone, Copy)]
@@ -3806,7 +3852,7 @@ trait UnitJudge {
         direction: Direction,
         index: usize,
         fragment: FragmentView<'_>,
-    ) -> FragmentFate;
+    ) -> FragmentReading;
     /// A batch of network messages the walk has read.
     fn batch_read(&mut self, direction: Direction, batch: &BatchParse);
     /// A record of `seat`'s direction captured at `instant`.
@@ -3862,7 +3908,7 @@ impl UnitJudge for LiveJudge<'_, '_> {
         direction: Direction,
         _index: usize,
         fragment: FragmentView<'_>,
-    ) -> FragmentFate {
+    ) -> FragmentReading {
         self.session.ingest_fragment(direction, fragment)
     }
 
@@ -4282,31 +4328,38 @@ fn carried_of(
             priority,
             markers,
             ..
-        } => match judge.fragment(
-            direction,
-            index,
-            FragmentView {
-                reliable: *reliable,
-                sn: *sn,
-                more: *more,
-                payload,
-                priority: *priority,
-                markers: *markers,
-            },
-        ) {
-            FragmentFate::Joined(bytes) => {
-                let b = crate::network_message::parse_reassembled_payload_best_effort(&bytes);
-                judge.batch_read(direction, &b);
-                // R2706 — the buffer travels WITH the parse, as the referent of
-                // `b.spans`.
-                Carried::Reassembled {
-                    batch: b,
-                    joined: bytes,
+        } => {
+            let FragmentReading { fate, displaced } = judge.fragment(
+                direction,
+                index,
+                FragmentView {
+                    reliable: *reliable,
+                    sn: *sn,
+                    more: *more,
+                    payload,
+                    priority: *priority,
+                    markers: *markers,
+                },
+            );
+            match fate {
+                FragmentFate::Joined(bytes) => {
+                    let b = crate::network_message::parse_reassembled_payload_best_effort(&bytes);
+                    judge.batch_read(direction, &b);
+                    // R2706 — the buffer travels WITH the parse, as the referent
+                    // of `b.spans`.
+                    Carried::Reassembled {
+                        batch: b,
+                        joined: bytes,
+                        displaced,
+                    }
                 }
+                // The router ends a chain `Unresolvable` only on a continuation
+                // of the chain open on its key, and a continuation displaces no
+                // other chain.
+                FragmentFate::WithoutResolution => Carried::FragmentWithoutResolution,
+                FragmentFate::Pending(outcome) => Carried::Fragment { outcome, displaced },
             }
-            FragmentFate::WithoutResolution => Carried::FragmentWithoutResolution,
-            FragmentFate::Pending(outcome) => Carried::Fragment(outcome),
-        },
+        }
         _ => Carried::Nothing,
     }
 }
@@ -4394,6 +4447,10 @@ pub struct MessageFacts {
     /// What it came to, when it is a `Fragment`.
     #[cfg(feature = "reassembly")]
     pub fragment: Option<FragmentFate>,
+    /// The other open chain it ended, when it is a `Fragment` that ended one
+    /// (the `displaced` of [`Carried::Fragment`] and [`Carried::Reassembled`]).
+    #[cfg(feature = "reassembly")]
+    pub displaced: Option<DisplacedChain>,
 }
 
 /// What a unit's first reading knew that its bytes do not say: the input of
@@ -4446,9 +4503,11 @@ impl MessageFacts {
             fragment: match &frame.carried {
                 Carried::Reassembled { joined, .. } => Some(FragmentFate::Joined(joined.clone())),
                 Carried::FragmentWithoutResolution => Some(FragmentFate::WithoutResolution),
-                Carried::Fragment(outcome) => Some(FragmentFate::Pending(*outcome)),
+                Carried::Fragment { outcome, .. } => Some(FragmentFate::Pending(*outcome)),
                 _ => None,
             },
+            #[cfg(feature = "reassembly")]
+            displaced: frame.carried.displaced(),
         }
     }
 }
@@ -4504,20 +4563,23 @@ impl UnitJudge for Recorded<'_> {
         _direction: Direction,
         index: usize,
         _fragment: FragmentView<'_>,
-    ) -> FragmentFate {
-        match self
-            .facts
-            .messages
-            .get(index)
-            .and_then(|m| m.fragment.clone())
-        {
-            Some(fate) => fate,
+    ) -> FragmentReading {
+        match self.facts.messages.get(index).and_then(|m| {
+            m.fragment.clone().map(|fate| FragmentReading {
+                fate,
+                displaced: m.displaced,
+            })
+        }) {
+            Some(reading) => reading,
             None => {
                 // The walk read a fragment where the first reading recorded
                 // none. The value stands in so the walk can end; the result is
                 // refused (see `redecode_unit`).
                 self.unanswered = true;
-                FragmentFate::WithoutResolution
+                FragmentReading {
+                    fate: FragmentFate::WithoutResolution,
+                    displaced: None,
+                }
             }
         }
     }
@@ -6058,7 +6120,13 @@ mod tests {
         {
             let fragment = s.next_frame(Direction::B).expect("the Fragment decodes");
             assert!(
-                matches!(fragment.carried, Carried::Fragment(IngestOutcome::Begun)),
+                matches!(
+                    fragment.carried,
+                    Carried::Fragment {
+                        outcome: IngestOutcome::Begun,
+                        displaced: None,
+                    }
+                ),
                 "{:?}",
                 fragment.carried
             );
@@ -6584,7 +6652,13 @@ mod tests {
         s.push(Direction::A, &framed(&fragment_wire(0, true, head), 2));
         let first = s.next_frame(Direction::A).expect("fragment 1");
         assert!(
-            matches!(first.carried, Carried::Fragment(IngestOutcome::Begun)),
+            matches!(
+                first.carried,
+                Carried::Fragment {
+                    outcome: IngestOutcome::Begun,
+                    displaced: None,
+                }
+            ),
             "expected a chain start, got {:?}",
             first.carried
         );
@@ -6592,7 +6666,11 @@ mod tests {
         s.push(Direction::A, &framed(&fragment_wire(1, false, tail), 2));
         let last = s.next_frame(Direction::A).expect("fragment 2");
         match last.carried {
-            Carried::Reassembled { batch: b, joined } => {
+            Carried::Reassembled {
+                batch: b,
+                joined,
+                displaced: None,
+            } => {
                 assert!(b.is_complete(), "reassembled batch halted: {:?}", b.halt);
                 assert_eq!(b.messages.len(), 1);
                 // R2706 — the buffer the spans index into travelled with them,
@@ -6684,7 +6762,13 @@ mod tests {
         }
         let begun = s.next_frame(Direction::A).expect("fragment");
         assert!(
-            matches!(begun.carried, Carried::Fragment(IngestOutcome::Begun)),
+            matches!(
+                begun.carried,
+                Carried::Fragment {
+                    outcome: IngestOutcome::Begun,
+                    ..
+                }
+            ),
             "got {:?}",
             begun.carried
         );
@@ -6692,7 +6776,10 @@ mod tests {
         assert!(
             matches!(
                 continued.carried,
-                Carried::Fragment(IngestOutcome::Continued)
+                Carried::Fragment {
+                    outcome: IngestOutcome::Continued,
+                    ..
+                }
             ),
             "a step of one needs no ring: {:?}",
             continued.carried

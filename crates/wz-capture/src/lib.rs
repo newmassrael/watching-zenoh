@@ -12686,7 +12686,10 @@ mod datagram_tests {
         assert!(
             matches!(
                 flow.frames().get(0).as_deref().map(|f| &f.carried),
-                Some(Carried::Fragment(IngestOutcome::Begun))
+                Some(Carried::Fragment {
+                    outcome: IngestOutcome::Begun,
+                    displaced: None,
+                })
             ),
             "got {:?}",
             flow.frames().get(0).as_deref().map(|f| &f.carried)

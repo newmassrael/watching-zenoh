@@ -401,6 +401,8 @@ fn chains_of(doc: &str) -> Vec<String> {
 /// The keys of a row's `chain` after `chain_id` (field document 62), as the
 /// document writes them: `placed` is `(index, offset, length)`, `sns` the
 /// expected and received sequence numbers, `held` the fragments and bytes.
+/// `displaced` (field document 69) is `null`: no fragment of these captures
+/// carries a marker, so none restarts a chain.
 fn chain_tail(
     placed: Option<(u32, usize, usize)>,
     sns: Option<(Option<u64>, u64)>,
@@ -417,7 +419,7 @@ fn chain_tail(
     format!(
         ",\"index\":{index},\"offset\":{offset},\"length\":{length},\
          \"expected_sn\":{expected},\"received_sn\":{received},\
-         \"held_fragments\":{fragments},\"held_bytes\":{bytes}}}"
+         \"held_fragments\":{fragments},\"held_bytes\":{bytes},\"displaced\":null}}"
     )
 }
 

@@ -898,7 +898,7 @@ impl InterestCensus {
                 Carried::FragmentWithoutResolution => return,
                 Carried::Nothing => return,
                 #[cfg(feature = "reassembly")]
-                Carried::Fragment(_) => return,
+                Carried::Fragment { .. } => return,
             };
             for (message, _span) in batch.records() {
                 match message {
