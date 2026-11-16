@@ -1293,8 +1293,38 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     ),
 }
 
+#: The target kinds cargo gives a library a dependent can name by its crate path.
+LIB_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"})
+
+
+def lib_crate_names(meta: dict) -> dict[str, str]:
+    """`{package: crate path}` for every library package in `meta`, as cargo
+    names the library target.
+
+    Open-debt item 629: the crate path used to be re-derived from each manifest
+    line by line, which a `[lib] name` spread over lines or inherited from the
+    workspace would have sent silently to the package-name fallback. Cargo has
+    already resolved every such spelling into the target's `name`, so this
+    reads cargo's answer rather than repeating its rule. A package with no
+    library target is absent, and a workspace with none is an error: a reader
+    that found no library would answer `None` for every row.
+    """
+    names: dict[str, str] = {}
+    for package in meta.get("packages", []):
+        for target in package.get("targets", []):
+            if LIB_KINDS & set(target.get("kind", [])):
+                names[package["name"]] = target["name"]
+                break
+    if not names:
+        raise RuntimeError(
+            "cargo metadata named no library package, so no crate path can be "
+            "read and every AXIS_REACHABLE row would be refused for nothing"
+        )
+    return names
+
+
 def axis_reachable_crate(pkg: str) -> str | None:
-    """The Rust crate path `pkg` is named by, READ from its manifest.
+    """The Rust crate path `pkg` is named by, as cargo resolves it.
 
     R2298b — this replaces a four-row table that stated the same four names,
     whose docstring claimed `axis_reachable_findings` would refuse a wrong one
@@ -1305,23 +1335,10 @@ def axis_reachable_crate(pkg: str) -> str | None:
     item 606 is about, so the fix is to stop declaring it -- derived, "wrong"
     is not a state this can be in.
 
-    Cargo's rule, and the one applied here: an explicit `[lib] name` wins,
-    otherwise the package name with `-` mapped to `_`. Returns `None` when the
-    manifest is missing, which IS a finding -- the package named in the row
-    does not exist.
+    Returns `None` when cargo knows no library package of that name, which IS
+    a finding -- the package named in the row does not exist.
     """
-    manifest = ROOT / "crates" / pkg / "Cargo.toml"
-    if not manifest.is_file():
-        return None
-    section, text = None, manifest.read_text(encoding="utf-8")
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if line.startswith("["):
-            section = line
-        elif section == "[lib]" and line.startswith("name"):
-            _, _, value = line.partition("=")
-            return value.strip().strip('"').strip("'")
-    return pkg.replace("-", "_")
+    return lib_crate_names(_metadata()).get(pkg)
 
 # R3494 -- the packages whose `OFF_AXIS` reason is the claim "this crate is a member of the zenoh
 # compatibility family, whose public surface is graded against upstream's own, per feature arm",
@@ -2025,9 +2042,9 @@ def axis_reachable_findings(
         crate = (crate_of or axis_reachable_crate)(pkg)
         if crate is None:
             findings.append(
-                f"`{pkg}` is in `AXIS_REACHABLE` but `crates/{pkg}/Cargo.toml` "
-                f"does not exist, so its crate path cannot be read and the "
-                f"derivation cannot be run against anything"
+                f"`{pkg}` is in `AXIS_REACHABLE` but a library package of that "
+                f"name does not exist in `cargo metadata`, so its crate path "
+                f"cannot be read and the derivation cannot be run against anything"
             )
             continue
         _why, row = OFF_AXIS[pkg]
@@ -3017,9 +3034,12 @@ def axis_reachable_selftest() -> int:
         )
         empty = axis_reachable_findings(covers_none, site_map, named)
         # R2298b — the crate path is READ, not declared, so this case drives the
-        # REAL reader: `crates/demo/Cargo.toml` does not exist, and a row naming
-        # a package that is not in the tree must be refused rather than skipped.
-        no_crate = axis_reachable_findings(covers_all, site_map)
+        # REAL reader over a cargo answer with no `demo` library in it, and a
+        # row naming a package that is not in the tree must be refused rather
+        # than skipped.
+        no_crate = axis_reachable_findings(
+            covers_all, site_map, lambda p: lib_crate_names(LIB_META_FIXTURE).get(p)
+        )
         OFF_AXIS[pkg] = ("fixture", frozenset({"one", "two", "three"}))
         partial = axis_reachable_findings(covers_all, site_map, named)
         del OFF_AXIS[pkg]
@@ -3057,7 +3077,7 @@ def axis_reachable_selftest() -> int:
          "a derivation that produces NOTHING while the sites ARE nameable is a "
          "row the axis cannot in fact reach, and must FAIL rather than pass"),
         (any("does not exist" in f for f in no_crate),
-         "a row naming a package with no manifest in the tree cannot have its "
+         "a row naming a package with no library in the tree cannot have its "
          "crate path read, and must be reported rather than skipped"),
         (any("PART of a row" in f for f in partial),
          "a predicate covering part of a row must be reported"),
@@ -3071,7 +3091,55 @@ def axis_reachable_selftest() -> int:
         if not ok:
             print(f"feature-public-surface: SELFTEST FAIL -- {why}")
             return 1
-    return 0
+    return lib_crate_names_selftest()
+
+
+#: A cargo answer in the shape `cargo metadata --format-version 1` gives it,
+#: holding each spelling the line-by-line manifest reader could not see.
+LIB_META_FIXTURE: dict = {
+    "packages": [
+        {"name": "wz-plain", "targets": [{"name": "wz_plain", "kind": ["lib"]}]},
+        # A `[lib] name` that differs from the package, as a multi-line or
+        # workspace-inherited spelling resolves to.
+        {"name": "wz-renamed", "targets": [{"name": "renamed_core", "kind": ["lib"]}]},
+        {
+            "name": "wz-capi",
+            "targets": [
+                {"name": "wz-capi", "kind": ["bin"]},
+                {"name": "wz_capi", "kind": ["cdylib", "rlib"]},
+            ],
+        },
+        {"name": "wz-macros", "targets": [{"name": "wz_macros", "kind": ["proc-macro"]}]},
+        {"name": "wz-tool", "targets": [{"name": "wz-tool", "kind": ["bin"]}]},
+    ]
+}
+
+
+def lib_crate_names_selftest() -> int:
+    """Open-debt item 629 -- the crate path is cargo's, in each shape it takes."""
+    got = lib_crate_names(LIB_META_FIXTURE)
+    want = {
+        "wz-plain": "wz_plain",
+        "wz-renamed": "renamed_core",
+        "wz-capi": "wz_capi",
+        "wz-macros": "wz_macros",
+    }
+    if got != want:
+        print(
+            f"feature-public-surface: SELFTEST FAIL -- lib_crate_names read "
+            f"{got}, cargo's answer says {want}. A renamed library must keep its "
+            f"own name and a binary-only package must be absent"
+        )
+        return 1
+    try:
+        lib_crate_names({"packages": [LIB_META_FIXTURE["packages"][-1]]})
+    except RuntimeError:
+        return 0
+    print(
+        "feature-public-surface: SELFTEST FAIL -- a cargo answer with no library "
+        "package was read as an empty map, so every row would be refused for nothing"
+    )
+    return 1
 
 
 def facade_only_selftest() -> int:
