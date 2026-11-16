@@ -527,7 +527,10 @@ BASENAME_LINE_CITE = re.compile(r"(?<![\w/.-])([\w-]+\.(?:rs|c|h)):(\d+)")
 #: justified the negotiation check went with it: it cited the transport's receive
 #: callback and its `is_shm` predicate by line. The comment now says the same thing
 #: with the callback as a needle. (Described, not spelled: see the warning above.)
-LINE_BUDGET = 282
+#: 282 -> 281. The transport-OAM count in the codec gate's doc was retaken at the
+#: 1.10.2 pin, and its line citation of the link-state network's OAM sender became
+#: a needle.
+LINE_BUDGET = 281
 #: 58 -> 57 (R2862). The SHM payload provider's module doc named the upstream
 #: POSIX shm implementation file with no anchor; the rewrite that mirrors the
 #: metadata segment cites the files it follows by needle instead.
@@ -537,7 +540,9 @@ LINE_BUDGET = 282
 #: as the source of an identity mask constant, with no anchor, and upstream declares
 #: no such constant there; the rewrite cites the `eid` function it really follows as
 #: a needle.
-BARE_BUDGET = 54
+#: 54 -> 53. The reply extension count was retaken at the 1.10.2 pin, and its bare
+#: mention of upstream's reply module became a needle on the struct it counts.
+BARE_BUDGET = 53
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
 #:
@@ -758,7 +763,9 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "memory_backend": 11,
     "protocol": 7,
     "replication": 4,
-    "routing": 2,
+    # 2 -> 1: the codec gate's transport-OAM count, retaken at the 1.10.2 pin, cites
+    # the gossip OAM sender with its root and a needle.
+    "routing": 1,
     "runtime": 1,
     "storages_mgt": 25,
     "unicast": 75,
@@ -774,7 +781,9 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "zenoh-link-ws": 2,
     "zenoh-plugin-rest": 2,
     "zenoh-plugin-storage-manager": 4,
-    "zenoh-protocol": 42,
+    # 42 -> 41: the same count cites the transport body's random generator with its
+    # root and a needle.
+    "zenoh-protocol": 41,
     "zenoh-runtime": 2,
     "zenoh-util": 3,
 }
@@ -894,7 +903,9 @@ def rootless_undeclared_budget() -> int:
 # purpose.)
 # 475 -> 474, the `dispatcher` row 48 -> 47: the router forwarder's stamp note now cites
 # the dispatcher's empty-route test with its root and a needle.
-ROOTLESS_TOTAL_BUDGET = 474
+# 474 -> 472, the `routing` row 2 -> 1 and the `zenoh-protocol` row 42 -> 41: the
+# codec gate's transport-OAM count, retaken at the 1.10.2 pin, cites both with roots.
+ROOTLESS_TOTAL_BUDGET = 472
 
 #: The pico axis's two legacy forms, held both ways like `LINE_BUDGET`. MEASURED
 #: when the axis landed, by reading `PICO_LINE_CITE` and the plain path pattern
