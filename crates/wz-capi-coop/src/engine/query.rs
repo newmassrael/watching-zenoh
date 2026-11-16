@@ -127,9 +127,7 @@ fn responder_for<'a>(
     qos: QosLevel,
     replies: &'a mut ReplyStage,
 ) -> QueryResponder<'a> {
-    let accept = parameters
-        .and_then(|bytes| core::str::from_utf8(bytes).ok())
-        .map_or(ReplyKeyExpr::MatchingQuery, ReplyKeyExpr::from_parameters);
+    let accept = ReplyKeyExpr::from_parameter_bytes(parameters);
     QueryResponder::new(rid, keyexpr.to_owned(), accept, qos, replies)
 }
 

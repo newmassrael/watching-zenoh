@@ -765,13 +765,7 @@ impl QueryOptions {
     /// that has a getter at all.
     #[cfg(feature = "query-get")]
     pub fn effective_accept_replies(&self) -> ReplyKeyExpr {
-        match self.parameters.as_deref() {
-            Some(bytes) => match core::str::from_utf8(bytes) {
-                Ok(params) => ReplyKeyExpr::from_parameters(params),
-                Err(_) => ReplyKeyExpr::MatchingQuery,
-            },
-            None => ReplyKeyExpr::MatchingQuery,
-        }
+        ReplyKeyExpr::from_parameter_bytes(self.parameters.as_deref())
     }
 
     /// See [`Self::effective_target`]. THE CALLER'S READING: exactly what this

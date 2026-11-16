@@ -50,7 +50,7 @@ pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: 
 /// side (`crate::get`). wz's own GETs emit exactly that shape:
 /// `wz-runtime-tokio`'s history selector builds `_max=2;_time=[…];_anyke`.
 ///
-/// It calls [`ReplyKeyExpr::from_parameters`], not the parameter reader under
+/// It calls [`ReplyKeyExpr::from_parameter_bytes`], not the parameter reader under
 /// it, because that enum IS the question — "which reply-keyexpr mode does this
 /// selector express" — and its own doc already names both references it has to
 /// agree with. Reaching past it to `selector_params::has_param` would make this
@@ -62,9 +62,8 @@ pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: 
 /// reverse: pico's `_z_parameters_has_anyke` has no key/value semantics, and
 /// porting zenoh's there would be the mirror of this defect.
 pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
-    std::str::from_utf8(parameters).is_ok_and(|text| {
-        reply_acceptance::ReplyKeyExpr::from_parameters(text) == reply_acceptance::ReplyKeyExpr::Any
-    })
+    reply_acceptance::ReplyKeyExpr::from_parameter_bytes(Some(parameters))
+        == reply_acceptance::ReplyKeyExpr::Any
 }
 
 #[cfg(test)]

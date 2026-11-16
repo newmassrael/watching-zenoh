@@ -53,6 +53,7 @@ use core::ffi::c_void;
 
 use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
+use wz_session_core::reply_acceptance::ReplyKeyExpr;
 
 use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
@@ -235,17 +236,31 @@ fn flush_one(
 /// before a reply is queued and return `_Z_ERR_KEYEXPR_NOT_MATCH` to the C
 /// program there, as pico's `_z_send_reply` does. The core responder applies
 /// the intersection again at flush, reading `_anyke` in zenoh's dialect where
-/// this ABI reads it in pico's ([`parameters_has_anyke`]). Every `_anyke` pico
-/// finds is a whole `;`-bounded segment, which zenoh's split also reads as the
-/// key, so an admission here is an admission there; a refusal at flush means
-/// the two gates disagree, a wz defect with no C caller left to tell — so a
-/// debug build stops on it rather than dropping the reply unseen.
+/// this ABI reads it in both (`abi_reads_anyke`), so an admission here is an
+/// admission there; a refusal at flush means the two gates disagree, a wz
+/// defect with no C caller left to tell — so a debug build stops on it rather
+/// than dropping the reply unseen.
 fn admitted_at_the_abi(staged: Result<(), wz_session_core::query_sink::ReplyError>) {
     debug_assert_eq!(
         staged,
         Ok(()),
         "the core reply gate refused a reply z_query_reply had admitted"
     );
+}
+
+/// The `_anyke` this ABI answers with: pico's reading, where the core responder
+/// that stages the reply reads the same flag.
+///
+/// The two readings agree on every UTF-8 list
+/// (`the_abi_admits_no_reply_the_core_responder_would_refuse` measures it). They
+/// part on a list that is not UTF-8, where pico's byte scan still finds a
+/// `;`-bounded `_anyke` and the core reads the guarantee
+/// ([`ReplyKeyExpr::from_parameter_bytes`]). Admitting there would hand the C
+/// program `Z_OK` for a reply the flush then refuses, so the ABI reads what both
+/// read.
+fn abi_reads_anyke(parameters: &[u8]) -> bool {
+    parameters_has_anyke(parameters)
+        && ReplyKeyExpr::from_parameter_bytes(Some(parameters)) == ReplyKeyExpr::Any
 }
 
 /// The owned marshal behind a borrowed `z_loaned_query_t` during one callback.
@@ -345,7 +360,7 @@ impl QueryMarshal {
         let parameters = view.parameters().map(<[u8]>::to_vec).unwrap_or_default();
         Self {
             keyexpr: view.keyexpr().to_owned(),
-            anyke: parameters_has_anyke(&parameters),
+            anyke: abi_reads_anyke(&parameters),
             parameters,
             // Absence collapses to EMPTY here, not to a flag: the accessors
             // must hand C a pointer either way (see the field docs).
@@ -1829,6 +1844,118 @@ mod tests {
         // exactly pico's `!query->_anyke && !intersects` short-circuit.
         assert!(reply_keyexpr_is_covered("a/**", "z/b", true));
         assert!(reply_keyexpr_is_covered("a/b", "a/c", true));
+    }
+
+    /// A query whose only content is its selector parameters.
+    struct ParamsQuery {
+        parameters: Vec<u8>,
+    }
+
+    impl QueryView for ParamsQuery {
+        fn keyexpr(&self) -> &str {
+            "a/b"
+        }
+        fn parameters(&self) -> Option<&[u8]> {
+            Some(&self.parameters)
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            None
+        }
+        fn payload(&self) -> Option<&[u8]> {
+            None
+        }
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
+            7
+        }
+        fn qos(&self) -> wz_session_core::sample::QosLevel {
+            wz_session_core::sample::QosLevel::DEFAULT
+        }
+    }
+
+    /// The core responder's gate behind `z_query_reply` is never the one that
+    /// refuses: whatever `_anyke` the ABI reads, the responder built from the
+    /// same parameters reads too, so no reply the ABI answered `Z_OK` for is
+    /// refused at flush.
+    ///
+    /// Measured over every list of one to three segments drawn from the shapes
+    /// on which pico's byte scan and zenoh's key split could part (a valued
+    /// flag, a prefix, a suffix, an `&` list, an empty segment), with and
+    /// without a trailing `;`. On those UTF-8 lists the ABI keeps pico's own
+    /// answer. The list that is not UTF-8 is where pico's scan finds the flag
+    /// and the core does not, and there the ABI reads no flag.
+    #[test]
+    fn the_abi_admits_no_reply_the_core_responder_would_refuse() {
+        let segments: [&[u8]; 10] = [
+            b"_anyke",
+            b"_anyke=",
+            b"_anyke=true",
+            b"x_anyke",
+            b"_anykex",
+            b"a=1",
+            b"",
+            b"_anyke&b=2",
+            b"b=2&_anyke",
+            b"_max=5",
+        ];
+        let mut lists: Vec<Vec<u8>> = Vec::new();
+        for a in segments {
+            lists.push(a.to_vec());
+            for b in segments {
+                lists.push([a, b].join(&b';'));
+                for c in segments {
+                    lists.push([a, b, c].join(&b';'));
+                }
+            }
+        }
+        let trailing: Vec<Vec<u8>> = lists
+            .iter()
+            .map(|l| [l.as_slice(), b";".as_slice()].concat())
+            .collect();
+        lists.extend(trailing);
+
+        let mut flagged = 0usize;
+        for list in &lists {
+            let marshal = QueryMarshal::new(&ParamsQuery {
+                parameters: list.clone(),
+            });
+            let shown = String::from_utf8_lossy(list);
+            assert_eq!(
+                marshal.anyke,
+                parameters_has_anyke(list),
+                "the ABI keeps pico's reading of the UTF-8 list {shown:?}"
+            );
+            if marshal.anyke {
+                flagged += 1;
+                assert_eq!(
+                    ReplyKeyExpr::from_parameter_bytes(Some(list.as_slice())),
+                    ReplyKeyExpr::Any,
+                    "the core responder refuses what the ABI admitted under {shown:?}"
+                );
+            }
+        }
+        assert!(
+            flagged > 0 && flagged < lists.len(),
+            "the corpus holds both answers: {flagged} of {}",
+            lists.len()
+        );
+
+        let not_text = b"\xff;_anyke".to_vec();
+        assert!(
+            parameters_has_anyke(&not_text),
+            "pico's scan finds the flag"
+        );
+        assert_eq!(
+            ReplyKeyExpr::from_parameter_bytes(Some(not_text.as_slice())),
+            ReplyKeyExpr::MatchingQuery,
+            "the core reads the guarantee"
+        );
+        assert!(
+            !QueryMarshal::new(&ParamsQuery {
+                parameters: not_text
+            })
+            .anyke,
+            "so the ABI reads no flag and refuses the reply itself"
+        );
     }
 
     #[test]

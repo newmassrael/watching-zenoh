@@ -496,14 +496,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     let mut responder = wz_session_core::query::QueryResponder::new(
                         owned.rid,
                         owned.keyexpr.clone(),
-                        owned
-                            .parameters
-                            .as_deref()
-                            .and_then(|b| core::str::from_utf8(b).ok())
-                            .map_or(
-                                wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
-                                wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
-                            ),
+                        wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameter_bytes(
+                            owned.parameters.as_deref(),
+                        ),
                         owned.qos,
                         &mut replies,
                     );

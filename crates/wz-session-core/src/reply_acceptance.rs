@@ -78,6 +78,20 @@ impl ReplyKeyExpr {
             Self::MatchingQuery
         }
     }
+
+    /// The mode an inbound query's raw selector parameters express: the one
+    /// reading every responder builds its gate from.
+    ///
+    /// Parameters that are not UTF-8 read as [`Self::MatchingQuery`] whatever
+    /// bytes they hold. zenoh's selector parameters are a `String`, so a peer
+    /// following it cannot send them, and the opt-out is something a querier
+    /// must say plainly; a byte list that merely contains the token is not
+    /// read as saying it.
+    pub fn from_parameter_bytes(parameters: Option<&[u8]>) -> Self {
+        parameters
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .map_or(Self::MatchingQuery, Self::from_parameters)
+    }
 }
 
 /// What a pending registration is told about the query it belongs to, borrowed
@@ -216,6 +230,29 @@ mod tests {
     #[test]
     fn the_default_mode_is_the_guarantee_not_the_opt_out() {
         assert_eq!(ReplyKeyExpr::default(), ReplyKeyExpr::MatchingQuery);
+    }
+
+    /// Raw parameters read as their text does, an absent list keeps the
+    /// guarantee, and a list that is not UTF-8 keeps it even when the token
+    /// sits in it as a whole segment.
+    #[test]
+    fn raw_parameters_select_any_only_when_they_are_text_that_says_so() {
+        assert_eq!(
+            ReplyKeyExpr::from_parameter_bytes(Some(b"_max=5;_anyke".as_slice())),
+            ReplyKeyExpr::Any
+        );
+        assert_eq!(
+            ReplyKeyExpr::from_parameter_bytes(Some(b"_max=5".as_slice())),
+            ReplyKeyExpr::MatchingQuery
+        );
+        assert_eq!(
+            ReplyKeyExpr::from_parameter_bytes(None),
+            ReplyKeyExpr::MatchingQuery
+        );
+        assert_eq!(
+            ReplyKeyExpr::from_parameter_bytes(Some(b"\xff;_anyke".as_slice())),
+            ReplyKeyExpr::MatchingQuery
+        );
     }
 
     #[test]
