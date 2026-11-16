@@ -126,6 +126,18 @@ fn wz_peer_delivers_a_transit_sourced_push_to_a_pico_client_sub() {
     // interest propagation + the continuous `--publish` tick.
     let received_substr = ">> [Subscriber] Received";
     let received = wait_for_substring(&mut z_sub_reader, received_substr, Duration::from_secs(20));
+    // Peers A and C are asserted on below, so each is waited on for its own
+    // in-run line before anything is stopped.
+    let _c_data = wait_for_substring(
+        &mut c_reader,
+        "peer: received mesh data",
+        Duration::from_secs(15),
+    );
+    let _a_interest = wait_for_substring(
+        &mut a_reader,
+        "peer: publisher learned subscriber interest",
+        Duration::from_secs(15),
+    );
 
     // Teardown: kill the pico one-shot; graceful_terminate the wz peers.
     let _ = z_sub_child.child_mut().kill();

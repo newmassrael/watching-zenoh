@@ -102,6 +102,12 @@ use wz_integration_tests::common::{
 /// these assertions were never about.
 const LINK_STATE: [&str; 2] = ["--peer-mode", "linkstate"];
 
+/// How long a node that a test asserts on is waited on for its own in-run line,
+/// after the line the test settles on. Not a verdict: the assertion on the
+/// post-shutdown capture judges; the wait only keeps the node's neighbours up
+/// until it has had the chance to log the event.
+const WITNESS_WAIT: Duration = Duration::from_secs(15);
+
 /// Spawn the router-hat node (`--router-hat`) — presents wire `WhatAmI::Router`.
 /// Thin wrapper over [`spawn_on_ephemeral_port`](wz_integration_tests::common) that
 /// owns the tempfile the dev-dependency-restricted lib helper cannot allocate.
@@ -181,6 +187,13 @@ fn wz_router_hat_converges_with_a_peer() {
         &mut r_reader,
         "router-hat: peers-net converged (2 node(s))",
         Duration::from_secs(15),
+    );
+    // The peer is asserted on below, so it is waited on for its own ingest:
+    // R's convergence does not say the peer has taken R's link-state in.
+    let _p_ingest = wait_for_substring(
+        &mut p_reader,
+        "peer: ingested neighbour link-state",
+        WITNESS_WAIT,
     );
 
     graceful_terminate(r_guard.child_mut(), Duration::from_secs(5));
@@ -274,6 +287,19 @@ fn wz_router_hat_region_peers_exchange_data_directly() {
         &mut sub_reader,
         "received mesh data",
         Duration::from_secs(15),
+    );
+    // R and the publisher are asserted on below, so each is waited on for its
+    // own in-run line. R's logs each new high of its peer tier, so the line for
+    // three nodes is there whichever tick the second peer joined on.
+    let _r_peers = wait_for_substring(
+        &mut r_reader,
+        "router-hat: peers-net converged (3 node(s))",
+        WITNESS_WAIT,
+    );
+    let _pub_interest = wait_for_substring(
+        &mut pub_reader,
+        "publisher learned subscriber interest",
+        WITNESS_WAIT,
     );
 
     graceful_terminate(r_guard.child_mut(), Duration::from_secs(5));
@@ -502,6 +528,12 @@ fn wz_router_hat_federates_data_across_two_routers() {
         "received mesh data",
         Duration::from_secs(15),
     );
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _pub_interest = wait_for_substring(
+        &mut pub_reader,
+        "publisher learned subscriber interest",
+        WITNESS_WAIT,
+    );
 
     graceful_terminate(pub_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(sub_guard.child_mut(), Duration::from_secs(5));
@@ -622,6 +654,8 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
 
     let reply = wait_for_substring(&mut iss_reader, "REPLY RECEIVED", Duration::from_secs(15));
     let final_recv = wait_for_substring(&mut iss_reader, "FINAL RECEIVED", Duration::from_secs(10));
+    // The queryable is asserted on below, so it is waited on for its own line.
+    let _qbl_fired = wait_for_substring(&mut qbl_reader, "QUERYABLE FIRED", WITNESS_WAIT);
 
     graceful_terminate(iss_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(qbl_guard.child_mut(), Duration::from_secs(5));
@@ -799,6 +833,8 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
 
     let reply = wait_for_substring(&mut iss_reader, "REPLY RECEIVED", Duration::from_secs(15));
     let final_recv = wait_for_substring(&mut iss_reader, "FINAL RECEIVED", Duration::from_secs(10));
+    // The queryable is asserted on below, so it is waited on for its own line.
+    let _qbl_fired = wait_for_substring(&mut qbl_reader, "QUERYABLE FIRED", WITNESS_WAIT);
 
     graceful_terminate(iss_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(qbl_guard.child_mut(), Duration::from_secs(5));

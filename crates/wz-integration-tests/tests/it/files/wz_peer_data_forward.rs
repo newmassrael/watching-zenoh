@@ -66,6 +66,12 @@ use wz_integration_tests::common::{
     ChildGuard,
 };
 
+/// How long a peer that a test asserts on is waited on for its own in-run
+/// line, after the line the test settles on. Not a verdict: the assertion on
+/// the post-shutdown capture judges; the wait only keeps the peer's neighbours
+/// up until it has had the chance to log the event.
+const WITNESS_WAIT: Duration = Duration::from_secs(15);
+
 /// Spawn a `--peer` demo on an ephemeral port and wait until it binds, then read
 /// the bound port back from its listen log. Returns the guard, its stderr
 /// reader, and the port.
@@ -222,6 +228,14 @@ fn wz_peer_mesh_forwards_subscribed_data_two_hops() {
     // direct link to A, so receiving this proves the full subscription-gated
     // multi-hop chain (declare propagate + filtered data route) over the wire.
     let c_data = wait_for_substring(&mut c_reader, "received mesh data", Duration::from_secs(15));
+    // A and B are asserted on below, so each is waited on for its own in-run
+    // line before anyone is stopped: C's reception is not read as theirs.
+    let _a_interest = wait_for_substring(
+        &mut a_reader,
+        "publisher learned subscriber interest",
+        WITNESS_WAIT,
+    );
+    let _b_data = wait_for_substring(&mut b_reader, "received mesh data", WITNESS_WAIT);
 
     // Graceful-shutdown all three, then read their captured logs.
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
@@ -298,6 +312,12 @@ fn wz_peer_mesh_wildcard_subscription_attracts_a_concrete_publish() {
     );
 
     let c_data = wait_for_substring(&mut c_reader, "received mesh data", Duration::from_secs(15));
+    // A is asserted on below, so it is waited on for its own in-run line.
+    let _a_interest = wait_for_substring(
+        &mut a_reader,
+        "publisher learned subscriber interest",
+        WITNESS_WAIT,
+    );
 
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
@@ -383,6 +403,8 @@ fn wz_peer_mesh_withdraws_subscription_two_hops() {
         "publisher subscriber interest withdrawn",
         Duration::from_secs(20),
     );
+    // C is asserted on below, so it is waited on for its own in-run line.
+    let _c_data = wait_for_substring(&mut c_reader, "received mesh data", WITNESS_WAIT);
 
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
@@ -496,6 +518,21 @@ fn wz_peer_mesh_prunes_the_unsubscribed_branch_four_peers() {
     // already run the single fan-out that either includes or excludes each of its
     // tree children, so D's state is settled.
     let c_data = wait_for_substring(&mut c_reader, "received mesh data", Duration::from_secs(15));
+    // A, B and D are asserted on below, so each is waited on for its own in-run
+    // line before anyone is stopped. D's matters most: C's reception says
+    // nothing about whether D has counted all four peers, and stopping A first
+    // could leave D's peak short of them.
+    let _a_interest = wait_for_substring(
+        &mut a_reader,
+        "publisher learned subscriber interest",
+        WITNESS_WAIT,
+    );
+    let _b_data = wait_for_substring(&mut b_reader, "received mesh data", WITNESS_WAIT);
+    let _d_graph = wait_for_substring(
+        &mut d_reader,
+        "peer: topology graph reached 4 node(s)",
+        WITNESS_WAIT,
+    );
 
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));

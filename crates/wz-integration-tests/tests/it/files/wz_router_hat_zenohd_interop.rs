@@ -706,6 +706,13 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query() {
         )
     });
 
+    // The pico queryable is asserted on below, so it is waited on for its own
+    // line before it is stopped.
+    let _qabl_heard = wait_for_substring(
+        &mut z_qabl_reader,
+        "[Queryable handler] Received Query",
+        Duration::from_secs(15),
+    );
     let z_querier_captured = if let Some((mut child, mut reader)) = z_querier_pair {
         let _ = child.child_mut().kill();
         let _ = child.child_mut().wait();
@@ -1004,6 +1011,13 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone() {
         )
     });
 
+    // The pico queryable is asserted on below, so it is waited on for its own
+    // line before it is stopped.
+    let _qabl_heard = wait_for_substring(
+        &mut z_qabl_reader,
+        "[Queryable handler] Received Query",
+        Duration::from_secs(15),
+    );
     let z_querier_captured = if let Some((mut child, mut reader)) = z_querier_pair {
         let _ = child.child_mut().kill();
         let _ = child.child_mut().wait();
@@ -1172,6 +1186,13 @@ fn wz_router_hat_pushes_a_future_queryable_to_a_pico_querier() {
             Duration::from_secs(5),
         )
     });
+    // The pico queryable is asserted on below, so it is waited on for its own
+    // line before it is stopped.
+    let _qabl_heard = wait_for_substring(
+        &mut z_qabl_reader,
+        "[Queryable handler] Received Query",
+        Duration::from_secs(15),
+    );
 
     let _ = z_querier_guard.child_mut().kill();
     let _ = z_querier_guard.child_mut().wait();
@@ -1481,6 +1502,13 @@ fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
     // installs no signal handler, so its SOCKET CLOSE (not a graceful undeclare) is
     // what makes zenohd flood the UndeclareToken; wz undeclare_push_token's it to the
     // subscriber, which prints the DELETE. Only probed once the declare half arrived.
+    // The token holder is asserted on below, so it is waited on for its own
+    // line before it is stopped.
+    let _token_declared = wait_for_substring(
+        &mut z_token_reader,
+        "Declaring liveliness token 'group1/zenoh-pico'",
+        Duration::from_secs(15),
+    );
     let dropped = alive.is_ok().then(|| {
         let _ = z_token_guard.child_mut().kill();
         let _ = z_token_guard.child_mut().wait();

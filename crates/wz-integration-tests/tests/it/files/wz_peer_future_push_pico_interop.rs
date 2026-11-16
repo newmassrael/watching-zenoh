@@ -126,6 +126,19 @@ fn wz_peer_pushes_a_future_subscriber_and_reinjects_a_pico_publish_to_a_pico_sub
     // barrier, not a race.
     let received_substr = ">> [Subscriber] Received";
     let received = wait_for_substring(&mut z_sub_reader, received_substr, Duration::from_secs(20));
+    // Both wz peers are asserted on below, so each is waited on for its own
+    // in-run line before anything is stopped: the pico subscriber's reception
+    // is not read as theirs.
+    let _a_pushed = wait_for_substring(
+        &mut a_reader,
+        "peer: pushed a future subscriber",
+        Duration::from_secs(15),
+    );
+    let _b_data = wait_for_substring(
+        &mut b_reader,
+        "peer: received mesh data",
+        Duration::from_secs(15),
+    );
 
     // Tear down: the pico one-shots are killed directly; the wz peers are
     // graceful_terminate'd (SIGTERM) so they flush their LATCHED shutdown witnesses
