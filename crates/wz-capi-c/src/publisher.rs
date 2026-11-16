@@ -50,7 +50,7 @@ use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 #[cfg(feature = "router-node")]
 use crate::result::Z_EUNAVAILABLE;
-use crate::result::{publish_refusal, ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{publish_refusal, ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::session::{session_handle, SessionHandle};
 use crate::statement::PublishStatement;
 
@@ -352,6 +352,10 @@ pub(crate) struct PublisherState {
     /// dropped. What a put names its key by, with the caller's own declaration ahead of it
     /// ([`Self::wire_mapping`]).
     held_declaration: Option<wz_session_core::wire_id::ExprId>,
+    /// The question this publisher asks every face for the subscribers of its key, held for
+    /// its life and let go when it is dropped; `None` for a publisher that writes to its own
+    /// session alone and asks nobody.
+    interest: Option<wz_capi_core::faces::FilterId>,
     loaned_keyexpr: z_loaned_keyexpr_t,
     /// The background matching listener this publisher declared, if any.
     ///
@@ -395,6 +399,11 @@ impl Drop for PublisherState {
         // key still holds it.
         if let Some(id) = self.held_declaration.take() {
             self.shared.release_keyexpr(id);
+        }
+        // The last publisher asking on its key (or aggregate) retracts the question on every
+        // face with its `Interest(Final)`; one that still has company sends nothing.
+        if let Some(id) = self.interest.take() {
+            self.shared.undeclare_write_filter(id);
         }
     }
 }
@@ -887,6 +896,40 @@ pub(crate) unsafe fn declare_publisher_stated(
             held.publication_options(&keyexpr, unsafe { resolve_publisher_options(options) }),
         );
         let plain = base.plain_put_params();
+        // A publisher asks every face for the subscribers of its key, once for the future and
+        // for what stands now, and holds the question for its life, as upstream's declaration
+        // asks (`zenoh/src/api/session.rs` @ `fn declare_publisher_inner`): a peer or router
+        // tells a client the declarations it holds an Interest in, and without the question the
+        // publisher's matching status never sees a subscriber, whether or not a matching
+        // listener is declared. Under `aggregation/publishers` it asks as the aggregate that
+        // includes the key, once for every publisher under it. One that writes to its own
+        // session alone asks nobody (`let declared_pub = (destination != Locality::SessionLocal)`).
+        let interest = if base.allowed_destination.allows_remote() {
+            let asked = state.shared.declare_write_filter(
+                wz_capi_core::faces::FilterPlane::Subscribers,
+                keyexpr.clone(),
+                &wz_capi_core::faces::WireKey::literal(),
+                Some(wz_session_core::declare_form::InterestForm {
+                    mapping_id: 0,
+                    suffix: Some(keyexpr.clone()),
+                    aggregate: false,
+                }),
+                base.allowed_destination.allows_local(),
+            );
+            match asked {
+                Some(id) => Some(id),
+                // The session has no entity id left to ask by: the declaration is refused, as
+                // a publisher that cannot ask could never be told it matches.
+                None => {
+                    if let Some(id) = own_declaration {
+                        state.shared.release_keyexpr(id);
+                    }
+                    return Z_EGENERIC;
+                }
+            }
+        } else {
+            None
+        };
         let mut boxed = Box::new(PublisherHandle::Registry(PublisherState {
             shared: state.shared.clone(),
             // The mapping travels with the keyexpr rather than with the session, which is
@@ -899,6 +942,7 @@ pub(crate) unsafe fn declare_publisher_stated(
                 mapping: declared,
             },
             held_declaration: own_declaration,
+            interest,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             matching: std::sync::Mutex::new(None),
             base,

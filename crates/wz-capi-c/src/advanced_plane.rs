@@ -26,7 +26,8 @@ use std::time::Duration;
 use wz_capi_core::drive::PeriodicJob;
 use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{
-    QblId, QueryCallback, QueryHolder, QueryableSink, SessionEngine, Ticker, TokenId, WireKey,
+    FilterId, FilterPlane, QblId, QueryCallback, QueryHolder, QueryableSink, SessionEngine, Ticker,
+    TokenId, WireKey,
 };
 use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
@@ -35,6 +36,7 @@ use wz_ext_pubsub::advanced_publisher::{
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::session::{PublishError, PublishOptions};
+use wz_session_core::declare_form::InterestForm;
 
 /// The plane of one zenoh-c session.
 pub(crate) struct CPlane {
@@ -81,9 +83,26 @@ impl Drop for Token {
     }
 }
 
+/// The question an advanced publisher asks every face for the subscribers of its key, held for
+/// its life and retracted when this is dropped; `None` for one that writes to its own session
+/// alone and asks nobody.
+pub(crate) struct PublisherInterest {
+    engine: Arc<dyn SessionEngine>,
+    id: Option<FilterId>,
+}
+
+impl Drop for PublisherInterest {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            self.engine.undeclare_write_filter(id);
+        }
+    }
+}
+
 impl AdvancedPublisherPlane for CPlane {
-    /// A zenoh-c publisher is the key it sends on: a send is a fan-out of the session's.
-    type Publisher = ();
+    /// A zenoh-c publisher is the key it sends on, a send being a fan-out of the session's, and
+    /// the question it asks the faces for the subscribers of that key.
+    type Publisher = PublisherInterest;
     type Queryable = CacheQueryable;
     type Token = Token;
     /// The beacon is sent on its literal key with no publisher of its own, as the runtime's is.
@@ -97,9 +116,9 @@ impl AdvancedPublisherPlane for CPlane {
 
     fn declare_publisher(
         &self,
-        _keyexpr: &str,
-        _options: PublishOptions,
-    ) -> Result<DeclaredPublisher<()>, AdvancedPublisherError> {
+        keyexpr: &str,
+        options: PublishOptions,
+    ) -> Result<DeclaredPublisher<PublisherInterest>, AdvancedPublisherError> {
         // The entity id of the `SourceInfo.eid` id space, one for the publisher and not one for
         // each face: the token and every sample name this publisher with it.
         let eid = self
@@ -108,7 +127,35 @@ impl AdvancedPublisherPlane for CPlane {
             .actions()
             .alloc_next_entity_id()
             .ok_or(AdvancedPublisherError::EntityIdsExhausted)?;
-        Ok(DeclaredPublisher { handle: (), eid })
+        // Upstream's advanced publisher sends through a publisher it declares on the session
+        // (`zenoh-ext/src/advanced_publisher.rs` @ `.declare_publisher(`), and that declaration
+        // asks every face for the subscribers of the key, as `z_declare_publisher` does here.
+        let id = if options.allowed_destination.allows_remote() {
+            let asked = self
+                .engine
+                .declare_write_filter(
+                    FilterPlane::Subscribers,
+                    keyexpr.to_owned(),
+                    &WireKey::literal(),
+                    Some(InterestForm {
+                        mapping_id: 0,
+                        suffix: Some(keyexpr.to_owned()),
+                        aggregate: false,
+                    }),
+                    options.allowed_destination.allows_local(),
+                )
+                .ok_or_else(|| Self::refusal("publisher"))?;
+            Some(asked)
+        } else {
+            None
+        };
+        Ok(DeclaredPublisher {
+            handle: PublisherInterest {
+                engine: Arc::clone(&self.engine),
+                id,
+            },
+            eid,
+        })
     }
 
     fn declare_cache_queryable(
@@ -173,7 +220,7 @@ impl AdvancedPublisherPlane for CPlane {
 
     fn publish(
         &self,
-        _publisher: &(),
+        _publisher: &PublisherInterest,
         keyexpr: &str,
         payload: &[u8],
         options: PublishOptions,
@@ -188,7 +235,7 @@ impl AdvancedPublisherPlane for CPlane {
     #[cfg(feature = "zenoh-c-shared-memory")]
     fn publish_shm(
         &self,
-        publisher: &(),
+        publisher: &PublisherInterest,
         keyexpr: &str,
         payload: &Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk>,
         options: PublishOptions,
@@ -215,7 +262,7 @@ impl AdvancedPublisherPlane for CPlane {
         );
     }
 
-    fn retained_key(&self, _publisher: &()) -> Option<Retained> {
+    fn retained_key(&self, _publisher: &PublisherInterest) -> Option<Retained> {
         None
     }
 }

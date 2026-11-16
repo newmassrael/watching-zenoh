@@ -1576,6 +1576,139 @@ fn the_matching_of_a_node_publisher_and_querier_reads_the_peer() {
     }
 }
 
+/// Declare a subscriber on [`KEYEXPR`] that counts its samples, and hand back its handle so the
+/// caller can undeclare it. The context must outlive `session` and be freed by the caller.
+#[cfg(feature = "router-node")]
+unsafe fn declare_counting_subscriber(
+    session: &z_owned_session_t,
+) -> (z_owned_subscriber_t, *mut CountCtx) {
+    let ctx = Box::into_raw(Box::new(CountCtx {
+        hits: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+    let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+    z_closure_sample(&mut closure, Some(on_sample), None, ctx.cast());
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+    assert_eq!(
+        z_declare_subscriber(
+            z_session_loan(session),
+            &mut sub,
+            z_view_keyexpr_loan(&view),
+            (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+            std::ptr::null_mut(),
+        ),
+        Z_OK
+    );
+    (sub, ctx)
+}
+
+/// Whether `check` stays false for a whole second.
+#[cfg(feature = "router-node")]
+fn stays_false(check: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if check() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// The matching status of a CLIENT's publisher, polled with NO matching listener declared, reads
+/// what the router tells the client: false while nothing subscribes, true once another client of
+/// the router subscribes to the key, whether the subscriber came after the publisher or before
+/// it, and false again once the subscriber goes.
+///
+/// A client hears of a subscriber only through an Interest it holds, and upstream's publisher
+/// sends one at its declaration (`zenoh/src/api/session.rs` @ `fn declare_publisher_inner`). A
+/// publisher that asked only when a matching listener was declared polled false for ever.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_client_publisher_with_no_listener_polls_the_subscribers_the_router_holds() {
+    let port_router = free_port();
+    // SAFETY: fresh configs and sessions.
+    let (rc, router) = unsafe { open_with(&stated("router", Some(port_router), None)) };
+    assert_eq!(rc, Z_OK, "the router opens");
+    let (rc, publishing) = unsafe { open_with(&stated("client", None, Some(port_router))) };
+    assert_eq!(rc, Z_OK, "the publishing client dials the router");
+    let (rc, subscribing) = unsafe { open_with(&stated("client", None, Some(port_router))) };
+    assert_eq!(rc, Z_OK, "the subscribing client dials the router");
+    // SAFETY: the sessions are live; the context is freed after them.
+    unsafe {
+        let key = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        let declare = |publisher: &mut z_owned_publisher_t| {
+            assert_eq!(
+                z_declare_publisher(
+                    z_session_loan(&publishing),
+                    publisher,
+                    z_view_keyexpr_loan(&view),
+                    std::ptr::null_mut()
+                ),
+                Z_OK
+            );
+        };
+        let matching = |publisher: &z_owned_publisher_t| {
+            let mut status: z_matching_status_t = std::mem::zeroed();
+            assert_eq!(
+                z_publisher_get_matching_status(z_publisher_loan(publisher), &mut status),
+                Z_OK
+            );
+            status.matching
+        };
+
+        // The publisher comes first, and nothing subscribes yet.
+        let mut first: z_owned_publisher_t = std::mem::zeroed();
+        declare(&mut first);
+        assert!(
+            stays_false(|| matching(&first)),
+            "a publisher matched while nothing subscribed to its key"
+        );
+        // A subscriber declared AFTER the publisher.
+        let (mut subscriber, ctx) = declare_counting_subscriber(&subscribing);
+        assert!(
+            eventually(|| matching(&first)),
+            "the status of a listener-less client publisher never saw a subscriber declared \
+             after it"
+        );
+        assert_eq!(
+            z_undeclare_publisher((&mut first as *mut z_owned_publisher_t).cast()),
+            Z_OK
+        );
+        // A publisher declared while the subscriber already stands, with no other publisher on
+        // the key holding a question it could ride.
+        let mut second: z_owned_publisher_t = std::mem::zeroed();
+        declare(&mut second);
+        assert!(
+            eventually(|| matching(&second)),
+            "the status of a listener-less client publisher never saw a subscriber declared \
+             before it"
+        );
+        // The subscriber goes.
+        assert_eq!(
+            z_undeclare_subscriber((&mut subscriber as *mut z_owned_subscriber_t).cast()),
+            Z_OK
+        );
+        assert!(
+            eventually(|| !matching(&second)),
+            "the status of a listener-less client publisher still matched after the subscriber \
+             went"
+        );
+        assert_eq!(
+            z_undeclare_publisher((&mut second as *mut z_owned_publisher_t).cast()),
+            Z_OK
+        );
+        close_session(subscribing);
+        close_session(publishing);
+        close_session(router);
+        drop(Box::from_raw(ctx));
+    }
+}
+
 /// A querier declared on a node asks as the node does: the queryable of a registry peer that dials
 /// the node answers its gets, and the querier answers its key and an id of the node's session.
 #[cfg(feature = "router-node")]

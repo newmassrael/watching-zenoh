@@ -175,6 +175,37 @@ pub type QueryableSink = Arc<
         + Sync,
 >;
 
+/// The question a write filter asks every face: the key its Interest is held and counted under
+/// on the face's session, and how that Interest names the key on the wire.
+///
+/// The key is the filter's own literal, except that the subscribers a publisher asks for are
+/// asked under the first `aggregation/publishers` aggregate that includes its key, once per
+/// aggregate, as upstream's publisher asks
+/// (`zenoh/src/api/session.rs` @ `.aggregated_publishers`). It is the key the face session's
+/// own publishers count their Interest under
+/// (`wz_runtime_tokio::session::Session::publisher_interest_key`), so a filter, a matching
+/// listener's watch and a matching poll on one key share one Interest and one `Final`.
+struct FilterAsk {
+    key: String,
+    form: InterestForm,
+}
+
+impl FilterAsk {
+    /// Ask `session` the question, holding its Interest until the returned hold is dropped.
+    fn hold(
+        &self,
+        plane: FilterPlane,
+        session: &TokioSession,
+    ) -> MatchingInterestHold<TokioRuntime, TokioTime> {
+        match plane {
+            FilterPlane::Subscribers => session.hold_subscribers_interest(&self.key, &self.form),
+            FilterPlane::Queryables { .. } => {
+                session.hold_queryables_interest(&self.key, &self.form)
+            }
+        }
+    }
+}
+
 /// A C-declared write filter — the SSOT replayed onto every face that comes up,
 /// as every other entry here is.
 struct FilterEntry {
@@ -186,7 +217,7 @@ struct FilterEntry {
     /// Interest at all from a peer with no router among its peers
     /// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_add_interest`), and
     /// learns only what peers volunteer.
-    ask: Option<InterestForm>,
+    ask: Option<FilterAsk>,
     /// Whether the session's OWN entities count, as they do in zenoh-pico when its
     /// local subscriber or queryable switch is on and the entity's locality admits
     /// session-local traffic (`ctx->allow_local`, `vendor/zenoh-pico/src/net/filtering.c` @
@@ -3111,16 +3142,8 @@ impl SharedSession {
             if held.filters.contains_key(&entry.id) {
                 continue;
             }
-            if let Some(form) = &entry.ask {
-                let hold = match entry.plane {
-                    FilterPlane::Subscribers => {
-                        session.hold_subscribers_interest(&entry.keyexpr, form)
-                    }
-                    FilterPlane::Queryables { .. } => {
-                        session.hold_queryables_interest(&entry.keyexpr, form)
-                    }
-                };
-                filters.insert(entry.id, hold);
+            if let Some(ask) = &entry.ask {
+                filters.insert(entry.id, ask.hold(entry.plane, &session));
             }
         }
         // R3073 -- the LAST line of the replay: a peer this node meets as a north-bound peer is
@@ -5773,6 +5796,30 @@ impl SharedSession {
         })
     }
 
+    /// The question a write filter on `keyexpr` asks every face, `form` being how its caller
+    /// names the key: a publisher's under the `aggregation/publishers` aggregate that includes
+    /// the key, else as asked. See [`FilterAsk`].
+    fn filter_ask(&self, plane: FilterPlane, keyexpr: &str, form: InterestForm) -> FilterAsk {
+        let aggregate = match plane {
+            FilterPlane::Subscribers => self.aggregation.publisher_aggregate(keyexpr),
+            FilterPlane::Queryables { .. } => None,
+        };
+        match aggregate {
+            Some(aggregate) => FilterAsk {
+                key: aggregate.to_owned(),
+                form: InterestForm {
+                    mapping_id: 0,
+                    suffix: Some(aggregate.to_owned()),
+                    aggregate: false,
+                },
+            },
+            None => FilterAsk {
+                key: keyexpr.to_owned(),
+                form,
+            },
+        }
+    }
+
     /// Declare a WRITE FILTER — zenoh-pico's `_z_write_filter_create`, which a
     /// publisher or querier does once, at declare.
     ///
@@ -5799,6 +5846,9 @@ impl SharedSession {
     /// told it. A group that comes up later is not asked: zenoh-pico opens its one transport
     /// before any entity, so it has no such moment. With no entity id left the filter is
     /// refused (`None`) and nothing is asked.
+    ///
+    /// The subscribers a publisher's filter asks for are asked under the
+    /// `aggregation/publishers` aggregate that includes its key, when one does ([`FilterAsk`]).
     pub fn declare_write_filter(
         &self,
         plane: FilterPlane,
@@ -5823,16 +5873,10 @@ impl SharedSession {
         );
         #[cfg(not(feature = "multicast-transport"))]
         let _ = (interest_id, wire);
-        if let Some(form) = &ask {
+        let ask = ask.map(|form| self.filter_ask(plane, &keyexpr, form));
+        if let Some(ask) = &ask {
             for face in guard.faces.values_mut() {
-                let hold = match plane {
-                    FilterPlane::Subscribers => {
-                        face.session.hold_subscribers_interest(&keyexpr, form)
-                    }
-                    FilterPlane::Queryables { .. } => {
-                        face.session.hold_queryables_interest(&keyexpr, form)
-                    }
-                };
+                let hold = ask.hold(plane, &face.session);
                 face.filters.insert(id, hold);
             }
         }
