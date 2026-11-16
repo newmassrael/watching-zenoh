@@ -11,13 +11,21 @@
 //! Upstream copies a plain payload into the session's own provider when the link's peer
 //! negotiated shared memory, the payload is at least the threshold, and the message's kind is in
 //! the list (`io/zenoh-transport/src/common/shm/interop.rs` @
-//! `if slice.len() >= self.message_size_threshold {` and @ `let p = if policy.put {`). The
-//! receiver then holds a shared-memory buffer where it would otherwise hold bytes, and that is
-//! what is read: a receiver linked against the REAL library, the same program in every exchange,
-//! prints for each sample whether `z_bytes_as_loaned_shm` takes its payload. Only the SENDER
-//! changes between the two arms, and it is handed the document.
+//! `if slice.len() >= self.message_size_threshold {`, and per kind @ `let p = if policy.put {`,
+//! @ `let p = if policy.query {` and @ `let p = if policy.reply {`). The receiver then holds a
+//! shared-memory buffer where it would otherwise hold bytes, and that is what is read: a receiver
+//! linked against the REAL library, the same program in every exchange, prints for each payload
+//! it is handed whether `z_bytes_as_loaned_shm` takes it. Only the SENDER changes between the two
+//! arms, and it is handed the document.
 //!
-//! The sender asks for its provider without waiting before it puts. Upstream builds the provider
+//! Each kind is sent its own way, and the receiver takes it the matching way: a put, which the
+//! receiver's subscriber is handed; the value of a get, which the receiver's queryable is handed;
+//! and a reply, which the sender's queryable makes to the receiver's get. An error reply is not a
+//! case: upstream's codec writes its payload in line whatever the transport did to it
+//! (`commons/zenoh-codec/src/zenoh/err.rs` @ `let bodec = Zenoh080Bounded::<u32>::new();`), so
+//! the receiver reads bytes from both libraries.
+//!
+//! The sender asks for its provider without waiting before it sends. Upstream builds the provider
 //! the first time anything asks and hands it to the promotion only once a later ask receives the
 //! built provider from the build (`io/zenoh-transport/src/common/shm/interop.rs` @
 //! `ProviderInitStateInner::Initializing(join_handle) => match join_handle.try_recv() {`). A
@@ -57,24 +65,76 @@ use wz_integration_tests::common::{
 };
 
 /// A sender that opens a session from the config file it is given, asks for the session's
-/// provider without waiting, and puts two plain payloads of one size. Arguments: the config file,
-/// the key, the payload size in bytes.
+/// provider without waiting, and sends two plain payloads of one size of the kind its mode names:
+/// `put` puts them, `query` gets with each as the value, and `reply` answers each of the
+/// receiver's gets with one. Arguments: the config file, the key, the payload size in bytes, the
+/// mode.
 const SENDER: &str = r#"#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "zenoh.h"
 
+/* The payload every message carries. */
+static uint8_t *g_buf = NULL;
+static size_t g_size = 0;
+
+static void on_query(z_loaned_query_t *query, void *arg) {
+    (void)arg;
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_buf(&payload, g_buf, g_size);
+    int rc = z_query_reply(query, z_query_keyexpr(query), z_move(payload), NULL);
+    printf("reply rc=%d\n", rc);
+}
+
+static void get_with_value(const z_loaned_session_t *s, const z_loaned_keyexpr_t *ke, int i) {
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_buf(&payload, g_buf, g_size);
+    z_owned_closure_reply_t closure;
+    z_owned_fifo_handler_reply_t handler;
+    z_fifo_channel_reply_new(&closure, &handler, 16);
+    z_get_options_t opts;
+    z_get_options_default(&opts);
+    opts.payload = z_move(payload);
+    opts.timeout_ms = 1000;
+    int rc = z_get(s, ke, "", z_move(closure), &opts);
+    printf("get %d rc=%d\n", i, rc);
+    z_owned_reply_t reply;
+    while (z_recv(z_loan(handler), &reply) == Z_OK) {
+        z_drop(z_move(reply));
+    }
+    z_drop(z_move(handler));
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (argc != 4) { return 2; }
-    size_t size = (size_t)atol(argv[3]);
+    if (argc != 5) { return 2; }
+    const char *mode = argv[4];
+    int put = strcmp(mode, "put") == 0;
+    int query = strcmp(mode, "query") == 0;
+    int reply = strcmp(mode, "reply") == 0;
+    if (!put && !query && !reply) { return 2; }
+    g_size = (size_t)atol(argv[3]);
+    g_buf = malloc(g_size);
+    if (g_buf == NULL) { return 6; }
+    memset(g_buf, 'x', g_size);
     z_owned_config_t config;
     if (zc_config_from_file(&config, argv[1]) != Z_OK) { printf("config failed\n"); return 3; }
     z_owned_session_t s;
     if (z_open(&s, z_move(config), NULL) != Z_OK) { printf("open failed\n"); return 4; }
     z_view_keyexpr_t ke;
     if (z_view_keyexpr_from_str(&ke, argv[2]) != Z_OK) { return 5; }
-    /* Let the receiver's subscription reach this session. */
+    /* The queryable that replies is declared first, so that the receiver knows it when it asks. */
+    z_owned_queryable_t qable;
+    z_internal_queryable_null(&qable);
+    if (reply) {
+        z_owned_closure_query_t qcb;
+        z_closure(&qcb, on_query, NULL, NULL);
+        if (z_declare_queryable(z_loan(s), &qable, z_loan(ke), z_move(qcb), NULL) != Z_OK) {
+            printf("queryable failed\n");
+            return 7;
+        }
+    }
+    /* Let the receiver's declaration reach this session. */
     z_sleep_ms(1500);
 
     /* Start the provider's build and take nothing out of it. */
@@ -85,41 +145,81 @@ int main(int argc, char **argv) {
     z_shared_shm_provider_drop(z_shared_shm_provider_move(&provider));
     z_sleep_ms(2000);
 
-    uint8_t *buf = malloc(size);
-    if (buf == NULL) { return 6; }
-    memset(buf, 'x', size);
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; put && i < 2; i++) {
         z_owned_bytes_t payload;
-        z_bytes_copy_from_buf(&payload, buf, size);
+        z_bytes_copy_from_buf(&payload, g_buf, g_size);
         int rc = z_put(z_loan(s), z_loan(ke), z_move(payload), NULL);
         printf("put %d rc=%d\n", i, rc);
         z_sleep_ms(300);
     }
-    free(buf);
+    for (int i = 0; query && i < 2; i++) {
+        get_with_value(z_loan(s), z_loan(ke), i);
+        z_sleep_ms(300);
+    }
+    /* The receiver asks from 5 s after it opened, which is after this session started its
+       provider's build. */
+    if (reply) { z_sleep_ms(4500); }
     z_sleep_ms(1000);
+    z_drop(z_move(qable));
     z_session_drop(z_session_move(&s));
+    free(g_buf);
     return 0;
 }
 "#;
 
-/// A receiver with the real library's defaults that prints, for each sample, whether its payload
-/// is a shared-memory buffer and how long it is. Arguments: the endpoint to listen on, the key,
-/// how many seconds to run.
+/// A receiver with the real library's defaults that prints, for each payload it is handed of the
+/// kind its mode names, whether the payload is a shared-memory buffer and how long it is: `put`
+/// subscribes, `query` declares a queryable that reads each query's value, and `reply` gets
+/// twice, 5 s after it opened, and reads each reply. Arguments: the endpoint to listen on, the
+/// key, how many seconds a subscriber or a queryable runs, the mode.
 const RECEIVER: &str = r#"#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "zenoh.h"
 
-static void on_sample(z_loaned_sample_t *sample, void *arg) {
-    (void)arg;
-    const z_loaned_bytes_t *payload = z_sample_payload(sample);
+static void report(const z_loaned_bytes_t *payload) {
     const z_loaned_shm_t *shm = NULL;
     int rc = z_bytes_as_loaned_shm(payload, &shm);
     printf("sample: shm=%s len=%zu\n", rc == 0 ? "yes" : "no", z_bytes_len(payload));
 }
 
+static void on_sample(z_loaned_sample_t *sample, void *arg) {
+    (void)arg;
+    report(z_sample_payload(sample));
+}
+
+static void on_query(z_loaned_query_t *query, void *arg) {
+    (void)arg;
+    const z_loaned_bytes_t *payload = z_query_payload(query);
+    if (payload == NULL) { printf("sample: no value\n"); return; }
+    report(payload);
+}
+
+static void ask(const z_loaned_session_t *s, const z_loaned_keyexpr_t *ke) {
+    z_owned_closure_reply_t closure;
+    z_owned_fifo_handler_reply_t handler;
+    z_fifo_channel_reply_new(&closure, &handler, 16);
+    z_get_options_t opts;
+    z_get_options_default(&opts);
+    opts.timeout_ms = 2000;
+    z_get(s, ke, "", z_move(closure), &opts);
+    z_owned_reply_t reply;
+    while (z_recv(z_loan(handler), &reply) == Z_OK) {
+        if (z_reply_is_ok(z_loan(reply))) {
+            report(z_sample_payload(z_reply_ok(z_loan(reply))));
+        }
+        z_drop(z_move(reply));
+    }
+    z_drop(z_move(handler));
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (argc != 4) { return 2; }
+    if (argc != 5) { return 2; }
+    const char *mode = argv[4];
+    if (strcmp(mode, "put") != 0 && strcmp(mode, "query") != 0 && strcmp(mode, "reply") != 0) {
+        return 2;
+    }
     z_owned_config_t config;
     z_config_default(&config);
     char listen[512];
@@ -132,15 +232,33 @@ int main(int argc, char **argv) {
     if (rc != Z_OK) { return 3; }
     z_view_keyexpr_t ke;
     z_view_keyexpr_from_str(&ke, argv[2]);
-    z_owned_closure_sample_t cb;
-    z_closure(&cb, on_sample, NULL, NULL);
-    z_owned_subscriber_t sub;
-    if (z_declare_subscriber(z_loan(s), &sub, z_loan(ke), z_move(cb), NULL) != Z_OK) {
-        printf("declare failed\n");
-        return 4;
+    if (strcmp(mode, "put") == 0) {
+        z_owned_closure_sample_t cb;
+        z_closure(&cb, on_sample, NULL, NULL);
+        z_owned_subscriber_t sub;
+        if (z_declare_subscriber(z_loan(s), &sub, z_loan(ke), z_move(cb), NULL) != Z_OK) {
+            printf("declare failed\n");
+            return 4;
+        }
+        z_sleep_s((size_t)atoi(argv[3]));
+        z_drop(z_move(sub));
+    } else if (strcmp(mode, "query") == 0) {
+        z_owned_closure_query_t cb;
+        z_closure(&cb, on_query, NULL, NULL);
+        z_owned_queryable_t qable;
+        if (z_declare_queryable(z_loan(s), &qable, z_loan(ke), z_move(cb), NULL) != Z_OK) {
+            printf("declare failed\n");
+            return 4;
+        }
+        z_sleep_s((size_t)atoi(argv[3]));
+        z_drop(z_move(qable));
+    } else {
+        z_sleep_ms(5000);
+        for (int i = 0; i < 2; i++) {
+            ask(z_loan(s), z_loan(ke));
+            z_sleep_ms(300);
+        }
     }
-    z_sleep_s((size_t)atoi(argv[3]));
-    z_drop(z_move(sub));
     z_drop(z_move(s));
     return 0;
 }
@@ -192,7 +310,8 @@ int main(int argc, char **argv) {
 
 const KEY: &str = "demo/example/shm-session-keys";
 
-/// How long a receiver runs: the sender's settle, warm-up and two puts fit inside it.
+/// How long a receiver's subscriber or queryable runs: the sender's settle, warm-up and two puts
+/// or gets fit inside it.
 const RECEIVER_SECONDS: &str = "8";
 
 /// The oracle, or `None` with a LOUD note naming what to do about it.
@@ -264,10 +383,34 @@ fn compile(name: &str, source: &str, include: &Path, work: &Path, arm: Arm) -> B
     Built { exe, libdir }
 }
 
-/// One promotion case: what it shows, the `transport_optimization` members its document states,
-/// the size of the payload put, and whether upstream's rule promotes it.
+/// The kind of message a case sends, as upstream's list names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Message {
+    /// The sender puts; the receiver subscribes.
+    Put,
+    /// The sender gets with the payload as the value; the receiver's queryable reads it.
+    Query,
+    /// The receiver gets; the sender's queryable answers with the payload.
+    Reply,
+}
+
+impl Message {
+    /// The mode both programs are run in for this kind.
+    fn mode(self) -> &'static str {
+        match self {
+            Message::Put => "put",
+            Message::Query => "query",
+            Message::Reply => "reply",
+        }
+    }
+}
+
+/// One promotion case: what it shows, the kind of message sent, the `transport_optimization`
+/// members its document states, the size of the payload, and whether upstream's rule promotes
+/// it.
 struct PromotionCase {
     what: &'static str,
+    message: Message,
     optimization: &'static str,
     size: usize,
     promoted: bool,
@@ -285,12 +428,18 @@ fn sender_document(endpoint: &str, case: &PromotionCase) -> String {
 }
 
 /// One exchange: the reference receiver listens, the sender on `sender` dials it with `case`'s
-/// document and puts, and the receiver's sample rows come back sorted.
+/// document and sends the case's kind of message, and the receiver's sample rows come back
+/// sorted.
 fn exchange(sender: &Built, receiver: &Built, case: &PromotionCase, work: &Path) -> Vec<String> {
     let reservation = PortReservation::pick();
     let endpoint = format!("tcp/127.0.0.1:{}", reservation.port());
     let mut receiving = Command::new(&receiver.exe)
-        .args([endpoint.as_str(), KEY, RECEIVER_SECONDS])
+        .args([
+            endpoint.as_str(),
+            KEY,
+            RECEIVER_SECONDS,
+            case.message.mode(),
+        ])
         .env("LD_LIBRARY_PATH", &receiver.libdir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -313,6 +462,7 @@ fn exchange(sender: &Built, receiver: &Built, case: &PromotionCase, work: &Path)
         .arg(document)
         .arg(KEY)
         .arg(case.size.to_string())
+        .arg(case.message.mode())
         .env("LD_LIBRARY_PATH", &sender.libdir)
         .stderr(Stdio::null())
         .output_bounded()
@@ -334,7 +484,7 @@ fn exchange(sender: &Built, receiver: &Built, case: &PromotionCase, work: &Path)
     rows
 }
 
-/// The rows the reference receiver prints for `case` under upstream's rule: both puts, each a
+/// The rows the reference receiver prints for `case` under upstream's rule: both messages, each a
 /// shared-memory buffer exactly when the case promotes it.
 fn expected_rows(case: &PromotionCase) -> Vec<String> {
     let shm = if case.promoted { "yes" } else { "no" };
@@ -373,8 +523,8 @@ fn promotion_differential(cases: &[PromotionCase]) {
     let sender_wz = compile("shm_keys_sender", SENDER, &include, work.path(), Arm::Wz);
 
     for case in cases {
-        // The ORACLE first: a reference that did not deliver both puts, or that promoted against
-        // the rule, makes the equality below say nothing about the key.
+        // The ORACLE first: a reference that did not deliver both messages, or that promoted
+        // against the rule, makes the equality below say nothing about the key.
         let by_ref = exchange(&sender_ref, &receiver, case, work.path());
         assert_eq!(
             by_ref,
@@ -386,9 +536,10 @@ fn promotion_differential(cases: &[PromotionCase]) {
         let by_wz = exchange(&sender_wz, &receiver, case, work.path());
         assert_eq!(
             by_wz, by_ref,
-            "§5.27 api-compat-c: {}: with the same document, wz's sender delivered the put \
-             otherwise than libzenohc's.\n--- wz ---\n{by_wz:#?}\n--- libzenohc ---\n{by_ref:#?}",
-            case.what
+            "§5.27 api-compat-c: {} ({:?}): with the same document, wz's sender delivered the \
+             message otherwise than libzenohc's.\n--- wz ---\n{by_wz:#?}\n--- libzenohc ---\n\
+             {by_ref:#?}",
+            case.what, case.message
         );
     }
 }
@@ -404,30 +555,35 @@ fn the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_a
     promotion_differential(&[
         PromotionCase {
             what: "no threshold stated, a payload above upstream's 3072",
+            message: Message::Put,
             optimization: "",
             size: 4096,
             promoted: true,
         },
         PromotionCase {
             what: "no threshold stated, a payload below upstream's 3072",
+            message: Message::Put,
             optimization: "",
             size: 2048,
             promoted: false,
         },
         PromotionCase {
             what: "a threshold of 1024 promotes a payload the default holds back",
+            message: Message::Put,
             optimization: "message_size_threshold: 1024",
             size: 2048,
             promoted: true,
         },
         PromotionCase {
             what: "a payload exactly at the threshold",
+            message: Message::Put,
             optimization: "message_size_threshold: 2048",
             size: 2048,
             promoted: true,
         },
         PromotionCase {
             what: "a threshold of 8192 holds back a payload the default promotes",
+            message: Message::Put,
             optimization: "message_size_threshold: 8192",
             size: 4096,
             promoted: false,
@@ -435,30 +591,76 @@ fn the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_a
     ]);
 }
 
-/// THE GATE for `transport/shared_memory/transport_optimization/messages`: a put is copied into
-/// shared memory when the list names `put` and sent as bytes when it does not, by wz's sender as
-/// by the real library's. The threshold is held at 1024 in every case, so only the list differs.
+/// THE GATE for `transport/shared_memory/transport_optimization/messages`: a put, the value of a
+/// get and a reply are each copied into shared memory when the list names their kind and sent as
+/// bytes when it does not, by wz's sender as by the real library's. The threshold is held at 1024
+/// in every case, so only the list differs.
 // wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
 #[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
             ABI arm this needs)"]
-fn the_promoted_messages_list_decides_whether_a_put_travels_as_shared_memory_on_wz_and_libzenohc() {
+fn the_promoted_messages_list_decides_which_messages_travel_as_shared_memory_on_wz_and_libzenohc() {
     promotion_differential(&[
         PromotionCase {
-            what: "no list stated, upstream's put, query and reply",
+            what: "no list stated, upstream's put, query and reply: a put",
+            message: Message::Put,
             optimization: "message_size_threshold: 1024",
             size: 4096,
             promoted: true,
         },
         PromotionCase {
             what: "a list without put",
+            message: Message::Put,
             optimization: r#"message_size_threshold: 1024, messages: ["query", "reply"]"#,
             size: 4096,
             promoted: false,
         },
         PromotionCase {
             what: "a list naming put alone",
+            message: Message::Put,
             optimization: r#"message_size_threshold: 1024, messages: ["put"]"#,
+            size: 4096,
+            promoted: true,
+        },
+        PromotionCase {
+            what: "no list stated, upstream's put, query and reply: a query's value",
+            message: Message::Query,
+            optimization: "message_size_threshold: 1024",
+            size: 4096,
+            promoted: true,
+        },
+        PromotionCase {
+            what: "a list without query",
+            message: Message::Query,
+            optimization: r#"message_size_threshold: 1024, messages: ["put", "reply"]"#,
+            size: 4096,
+            promoted: false,
+        },
+        PromotionCase {
+            what: "a list naming query alone",
+            message: Message::Query,
+            optimization: r#"message_size_threshold: 1024, messages: ["query"]"#,
+            size: 4096,
+            promoted: true,
+        },
+        PromotionCase {
+            what: "no list stated, upstream's put, query and reply: a reply",
+            message: Message::Reply,
+            optimization: "message_size_threshold: 1024",
+            size: 4096,
+            promoted: true,
+        },
+        PromotionCase {
+            what: "a list without reply",
+            message: Message::Reply,
+            optimization: r#"message_size_threshold: 1024, messages: ["put", "query"]"#,
+            size: 4096,
+            promoted: false,
+        },
+        PromotionCase {
+            what: "a list naming reply alone",
+            message: Message::Reply,
+            optimization: r#"message_size_threshold: 1024, messages: ["reply"]"#,
             size: 4096,
             promoted: true,
         },
