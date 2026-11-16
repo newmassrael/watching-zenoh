@@ -4418,12 +4418,18 @@ jobs:
 
       - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
         # R311y892 — `id` so the RESOLVED patch version can be named in the
-        # Zephyr cache key below. "3.12" is a range, and which patch this step
-        # hands back is the runner image's choice, not ours.
+        # Zephyr cache key below. It was the range "3.12", so which patch this
+        # step handed back was the runner image's choice, and every image that
+        # moved the patch re-keyed the venv and paid a full reprovision
+        # (open-debt item 381). The version is now PINNED, in the one file every
+        # workflow's setup-python reads, the way rust-toolchain.toml pins Rust:
+        # the venv is rebuilt when this repository moves the pin, not when the
+        # image does. setup-python fetches the pinned patch when the image's
+        # tool cache lacks it, which costs seconds, not a reprovision.
         id: setuppy
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: .github/python-version
 
       # R311y33 — restore/save SPLIT (not the combined actions/cache@v4 whose
       # post-step saves unconditionally): the save below is gated on success() so
@@ -4696,10 +4702,11 @@ jobs:
         run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
+        # Pinned in .github/python-version; see the first Zephyr job's step.
         id: setuppy
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: .github/python-version
 
       - name: Restore Zephyr workspace + SDK cache
         # The key `zephyr-mcu` uses, character for character: it names every
@@ -8107,7 +8114,7 @@ jobs:
       - name: Set up Python (the platform-surface matrix gate is python)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: .github/python-version
 
       - name: platform surface matrix — the leg this host is owed
         # The leg bounds each target itself and names a stalled one by its
