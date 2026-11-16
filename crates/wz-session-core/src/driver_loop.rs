@@ -1339,8 +1339,14 @@ pub enum ReassemblyDropReason {
     /// congested-but-correct link as a lossy one.
     SenderDropped,
     /// R311y578 — a `0x2 First` marker restarted a chain that was already
-    /// open on the same key; the staged prefix was discarded.
+    /// open on the same key; the staged prefix was discarded. Reported for
+    /// the discarded chain, beside the outcome of the fragment that
+    /// restarted it.
     Superseded,
+    /// The pool was full and its oldest-wins overflow policy ended this
+    /// chain, the oldest open one, to give its slot to a new chain. Reported
+    /// beside the outcome of the fragment that took the slot.
+    Evicted,
     /// R311y578 — the fragment would have started a chain but carried no
     /// `0x2 First` marker on a session that negotiated them. The
     /// observer-vs-participant case: a reader attached to a live flow sees
@@ -1417,6 +1423,18 @@ impl ReassemblyDropReason {
                 Some(ReassemblyDropReason::Unresolvable)
             }
             IngestOutcome::Begun | IngestOutcome::Continued | IngestOutcome::Reassembled => None,
+        }
+    }
+
+    /// Map the chain an ingest ended for a fragment not of it
+    /// ([`ReassemblyDispatcher::displaced_by_last_ingest`](crate::reassembly_dispatch::ReassemblyDispatcher::displaced_by_last_ingest))
+    /// to this observer mirror. Every ingest reporter raises it beside
+    /// [`Self::from_ingest`]'s, since one fragment can end two chains.
+    pub fn from_displaced(displaced: crate::reassembly_dispatch::DisplacedChain) -> Self {
+        use crate::reassembly_dispatch::DisplacedChain;
+        match displaced {
+            DisplacedChain::Superseded => ReassemblyDropReason::Superseded,
+            DisplacedChain::Evicted => ReassemblyDropReason::Evicted,
         }
     }
 }

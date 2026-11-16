@@ -2565,6 +2565,13 @@ where
             .err();
         },
     );
+    // The chain this fragment ended besides its own, which the in-place
+    // delivery above has already walked past.
+    if let Some(displaced) = reasm.displaced_by_last_ingest() {
+        on_event.event(IterationEvent::ReassemblyDropped(
+            ReassemblyDropReason::from_displaced(displaced),
+        ));
+    }
     // A reassembled message that does not decode is reported and dropped; the
     // session goes on, as on the copying path.
     if let Some(parse_err) = dropped_by_decode {
@@ -3575,6 +3582,14 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
             },
         )
     });
+    // The chain this fragment ended besides its own (a `0x2 First` restart, or
+    // an eviction from a full pool) ended before the fragment's chain was
+    // delivered, so it is reported first.
+    if let Some(displaced) = reasm.displaced_by_last_ingest() {
+        on_event(IterationEvent::ReassemblyDropped(
+            ReassemblyDropReason::from_displaced(displaced),
+        ));
+    }
     if let Some(o) = completed {
         // §5.21 routing-namespace — strip the REASSEMBLED FramePayload (the
         // second owned-outcome mint point) before its observer fan-out, the

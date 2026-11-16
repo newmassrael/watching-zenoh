@@ -1573,6 +1573,94 @@ mod batch_walk_tests {
         );
     }
 
+    /// A member that restarts a chain reaches the observer as ONE dropped
+    /// chain, `Superseded`, beside the new chain it then completes.
+    ///
+    /// The member announces the marker contract and sends wz's own marked
+    /// chains: the first fragment of one chain, then the whole of another
+    /// whose `0x2 First` ends the first. The restart's own fragment is a chain
+    /// start, so before the router reported what it evicted, the stranded
+    /// chain ended without a word.
+    #[test]
+    #[cfg(all(
+        feature = "reassembly",
+        feature = "transport-fragmentation",
+        feature = "codec-push"
+    ))]
+    fn a_restarted_member_chain_is_reported_dropped_once_as_superseded() {
+        use crate::driver_loop::ReassemblyDropReason;
+        use crate::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        let local = params(&[0x11; 4]);
+        let mut d = running::<4>();
+        let mut r: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        dispatch_multicast_inbound_reassembling(
+            &mut d,
+            &mut r,
+            &local,
+            &peer_join(&[0x22; 4]),
+            PEER,
+            0,
+            &mut |_| {},
+            &(),
+        );
+        assert!(d.peer_index_by_src(PEER).is_some());
+
+        // Two marked chains at consecutive sequence numbers: the first starts
+        // at 0, the second at 1, so the member's SN gate admits both.
+        let chain_at = |first_sn: u64| {
+            let frame = crate::frame_encode::encode_frame_with_push(
+                first_sn,
+                crate::push_build::build_push_literal("demo/mc", b"restarted-chain-from-wire")
+                    .expect("push fixture"),
+                true,
+            );
+            let mtu = frame.len() / 2 + 8;
+            let mut tx = MulticastTxConduits::new(sn::mask_from_res(local.seq_num_res));
+            crate::frame_encode::multicast_frame_or_fragments(
+                frame, first_sn, true, mtu, &mut tx, None,
+            )
+        };
+        let stranded = chain_at(0);
+        let restart = chain_at(1);
+        assert!(
+            stranded.len() > 1 && restart.len() > 1,
+            "the fixture must fragment, or no chain is left open to strand"
+        );
+
+        let mut drops: Vec<ReassemblyDropReason> = Vec::new();
+        let mut payloads = 0usize;
+        for (i, dgram) in core::iter::once(&stranded[0])
+            .chain(restart.iter())
+            .enumerate()
+        {
+            dispatch_multicast_inbound_reassembling(
+                &mut d,
+                &mut r,
+                &local,
+                dgram,
+                PEER,
+                1 + i as u64,
+                &mut |event| match event {
+                    IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
+                        ..
+                    }) => payloads += 1,
+                    IterationEvent::ReassemblyDropped(reason) => drops.push(reason),
+                    _ => {}
+                },
+                &(),
+            );
+        }
+        assert_eq!(
+            drops,
+            [ReassemblyDropReason::Superseded],
+            "the stranded chain is reported once, and nothing else is dropped"
+        );
+        assert_eq!(payloads, 1, "the restarted chain reassembles whole");
+        assert_eq!(r.active_chains(), 0);
+    }
+
     /// R311y633 (§17.6) — and the walk stops where the extent is unknown
     /// rather than dispatching bytes it cannot place.
     ///

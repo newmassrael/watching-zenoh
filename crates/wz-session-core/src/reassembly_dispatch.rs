@@ -2995,6 +2995,22 @@ mod chain_boundary_marker_tests {
             ReassemblyDropReason::OutOfOrder
         );
     }
+
+    /// A chain an ingest displaced reaches the observer mirror under the word
+    /// for how it was displaced, the restart's apart from the eviction's.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_displaced_chain_maps_to_its_own_observer_reason() {
+        use crate::driver_loop::ReassemblyDropReason;
+        assert_eq!(
+            ReassemblyDropReason::from_displaced(DisplacedChain::Superseded),
+            ReassemblyDropReason::Superseded
+        );
+        assert_eq!(
+            ReassemblyDropReason::from_displaced(DisplacedChain::Evicted),
+            ReassemblyDropReason::Evicted
+        );
+    }
 }
 
 // ── The router over a ring the caller does not know ([`SnRing::Unknown`]): a

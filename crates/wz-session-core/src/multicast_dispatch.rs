@@ -2437,6 +2437,14 @@ pub(crate) fn ingest_multicast_fragment_counted<
             completed = Some(reassembled_chain_outcome(reliable, sn, priority, chain));
         },
     );
+    // The chain this fragment ended besides its own (a `0x2 First` restart, or
+    // an eviction from a full pool), reported before the fragment's own chain is
+    // delivered, as it ended first.
+    if let Some(displaced) = reasm.displaced_by_last_ingest() {
+        on_event(IterationEvent::ReassemblyDropped(
+            ReassemblyDropReason::from_displaced(displaced),
+        ));
+    }
     if let Some(o) = completed {
         // §5.21 router-multicast-faces (I3a) — resolve this peer's aliased Push
         // keyexprs on the REASSEMBLED batch too (per-peer via `src`), symmetric
@@ -2581,6 +2589,13 @@ pub(crate) fn ingest_multicast_fragment_in_place<
             let _ = crate::driver_loop::walk_lent_payload(chain, reliable, sn, priority, on_event);
         },
     );
+    // The chain this fragment ended besides its own, which the records lent
+    // above have already walked past.
+    if let Some(displaced) = reasm.displaced_by_last_ingest() {
+        on_event(IterationEvent::ReassemblyDropped(
+            ReassemblyDropReason::from_displaced(displaced),
+        ));
+    }
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
         on_event(IterationEvent::ReassemblyDropped(reason));
     }
