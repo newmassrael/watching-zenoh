@@ -4124,6 +4124,12 @@ layer_c0_test_discipline() {
     # binary beside it, an all-absent population armed and unarmed).
     _runci_leg oracle_pin_gate.selftest -- python3 scripts/lib/oracle_pin_gate.py --selftest
     _runci_leg oracle_pin_gate --after oracle_pin_gate.selftest -- python3 scripts/lib/oracle_pin_gate.py --check
+    # The repairer beside that grader, which the gate's docstring places here: the
+    # selftest drives its decisions and the source-tree predicate build-zenohd.sh
+    # asks before building (open-debt item 768, over git trees it makes); `--check`
+    # pairs each oracle to its build variable and reads no binary.
+    _runci_leg ensure_zenohd_at_pin.selftest -- python3 scripts/lib/ensure_zenohd_at_pin.py --selftest
+    _runci_leg ensure_zenohd_at_pin.check --after ensure_zenohd_at_pin.selftest -- python3 scripts/lib/ensure_zenohd_at_pin.py --check
     # R3978 — the machine's store those oracles are built into and copied from.
     # The selftest drives publication (refused off the pin), copying, the key that
     # makes a half copy read as stale, pruning and the source view against a

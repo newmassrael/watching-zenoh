@@ -257,10 +257,11 @@ fi
 # only ANNOTATED tags count. A check written with `--tags` would accept a tree
 # whose pin tag is lightweight, the build would still fall through to the sha,
 # and this same red would come back having passed its own gate.
+#
+# The predicate lives in `ensure_zenohd_at_pin.names_the_pin`, whose --selftest
+# drives it over git trees it makes (open-debt item 768); here it is only asked.
 zenohd_names_the_pin() {
-    local tree="$1" seen
-    seen="$(git -C "$tree" describe --always --dirty=-modified 2>/dev/null)" || return 1
-    [[ "$seen" == "$ZENOHD_VERSION" ]]
+    python3 "$ROOT/scripts/lib/ensure_zenohd_at_pin.py" --names-the-pin "$1" "$ZENOHD_VERSION"
 }
 
 if [[ -n "$ZH" ]] && ! zenohd_names_the_pin "$ZH"; then

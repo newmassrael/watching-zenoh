@@ -146,6 +146,45 @@ def decide(finding_kind: str) -> bool:
     return finding_kind != g.MATCH
 
 
+def _tree_env() -> dict[str, str]:
+    """This environment without the variables that bind git to ONE repository.
+
+    Asked of git (`rev-parse --local-env-vars`) rather than listed: a hook
+    exports `GIT_DIR` and `GIT_INDEX_FILE`, and with them set `git -C <tree>`
+    answers about the hook's repository instead of `<tree>`.
+    """
+    names = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    return {k: v for k, v in os.environ.items() if k not in names}
+
+
+def names_the_pin(tree: pathlib.Path, pin: str) -> bool:
+    """Whether a zenoh source tree's build would report `pin` as its version.
+
+    Open-debt items 758 and 768. `zenohd`'s `GIT_VERSION` comes from the
+    `git-version` crate, which runs `git describe` at build time with its
+    default arguments, `--always --dirty=-modified`: no `--tags`, so only an
+    ANNOTATED tag names a release. A cargo git checkout carries no tags and
+    answers a sha; a tree with local edits answers `<tag>-modified`. Either way
+    the oracle built from it reports something other than the pin, and the
+    store refuses to publish it. The predicate is therefore the build's own
+    command, compared whole; a check written with `--tags` would pass a tree
+    whose pin tag is lightweight and the build would still say a sha.
+    """
+    seen = subprocess.run(
+        ["git", "-C", str(tree), "describe", "--always", "--dirty=-modified"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_tree_env(),
+    )
+    return seen.returncode == 0 and seen.stdout.strip() == pin
+
+
 def build_command(env_var: str | None) -> tuple[list[str], dict[str, str]]:
     env = {"ZENOHD_ALLOW_CLONE": "1"}
     if env_var:
@@ -187,7 +226,85 @@ def _fixture(variants: list[str], with_default: bool = True) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _names_the_pin_arms(scratch: pathlib.Path) -> list[tuple[str, bool, bool]]:
+    """`(arm, expected, got)` for `names_the_pin` over trees made here.
+
+    The arms R2665 drove once by hand and deleted. The green arm is what makes
+    the four refusals mean something, and the wrong-pin arm is the one that
+    shows the VALUE is compared rather than the presence of a tag.
+    """
+    env = _tree_env()
+
+    def git(cwd: pathlib.Path, *args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-c", "user.name=wz-selftest",
+                "-c", "user.email=selftest@invalid",
+                "-c", "commit.gpgsign=false",
+                "-c", "tag.gpgsign=false",
+                "-c", "core.hooksPath=/dev/null",
+                *args,
+            ],
+            cwd=str(cwd),
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+
+    def tree(name: str, tag: list[str] | None) -> pathlib.Path:
+        at = scratch / name
+        at.mkdir()
+        git(at, "init", "-q")
+        (at / "Cargo.toml").write_text('[workspace.package]\nversion = "9.9.9"\n')
+        git(at, "add", "Cargo.toml")
+        git(at, "commit", "-q", "-m", "fixture")
+        if tag is not None:
+            git(at, "tag", *tag)
+        return at
+
+    annotated = tree("annotated", ["-a", "9.9.9", "-m", "9.9.9"])
+    lightweight = tree("lightweight", ["9.9.9"])
+    untagged = tree("untagged", None)
+    # The shape cargo materialises: the tagged commit itself, with no tags.
+    checkout = scratch / "checkout"
+    git(scratch, "clone", "-q", "--no-tags", str(annotated), str(checkout))
+    git(checkout, "checkout", "-q", "--detach")
+
+    arms = [
+        ("an annotated tag at the pin names it", True, names_the_pin(annotated, "9.9.9")),
+        ("the same tree against another pin does not", False, names_the_pin(annotated, "9.9.8")),
+        ("a lightweight tag at the pin does not", False, names_the_pin(lightweight, "9.9.9")),
+        ("an untagged tree does not", False, names_the_pin(untagged, "9.9.9")),
+        ("a cargo-shaped checkout of the tagged commit does not", False,
+         names_the_pin(checkout, "9.9.9")),
+    ]
+    # A different LENGTH as well as different bytes, so the edit is seen even
+    # when it lands in the same second as the index.
+    (annotated / "Cargo.toml").write_text('[workspace.package]\nversion = "9.9.9-local"\n')
+    arms.append(
+        ("a tagged tree with local edits does not", False, names_the_pin(annotated, "9.9.9"))
+    )
+    return arms
+
+
 def selftest() -> int:
+    # ── the build's own version predicate, over real git trees ──────────
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        try:
+            arms = _names_the_pin_arms(pathlib.Path(scratch))
+        except subprocess.CalledProcessError as exc:
+            print("selftest FAIL: could not make the git fixture: %s\n%s"
+                  % (exc, exc.stderr))
+            return 1
+    for arm, expected, got in arms:
+        if got is not expected:
+            print("selftest FAIL: names_the_pin -- %s: expected %s, got %s"
+                  % (arm, expected, got))
+            return 1
+
     # ── the decision table, which is the whole behaviour ────────────────
     # Only MATCH means "leave it alone". The other three all mean the oracle
     # this job is about to use is not the one the tree pins.
@@ -261,7 +378,10 @@ def selftest() -> int:
     finally:
         g.INSTALL_DIR_RE = saved
 
-    print("ensure-zenohd-at-pin: selftest OK (6 derivations driven)")
+    print(
+        "ensure-zenohd-at-pin: selftest OK (6 derivations driven, and %d "
+        "names-the-pin arm(s) over git trees, one of them green)" % len(arms)
+    )
     return 0
 
 
@@ -283,10 +403,23 @@ def main() -> int:
             "grades it exactly as a host with four."
         ),
     )
+    ap.add_argument(
+        "--names-the-pin",
+        nargs=2,
+        metavar=("TREE", "PIN"),
+        help=(
+            "exit 0 when a zenoh source tree's build would report PIN as its "
+            "version, else 1; build-zenohd.sh asks this before building from a tree"
+        ),
+    )
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
+
+    if args.names_the_pin:
+        tree, pin = args.names_the_pin
+        return 0 if names_the_pin(pathlib.Path(tree), pin) else 1
 
     script_text = g.BUILD_SCRIPT.read_text(encoding="utf-8")
     pairs = resolve(script_text)
