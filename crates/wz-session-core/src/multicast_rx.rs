@@ -35,7 +35,7 @@ use crate::driver_loop::IterationEvent;
 use crate::inbound::{parse_inbound, parse_inbound_consuming_in, InboundFrame};
 #[cfg(feature = "alloc")]
 use crate::link::RxBytes;
-use crate::multicast_dispatch::{FrameIngest, JoinOutcome, MulticastDispatcher};
+use crate::multicast_dispatch::{FrameIngest, JoinOutcome, MulticastDispatcher, TableGrowth};
 #[cfg(feature = "transport-qos")]
 use crate::multicast_join::decode_join_qos;
 use crate::multicast_join::{decode_join, judge_join, JoinMismatch};
@@ -139,8 +139,8 @@ fn multicast_message_len(msg: &[u8]) -> Option<usize> {
 /// network message handed up, attributed to its sender (see
 /// [`MulticastStatsRecorder`]); the datagram's bytes are the caller's to count,
 /// since it is the caller that read them. `&()` records nothing.
-pub fn dispatch_multicast_inbound<F, R, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+pub fn dispatch_multicast_inbound<F, R, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
     bytes: &[u8],
     src: SocketAddr,
@@ -180,8 +180,8 @@ where
 /// Heap profile only: a datagram that is shared is an [`RxBytes`], which is a `Vec` or a
 /// reference to one. The slot profile reads the datagram where the link wrote it.
 #[cfg(feature = "alloc")]
-pub fn dispatch_multicast_inbound_in<F, R, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+pub fn dispatch_multicast_inbound_in<F, R, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
     unit: &RxBytes,
     src: SocketAddr,
@@ -214,8 +214,8 @@ where
 /// `on_evict` is handed the pool-slot index of a member the walk drops, before
 /// the slot recycles; see [`dispatch_multicast_message`].
 #[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin and the eviction observer
-fn walk_multicast_inbound<F, R, E, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+fn walk_multicast_inbound<F, R, E, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
@@ -283,8 +283,8 @@ fn unwrap_batch(params: &MulticastParams, datagram: &[u8]) -> Option<alloc::vec:
 /// to [`dispatch_multicast_message`] with the range of it that starts at that
 /// message.
 #[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin and the eviction observer
-fn walk_multicast_batch<F, R, E, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+fn walk_multicast_batch<F, R, E, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
@@ -350,8 +350,8 @@ where
 /// the index can be issued to the next member. A caller with no Router passes
 /// an observer that does nothing.
 #[allow(clippy::too_many_arguments)] // the walk's seven plus the range of the datagram the message is and the eviction observer
-fn dispatch_multicast_message<F, R, E, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+fn dispatch_multicast_message<F, R, E, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
@@ -677,8 +677,8 @@ where
 /// whole first). The messages are not counted per network message: the owned messages
 /// `transport-stats` counts by are the heap profile's.
 #[cfg(not(feature = "alloc"))]
-fn dispatch_multicast_frame_in_place<F, R, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+fn dispatch_multicast_frame_in_place<F, R, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     bytes: &[u8],
     src: SocketAddr,
     now_ms: u64,
@@ -738,8 +738,9 @@ pub fn dispatch_multicast_inbound_reassembling<
     const CAP: usize,
     S,
     R,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -780,8 +781,9 @@ pub fn dispatch_multicast_inbound_reassembling_in<
     const CAP: usize,
     S,
     R,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
     unit: &RxBytes,
@@ -819,8 +821,9 @@ fn walk_multicast_inbound_reassembling<
     const CAP: usize,
     S,
     R,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -876,8 +879,9 @@ fn walk_multicast_batch_reassembling<
     const CAP: usize,
     S,
     R,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -1039,8 +1043,9 @@ pub fn sweep_multicast_reassembling<
     const SLOTS: usize,
     const CAP: usize,
     S,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
     on_event: &mut F,
