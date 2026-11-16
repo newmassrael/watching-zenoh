@@ -18168,7 +18168,11 @@ layer_c1bp_plugin_dynamic_loading() {
     # plugin.rs's convention — so it is that build, not this pin, that makes
     # them mean something). Pinned so a filter that selects a different set,
     # or none, reds rather than exits 0.
-    _runci_guarded_test "C1bp plugin_plane" 4 \
+    # 4 -> 6: `plugins_loading/search_dirs` and `plugins_loading/enabled` each
+    # added one (a plugin named without a path found in the search dirs; by-name
+    # loading off leaves an unnamed plugin unloaded). The pc5 run of the 8e
+    # integration branch printed 6.
+    _runci_guarded_test "C1bp plugin_plane" 6 \
         cargo test -p wz-runtime-tokio \
         --features plugin-dynamic-loading,adminspace-config-hotreload \
         --lib plugin_plane --quiet || return 1
