@@ -528,7 +528,7 @@ pub fn interests_json(
         let _ = write!(
             out,
             ",\"unjudged_answers\":{},\"answers_in_scope\":{}",
-            r.unjudged_answers,
+            r.unjudged_answers(),
             r.answers_in_scope(),
         );
         out.push_str(",\"flow\":");
@@ -2372,6 +2372,42 @@ pub(crate) mod fed_tests {
                 && control.contains("\"refused_missing_start_marker\":0"),
             "the control differs by ONE extension and must land in the other \
              counter, or the test above proves only that the fixture is inert: {control}"
+        );
+    }
+
+    /// Census revision 24 — A RESTART IS COUNTED AS THE CHAIN IT STRANDED.
+    ///
+    /// The restarting fragment's own outcome is its new chain's (`begun`), so a
+    /// count read off that outcome alone stays at 0; the router names the
+    /// chain it ended beside it, and that word is what is counted. The control
+    /// differs by one marker: the second fragment continues the chain instead.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_restart_is_counted_as_the_chain_it_stranded() {
+        let restarted = crate::datagram_tests::marked_fragment_dissection(&[
+            (0, true, true, false),
+            (1, true, true, false),
+        ]);
+        let doc = census_json_where(&restarted, &crate::filter::Filter::any());
+        assert!(
+            doc.contains("\"begun\":2") && doc.contains("\"aborted_superseded\":1"),
+            "two chains began and the first was stranded by the second: {doc}"
+        );
+        assert!(
+            doc.contains("\"aborted_out_of_order\":0"),
+            "a restart is not a lossy link: {doc}"
+        );
+
+        let continued = crate::datagram_tests::marked_fragment_dissection(&[
+            (0, true, true, false),
+            (1, true, false, false),
+        ]);
+        let control = census_json_where(&continued, &crate::filter::Filter::any());
+        assert!(
+            control.contains("\"begun\":1")
+                && control.contains("\"continued\":1")
+                && control.contains("\"aborted_superseded\":0"),
+            "{control}"
         );
     }
 

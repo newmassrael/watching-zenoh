@@ -73,19 +73,21 @@
 
 /// SHAKE128's rate in bytes: 1600 state bits minus twice the 128-bit
 /// capacity, FIPS 202 §6.2.
-#[cfg(not(feature = "initial-sn-compact"))]
 const SHAKE128_RATE: usize = 168;
 
 /// SHAKE128 as a bare sponge over `keccak::f1600`, reading the first eight
 /// output bytes — all this module squeezes.
-#[cfg(not(feature = "initial-sn-compact"))]
+///
+/// Built in every build of the Open body, the compact one included: the
+/// passive plane checks a foreign session's announced origin against zenoh's
+/// derivation ([`zenoh_initial_sn`]) whichever one this build announces its
+/// own by.
 struct Shake128 {
     state: [u64; 25],
     /// Bytes absorbed into the current block.
     pos: usize,
 }
 
-#[cfg(not(feature = "initial-sn-compact"))]
 impl Shake128 {
     fn new() -> Self {
         Self {
@@ -153,9 +155,26 @@ impl Shake128 {
 /// pins that.
 #[cfg(not(feature = "initial-sn-compact"))]
 pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
+    zenoh_initial_sn(own_zid, peer_zid, sn_mask)
+}
+
+/// zenoh's `compute_sn` itself, in every build: the origin a zenoh sender
+/// whose zid is `sender_zid` announces in its `Open` to the peer whose zid is
+/// `receiver_zid`, on the ring of `sn_mask`
+/// (`io/zenoh-transport/src/unicast/establishment/mod.rs` @
+/// `let mut hasher = Shake128::default();`), which the sender calls with its
+/// own zid first at both Open seams
+/// (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+/// `compute_sn(input.mine_zid, input.other_zid, state.transport.resolution);`).
+///
+/// [`derive_initial_sn`] is this in a build without `initial-sn-compact`,
+/// which is what wz announces by; this one is what a passive reader checks a
+/// FOREIGN session's announced origin against, whichever derivation the
+/// reading build announces its own by.
+pub fn zenoh_initial_sn(sender_zid: &[u8], receiver_zid: &[u8], sn_mask: u64) -> u64 {
     let mut hasher = Shake128::new();
-    hasher.absorb(own_zid);
-    hasher.absorb(peer_zid);
+    hasher.absorb(sender_zid);
+    hasher.absorb(receiver_zid);
     u64::from_le_bytes(hasher.squeeze_u64()) & sn_mask
 }
 
@@ -338,6 +357,30 @@ mod tests {
         // res 2 masks to 28 bits, so compare on the full u32 ring the way
         // zenoh's own `RES_U64` cap does.
         assert_eq!(derive_initial_sn(A, B, u32::MAX as u64), zenoh_value);
+    }
+
+    /// The derivation a passive reader checks a foreign origin against is
+    /// zenoh's in every build, the compact one included: the low four bytes
+    /// of SHAKE128 over the sender's zid then the receiver's, masked.
+    #[test]
+    fn the_checked_derivation_is_zenohs_in_every_build() {
+        use sha3::digest::{ExtendableOutput, Update, XofReader};
+        let mut hasher = sha3::Shake128::default();
+        hasher.update(A);
+        hasher.update(B);
+        let mut four = [0u8; 4];
+        hasher.finalize_xof().read(&mut four);
+        let zenoh_value = u64::from(u32::from_le_bytes(four));
+        assert_eq!(zenoh_initial_sn(A, B, u64::from(u32::MAX)), zenoh_value);
+        assert_eq!(
+            zenoh_initial_sn(A, B, mask_from_res(2)),
+            zenoh_value & mask_from_res(2)
+        );
+        assert_ne!(
+            zenoh_initial_sn(A, B, u64::from(u32::MAX)),
+            zenoh_initial_sn(B, A, u64::from(u32::MAX)),
+            "the sender's zid is absorbed first"
+        );
     }
 
     /// The XOF zenoh's `compute_sn` calls, from the crate it calls it from.

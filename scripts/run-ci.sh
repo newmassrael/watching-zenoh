@@ -16821,6 +16821,7 @@ layer_c1bt_capture_no_default_features() {
         report::tests::a_row_says_whether_its_own_byte_total_is_whole \
         interest::no_wildcard_tests::a_wildcard_this_build_cannot_evaluate_is_undecidable_rather_than_silent \
         interest::no_wildcard_tests::an_undecidable_ask_judges_its_answers_neither_way \
+        interest::no_wildcard_tests::an_undecidable_pattern_is_named_for_its_side \
         interest::tests::an_answer_of_a_kind_nobody_asked_for_is_a_finding \
         interest::tests::an_unrestricted_ask_puts_every_answer_in_scope \
         interest::tests::a_restriction_this_reader_cannot_name_leaves_its_answers_unjudged

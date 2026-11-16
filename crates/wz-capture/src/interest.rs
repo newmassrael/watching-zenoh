@@ -365,13 +365,16 @@ pub struct InterestRequest {
     /// kinds its option bits named (`hat/router/interests.rs:60,71,82`) — so
     /// each one is a finding about the peer rather than furniture.
     pub mismatched: Vec<usize>,
-    /// Answers this build could not judge either way.
+    /// Answers this build could not judge either way, each with the reason.
     ///
     /// The same rule the coverage join runs under: an undecidable pattern, an
     /// alias that never resolved, or an interest carrying no body at all are
     /// "cannot tell", and folding them into [`Self::mismatched`] would report
-    /// a confident divergence this reader did not observe.
-    pub unjudged_answers: usize,
+    /// a confident divergence this reader did not observe. The reason is kept
+    /// per answer so that a cause added later has to be named where it is
+    /// produced, rather than joining a catch-all that shrinks `mismatched`
+    /// without a word.
+    pub unjudged: Vec<UnjudgedAnswer>,
     /// Anchor of the `DeclFinal` that terminated the current dump.
     pub closed_at: Option<usize>,
     /// Anchor of the asker's own `Interest(Final)` for this id.
@@ -385,8 +388,43 @@ impl InterestRequest {
     /// number a reader handed `answers = 3` needs before concluding the peer
     /// served the question.
     pub fn answers_in_scope(&self) -> usize {
-        self.answers - self.mismatched.len() - self.unjudged_answers
+        self.answers - self.mismatched.len() - self.unjudged_answers()
     }
+
+    /// How many answers this build could not judge ([`Self::unjudged`]).
+    pub fn unjudged_answers(&self) -> usize {
+        self.unjudged.len()
+    }
+}
+
+/// One answer [`InterestRequest::unjudged`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnjudgedAnswer {
+    /// Index into [`InterestCensus::interests`] of the declaration.
+    pub declaration: usize,
+    /// Why it could be judged neither in nor out of scope.
+    pub reason: UnjudgedReason,
+}
+
+/// Why an answer to an interest was not judged.
+///
+/// The kind axis is decided first and is decidable in every build, so none of
+/// these stands for an answer of a kind the request did not ask for: that one
+/// is mismatched whatever its keyexpr. Each reason below is the first of the
+/// keyexpr axis' inputs that was missing, read in the order listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnjudgedReason {
+    /// The request carried no body, so there is no ask to be inside of.
+    NoAsk,
+    /// The request was restricted to an alias this capture never saw bound.
+    AskUnresolved,
+    /// The declaration named an alias this capture never saw bound.
+    AnswerUnresolved,
+    /// The restriction is a pattern this build's matcher cannot evaluate.
+    AskUndecidable,
+    /// The declaration's keyexpr is a pattern this build's matcher cannot
+    /// evaluate.
+    AnswerUndecidable,
 }
 
 /// One declaration this capture saw, and what became of it.
@@ -757,7 +795,7 @@ impl InterestCensus {
     /// The floor under [`Self::mismatched`]: while this is non-zero, "no
     /// divergence was found" is not "the peer answered in scope".
     pub fn unjudged_answers(&self) -> usize {
-        self.requests.iter().map(|r| r.unjudged_answers).sum()
+        self.requests.iter().map(|r| r.unjudged_answers()).sum()
     }
 
     /// How many of each kind were declared, `[subscriber, queryable, token]`.
@@ -860,7 +898,7 @@ impl InterestCensus {
                 Carried::FragmentWithoutResolution => return,
                 Carried::Nothing => return,
                 #[cfg(feature = "reassembly")]
-                Carried::Fragment(_) => return,
+                Carried::Fragment { .. } => return,
             };
             for (message, _span) in batch.records() {
                 match message {
@@ -928,7 +966,7 @@ impl InterestCensus {
             asked_at: anchor,
             answers: 0,
             mismatched: Vec::new(),
-            unjudged_answers: 0,
+            unjudged: Vec::new(),
             closed_at: None,
             cancelled_at: None,
             anchors: self.anchors,
@@ -1084,51 +1122,19 @@ impl InterestCensus {
     /// Using the literal matcher here would report every wildcard declaration
     /// in a normal session as a divergence.
     fn judge_answer(&mut self, request: usize, declaration: usize) {
-        let (kind, answer) = {
+        let verdict = {
             let d = &self.interests[declaration];
-            (d.kind, d.keyexpr.clone())
+            let r = &self.requests[request];
+            scope_verdict(r.scope, r.keyexpr.as_deref(), d.kind, d.keyexpr.as_deref())
         };
-        let r = &self.requests[request];
-        // No body at all: there is no ask for this to be inside or outside of.
-        let verdict = match r.scope {
-            None => Verdict::Unjudged,
-            Some(scope) => {
-                let asked_for_this_kind = match kind {
-                    InterestKind::Subscriber => scope.subscribers,
-                    InterestKind::Queryable => scope.queryables,
-                    InterestKind::LivelinessToken => scope.tokens,
-                };
-                if !asked_for_this_kind {
-                    Verdict::Mismatched
-                } else if !scope.restricted {
-                    // `R` clear is an ask for ALL key expressions, so no
-                    // keyexpr can fall outside it. Distinct from a restriction
-                    // that failed to resolve, which is the arm below.
-                    Verdict::InScope
-                } else {
-                    match (r.keyexpr.as_deref(), answer.as_deref()) {
-                        (Some(ask), Some(got))
-                            if pattern_is_decidable(ask) && pattern_is_decidable(got) =>
-                        {
-                            let ask_chunks: Vec<&str> = ask.split('/').collect();
-                            if wz_session_core::keyexpr_match::keyexpr_intersects_target(
-                                got,
-                                &ask_chunks,
-                            ) {
-                                Verdict::InScope
-                            } else {
-                                Verdict::Mismatched
-                            }
-                        }
-                        _ => Verdict::Unjudged,
-                    }
-                }
-            }
-        };
+        let r = &mut self.requests[request];
         match verdict {
             Verdict::InScope => {}
-            Verdict::Mismatched => self.requests[request].mismatched.push(declaration),
-            Verdict::Unjudged => self.requests[request].unjudged_answers += 1,
+            Verdict::Mismatched => r.mismatched.push(declaration),
+            Verdict::Unjudged(reason) => r.unjudged.push(UnjudgedAnswer {
+                declaration,
+                reason,
+            }),
         }
     }
 
@@ -1293,8 +1299,57 @@ enum Verdict {
     InScope,
     /// Judged, and outside — the finding.
     Mismatched,
-    /// Neither: an undecidable pattern, an unresolved alias, or no ask at all.
-    Unjudged,
+    /// Neither, for the reason given.
+    Unjudged(UnjudgedReason),
+}
+
+/// The verdict on an answer of `kind` at `answer` to a request of `scope`
+/// restricted to `ask` (`None` where an alias did not resolve, or where the
+/// request was unrestricted).
+///
+/// Every input that can leave the keyexpr axis undecided has its own early
+/// return and its own [`UnjudgedReason`], and there is no catch-all arm: a
+/// further input would have to be named here to be reachable at all.
+fn scope_verdict(
+    scope: Option<InterestScope>,
+    ask: Option<&str>,
+    kind: InterestKind,
+    answer: Option<&str>,
+) -> Verdict {
+    let Some(scope) = scope else {
+        return Verdict::Unjudged(UnjudgedReason::NoAsk);
+    };
+    let asked_for_this_kind = match kind {
+        InterestKind::Subscriber => scope.subscribers,
+        InterestKind::Queryable => scope.queryables,
+        InterestKind::LivelinessToken => scope.tokens,
+    };
+    if !asked_for_this_kind {
+        return Verdict::Mismatched;
+    }
+    if !scope.restricted {
+        // `R` clear is an ask for ALL key expressions, so no keyexpr can fall
+        // outside it. Distinct from a restriction that failed to resolve.
+        return Verdict::InScope;
+    }
+    let Some(ask) = ask else {
+        return Verdict::Unjudged(UnjudgedReason::AskUnresolved);
+    };
+    let Some(answer) = answer else {
+        return Verdict::Unjudged(UnjudgedReason::AnswerUnresolved);
+    };
+    if !pattern_is_decidable(ask) {
+        return Verdict::Unjudged(UnjudgedReason::AskUndecidable);
+    }
+    if !pattern_is_decidable(answer) {
+        return Verdict::Unjudged(UnjudgedReason::AnswerUndecidable);
+    }
+    let ask_chunks: Vec<&str> = ask.split('/').collect();
+    if wz_session_core::keyexpr_match::keyexpr_intersects_target(answer, &ask_chunks) {
+        Verdict::InScope
+    } else {
+        Verdict::Mismatched
+    }
 }
 
 /// The index [`Direction`] stands at in this module's two-slot registries.
@@ -2483,7 +2538,7 @@ mod tests {
             alloc::vec![0usize],
             "and it is the declaration at index 0 that was not asked for"
         );
-        assert_eq!(r.unjudged_answers, 0, "the pattern was decidable");
+        assert!(r.unjudged.is_empty(), "the pattern was decidable");
         assert_eq!(r.answers_in_scope(), 0, "so NOTHING it asked for came back");
         assert_eq!(census.mismatched(), alloc::vec![0usize]);
         // The two findings stay apart: this peer did not stay silent, it
@@ -2545,7 +2600,7 @@ mod tests {
             "both intersect the ask: {:?}",
             r.mismatched
         );
-        assert_eq!(r.unjudged_answers, 0);
+        assert!(r.unjudged.is_empty());
         assert_eq!(r.answers_in_scope(), 2);
         assert!(census.mismatched().is_empty());
     }
@@ -2569,8 +2624,8 @@ mod tests {
         assert!(r.keyexpr.is_none());
         assert!(r.unresolved.is_none(), "and no alias failed to resolve");
         assert!(r.mismatched.is_empty());
-        assert_eq!(
-            r.unjudged_answers, 0,
+        assert!(
+            r.unjudged.is_empty(),
             "unrestricted is DECIDED, not unknown"
         );
         assert_eq!(r.answers_in_scope(), 1);
@@ -2618,7 +2673,14 @@ mod tests {
             r.mismatched.is_empty(),
             "an ask this reader cannot name judges nothing wrong"
         );
-        assert_eq!(r.unjudged_answers, 1);
+        assert_eq!(
+            r.unjudged,
+            alloc::vec![UnjudgedAnswer {
+                declaration: 0,
+                reason: UnjudgedReason::AskUnresolved,
+            }],
+            "the ask's alias is the input that was missing"
+        );
         assert_eq!(census.unjudged_answers(), 1);
         assert_eq!(
             r.answers_in_scope(),
@@ -2626,6 +2688,86 @@ mod tests {
             "and the in-scope count is not inflated by it"
         );
         assert!(census.mismatched().is_empty());
+    }
+
+    /// Every input that leaves an answer unjudged is named, and the kind axis
+    /// is decided before any of them.
+    #[test]
+    fn each_input_that_leaves_an_answer_unjudged_is_named() {
+        let restricted = InterestScope {
+            subscribers: true,
+            restricted: true,
+            ..InterestScope::default()
+        };
+        let sub = InterestKind::Subscriber;
+        assert_eq!(
+            scope_verdict(None, Some("demo/a"), sub, Some("demo/a")),
+            Verdict::Unjudged(UnjudgedReason::NoAsk),
+            "a request with no body asks nothing"
+        );
+        assert_eq!(
+            scope_verdict(Some(restricted), None, sub, Some("demo/a")),
+            Verdict::Unjudged(UnjudgedReason::AskUnresolved)
+        );
+        assert_eq!(
+            scope_verdict(Some(restricted), Some("demo/a"), sub, None),
+            Verdict::Unjudged(UnjudgedReason::AnswerUnresolved)
+        );
+        assert_eq!(
+            scope_verdict(Some(restricted), None, sub, None),
+            Verdict::Unjudged(UnjudgedReason::AskUnresolved),
+            "with both aliases missing the ask is named"
+        );
+        // Decided although both keyexprs are missing: the kind is on the wire.
+        assert_eq!(
+            scope_verdict(Some(restricted), None, InterestKind::Queryable, None),
+            Verdict::Mismatched
+        );
+        // Decided although the answer's alias is missing: `R` clear asks for
+        // every keyexpr.
+        let unrestricted = InterestScope {
+            subscribers: true,
+            ..InterestScope::default()
+        };
+        assert_eq!(
+            scope_verdict(Some(unrestricted), None, sub, None),
+            Verdict::InScope
+        );
+    }
+
+    /// An answer whose own alias never resolved is unjudged under its own
+    /// reason, apart from an ask that could not be named.
+    #[test]
+    fn an_answer_whose_alias_never_resolved_is_named_for_it() {
+        let d = wire(&[
+            (true, interest_subs(15, true, false, "demo/a")),
+            // Alias 9, never bound by a `DeclKexpr`, cited as an answer the
+            // way `declare_sub_solicited` cites one.
+            (false, {
+                let mut declare = declare_build::build_declare_subscriber(0, 9, Some("tail"))
+                    .expect("the production builder must build a subscriber");
+                declare.header |= 0x20;
+                declare.interest_id = Some(15);
+                declare
+                    .try_as_borrowed()
+                    .expect("re-borrow")
+                    .encode_to_vec()
+            }),
+        ]);
+        let census = interests(&d);
+        let r = &census.requests()[0];
+        assert_eq!(r.keyexpr.as_deref(), Some("demo/a"), "the ask is named");
+        assert_eq!(r.answers, 1);
+        assert!(census.interests()[0].keyexpr.is_none());
+        assert_eq!(
+            r.unjudged,
+            alloc::vec![UnjudgedAnswer {
+                declaration: 0,
+                reason: UnjudgedReason::AnswerUnresolved,
+            }]
+        );
+        assert!(r.mismatched.is_empty());
+        assert_eq!(r.answers_in_scope(), 0);
     }
 }
 
@@ -2748,8 +2890,47 @@ mod no_wildcard_tests {
             r.mismatched.is_empty(),
             "'this build cannot evaluate the ask' is never 'the peer is wrong'"
         );
-        assert_eq!(r.unjudged_answers, 1);
+        assert_eq!(
+            r.unjudged,
+            alloc::vec![UnjudgedAnswer {
+                declaration: 0,
+                reason: UnjudgedReason::AskUndecidable,
+            }]
+        );
         assert_eq!(r.answers_in_scope(), 0);
         assert!(census.mismatched().is_empty());
+    }
+
+    /// Each pattern the matcher of this build cannot evaluate is named for the
+    /// side it stands on, the ask first.
+    #[test]
+    fn an_undecidable_pattern_is_named_for_its_side() {
+        let scope = InterestScope {
+            subscribers: true,
+            restricted: true,
+            ..InterestScope::default()
+        };
+        let verdict = |ask, answer| {
+            scope_verdict(
+                Some(scope),
+                Some(ask),
+                InterestKind::Subscriber,
+                Some(answer),
+            )
+        };
+        assert_eq!(
+            verdict("demo/**", "demo/a"),
+            Verdict::Unjudged(UnjudgedReason::AskUndecidable)
+        );
+        assert_eq!(
+            verdict("demo/a", "demo/*"),
+            Verdict::Unjudged(UnjudgedReason::AnswerUndecidable)
+        );
+        assert_eq!(
+            verdict("demo/*", "demo/*"),
+            Verdict::Unjudged(UnjudgedReason::AskUndecidable)
+        );
+        // The control: two literals are decided in this build too.
+        assert_eq!(verdict("demo/a", "demo/b"), Verdict::Mismatched);
     }
 }

@@ -1081,7 +1081,7 @@ impl KeyexprSpaces {
             Carried::FragmentWithoutResolution => return,
             Carried::Nothing => return,
             #[cfg(feature = "reassembly")]
-            Carried::Fragment(_) => return,
+            Carried::Fragment { .. } => return,
         };
         #[cfg(feature = "network-codecs")]
         for (message, _) in batch.records() {
@@ -1484,6 +1484,11 @@ pub struct FragmentChains {
     pub aborted_sender_dropped: usize,
     /// Aborted because a `0x2 First` arrived while a chain was already open on
     /// the same key: the sender restarted and the staged prefix is stranded.
+    ///
+    /// Counted off the router's displacement word on the restarting fragment
+    /// (`Carried::displaced`, in a build with `reassembly`): that fragment's own
+    /// outcome is its new chain's, so the abandoned chain is the second fact
+    /// the one fragment decided.
     pub aborted_superseded: usize,
     /// Aborted because a continuation's SN was not the last plus one and this
     /// observer never saw the InitAck, so it could not say whether the step was
@@ -1547,6 +1552,24 @@ impl FragmentChains {
             IngestOutcome::Refused(RefuseReason::MissingStartMarker) => {
                 self.refused_missing_start_marker += 1
             }
+        }
+    }
+
+    /// Fold in the other chain one fragment ended, as the router named it.
+    #[cfg(feature = "reassembly")]
+    fn fold_displaced(
+        &mut self,
+        displaced: Option<wz_session_core::reassembly_dispatch::DisplacedChain>,
+    ) {
+        use wz_session_core::reassembly_dispatch::DisplacedChain;
+        match displaced {
+            Some(DisplacedChain::Superseded) => self.aborted_superseded += 1,
+            // The observer's routers refuse a chain start on a full pool
+            // rather than evict (`ReassemblyConfig::new`), so no capture
+            // reaches this arm, and a counter for it would always read zero,
+            // which the type's doc names a naming error.
+            Some(DisplacedChain::Evicted) => {}
+            None => {}
         }
     }
 }
@@ -1671,6 +1694,7 @@ impl ThroughputTable {
                     // deliver buffer, which is what turns the frame into this
                     // variant rather than `Fragment`.
                     self.chains.completed += 1;
+                    self.chains.fold_displaced(frame.carried.displaced());
                     self.observe_batch(spaces, frame, batch, filter, ctx)
                 }
                 // R311y614 (§1.4i) — the arms that carry traffic this table
@@ -1702,7 +1726,10 @@ impl ThroughputTable {
                 // `IngestOutcome` variant must fail to compile here rather than
                 // join a silent set.
                 #[cfg(feature = "reassembly")]
-                Carried::Fragment(outcome) => self.chains.fold(*outcome),
+                Carried::Fragment { outcome, displaced } => {
+                    self.chains.fold_displaced(*displaced);
+                    self.chains.fold(*outcome);
+                }
             }
         }
     }

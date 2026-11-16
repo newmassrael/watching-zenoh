@@ -158,6 +158,13 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
         Cell("fields", "a half's lease_ms", _HALVES_HEADER, "`lease_ms` is a wire field's value", born=25),
         Cell("fields", "a half's last_seen_ts_ns", _HALVES_HEADER, "`last_seen_ts_ns` a nanosecond instant", born=25),
         Cell("fields", "a half's parameters.lease_ms value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
+        Cell(
+            "fields",
+            "a half's initial_sn",
+            "the `initial_sn` of a flow's `halves`",
+            "`initial_sn` is the ring origin the direction's own `Open` announced",
+            born=70,
+        ),
     ),
     ("crates/wz-capture/src/fields_json.rs", "push_parameters"): (
         Cell("fields", "a context parameters entry's integer value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),

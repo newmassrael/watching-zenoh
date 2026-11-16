@@ -1351,7 +1351,7 @@ impl PayloadCensus {
             Carried::FragmentWithoutResolution => self.gaps.unresolvable_fragments += 1,
             Carried::Nothing => {}
             #[cfg(feature = "reassembly")]
-            Carried::Fragment(_) => {}
+            Carried::Fragment { .. } => {}
         }
     }
 

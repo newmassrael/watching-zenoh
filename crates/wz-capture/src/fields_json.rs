@@ -4485,7 +4485,7 @@ fn carried_state(carried: &wz_session_core::passive::Carried) -> CarriedState {
         Carried::Nothing => CarriedState::Nothing,
         Carried::Batch(_) => CarriedState::Batch,
         Carried::Undecompressible => CarriedState::Undecompressible,
-        Carried::Fragment(_) => CarriedState::Fragment,
+        Carried::Fragment { .. } => CarriedState::Fragment,
         Carried::Reassembled { .. } => CarriedState::Reassembled,
         Carried::FragmentWithoutResolution => CarriedState::FragmentWithoutResolution,
     }
@@ -4592,7 +4592,7 @@ fn push_above_transport(
     };
     out.push_str("{\"carried_state\":");
     escape_into(carried_state(carried).name(), out);
-    if let wz_session_core::passive::Carried::Reassembled { joined, batch } = carried {
+    if let wz_session_core::passive::Carried::Reassembled { joined, batch, .. } = carried {
         let walked = wz_session_core::dissect::dissect_batch(joined, 0);
         // Walked from offset 0 of the buffer the session parsed, so the two
         // readers' coordinates are the same.
@@ -4733,6 +4733,9 @@ struct ChainRow {
     /// Revision 62, on an abort only: the fragments and bytes the chain had
     /// staged when this fragment ended it, which are lost with it.
     held: Option<(u32, u64)>,
+    /// Revision 69: the other open chain this fragment ended, as the router
+    /// named it.
+    displaced: Option<DisplacedWord>,
 }
 
 /// The one word per `SnVerdict` variant this document writes under
@@ -4856,10 +4859,11 @@ impl ChainOutcome {
 /// consumer reads it beside `outcome`, which already says which of the two it
 /// is.
 ///
-/// `superseded` is declared although no row carries it today: the router
-/// reports a restart as `Begun` for the NEW chain and the stranded one ends
-/// without a row of its own. The word is the router's, and a router that one
-/// day returns it must not reach a consumer under an undeclared word.
+/// `superseded` is declared although no row's `reason` carries it: a restart's
+/// own outcome is its NEW chain's, and the stranded one is named by the row's
+/// `displaced` ([`DisplacedWord`]). The word is the router's, and a router that
+/// one day returns it as an outcome must not reach a consumer under an
+/// undeclared word.
 ///
 /// `unresolvable` is the router's refusal to judge a step it has no ring for,
 /// and it is not `out_of_order`: that word says the router judged the step on a
@@ -4929,6 +4933,60 @@ impl ChainReason {
     pub(crate) fn names() -> Vec<&'static str> {
         let mut out = Vec::new();
         let mut cur = Some(Self::CapacityOverflow);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+}
+
+/// The other open chain a fragment ended, as the word `chain.displaced`
+/// carries (revision 69): the router's
+/// [`DisplacedChain`](wz_session_core::reassembly_dispatch::DisplacedChain).
+///
+/// One fragment can decide two chains, its own and one it displaced, and
+/// `outcome` is its own: a restart reads `begun` (or `reassembled`, when it is
+/// its whole chain) with `superseded` here, and the chain it ended is the
+/// flow's `ended_chains` entry whose `ending` is `superseded`. `evicted` is
+/// the router's word for a start that took the oldest chain's slot; this
+/// reader's routers refuse such a start instead, so a capture does not
+/// produce it, and the word is declared so that a router that does never
+/// reaches a consumer under an undeclared word.
+#[derive(Clone, Copy)]
+enum DisplacedWord {
+    Evicted,
+    Superseded,
+}
+
+impl DisplacedWord {
+    fn of(displaced: wz_session_core::reassembly_dispatch::DisplacedChain) -> Self {
+        use wz_session_core::reassembly_dispatch::DisplacedChain;
+        match displaced {
+            DisplacedChain::Superseded => Self::Superseded,
+            DisplacedChain::Evicted => Self::Evicted,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Evicted => "evicted",
+            Self::Superseded => "superseded",
+        }
+    }
+
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Evicted => Self::Superseded,
+            Self::Superseded => return None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::Evicted);
         while let Some(v) = cur {
             out.push(v.name());
             cur = v.next();
@@ -5028,6 +5086,7 @@ impl ChainIds {
             placed: fact.placed.map(|p| (p.index, p.offset, p.length)),
             sns: aborted.then(|| (fact.held_at_abort.map(|b| next(b.last_sn)), fact.sn)),
             held: fact.held_at_abort.map(|b| (b.fragments, b.bytes)),
+            displaced: frame.carried.displaced().map(DisplacedWord::of),
         })
     }
 }
@@ -5133,6 +5192,12 @@ fn push_session_row(row: &SessionRow, out: &mut String) {
                     );
                 }
                 None => out.push_str(",\"held_fragments\":null,\"held_bytes\":null"),
+            }
+            // Revision 69.
+            out.push_str(",\"displaced\":");
+            match chain.displaced {
+                Some(word) => escape_into(word.name(), out),
+                None => out.push_str("null"),
             }
             out.push('}');
         }
@@ -5709,6 +5774,11 @@ impl BasisWord {
 ///   `ts_ns` uses; `null` when nothing was read with a clock, which is a
 ///   different fact from `0`.
 /// * `close_seen` — whether that direction carried a `Close`.
+/// * `initial_sn` — the ring origin that direction's sender announced in its
+///   `Open`; `null` until that `Open` was read. `initial_sn_derivation` —
+///   `derived` when it is zenoh's derivation over the two zids, the sender's
+///   first, on the session's ring, `not_derived` when it is not, `null` when
+///   either zid or the ring is unknown.
 /// * `fin_seen`, `rst_seen` — whether a TCP FIN or RST was observed on that
 ///   direction; `null` on a flow that is not TCP, where the flag does not
 ///   exist, and never `false` for a flag that could not have been looked for.
@@ -5748,6 +5818,19 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
             tri_state(half.rst_seen),
             BatchHeaderWord::of(half.batch_header).name()
         );
+        // Revision 70 — the origin the direction's `Open` announced, a wire
+        // sequence number (the integer door), and whether it is zenoh's
+        // derivation over the two zids.
+        out.push_str(",\"initial_sn\":");
+        match half.initial_sn {
+            Some(sn) => u64_into(sn, out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"initial_sn_derivation\":");
+        match half.initial_sn_derivation {
+            Some(derivation) => escape_into(DerivationWord::of(derivation).name(), out),
+            None => out.push_str("null"),
+        }
         // Revision 45 — the direction's own parameter, in `push_parameters`'
         // shape: the lease its `Open` stated, or nothing.
         let lease = wz_session_core::passive::Reading::stated(half.lease_ms);
@@ -5760,6 +5843,49 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
         out.push_str("}}}");
     }
     out.push(']');
+}
+
+/// Revision 70 — the word a half's `initial_sn_derivation` carries: whether
+/// the origin that direction's `Open` announced is zenoh's derivation over the
+/// session's two zids (`derived`) or not (`not_derived`).
+///
+/// An observation about the sender and not a fault: zenoh derives the origin,
+/// zenoh-pico draws it, and a constant is legal on the wire.
+#[derive(Clone, Copy)]
+pub(crate) enum DerivationWord {
+    Derived,
+    NotDerived,
+}
+
+impl DerivationWord {
+    pub(crate) fn of(derivation: wz_session_core::passive::InitialSnDerivation) -> Self {
+        use wz_session_core::passive::InitialSnDerivation;
+        match derivation {
+            InitialSnDerivation::Derived => Self::Derived,
+            InitialSnDerivation::NotDerived => Self::NotDerived,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Derived => "derived",
+            Self::NotDerived => "not_derived",
+        }
+    }
+
+    /// Every word, sorted: what the field document's family is held to.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = [
+            wz_session_core::passive::InitialSnDerivation::Derived,
+            wz_session_core::passive::InitialSnDerivation::NotDerived,
+        ]
+        .into_iter()
+        .map(|d| Self::of(d).name())
+        .collect();
+        words.sort_unstable();
+        words
+    }
 }
 
 /// Revision 44 — the word a half's `batch_header` carries: whether the
@@ -8825,6 +8951,151 @@ mod tests {
         );
     }
 
+    /// Revision 69 — a `First` that restarts its key says on its row which
+    /// chain it ended, and the stranded chain is listed as superseded.
+    ///
+    /// The control is the same capture with the second marker left off: the
+    /// fragment then continues the chain, and no row says `displaced`.
+    #[test]
+    fn a_restart_names_the_chain_it_displaced_on_its_row() {
+        let displaced_words = |doc: &str| -> Vec<String> {
+            crate::doc_revision::json_string_values(doc)
+                .into_iter()
+                .filter(|(k, _)| *k == "displaced")
+                .map(|(_, v)| String::from(v))
+                .collect()
+        };
+        let (d, file) = crate::datagram_tests::marked_fragment_dissection_with_file(&[
+            (0, true, true, false),
+            (1, true, true, false),
+        ]);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            displaced_words(&doc),
+            ["superseded"],
+            "the restarting row, and only it, names the chain it ended: {doc}"
+        );
+        assert!(
+            doc.contains(
+                "\"outcome\":\"begun\",\"reason\":null,\"chain_id\":1,\
+                 \"index\":0,\"offset\":0,\"length\":2"
+            ),
+            "the restart's own outcome is its new chain's: {doc}"
+        );
+        assert!(
+            doc.contains("\"chain_id\":0,\"ending\":\"superseded\",\"reason\":null"),
+            "the stranded chain is listed as superseded: {doc}"
+        );
+
+        let (plain, plain_file) = crate::datagram_tests::marked_fragment_dissection_with_file(&[
+            (0, true, true, false),
+            (1, true, false, false),
+        ]);
+        let control = fields_json(&plain, &plain_file, None, None);
+        assert!(
+            displaced_words(&control).is_empty(),
+            "a continuation displaces nothing: {control}"
+        );
+        assert!(
+            control.contains("\"displaced\":null"),
+            "and the key is written on every chain object: {control}"
+        );
+        assert!(!control.contains("\"ending\":\"superseded\""), "{control}");
+    }
+
+    /// Revision 70 — each half says what origin its `Open` announced and
+    /// whether that is zenoh's derivation over the two zids. A, the low side,
+    /// announces the derived origin; B announces a constant, the control.
+    #[test]
+    fn a_halfs_announced_origin_is_judged_against_zenohs_derivation() {
+        use crate::datagram_tests::{init_datagram, open_datagram_announcing, udp_packet};
+        let capture = |messages: &[(bool, Vec<u8>)]| {
+            let packets: Vec<Vec<u8>> = messages
+                .iter()
+                .map(|(from_low, message)| {
+                    if *from_low {
+                        udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, message)
+                    } else {
+                        udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, message)
+                    }
+                })
+                .collect();
+            let refs: Vec<(u32, u32, &[u8])> = packets
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+                .collect();
+            let file = crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs);
+            let d = crate::Dissection::from_capture(&file).expect("the capture reads");
+            (d, file)
+        };
+        let inits = [
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+        ];
+        let (d, _) = capture(&inits);
+        let mask = d.datagram_flows()[0]
+            .session
+            .context()
+            .sn_mask()
+            .expect("the InitAck states the ring");
+        // Both Inits state the zid `AA AA AA AA`.
+        let derived = wz_session_core::initial_sn::zenoh_initial_sn(&[0xAA; 4], &[0xAA; 4], mask);
+        let constant = if derived == 0 { 1 } else { 0 };
+        let mut messages = inits.to_vec();
+        messages.push((true, open_datagram_announcing(false, derived)));
+        messages.push((false, open_datagram_announcing(true, constant)));
+        let (d, file) = capture(&messages);
+        let doc = fields_json(&d, &file, None, None);
+        let words: Vec<&str> = crate::doc_revision::json_string_values(&doc)
+            .into_iter()
+            .filter(|(k, _)| *k == "initial_sn_derivation")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(words, ["derived", "not_derived"], "a then b: {doc}");
+        assert!(
+            doc.contains(&alloc::format!("\"initial_sn\":{derived},")),
+            "the announced origin is written: {doc}"
+        );
+
+        // Before any Open, nothing is announced and nothing is judged.
+        let (d, file) = capture(&inits);
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains("\"initial_sn\":null,\"initial_sn_derivation\":null"),
+            "{doc}"
+        );
+    }
+
+    /// Revision 69 — a `First` with no more to follow, on a key whose chain is
+    /// open, ends that chain and is a whole chain of its own: it is not joined
+    /// to the chain it stranded.
+    #[test]
+    fn a_restart_that_is_its_whole_chain_does_not_join_the_chain_it_ended() {
+        let (d, file) = crate::datagram_tests::marked_fragment_dissection_with_file(&[
+            (0, true, true, false),
+            (1, false, true, false),
+        ]);
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains(
+                "\"outcome\":\"reassembled\",\"reason\":null,\"chain_id\":1,\
+                 \"index\":0,\"offset\":0,\"length\":2"
+            ),
+            "the restart is chain 1 from its first byte: {doc}"
+        );
+        assert!(
+            doc.contains("\"chain_id\":0,\"ending\":\"superseded\",\"reason\":null"),
+            "and chain 0 ended superseded: {doc}"
+        );
+        let words: Vec<&str> = crate::doc_revision::json_string_values(&doc)
+            .into_iter()
+            .filter(|(k, _)| *k == "displaced")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(words, ["superseded"], "{doc}");
+    }
+
     /// The row and flow objects revision 14 added, RENDERED FROM
     /// THEIR OWN TYPES, one per word.
     ///
@@ -8890,6 +9161,7 @@ mod tests {
                         placed: Some((0, 0, 4)),
                         sns: None,
                         held: None,
+                        displaced: None,
                     }),
                 },
                 &mut out,
@@ -8910,12 +9182,36 @@ mod tests {
                         placed: None,
                         sns: Some((Some(1), 3)),
                         held: Some((1, 4)),
+                        displaced: None,
                     }),
                 },
                 &mut out,
             );
             arms.push(out);
             reason = word.next();
+        }
+        // Revision 69 — every `displaced` word, on the row whose fragment
+        // began a chain in the place of the one it ended.
+        let mut displaced = Some(DisplacedWord::Evicted);
+        while let Some(word) = displaced {
+            let mut out = String::new();
+            push_session_row(
+                &SessionRow {
+                    sn: None,
+                    chain: Some(ChainRow {
+                        outcome: ChainOutcome::Begun,
+                        reason: None,
+                        chain_id: Some(1),
+                        placed: Some((0, 0, 4)),
+                        sns: None,
+                        held: None,
+                        displaced: Some(word),
+                    }),
+                },
+                &mut out,
+            );
+            arms.push(out);
+            displaced = word.next();
         }
         // The phases are the session's own enum, so they are listed here and
         // held to the word walk by COUNT: a sixth `SessionPhase` fails
@@ -8945,6 +9241,20 @@ mod tests {
         ] {
             let half = crate::HalfObservation {
                 batch_header: header,
+                ..crate::HalfObservation::default()
+            };
+            let mut out = String::new();
+            push_halves(&half, &half, &mut out);
+            arms.push(out);
+        }
+        // Revision 70 — every `initial_sn_derivation` word, on a half.
+        for derivation in [
+            wz_session_core::passive::InitialSnDerivation::Derived,
+            wz_session_core::passive::InitialSnDerivation::NotDerived,
+        ] {
+            let half = crate::HalfObservation {
+                initial_sn: Some(1),
+                initial_sn_derivation: Some(derivation),
                 ..crate::HalfObservation::default()
             };
             let mut out = String::new();
@@ -10788,7 +11098,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 98] = [
+        let live: [(&str, &str, Vec<&'static str>); 100] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -10813,6 +11123,12 @@ mod tests {
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
             (rev::FIELDS, "outcome", ChainOutcome::names()),
             (rev::FIELDS, "reason", ChainReason::names()),
+            (rev::FIELDS, "displaced", DisplacedWord::names()),
+            (
+                rev::FIELDS,
+                "initial_sn_derivation",
+                DerivationWord::names(),
+            ),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the

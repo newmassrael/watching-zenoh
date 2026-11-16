@@ -4287,8 +4287,11 @@ int main(void) {
      * stationary keys.
      * 23: a reply carrying a put leaves its `e2e` terms undecided under a
      * selector, as a published sample's are, where they were `none`. Values
-     * move under stationary keys. */
-    revisioned[0].revision = 23;
+     * move under stationary keys.
+     * 24: `fragment_chains.aborted_superseded` counts the chains a restart
+     * stranded, off the router's word for the other chain a fragment ended;
+     * it read 0 on every capture before. Values move under stationary keys. */
+    revisioned[0].revision = 24;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4569,8 +4572,16 @@ int main(void) {
      * 68: model 7 of the zenoh test: a Frame's records end where the
      * batch's next transport message begins, a record that does not decode
      * fails the batch, and the parameters the corpus gives under that
-     * reading. Values move under stationary keys. */
-    revisioned[2].revision = 68;
+     * reading. Values move under stationary keys.
+     * 69: a row's `chain` gains `displaced` (`superseded`, `evicted`, or
+     * null), the router's word for the other chain the fragment ended; a
+     * restart that is its whole chain no longer joins the chain it stranded.
+     * A key and a family arrive; nothing retires.
+     * 70: each of a flow's `halves` gains `initial_sn`, the origin its
+     * `Open` announced, and `initial_sn_derivation` (`derived`,
+     * `not_derived`, or null), whether it is zenoh's derivation over the two
+     * zids. Two keys and a family arrive; nothing retires. */
+    revisioned[2].revision = 70;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

@@ -1252,8 +1252,10 @@
  * `declared_id` and `timestamp_ntp64` of a `carried` entry and to the `sn` of a
  * row's `transport_header` (keys that exist from field document 64 and take the
  * rule from their first appearance: an NTP64 time is past the line for every
- * date after 1900, and an id and a sequence number are wire values); to every
- * integer of a
+ * date after 1900, and an id and a sequence number are wire values); to the
+ * `initial_sn` of a flow's `halves` (a key that exists from field document 70
+ * and takes the rule from its first appearance: a ring origin is as wide as
+ * the session's ring); to every integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1306,7 +1308,8 @@
  *   "chain":{"outcome":..,"reason":..|null,"chain_id":N|null,
  *            "index":N|null,"offset":N|null,"length":N|null,
  *            "expected_sn":N|null,"received_sn":N|null,
- *            "held_fragments":N|null,"held_bytes":N|null}
+ *            "held_fragments":N|null,"held_bytes":N|null,
+ *            "displaced":"superseded"|"evicted"|null}
  *
  *     What the reassembly router did with a Fragment row, and an identity
  *     shared by every row of one chain (unique within the flow, counted from 0
@@ -1335,9 +1338,20 @@
  *     a flow read before any InitAck, where no router ran: the router runs on
  *     those now, and `carried_state: fragment_without_resolution` is the
  *     fragment that ended a chain as `unresolvable`.) `superseded` is declared
- *     and not emitted today: the router
- *     reports a restart as `begun` for the new chain, so the stranded chain
- *     ends WITHOUT a row.
+ *     under `reason` and not emitted there: a restart's own outcome is its NEW
+ *     chain's (`begun`, or `reassembled` when it is its whole chain), and the
+ *     chain it stranded is named by `displaced` below.
+ *
+ *     THE OTHER CHAIN A FRAGMENT ENDED, at field-document revision 69. One
+ *     fragment can decide two chains, and `outcome` is its own. `displaced` is
+ *     the router's word for the other: `superseded` on a `First` that
+ *     restarted the chain open on its key, whose stranded chain is the flow's
+ *     `ended_chains` entry with `ending` `superseded`; `evicted` on a start
+ *     that took the slot of the oldest open chain, which a router built to
+ *     evict says and this library's capture readers, whose routers refuse
+ *     such a start instead, do not produce. `null` on a fragment that ended no
+ *     other chain. The census's `fragment_chains.aborted_superseded` counts
+ *     the same restarts (census revision 24).
  *
  *     `outcome` is one of `begun`, `continued`, `reassembled`, `aborted`,
  *     `refused`. `reason` is one of `out_of_order`, `capacity_overflow`,
@@ -1349,6 +1363,7 @@
  *
  * @values fields outcome
  * @values fields reason
+ * @values fields displaced
  *
  *   "first_byte":{"packet":N,"payload_offset":N,"frame_offset":N|null}
  *   "l2":{"src":"aa:bb:cc:dd:ee:ff","dst":"..","frame_offset":0,"length":14}|null
@@ -1533,8 +1548,10 @@
  *   "halves":[{"direction":"a","lease_ms":N|null,"last_seen_ts_ns":N|null,
  *              "close_seen":bool,"fin_seen":bool|null,"rst_seen":bool|null,
  *              "batch_header":"absent"|"negotiated"|"inferred",
+ *              "initial_sn":N|null,
+ *              "initial_sn_derivation":"derived"|"not_derived"|null,
  *              "parameters":{"lease_ms":{"value":N|null,"basis":B}}},
- *             {"direction":"b", ...the same eight keys...}]
+ *             {"direction":"b", ...the same ten keys...}]
  *
  *     Two entries, `a` then `b`, with the `direction` the rows carry. The
  *     context says what the handshake settled for the SESSION; whether a
@@ -1559,6 +1576,19 @@
  *     read headed until the bytes show otherwise), or `absent`. `parameters`
  *     (revision 45) is `lease_ms` again in the context's `parameters` shape:
  *     `stated` by the direction's own `Open`, or `absent`.
+ *
+ *     THE RING ORIGIN, at field-document revision 70. `initial_sn` is the
+ *     origin the direction's own `Open` announced (the integer rule), `null`
+ *     until that `Open` was read. `initial_sn_derivation` says whether it is
+ *     zenoh's derivation: SHAKE128 over the sender's zid then the receiver's,
+ *     both as their `Init` stated them, masked to the session's ring.
+ *     `derived` when it is, `not_derived` when it is not, `null` when either
+ *     `Init` or the ring is unknown. It describes the SENDER and is not a
+ *     fault: zenoh derives the origin, zenoh-pico draws it at random, and a
+ *     constant is legal on the wire, so only a zenoh sender is expected to
+ *     read `derived`.
+ *
+ * @values fields initial_sn_derivation
  *
  * @values fields batch_header
  *
@@ -1648,7 +1678,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":23,
+ *     {"document":{"name":"census","revision":24,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1694,13 +1724,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":68,"key":"kind","values":[...],
+ *     {"name":"fields","revision":70,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":23,"key":"mode","values":[...],
+ *     {"name":"census","revision":24,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1734,10 +1764,12 @@
  * @carries fields check passenger
  * @carries fields counter_reason passenger
  * @carries fields direction passenger
+ * @carries fields displaced passenger
  * @carries fields ended_by passenger
  * @carries fields eps_basis passenger
  * @carries fields family passenger
  * @carries fields ending passenger
+ * @carries fields initial_sn_derivation passenger
  * @carries fields keyexpr_carriage passenger
  * @carries fields keyexpr_cause passenger
  * @carries fields keyexpr_source passenger
@@ -6110,7 +6142,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":68,"key":"state",
+ *     "value_families":[{"name":"fields","revision":70,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

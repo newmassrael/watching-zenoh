@@ -1851,6 +1851,8 @@ impl DatagramDissection {
             fin_seen: None,
             rst_seen: None,
             batch_header: self.session.context().batch_header(direction),
+            initial_sn: facts.initial_sn,
+            initial_sn_derivation: facts.initial_sn_derivation,
         }
     }
 
@@ -3655,6 +3657,8 @@ impl FlowDissection {
             fin_seen: tcp.then(|| assembler.fin_seen()),
             rst_seen: tcp.then(|| assembler.rst_seen()),
             batch_header: self.session.context().batch_header(direction),
+            initial_sn: facts.initial_sn,
+            initial_sn_derivation: facts.initial_sn_derivation,
         }
     }
 
@@ -5916,6 +5920,12 @@ pub struct HalfObservation {
     /// what grounds: negotiated by the Init pair, or inferred from the bytes
     /// of a capture that holds no Init.
     pub batch_header: wz_session_core::passive::BatchHeader,
+    /// The ring origin this direction's sender announced in its `Open`, and
+    /// whether it is zenoh's derivation over the two zids
+    /// ([`wz_session_core::passive::HalfFacts::initial_sn_derivation`]).
+    pub initial_sn: Option<u64>,
+    /// See [`Self::initial_sn`]; `None` where it cannot be judged.
+    pub initial_sn_derivation: Option<wz_session_core::passive::InitialSnDerivation>,
 }
 
 /// R311y605 (F5) — the totals across a whole dissection.
@@ -12101,6 +12111,17 @@ mod datagram_tests {
     /// differs between the two directions in the tests that ask which sender
     /// said what.
     pub(crate) fn open_datagram_leased(is_ack: bool, lease: u64) -> Vec<u8> {
+        open_datagram_stated(is_ack, lease, 0)
+    }
+
+    /// [`open_datagram`] announcing `initial_sn` as its ring origin.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn open_datagram_announcing(is_ack: bool, initial_sn: u64) -> Vec<u8> {
+        open_datagram_stated(is_ack, 10_000, initial_sn)
+    }
+
+    /// An Open datagram announcing `lease` and `initial_sn`.
+    fn open_datagram_stated(is_ack: bool, lease: u64, initial_sn: u64) -> Vec<u8> {
         let mut flags = 0u8;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_OPEN_A;
@@ -12109,7 +12130,7 @@ mod datagram_tests {
         wire.extend_from_slice(
             &wz_codecs::open_body::OpenBody {
                 lease,
-                initial_sn: 0,
+                initial_sn,
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: (!is_ack).then(|| wz_codecs::Bounded::new(&[] as &[u8]).unwrap()),
             }
@@ -12686,7 +12707,10 @@ mod datagram_tests {
         assert!(
             matches!(
                 flow.frames().get(0).as_deref().map(|f| &f.carried),
-                Some(Carried::Fragment(IngestOutcome::Begun))
+                Some(Carried::Fragment {
+                    outcome: IngestOutcome::Begun,
+                    displaced: None,
+                })
             ),
             "got {:?}",
             flow.frames().get(0).as_deref().map(|f| &f.carried)

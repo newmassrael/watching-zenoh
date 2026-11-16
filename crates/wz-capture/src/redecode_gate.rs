@@ -1676,6 +1676,14 @@ fn every_unit_of_the_fragment_chain_captures_reads_again_the_same() {
         (2, true, false, true),
     ]);
     total += reread_capture("marked fragments", &file);
+    // Two restarts, the second its whole chain: each row carries the router's
+    // word for the chain it displaced, a fact of the row a re-read is handed.
+    let (_, file) = marked_fragment_dissection_with_file(&[
+        (0, true, true, false),
+        (1, true, true, false),
+        (2, false, true, false),
+    ]);
+    total += reread_capture("restarted chains", &file);
     let (_, file) = wide_sn_dissection_with_file(&[1, 2, 2, 7, 3, 1 << 40]);
     total += reread_capture("wide sequence numbers", &file);
     #[cfg(feature = "fixtures")]
@@ -1714,8 +1722,14 @@ fn the_fragment_chain_captures_reach_every_fate_a_fragment_comes_to() {
             (2, true, false, true),
         ])
         .0,
+        marked_fragment_dissection_with_file(&[
+            (0, true, true, false),
+            (1, true, true, false),
+            (2, false, true, false),
+        ])
+        .0,
     ];
-    let mut fates = [false; 3];
+    let mut fates = [false; 4];
     for d in &captures {
         let rows = d
             .flows
@@ -1725,14 +1739,18 @@ fn the_fragment_chain_captures_reach_every_fate_a_fragment_comes_to() {
         for frame in rows {
             match frame.carried {
                 Carried::Reassembled { .. } => fates[0] = true,
-                Carried::Fragment(_) => fates[1] = true,
+                Carried::Fragment { .. } => fates[1] = true,
                 Carried::FragmentWithoutResolution => fates[2] = true,
                 _ => {}
+            }
+            if frame.carried.displaced().is_some() {
+                fates[3] = true;
             }
         }
     }
     assert_eq!(
-        fates, [true; 3],
-        "joined, pending and without a resolution must each be reached"
+        fates, [true; 4],
+        "joined, pending, without a resolution and displacing another chain \
+         must each be reached"
     );
 }
