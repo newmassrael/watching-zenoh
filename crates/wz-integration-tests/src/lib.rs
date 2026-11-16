@@ -2442,6 +2442,37 @@ pub mod common {
         path
     }
 
+    /// Locate the `zenohd` built with zenoh's `stats` feature: the
+    /// `WZ_ZENOHD_STATS_BIN` env override, else `scripts/build-zenohd.sh
+    /// ZENOHD_STATS=1`'s `target/zenohd-stats/zenohd` install.
+    ///
+    /// A SEPARATE binary because `stats` is not in zenoh's `default` set, and a
+    /// router built without it keeps no stats registry: its tables never read
+    /// `stats/filters`
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `config.stats.filters().iter().map(|f| &*f.key),`)
+    /// and its metrics leg answers with the build-info document alone
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `#[cfg(not(feature = "stats"))]`).
+    /// So the stock oracle cannot show that key's effect, and this one can.
+    /// Panics with the build hint if absent, as [`zenohd_unixpipe_binary`]
+    /// does: the lane checks the binary before it runs a leg that needs it, and
+    /// fails there when the job provisions it.
+    pub fn zenohd_stats_binary() -> PathBuf {
+        let path = match std::env::var("WZ_ZENOHD_STATS_BIN") {
+            Ok(p) => PathBuf::from(p),
+            Err(_) => artifact("target/zenohd-stats/zenohd"),
+        };
+        assert!(
+            path.is_file(),
+            "stats-enabled zenohd missing at {}; set WZ_ZENOHD_STATS_BIN or run \
+             `ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh` first",
+            path.display()
+        );
+        // Built by the same script from the same pinned checkout as the stock
+        // router, so held to the same pin.
+        wz_codegen_build::assert_zenohd_at_pin(&path);
+        path
+    }
+
     /// Locate the `zenoh-plugin-storage-manager` dynamic plugin
     /// (`libzenoh_plugin_storage_manager.so`): the `WZ_STORAGE_MANAGER_SO`
     /// env override, else `scripts/build-zenohd.sh`'s
