@@ -38,6 +38,32 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# Open-debt item 742 -- the cheap static gates RECORD a refusal and go on, and a
+# settle point refuses once with all of them. A fail-fast hook shows one refusal
+# per push, so a round that tripped three static gates paid three push round
+# trips to learn what one run could have printed. Each recording gate prints its
+# own `[gate N]` reason before it records, so the settle point adds only the
+# count. The publication gates (0, 0b, 0b2, 0c), the ref gates and the pin gate
+# stay fail-fast: once one of those trips, nothing more is to be printed.
+# `hook_gate_boundary_gate.py` reads `_prepush_refuse` as a refusal and refuses a
+# hook that records with no `_prepush_settle` after it -- the policy boundary
+# below exits 0, so a recording left unsettled above it would be a pass.
+prepush_refused=0
+_prepush_refuse() {
+    prepush_refused=$((prepush_refused + 1))
+}
+# The status is the number of refusals, held under 126 so that it can never
+# wrap to 0 or read as a shell's own command-not-found status.
+_prepush_settle() {
+    if (( prepush_refused == 0 )); then
+        return 0
+    fi
+    echo "" >&2
+    echo "pre-push: ${prepush_refused} gate(s) above refused this push; each" >&2
+    echo "          printed its own [gate N] reason before it was recorded." >&2
+    exit "$(( prepush_refused > 125 ? 125 : prepush_refused ))"
+}
+
 # ─── gate 0r — the pushed refs, read by kind; empty / delete-only exits (R224a) ──
 # grades: pushed-range
 # It reads the refs being pushed and sorts them by kind into the ranges the gates
@@ -379,7 +405,7 @@ if ! mnemosyne-cli validate-workspace; then
     echo "" >&2
     echo "pre-push: [gate 2] validate-workspace FAILED — fix before push." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── the diff range, hoisted (used by gate 2b and gate 3) ───────────
@@ -438,7 +464,7 @@ if [[ -n "$diff_base" ]]; then
             echo "pre-push: [gate 2b] cross-impl proof audit FAILED — hosted Layer A4," >&2
             echo "          run early because a claim moved in this push." >&2
             echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-            exit 1
+            _prepush_refuse
         fi
     fi
 fi
@@ -488,7 +514,7 @@ fi
 if ! wz_previous_run_gate "$prev_sha" 'pre-push' "$ack_range"; then
     echo "pre-push: [gate 2c] the previous push's hosted verdict refuses this one." >&2
     echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2f — an upstream citation's FORM, before it is published ──
@@ -546,7 +572,7 @@ if ! python3 scripts/lib/upstream_citation_anchor_gate.py --resolve-if-pinned; t
     echo "          \`@\` (R2613); what still reads as bare is a needle with no" >&2
     echo "          backticks, or a path with no \`@ <needle>\` after it." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 # The anchor gate's two siblings (store-reason citations, prose cargo features)
 # moved below the policy boundary on 2026-10-27: see the block after it.
@@ -583,7 +609,7 @@ if ! bash scripts/run-ci.sh --layer C0d; then
     echo "pre-push: [gate 2c2] hosted Layer C0d failed -- the doc-link dependent" >&2
     echo "          expansion, or a macro-emitted doc link into another crate." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2c3 — the count guards this push reaches, from the cache (item 898) ─
@@ -639,7 +665,7 @@ if [[ -n "$diff_base" ]]; then
         echo "          CI would red the lane that owns it. Move the constant IN THIS" >&2
         echo "          COMMIT, to what the command above printed." >&2
         echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-        exit 1
+        _prepush_refuse
         ;;
     *)
         printf '%s\n' "$cg_out" >&2
@@ -648,7 +674,7 @@ if [[ -n "$diff_base" ]]; then
         echo "          (exit $cg_rc). That is not a disagreement and not a deferral:" >&2
         echo "          nothing was read. The output above says why." >&2
         echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-        exit 1
+        _prepush_refuse
         ;;
     esac
 else
@@ -658,7 +684,9 @@ fi
 # ─── local sweep policy — owner decisions, 2026-09-23 and 2026-10-27 ─
 # This boundary is AFTER every mandatory integrity/publication check, the
 # checks that refuse often (2b, 2c, 2f, 2c2, 2c3), and BEFORE everything else.
-# Exact opt-in only.
+# Exact opt-in only. The gates above recorded their refusals (item 742); they
+# are settled here, before the exit 0 below could let one through.
+_prepush_settle
 if [[ "${WZ_PREPUSH_EXTENDED:-0}" != "1" ]]; then
     echo "pre-push: mandatory publication, pin and SSOT checks passed."
     echo "pre-push: DEFERRED to hosted CI: corpus static gates, feature tests,"
@@ -680,14 +708,14 @@ if ! python3 scripts/lib/hook_default_region_gate.py; then
     echo "pre-push: [gate 2c2x] a check an ordinary push must run is not above the" >&2
     echo "          policy boundary of this hook (the line above says which)." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/store_reason_citation_gate.py; then
     echo "" >&2
     echo "pre-push: [gate 2c2x] store-reason citation gate FAILED — an atom reason's" >&2
     echo "          upstream claim is bare or line-numbered. Same form rule as 2f." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 # R2551 — it grades cargo commands WRITTEN DOWN in prose: every feature named in
 # one must exist, and every site declared unresolvable must still be there.
@@ -698,27 +726,27 @@ if ! python3 scripts/lib/prose_feature_gate.py --check; then
     echo "          declared unresolvable is gone. Deleting a quoted command means" >&2
     echo "          deleting the declaration that excused it." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! bash scripts/run-ci.sh --layer C0e; then
     echo "" >&2
     echo "pre-push: [gate 2c2x] hosted Layer C0e failed -- the inventory tag reader." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! bash scripts/run-ci.sh --layer C0f; then
     echo "" >&2
     echo "pre-push: [gate 2c2x] hosted Layer C0f failed -- layer Z restores a demo" >&2
     echo "          feature set other than the one it opened with." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/count_guard_lint.py; then
     echo "" >&2
     echo "pre-push: [gate 2c2x] a run-ci count guard disagrees with the tests on disk." >&2
     echo "          Move the constant in this commit; the line above names the guard." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 # Item 858 — a cargo test piped into `grep -q`, with or without a `tee`, races a
 # SIGPIPE under pipefail; the lint derives the shape from run-ci.sh (0.1s).
@@ -727,7 +755,7 @@ if ! python3 scripts/lib/build_evidence_lint.py; then
     echo "pre-push: [gate 2c2x] run-ci.sh pipes a build into grep -q or discards its output." >&2
     echo "          Use _runci_guarded_test <label> <N> cargo test ...; the line above names it." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2d — the config key set vs the fixtures that owe it ───────
@@ -767,7 +795,7 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     echo "          Hosted Layer Z is the only other thing that checks this," >&2
     echo "          and it needs zenohd built." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2d2 — a declared demo feature has an AP-full membership verdict ──
@@ -792,7 +820,7 @@ if ! python3 scripts/lib/apfull_membership.py >/dev/null; then
     echo "          \`python3 scripts/lib/apfull_membership.py\` for the key." >&2
     echo "          Hosted Layer A5 is the only other thing that checks this." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2e2 — every attachment carrier witnesses its own capacity ──
@@ -825,7 +853,7 @@ if ! python3 scripts/lib/attachment_capacity_witness_gate.py; then
     echo "          lines above name WHICH; a carrier without a witness is not" >&2
     echo "          a missing test so much as an unproven parity claim." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2y — a script that spells a pin must read one (R2540) ─────
@@ -853,7 +881,7 @@ if ! python3 scripts/lib/pin_constant_binding_gate.py --check; then
     echo "          (a SSOT script, or the shared deriver) and refuse when the" >&2
     echo "          two differ, in the mode that runs without a checkout." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2v — the replay ABI names what wz-replay says (R2441) ─────
@@ -884,7 +912,7 @@ if ! python3 scripts/lib/capi_replay_vocabulary.py; then
     echo "          variant or constant, and in which direction." >&2
     echo "          Hosted Layer C1cj is the only other thing that checks it." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2r — the C consumer's document revisions (R2463) ──────────
@@ -914,7 +942,7 @@ if ! python3 scripts/lib/doc_revision_consumer_pin.py; then
     echo "          The lines above name EVERY stale pin; hosted Layer C1bo" >&2
     echo "          reports only the first, so fix them in one edit." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2e — the grading-pin ratchet (R2394) ──────────────────────
@@ -942,7 +970,7 @@ if ! python3 scripts/lib/grading_pin_ratchet.py; then
     echo "          BELOW budget means this commit re-measured one: lower the" >&2
     echo "          budget in the same commit and say which atom moved." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2z — the gates a ROUND's own changes FEED (R2576) ─────────
@@ -1017,7 +1045,7 @@ fi
 # never spelled here as paths, so they take nothing further from it -- and that
 # gate is itself a member below now, which is the repair for the class rather
 # than for the count. A typo here is caught instead by python failing on the
-# missing module -- which exits the hook, loudly -- and by
+# missing module -- which refuses the push, loudly -- and by
 # `round_fed_gate_reach.py`, whose population IS the scripts/lib directory.
 # Neither is a static path check; that is the trade.
 round_fed_gates=(
@@ -1424,7 +1452,7 @@ for round_fed_gate in "${round_fed_gates[@]}"; do
         echo "          Layer C0, two rounds away. Never raise a pin to make a" >&2
         echo "          red go away." >&2
         echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-        exit 1
+        _prepush_refuse
     fi
 done
 
@@ -1455,7 +1483,7 @@ if ! python3 scripts/lib/replication_log_funnel_gate.py; then
     echo "          hear about a write advertises state this replica does not" >&2
     echo "          hold, to every peer, until it restarts." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2j — the test-double witness (R2293, item 625) ────────────
@@ -1477,7 +1505,7 @@ if ! python3 scripts/lib/test_double_knob_gate.py --selftest >/dev/null; then
     echo "pre-push: [gate 2j] test-double witness gate SELFTEST failed — the" >&2
     echo "          gate can no longer tell a witnessed test from a vacuous" >&2
     echo "          one, so its verdict on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/test_double_knob_gate.py; then
     echo "" >&2
@@ -1487,7 +1515,7 @@ if ! python3 scripts/lib/test_double_knob_gate.py; then
     echo "          the fixture's, which is how a deleted check stayed green in" >&2
     echo "          R2289. Assert one of the counters the double records." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2k2 — how many places read `_anyke` (R2306, item 156) ───────
@@ -1508,7 +1536,7 @@ if ! python3 scripts/lib/anyke_reader_gate.py --selftest >/dev/null; then
     echo "pre-push: [gate 2k2] anyke-reader gate SELFTEST failed — it can no" >&2
     echo "          longer tell a reader from a test fixture, so its verdict" >&2
     echo "          on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/anyke_reader_gate.py; then
     echo "" >&2
@@ -1518,7 +1546,7 @@ if ! python3 scripts/lib/anyke_reader_gate.py; then
     echo "          this drifted before; call the SSOT for the implementation" >&2
     echo "          your ABI mirrors." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2l — a foreign one-shot query is not a verdict (R2311, item 645) ──
@@ -1546,7 +1574,7 @@ if ! python3 scripts/lib/foreign_query_readiness_gate.py --selftest >/dev/null; 
     echo "pre-push: [gate 2l] foreign-query readiness gate SELFTEST failed —" >&2
     echo "          it can no longer tell a retried query from a one-shot, so" >&2
     echo "          its verdict on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/foreign_query_readiness_gate.py; then
     echo "" >&2
@@ -1557,7 +1585,7 @@ if ! python3 scripts/lib/foreign_query_readiness_gate.py; then
     echo "          \`run_query_until_answered(...)\`; a leg that must ask once" >&2
     echo "          passes \`QueryAttempts::Once { because: .. }\` and says why." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2m — which plane may reach which Interest builder (R2316) ──
@@ -1586,7 +1614,7 @@ if ! python3 scripts/lib/router_interest_qos_gate.py --selftest >/dev/null; then
     echo "          no longer tell a stamping builder from a bare one, or a" >&2
     echo "          router-plane file from an api-plane one, so its verdict on" >&2
     echo "          this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/router_interest_qos_gate.py; then
     echo "" >&2
@@ -1597,7 +1625,7 @@ if ! python3 scripts/lib/router_interest_qos_gate.py; then
     echo "          Every upstream routing hat stamps \`QoSType::INTEREST\`;" >&2
     echo "          propagate through \`build_interest_propagated\`." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2n — every foreign oracle root is judged (R2326, item 10) ──
@@ -1633,7 +1661,7 @@ if ! python3 scripts/lib/oracle_provenance_gate.py --selftest; then
     echo "          longer tell an unjudged root from a covered one, or a route" >&2
     echo "          that skips the assertion from one that reaches it, so its" >&2
     echo "          verdict on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/oracle_provenance_gate.py; then
     echo "" >&2
@@ -1645,7 +1673,7 @@ if ! python3 scripts/lib/oracle_provenance_gate.py; then
     echo "          \`vendored_oracle_stamp_root \"\$VAR\" \"\$token\"\`; a new" >&2
     echo "          resolver goes through the one that grades its root." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2o — guarded counts vs the feature lattice (R2327, item 11) ──
@@ -1677,7 +1705,7 @@ if ! python3 scripts/lib/guarded_count_lattice_gate.py --selftest; then
     echo "          longer catch R311y772's real miss, or it has stopped" >&2
     echo "          parsing continuations / the shell tail, so its verdict on" >&2
     echo "          this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/guarded_count_lattice_gate.py; then
     echo "" >&2
@@ -1688,7 +1716,7 @@ if ! python3 scripts/lib/guarded_count_lattice_gate.py; then
     echo "          RUN both commands and use what they PRINT; do not average," >&2
     echo "          and do not move only the one that reds." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2p — an excluded member still runs somewhere (R2328, item 12) ──
@@ -1714,7 +1742,7 @@ if ! python3 scripts/lib/workspace_exclude_lane_gate.py --selftest; then
     echo "pre-push: [gate 2p] workspace-exclude-lane SELFTEST failed — it can no" >&2
     echo "          longer tell an excluded-and-unrun member from a covered one," >&2
     echo "          so its verdict on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/workspace_exclude_lane_gate.py; then
     echo "" >&2
@@ -1724,7 +1752,7 @@ if ! python3 scripts/lib/workspace_exclude_lane_gate.py; then
     echo "          \`--exclude\` names a package that is not a member." >&2
     echo "          Give it an isolated lane, the way the others have one." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2q — the deny diagnostic is emitted, once-worded (R2329, item 13) ──
@@ -1753,7 +1781,7 @@ if ! python3 scripts/lib/deny_diagnostic_gate.py --selftest; then
     echo "          tell a silent host from an emitting one, or it has started" >&2
     echo "          counting the library's own returns as hosts, so its verdict" >&2
     echo "          on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/deny_diagnostic_gate.py; then
     echo "" >&2
@@ -1763,7 +1791,7 @@ if ! python3 scripts/lib/deny_diagnostic_gate.py; then
     echo "          \`denied_read_diagnostic\`. Emit through that function: a" >&2
     echo "          witness greps for ONE spelling." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2r2 — a shipped multicast loop must be stoppable (R2333, item 15) ──
@@ -1794,7 +1822,7 @@ if ! python3 scripts/lib/multicast_stop_wiring_gate.py; then
     echo "          Drive it through a shutdown-capable entry point and hand" >&2
     echo "          the host the stop handle." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2s — a lane may not claim a term its test denies (R2335, item 15) ──
@@ -1821,7 +1849,7 @@ if ! python3 scripts/lib/denied_term_lane_gate.py --selftest >/dev/null; then
     echo "pre-push: [gate 2s] denied-term-lane SELFTEST FAILED — the gate below" >&2
     echo "          cannot be trusted to fail, so its silence means nothing." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/denied_term_lane_gate.py; then
     echo "" >&2
@@ -1832,7 +1860,7 @@ if ! python3 scripts/lib/denied_term_lane_gate.py; then
     echo "          Reword the lane comment. Do not quote the denied phrase in" >&2
     echo "          the repair — a quotation of it is still an occurrence." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2t — a production task names its subsystem (R2366, item 15) ──
@@ -1856,7 +1884,7 @@ if ! python3 scripts/lib/subsystem_spawn_gate.py --selftest >/dev/null; then
     echo "pre-push: [gate 2t] subsystem-spawn SELFTEST FAILED — the gate below" >&2
     echo "          cannot be trusted to fail, so its silence means nothing." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/subsystem_spawn_gate.py; then
     echo "" >&2
@@ -1867,7 +1895,7 @@ if ! python3 scripts/lib/subsystem_spawn_gate.py; then
     echo "          Name the subsystem at the call site (\`WzRuntime::Rx\`," >&2
     echo "          \`PartitionedRuntime::TX\`, ..) rather than widening this gate." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2e3 — the scouting socket's movable axes (R2142, item 225) ──
@@ -1890,7 +1918,7 @@ if ! python3 scripts/lib/scouting_socket_axis_census.py > /dev/null; then
     echo "          Run \`python3 scripts/lib/scouting_socket_axis_census.py\`" >&2
     echo "          to see the per-axis breakdown." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2f2 — a flag's precondition SET, derived (R2144, item 218) ──
@@ -1920,7 +1948,7 @@ if ! python3 scripts/lib/flag_precondition_gate.py > /dev/null; then
     echo "          Run \`python3 scripts/lib/flag_precondition_gate.py\` for the" >&2
     echo "          per-site breakdown (\`--verbose\` for every class)." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2g — the KIND of unhonoured, evidenced (R2150, item 539) ──
@@ -1947,7 +1975,7 @@ if ! python3 scripts/lib/unhonoured_kind_evidence_gate.py > /dev/null; then
     echo "          Run \`python3 scripts/lib/unhonoured_kind_evidence_gate.py\`" >&2
     echo "          for the per-key breakdown (\`--verbose\` for the sites)." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2i — every framing refusal is named by a test (R2288, item 610) ──
@@ -1979,7 +2007,7 @@ if ! python3 scripts/lib/framing_refusal_reachability_gate.py; then
     echo "          which. Add the test and its \`// REACHED-BY:\` marker, or" >&2
     echo "          remove the refusal — an arm that cannot fire is item 610." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2u — every link-drop cause has a decided disposition (R2423, item 688) ──
@@ -2029,7 +2057,7 @@ if ! python3 scripts/lib/link_drop_disposition_gate.py; then
     echo "          which. Decide the cause at the seam AND witness it; a" >&2
     echo "          \`_ => {}\` there un-decides every variant added later." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2w — a codec-elision witness holds its boundary (R2450, item 695) ──
@@ -2059,7 +2087,7 @@ if ! python3 scripts/lib/witness_boundary_gate.py --selftest >/dev/null; then
     echo "pre-push: [gate 2w] witness-boundary gate SELFTEST failed — it can no" >&2
     echo "          longer tell a witness that holds a boundary from one that" >&2
     echo "          does not, so its verdict on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! python3 scripts/lib/witness_boundary_gate.py; then
     echo "" >&2
@@ -2070,7 +2098,7 @@ if ! python3 scripts/lib/witness_boundary_gate.py; then
     echo "          optimizer decision, and an unrelated edit flips it into a" >&2
     echo "          hosted Layer F red nobody can attribute." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
 
 # ─── gate 2x — a tracked capture is a function of its encoders (R2451, 699) ──
@@ -2104,7 +2132,7 @@ if ! bash scripts/lib/capture_provenance_gate.sh --selftest >/dev/null; then
     echo "pre-push: [gate 2x] capture-provenance gate SELFTEST failed — it can no" >&2
     echo "          longer tell an oracle that reported from one that never ran," >&2
     echo "          so its verdict on this push means nothing." >&2
-    exit 1
+    _prepush_refuse
 fi
 if ! bash scripts/lib/capture_provenance_gate.sh; then
     echo "" >&2
@@ -2124,8 +2152,15 @@ if ! bash scripts/lib/capture_provenance_gate.sh; then
     echo "              --lib refresh_the_tracked_publisher_fields_capture -- --ignored" >&2
     echo "          then re-run the suite to grade it. See captures/README.md." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+    _prepush_refuse
 fi
+
+# ─── the static block settles what it recorded (item 742) ───────────
+# Every gate from 2c2x to here records its refusal and the run goes on, so one
+# extended run prints every static refusal at once. The gates below (2h
+# onward) build and test; they stay fail-fast, and nothing they print is worth
+# reading once a static gate has refused.
+_prepush_settle
 
 # ─── gate 2h — the RUST half of the static gates, RUN (R2153, item 542) ──
 # grades: worktree
