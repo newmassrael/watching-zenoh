@@ -3145,12 +3145,12 @@ pub struct RouterForwarder {
     /// The observers of the faces coming up and going down, by the id [`RouterForwarder::watch_faces`]
     /// answered: the program that holds the node is told, outside every lock, as a session is told of
     /// its transports and links.
-    face_watchers: std::sync::Mutex<Vec<(u64, FaceEventSink)>>,
+    face_watchers: PlainMutex<Vec<(u64, FaceEventSink)>>,
     /// The allocator of the ids of `face_watchers`.
     next_face_watcher: std::sync::atomic::AtomicU64,
     /// The transitions a write of the tables made, to be told once it is released
     /// ([`WrittenTables`]): an observer runs user code, and the tables are held for writing.
-    face_events: std::sync::Mutex<Vec<(FaceEventKind, FaceSnapshot)>>,
+    face_events: PlainMutex<Vec<(FaceEventKind, FaceSnapshot)>>,
     /// Whether `face_events` holds something, so that the write that made nothing pays no lock.
     face_events_pending: std::sync::atomic::AtomicBool,
     /// Whether the face has been told the tables were written since it last looked.
@@ -3241,7 +3241,7 @@ struct LocalNamespace {
     prefix: wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr,
     /// The ingress half is stateful (it remembers the ids of the declarations it dropped, so that
     /// their id-only retraction is dropped as well).
-    ingress: std::sync::Mutex<wz_session_core::namespace::NamespaceIngress>,
+    ingress: PlainMutex<wz_session_core::namespace::NamespaceIngress>,
 }
 
 /// The handler of a queryable a host registered on the router: the shape the session's own
@@ -4658,7 +4658,7 @@ impl RouterForwarder {
         prefix: wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr,
     ) -> Self {
         self.local_namespace = Some(LocalNamespace {
-            ingress: std::sync::Mutex::new(wz_session_core::namespace::NamespaceIngress::new(
+            ingress: PlainMutex::new(wz_session_core::namespace::NamespaceIngress::new(
                 prefix.clone(),
             )),
             prefix,
@@ -5066,9 +5066,9 @@ impl RouterForwarder {
             egress_interceptors: PlainRwLock::new(InterceptorChain::new()),
             interceptor_version: PlainCell::new(0),
             watchers: std::sync::atomic::AtomicUsize::new(0),
-            face_watchers: std::sync::Mutex::new(Vec::new()),
+            face_watchers: PlainMutex::new(Vec::new()),
             next_face_watcher: std::sync::atomic::AtomicU64::new(0),
-            face_events: std::sync::Mutex::new(Vec::new()),
+            face_events: PlainMutex::new(Vec::new()),
             face_events_pending: std::sync::atomic::AtomicBool::new(false),
             change_told: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "routing-namespace")]

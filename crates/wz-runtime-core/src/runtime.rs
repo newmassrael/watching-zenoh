@@ -191,6 +191,23 @@ pub trait Runtime: Send + Sync + 'static {
     where
         T: Send + 'static;
 
+    /// [`Self::new_mutex`] for a lock that is HELD ACROSS A WAIT FOR AN EVENT: a sender's
+    /// conduit, which a blocking sender keeps while it waits for room on its link (up to that
+    /// link's `wait_before_close`), so that the fragments of a chain keep their sequence numbers.
+    ///
+    /// Such a lock is taken without waiting by every sender that may not wait (a probe answers a
+    /// held conduit as a lane with no room), and taken by waiting only by a thread that holds no
+    /// other lock: a thread that waited for it while holding another would hold that one for as
+    /// long as the room takes. A profile that checks the order of its locks in a debug build
+    /// checks that rule on a lock made here; every other profile makes it as
+    /// [`Self::new_mutex`] does.
+    fn new_mutex_held_across_waits<T>(value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static,
+    {
+        Self::new_mutex(value)
+    }
+
     /// R311di-pre-e — construction-side complement of [`Self::RwLock`].
     /// Same per-profile binding discipline as [`Self::new_mutex`]:
     /// tokio binds to `std::sync::RwLock::new(value)`; MCU profiles

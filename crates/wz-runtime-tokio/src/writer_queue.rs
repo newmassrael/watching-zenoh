@@ -62,7 +62,12 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, WaitTimeoutResult};
+use std::sync::Arc;
+
+// The lanes' lock and the senders' wait for room are the runtime's own (`crate::sync`), so a
+// debug build checks them with every other lock of the node: a sender that waits for room while
+// it holds another lock (the routing tables) is reported where it waits.
+use crate::sync::{NeverPoisoned, PlainCondvar, PlainGuard, PlainMutex, WaitTimeoutResult};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Notify};
@@ -144,7 +149,7 @@ pub fn outbound_channel_with_capacity(
     batch_bytes: usize,
 ) -> (OutboundTx, OutboundRx) {
     let shared = Arc::new(Lanes {
-        state: Mutex::new(LaneState {
+        state: PlainMutex::new(LaneState {
             urgent: VecDeque::new(),
             lanes: std::array::from_fn(|_| VecDeque::new()),
             capacity: queue_size.map(|n| n * batch_bytes),
@@ -173,7 +178,7 @@ pub fn outbound_channel_with_capacity(
         ready: Notify::new(),
         frame_ready: Notify::new(),
         room: RoomSignal::new(),
-        idle_hook: Mutex::new(None),
+        idle_hook: PlainMutex::new(None),
         flush_wanted: AtomicBool::new(false),
         staged: AtomicU64::new(0),
         staged_at_flush: AtomicU64::new(0),
@@ -278,7 +283,7 @@ fn with_pools(channel: (OutboundTx, OutboundRx), pools: TxPools) -> (OutboundTx,
 }
 
 struct Lanes {
-    state: Mutex<LaneState>,
+    state: PlainMutex<LaneState>,
     /// Wakes the (single) writer when a frame lands or the last sender goes.
     ready: Notify,
     /// Wakes the writer ONLY for a frame that landed, which is what it waits for while it
@@ -291,7 +296,7 @@ struct Lanes {
     /// What the writer runs when it has nothing to write and is about to wait: the
     /// session's flush of the batch frames it has staged
     /// ([`OutboundTx::set_idle_hook`]).
-    idle_hook: Mutex<Option<IdleHook>>,
+    idle_hook: PlainMutex<Option<IdleHook>>,
     /// A sender staged something the hook would flush and has said so
     /// ([`OutboundTx::wake_for_flush`]); the writer clears it just before it runs the
     /// hook. It is what keeps the wake to one per idle spell and not one per message.
@@ -640,26 +645,26 @@ const NEVER_FLUSHED: u64 = u64::MAX;
 /// notifying thread. It is read behind its own flag, so a queue nobody watches pays one atomic
 /// read per notice, which is what the waiter count costs.
 struct RoomSignal {
-    cv: Condvar,
+    cv: PlainCondvar,
     waiters: AtomicUsize,
     /// Whether a watcher is set. Read before the watcher's lock is taken.
     watched: AtomicBool,
-    watcher: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    watcher: PlainMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The tasks waiting for room by waker ([`OutboundTx::poll_reserve`]): each is woken once,
     /// by the next notice, and asks again. Whether any is set is read before the lock is taken.
     waiting: AtomicBool,
-    wakers: Mutex<Vec<std::task::Waker>>,
+    wakers: PlainMutex<Vec<std::task::Waker>>,
 }
 
 impl RoomSignal {
     fn new() -> Self {
         Self {
-            cv: Condvar::new(),
+            cv: PlainCondvar::new(),
             waiters: AtomicUsize::new(0),
             watched: AtomicBool::new(false),
-            watcher: Mutex::new(None),
+            watcher: PlainMutex::new(None),
             waiting: AtomicBool::new(false),
-            wakers: Mutex::new(Vec::new()),
+            wakers: PlainMutex::new(Vec::new()),
         }
     }
 
@@ -685,18 +690,28 @@ impl RoomSignal {
 
     /// Only the pooled queue waits without a bound (for a free slot).
     #[cfg(feature = "runtime-zero-copy")]
-    fn wait<'a>(&self, guard: MutexGuard<'a, LaneState>) -> LockResult<MutexGuard<'a, LaneState>> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[allow(clippy::type_complexity)]
+    fn wait<'a>(
+        &self,
+        guard: PlainGuard<'a, LaneState>,
+    ) -> Result<PlainGuard<'a, LaneState>, NeverPoisoned<PlainGuard<'a, LaneState>>> {
         self.waiters.fetch_add(1, Ordering::SeqCst);
         let woken = self.cv.wait(guard);
         self.waiters.fetch_sub(1, Ordering::SeqCst);
         woken
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[allow(clippy::type_complexity)]
     fn wait_timeout<'a>(
         &self,
-        guard: MutexGuard<'a, LaneState>,
+        guard: PlainGuard<'a, LaneState>,
         limit: Duration,
-    ) -> LockResult<(MutexGuard<'a, LaneState>, WaitTimeoutResult)> {
+    ) -> Result<
+        (PlainGuard<'a, LaneState>, WaitTimeoutResult),
+        NeverPoisoned<(PlainGuard<'a, LaneState>, WaitTimeoutResult)>,
+    > {
         self.waiters.fetch_add(1, Ordering::SeqCst);
         let woken = self.cv.wait_timeout(guard, limit);
         self.waiters.fetch_sub(1, Ordering::SeqCst);
@@ -2563,7 +2578,7 @@ impl OutboundTx {
 #[cfg(feature = "runtime-zero-copy")]
 #[derive(Default)]
 pub struct LendTable {
-    lent: Mutex<(Vec<Option<TxLend>>, Vec<u32>)>,
+    lent: PlainMutex<(Vec<Option<TxLend>>, Vec<u32>)>,
 }
 
 #[cfg(feature = "runtime-zero-copy")]
@@ -3660,7 +3675,7 @@ mod tests {
     /// write, answers `WouldBlock` to every `block_every`th call (never when that is 0), and
     /// keeps what it took, in the order it took it.
     struct FakeLink {
-        taken: Mutex<Vec<u8>>,
+        taken: PlainMutex<Vec<u8>>,
         calls: AtomicUsize,
         chunk: usize,
         block_every: usize,
@@ -3669,7 +3684,7 @@ mod tests {
     impl FakeLink {
         fn new(chunk: usize, block_every: usize) -> Arc<Self> {
             Arc::new(Self {
-                taken: Mutex::new(Vec::new()),
+                taken: PlainMutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
                 chunk,
                 block_every,

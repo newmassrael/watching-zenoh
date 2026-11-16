@@ -13830,6 +13830,46 @@
         "Open: the row's role cells of an unread QUIC flow keep the coarse reason; the flow's `decryption` holds the finer one.",
         "Open: the consumer's router stall (no lock-order cycle found on its path; the std locks of the router path and the waits that are not locks remain), and the owner's next steps for the node's locks."
       ]
+    },
+    "Round 4496": {
+      "decision_summary": "The lock-order checker of the round before checked the node's locks but not its waits for events, and a node that stops can stop on either. The send queue's wait for room was a std condition variable, which the checker did not see. The queue's lock and its wait now go through the runtime's own mutex and a new condition variable of the same shape, and in a debug build a thread that waits for an event while it holds another lock is reported, with its stack: the thread that would make the event happen may need that lock. The router's std locks on its path (the face watchers and events, the namespace ingress, the shed registry, the node's statistics) moved to the runtime's locks with it. The first run found the wait the consumer's stall looks like. A message longer than a link's batch leaves as a chain of fragments, a chain waits for room between its fragments, and the router sent it where it routed it: with the routing tables held for reading, or from a pass of the held messages, for up to the message's wait_before_close. A destination that did not read then held the read, every writer of the tables (a face coming up, a declaration, the tick) waited for it, and every face's reader that queues behind a waiting writer waited with them; the code had named it the one message its credit stage did not isolate. A chain is now sent on a blocking thread of the runtime that holds nothing of the router's, its destination's lane is marked while it goes so that what follows it there is held behind it and keeps its order, and its end takes the mark away and wakes the loop to send what was held; one chain per destination and lane at a time bounds the threads by the faces. The next layer was the session's conduit lock, which a blocking sender keeps across its wait for room so that a chain's fragments keep their sequence numbers, and which a probe takes without waiting. It is now made through a new runtime constructor for a lock held across waits, which every other runtime makes as a plain mutex and under which the checker lets a wait be made; the session's generic locks are each their own class, by the place in the session that made them. The other half of that rule, that a thread holding another lock takes such a lock only without waiting, is not switched on: the router still makes waiting sends with its tables held and the session with its state held, at the places this round measured, and making them not is the next step of the owner's plan.",
+      "changes_bullets": [
+        "`crate::sync::PlainCondvar` (std's shape over parking_lot's) and `WaitTimeoutResult`; in a debug build a wait takes its lock off the thread's held locks and reports a wait made under any other lock not held across waits. `PlainMutex::held_across_waits` marks such a lock.",
+        "The send queue's lanes lock, idle hook, watcher, wakers and lent slots are `PlainMutex`, its wait for room `PlainCondvar`; the router's face watchers and events, its namespace ingress, the shed registry and the node statistics are `PlainMutex`.",
+        "`RouterForwarder::send_chain_off_thread`: a chain found by the credited send or by the drain pass is sent on a blocking thread, its destination's lane marked in `FaceRuntime::chain_in_flight` until it ends; the credited send and the drain hold or skip a marked lane.",
+        "`Runtime::new_mutex_held_across_waits` (default `new_mutex`), used for the session's conduits; the tokio runtime's `new_mutex` and it carry the caller's place, so each lock of the session's generic code is its own class.",
+        "Two C ABI budgets move by the chain send measured (capic-router-node 6,089,500, capic-default 10,896,400); one reason pin re-read."
+      ],
+      "verification_bullets": [
+        "On a build host, debug, the checker on: wz-runtime-tokio's unit tests by default and with the router (routing-router-hat, routing-peer, transport-link-ws), with runtime-zero-copy, with transport-shm, its integration tests, the router tests in six feature combinations, wz-session-core's tests, wz-ap-demo's and wz-integration-tests' tests all pass, with no lock-order report. Before the fix the router suites reported the chain's wait for room under the tables (egress test of a message longer than the lane); the off-thread send then reported the session conduit; with the conduit marked, nothing.",
+        "The checker's tests: a condition wait under its own lock is made, under another lock is refused, under a lock held across waits is made.",
+        "The egress test of a message larger than a destination's whole budget waits, bounded, for the chain sent off the thread.",
+        "Layer C1cs measured on pc2: every case within its budget; the symbol diff of the router-node build against the previous main names the growth (the off-thread send and the condition variable, less the std paths).",
+        "clippy -D warnings clean for wz-runtime-tokio (router, transport-link-ws, release), wz-session-core and wz-runtime-core; the workspace checks with all targets; the reason pin and prose-name gates pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Open: the next step of the owner's plan for the node's locks: no waiting send under the routing tables (the router's sends at its frame, publish, query and multicast routes) or under the session's state, after which the checker's rule that a lock held across waits is taken only without waiting under another lock is switched on.",
+        "Open: the consumer's router stall; the chain's wait under the tables, now removed, matches its shape, and the consumer is told the head to pin."
+      ]
+    },
+    "Round 4497": {
+      "decision_summary": "The landing queue merges a landed item onto main instead of replaying its commits (bx.toml [land] strategy = \"merge\", owner decision 2026-11-15). An integration branch that merged several sessions' branches cannot be replayed commit by commit without passing mixed intermediate trees through the pre-commit hook, and the hook is never turned off; a merge keeps every commit with its reason, and the pre-push hook judges the merged tree, which is the tree that lands. The integrator reads [land] from main's current value, so this lands alone and takes effect for the items after it.",
+      "changes_bullets": [
+        "bx.toml [land]: strategy rebase -> merge, with the owner decision and the reason as a comment",
+        "scripts/land.sh: the after-landing comment says the item was merged onto the tip and that origin/main reaches the landed commits"
+      ],
+      "verification_bullets": [
+        "Local at bb7f6a7f22 over origin/main eb14784d20: bash -n and shellcheck -S warning over scripts/land.sh rc 0; reason_review_pin_gate.py --check OK (55 rows). The integrator's hook run judges this item. The first merge-strategy landing is the c2 integration that follows."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Land the c2 integration as a merge item: 294 commits of axes, debts and claims, verified at its target tree (C1bf 100/100, workspace tests, E18 contract, C1v/C1y/C1bo)."
+      ]
     }
   },
   "inventory_entries": {
