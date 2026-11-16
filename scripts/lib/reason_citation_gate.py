@@ -54,6 +54,7 @@ population is DERIVED, which is the split R2301 settled.
 from __future__ import annotations
 
 import collections
+import fnmatch
 import json
 import os
 import re
@@ -216,6 +217,73 @@ def wz_paths(paths: list[str]) -> list[str]:
     return [p for p in paths if not p.startswith(FOREIGN_TREES)]
 
 
+# Open-debt item 674 -- an inventory row's `source` names where its feature
+# lives, and a source naming an in-tree path that is gone was graded by nothing:
+# this gate read `reason` only, and the upstream gates skip the store. Twelve
+# rows pointed at files that had moved (measured on 2026-09-21: 68 in-tree
+# sources, 12 not on disk). A source token is IN-TREE when its first component
+# is a top-level directory of this tree's tracked files; anything else (an
+# upstream path, a plugin's name) is not this arm's to grade. A token with a
+# glob character names a FAMILY (`sources/codecs/undecl_*.scxml`) and holds when
+# at least one tracked file matches it; a plain token holds when it is a tracked
+# file or a directory holding one.
+SOURCE_TOKEN = re.compile(r"(?<![\w./*-])([A-Za-z0-9_.-]+/[A-Za-z0-9_./*?\[\]-]+)")
+GLOB_CHARS = re.compile(r"[*?\[]")
+
+#: The fewest in-tree source tokens a run may find before it refuses to grade:
+#: zero means the reader of `source` lost its subject. `WZ_REASON_SOURCE_FLOOR`
+#: replaces it for the selftest's fixtures, whose rows carry no source.
+SOURCE_FLOOR = 1
+
+
+def source_floor() -> int:
+    override = os.environ.get("WZ_REASON_SOURCE_FLOOR")
+    return int(override) if override else SOURCE_FLOOR
+
+
+def source_findings(
+    rows: list[dict], tracked: list[str], ever: dict[str, set[str]]
+) -> tuple[list[str], int]:
+    """Findings for every in-tree `source` token that names nothing tracked, and
+    how many in-tree tokens were graded."""
+    files = set(tracked)
+    dirs: set[str] = set()
+    for path in tracked:
+        parts = path.split("/")
+        for i in range(1, len(parts)):
+            dirs.add("/".join(parts[:i]))
+    top = {p.split("/", 1)[0] for p in tracked if "/" in p}
+    findings: list[str] = []
+    graded = 0
+    for row in rows:
+        for m in SOURCE_TOKEN.finditer(row.get("source") or ""):
+            token = m.group(1).rstrip(".,;:)")
+            if token.split("/", 1)[0] not in top:
+                continue
+            # Inside a submodule: the index holds the submodule as one entry, so
+            # its files are another repository's and not graded here.
+            parts = token.split("/")
+            if any("/".join(parts[:i]) in files for i in range(1, len(parts))):
+                continue
+            graded += 1
+            if GLOB_CHARS.search(token):
+                if not any(fnmatch.fnmatchcase(p, token) for p in tracked):
+                    findings.append(
+                        f"{row['id']}: source family `{token}` matches no tracked "
+                        f"file. Re-point the row's source at where its feature lives now"
+                    )
+                continue
+            plain = token.rstrip("/")
+            if plain in files or plain in dirs:
+                continue
+            had = " (this tree HAD it and dropped or moved it)" if plain in ever else ""
+            findings.append(
+                f"{row['id']}: source `{token}` is not a tracked file or directory"
+                f"{had}. Re-point the row's source at where its feature lives now"
+            )
+    return findings, graded
+
+
 def audit() -> tuple[list[str], dict[str, int]]:
     rows = inventory()
     tracked = wz_paths(git_paths(["ls-files"]))
@@ -237,8 +305,8 @@ def audit() -> tuple[list[str], dict[str, int]]:
         derived,
     )
 
-    findings: list[str] = []
-    counts = {"total": 0, "unique": 0, "ambiguous": 0, "foreign": 0}
+    findings, graded = source_findings(rows, tracked, ever)
+    counts = {"total": 0, "unique": 0, "ambiguous": 0, "foreign": 0, "sources": graded}
     for row in rows:
         for m in CITE.finditer(row.get("reason") or ""):
             path, lo, hi = m.group(1), int(m.group(2)), m.group(3)
@@ -326,8 +394,15 @@ def main() -> int:
     print(
         f"reason-citation: {counts['total']} citation(s) -- "
         f"{counts['unique']} resolve to one tracked file, "
-        f"{counts['ambiguous']} ambiguous, {counts['foreign']} foreign to this tree"
+        f"{counts['ambiguous']} ambiguous, {counts['foreign']} foreign to this tree; "
+        f"{counts['sources']} in-tree source path(s) graded"
     )
+    if counts["sources"] < source_floor():
+        findings.append(
+            f"{counts['sources']} in-tree source path(s) graded, under the floor of "
+            f"{source_floor()}: the reader of `source` lost its subject, and a "
+            f"population of zero must not read as a pass"
+        )
 
     baseline = ambiguous_baseline()
     if counts["ambiguous"] > baseline:
@@ -353,6 +428,10 @@ def main() -> int:
     print("reason-citation: ok - every resolvable citation still points at code")
     return 0
 
+
+# A reason citation that resolves to one live line, for the source arms: each
+# needs one so the reason arm passes and only the source arm is under test.
+_LIVE = "see scripts/lib/debt_plane_census.py:1"
 
 # Each fixture is a shape the gate must tell apart. `want` is the substring the
 # output has to carry; None means the arm must pass.
@@ -424,7 +503,56 @@ SELFTEST: tuple[tuple[str, list[dict], int, str | None], ...] = (
         1,
         "BELOW the baseline",
     ),
+    # --- the `source` arm (open-debt item 674) ---
+    (
+        "a source naming a tracked file holds",
+        [{"id": "s-file", "reason": _LIVE, "source": "scripts/lib/debt_plane_census.py"}],
+        0,
+        None,
+    ),
+    (
+        "a source naming a tracked directory holds",
+        [{"id": "s-dir", "reason": _LIVE, "source": "crates/wz-runtime-tokio/src/session at R9"}],
+        0,
+        None,
+    ),
+    (
+        "a source family with a tracked member holds",
+        [{"id": "s-fam", "reason": _LIVE, "source": "sources/codecs/undecl_*.scxml"}],
+        0,
+        None,
+    ),
+    (
+        "a source family with no member is a finding",
+        [{"id": "s-nofam", "reason": _LIVE, "source": "sources/codecs/nosuch_*.scxml"}],
+        1,
+        "matches no tracked file",
+    ),
+    (
+        "a source naming a path this tree dropped is a finding",
+        [{"id": "s-dead", "reason": _LIVE, "source": "crates/wz-ap-demo/src/link_driver.rs"}],
+        1,
+        "HAD it",
+    ),
+    (
+        "an upstream source is not this arm's to grade",
+        [{"id": "s-up", "reason": _LIVE, "source": "zenoh/src/net/routing/dispatcher/queries.rs"}],
+        0,
+        None,
+    ),
+    (
+        "no in-tree source at all is a FAILURE under a floor of one",
+        [{"id": "s-none", "reason": _LIVE, "source": "zenoh-acl plugin"}],
+        1,
+        "in-tree source path(s) graded, under the floor",
+    ),
 )
+
+# The source arm's floor per fixture: zero for every arm but the one that tests
+# the floor, so the reason arms are not failed by rows that carry no source.
+SELFTEST_SOURCE_FLOOR = {
+    "no in-tree source at all is a FAILURE under a floor of one": "1",
+}
 
 # Each arm declares the ambiguity baseline it is judged against, so the ratchet
 # is exercised in BOTH directions instead of being switched off for the others.
@@ -445,6 +573,7 @@ def selftest() -> int:
         env = dict(os.environ)
         env["WZ_REASON_INVENTORY"] = fixture
         env["WZ_REASON_AMBIGUOUS_BASELINE"] = SELFTEST_BASELINE.get(label, "0")
+        env["WZ_REASON_SOURCE_FLOOR"] = SELFTEST_SOURCE_FLOOR.get(label, "0")
         run = subprocess.run(
             [sys.executable, __file__], capture_output=True, text=True, env=env
         )
