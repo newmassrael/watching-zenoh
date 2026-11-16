@@ -219,16 +219,6 @@ IN_PROCESS_PKG = "wz-integration-tests"
 # Linking the real zenoh-pico C library in-process.
 PICO_FFI_CRATE = "zenoh_pico_sys"
 
-CLAIM_RE = re.compile(
-    r"^\s*//[/!]?\s*wz-proves:\s*(?P<atom>[A-Za-z0-9_-]+)\s+"
-    r"(?P<kind>wz->pico|pico->wz|wz->zenoh-ext|zenoh-ext->wz|wz->zenoh-c|zenoh-c->wz"
-    # R311y841 — `wz->zenoh` / `zenoh->wz` MUST follow the two hyphen-suffixed
-    # zenoh kinds above: alternation is first-match, so listing the shorter one
-    # first would claim the `wz->zenoh` prefix of `wz->zenoh-ext` and leave
-    # `-ext` to fail the tail anchor.
-    r"|wz->zenohd|zenohd->wz|wz->zenoh|zenoh->wz|codec-parity)"
-    r"\s*(?P<partial>partial)?\s*$"
-)
 # A corpus test that witnesses NO atom must say so, with a reason, rather than be
 # left blank -- otherwise invariant A4-4 (every corpus test declares) would force an
 # invented claim, which is the exact fabrication this gate exists to prevent. The
@@ -254,6 +244,20 @@ KINDS = {
     "zenoh-c->wz",
     "codec-parity",
 }
+# Open-debt item 192 -- the claim grammar's kind alternation is DERIVED from
+# `KINDS` rather than written out beside it: two lists of one fact drift, and a
+# kind added to one was a kind the other refused. Longest first, because
+# alternation is first-match: `wz->zenoh` listed before `wz->zenoh-ext` would
+# claim its prefix and leave `-ext` to fail the tail anchor (R311y841 met that
+# by ordering the hand-written list; the sort makes the order a property).
+_KIND_ALTERNATION = "|".join(
+    re.escape(kind) for kind in sorted(KINDS, key=lambda k: (-len(k), k))
+)
+CLAIM_RE = re.compile(
+    r"^\s*//[/!]?\s*wz-proves:\s*(?P<atom>[A-Za-z0-9_-]+)\s+"
+    rf"(?P<kind>{_KIND_ALTERNATION})"
+    r"\s*(?P<partial>partial)?\s*$"
+)
 # Which foreign classes can legitimately produce each proof kind.
 #
 # A directional pico proof does NOT require a spawned CLI: the `codec` class LINKS
@@ -1122,10 +1126,24 @@ def selftest() -> bool:
             print("SELFTEST CONTROL %s: a line-oriented reader CAN read this "
                   "reason, so the fixture no longer covers the defect" % name,
                   file=sys.stderr)
+    # Item 192: every kind KINDS holds is a kind the claim grammar reads, whole,
+    # with and without `partial`; and a kind KINDS does not hold is refused.
+    for kind in sorted(KINDS):
+        for tail, partial in (("", None), (" partial", "partial")):
+            m = CLAIM_RE.match(f"// wz-proves: some-atom {kind}{tail}")
+            if m is None or m.group("kind") != kind or m.group("partial") != partial:
+                ok = False
+                print("SELFTEST claim grammar: `%s%s` read as %r"
+                      % (kind, tail, m and (m.group("kind"), m.group("partial"))),
+                      file=sys.stderr)
+    if CLAIM_RE.match("// wz-proves: some-atom wz->nowhere") is not None:
+        ok = False
+        print("SELFTEST claim grammar: a kind outside KINDS was accepted",
+              file=sys.stderr)
     if ok:
         print("crossimpl_corpus selftest: %d reason shape(s) read, %d of them "
-              "invisible to a line-oriented reader"
-              % (len(_SELFTEST_EXPECTED), len(_SELFTEST_LINE_BLIND)))
+              "invisible to a line-oriented reader; %d claim kind(s) read whole"
+              % (len(_SELFTEST_EXPECTED), len(_SELFTEST_LINE_BLIND), len(KINDS)))
     return ok
 
 
