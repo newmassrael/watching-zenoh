@@ -357,33 +357,50 @@ impl WzRuntime {
     where
         F: Future<Output = R>,
     {
-        match Handle::try_current() {
-            Ok(handle) => {
-                assert!(
-                    handle.runtime_flavor() != RuntimeFlavor::CurrentThread,
-                    "wz runtime does not support tokio's current-thread scheduler here: \
+        block_in_place_on(self.handle(), fut)
+    }
+}
+
+/// [`WzRuntime::block_in_place`] onto the runtime `handle` names: the one
+/// sync-over-async bridge, with its guards, for a caller that holds a handle
+/// rather than a subsystem name (a link driver adapter handed its runtime at
+/// construction).
+///
+/// Panics by name on tokio's current-thread scheduler and once tokio's
+/// thread-locals are gone, as [`WzRuntime::block_in_place`] does. From a
+/// multi-thread worker the worker is released for the duration; from a thread
+/// that is not a worker (a `spawn_blocking` thread, a plain thread) the future
+/// is simply driven on it.
+pub fn block_in_place_on<F, R>(handle: &Handle, fut: F) -> R
+where
+    F: Future<Output = R>,
+{
+    match Handle::try_current() {
+        Ok(current) => {
+            assert!(
+                current.runtime_flavor() != RuntimeFlavor::CurrentThread,
+                "wz runtime does not support tokio's current-thread scheduler here: \
                      blocking on it has no second worker to make progress and would \
                      deadlock. Use a multi-thread scheduler, e.g. \
                      #[tokio::main(flavor = \"multi_thread\", worker_threads = 1)]"
-                );
-            }
-            Err(e) => {
-                assert!(
-                    !e.is_thread_local_destroyed(),
-                    "tokio's thread-local state is already destroyed, so no wz runtime \
+            );
+        }
+        Err(e) => {
+            assert!(
+                !e.is_thread_local_destroyed(),
+                "tokio's thread-local state is already destroyed, so no wz runtime \
                      can be reached. This is what calling the wz API at process exit \
                      looks like (an atexit handler, or a static destructor); it is not \
                      supported."
-                );
-            }
+            );
         }
-
-        // Polled on this thread, where the caller's span is current already; carried anyway, as
-        // upstream's `ZRuntime::block_in_place` carries it, so the future that runs is the same
-        // future whichever bridge it took.
-        let fut = in_caller_span(fut);
-        tokio::task::block_in_place(move || self.handle().block_on(fut))
     }
+
+    // Polled on this thread, where the caller's span is current already; carried anyway, as
+    // upstream's `ZRuntime::block_in_place` carries it, so the future that runs is the same
+    // future whichever bridge it took.
+    let fut = in_caller_span(fut);
+    tokio::task::block_in_place(move || handle.block_on(fut))
 }
 
 impl fmt::Display for WzRuntime {

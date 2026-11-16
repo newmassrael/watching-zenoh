@@ -101,6 +101,7 @@ use wz_runtime_core::TimeSource;
 
 use crate::runtime_impl::{TokioRuntime, TokioTime};
 
+use crate::runtime_pool::block_in_place_on;
 use crate::{LinkDriver, Reliability, TxFrame};
 
 // R311ei — SigningKey + SigningKeyTooShort + the HMAC-SHA256 cookie
@@ -294,6 +295,13 @@ pub use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkKind, LinkSu
 
 /// Tokio multi-thread runtime adapter for a `LinkDriver`
 /// implementation.
+///
+/// Each blocking call crosses into the runtime through
+/// [`block_in_place_on`](crate::runtime_pool::block_in_place_on), the bridge
+/// [`WzRuntime::block_in_place`](crate::runtime_pool::WzRuntime::block_in_place)
+/// is, so a script action fired on a runtime worker releases that worker
+/// rather than nesting a runtime inside it, and the bridge's guards are the
+/// ones every sync-over-async crossing in wz has.
 pub struct TokioLinkDriverAdapter<D: LinkDriver + Send + 'static> {
     driver: Mutex<D>,
     handle: tokio::runtime::Handle,
@@ -331,7 +339,7 @@ impl<D: LinkDriver + Send + 'static> BoxedLinkDriver for TokioLinkDriverAdapter<
         // honest cause here: this adapter cannot tell an oversize refusal from
         // any other driver error, and guessing `Oversize` would put a wrong
         // reason on a real drop.
-        match self.handle.block_on(driver.send(&frame, reliability)) {
+        match block_in_place_on(&self.handle, driver.send(&frame, reliability)) {
             Ok(()) => LinkSendOutcome::Sent,
             Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
         }
@@ -339,12 +347,12 @@ impl<D: LinkDriver + Send + 'static> BoxedLinkDriver for TokioLinkDriverAdapter<
 
     fn open_blocking(&self) {
         let mut driver = self.driver.lock().unwrap();
-        let _ = self.handle.block_on(driver.open());
+        let _ = block_in_place_on(&self.handle, driver.open());
     }
 
     fn close_blocking(&self) {
         let mut driver = self.driver.lock().unwrap();
-        let _ = self.handle.block_on(driver.close());
+        let _ = block_in_place_on(&self.handle, driver.close());
     }
 }
 
@@ -1911,6 +1919,53 @@ mod tests {
         feature = "reassembly"
     ))]
     use wz_codecs_test_support::TestWire;
+
+    /// A driver that records what it is asked to send, after one real await on
+    /// the runtime that drives it.
+    struct RecordingDriver(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+    impl LinkDriver for RecordingDriver {
+        async fn open(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn send(&mut self, frame: &TxFrame<'_>, _: Reliability) -> std::io::Result<()> {
+            tokio::task::yield_now().await;
+            self.0.lock().unwrap().push(frame.bytes.to_vec());
+            Ok(())
+        }
+
+        async fn close(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn poll_event(&mut self) -> crate::LinkEvent {
+            core::future::pending().await
+        }
+    }
+
+    /// The adapter's blocking calls work from a runtime WORKER, which is where
+    /// a script action fired by a session loop runs. A bare
+    /// `Handle::block_on` there panics ("Cannot start a runtime from within a
+    /// runtime"); the bridge releases the worker instead.
+    ///
+    /// CONTROL: put `self.handle.block_on` back in `send_blocking` and this
+    /// panics on the first send.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_link_adapter_sends_from_a_runtime_worker() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let adapter = TokioLinkDriverAdapter::new(
+            RecordingDriver(Arc::clone(&sent)),
+            tokio::runtime::Handle::current(),
+        );
+        adapter.open_blocking();
+        assert!(matches!(
+            adapter.send_blocking(b"frame", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        ));
+        adapter.close_blocking();
+        assert_eq!(*sent.lock().unwrap(), vec![b"frame".to_vec()]);
+    }
 
     /// R69 / R311ei — `signing_key_from_os_entropy` yields a 32-byte
     /// key (satisfies the >= 32 invariant by construction) and two
