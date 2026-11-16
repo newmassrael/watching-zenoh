@@ -8699,8 +8699,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // leak below used to state.
     #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
     let library_plane = {
-        // `plugins_loading/enabled` as the library reads it: this host is configured by its
-        // file, unlike zenohd, which turns by-name loading on whatever its file says.
+        // `plugins_loading/enabled` as `--plugins-loading` states it, which a `--config` run
+        // adds whatever the file says, as zenohd turns by-name loading on over its file.
         let mut plane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane::new(
             wz::runtime_tokio::plugin_plane::PluginsLoading::from_config(Some(plugins_loading)),
         );

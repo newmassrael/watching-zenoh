@@ -15,9 +15,11 @@ the pinned tree.
 
 wz: a single-session client of `wz-ap-demo` hosts one with `--config-queryable`.
 `wz-ap-demo --config <file>` is the daemon form and reads the file as zenohd
-does: it hosts the admin space in every run-mode that has one, whatever the file
-says about `adminspace/enabled` (an explicit `false` included, which the report
-names as overridden), under the permissions the file states. The expansion adds
+does, through the one table of zenohd's writes over its file
+(`DAEMON_OVERRIDES` in `crates/wz-runtime-tokio/src/zenoh_config.rs`): it hosts
+the admin space in every run-mode that has one, whatever the file says about
+`adminspace/enabled` (an explicit `false` included, which the report names as
+overridden), under the permissions the file states. The expansion adds
 `--config-queryable` to the client, the client node and the peer, with or
 without an `adminspace` block; the router host (`adminspace-router-linkstate`)
 and the storage host serve theirs with no flag. A build without the demo's

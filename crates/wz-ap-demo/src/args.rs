@@ -808,9 +808,8 @@ pub(crate) fn single_session_admin_refusal(flag: &str) -> Option<&'static str> {
     }
 }
 
-/// How the run-mode a `--config` run selects hosts the admin space the daemon
-/// form turns on (`zenohd/src/main.rs` @
-/// `config.adminspace.set_enabled(true).unwrap();`).
+/// How the run-mode a `--config` run selects hosts the admin space its
+/// configuration enables, which the daemon reading does in every mode.
 #[cfg(feature = "zenoh-config")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonAdminHost {
@@ -847,6 +846,18 @@ fn daemon_admin_host(run_flag: Option<&str>) -> DaemonAdminHost {
         Some(flag) => single_session_admin_refusal(flag)
             .map_or(DaemonAdminHost::OnTheFlag, DaemonAdminHost::Nowhere),
         None => DaemonAdminHost::Nowhere("an adminspace host (this document selects no run-mode)"),
+    }
+}
+
+/// [`daemon_admin_host`] for a configuration that `enables` an admin space, and
+/// `Nowhere` for one that enables none: whether there is an admin space to host
+/// is the configuration's answer, not the run-mode's.
+#[cfg(feature = "zenoh-config")]
+fn admin_host_of(enables: bool, run_flag: Option<&str>) -> DaemonAdminHost {
+    if enables {
+        daemon_admin_host(run_flag)
+    } else {
+        DaemonAdminHost::Nowhere("an adminspace (this configuration enables none)")
     }
 }
 
@@ -935,13 +946,21 @@ pub(crate) fn split_endpoint_list(raw: &str) -> Vec<String> {
 /// | `transport/link/unixpipe/file_access_mask` | `--link-config unixpipe#file_mask=<n>` |
 /// | `transport/link/tls/close_link_on_expiration: true` | `--link-config <kind>#close_link_on_expiration=true` for tls, quic and quic-datagram |
 /// | anything, on a run-mode that hosts its adminspace on the flag | `--config-queryable` |
+/// | anything, on the storage host of a build with a plugin plane | `--plugins-loading` |
 /// | `adminspace/permissions/read: false` | `--no-admin-read` |
 /// | `adminspace/permissions/write: true` | `--config-writable` `--config-write-permit` |
 ///
-/// The adminspace row does not read `adminspace/enabled`: a `--config` run is
-/// the daemon form, and zenohd turns the admin space on after it loads its file
-/// in every mode, over an explicit `enabled: false` too
-/// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`).
+/// ## The file is read as zenohd reads its `--config`
+///
+/// A `--config` run is wz's daemon entry point, so the file is read under
+/// `ConfigReading::Daemon`: the file, then every write zenohd makes to it
+/// before it opens a runtime (`DAEMON_OVERRIDES` in the runtime's
+/// `zenoh_config`, the one place they are listed). A file that names no `mode`
+/// is a router, the admin space is hosted whatever `adminspace/enabled` says,
+/// and the storage host looks plugins up by name whatever
+/// `plugins_loading/enabled` says. A key the file states and the daemon
+/// writes over is reported overridden. The library entry points keep the
+/// library reading.
 ///
 /// R311y843 added the lower nine rows. R311y842 shipped the reader with only
 /// the upper five wired, so eight of the fourteen keys it reports as
@@ -993,14 +1012,14 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     read_file: impl FnOnce(&str) -> Result<String, String>,
     compiled_in_schemes: &[&str],
 ) -> Result<Option<StockConfigExpansion>, String> {
-    use wz::runtime_tokio::zenoh_config::ZenohNodeConfig;
+    use wz::runtime_tokio::zenoh_config::{ConfigReading, ZenohNodeConfig};
 
     let Some(path) = parse_pair(rest, "--config") else {
         return Ok(None);
     };
     let source = read_file(&path)?;
-    let ingest =
-        ZenohNodeConfig::from_json5(&source).map_err(|e| format!("--config: {path}: {e}"))?;
+    let ingest = ZenohNodeConfig::from_json5_read_as(&source, ConfigReading::Daemon)
+        .map_err(|e| format!("--config: {path}: {e}"))?;
     // A defect is refused HERE rather than surfacing as a failed bind some
     // milliseconds later, which is the whole reason `validate` exists.
     //
@@ -1021,6 +1040,9 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     }
 
     let named = |key: &str| ingest.named.contains(&key);
+    // A key the file states and the daemon reading wrote over: the node does
+    // what zenohd does, not what the file says.
+    let daemon_overrode = |key: &str| ingest.daemon_overrode.contains(&key);
     // R2109 (open-debt item 514) — read BEFORE the ingest is taken apart below,
     // and read from the ingest rather than recomputed from `named`: what a
     // silence about `mode` MEANS is the reader's fact, not the expansion's.
@@ -2674,15 +2696,11 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         }
     }
     // `plugins_loading/enabled`, onto the storage host's `--plugins-loading`, under the
-    // `plugins` site's precondition: only that run-mode hosts plugins. A named `false` is the
-    // library's default, which the absent flag already means; this host reads the file as a
-    // library session does, and not as zenohd, which turns the lookup on over its file.
-    //
-    // The `--config` form reads the file two ways at once: the admin space below as zenohd's
-    // daemon does (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`),
-    // this key and the default mode (`DAEMON_DEFAULT_MODE`) as the library reading R2109
-    // chose. Which reading the whole form follows is an open decision for the owner.
-    if named("plugins_loading/enabled") {
+    // `plugins` site's precondition: only that run-mode hosts plugins. The value is the
+    // configuration's, which the daemon reading turns on whatever the file says, so the storage
+    // host gains the flag whether or not the file names the key, and a named `false` is
+    // reported overridden.
+    {
         let run_flag = typed_role
             .map(|(flag, _)| flag)
             .or(selected.map(|s| s.flag));
@@ -2691,19 +2709,27 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 "a plugin host (only --storage-host runs one)",
             ))
         });
-        exp.presence(
-            "plugins_loading/enabled",
-            "--plugins-loading",
-            cfg.plugins_loading_enabled == Some(true),
-            blocked,
-        );
+        let on = cfg.plugins_loading_enabled == Some(true);
+        if !named("plugins_loading/enabled") {
+            if on && blocked.is_none() {
+                exp.decide_presence("--plugins-loading", true, None);
+            }
+        } else if blocked.is_none() && daemon_overrode("plugins_loading/enabled") {
+            exp.decide_presence("--plugins-loading", on, None);
+            exp.record(
+                "plugins_loading/enabled",
+                KeyEffect::OverriddenByTheDaemonForm,
+            );
+        } else {
+            exp.presence("plugins_loading/enabled", "--plugins-loading", on, blocked);
+        }
     }
     // The run-mode the expanded argv runs, typed or selected by the file, and
-    // how that run-mode hosts the admin space the daemon form turns on.
+    // how that run-mode hosts the admin space the configuration enables.
     let run_flag = typed_role
         .map(|(flag, _)| flag)
         .or(selected.as_ref().map(|s| s.flag));
-    let admin_host = daemon_admin_host(run_flag);
+    let admin_host = admin_host_of(cfg.adminspace.is_some(), run_flag);
     // §5.23 `adminspace-core` — `metadata`, onto `--metadata <value>`: the whole
     // value as JSON5 text, taken VERBATIM like `--plugins`, so nothing is
     // approximated. Every run-mode that hosts an adminspace takes it; the value
@@ -2724,14 +2750,12 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("metadata", "--metadata", value, blocked);
     }
-    // The admin space, which the daemon form hosts in every run-mode that can
-    // host one, whatever the document says about `adminspace/enabled`: zenohd
-    // turns it on after loading its file, over an explicit `enabled: false` as
-    // well, and serves it under the permissions the file states
-    // (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`).
-    // A run-mode that hosts it on `--config-queryable` gains that flag whether
-    // or not the file has an `adminspace` block; the router and storage hosts
-    // serve theirs with no flag.
+    // The admin space the configuration enables, which the daemon reading does
+    // whatever the document says about `adminspace/enabled`, under the
+    // permissions the file states. A run-mode that hosts it on
+    // `--config-queryable` gains that flag whether or not the file has an
+    // `adminspace` block; the router and storage hosts serve theirs with no
+    // flag.
     //
     // zenoh states the admin space as ONE `permissions.write`; wz splits it
     // into hosting the write subscriber (`--config-writable`) and permitting
@@ -2755,13 +2779,11 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             if admin_host == DaemonAdminHost::OnTheFlag && !exp.typed("--config-queryable") {
                 exp.added.push(String::from("--config-queryable"));
             }
-            // The library reading holds no block for `enabled: false`, which is
-            // how the key's `false` is told from its `true` here.
             if named("adminspace/enabled") {
-                let effect = if cfg.adminspace.is_some() {
-                    KeyEffect::AlreadyTheBehaviour
-                } else {
+                let effect = if daemon_overrode("adminspace/enabled") {
                     KeyEffect::OverriddenByTheDaemonForm
+                } else {
+                    KeyEffect::AlreadyTheBehaviour
                 };
                 exp.record("adminspace/enabled", effect);
             }
@@ -3009,9 +3031,10 @@ pub(crate) enum KeyEffect {
     /// `mode` only: the run-mode these endpoints select announces a different
     /// role than the file asked for.
     NotTheRoleTheseEndpointsSelect,
-    /// `adminspace/enabled: false` only: the daemon form hosts the admin space
-    /// whatever the file says, as zenohd does (`zenohd/src/main.rs` @
-    /// `config.adminspace.set_enabled(true).unwrap();`).
+    /// The file states a value zenohd writes over after it loads the file
+    /// (`DAEMON_OVERRIDES` in the runtime's `zenoh_config`), and a `--config`
+    /// run reads the file as zenohd does: `adminspace/enabled: false` and
+    /// `plugins_loading/enabled: false`.
     OverriddenByTheDaemonForm,
     /// R2099 (open-debt item 512) — the key is a LIST and only SOME of its
     /// members reached the command line.
@@ -3148,7 +3171,8 @@ impl KeyEffect {
                 "these endpoints select a run-mode in another role".into()
             }
             Self::OverriddenByTheDaemonForm => {
-                "a --config run hosts the adminspace whatever the file says, as zenohd does".into()
+                "a --config run reads the file as zenohd does, which writes its own value here"
+                    .into()
             }
             Self::PartlyExpanded { named, carried } => {
                 format!("only {carried} of its {named} endpoints reach this run-mode")
@@ -3412,7 +3436,9 @@ pub(crate) fn check_topology_for_build(
     mut read_file: impl FnMut(&str) -> Result<String, String>,
     compiled_in_schemes: &[&str],
 ) -> Option<Result<String, String>> {
-    use wz::runtime_tokio::zenoh_config::{validate_topology_with_external, ZenohNodeConfig};
+    use wz::runtime_tokio::zenoh_config::{
+        validate_topology_with_external, ConfigReading, ZenohNodeConfig,
+    };
 
     let paths = parse_repeated(rest, "--check-topology");
     // R2117 (open-debt item 498) — the listeners this deployment does NOT
@@ -3445,7 +3471,10 @@ pub(crate) fn check_topology_for_build(
             Ok(source) => source,
             Err(message) => return Some(Err(message)),
         };
-        let ingest = match ZenohNodeConfig::from_json5(&source) {
+        // Read as `--config` reads it, because the nodes this set describes
+        // are the ones `--config` starts: a mode-less file is a router there,
+        // and a verdict reached over a peer would be about another network.
+        let ingest = match ZenohNodeConfig::from_json5_read_as(&source, ConfigReading::Daemon) {
             Ok(ingest) => ingest,
             Err(e) => return Some(Err(format!("--check-topology: {path}: {e}"))),
         };
@@ -3458,8 +3487,8 @@ pub(crate) fn check_topology_for_build(
         // R2109 (open-debt item 514) — the SAME seam one surface over, and it
         // bites harder here than under `--config`: this check's whole verdict
         // is a function of the roles, and `validate_topology` is what says
-        // "every node is a client, so nothing routes". A file the operator's
-        // zenohd deployed as the ROUTER counts here as a peer, and the reader
+        // "every node is a client, so nothing routes". A mode-less file is a
+        // router here and a peer to a zenoh library session, and the reader
         // has to be told which reading it just got a verdict under.
         if let Some(unstated) = ingest.mode_left_unstated() {
             notes.push_str(&format!(
@@ -4760,9 +4789,34 @@ mod stock_config_tests {
         }
     }
 
+    /// The flag a `--config` run adds so the storage host looks plugins up by
+    /// name as zenohd does over its file, where the build has the plugin plane.
+    fn daemon_plugin_flags(run: Option<&str>) -> Vec<String> {
+        if run == Some("--storage-host") && cfg!(all(unix, feature = "plugin-dynamic-loading")) {
+            argv(&["--plugins-loading"])
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Every flag a `--config` run adds for the run-mode `run` whatever the
+    /// file says, in the order the expansion adds them.
+    fn daemon_flags(run: Option<&str>) -> Vec<String> {
+        let mut out = daemon_plugin_flags(run);
+        out.extend(daemon_admin_flags(run));
+        out
+    }
+
     /// The honoured keys a `--config` run decides whatever the file says, as
-    /// zenohd does after it loads its file.
-    const KEYS_THE_DAEMON_FORM_DECIDES: [&str; 1] = ["adminspace/enabled"];
+    /// zenohd does after it loads its file: the table's rows written over the
+    /// file.
+    fn keys_the_daemon_form_decides() -> Vec<&'static str> {
+        wz::runtime_tokio::zenoh_config::DAEMON_OVERRIDES
+            .iter()
+            .filter(|row| row.overrides_the_file())
+            .map(|row| row.key)
+            .collect()
+    }
 
     /// `want`, the argv a document's run-mode and endpoints expand to, followed
     /// by `daemon_admin_flags` for the run-mode it starts with.
@@ -4785,9 +4839,9 @@ mod stock_config_tests {
     fn link_socket_buffers_expand_per_key_and_yield_to_a_typed_key() {
         use wz::runtime_tokio::locator::Proto;
         const TLS_KEY: &str = "transport/link/tls/so_sndbuf";
-        let tcp_only = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+        let tcp_only = r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                             transport: { link: { tcp: { so_rcvbuf: 4096, so_sndbuf: 8192 } } } }"#;
-        let with_tls = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+        let with_tls = r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                             transport: { link: { tcp: { so_rcvbuf: 4096, so_sndbuf: 8192 },
                                                  tls: { so_sndbuf: 16384 } } } }"#;
 
@@ -4849,7 +4903,7 @@ mod stock_config_tests {
     fn the_expiry_flag_expands_onto_every_certificate_kind() {
         use wz::runtime_tokio::locator::{LinkTlsMaterial, Proto};
         let key = "transport/link/tls/close_link_on_expiration";
-        let file = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+        let file = r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                         transport: { link: { tls: { close_link_on_expiration: true } } } }"#;
         if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
             let refused = expand(&["--config", "z.json5"], file)
@@ -4900,7 +4954,7 @@ mod stock_config_tests {
 
         let off = expand(
             &["--config", "z.json5"],
-            r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+            r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                  transport: { link: { tls: { close_link_on_expiration: false } } } }"#,
         )
         .expect("a valid file");
@@ -5292,6 +5346,49 @@ mod stock_config_tests {
         }
     }
 
+    /// zenohd turns plugin lookup by name on over its file, so the storage host
+    /// of a `--config` run gains `--plugins-loading` with no key named, where
+    /// the build has the plugin plane; a named `false` is reported overridden
+    /// rather than applied, a named `true` is applied, and a run that hosts no
+    /// plugins gains nothing.
+    #[test]
+    fn the_daemon_form_turns_plugin_loading_on_for_the_storage_host() {
+        const KEY: &str = "plugins_loading/enabled";
+        let storage_host = ["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"];
+        let has_plane = cfg!(all(unix, feature = "plugin-dynamic-loading"));
+        let carried = |ex: &StockConfigExpansion| ex.added.iter().any(|a| a == "--plugins-loading");
+
+        let silent = expand(&storage_host, r#"{ mode: "peer" }"#).expect("a valid file");
+        assert_eq!(carried(&silent), has_plane, "{:?}", silent.added);
+        assert_eq!(silent.effect(KEY), None, "the key is not named");
+
+        let peer = expand(
+            &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
+            r#"{ mode: "peer" }"#,
+        )
+        .expect("a valid file");
+        assert!(!carried(&peer), "a peer hosts no plugins: {:?}", peer.added);
+
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(KEY) {
+            return;
+        }
+        let off = expand(
+            &storage_host,
+            r#"{ mode: "peer", plugins_loading: { enabled: false } }"#,
+        )
+        .expect("a valid file");
+        assert!(carried(&off), "{:?}", off.added);
+        assert_eq!(off.effect(KEY), Some(KeyEffect::OverriddenByTheDaemonForm));
+        assert!(!off.applied().contains(&KEY), "{:?}", off.applied());
+        let on = expand(
+            &storage_host,
+            r#"{ mode: "peer", plugins_loading: { enabled: true } }"#,
+        )
+        .expect("a valid file");
+        assert!(carried(&on), "{:?}", on.added);
+        assert_eq!(on.effect(KEY), Some(KeyEffect::Expanded));
+    }
+
     /// The flag is added once, never beside a typed one; the one-shot acceptor,
     /// the storage host and a document that selects no run-mode gain none, the
     /// last with its `enabled` told why.
@@ -5382,6 +5479,20 @@ mod stock_config_tests {
             daemon_admin_host(None),
             DaemonAdminHost::Nowhere(_)
         ));
+        // A configuration that enables no admin space has none to host in any
+        // run-mode; one that enables it is hosted as the run-mode hosts it.
+        for run in [
+            Some("--peer"),
+            Some("--storage-host"),
+            Some("--router-hat"),
+            None,
+        ] {
+            assert!(
+                matches!(admin_host_of(false, run), DaemonAdminHost::Nowhere(m) if m.contains("enables none")),
+                "{run:?}"
+            );
+            assert_eq!(admin_host_of(true, run), daemon_admin_host(run), "{run:?}");
+        }
     }
 
     #[test]
@@ -5585,8 +5696,8 @@ mod stock_config_tests {
 
     /// A topology named on the command line wins — the file supplies defaults,
     /// it does not overrule the operator standing in front of the machine. What
-    /// the file adds beside a typed role is only the flag that role hosts its
-    /// admin space on, never a role of its own.
+    /// the file adds beside a typed role is only what the daemon form adds for
+    /// that role (`daemon_flags`), never a role of its own.
     #[test]
     fn a_role_on_the_command_line_is_not_second_guessed_by_the_file() {
         for role in [
@@ -5611,11 +5722,7 @@ mod stock_config_tests {
                 r#"{ mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
             )
             .unwrap();
-            assert_eq!(
-                out.added,
-                daemon_admin_flags(role.first().copied()),
-                "{role:?}"
-            );
+            assert_eq!(out.added, daemon_flags(role.first().copied()), "{role:?}");
         }
     }
 
@@ -5814,10 +5921,11 @@ mod stock_config_tests {
         let out = expand(
             &["--config", "z.json5"],
             // No `mode`, so the silence axis fires and this node reads as
-            // `peer`; `timestamping/enabled` then names a row for ROUTER only,
-            // which is the axis that is neither honoured-here nor unreadable.
+            // `router`, as zenohd reads it; `timestamping/enabled` then names a
+            // row for PEER only, which is the axis that is neither
+            // honoured-here nor unreadable.
             r#"{ connect: { endpoints: ["tcp/r:7447"] },
-                 timestamping: { enabled: { router: true } },
+                 timestamping: { enabled: { peer: true } },
                  transport: { link: { tx: { threads: 8 } } },
                  plugins: {} }"#,
         )
@@ -5946,16 +6054,20 @@ mod stock_config_tests {
     /// The table is also checked for COVERAGE against `HONOURED_CONFIG_KEYS`,
     /// so a fifteenth honoured key cannot be added without stating here what
     /// the demo does with it.
-    const LISTEN_ONLY: &str = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#;
-    const CONNECT_ONLY: &str = r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#;
-    const LISTEN_TLS: &str = r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] } }"#;
-    const CONNECT_TLS: &str = r#"{ connect: { endpoints: ["tls/r:7447"] } }"#;
+    ///
+    /// Every document names its `mode`: a `--config` run reads a silent one as
+    /// a router, as zenohd does, and these rows are about their keys rather
+    /// than about the role.
+    const LISTEN_ONLY: &str = r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#;
+    const CONNECT_ONLY: &str = r#"{ mode: "peer", connect: { endpoints: ["tcp/r:7447"] } }"#;
+    const LISTEN_TLS: &str = r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447"] } }"#;
+    const CONNECT_TLS: &str = r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447"] } }"#;
     /// Both links that read the certificate material, so a build with either one
     /// has an endpoint its flag is emitted for.
     const LISTEN_TLS_AND_QUIC: &str =
-        r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] } }"#;
+        r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] } }"#;
     const CONNECT_TLS_AND_QUIC: &str =
-        r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] } }"#;
+        r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447", "quic/r:7448"] } }"#;
     /// R311y845 — the argv half of the scouting socket: what `--scout-*`
     /// parses, and what an unset flag resolves to.
     ///
@@ -6136,13 +6248,13 @@ mod stock_config_tests {
             (
                 "listen/endpoints",
                 CONNECT_ONLY,
-                r#"{ connect: { endpoints: ["tcp/r:7447"] },
+                r#"{ mode: "peer", connect: { endpoints: ["tcp/r:7447"] },
                      listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
             ),
             (
                 "connect/endpoints",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      connect: { endpoints: ["tcp/r:7447"] } }"#,
             ),
             // R2145 (open-debt item 209) — the control NAMES the direction the
@@ -6153,16 +6265,16 @@ mod stock_config_tests {
             // measured exactly that against this row, and it was right.
             (
                 "scouting/multicast/enabled",
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      scouting: { multicast: { address: "224.0.0.99:7999" } } }"#,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      scouting: { multicast: { enabled: false,
                                               address: "224.0.0.99:7999" } } }"#,
             ),
             (
                 "timestamping/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      timestamping: { enabled: true } }"#,
             ),
             // R2626 — `true`, because upstream ships `false`: a fixture naming
@@ -6171,7 +6283,7 @@ mod stock_config_tests {
             (
                 "timestamping/drop_future_timestamp",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      timestamping: { drop_future_timestamp: true } }"#,
             ),
             // Item 751 — a custom partition, because the preset is what the node
@@ -6179,13 +6291,13 @@ mod stock_config_tests {
             (
                 "gateway/south",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
             ),
             (
                 "transport/unicast/max_links",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { max_links: 9 } } }"#,
             ),
             // R2758 — 5, away from the 1000 default, so the fixture proves the
@@ -6194,13 +6306,13 @@ mod stock_config_tests {
             (
                 "transport/unicast/max_sessions",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { max_sessions: 5 } } }"#,
             ),
             (
                 "transport/unicast/open_timeout",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { open_timeout: 2500 } } }"#,
             ),
             // `qos` RESOLVES to true in stock zenoh, so a document that names
@@ -6209,158 +6321,158 @@ mod stock_config_tests {
             // expansion acts on a named `true` — so the delta stays the one key.
             (
                 "transport/unicast/lowlatency",
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { qos: { enabled: false } } } }"#,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { qos: { enabled: false },
                                              lowlatency: true } } }"#,
             ),
             (
                 "transport/unicast/qos/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { qos: { enabled: true } } } }"#,
             ),
             (
                 "transport/unicast/compression/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { compression: { enabled: true } } } }"#,
             ),
             (
                 "transport/link/tx/batch_size",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { batch_size: 4096 } } } }"#,
             ),
             (
                 "transport/link/tx/lease",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { lease: 3000 } } } }"#,
             ),
             (
                 "transport/link/tx/sequence_number_resolution",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#,
             ),
             // R2925 — the queue sizes and the two congestion waits.
             (
                 "transport/link/tx/queue/size/control",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { control: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/real_time",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { real_time: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/interactive_high",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { interactive_high: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/interactive_low",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { interactive_low: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/data_high",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { data_high: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/data",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { data: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/data_low",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { data_low: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/background",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { size: { background: 4 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: {
                        congestion_control: { drop: { wait_before_drop: 3000 } } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: {
                        congestion_control: { drop: { max_wait_before_drop_fragments: 30000 } } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/congestion_control/block/wait_before_close",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: {
                        congestion_control: { block: { wait_before_close: 7000000 } } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/batching/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/batching/time_limit",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { batching: { time_limit: 5 } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/allocation/mode",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { rx: { max_message_size: 65536 } } } }"#,
             ),
             (
                 "transport/link/rx/buffer_size",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { rx: { buffer_size: 262140 } } } }"#,
             ),
             (
                 "adminspace/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      adminspace: { enabled: true } }"#,
             ),
             (
                 "adminspace/permissions/read",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      adminspace: { enabled: true, permissions: { read: false } } }"#,
             ),
             (
                 "adminspace/permissions/write",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      adminspace: { enabled: true, permissions: { write: true } } }"#,
             ),
             // R311y844 — the ten keys wz already acted on, each paired with the
@@ -6368,19 +6480,19 @@ mod stock_config_tests {
             (
                 "id",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      id: "0102030405060708" }"#,
             ),
             (
                 "namespace",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      namespace: "demo/ns" }"#,
             ),
             (
                 "queries_default_timeout",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      queries_default_timeout: 12000 }"#,
             ),
             // R2568 — honoured by R2567. This row exists so the table stays
@@ -6394,7 +6506,7 @@ mod stock_config_tests {
             (
                 "transport/auth/usrpwd/dictionary_file",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { usrpwd: {
                        dictionary_file: "/etc/wz/usrpwd.txt" } } } }"#,
             ),
@@ -6404,13 +6516,13 @@ mod stock_config_tests {
             (
                 "transport/auth/usrpwd/user",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { usrpwd: { user: "alice" } } } }"#,
             ),
             (
                 "transport/auth/usrpwd/password",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { usrpwd: { password: "s3cret" } } } }"#,
             ),
             // R2650 — `low_pass_filter`, the first interceptor key with a reader.
@@ -6426,7 +6538,7 @@ mod stock_config_tests {
             (
                 "low_pass_filter",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      low_pass_filter: [ { messages: ["put"],
                                           key_exprs: ["demo/**"],
                                           size_limit: 8192 } ] }"#,
@@ -6438,7 +6550,7 @@ mod stock_config_tests {
             (
                 "downsampling",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      downsampling: [ { messages: ["put"],
                                        rules: [ { key_expr: "demo/**",
                                                   freq: 0.5 } ] } ] }"#,
@@ -6458,26 +6570,26 @@ mod stock_config_tests {
             (
                 "access_control/default_permission",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      access_control: { default_permission: "allow" } }"#,
             ),
             (
                 "access_control/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      access_control: { enabled: true } }"#,
             ),
             (
                 "access_control/policies",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      access_control: { policies: [ { rules: ["r1"],
                                                      subjects: ["s1"] } ] } }"#,
             ),
             (
                 "access_control/rules",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      access_control: { rules: [ { id: "r1",
                                                   key_exprs: ["demo/**"],
                                                   messages: ["put"],
@@ -6486,7 +6598,7 @@ mod stock_config_tests {
             (
                 "access_control/subjects",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      access_control: { subjects: [ { id: "s1",
                                                      usernames: ["alice"] } ] } }"#,
             ),
@@ -6498,54 +6610,54 @@ mod stock_config_tests {
             (
                 "transport/auth/pubkey/private_key_file",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { pubkey: {
                        private_key_file: "/etc/wz/pubkey.key" } } } }"#,
             ),
             (
                 "transport/auth/pubkey/private_key_pem",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { pubkey: {
                        private_key_pem: "PLACEHOLDER-PRIVATE-PEM" } } } }"#,
             ),
             (
                 "transport/auth/pubkey/public_key_file",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { pubkey: {
                        public_key_file: "/etc/wz/pubkey.pem" } } } }"#,
             ),
             (
                 "transport/auth/pubkey/public_key_pem",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { pubkey: {
                        public_key_pem: "PLACEHOLDER-PUBLIC-PEM" } } } }"#,
             ),
             (
                 "routing/interests/timeout",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      routing: { interests: { timeout: 9000 } } }"#,
             ),
             (
                 "scouting/timeout",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      scouting: { timeout: 2500 } }"#,
             ),
             (
                 "transport/multicast/qos/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { multicast: { qos: { enabled: true } } } }"#,
             ),
             // 9, away from upstream's 1000, so the delta is a value the file asked for.
             (
                 "transport/multicast/max_sessions",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { multicast: { max_sessions: 9 } } }"#,
             ),
             // R2063 (open-debt item 214) — the non-default value, for the reason
@@ -6555,13 +6667,13 @@ mod stock_config_tests {
             (
                 "routing/peer/mode",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      routing: { peer: { mode: "linkstate" } } }"#,
             ),
             (
                 "transport/shared_memory/enabled",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { shared_memory: { enabled: true } } }"#,
             ),
             // The certificate three need an endpoint of a link that reads them: the
@@ -6571,19 +6683,19 @@ mod stock_config_tests {
             (
                 "transport/link/tls/root_ca_certificate",
                 CONNECT_TLS_AND_QUIC,
-                r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
+                r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
                      transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_certificate",
                 LISTEN_TLS_AND_QUIC,
-                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
                      transport: { link: { tls: { listen_certificate: "/etc/srv.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_private_key",
                 LISTEN_TLS_AND_QUIC,
-                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
                      transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
             ),
             // The mutual-TLS four, each against the TLS endpoint of the side it configures, so a
@@ -6591,25 +6703,25 @@ mod stock_config_tests {
             (
                 "transport/link/tls/connect_certificate",
                 CONNECT_TLS,
-                r#"{ connect: { endpoints: ["tls/r:7447"] },
+                r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447"] },
                      transport: { link: { tls: { connect_certificate: "/etc/cli.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/connect_private_key",
                 CONNECT_TLS,
-                r#"{ connect: { endpoints: ["tls/r:7447"] },
+                r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447"] },
                      transport: { link: { tls: { connect_private_key: "/etc/cli.key" } } } }"#,
             ),
             (
                 "transport/link/tls/enable_mtls",
                 LISTEN_TLS,
-                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447"] },
                      transport: { link: { tls: { enable_mtls: true } } } }"#,
             ),
             (
                 "transport/link/tls/verify_name_on_connect",
                 CONNECT_TLS,
-                r#"{ connect: { endpoints: ["tls/r:7447"] },
+                r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447"] },
                      transport: { link: { tls: { verify_name_on_connect: false } } } }"#,
             ),
             // The expiry teardown takes no tls endpoint: like the buffers, it is each kind's
@@ -6617,19 +6729,19 @@ mod stock_config_tests {
             (
                 "transport/link/tls/close_link_on_expiration",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tls: { close_link_on_expiration: true } } } }"#,
             ),
             (
                 "transport/link/protocols",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { protocols: ["tcp"] } } }"#,
             ),
             (
                 "qos/network",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      qos: { network: [ { messages: ["put"], overwrite: { express: true } } ] } }"#,
             ),
             // R2593 — the per-link-kind socket buffers. The control is the same
@@ -6637,32 +6749,32 @@ mod stock_config_tests {
             (
                 "transport/link/tcp/so_rcvbuf",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tcp: { so_rcvbuf: 4096 } } } }"#,
             ),
             (
                 "transport/link/tcp/so_sndbuf",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tcp: { so_sndbuf: 8192 } } } }"#,
             ),
             (
                 "transport/link/tls/so_rcvbuf",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tls: { so_rcvbuf: 4096 } } } }"#,
             ),
             (
                 "transport/link/tls/so_sndbuf",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tls: { so_sndbuf: 8192 } } } }"#,
             ),
             // The unixpipe kind's FIFO mode, onto `--link-config unixpipe#file_mask=<n>`.
             (
                 "transport/link/unixpipe/file_access_mask",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#,
             ),
             // R311y845 — the scouting SOCKET. Both sides of each pair are a
@@ -6868,7 +6980,7 @@ mod stock_config_tests {
             (
                 "stats/filters",
                 LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      stats: { filters: [{ key: "demo/**" }] } }"#,
             ),
         ]
@@ -6938,12 +7050,12 @@ mod stock_config_tests {
         reached_nothing.sort_unstable();
         let mut pinned: Vec<&str> = config_keys_the_demo_drops();
         // A key the daemon form decides over the file reaches nothing by
-        // design: zenohd turns the admin space on whatever `adminspace/enabled`
-        // says (`zenohd/src/main.rs` @
-        // `config.adminspace.set_enabled(true).unwrap();`), so the control
-        // already hosts what the variant asks for.
-        pinned.extend(KEYS_THE_DAEMON_FORM_DECIDES);
+        // design: zenohd writes it whatever the file says, so the control
+        // already does what the variant asks for. A key this build also drops
+        // is pinned once.
+        pinned.extend(keys_the_daemon_form_decides());
         pinned.sort_unstable();
+        pinned.dedup();
         assert_eq!(
             reached_nothing, pinned,
             "a key the report calls honoured reaches no behaviour and is not \
@@ -7030,6 +7142,12 @@ mod stock_config_tests {
     #[test]
     fn a_role_the_file_supplies_honours_every_key_a_typed_role_does() {
         let roles: Vec<&str> = RUN_MODE_ROLES.iter().map(|(flag, _)| *flag).collect();
+        // The flags the daemon form adds for a run-mode whatever the file says,
+        // which belong to the role as the role flags do.
+        let role_flags: Vec<String> = roles
+            .iter()
+            .flat_map(|role| daemon_flags(Some(*role)))
+            .collect();
         // `variant.added` minus `control.added`, which is the key's own effect,
         // less the run-mode flags themselves.
         //
@@ -7042,7 +7160,11 @@ mod stock_config_tests {
         let delta = |base: &StockConfigExpansion, with: &StockConfigExpansion| -> Vec<String> {
             with.added
                 .iter()
-                .filter(|a| !base.added.contains(a) && !roles.contains(&a.as_str()))
+                .filter(|a| {
+                    !base.added.contains(a)
+                        && !roles.contains(&a.as_str())
+                        && !role_flags.contains(a)
+                })
                 .cloned()
                 .collect()
         };
@@ -7746,21 +7868,21 @@ mod stock_config_tests {
                 "transport/link/tls/root_ca_certificate",
                 ["--tls-ca", "--quic-ca"],
                 "/etc/ca.pem",
-                r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
+                r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
                      transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_certificate",
                 ["--tls-cert", "--quic-cert"],
                 "/etc/srv.pem",
-                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
                      transport: { link: { tls: { listen_certificate: "/etc/srv.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_private_key",
                 ["--tls-key", "--quic-key"],
                 "/etc/srv.key",
-                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
+                r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
                      transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
             ),
         ];
@@ -7805,7 +7927,7 @@ mod stock_config_tests {
         }
         let quic_only = expand_as_a_build_with_every_link(
             &["--config", "z.json5"],
-            r#"{ connect: { endpoints: ["quic/r:7448"] },
+            r#"{ mode: "peer", connect: { endpoints: ["quic/r:7448"] },
                  transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
         )
         .expect("a valid file");
@@ -7862,7 +7984,7 @@ mod stock_config_tests {
         const KEY: &str = "transport/link/tls/root_ca_certificate";
         let ex = expand_as_a_build_with_every_link(
             &["--config", "z.json5", "--tls-ca", "/mine.pem"],
-            r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
+            r#"{ mode: "peer", connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
                  transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
         )
         .expect("a valid file");
@@ -8983,7 +9105,7 @@ mod stock_config_tests {
     fn the_adminspace_block_and_compression_expand_to_the_flags_that_carry_them() {
         let out = expand(
             &["--config", "z.json5"],
-            r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+            r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                  transport: { unicast: { compression: { enabled: true } } },
                  adminspace: { enabled: true,
                                permissions: { read: false, write: true } } }"#,
@@ -8992,10 +9114,6 @@ mod stock_config_tests {
         assert_eq!(
             out.added,
             argv(&[
-                // R2091b (open-debt item 511) — `--peer`, because a document
-                // that names no `mode` resolves to upstream's own default and
-                // that default is `peer` (`DEFAULT_CONFIG.json5:12`). It used to
-                // read as the one-shot acceptor.
                 "--peer",
                 "tcp/0.0.0.0:7447",
                 "--compression",
@@ -9007,14 +9125,14 @@ mod stock_config_tests {
         );
     }
 
-    /// A document that names NO `mode` is reported as naming none, in both
-    /// readings of that silence.
+    /// A document that names NO `mode` is read as zenohd reads it, a router,
+    /// and is reported as naming none, with the library's reading of the same
+    /// silence beside it.
     ///
-    /// R2109 (open-debt item 514). The fixture above is the same shape and it
-    /// shows the harm: `--peer` appears on the `argv +=` line and the word
-    /// `mode` appears NOWHERE in the report, because every other partition
-    /// enumerates keys the file wrote. An operator moving that file off zenohd
-    /// -- which reads the same silence as `router` -- had nothing to read.
+    /// R2109 (open-debt item 514). Without the line the word `mode` appears
+    /// NOWHERE in the report, because every other partition enumerates keys
+    /// the file wrote, and the role the silence selected sits only on the
+    /// `argv +=` line.
     ///
     /// Both roles are asserted from the CONSTANTS rather than from the literals
     /// `peer` / `router`. The values themselves are graded against upstream by
@@ -9022,7 +9140,9 @@ mod stock_config_tests {
     /// them here would put a second, unoracled pin on the same fact.
     #[test]
     fn a_document_that_names_no_mode_reports_both_readings_of_its_silence() {
-        use wz::runtime_tokio::zenoh_config::{DAEMON_DEFAULT_MODE, LIBRARY_DEFAULT_MODE};
+        use wz::runtime_tokio::zenoh_config::{
+            ConfigReading, DAEMON_DEFAULT_MODE, LIBRARY_DEFAULT_MODE,
+        };
 
         let silent = expand(
             &["--config", "z.json5"],
@@ -9034,11 +9154,19 @@ mod stock_config_tests {
             "the fixture names the key, so there is no silence here to report: {:?}",
             silent.named
         );
+        assert_eq!(silent.mode, DAEMON_DEFAULT_MODE);
+        assert_eq!(
+            silent.added.get(..2),
+            Some(&argv(&["--router-hat", "tcp/0.0.0.0:7447"])[..]),
+            "a silent mode selects the router run-mode: {:?}",
+            silent.added
+        );
         let unstated = silent
             .mode_unstated
             .expect("a document that names no `mode` left it unstated");
         assert_eq!(unstated.read_as, silent.mode);
-        assert_eq!(unstated.read_as, LIBRARY_DEFAULT_MODE);
+        assert_eq!(unstated.reading, ConfigReading::Daemon);
+        assert_eq!(unstated.a_library_reads, LIBRARY_DEFAULT_MODE);
         assert_eq!(unstated.a_daemon_reads, DAEMON_DEFAULT_MODE);
         // The sentence, not just the struct: this is what `main` prints, and a
         // pair of roles nobody rendered tells an operator nothing.
@@ -9056,7 +9184,7 @@ mod stock_config_tests {
         // above and put the line on every run of this binary.
         let named = expand(
             &["--config", "z.json5"],
-            r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+            r#"{ mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
         )
         .unwrap();
         assert_eq!(
@@ -9852,9 +9980,10 @@ mod stock_config_tests {
     /// R2109 (open-debt item 514) — the same seam as the `--config` report one
     /// surface over, and sharper: this check's ENTIRE answer is a function of
     /// the roles. The fixture is a lone node whose file names `listen` and
-    /// nothing else; wz grades it as a peer, a zenohd would have deployed it as
-    /// a router, and "1 node(s) can form the network they describe" is true of
-    /// both while meaning different networks.
+    /// nothing else; the check grades it as the router `--config` starts from
+    /// it, a zenoh library session would open it as a peer, and "1 node(s) can
+    /// form the network they describe" is true of both while meaning different
+    /// networks.
     #[test]
     fn a_verdict_over_a_mode_less_document_says_which_reading_it_used() {
         use wz::runtime_tokio::zenoh_config::{DAEMON_DEFAULT_MODE, LIBRARY_DEFAULT_MODE};
@@ -9865,6 +9994,13 @@ mod stock_config_tests {
         for role in [LIBRARY_DEFAULT_MODE.to_str(), DAEMON_DEFAULT_MODE.to_str()] {
             assert!(ok.contains(role), "the note never names `{role}`: {ok}");
         }
+        assert!(
+            ok.contains(&format!(
+                "read as `{}` (as a zenoh daemon reads it)",
+                DAEMON_DEFAULT_MODE.to_str()
+            )),
+            "the check reads the file as --config does: {ok}"
+        );
 
         // CONTROL: the SAME node with the key written carries no such line, so
         // the assertion above is about the silence and not about the check

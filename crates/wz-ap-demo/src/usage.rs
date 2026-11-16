@@ -163,9 +163,13 @@ pub(crate) fn print_usage() {
     eprintln!("                             a run mode is chosen, so the file's mode and");
     eprintln!("                             endpoints can select it. Prints which keys it read");
     eprintln!("                             and which reached this run, with the reason for each");
-    eprintln!("                             that did not. As zenohd does, it hosts the node's");
-    eprintln!("                             adminspace in every run-mode that has one, whatever");
-    eprintln!("                             the file says of adminspace/enabled. Requires the");
+    eprintln!("                             that did not. The file is read as zenohd reads its");
+    eprintln!("                             --config: a file that names no mode is a router,");
+    eprintln!("                             the node's adminspace is hosted in every run-mode");
+    eprintln!("                             that has one whatever the file says of");
+    eprintln!("                             adminspace/enabled, and the storage host looks");
+    eprintln!("                             plugins up by name whatever it says of");
+    eprintln!("                             plugins_loading/enabled. Requires the");
     eprintln!("                             `zenoh-config` build feature");
     eprintln!("    --listen <addr>         acceptor mode (e.g. 127.0.0.1:7447); announces the");
     eprintln!("                             zenoh peer role on the wire");
@@ -811,6 +815,7 @@ pub(crate) fn print_usage() {
     eprintln!("                             files are read as the WHOLE deployment, so a");
     eprintln!("                             fragment's outward dials are reported as dangling");
     eprintln!("                             unless --check-topology-external names them.");
+    eprintln!("                             Each file is read as --config reads it.");
     eprintln!("                             Nothing is resolved or probed. Requires the");
     eprintln!("                             `zenoh-config` build feature");
     eprintln!("    --check-topology-external <endpoint>");
