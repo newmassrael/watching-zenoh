@@ -580,6 +580,28 @@ pub struct HalfFacts {
     /// Whether this direction carried a `Close`. Whichever scope it asked for:
     /// the frame's own row says which.
     pub close_seen: bool,
+    /// The ring origin this direction's sender announced in its own `Open`
+    /// (`initial_sn`); `None` until that `Open` was read.
+    pub initial_sn: Option<u64>,
+    /// Whether that origin is zenoh's derivation over the two zids
+    /// ([`crate::initial_sn::zenoh_initial_sn`], the sender's zid first) on
+    /// the session's ring. `None` where it cannot be judged: no `Open` from
+    /// this direction, either `Init` unseen (no zid), or the ring unknown.
+    ///
+    /// An observation about the SENDER and not a fault: zenoh derives its
+    /// origin, and an implementation that draws it (zenoh-pico) or states a
+    /// constant reads `not_derived` while being correct on the wire.
+    pub initial_sn_derivation: Option<InitialSnDerivation>,
+}
+
+/// Whether a sender's announced `initial_sn` is zenoh's derivation over the
+/// session's two zids ([`HalfFacts::initial_sn_derivation`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialSnDerivation {
+    /// The announced origin is the derivation's value.
+    Derived,
+    /// It is not.
+    NotDerived,
 }
 
 /// Whether a direction's batches open with a `BatchHeader`, and on what grounds
@@ -2042,6 +2064,12 @@ pub struct PassiveSession {
     /// long it will tolerate silence from the other, and the lease that judges
     /// whether a direction has gone quiet is the one its sender announced.
     lease_ms: [Option<u64>; 2],
+    /// The ring origin each direction's first `Open` announced. See
+    /// [`HalfFacts::initial_sn`].
+    initial_sn: [Option<u64>; 2],
+    /// The wire zid each direction's first `Init` announced, as bytes and
+    /// their count: what [`HalfFacts::initial_sn_derivation`] hashes.
+    init_zid: [Option<([u8; 16], u8)>; 2],
     /// R3054 — the capture instant of the last message record this direction
     /// produced, `None` while nothing with a clock was read. See
     /// [`HalfFacts::last_seen_ns`]; the millisecond reading is derived from it.
@@ -2313,6 +2341,8 @@ impl Default for PassiveSession {
             }),
             observed_at_ns: None,
             lease_ms: [None; 2],
+            initial_sn: [None; 2],
+            init_zid: [None; 2],
             last_seen_ns: [None; 2],
             close_seen: [false; 2],
             batch_header_evidence: [BatchHeaderEvidence::default(); 2],
@@ -3095,7 +3125,31 @@ impl PassiveSession {
             last_seen_ms: self.last_seen_ns[seat].map(|ns| ns / NANOS_PER_MILLI),
             last_seen_ns: self.last_seen_ns[seat],
             close_seen: self.close_seen[seat],
+            initial_sn: self.initial_sn[seat],
+            initial_sn_derivation: self.initial_sn_derivation(seat, direction),
         }
+    }
+
+    /// [`HalfFacts::initial_sn_derivation`] for the direction at `seat`.
+    fn initial_sn_derivation(
+        &self,
+        seat: usize,
+        direction: Direction,
+    ) -> Option<InitialSnDerivation> {
+        let announced = self.initial_sn[seat]?;
+        let (sender, sender_len) = self.init_zid[seat]?;
+        let (receiver, receiver_len) = self.init_zid[1 - seat]?;
+        let mask = self.context.sn_mask_of(direction)?;
+        let derived = crate::initial_sn::zenoh_initial_sn(
+            &sender[..usize::from(sender_len)],
+            &receiver[..usize::from(receiver_len)],
+            mask,
+        );
+        Some(if derived == announced {
+            InitialSnDerivation::Derived
+        } else {
+            InitialSnDerivation::NotDerived
+        })
     }
 
     /// R311y611 (§1.4b) — messages this direction decoded whose header set a
@@ -3514,6 +3568,16 @@ impl PassiveSession {
             // Open is a replay and not a new announcement.
             InboundFrame::Open { body, .. } => {
                 self.lease_ms[seat].get_or_insert(body.lease);
+                self.initial_sn[seat].get_or_insert(body.initial_sn);
+            }
+            // The zid a direction's first Init states, first wins as the
+            // lease does: the sender's half of the origin derivation.
+            InboundFrame::Init { body, .. } => {
+                let wire = body.zid.as_slice();
+                let mut zid = [0u8; 16];
+                let len = wire.len().min(zid.len());
+                zid[..len].copy_from_slice(&wire[..len]);
+                self.init_zid[seat].get_or_insert((zid, len as u8));
             }
             InboundFrame::Close { .. } => self.close_seen[seat] = true,
             #[cfg(feature = "codec-join")]
@@ -5142,6 +5206,16 @@ mod tests {
     /// differs between the two directions in the tests that ask which sender
     /// said what.
     fn open_wire_leased(is_ack: bool, lease: u64) -> Vec<u8> {
+        open_wire_stated(is_ack, lease, 0)
+    }
+
+    /// [`open_wire`], announcing `initial_sn` as its ring origin.
+    fn open_wire_announcing(is_ack: bool, initial_sn: u64) -> Vec<u8> {
+        open_wire_stated(is_ack, 10_000, initial_sn)
+    }
+
+    /// An Open announcing `lease` and `initial_sn`.
+    fn open_wire_stated(is_ack: bool, lease: u64, initial_sn: u64) -> Vec<u8> {
         let mut flags = 0u8;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_OPEN_A;
@@ -5150,7 +5224,7 @@ mod tests {
         wire.extend_from_slice(
             &wz_codecs::open_body::OpenBody {
                 lease,
-                initial_sn: 0,
+                initial_sn,
                 // INVERTED against Init: on Open the cookie rides the SYN
                 // (`a == 0`), not the ACK (`out/wz-codecs/open_body.rs:67-79`).
                 cookie_len: if is_ack { None } else { Some(0) },
@@ -5201,13 +5275,27 @@ mod tests {
         s.observe_at(2_500);
         s.push(Direction::B, &framed(&open_wire_leased(true, 20_000), 2));
         s.next_frame(Direction::B).expect("open ack");
+        // Both Opens announce 0, and both Inits state the zid `AA AA AA AA`:
+        // the derivation is judged, and says what zenoh's value makes of 0.
+        let origin = crate::initial_sn::zenoh_initial_sn(
+            &[0xAA; 4],
+            &[0xAA; 4],
+            s.context().sn_mask().expect("the InitAck states the ring"),
+        );
+        let derivation = Some(if origin == 0 {
+            InitialSnDerivation::Derived
+        } else {
+            InitialSnDerivation::NotDerived
+        });
         assert_eq!(
             s.half(Direction::A),
             HalfFacts {
                 lease_ms: Some(10_000),
                 last_seen_ms: Some(2_000),
                 last_seen_ns: Some(2_000_000_000),
-                close_seen: false
+                close_seen: false,
+                initial_sn: Some(0),
+                initial_sn_derivation: derivation,
             }
         );
         assert_eq!(
@@ -5216,7 +5304,9 @@ mod tests {
                 lease_ms: Some(20_000),
                 last_seen_ms: Some(2_500),
                 last_seen_ns: Some(2_500_000_000),
-                close_seen: false
+                close_seen: false,
+                initial_sn: Some(0),
+                initial_sn_derivation: derivation,
             }
         );
 
@@ -5230,7 +5320,9 @@ mod tests {
                 lease_ms: Some(10_000),
                 last_seen_ms: Some(2_000),
                 last_seen_ns: Some(2_000_000_000),
-                close_seen: false
+                close_seen: false,
+                initial_sn: Some(0),
+                initial_sn_derivation: derivation,
             },
             "the other direction's half is untouched by a Close"
         );
@@ -5240,9 +5332,60 @@ mod tests {
                 lease_ms: Some(20_000),
                 last_seen_ms: Some(9_000),
                 last_seen_ns: Some(9_000_000_000),
-                close_seen: true
+                close_seen: true,
+                initial_sn: Some(0),
+                initial_sn_derivation: derivation,
             }
         );
+    }
+
+    /// The origin a sender announced is judged against zenoh's derivation over
+    /// the two zids, the sender's first; a constant 0 is the control.
+    #[test]
+    fn an_announced_origin_is_judged_against_zenohs_derivation() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, Vec::new()), 2));
+        s.next_frame(Direction::A).expect("init syn");
+        assert_eq!(
+            s.half(Direction::A).initial_sn_derivation,
+            None,
+            "nothing to judge before an Open"
+        );
+        s.push(Direction::B, &framed(&init_wire(true, Vec::new()), 2));
+        s.next_frame(Direction::B).expect("init ack");
+        let mask = s.context().sn_mask().expect("the InitAck states the ring");
+        let derived = crate::initial_sn::zenoh_initial_sn(&[0xAA; 4], &[0xAA; 4], mask);
+        // A announces the derived origin; B announces 0 (or, should the
+        // derivation be 0 itself, one past it), which is not.
+        let other = if derived == 0 { 1 } else { 0 };
+        s.push(
+            Direction::A,
+            &framed(&open_wire_announcing(false, derived), 2),
+        );
+        s.next_frame(Direction::A).expect("open syn");
+        s.push(Direction::B, &framed(&open_wire_announcing(true, other), 2));
+        s.next_frame(Direction::B).expect("open ack");
+        assert_eq!(s.half(Direction::A).initial_sn, Some(derived));
+        assert_eq!(
+            s.half(Direction::A).initial_sn_derivation,
+            Some(InitialSnDerivation::Derived)
+        );
+        assert_eq!(s.half(Direction::B).initial_sn, Some(other));
+        assert_eq!(
+            s.half(Direction::B).initial_sn_derivation,
+            Some(InitialSnDerivation::NotDerived)
+        );
+    }
+
+    /// A session that starts at its Open has no zid to hash, so its origin
+    /// is reported and not judged.
+    #[test]
+    fn an_origin_with_no_init_seen_is_not_judged() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&open_wire_announcing(false, 7), 2));
+        let _ = s.next_frame(Direction::A);
+        assert_eq!(s.half(Direction::A).initial_sn, Some(7));
+        assert_eq!(s.half(Direction::A).initial_sn_derivation, None);
     }
 
     /// R3054 — a session that was never told the time has no last-seen

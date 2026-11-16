@@ -4576,8 +4576,12 @@ int main(void) {
      * 69: a row's `chain` gains `displaced` (`superseded`, `evicted`, or
      * null), the router's word for the other chain the fragment ended; a
      * restart that is its whole chain no longer joins the chain it stranded.
-     * A key and a family arrive; nothing retires. */
-    revisioned[2].revision = 69;
+     * A key and a family arrive; nothing retires.
+     * 70: each of a flow's `halves` gains `initial_sn`, the origin its
+     * `Open` announced, and `initial_sn_derivation` (`derived`,
+     * `not_derived`, or null), whether it is zenoh's derivation over the two
+     * zids. Two keys and a family arrive; nothing retires. */
+    revisioned[2].revision = 70;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

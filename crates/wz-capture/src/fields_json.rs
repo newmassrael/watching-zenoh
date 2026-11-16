@@ -5774,6 +5774,11 @@ impl BasisWord {
 ///   `ts_ns` uses; `null` when nothing was read with a clock, which is a
 ///   different fact from `0`.
 /// * `close_seen` — whether that direction carried a `Close`.
+/// * `initial_sn` — the ring origin that direction's sender announced in its
+///   `Open`; `null` until that `Open` was read. `initial_sn_derivation` —
+///   `derived` when it is zenoh's derivation over the two zids, the sender's
+///   first, on the session's ring, `not_derived` when it is not, `null` when
+///   either zid or the ring is unknown.
 /// * `fin_seen`, `rst_seen` — whether a TCP FIN or RST was observed on that
 ///   direction; `null` on a flow that is not TCP, where the flag does not
 ///   exist, and never `false` for a flag that could not have been looked for.
@@ -5813,6 +5818,19 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
             tri_state(half.rst_seen),
             BatchHeaderWord::of(half.batch_header).name()
         );
+        // Revision 70 — the origin the direction's `Open` announced, a wire
+        // sequence number (the integer door), and whether it is zenoh's
+        // derivation over the two zids.
+        out.push_str(",\"initial_sn\":");
+        match half.initial_sn {
+            Some(sn) => u64_into(sn, out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"initial_sn_derivation\":");
+        match half.initial_sn_derivation {
+            Some(derivation) => escape_into(DerivationWord::of(derivation).name(), out),
+            None => out.push_str("null"),
+        }
         // Revision 45 — the direction's own parameter, in `push_parameters`'
         // shape: the lease its `Open` stated, or nothing.
         let lease = wz_session_core::passive::Reading::stated(half.lease_ms);
@@ -5825,6 +5843,49 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
         out.push_str("}}}");
     }
     out.push(']');
+}
+
+/// Revision 70 — the word a half's `initial_sn_derivation` carries: whether
+/// the origin that direction's `Open` announced is zenoh's derivation over the
+/// session's two zids (`derived`) or not (`not_derived`).
+///
+/// An observation about the sender and not a fault: zenoh derives the origin,
+/// zenoh-pico draws it, and a constant is legal on the wire.
+#[derive(Clone, Copy)]
+pub(crate) enum DerivationWord {
+    Derived,
+    NotDerived,
+}
+
+impl DerivationWord {
+    pub(crate) fn of(derivation: wz_session_core::passive::InitialSnDerivation) -> Self {
+        use wz_session_core::passive::InitialSnDerivation;
+        match derivation {
+            InitialSnDerivation::Derived => Self::Derived,
+            InitialSnDerivation::NotDerived => Self::NotDerived,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Derived => "derived",
+            Self::NotDerived => "not_derived",
+        }
+    }
+
+    /// Every word, sorted: what the field document's family is held to.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = [
+            wz_session_core::passive::InitialSnDerivation::Derived,
+            wz_session_core::passive::InitialSnDerivation::NotDerived,
+        ]
+        .into_iter()
+        .map(|d| Self::of(d).name())
+        .collect();
+        words.sort_unstable();
+        words
+    }
 }
 
 /// Revision 44 — the word a half's `batch_header` carries: whether the
@@ -8942,6 +9003,70 @@ mod tests {
         assert!(!control.contains("\"ending\":\"superseded\""), "{control}");
     }
 
+    /// Revision 70 — each half says what origin its `Open` announced and
+    /// whether that is zenoh's derivation over the two zids. A, the low side,
+    /// announces the derived origin; B announces a constant, the control.
+    #[test]
+    fn a_halfs_announced_origin_is_judged_against_zenohs_derivation() {
+        use crate::datagram_tests::{init_datagram, open_datagram_announcing, udp_packet};
+        let capture = |messages: &[(bool, Vec<u8>)]| {
+            let packets: Vec<Vec<u8>> = messages
+                .iter()
+                .map(|(from_low, message)| {
+                    if *from_low {
+                        udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, message)
+                    } else {
+                        udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, message)
+                    }
+                })
+                .collect();
+            let refs: Vec<(u32, u32, &[u8])> = packets
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+                .collect();
+            let file = crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs);
+            let d = crate::Dissection::from_capture(&file).expect("the capture reads");
+            (d, file)
+        };
+        let inits = [
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+        ];
+        let (d, _) = capture(&inits);
+        let mask = d.datagram_flows()[0]
+            .session
+            .context()
+            .sn_mask()
+            .expect("the InitAck states the ring");
+        // Both Inits state the zid `AA AA AA AA`.
+        let derived = wz_session_core::initial_sn::zenoh_initial_sn(&[0xAA; 4], &[0xAA; 4], mask);
+        let constant = if derived == 0 { 1 } else { 0 };
+        let mut messages = inits.to_vec();
+        messages.push((true, open_datagram_announcing(false, derived)));
+        messages.push((false, open_datagram_announcing(true, constant)));
+        let (d, file) = capture(&messages);
+        let doc = fields_json(&d, &file, None, None);
+        let words: Vec<&str> = crate::doc_revision::json_string_values(&doc)
+            .into_iter()
+            .filter(|(k, _)| *k == "initial_sn_derivation")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(words, ["derived", "not_derived"], "a then b: {doc}");
+        assert!(
+            doc.contains(&alloc::format!("\"initial_sn\":{derived},")),
+            "the announced origin is written: {doc}"
+        );
+
+        // Before any Open, nothing is announced and nothing is judged.
+        let (d, file) = capture(&inits);
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains("\"initial_sn\":null,\"initial_sn_derivation\":null"),
+            "{doc}"
+        );
+    }
+
     /// Revision 69 — a `First` with no more to follow, on a key whose chain is
     /// open, ends that chain and is a whole chain of its own: it is not joined
     /// to the chain it stranded.
@@ -9116,6 +9241,20 @@ mod tests {
         ] {
             let half = crate::HalfObservation {
                 batch_header: header,
+                ..crate::HalfObservation::default()
+            };
+            let mut out = String::new();
+            push_halves(&half, &half, &mut out);
+            arms.push(out);
+        }
+        // Revision 70 — every `initial_sn_derivation` word, on a half.
+        for derivation in [
+            wz_session_core::passive::InitialSnDerivation::Derived,
+            wz_session_core::passive::InitialSnDerivation::NotDerived,
+        ] {
+            let half = crate::HalfObservation {
+                initial_sn: Some(1),
+                initial_sn_derivation: Some(derivation),
                 ..crate::HalfObservation::default()
             };
             let mut out = String::new();
@@ -10959,7 +11098,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 99] = [
+        let live: [(&str, &str, Vec<&'static str>); 100] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -10985,6 +11124,11 @@ mod tests {
             (rev::FIELDS, "outcome", ChainOutcome::names()),
             (rev::FIELDS, "reason", ChainReason::names()),
             (rev::FIELDS, "displaced", DisplacedWord::names()),
+            (
+                rev::FIELDS,
+                "initial_sn_derivation",
+                DerivationWord::names(),
+            ),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the

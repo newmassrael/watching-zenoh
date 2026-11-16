@@ -1252,8 +1252,10 @@
  * `declared_id` and `timestamp_ntp64` of a `carried` entry and to the `sn` of a
  * row's `transport_header` (keys that exist from field document 64 and take the
  * rule from their first appearance: an NTP64 time is past the line for every
- * date after 1900, and an id and a sequence number are wire values); to every
- * integer of a
+ * date after 1900, and an id and a sequence number are wire values); to the
+ * `initial_sn` of a flow's `halves` (a key that exists from field document 70
+ * and takes the rule from its first appearance: a ring origin is as wide as
+ * the session's ring); to every integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1546,8 +1548,10 @@
  *   "halves":[{"direction":"a","lease_ms":N|null,"last_seen_ts_ns":N|null,
  *              "close_seen":bool,"fin_seen":bool|null,"rst_seen":bool|null,
  *              "batch_header":"absent"|"negotiated"|"inferred",
+ *              "initial_sn":N|null,
+ *              "initial_sn_derivation":"derived"|"not_derived"|null,
  *              "parameters":{"lease_ms":{"value":N|null,"basis":B}}},
- *             {"direction":"b", ...the same eight keys...}]
+ *             {"direction":"b", ...the same ten keys...}]
  *
  *     Two entries, `a` then `b`, with the `direction` the rows carry. The
  *     context says what the handshake settled for the SESSION; whether a
@@ -1572,6 +1576,19 @@
  *     read headed until the bytes show otherwise), or `absent`. `parameters`
  *     (revision 45) is `lease_ms` again in the context's `parameters` shape:
  *     `stated` by the direction's own `Open`, or `absent`.
+ *
+ *     THE RING ORIGIN, at field-document revision 70. `initial_sn` is the
+ *     origin the direction's own `Open` announced (the integer rule), `null`
+ *     until that `Open` was read. `initial_sn_derivation` says whether it is
+ *     zenoh's derivation: SHAKE128 over the sender's zid then the receiver's,
+ *     both as their `Init` stated them, masked to the session's ring.
+ *     `derived` when it is, `not_derived` when it is not, `null` when either
+ *     `Init` or the ring is unknown. It describes the SENDER and is not a
+ *     fault: zenoh derives the origin, zenoh-pico draws it at random, and a
+ *     constant is legal on the wire, so only a zenoh sender is expected to
+ *     read `derived`.
+ *
+ * @values fields initial_sn_derivation
  *
  * @values fields batch_header
  *
@@ -1707,7 +1724,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":69,"key":"kind","values":[...],
+ *     {"name":"fields","revision":70,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1752,6 +1769,7 @@
  * @carries fields eps_basis passenger
  * @carries fields family passenger
  * @carries fields ending passenger
+ * @carries fields initial_sn_derivation passenger
  * @carries fields keyexpr_carriage passenger
  * @carries fields keyexpr_cause passenger
  * @carries fields keyexpr_source passenger
@@ -6124,7 +6142,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":69,"key":"state",
+ *     "value_families":[{"name":"fields","revision":70,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
