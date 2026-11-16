@@ -545,6 +545,55 @@ mod tests {
         assert!(peers.face_down(id, &cx, &mut next_id).is_none(), "once");
     }
 
+    /// A peer that came up and is then lost again starts that outage from the
+    /// initial wait: the growth of the outage it recovered from ends with the
+    /// session it opened, as zenoh's retry period is a local of one connect
+    /// attempt. A schedule kept across the success would make the new outage
+    /// wait the ceiling the old one reached.
+    #[test]
+    fn a_peer_lost_after_it_came_up_starts_from_the_initial_wait() {
+        let directory = directory_with(&["tcp/127.0.0.1:7210"]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy {
+            period_init_ms: 50,
+            period_max_ms: 800,
+            period_increase_factor: 4.0,
+        });
+        let mut next_id = 0;
+
+        // The first outage: two failures, the second waiting longer.
+        let (id, _) = the_dial(&peers.open_node(A, &cx, &mut next_id));
+        let (_, generation, first) = the_retry(
+            &peers
+                .dial_ended(id, DialEnd::Failed, &cx, &mut next_id)
+                .expect("its dial")
+                .1,
+        );
+        assert_eq!(first, 50);
+        let (id, _) = the_dial(&peers.retry_due(NODE, generation, &cx, &mut next_id));
+        let (_, generation, grown) = the_retry(
+            &peers
+                .dial_ended(id, DialEnd::Failed, &cx, &mut next_id)
+                .expect("its dial")
+                .1,
+        );
+        assert_eq!(grown, 200, "a second failure in one outage waits longer");
+
+        // The retry comes up, and the session it opened is lost.
+        let (id, _) = the_dial(&peers.retry_due(NODE, generation, &cx, &mut next_id));
+        peers.dial_ended(id, UP, &cx, &mut next_id);
+        assert_eq!(peers.state(&NODE), Some(S::Established));
+        let lost = peers.face_down(id, &cx, &mut next_id).expect("a held face");
+        assert_eq!(
+            the_retry(&lost).2,
+            50,
+            "the outage after a success waits the initial period, not the grown one"
+        );
+    }
+
     #[test]
     fn each_refusal_is_the_machine_state_that_names_it() {
         let empty = directory_with(&[]);
