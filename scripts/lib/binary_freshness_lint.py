@@ -242,7 +242,11 @@ CARRIED_SUBJECT = 213
 # 25 -> 27 (step T5 of L6): two legs of `pico_c_examples_on_wz_capi_dropin.rs` reach
 # `wz-ap-demo` only through `spawn_zenohd*`; the subject is a subscriber on wz and
 # zenohd is the router it hears through, so the demo is the probe here as well.
-PROBE_ROUTE = 27
+# 27 -> 29 (R4502): the two legs of `zenoh_c_declaration_aggregation_twice_and_diff.rs`
+# hand one document to wz's C library and to libzenohc and read what each declares
+# through a zenohd; the subjects are the two libraries, and the demo is that
+# zenohd's readiness probe.
+PROBE_ROUTE = 29
 REFUSAL_ONLY = 8
 
 # THE LIVE POLICY SPLIT, budgeted so it cannot go back to being invisible.

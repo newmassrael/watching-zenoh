@@ -5218,7 +5218,8 @@ pub enum DaemonWrite {
 pub struct DaemonOverride {
     /// The honoured key the write lands on.
     pub key: &'static str,
-    /// The statement in `zenohd/src/main.rs` that makes the write.
+    /// The statement of zenohd's `main` that makes the write, quoted as the needle of the
+    /// anchored citation above each row of [`DAEMON_OVERRIDES`].
     pub upstream: &'static str,
     /// When the write is made, and what it does to wz's configuration.
     pub write: DaemonWrite,
