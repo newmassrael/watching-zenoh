@@ -276,6 +276,7 @@ mod zenoh_c_shm_reply_twice_and_diff;
 mod zenoh_c_source_info_twice_and_diff;
 mod zenoh_c_throughput_diff;
 mod zenoh_c_upstream_api_tests_on_wz;
+mod zenoh_close_scope_foreign_witness;
 mod zenoh_config_emit_zenohd_interop;
 mod zenoh_ext_body_foreign_witness;
 mod zenoh_join_qos_foreign_witness;

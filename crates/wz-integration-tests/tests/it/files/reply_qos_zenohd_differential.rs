@@ -47,6 +47,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_capture::Dissection;
+use wz_codecs::response::ResponseOwnedVariant;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, read_captured, run_query_until_answered,
     spawn_zenohd_dialer_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary,
@@ -56,7 +57,7 @@ use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side
 use wz_session_core::declare_ext_qos::QOS_EXT_HEADER;
 use wz_session_core::ext_nodeid::read_z64_ext;
 use wz_session_core::inbound::InboundFrame;
-use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+use wz_session_core::network_message::{parse_frame_payload, NetworkMessage, WireStorage};
 use wz_session_core::passive::Direction;
 use wz_session_core::sample::QosLevel;
 
@@ -91,6 +92,19 @@ enum Answerer {
 struct Answers {
     responses: Vec<QosLevel>,
     finals: Vec<QosLevel>,
+    /// The consolidation field of each Reply, `None` where the header's flag is
+    /// clear and the field absent, which both upstream decoders read as `Auto`
+    /// and which is a different fact from any value.
+    consolidations: Vec<Option<u64>>,
+}
+
+/// The consolidation field a Response's Reply carries; an `Err` body has none.
+fn reply_consolidation(body: &ResponseOwnedVariant<WireStorage>) -> Option<Option<u64>> {
+    match body {
+        ResponseOwnedVariant::CodecZenohReply(reply)
+        | ResponseOwnedVariant::Default { body: reply, .. } => Some(reply.consolidation),
+        ResponseOwnedVariant::CodecZenohErr(_) => None,
+    }
 }
 
 /// A message's `ext_qos` as a receiver acts on it: an absent extension keeps
@@ -210,6 +224,7 @@ fn answers_on_the_answerer_half(recording: &Recording) -> Answers {
     let mut answers = Answers {
         responses: Vec::new(),
         finals: Vec::new(),
+        consolidations: Vec::new(),
     };
     for frame in flow.frames().iter() {
         if frame.direction != Direction::B {
@@ -223,9 +238,14 @@ fn answers_on_the_answerer_half(recording: &Recording) -> Answers {
         };
         for record in records {
             match record {
-                NetworkMessage::Response(r) => answers
-                    .responses
-                    .push(effective_qos(r.extensions.as_deref())),
+                NetworkMessage::Response(r) => {
+                    answers
+                        .responses
+                        .push(effective_qos(r.extensions.as_deref()));
+                    if let Some(consolidation) = reply_consolidation(&r.body) {
+                        answers.consolidations.push(consolidation);
+                    }
+                }
                 NetworkMessage::ResponseFinal(f) => {
                     answers.finals.push(effective_qos(f.extensions.as_deref()))
                 }
@@ -349,5 +369,44 @@ fn a_wz_reply_carries_the_qos_a_stock_zenoh_queryable_gives_the_same_query_via_z
          stock={:?} wz={:?}",
         stock.finals,
         wz.finals
+    );
+}
+
+/// Open-debt item 168 — the REPLY's consolidation field, measured on the same
+/// two answerers. The Query side of this field has its own witness
+/// (`query_consolidation_wire_byte_divergence.rs`); a reply carries the field too,
+/// and what a stock queryable writes there had been read out of upstream's
+/// source and never measured. The expected value is again the stock leg's own
+/// recording: wz is held to what a stock zenoh queryable wrote for the same query
+/// through the same router, absent field and all.
+// wz-proves: query-reply wz->zenoh partial
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh z_queryable/z_get + wz-ap-demo); Layer Z runs via --ignored"]
+fn a_wz_reply_writes_the_consolidation_field_a_stock_zenoh_queryable_writes_via_zenohd() {
+    let stock = run_leg(Answerer::StockZenoh);
+    let wz = run_leg(Answerer::Wz);
+
+    // ANTI-VACUITY: a Response whose body was an Err carries no consolidation
+    // field, so a leg that answered only with errors would compare nothing.
+    assert!(
+        !stock.consolidations.is_empty() && !wz.consolidations.is_empty(),
+        "each leg must put at least one Reply on the wire: stock={:?} wz={:?}",
+        stock.consolidations,
+        wz.consolidations
+    );
+    let distinct_fields = |values: &[Option<u64>]| -> Vec<Option<u64>> {
+        let mut v = values.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    assert_eq!(
+        distinct_fields(&wz.consolidations),
+        distinct_fields(&stock.consolidations),
+        "the same default query, routed by the same zenohd, was answered with a different \
+         Reply consolidation field (None = the flag clear and the field absent). \
+         stock={:?} wz={:?}",
+        stock.consolidations,
+        wz.consolidations
     );
 }

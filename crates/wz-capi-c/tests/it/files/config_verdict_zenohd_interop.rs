@@ -37,9 +37,11 @@
 
 use std::ffi::CString;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+// The reference router, held to the pinned version (open-debt item 635).
+use wz_codegen_build::zenohd_binary;
 
 use wz_capi_c::abi::{z_moved_string_t, z_owned_config_t, z_owned_string_t};
 use wz_capi_c::config::{
@@ -55,23 +57,6 @@ const RESOLVED_CONF_MARKER: &str = "Initial conf:";
 
 /// How long to wait for zenohd to either print its resolved config or exit.
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
-
-/// Locate the reference `zenohd`: the `WZ_ZENOHD_BIN` override, else
-/// `scripts/build-zenohd.sh`'s install.
-///
-/// A private copy of `wz_integration_tests::common::zenohd_binary` for the
-/// reason the module header gives — that crate cannot depend on this one — and
-/// kept to the two lines that resolve a path so there is nothing here to drift.
-fn zenohd_binary() -> PathBuf {
-    if let Ok(p) = std::env::var("WZ_ZENOHD_BIN") {
-        return PathBuf::from(p);
-    }
-    let path = wz_codegen_build::artifact("target/zenohd/zenohd")
-        .canonicalize()
-        .expect("target/zenohd/zenohd is missing; run scripts/build-zenohd.sh");
-    assert!(path.is_file(), "{} is not a file", path.display());
-    path
-}
 
 /// Kills the child on drop, so a test that panics does not leave a zenohd
 /// holding a port.
