@@ -78,7 +78,7 @@ use wz_integration_tests::common::{
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording};
 use wz_runtime_tokio::zenoh_config::{
-    default_listen_endpoint, gateway_south_json, honoured_surface, ZenohNodeConfig,
+    default_listen_endpoint, gateway_south_json, honoured_surface, ConfigReading, ZenohNodeConfig,
     CONFIG_KEYS_PROVEN_ON_THE_WIRE, DAEMON_DEFAULT_MODE, DEEPENABLE_UPSTREAM_KEYS,
     HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE, UNHONOURED_UPSTREAM_CONFIG_KEYS,
     UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS, WZ_EXTENSION_HONOURED_KEYS,
@@ -773,8 +773,8 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     // Keys the zenohd BINARY sets over whatever its file says, so its resolved tree
     // answers the binary's value and not the default a file gets from the library
     // (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`).
-    // wz's reader carries the document's value, `None` for silence, which a host the
-    // file configures reads as the library's `false`; both halves are asserted below.
+    // wz's library reading carries the document's value, `None` for silence, and its
+    // daemon reading carries the binary's `true`; all three are asserted below.
     const THE_ZENOHD_BINARY_SETS_IT: &[&str] = &["plugins_loading/enabled"];
 
     let reservation = PortReservation::pick();
@@ -1112,7 +1112,21 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     );
     assert_eq!(
         wz.plugins_loading_enabled, None,
-        "wz's reader carries the silent document, not the zenohd binary's override"
+        "wz's library reading carries the silent document, not the zenohd binary's override"
+    );
+    // The same bytes read as zenohd reads its `--config`, which is what
+    // `wz-ap-demo --config` does: the binary's writes over the file are the
+    // values this zenohd resolved.
+    let as_daemon = ZenohNodeConfig::from_json5_read_as(&source, ConfigReading::Daemon)
+        .unwrap_or_else(|e| panic!("wz cannot read the census config as zenohd does: {e}"));
+    assert_eq!(
+        as_daemon.config.plugins_loading_enabled,
+        Some(true),
+        "wz's daemon reading leaves by-name plugin loading off where zenohd turns it on"
+    );
+    assert!(
+        as_daemon.config.adminspace.is_some(),
+        "wz's daemon reading hosts no adminspace where zenohd enables one\n{captured}"
     );
 
     // EXHAUSTIVE: every honoured key is in exactly one class. A key added to
@@ -4884,27 +4898,27 @@ fn top_level_mode_of(document: &str) -> Option<WhatAmI> {
 ///   LEG 11's reason: a constant quoted out of a checkout is a fact about a
 ///   file somebody read once.
 ///
-/// So a mode-less file deploys a ROUTER on zenohd and a PEER here, and until
-/// this round nothing measured that and nothing said it. wz KEEPS the library
-/// reading -- `wz-ap-demo` is a library node, which is what R2092 settled --
-/// and what this leg pins is that the reading is upstream's, that the daemon's
-/// is the other one, and that the shipping binary says both out loud.
+/// wz reads the silence both ways too, each at its own entry point: the
+/// library reading (`ZenohNodeConfig::from_json5`, what a library session
+/// opens with) takes the library's peer, and `wz-ap-demo --config`, wz's
+/// zenohd counterpart, takes the daemon's router. This leg pins each against
+/// its upstream reader and that the shipping binary says both out loud.
 ///
 /// ## Why the whole chain is ONE leg
 ///
-/// Four assertions that could be four tests, and splitting them would dissolve
-/// the claim: "wz reads it as peer" is true of a wz that hardcoded peer,
-/// "upstream says peer" is true of a document nobody consulted, "a real zenohd
-/// says router" is true of a divergence nobody reports, and "the report has a
-/// line" is true of a line that names the wrong roles. The finding is the
-/// CONJUNCTION, and one fixture string handed to all three implementations is
+/// Assertions that could be separate tests, and splitting them would dissolve
+/// the claim: "wz's library reads it as peer" is true of a wz that hardcoded
+/// peer, "upstream says peer" is true of a document nobody consulted, "a real
+/// zenohd says router" is true of a divergence wz does not follow, and "the
+/// report has a line" is true of a line that names the wrong roles. The
+/// finding is the CONJUNCTION, and one fixture string handed to every reader is
 /// what makes it one.
 ///
 /// The name carries `zenohd` because Layer C0's skip-token obligation matches
 /// on the FUNCTION name and Layer E's default sweep provisions no router.
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd + its DEFAULT_CONFIG.json5 (scripts/build-zenohd.sh)"]
-fn zenohd_reads_an_unstated_mode_as_router_where_wz_takes_the_library_default() {
+fn zenohd_and_the_config_form_read_an_unstated_mode_as_router_where_the_library_reads_peer() {
     // (1) THE UPSTREAM DERIVATION. There is no literal `peer` on this side of
     // the comparison: a document stating no top-level `mode` FAILS here rather
     // than yielding one, which is what stops this leg from grading a constant
@@ -4925,9 +4939,9 @@ fn zenohd_reads_an_unstated_mode_as_router_where_wz_takes_the_library_default() 
         library_default.to_str()
     );
 
-    // (2) WZ, on a document that names no `mode` at all. The endpoint is there
-    // so the file describes a deployable node rather than an empty object;
-    // nothing in it speaks to the run-mode.
+    // (2) WZ'S LIBRARY READING, on a document that names no `mode` at all. The
+    // endpoint is there so the file describes a deployable node rather than an
+    // empty object; nothing in it speaks to the run-mode.
     let source = String::from(
         r#"{ listen: { endpoints: ["tcp/127.0.0.1:0"] },
              scouting: { multicast: { enabled: false } } }"#,
@@ -4986,6 +5000,26 @@ fn zenohd_reads_an_unstated_mode_as_router_where_wz_takes_the_library_default() 
         "the daemon and the library now read a silent `mode` the same way, so \
          item 514's divergence is gone and the report should stop claiming it"
     );
+    let daemon_role = [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+        .into_iter()
+        .find(|w| w.to_str() == daemon_mode)
+        .unwrap_or_else(|| panic!("zenohd resolved `mode` to {daemon_mode:?}"));
+
+    // (3b) WZ'S DAEMON READING, on the SAME bytes, against the zenohd above.
+    let as_daemon = ZenohNodeConfig::from_json5_read_as(&source, ConfigReading::Daemon)
+        .unwrap_or_else(|e| panic!("wz cannot read the fixture as zenohd does: {e}\n{source}"));
+    assert_eq!(
+        as_daemon.config.mode, daemon_role,
+        "wz's daemon reading came up in a run-mode a real zenohd does not give \
+         the same mode-less document"
+    );
+    assert_eq!(
+        as_daemon
+            .mode_left_unstated()
+            .expect("the fixture names no `mode`")
+            .read_as,
+        daemon_role
+    );
 
     // (4) AND THE SHIPPING BINARY SAYS SO. The verdict above lives in a library
     // this leg links; what an operator gets is what `main` prints, and the two
@@ -5029,18 +5063,18 @@ fn zenohd_reads_an_unstated_mode_as_router_where_wz_takes_the_library_default() 
         .lines()
         .find(|l| l.contains("MODE UNSTATED"))
         .expect("checked above");
-    // BOTH roles on the one line. Naming only wz's own would report this node's
-    // behaviour, which the `argv +=` line already carries; the fact an operator
-    // migrating off a daemon needs is the OTHER reading.
+    // BOTH roles on the one line. Naming only this node's would repeat the
+    // `argv +=` line; the fact an operator moving the file to a library session
+    // needs is the OTHER reading.
     for role in [library_default.to_str(), daemon_mode.as_str()] {
         assert!(
             line.contains(role),
             "the operator's line does not name `{role}`\n{line}"
         );
     }
-    // And the run-mode it actually selected is the library reading, so the line
-    // and the argv cannot disagree.
-    let expected_flag = match library_default {
+    // And the run-mode it actually selected is the one the real zenohd above
+    // took, so the line, the argv and the daemon cannot disagree.
+    let expected_flag = match daemon_role {
         WhatAmI::Router => "--router-hat",
         WhatAmI::Peer => "--peer",
         WhatAmI::Client => "--connect",
