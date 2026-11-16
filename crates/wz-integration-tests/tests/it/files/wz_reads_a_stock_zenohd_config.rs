@@ -2467,26 +2467,27 @@ fn held_until_closed(
 /// on each document first and must close in that document's window, which is the positive
 /// control; the demo, on the same two documents, must close in the same two.
 ///
-/// Both bounds sit below the window the demo waits for an InitAck, which upstream has no
-/// counterpart of, so the open's bound is what ends each run on both nodes; the two windows and
-/// that one are disjoint, so a demo that ignored the key would close outside both.
+/// The two windows are disjoint from each other and from the bound a node keeps when no document
+/// states one, so a demo that ignored the key would close outside both. The second bound lies past
+/// two seconds on purpose: wz once gave an open up when no InitAck came within two seconds,
+/// whatever the document said, and a node with that window closes this leg's link early.
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd and a wz-ap-demo built with `--features zenoh-config`"]
 fn a_silent_acceptor_is_given_up_at_the_open_timeout_zenohd_keeps_for_the_same_document() {
     /// (the fragment, the bound it states in milliseconds)
     const DOCUMENTS: [(&str, u64); 2] = [
         ("transport: { unicast: { open_timeout: 300 } }", 300),
-        ("transport: { unicast: { open_timeout: 1300 } }", 1300),
+        ("transport: { unicast: { open_timeout: 3000 } }", 3000),
     ];
-    let init_ack = Duration::from_millis(SessionTimeouts::from_build().init_ack_ms);
+    let unstated = Duration::from_millis(SessionTimeouts::from_build().opening_ms);
     let windows: Vec<(Duration, Duration)> = DOCUMENTS
         .iter()
         .map(|(_, ms)| open_bound_window(Duration::from_millis(*ms)))
         .collect();
     assert!(
-        windows[0].1 < windows[1].0 && windows[1].1 < init_ack,
-        "the windows {windows:?} overlap each other or reach the demo's InitAck window \
-         ({init_ack:?}), so a reading inside one would not say which bound ended the open"
+        windows[0].1 < windows[1].0 && windows[1].1 < unstated,
+        "the windows {windows:?} overlap each other or reach the bound a node keeps with no \
+         document ({unstated:?}), so a reading inside one would not say which bound ended the open"
     );
 
     let mut failures: Vec<String> = Vec::new();
