@@ -407,12 +407,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
         "selects as its engine, with no path a C program names; its features that gate a "
-        "public items, `scout`, `listen` and `tls-mbedtls`, are the blocking scouting window, "
-        "the listening role's `CoopEngine::listening` and the host's `tls/` link "
-        "(`tls::HostTls`), and all three are run by this crate's own tests over loopback "
-        "sockets (`tests/tls_provider.rs` for the last, and again through the pico ABI's "
+        "public items, `scout`, `scout-datagram`, `listen` and `tls-mbedtls`, are the blocking "
+        "scouting window, the window over one datagram socket of the stack the engine runs on "
+        "(`scout_datagram::run_scout` and `scout_first`, which the pico ABI's `scout-mcu` asks "
+        "through), the listening role's `CoopEngine::listening` and the host's `tls/` link "
+        "(`tls::HostTls`), and all four are run by this crate's own tests: the second by "
+        "`scout_datagram`'s unit tests, the others over loopback sockets "
+        "(`tests/tls_provider.rs` for the last, and again through the pico ABI's "
         "`tls_coop_roundtrip`)",
-        frozenset({"scout", "listen", "tls-mbedtls"}),
+        frozenset({"scout", "scout-datagram", "listen", "tls-mbedtls"}),
     ),
     "wz-capi-port": (
         "the port between a wz C ABI and its engine: a workspace-internal rlib with no path a C "
@@ -477,12 +480,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `resource-snapshot` gates `pub mod snapshot`, whose public items are wz's own doors
         # `wz_ext_snapshot_set_source`, `_poll`, `_size` and `_read`, and the types they take,
         # declared in `wz_ext.h`, off by default as `supervision` is.
+        # `scout-mcu` gates `pub mod scout` beside the default `scout`: the same module, whose
+        # public items are pico's `z_scout`, `z_hello_*` and `z_closure_hello*` doors, each
+        # `#[no_mangle] extern "C"`, and the types they take; the feature only changes the window
+        # the doors ask through (one datagram socket of the engine's stack, for an image).
         frozenset(
             {
                 "admin-space",
                 "clock-source",
                 "event-ring",
                 "resource-snapshot",
+                "scout-mcu",
                 "supervision",
             }
         ),
