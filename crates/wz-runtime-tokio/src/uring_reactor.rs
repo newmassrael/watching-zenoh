@@ -879,7 +879,13 @@ fn run_worker(
     // The asks taken off the shared list, empty between passes.
     let mut asked: Vec<u64> = Vec::new();
     let mut next_ticket = FixedSlotRing::FIRST_FREE_KEY;
-    let mut reaped: Vec<Completion> = Vec::new();
+    // Sized for the most one drain can bring, as `inflight` is for the most
+    // reads the ring carries. Empty, it grew at the worker's first completion
+    // and again at every drain larger than any before: an allocation on this
+    // thread at a moment no link chose, which the datagram allocation suite
+    // counted as one for the first accepted burst whose measurement adopted a
+    // worker that had just started.
+    let mut reaped: Vec<Completion> = Vec::with_capacity(ring.completion_capacity());
     let mut stopping = false;
 
     if arm_wake(&mut ring, &wake, &mut wake_buf).is_err() {

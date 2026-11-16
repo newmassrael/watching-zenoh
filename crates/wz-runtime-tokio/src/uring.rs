@@ -351,6 +351,17 @@ impl FixedSlotRing {
         self.registered
     }
 
+    /// The most completions one [`Self::submit_and_reap`] can append: the
+    /// size of the completion queue the kernel gave this ring, which is what
+    /// one drain reads at most (an overflowed completion waits in the kernel
+    /// for the next drain).
+    ///
+    /// A caller that keeps its reap buffer across waits reserves this much
+    /// once, so no drain ever grows it.
+    pub fn completion_capacity(&self) -> usize {
+        self.ring.params().cq_entries() as usize
+    }
+
     /// The first `user_data` a caller may spend on something that is NOT a
     /// registered slot.
     ///
