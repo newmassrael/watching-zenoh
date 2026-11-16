@@ -22915,7 +22915,9 @@ layer_z_zenohd_interop() {
     # reply from its query's QoS, so a default query's reply carries `Block`, and
     # wz's read as DEFAULT (droppable) until this round. Needs the core zenoh
     # examples beside zenohd, so it carries the same unavailability guard as the
-    # reassembly leg above; its own `1 passed` guard stops a dropped `#[ignore]`.
+    # reassembly leg above; its own count guard stops a dropped `#[ignore]`.
+    # Open-debt item 168 added the second leg: the Reply's consolidation field,
+    # held to what the stock queryable wrote on the same two answerers.
     local reply_qos_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
     local missing_reply_qos_example=""
     for ex in zenoh_z_queryable zenoh_z_get; do
@@ -22926,7 +22928,7 @@ layer_z_zenohd_interop() {
 ($reply_qos_examples_dir/$missing_reply_qos_example; run: bash scripts/build-zenohd.sh)" || return 1
     else
         wz_test_args wz-integration-tests reply_qos_zenohd_differential
-        _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" \
+        _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_CORE_EXAMPLES_DIR="$reply_qos_examples_dir" \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" \
