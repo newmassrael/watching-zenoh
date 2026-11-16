@@ -4022,6 +4022,46 @@ jobs:
           path: target/zenohd-shm
           key: ${{ steps.zenohd-shm-cache.outputs.cache-primary-key }}
 
+      - name: Cache the stats-enabled zenohd oracle (pinned 1.10.2)
+        # A FIFTH oracle. zenoh's `stats` feature is not in its default set, so the
+        # stock router keeps no stats registry, never reads `stats/filters`, and
+        # answers its metrics leg with the build-info document alone. Layer Z's
+        # `stats/filters` leg compares wz's per-key payload family with THIS router's,
+        # and under WZ_Z_REQUIRE an absent binary is a FAIL of that lane, so the
+        # steps below are what the leg stands on. Restore/save split and the key's
+        # script binding are `zenohd-cache`'s.
+        id: zenohd-stats-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target/zenohd-stats
+          key: zenohd-stats-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+
+      - name: Build the stats-enabled zenohd (cache miss only)
+        if: steps.zenohd-stats-cache.outputs.cache-hit != 'true'
+        # ZENOHD_ALLOW_CLONE=1 forces the SOURCE path: `cargo install` cannot add
+        # `zenoh/stats` to the published binary.
+        env:
+          ZENOHD_STATS: "1"
+          ZENOHD_ALLOW_CLONE: "1"
+        run: bash scripts/build-zenohd.sh
+
+      - name: Ensure the stats zenohd ANSWERS at the pin
+        id: zenohd-stats-ensure
+        # The same reading as the other variants: a restore is trusted for what its
+        # key promised, and only the binary knows what it is.
+        run: |
+          python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd-stats \
+            || { echo "::error::the stats zenohd is not at the pin and could not be rebuilt"; exit 1; }
+
+      - name: Save the stats-enabled zenohd (cache miss only)
+        # Gated on the ensure step, which rebuilds a poisoned restore and so is the
+        # only step whose success says the binary is the one this key names.
+        if: always() && github.ref == 'refs/heads/main' && steps.zenohd-stats-cache.outputs.cache-hit != 'true' && steps.zenohd-stats-ensure.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: target/zenohd-stats
+          key: ${{ steps.zenohd-stats-cache.outputs.cache-primary-key }}
+
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this
         # step existed they ran on exactly one machine.

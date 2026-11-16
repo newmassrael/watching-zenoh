@@ -83,6 +83,7 @@ routing/router/linkstate/transport_weights	wz-effect	crates/wz-integration-tests
 low_pass_filter	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::a_low_pass_filter_drops_a_payload_past_its_limit_on_both_paths	capi-c	-	delivery	-
 downsampling	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::a_downsampling_rule_thins_a_burst_on_both_paths	capi-c	-	delivery	-
 qos/network	unsurveyed	-	-	-	-	-
+stats/filters	differential	crates/wz-integration-tests/tests/it/files/wz_router_stats_filters_match_zenohd.rs::a_router_counts_payloads_under_the_stats_filters_they_meet_as_zenohd_does	router-hat	zenohd	delivery	the per-key family's count series off each router's metrics after the same puts; the zenohd is the one built with zenoh's stats feature
 access_control/default_permission	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	delivery	-
 access_control/enabled	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	delivery	-
 access_control/policies	wz-effect	crates/wz-capi-c/tests/it/files/interceptors.rs::an_ingress_deny_rule_drops_the_governed_put_before_the_subscriber_on_both_paths	capi-c	-	delivery	-

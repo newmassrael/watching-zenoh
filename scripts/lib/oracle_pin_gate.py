@@ -244,8 +244,8 @@ def run(root: pathlib.Path, script_text: str, require: bool) -> int:
             "  oracle-pin-gate: FAIL -- an oracle this tree builds does not "
             "answer with the pinned version. Rebuild it AT THE PIN "
             "(`ZENOHD_SRC=<a checkout at the pin> bash scripts/build-zenohd.sh`, "
-            "with ZENOHD_UNIXPIPE=1 / ZENOHD_VSOCK=1 / ZENOHD_SHM=1 for the "
-            "variants); do NOT move the pin to match a binary, which is the "
+            "with ZENOHD_UNIXPIPE=1 / ZENOHD_VSOCK=1 / ZENOHD_SHM=1 / "
+            "ZENOHD_STATS=1 for the variants); do NOT move the pin to match a binary, which is the "
             "direction that erases what the lanes are measuring.",
             file=sys.stderr,
         )

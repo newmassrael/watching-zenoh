@@ -22354,6 +22354,29 @@ layer_z_zenohd_interop() {
     wz_test_args wz-integration-tests wz_shm_router_zenohd_interop
     _runci_guarded_test Z 17 cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    # `stats/filters`, against the zenohd built with zenoh's `stats` feature
+    # (`ZENOHD_STATS=1 scripts/build-zenohd.sh`, target/zenohd-stats/): the stock
+    # oracle keeps no stats registry and never reads the key, so only this variant
+    # can be handed the document first. One config file goes to that zenohd and to
+    # a wz router-hat, the same admin probe puts under and beside the filters and
+    # reads each router's metrics, and the per-key payload family must match. The
+    # demo is rebuilt with the router's admin legs, the counters and the config
+    # reader for this leg alone; the restore below brings the lane's build back.
+    # Absent oracle: a SKIP on a machine that did not build it, a FAIL under
+    # WZ_Z_REQUIRE, which the hosted job that provisions it sets. 1 = the one test.
+    local zenohd_stats="${WZ_ZENOHD_STATS_BIN:-$WZ_ARTIFACTS/target/zenohd-stats/zenohd}"
+    if [[ -x "$zenohd_stats" ]]; then
+        (cd crates \
+            && cargo build -p wz-ap-demo --features adminspace-router-linkstate,adminspace-metrics,wz/transport-stats,zenoh-config --quiet \
+            && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+        wz_test_args wz-integration-tests wz_router_stats_filters_match_zenohd
+        _runci_guarded_test "Z stats filters" 1 \
+            env WZ_ZENOHD_STATS_BIN="$zenohd_stats" cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    else
+        _z_unavailable "stats zenohd absent ($zenohd_stats; build it with \
+ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
+    fi
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one
     # bin to one path), and every leg after this point expects the big feature set

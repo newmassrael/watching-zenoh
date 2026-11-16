@@ -103,6 +103,10 @@ FOREIGN_ROOTS = {
     # omits `shared-memory`), so every §5.1/§5.13 SHM establishment claim rests on
     # it and a test that spawns it IS a foreign zenohd witness.
     "zenohd_shm_binary": "zenohd",
+    # The router built with zenoh's `stats` feature, the fourth variant of the same
+    # shape: the only oracle that keeps a stats registry and reads `stats/filters`,
+    # so a test that spawns it is a foreign zenohd witness of the per-key family.
+    "zenohd_stats_binary": "zenohd",
     # R3009 — the shared-memory EXAMPLES (`z_pub_shm` / `z_sub_shm`), built beside
     # the shared-memory zenohd by `ZENOHD_SHM=1 scripts/build-zenohd.sh`. They are
     # the CORE `zenoh-examples` applications and not the router, which relays a

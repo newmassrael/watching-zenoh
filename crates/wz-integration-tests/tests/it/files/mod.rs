@@ -209,6 +209,7 @@ mod wz_router_reject_without_feature;
 mod wz_router_routes_liveliness_pico_interop;
 mod wz_router_routes_pico_interop;
 mod wz_router_serves_its_multicast_group_in_its_node_registry;
+mod wz_router_stats_filters_match_zenohd;
 mod wz_router_subregion_two_gateways_zenohd_interop;
 mod wz_router_terminates_a_pico_liveliness_get;
 mod wz_router_unixpipe_forward;

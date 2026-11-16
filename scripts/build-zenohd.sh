@@ -168,6 +168,19 @@ elif [[ "${ZENOHD_SHM:-0}" -eq 1 ]]; then
     INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd-shm"
     VARIANT_FEATURE="--features zenoh/shared-memory"
     VARIANT_NAME="shared-memory"
+# The STATS variant, the same pattern a fourth time. zenoh's `stats` feature is
+# not in its `default` set:
+#   `zenoh/Cargo.toml` @ `stats = ["zenoh-stats", "zenoh-transport/stats"]`
+# and a router built without it keeps no stats registry, so its tables never read
+# `stats/filters` and its metrics leg serves the build-info document alone:
+#   `zenoh/src/net/routing/dispatcher/tables.rs` @ `config.stats.filters().iter().map(|f| &*f.key),`
+#   `zenoh/src/net/runtime/adminspace.rs` @ `#[cfg(not(feature = "stats"))]`
+# The stock oracle can therefore show no effect of that key at all; this one is
+# what a `stats/filters` leg compares wz's per-key payload family with.
+elif [[ "${ZENOHD_STATS:-0}" -eq 1 ]]; then
+    INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd-stats"
+    VARIANT_FEATURE="--features zenoh/stats"
+    VARIANT_NAME="stats"
 fi
 
 # R3978 — the store's paths for this oracle (STORE_LOCK, STORE_SRC, STORE_BUILD,
