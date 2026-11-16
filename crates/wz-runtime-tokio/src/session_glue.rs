@@ -4198,6 +4198,65 @@ mod rx_sn_gate_tests {
         );
     }
 
+    /// The unicast reporter raises the chain an ingest evicted, beside the
+    /// fragment's own admission: under oldest-wins a one-slot pool gives the
+    /// slot of the open chain to the next chain start, and the observer is told
+    /// of the ended chain once, as `Evicted`.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_unicast_reporter_raises_a_chain_evicted_for_a_new_one() {
+        use wz_session_core::drive::report_outcome_reassembling;
+        use wz_session_core::driver_loop::{
+            DriverLoopOutcome, IterationEvent, ReassemblyDropReason,
+        };
+        use wz_session_core::qos::Priority;
+        use wz_session_core::reassembly_dispatch::{
+            PoolOverflow, ReassemblyConfig, ReassemblyDispatcher,
+        };
+
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        *actions.inbound_peer_zid.lock().unwrap() = Some(vec![0x0A; 4]);
+        let mut reasm: ReassemblyDispatcher<1, 4096> = ReassemblyDispatcher::new(
+            ReassemblyConfig::new(2, 5_000).with_pool_overflow(PoolOverflow::OldestWins),
+        );
+
+        // Two chain starts of one peer on two priorities: the second finds the
+        // one slot held by the first.
+        let start = |priority| DriverLoopOutcome::Fragment {
+            reliable: true,
+            sn: 30,
+            more: true,
+            payload: vec![0x01],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority,
+            markers: wz_session_core::extfragment::FragmentMarkers::NONE,
+        };
+        let mut drops: Vec<ReassemblyDropReason> = Vec::new();
+        let mut sink = |e: IterationEvent<'_, '_>| {
+            if let IterationEvent::ReassemblyDropped(reason) = e {
+                drops.push(reason);
+            }
+        };
+        report_outcome_reassembling(
+            &start(Priority::DEFAULT),
+            &mut reasm,
+            &actions,
+            0,
+            &mut sink,
+        );
+        report_outcome_reassembling(
+            &start(Priority::InteractiveHigh),
+            &mut reasm,
+            &actions,
+            0,
+            &mut sink,
+        );
+        assert_eq!(drops, [ReassemblyDropReason::Evicted]);
+        assert_eq!(reasm.active_chains(), 1, "the new chain holds the slot");
+    }
+
     /// R311y221 — the unicast FRAGMENTED delivery preserves the chain's band
     /// end-to-end through the PRODUCTION caller (`report_outcome_reassembling` ->
     /// `reassembled_frame_outcome(*priority, ..)`, drive.rs), not just the leaf
