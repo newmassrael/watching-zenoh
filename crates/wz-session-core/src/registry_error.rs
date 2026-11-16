@@ -18,9 +18,10 @@
 //! return [`RegisterError::TableFull`]. This is the idiomatic shared-error
 //! shape (cf. `std::io::Error`'s kinds) — a single operation produces a
 //! subset of the type's variants. On the growable (AP) backing no variant
-//! is ever returned: the table and keyexpr buffer grow past the advisory
-//! capacity, so the closure-taking convenience wrappers `.expect()` the
-//! result -- which is why those wrappers are not compiled with
+//! but [`RegisterError::IdsExhausted`] is ever returned, and that one only
+//! after four billion registrations: the table and keyexpr buffer grow past
+//! the advisory capacity, so the closure-taking convenience wrappers
+//! `.expect()` the result -- which is why those wrappers are not compiled with
 //! `bounded-heapless`, the fixed backing an MCU build selects while still
 //! linking an allocator ([`crate::bounded::ENFORCES_CAPACITY`]).
 
@@ -45,6 +46,13 @@ pub enum RegisterError {
     /// The image is built with a closed key set and does not declare this entity on this key
     /// (`docs/closed-key-set.md`). Produced only by the subscriber table of a closed build.
     KeyNotInSet,
+    /// Every declaration id the session can put on the wire has been handed
+    /// out. A declaration id is an `EntityId`, a `u32`
+    /// (`commons/zenoh-protocol/src/core/mod.rs` @ `pub type EntityId = u32;`),
+    /// and upstream's decoder refuses a wider one, so the registry refuses the
+    /// registration rather than reuse an id a live declaration may still hold.
+    /// Produced only by the subscriber table.
+    IdsExhausted,
 }
 
 impl core::fmt::Display for RegisterError {
@@ -53,6 +61,9 @@ impl core::fmt::Display for RegisterError {
             Self::TableFull => f.write_str("registry backing table at declared capacity"),
             Self::KeyexprTooLong => f.write_str("registry keyexpr exceeds declared capacity"),
             Self::KeyNotInSet => f.write_str("keyexpr is not declared in the image's key set"),
+            Self::IdsExhausted => {
+                f.write_str("registry has handed out every 32-bit declaration id")
+            }
         }
     }
 }

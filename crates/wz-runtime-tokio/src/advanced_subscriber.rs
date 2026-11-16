@@ -133,7 +133,7 @@ use wz_ext_pubsub::advanced_subscriber::{MissHandlers, State};
 /// R2815 — in EVERY build, and both `declare` forms return it. It was
 /// recovery-gated because only `declare_with_options` could fail in an
 /// advanced way; since a subscriber carries a global identity, the plain form
-/// can too ([`Self::SessionZid`], [`Self::EntityIdOutOfRange`]). Returning the
+/// can too ([`Self::SessionZid`]). Returning the
 /// same type from both builds keeps the signature-stability invariant the
 /// plain `declare` documents.
 #[derive(Debug)]
@@ -156,15 +156,6 @@ pub enum AdvancedSubscribeError {
     SessionZid {
         /// The session zid's length.
         len: usize,
-    },
-    /// R2815 — the subscription's declaration id does not fit the 32-bit
-    /// entity id upstream's identity carries
-    /// (`commons/zenoh-protocol/src/core/mod.rs` @ `pub type EntityId = u32;`).
-    /// wz allocates it from a 64-bit counter; the plain declaration already
-    /// sent it on the wire, and it is retracted with this refusal.
-    EntityIdOutOfRange {
-        /// The declaration id that did not fit.
-        id: u64,
     },
     /// R311y100 — the late-publisher-detection liveliness subscriber
     /// declaration was rejected (only reachable with
@@ -1151,8 +1142,7 @@ fn global_id_of<R: SessionRuntime>(
     zid: &[u8],
     subscriber: &Subscriber<R>,
 ) -> Result<EntityGlobalId, AdvancedSubscribeError> {
-    let id = subscriber.id().as_u64();
-    let eid = u32::try_from(id).map_err(|_| AdvancedSubscribeError::EntityIdOutOfRange { id })?;
+    let eid = subscriber.id().entity_id();
     EntityGlobalId::new(zid, eid).ok_or(AdvancedSubscribeError::SessionZid { len: zid.len() })
 }
 

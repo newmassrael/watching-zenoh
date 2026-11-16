@@ -223,16 +223,26 @@ use crate::sink::BoxedSink;
 /// (subscriber tables with duplicate keyexpr filters are explicitly
 /// allowed — e.g. a metrics callback AND a domain callback on the
 /// same topic).
+///
+/// The id is also the `DeclSubscriber.id` the session announces the
+/// subscription under, so it is a `u32`, the width of upstream's
+/// `EntityId` (`commons/zenoh-protocol/src/network/declare.rs` @
+/// `pub type SubscriberId = EntityId;`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SubscriptionId(u64);
+pub struct SubscriptionId(u32);
 
 impl SubscriptionId {
-    /// The numeric id behind the handle. Exposed for diagnostic
-    /// surfaces; callers should not depend on the exact value across
-    /// runs since the registry assigns ids monotonically from the
-    /// session-local counter, not from a deterministic hash.
-    pub fn as_u64(self) -> u64 {
+    /// The declaration id the subscription is announced under on the wire.
+    /// The registry assigns ids in order from one session-local counter, so
+    /// the value is not stable across runs.
+    pub fn entity_id(self) -> u32 {
         self.0
+    }
+
+    /// [`entity_id`](Self::entity_id), widened for the callers that carry a
+    /// declaration id as the wire's z64.
+    pub fn as_u64(self) -> u64 {
+        u64::from(self.0)
     }
 }
 
@@ -290,6 +300,10 @@ pub use crate::keyexpr_match::{keyexpr_intersect_patterns, keyexpr_pattern_match
 /// need cross-task sharing wrap in `Arc<Mutex<…>>`.
 pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     subscribers: BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
+    /// The declaration id the next subscription or aggregate reply takes. It
+    /// starts at 1, as upstream's counter does (0 is the routing core's), and
+    /// it is a `u64` only so that it can stand one past `u32::MAX`, which is
+    /// how the table knows every id has been handed out (`next_entity_id`).
     next_id: u64,
     /// How many times a subscription was registered or retired since this was
     /// built. A session that stages announcements from the subscription table
@@ -607,7 +621,7 @@ struct InboundSubInterest<P: Storage = Profile> {
     /// rather than stack a second target. R2292 draws it from the registry's
     /// ONE id counter — see the allocation site for why a second counter was
     /// a defect rather than a detail.
-    aggregate_decl_id: u64,
+    aggregate_decl_id: u32,
     /// The subscription id from which a registration is a FUTURE one for this
     /// interest: the id counter AFTER the row took its own declaration id. A
     /// subscription at or after it came after the interest, and is the one a peer
@@ -948,6 +962,21 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         self.shm.unnegotiated_drops()
     }
 
+    /// The declaration id the next subscription or aggregate reply takes, or
+    /// `None` once every `u32` id has been handed out. Upstream's counter wraps
+    /// (`zenoh/src/net/runtime/mod.rs` @ `self.next_id.fetch_add(1, Ordering::SeqCst)`)
+    /// and would hand out an id a live declaration may still hold; this one
+    /// stops instead, and the id is taken only by [`Self::consume_entity_id`].
+    fn next_entity_id(&self) -> Option<u32> {
+        u32::try_from(self.next_id).ok()
+    }
+
+    /// Take the id [`Self::next_entity_id`] returned. Called only after it
+    /// returned one, so the counter stops one past `u32::MAX`.
+    fn consume_entity_id(&mut self) {
+        self.next_id += 1;
+    }
+
     /// R311gb-2b — register an explicit [`SampleSink`] for a keyexpr
     /// pattern. The seam-native registration entry point: works on
     /// every profile (`C = BoxedSink` heap closure on AP, a consumer-
@@ -975,6 +1004,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// is stored unchanged and a `log::warn!` is emitted — this is
     /// non-breaking with prior callers; promotion to a Result-
     /// returning signature is deferred to the cluster API rewrite.
+    ///
+    /// Once the table has handed out every `u32` declaration id it refuses
+    /// with [`RegisterError::IdsExhausted`], on every backing.
     pub fn register_sink(
         &mut self,
         keyexpr_pattern: &str,
@@ -1014,7 +1046,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             .key_gate
             .admit_entity(&pattern, EntityKind::Subscriber)
             .map_err(|_| RegisterError::KeyNotInSet)?;
-        let id = SubscriptionId(self.next_id);
+        let id = SubscriptionId(self.next_entity_id().ok_or(RegisterError::IdsExhausted)?);
         // Push first; only consume the id counter on success so a
         // rejected (table-full) registration leaves no id gap.
         self.subscribers
@@ -1026,7 +1058,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 sink,
             })
             .map_err(|_| RegisterError::TableFull)?;
-        self.next_id = self.next_id.saturating_add(1);
+        self.consume_entity_id();
         self.epoch = self.epoch.saturating_add(1);
         #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
         if allowed_origin.allows_local() {
@@ -1454,27 +1486,29 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             // @ `local_subs.insert_aggregated_resource`, 1.10.0).
             //
             // The id is consumed only when the row is stored, the same rule
-            // `register_sink` keeps, so a refused row leaves no gap.
-            let decl_id = self.next_id;
+            // `register_sink` keeps, so a refused row leaves no gap. A table
+            // that has handed out every id stores no row, as a full one does.
+            //
             // A subscription registered from here on is the FUTURE half of this
             // interest: its id is at least the counter AFTER the id the row
             // took. `watermark` is that boundary, for a table that learns of
             // registrations by reading its epoch ([`SubscriberPeer::reconcile`]).
-            let watermark = self.next_id.saturating_add(1);
-            let stored = interests
-                .rows
-                .push(InboundSubInterest {
-                    interest_id,
-                    keyexpr,
-                    aggregate,
-                    aggregate_decl_id: decl_id,
-                    watermark,
-                    #[cfg(feature = "declare-undeclare")]
-                    announced: false,
-                })
-                .is_ok();
+            let stored = self.next_entity_id().is_some_and(|decl_id| {
+                interests
+                    .rows
+                    .push(InboundSubInterest {
+                        interest_id,
+                        keyexpr,
+                        aggregate,
+                        aggregate_decl_id: decl_id,
+                        watermark: u64::from(decl_id) + 1,
+                        #[cfg(feature = "declare-undeclare")]
+                        announced: false,
+                    })
+                    .is_ok()
+            });
             if stored {
-                self.next_id = self.next_id.saturating_add(1);
+                self.consume_entity_id();
             } else if future {
                 // A full table loses the FUTURE half for this publisher: a
                 // subscription declared later is not pushed to it.
@@ -1531,7 +1565,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                         .staged
                         .push(SubInterestReply::Concrete {
                             interest_id,
-                            subscription_id: sub.id.0,
+                            subscription_id: sub.id.as_u64(),
                         })
                         .expect(RESERVED);
                 }
@@ -1564,7 +1598,11 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// [`SubscriberPeer::reconcile`], which finds the same subscriptions by their
     /// ids instead of by being told.
     #[cfg(feature = "declare-subscriber")]
-    fn stage_future_subscriber_pushes(&self, interests: &mut InterestSide<P>, new_id: u64) {
+    fn stage_future_subscriber_pushes(
+        &self,
+        interests: &mut InterestSide<P>,
+        new_id: SubscriptionId,
+    ) {
         let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }> =
             BoundedVec::new();
         {
@@ -1573,7 +1611,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             // the row, and `BoundedString` is deliberately not `Clone` (the
             // no-alloc backing is an inline buffer). Both borrows are immutable
             // and end with this block, before the staging push below.
-            let Some(sub) = self.subscribers.iter().find(|s| s.id.0 == new_id) else {
+            let Some(sub) = self.subscribers.iter().find(|s| s.id == new_id) else {
                 return;
             };
             let new_pattern = sub.pattern.as_str();
@@ -1591,7 +1629,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             } else {
                 SubInterestReply::Concrete {
                     interest_id,
-                    subscription_id: new_id,
+                    subscription_id: new_id.as_u64(),
                 }
             };
             // NO terminating `Final` here: this is an unsolicited FUTURE push,
@@ -1675,7 +1713,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         }
         let row = &mut rows[idx];
         row.announced = false;
-        Some(row.aggregate_decl_id)
+        Some(u64::from(row.aggregate_decl_id))
     }
 
     /// R311y530 — resolve one staged reply item to the `(subscriber_id,
@@ -1732,14 +1770,14 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 .iter()
                 .find(|row| row.interest_id == *interest_id)
                 .filter(|row| self.any_subscription_matches(Some(row.keyexpr.as_str())))
-                .map(|row| (row.aggregate_decl_id, row.keyexpr.as_str())),
+                .map(|row| (u64::from(row.aggregate_decl_id), row.keyexpr.as_str())),
             SubInterestReply::Concrete {
                 subscription_id, ..
             } => self
                 .subscribers
                 .iter()
-                .find(|sub| sub.id.0 == *subscription_id)
-                .map(|sub| (sub.id.0, sub.pattern.as_str())),
+                .find(|sub| sub.id.as_u64() == *subscription_id)
+                .map(|sub| (sub.id.as_u64(), sub.pattern.as_str())),
             SubInterestReply::Final { .. } => None,
             // R2292 — a retraction is not a reply: it resolves through
             // `take_aggregate_retract`, which needs `&mut self` to clear the
@@ -3306,7 +3344,11 @@ impl<P: Storage> SubscriberPeer<P> {
                 (row.interest_id, row.aggregate, row.watermark)
             };
             let mut told = false;
-            for sub in table.subscribers.iter().filter(|s| s.id.0 >= watermark) {
+            for sub in table
+                .subscribers
+                .iter()
+                .filter(|s| s.id.as_u64() >= watermark)
+            {
                 if !subscription_matches_interest(
                     sub.pattern.as_str(),
                     Some(interests.rows[at].keyexpr.as_str()),
@@ -3322,7 +3364,7 @@ impl<P: Storage> SubscriberPeer<P> {
                 } else {
                     SubInterestReply::Concrete {
                         interest_id,
-                        subscription_id: sub.id.0,
+                        subscription_id: sub.id.as_u64(),
                     }
                 };
                 // No terminating `Final`: an unsolicited FUTURE push, not a
@@ -3393,7 +3435,7 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
         #[cfg(feature = "declare-subscriber")]
         {
             self.table
-                .stage_future_subscriber_pushes(&mut self.peer.interests, id.0);
+                .stage_future_subscriber_pushes(&mut self.peer.interests, id);
             self.peer.interests.reconciled_epoch = self.table.epoch;
         }
         Ok(id)
@@ -7812,6 +7854,87 @@ mod fixed_backing_interest_staging_tests {
         assert_eq!(reg.interest_staging_refusals().chains, 1);
         assert!(
             reg.take_staged_sub_interest_replies().is_empty(),
+            "no bare Final for a chain that could not be answered"
+        );
+    }
+}
+
+/// A subscription's id is the `DeclSubscriber.id` it is announced under, a
+/// `u32` upstream's decoder refuses to read wider, so the table hands out ids
+/// up to `u32::MAX` and refuses past it.
+#[cfg(all(test, feature = "alloc"))]
+mod entity_id_space_tests {
+    use super::*;
+    use crate::locality::Locality;
+
+    #[test]
+    fn the_last_u32_id_is_handed_out_and_the_next_registration_is_refused() {
+        let mut table = SubscriberTable::new();
+        table.next_id = u64::from(u32::MAX);
+
+        let last = table
+            .register_sink("topic/a", Locality::Any, BoxedSink::new(|_| {}))
+            .expect("the last id is free");
+        assert_eq!(last.entity_id(), u32::MAX);
+        assert_eq!(last.as_u64(), u64::from(u32::MAX));
+
+        let epoch = table.epoch;
+        assert_eq!(
+            table.register_sink("topic/b", Locality::Any, BoxedSink::new(|_| {})),
+            Err(RegisterError::IdsExhausted)
+        );
+        assert_eq!(table.len(), 1, "the refused subscription is not stored");
+        assert_eq!(table.epoch, epoch, "a refusal does not move the table");
+
+        // Retiring a subscription frees its row, not its id: an id a peer may
+        // still hold for the retired declaration is not handed out again.
+        assert!(table.unregister(last));
+        assert_eq!(
+            table.register_sink("topic/c", Locality::Any, BoxedSink::new(|_| {})),
+            Err(RegisterError::IdsExhausted)
+        );
+    }
+
+    #[test]
+    fn ids_start_at_one_and_count_up() {
+        let mut table = SubscriberTable::new();
+        let first = table
+            .register_sink("topic/a", Locality::Any, BoxedSink::new(|_| {}))
+            .expect("registers");
+        let second = table
+            .register_sink("topic/b", Locality::Any, BoxedSink::new(|_| {}))
+            .expect("registers");
+        assert_eq!((first.entity_id(), second.entity_id()), (1, 2));
+    }
+
+    /// An aggregate interest's reply takes its declaration id from the same
+    /// counter, so a table with no id left stores no row for it and refuses
+    /// the chain rather than answer under an id it does not have.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn an_aggregate_interest_is_refused_once_the_ids_are_spent() {
+        let mut control = SubscriberRegistry::new();
+        control
+            .register_sink("topic/a", Locality::Any, BoxedSink::new(|_| {}))
+            .expect("registers");
+        assert_eq!(
+            control.respond_to_subscriber_interest_borrowed(7, Some("topic/**"), true, true, false),
+            1,
+            "a table with ids left answers the aggregate interest"
+        );
+
+        let mut spent = SubscriberRegistry::new();
+        spent.table.next_id = u64::from(u32::MAX);
+        spent
+            .register_sink("topic/a", Locality::Any, BoxedSink::new(|_| {}))
+            .expect("the last id is free");
+        assert_eq!(
+            spent.respond_to_subscriber_interest_borrowed(7, Some("topic/**"), true, true, false),
+            0,
+            "no id is left for the aggregate reply"
+        );
+        assert!(
+            spent.take_staged_sub_interest_replies().is_empty(),
             "no bare Final for a chain that could not be answered"
         );
     }
