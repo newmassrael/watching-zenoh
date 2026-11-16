@@ -7213,12 +7213,14 @@ layer_c1bd_locator_iface() {
 #      a compile error but no lint.
 #
 # R311y414 — both test steps were BARE; they now carry anchored count guards
-# with the MEASURED counts (6 unit / 2 e2e).
+# with the MEASURED counts (6 unit / 2 e2e). The e2e count is 3 since the
+# Init-chain order test joined `compression_e2e.rs`: three ungated tests in a
+# file the leg's features compile whole.
 layer_c1ae_cargo_test_compression() {
     _runci_guarded_test C1ae 6 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
         || return 1
     wz_test_args wz-runtime-tokio compression_e2e
-    _runci_guarded_test C1ae 2 cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1ae 3 cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extcompression,transport-unicast,transport-link-tcp --quiet -- -D warnings \

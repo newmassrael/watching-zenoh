@@ -11413,13 +11413,13 @@ pub(crate) struct RemoteLogSpec {
 pub(crate) struct ReplyConsumerSpec {
     pub(crate) on_query_reply: bool,
     pub(crate) on_query_final: bool,
-    /// R263 — pending-entry deadline (ms) propagated to the
-    /// observer.replies.register call below. Value 0 means "no
-    /// timeout" (deadline_ms = None at register; pre-R263 behaviour
-    /// preserved). Value > 0 means "compute deadline_ms =
-    /// session_clock.now_monotonic_ms() + query_timeout_ms" so the
-    /// R264 sweep_task surfaces on_final within that wall-clock
-    /// budget when no Final arrives.
+    /// R263 — the outbound Query's timeout (ms), handed to
+    /// `QueryOptions::with_timeout_ms`. `Session::query` arms the
+    /// pending entry's deadline from it when the Query is sent, and the
+    /// R264 sweep_task surfaces on_final within that wall-clock budget
+    /// when no Final arrives. `0` is the library default, as it is for
+    /// every application query: a build with `query-timeout` resolves it
+    /// to the 10 s default, one without has no deadline at all.
     pub(crate) query_timeout_ms: u32,
     /// R270 — sweep_task tick period (ms). Lower values tighten
     /// the bound on `on_final`'s post-deadline wall-time at the cost

@@ -197,13 +197,11 @@ fn the_shm_walker_reads_what_two_stock_zenohd_wrote() {
     };
 
     // TWO ports under ONE reservation, and this is not a micro-optimisation.
-    // `PortReservation::pick` takes a process-global mutex that is NOT
-    // reentrant, so calling it twice on one thread DEADLOCKS -- the library's
-    // own doc on `pick_pair` says exactly that, and R2049's first run hung
-    // there after printing `running 1 test`, with no output and no timeout,
-    // until it was killed. Both routers listen (a zenohd always does), so this
-    // test needs two ports and `pick_pair` is the one way to get them.
-    let (reservation, dialer_port) = PortReservation::pick_pair();
+    // Both routers listen (a zenohd always does), so this test needs two
+    // ports, and both come from ONE reservation: a second `pick` on this
+    // thread would wait on the reservation it already holds.
+    let reservation = PortReservation::pick();
+    let dialer_port = reservation.next_port();
     let acceptor_port = reservation.port();
     let mut acceptor = spawn_shm_zenohd(&bin, acceptor_port, None);
 

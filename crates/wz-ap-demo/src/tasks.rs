@@ -27,13 +27,14 @@
 use std::sync::Arc;
 
 use wz::runtime_core::TimeSource;
-use wz::runtime_tokio::reply_sink::ReplyView;
+use wz::runtime_tokio::locality::Locality;
+use wz::runtime_tokio::reply_sink::{ReplyKind, ReplyView};
 use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{
     session_matching_compiled, LivelinessGetOptions, PublishAliasError, PublishOptions, Publisher,
-    TokioSession,
+    QueryOptions, TokioSession,
 };
-use wz::runtime_tokio::session_glue::{QueryMetadata, SessionLinkActions};
+use wz::runtime_tokio::session_glue::SessionLinkActions;
 use wz::runtime_tokio::Reliability;
 
 use crate::args::{LivelinessGetSpec, PublisherSpec, PushOperation};
@@ -74,17 +75,6 @@ const PUBLISHER_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const PUBLISHER_BURST_COUNT: usize = 5;
 const PUBLISHER_BURST_INTERVAL_MS: u64 = 200;
 
-/// R121j-5c-e2e-demo — single-shot query emit task. Mirrors
-/// [`publisher_task`]'s timing gate: wait for the role-agnostic
-/// `record_established_at` counter to fire, then send exactly one
-/// `Request(Query)` on `keyexpr` (literal form, `mapping_id = 0`,
-/// `rid = 1`). The peer's queryable registry produces zero or more
-/// `Response(Reply)` frames followed by exactly one `ResponseFinal`
-/// terminating the chain; this task does not currently consume
-/// the inbound Reply chain (no application-side z_get adapter
-/// yet — R121j-6 carry). The demo binary's purpose here is to
-/// drive the OUTBOUND Query path so a paired wz-ap-demo --queryable
-/// peer can fire its callback on the matched keyexpr.
 /// R2578 — how often `--matching-poll` re-reads the verdict. Fast enough that a
 /// fixture's own barrier, not this cadence, is what a timeout measures; slow
 /// enough that the line is a verdict rather than a stream. The task logs only
@@ -98,69 +88,38 @@ const MATCHING_POLL_ESTABLISHED_TIMEOUT_MS: u64 = 5_000;
 
 const QUERY_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
 const QUERY_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
-/// Exposed pub(crate) because `run_demo`'s ReplyRegistry register
-/// site (the on_query_reply / on_query_final binding plus the R263
-/// deadline + R264 sweep_task wiring) keys on the same rid that
-/// [`query_task`] emits on the wire. Keeping the constant single-
-/// sourced here means a future round that changes the rid (e.g. to
-/// a per-process counter) lands one edit and both sides follow.
-pub(crate) const QUERY_RID: u32 = 1;
+/// What `--query`'s answers are reported as and how long they are waited for:
+/// `--on-query-reply-log`, `--on-query-final-log` and `--query-timeout-ms`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueryAnswerLog {
+    /// Log every reply as `REPLY RECEIVED rid=<rid> keyexpr='<k>' body=<..>`.
+    pub(crate) replies: bool,
+    /// Log the end of the query as `FINAL RECEIVED rid=<rid>`.
+    pub(crate) finals: bool,
+    /// The query's timeout, `0` for the library default.
+    pub(crate) timeout_ms: u32,
+}
 
-/// R254 — `clock: T` generic + 1 sleep site migrated to
-/// [`TimeSource::sleep`], continuing the R253 leaf-first cadence.
-/// R255 — deadline math also migrated to u64 ms (option (b) from
-/// R254 carry); `std::time::Instant` is no longer referenced here.
+/// The options `--query` asks with: the selector parameters, the timeout, and
+/// the peer as the only destination. Everything else is the application
+/// default, so the Query's consolidation, reply acceptance and request id are
+/// decided where every other requester's are, by `Session::query`.
 ///
-/// R311y481 — the emit moved from `send_request_query` to
-/// `send_request_query_with_meta` so `--query-params` / `--query-attachment` can
-/// ride the Query body. The no-flag path is byte-UNCHANGED: an empty
-/// `QueryMetadata` is pinned to produce the identical frame
-/// (`send_request_query_with_meta_empty_emits_same_bytes_as_no_meta`,
-/// session_glue.rs), so every pre-existing Layer E fixture that greps this
-/// task's wire output keeps passing without a fixture edit.
-/// Round 2442 (open-debt item 675) — the Query's metadata, as a VALUE the task
-/// does not assemble inline.
+/// Remote only: `--query` is a question to the peer, and an answer from a
+/// queryable this same process declared would let a fixture pass with no peer
+/// answering at all.
 ///
-/// # The defect this closes
-///
-/// This was four fields in a struct literal inside [`query_task`], and it left
-/// `consolidation` at `Option::None` — so the demo's `--query` transmitted no
-/// consolidation byte while every other requester in the tree resolved
-/// `Auto -> Latest` and sent it. The atom's own reason has named that residual
-/// since R311y837: the demo "hand-builds a QueryMetadata and calls
-/// send_request_query_with_meta directly, bypassing QueryOptions and every
-/// resolution rule on it", and sixteen e2e files drive `--query` as "wz the
-/// requester" without ever exercising the application path.
-///
-/// It is not a demo-only wart. `preset-ap-full` carries `query-consolidation`,
-/// so the AP-full binary COMPILES the capability in and had no path that
-/// reached it from argv — which is the second of Layer A5's two rules, stated
-/// in this crate's own manifest about a different feature.
-///
-/// # Why a function
-///
-/// So it can be asserted about without standing a session up. The task around
-/// it waits on Established and sleeps; the decision it was hiding is a pure
-/// function of two arguments.
-///
-/// # It resolves NOTHING itself
-///
-/// [`wz::runtime_tokio::query::wire_consolidation`] is the SSOT, shared with
-/// `QueryOptions`, and it carries the `query-consolidation` gate internally.
-/// A copy of the `Auto -> Latest` rule here would be a second opinion about a
-/// judgement both upstreams keep in exactly one place.
-fn query_metadata(parameters: Option<&str>, attachment_blob: Option<Vec<u8>>) -> QueryMetadata {
-    let parameters = parameters.map(|p| p.as_bytes().to_vec());
-    QueryMetadata {
-        // `None` requested: the demo exposes no `--query-consolidation` flag,
-        // so this is exactly the "caller named no mode" case zenoh resolves
-        // inside `get()` -- and the `_time` carve-out reaches it, because
-        // `--query-params` is what a reader types the selector into.
-        consolidation: wz::runtime_tokio::query::wire_consolidation(None, parameters.as_deref()),
-        parameters,
-        attachment: attachment_blob,
-        ..Default::default()
-    }
+/// The parameters are written to the field rather than through the setter,
+/// which exists only on builds that put them on the wire: the selector is the
+/// caller's state on every build (it decides the time-range carve-out and the
+/// `_anyke` acceptance), and the wire builder alone decides whether it rides.
+/// A pure function so the decision can be asserted without a session.
+fn query_options(parameters: Option<&str>, timeout_ms: u32) -> QueryOptions {
+    let mut opts = QueryOptions::get()
+        .with_allowed_destination(Locality::Remote)
+        .with_timeout_ms(timeout_ms);
+    opts.parameters = parameters.map(|p| p.as_bytes().to_vec());
+    opts
 }
 
 /// R2578 — `--matching-poll`: read `Publisher::get_matching_status` on a cadence
@@ -225,9 +184,18 @@ pub(crate) async fn matching_poll_task(publisher: Publisher, actions: Arc<Sessio
     }
 }
 
+/// `--query`: one GET to the peer once the session is Established, asked
+/// through `Session::query` as an application asks it, with its answers
+/// reported as `answers` says.
+///
+/// The request id is the session's, allocated by the query; the
+/// `QUERY EMITTED` line names it, and the reply and final lines carry the
+/// same one, so a fixture reads the id off that line rather than assuming a
+/// value.
 pub(crate) async fn query_task<T>(
-    actions: Arc<SessionLinkActions>,
+    session: TokioSession,
     spec: crate::args::QueryEmitSpec,
+    answers: QueryAnswerLog,
     clock: T,
 ) where
     T: TimeSource + Send + 'static,
@@ -238,6 +206,8 @@ pub(crate) async fn query_task<T>(
         attachment,
         after_ms,
     } = spec;
+    // `actions()` is infallible on the unicast typestate `TokioSession` names.
+    let actions = session.actions();
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.is_established() {
@@ -268,46 +238,83 @@ pub(crate) async fn query_task<T>(
     }
     log::info!(
         "wz-ap-demo: query_task observed Established; emitting Query \
-         on keyexpr='{keyexpr}' rid={QUERY_RID}"
+         on keyexpr='{keyexpr}'"
     );
+    #[cfg_attr(not(feature = "query-attachment"), allow(unused_mut))]
+    let mut opts = query_options(parameters.as_deref(), answers.timeout_ms);
     // R311y481 — the attachment is encoded HERE rather than at argv parse time so
     // the kv-pair wire form has a single producer: `serialize_kv_attachment` is
     // the same SSOT the push-side `z_sub_attachment` witness uses, and pico's
     // deserializer reads the leading sequence count, so a second encoder would be
     // a second place for that count to drift.
     #[cfg(feature = "query-attachment")]
-    let attachment_blob = attachment.as_ref().map(|pairs| {
+    if let Some(pairs) = attachment.as_ref() {
         let borrowed: Vec<(&[u8], &[u8])> = pairs
             .iter()
             .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
             .collect();
-        wz::runtime_tokio::attachment::serialize_kv_attachment(&borrowed)
-    });
+        opts = opts.with_attachment(wz::runtime_tokio::attachment::serialize_kv_attachment(
+            &borrowed,
+        ));
+    }
     // The OFF arm is LOUD rather than silent, for the reason the `advanced`-OFF
     // arms in runner.rs state: a fixture that greps pico's `with attachment:`
     // line must be able to tell "built without the attachment plane" from "wz
     // attached and the foreign decode failed". A silent `None` here would read as
     // the second when it was the first.
     #[cfg(not(feature = "query-attachment"))]
-    let attachment_blob: Option<Vec<u8>> = {
-        if let Some(pairs) = attachment.as_ref() {
-            log::warn!(
-                "wz-ap-demo: --query-attachment={pairs:?} is INERT (built without the \
-                 `query-attachment` feature); the Query carries no attachment ext"
-            );
-        }
-        None
-    };
-    let meta = query_metadata(parameters.as_deref(), attachment_blob);
-    actions
-        .send_request_query_with_meta(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr), &meta)
-        .expect("demo query keyexpr is a fixed short literal, within codec bounds");
-    log::info!(
-        "wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID} params={:?} \
-         attachment_pairs={}",
-        parameters,
-        attachment.as_ref().map_or(0, |p| p.len()),
+    if let Some(pairs) = attachment.as_ref() {
+        log::warn!(
+            "wz-ap-demo: --query-attachment={pairs:?} is INERT (built without the \
+             `query-attachment` feature); the Query carries no attachment ext"
+        );
+    }
+    let QueryAnswerLog {
+        replies, finals, ..
+    } = answers;
+    let result = session.query(
+        &keyexpr,
+        opts,
+        move |reply: &dyn ReplyView| {
+            if replies {
+                log::info!(
+                    "wz-ap-demo: REPLY RECEIVED rid={} keyexpr='{}' body={}",
+                    reply.rid(),
+                    reply.keyexpr(),
+                    reply_body_text(reply),
+                );
+            }
+        },
+        move |rid| {
+            if finals {
+                log::info!("wz-ap-demo: FINAL RECEIVED rid={rid}");
+            }
+        },
     );
+    match result {
+        Ok(handle) => log::info!(
+            "wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={} params={:?} \
+             attachment_pairs={}",
+            handle.rid(),
+            parameters,
+            attachment.as_ref().map_or(0, |p| p.len()),
+        ),
+        Err(e) => log::warn!("wz-ap-demo: --query on keyexpr='{keyexpr}' was refused: {e}"),
+    }
+}
+
+/// The `body=` of a `REPLY RECEIVED` line: the kind, and the payload or the
+/// error's encoding and payload.
+fn reply_body_text(reply: &dyn ReplyView) -> String {
+    match reply.kind() {
+        ReplyKind::Put => format!("Put payload={:?}", String::from_utf8_lossy(reply.payload())),
+        ReplyKind::Del => "Del".to_string(),
+        ReplyKind::Err => format!(
+            "Err encoding={:?} payload={:?}",
+            reply.err_encoding(),
+            String::from_utf8_lossy(reply.payload()),
+        ),
+    }
 }
 
 /// R311y445 — `--group-join`: join a zenoh-ext GROUP as a member and hold the
@@ -1054,9 +1061,13 @@ async fn publish_cycle<T>(
 /// — so the DEFAULT build runs these, rather than only `preset-ap-full`. A
 /// residual about a path nobody exercises must not be closed by assertions
 /// nobody runs.
+///
+/// The metadata asserted is `QueryOptions::query_metadata`, which is what
+/// `Session::query` puts on the wire for these options.
 #[cfg(all(test, feature = "query-consolidation"))]
 mod query_metadata_tests {
-    use super::query_metadata;
+    use super::query_options;
+    use wz::runtime_tokio::locality::Locality;
     // Through `session_glue`, which is where this crate already reaches for the
     // query types -- not a second import path for one enum.
     use wz::runtime_tokio::session_glue::ConsolidationMode;
@@ -1069,7 +1080,7 @@ mod query_metadata_tests {
     /// resolution must not produce here.
     #[test]
     fn a_query_naming_no_mode_transmits_latest() {
-        let meta = query_metadata(None, None);
+        let meta = query_options(None, 0).query_metadata();
         assert_eq!(
             meta.consolidation,
             Some(ConsolidationMode::Latest),
@@ -1087,7 +1098,7 @@ mod query_metadata_tests {
     /// on the common path and silently destroy this one.
     #[test]
     fn a_time_range_selector_transmits_none() {
-        let meta = query_metadata(Some("_time=[now(-1h)..now()]"), None);
+        let meta = query_options(Some("_time=[now(-1h)..now()]"), 0).query_metadata();
         assert_eq!(
             meta.consolidation,
             Some(ConsolidationMode::None),
@@ -1101,19 +1112,23 @@ mod query_metadata_tests {
     /// parameter string would satisfy that one and fail this.
     #[test]
     fn an_ordinary_selector_still_transmits_latest() {
-        let meta = query_metadata(Some("_sn=3..9"), None);
+        let meta = query_options(Some("_sn=3..9"), 0).query_metadata();
         assert_eq!(meta.consolidation, Some(ConsolidationMode::Latest));
     }
 
-    /// The other slots survive the extraction.
+    /// The query asks the peer alone, carries its selector, and consolidates
+    /// what it receives the way it told the peer to.
     ///
-    /// It moved a struct literal into a function, and a field dropped in that
-    /// move would be invisible to the three assertions above.
+    /// The last is what the application path adds: the old emit sent LATEST
+    /// and delivered every reply as it came.
     #[test]
-    fn the_other_slots_are_unchanged_by_the_extraction() {
-        let meta = query_metadata(Some("_sn=3..9"), Some(vec![7, 8, 9]));
+    fn the_query_asks_the_peer_alone_and_carries_its_selector() {
+        let opts = query_options(Some("_sn=3..9"), 0);
+        assert_eq!(opts.allowed_destination, Locality::Remote);
+        assert_eq!(opts.resolved_consolidation(), ConsolidationMode::Latest);
+        let meta = opts.query_metadata();
         assert_eq!(meta.parameters.as_deref(), Some(b"_sn=3..9".as_slice()));
-        assert_eq!(meta.attachment.as_deref(), Some([7u8, 8, 9].as_slice()));
+        assert!(meta.attachment.is_none());
         assert!(meta.target.is_none());
         assert!(meta.value.is_none());
     }

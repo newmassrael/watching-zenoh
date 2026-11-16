@@ -3631,9 +3631,11 @@ fn a_mode_dependent_endpoint_table_binds_the_same_row_for_zenohd_and_for_wz() {
     /// reachability advertisement is about locators a node publishes.
     const REACHABLE: &str = LISTENER_UP_MARKER;
 
-    // `pick_pair` and not two `pick`s: the reservation mutex is non-reentrant,
-    // and the pair form is what guarantees the two ports differ.
-    let (reservation, peer_port) = PortReservation::pick_pair();
+    // One reservation and not two `pick`s: the reservation mutex is
+    // non-reentrant, and a port the reservation hands out is guaranteed to
+    // differ from the one it carries.
+    let reservation = PortReservation::pick();
+    let peer_port = reservation.next_port();
     let router_port = reservation.port();
     let template = format!(
         r#"{{

@@ -384,7 +384,8 @@ fn alone_rows() -> Vec<Alone> {
 
 /// One row on one library.
 fn run_alone(built: &Built, spec: &Alone, n: usize) -> String {
-    let (reservation, refused_port) = PortReservation::pick_pair();
+    let reservation = PortReservation::pick();
+    let refused_port = reservation.next_port();
     let key = format!("wz/roles/alone/{n}");
     let mut node = Node::start(
         built,
@@ -527,7 +528,8 @@ fn a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_an
 
 /// Two peers that each listen on their own port and dial the other's. Returns both rows.
 fn mutual_dial(a: &Built, b: &Built, key: &str) -> (String, String) {
-    let (reservation, b_port) = PortReservation::pick_pair();
+    let reservation = PortReservation::pick();
+    let b_port = reservation.next_port();
     let a_port = reservation.port();
     let mut node_a = Node::start(
         a,

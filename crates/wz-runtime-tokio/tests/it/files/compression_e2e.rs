@@ -30,6 +30,9 @@
 //!      the COMPRESSION bit set (0x01); the no-offer CONTROL ships a bare
 //!      T_MID_FRAME (0x05). Plus the negotiation `&=`: a one-sided offer leaves
 //!      BOTH sides uncompressed.
+//!
+//! And where the offer rides: `the_compression_offer_sits_in_upstreams_init_encode_order`
+//! reads both Init chains off the wire and holds them to zenoh's encode order.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -51,6 +54,7 @@ use wz_runtime_tokio_test_support::{
 use wz_session_core::compression::{
     decompress_batch, BATCH_HEADER_BYTES, BATCH_HEADER_COMPRESSION,
 };
+use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -296,4 +300,46 @@ async fn compression_put_rides_a_batch_header_not_a_bare_frame() {
         !one.resp_actions.is_compression(),
         "the responder never offered, so it stays uncompressed"
     );
+}
+
+/// Test 3 — the compression entry rides the Init chains where zenoh writes
+/// it. zenoh's InitSyn and InitAck encoders write qos, shm, auth, mlink,
+/// lowlatency, compression, patch, region in that order
+/// (`commons/zenoh-codec/src/transport/init.rs` @ `// Extensions`), ascending
+/// id, so the 0x6 compression offer comes BEFORE the 0x7 patch entry. wz seeds
+/// the patch entry when the session is built and stages compression later, so
+/// a chain kept in staging order would put 0x7 first on both messages.
+///
+/// Read off the emitted bytes with the production parser, so the claim is
+/// about the wire and not the staged slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_compression_offer_sits_in_upstreams_init_encode_order() {
+    let offer = |a: &Arc<SessionLinkActions>| {
+        a.set_compression_offer(true);
+    };
+    let both = establish_capability_pair(true, true, offer).await;
+    for (message, driver, want_ack) in [
+        ("InitSyn", &both.init_driver, false),
+        ("InitAck", &both.resp_driver, true),
+    ] {
+        let ids: Vec<u8> = driver
+            .snapshot()
+            .sends
+            .iter()
+            .find_map(|(bytes, _)| match parse_inbound(bytes) {
+                Ok(InboundFrame::Init {
+                    is_ack, extensions, ..
+                }) if is_ack == want_ack => Some(extensions.iter().map(|e| e.ext_id()).collect()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the {message} was sent"));
+        assert!(
+            ids.contains(&0x06) && ids.contains(&0x07),
+            "the {message} carries the compression offer and the patch level: {ids:?}"
+        );
+        assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "the {message} extensions are in ascending id order, as zenoh writes them: {ids:?}"
+        );
+    }
 }

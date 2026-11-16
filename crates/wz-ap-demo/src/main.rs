@@ -2192,10 +2192,10 @@ fn demo_main() -> ExitCode {
     // installing an unreachable callback.
     let on_query_reply_log = rest.iter().any(|a| a == "--on-query-reply-log");
     let on_query_final_log = rest.iter().any(|a| a == "--on-query-final-log");
-    // R263 — optional --query-timeout-ms <N> sets the ReplyRegistry
-    // pending-entry deadline so a peer that never replies surfaces
-    // the demo's on_final callback within N + driver-loop-tick wall
-    // time. Default 0 = no timeout (pre-R263 behaviour preserved).
+    // R263 — optional --query-timeout-ms <N> is the outbound Query's
+    // timeout, so a peer that never replies surfaces the demo's on_final
+    // callback within N + driver-loop-tick wall time. Default 0 is the
+    // library default an application query gets.
     let query_timeout_ms_opt = parse_pair(rest, "--query-timeout-ms");
     let query_timeout_ms: u32 = match query_timeout_ms_opt {
         Some(s) => match s.parse::<u32>() {

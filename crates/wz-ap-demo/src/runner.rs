@@ -80,8 +80,6 @@ use wz::runtime_tokio::reconnect::{
     reconnect_endpoint, ReconnectDriveOutcome, ReconnectPolicy, ReconnectTeardown,
     ReconnectingSession,
 };
-use wz::runtime_tokio::reply_acceptance::{ReplyAcceptance, ReplyKeyExpr};
-use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::runtime_impl::TokioJoinHandle;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_pool::PartitionedRuntime;
@@ -133,7 +131,7 @@ use crate::args::{
     TransportTuning,
 };
 use crate::shutdown::shutdown_signal;
-use crate::tasks::{liveliness_get_task, publisher_task, query_task, QUERY_RID};
+use crate::tasks::{liveliness_get_task, publisher_task, query_task, QueryAnswerLog};
 use crate::teardown;
 
 /// RAII keepers for the local Session-level declarations
@@ -1536,12 +1534,12 @@ async fn establish_link(
 }
 
 /// Step 3 — install the observer-side callbacks that run BEFORE
-/// `drive_session` starts: the three Remote* registries + the
-/// ReplyRegistry pending-entry for the outbound Query (when the
-/// caller asked for `--on-query-reply-log` / `--on-query-final-log`).
-/// The local Session-side handles (Subscriber / Queryable /
-/// LivelinessSubscriber) belong to [`install_session_handles`]; that
-/// split keeps each sub-fn focused on one registry layer.
+/// `drive_session` starts: the three Remote* registries. The outbound
+/// Query's pending entry is not here: `--query` asks through
+/// `Session::query`, which registers it ([`query_task`]). The local
+/// Session-side handles (Subscriber / Queryable / LivelinessSubscriber)
+/// belong to [`install_session_handles`]; that split keeps each sub-fn
+/// focused on one registry layer.
 ///
 /// R235 — `observer` is `Arc<Mutex<ApplicationLayerObserver>>`. The
 /// callback installs in this function run inside one lock scope so
@@ -1550,17 +1548,9 @@ async fn establish_link(
 /// on each dispatch / loopback fire (mutex contention is negligible
 /// — the critical section is the per-event fan-out which is
 /// already the serial bottleneck in the registry model).
-///
-/// R263 — `query_timeout_ms > 0` computes an absolute deadline
-/// against the shared `session_clock` so the R264 sweep_task (in
-/// the drive loop) can compare epoch-compatibly. `timeout_ms == 0`
-/// registers with `None`, preserving pre-R263 behaviour.
 fn install_observer_callbacks(
     observer: &Arc<wz::runtime_tokio::sync::PlainMutex<ApplicationLayerObserver>>,
-    query_spec: Option<&crate::args::QueryEmitSpec>,
     remote_log_spec: &RemoteLogSpec,
-    reply_log_spec: &ReplyConsumerSpec,
-    session_clock: TokioTime,
 ) {
     let mut observer_lock = observer.lock().expect("observer mutex poisoned");
 
@@ -1612,66 +1602,6 @@ fn install_observer_callbacks(
             .on_queryable_undeclared(|id| {
                 log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
             });
-    }
-    if let Some(spec) =
-        query_spec.filter(|_| reply_log_spec.on_query_reply || reply_log_spec.on_query_final)
-    {
-        let on_reply = reply_log_spec.on_query_reply;
-        let on_final = reply_log_spec.on_query_final;
-        let deadline_ms = (reply_log_spec.query_timeout_ms > 0)
-            .then(|| session_clock.now_monotonic_ms() + reply_log_spec.query_timeout_ms as u64);
-        // R311y833 — the demo registers its pending entry by hand rather than
-        // through `Session::query`, so it states the same acceptance policy
-        // that method derives: gate on the keyexpr the Query actually carries,
-        // unless `--query-params` carries the `_anyke` opt-out. Deriving it
-        // from the SAME spec the outbound Query is built from is what keeps the
-        // demo an honest interop witness — a demo that accepted replies its own
-        // Query forbade would report interop that a real zenoh client does not
-        // have.
-        let accept = ReplyAcceptance::for_query(
-            spec.keyexpr.as_str(),
-            spec.parameters
-                .as_deref()
-                .map_or(ReplyKeyExpr::MatchingQuery, ReplyKeyExpr::from_parameters),
-        );
-        observer_lock.replies.register(
-            QUERY_RID,
-            // R239 — wz-ap-demo issues an outbound Request(Query)
-            // via SessionLinkActions::send_request_query (wire-
-            // only, no loopback fan), so the pending entry expects
-            // exactly one Final from the peer.
-            1,
-            deadline_ms,
-            accept,
-            move |reply| {
-                if !on_reply {
-                    return;
-                }
-                let body_text = match reply.kind() {
-                    ReplyKind::Put => {
-                        format!("Put payload={:?}", String::from_utf8_lossy(reply.payload()))
-                    }
-                    ReplyKind::Del => "Del".to_string(),
-                    ReplyKind::Err => format!(
-                        "Err encoding={:?} payload={:?}",
-                        reply.err_encoding(),
-                        String::from_utf8_lossy(reply.payload()),
-                    ),
-                };
-                log::info!(
-                    "wz-ap-demo: REPLY RECEIVED rid={} keyexpr='{}' body={}",
-                    reply.rid(),
-                    reply.keyexpr(),
-                    body_text,
-                );
-            },
-            move |rid| {
-                if !on_final {
-                    return;
-                }
-                log::info!("wz-ap-demo: FINAL RECEIVED rid={rid}");
-            },
-        );
     }
     if remote_log_spec.on_remote_liveliness {
         observer_lock.liveliness.on_token_declared(|decl| {
@@ -2356,6 +2286,9 @@ fn install_session_handles(
 struct BackgroundTaskSpecs {
     publisher: Option<PublisherSpec>,
     query: Option<QueryEmitSpec>,
+    /// How `query`'s answers are reported and waited for; read only when
+    /// `query` is set.
+    query_answers: QueryAnswerLog,
     liveliness_get: Option<LivelinessGetSpec>,
     advanced_publish: Option<crate::args::AdvancedPublishSpec>,
     group_join: Option<crate::args::GroupJoinSpec>,
@@ -2363,7 +2296,6 @@ struct BackgroundTaskSpecs {
 
 fn spawn_background_tasks(
     session: &TokioSession,
-    actions: &Arc<SessionLinkActions>,
     specs: BackgroundTaskSpecs,
     session_clock: TokioTime,
     long_lived: bool,
@@ -2371,6 +2303,7 @@ fn spawn_background_tasks(
     let BackgroundTaskSpecs {
         publisher: publisher_spec,
         query: query_spec,
+        query_answers,
         liveliness_get: liveliness_get_spec,
         advanced_publish: advanced_publish_spec,
         group_join: group_join_spec,
@@ -2388,8 +2321,13 @@ fn spawn_background_tasks(
     });
 
     let query_handle = query_spec.map(|spec| {
-        let actions_for_query = actions.clone();
-        PartitionedRuntime::APPLICATION.spawn(query_task(actions_for_query, spec, session_clock))
+        let session_for_query = session.clone();
+        PartitionedRuntime::APPLICATION.spawn(query_task(
+            session_for_query,
+            spec,
+            query_answers,
+            session_clock,
+        ))
     });
 
     let liveliness_get_handle = liveliness_get_spec.map(|spec| {
@@ -3437,13 +3375,7 @@ pub(crate) async fn run_demo(
     let observer = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
         ApplicationLayerObserver::new(),
     ));
-    install_observer_callbacks(
-        &observer,
-        query_spec.as_ref(),
-        &remote_log_spec,
-        &reply_log_spec,
-        session_clock,
-    );
+    install_observer_callbacks(&observer, &remote_log_spec);
 
     // ── Step 4: bundle actions + observer into a Session and spawn the
     //          Established-gated background tasks. Each task polls
@@ -3561,10 +3493,14 @@ pub(crate) async fn run_demo(
             group_join_handle: _group_join_handle,
     } = spawn_background_tasks(
         &session,
-        &actions,
         BackgroundTaskSpecs {
             publisher: publisher_spec,
             query: query_spec,
+            query_answers: QueryAnswerLog {
+                replies: reply_log_spec.on_query_reply,
+                finals: reply_log_spec.on_query_final,
+                timeout_ms: reply_log_spec.query_timeout_ms,
+            },
             liveliness_get: liveliness_get_spec,
             advanced_publish: declare_spec.advanced_publish,
             group_join: declare_spec.group_join,

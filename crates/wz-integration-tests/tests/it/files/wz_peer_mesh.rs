@@ -40,12 +40,11 @@ use wz_integration_tests::common::{
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_holds_a_dialed_and_an_accepted_face() {
     let demo = wz_ap_demo_binary();
-    // TWO ports under ONE lock (pick_pair): the guard carries port_b, plus a
-    // bare port_a. Calling `pick()` twice on this thread would re-enter the
-    // process-global port mutex and DEADLOCK (the reservation holds the guard
-    // for its lifetime); `pick_pair` is the two-port API. Held until BOTH B and
-    // A have bound, then dropped for parallel Layer E tests.
-    let (port_res, port_a) = PortReservation::pick_pair();
+    // TWO ports under ONE reservation: it carries port_b and hands out port_a.
+    // Held until BOTH B and A have bound, then dropped for parallel Layer E
+    // tests.
+    let port_res = PortReservation::pick();
+    let port_a = port_res.next_port();
     let port_b = port_res.port();
     let addr_b = format!("127.0.0.1:{port_b}");
     let addr_a = format!("127.0.0.1:{port_a}");

@@ -272,7 +272,8 @@ fn run_both_arms(include: &Path) -> (String, String) {
     let run = |exe: &Path, libdir: &Path| -> (bool, String) {
         // ONE acquisition for both: a second `pick` on this thread would re-enter
         // the process-global lock and block until the job was killed.
-        let (first, second) = PortReservation::pick_pair();
+        let first = PortReservation::pick();
+        let second = first.next_port();
         let out = Command::new(exe)
             .arg(format!("tcp/127.0.0.1:{}", first.port()))
             .arg(format!("tcp/127.0.0.1:{second}"))

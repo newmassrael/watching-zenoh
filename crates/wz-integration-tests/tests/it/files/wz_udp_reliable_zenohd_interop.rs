@@ -169,7 +169,8 @@ fn wz_udp_reliable_acceptor_receives_pico_put_via_zenohd() {
 fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp_reliable() {
     let demo = demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let (tcp_res, udp_port) = PortReservation::pick_pair();
+    let tcp_res = PortReservation::pick();
+    let udp_port = tcp_res.next_port();
     let tcp_port = tcp_res.port();
     let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let publish_key = "demo/udprel";

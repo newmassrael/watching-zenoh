@@ -323,7 +323,11 @@ fn run_both_arms_with(
 
     let run = |arm: &str, exe: &Path, libdir: &Path| -> (bool, String) {
         // ONE reservation for all of them: picking `ports` times on a thread deadlocks.
-        let (_reservation, reserved) = PortReservation::pick_many(ports);
+        assert!(ports > 0, "a probe run takes at least one port");
+        let reservation = PortReservation::pick();
+        let reserved: Vec<u16> = std::iter::once(reservation.port())
+            .chain((1..ports).map(|_| reservation.next_port()))
+            .collect();
         let out = Command::new(exe)
             .args(leading)
             .args(reserved.iter().map(|port| format!("tcp/127.0.0.1:{port}")))

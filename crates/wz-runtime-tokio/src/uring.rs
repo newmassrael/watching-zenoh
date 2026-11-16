@@ -1090,31 +1090,64 @@ mod tests {
         );
     }
 
+    /// How many times the child measures a ceiling and takes its first
+    /// registration under it before it calls the host too busy to measure.
+    const MEASURE_ATTEMPTS: usize = 5;
+
     /// The child half of the test above: measure the tightest ceiling that
     /// still admits one registration, then register twice with a drop between.
+    ///
+    /// The first registration is the measurement's LAST PROBE, not a step
+    /// after it. The charge the ceiling was measured against is shared by
+    /// every process of this UID, so another one locking a few pages between
+    /// the search and the first registration leaves the ceiling below what
+    /// the first now needs; that refusal says nothing about the release this
+    /// test grades (hosted run 35825307894 died there). A refused first
+    /// registration therefore sends the child back to measuring, and only a
+    /// ceiling a registration of the subject was actually admitted at is used
+    /// for the second. The ceiling is never raised: a looser one would admit
+    /// the second registration beside a live first, and the reverted `Drop`
+    /// would pass.
     fn reclaim_child_body() {
         let (soft, hard) = memlock_limit().expect("RLIMIT_MEMLOCK must be readable");
         let upper = search_upper_bound().min(soft);
         let mut arena = LinkRxArena::new();
 
-        let ceiling = smallest_admitting_ceiling(hard, upper, &mut arena).unwrap_or_else(|| {
-            panic!(
-                "no registration fits even at {upper} bytes (this process's \
-                 ceiling is {soft}): the shared locked-memory charge is \
-                 already past what this pool needs, so nothing here is \
-                 measurable"
-            )
-        });
-        assert!(
-            set_memlock_soft(ceiling, hard),
-            "pinning the ceiling at the measured {ceiling} must succeed"
-        );
-
+        let mut admitted = None;
+        let mut refusals = Vec::new();
+        for _ in 0..MEASURE_ATTEMPTS {
+            let ceiling =
+                smallest_admitting_ceiling(hard, upper, &mut arena).unwrap_or_else(|| {
+                    panic!(
+                        "no registration fits even at {upper} bytes (this process's \
+                     ceiling is {soft}): the shared locked-memory charge is \
+                     already past what this pool needs, so nothing here is \
+                     measurable"
+                    )
+                });
+            assert!(
+                set_memlock_soft(ceiling, hard),
+                "pinning the ceiling at the measured {ceiling} must succeed"
+            );
+            match FixedSlotRing::register(&mut arena, 8) {
+                Ok(first) => {
+                    admitted = Some(first);
+                    break;
+                }
+                Err(e) => refusals.push(format!("{ceiling}: {e}")),
+            }
+        }
         // AT THIS CEILING THE SLACK IS UNDER ONE PAGE, so a second LIVE
         // registration cannot fit — which is what makes the assertion below an
         // assertion about the release and not about the host's generosity.
-        let first = FixedSlotRing::register(&mut arena, 8)
-            .expect("one registration must fit the ceiling just measured for one");
+        let first = admitted.unwrap_or_else(|| {
+            panic!(
+                "the first registration was refused at every one of \
+                 {MEASURE_ATTEMPTS} freshly measured ceilings ({refusals:?}): \
+                 another process of this UID keeps moving the shared charge, \
+                 so the release cannot be graded on this host now"
+            )
+        });
         assert_eq!(first.registered(), SLOT_COUNT);
         drop(first);
 
