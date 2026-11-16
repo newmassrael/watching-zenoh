@@ -461,6 +461,14 @@ fn main() {
         .write_to_file(out_dir.join("bindings.rs"))
         .expect("write OUT_DIR/bindings.rs");
 
+    // Which libclang generated these bindings, as the loaded library reports
+    // itself. A hosted runner and a developer machine bind different ones, so a
+    // green on one says nothing about the other unless each records its own.
+    // Cargo ignores a stdout line that does not start with `cargo:` and keeps it
+    // in this build's `output` file, which Layer G reads beside its verdict.
+    let libclang = bindgen::clang_version().full;
+    println!("wz-libclang: {libclang}");
+
     // R311az-3b-ii — propagate real-build mode to dependents. See the
     // stub branch above for the rationale; same metadata key, value
     // `=1` so direct dependents flip `lwip_real_build` on.

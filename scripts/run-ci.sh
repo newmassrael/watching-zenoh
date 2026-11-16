@@ -18935,6 +18935,21 @@ layer_f_codec_footprint() {
     bash scripts/measure-codec-footprint.sh || return 1
 }
 
+# Open-debt item 549 — which libclang bound G.6's bindings on THIS host. A
+# hosted runner and a developer machine bind different ones, so the same G.6
+# verdict is two measurements; each arm now prints its own. The value is what
+# the loaded library reports (`bindgen::clang_version()` in lwip-sys's build
+# script, which keeps it in the build's `output` file, so a warm build that
+# does not rerun the script still has it). A record, not a verdict.
+_g6_libclang_record() {
+    local t="$1" outputs=() seen
+    shopt -s nullglob
+    outputs=("$WZ_ARTIFACTS"/crates/target/"$t"/debug/build/lwip-sys-*/output)
+    shopt -u nullglob
+    seen="$(sed -n 's/^wz-libclang: //p' "${outputs[@]}" /dev/null | sort -u | paste -sd';' -)"
+    echo "  G.6 libclang $t: ${seen:-not recorded (no lwip-sys build output for $t names one)}"
+}
+
 # ─── Layer G — cross-compile cortex-m wz-runtime-core lib build ────
 #
 # Default gate (R311pt — opt-in axis retired). Phase W mechanical
@@ -19130,8 +19145,10 @@ layer_g_cross_compile_cortex_m() {
                     --target "$t" --no-default-features \
                     --features runtime-coop --quiet); then
             echo "  G.6 cross-real lwip-sys $t OK"
+            _g6_libclang_record "$t"
         else
             echo "  G.6 cross-real lwip-sys $t FAIL" >&2
+            _g6_libclang_record "$t"
             fail=1
         fi
         # G.7 (R311ih) static-scouting synth on the MCU profile. Proves
