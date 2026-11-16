@@ -2120,10 +2120,19 @@ impl ZenohNodeConfig {
         );
         // Item 751 — `gateway.south`, in `DEFAULT_CONFIG.json5`'s order (after
         // `timestamping`, before `transport`), so a partition survives a round
-        // trip through this emitter.
-        out.push_str(" },\n  \"gateway\": { \"south\": ");
-        out.push_str(&gateway_south_json(&self.gateway_south));
-        out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
+        // trip through this emitter. A build without the region hats reads the `auto` preset
+        // without naming it, so there the preset is left unstated, as nothing wz emits may be a
+        // key it cannot read back; a partition is written in every build, for that build's
+        // reader to refuse rather than this emitter to drop.
+        out.push_str(" }");
+        if cfg!(feature = "routing-router-hat")
+            || !matches!(self.gateway_south, SouthPartition::Auto)
+        {
+            out.push_str(",\n  \"gateway\": { \"south\": ");
+            out.push_str(&gateway_south_json(&self.gateway_south));
+            out.push_str(" }");
+        }
+        out.push_str(",\n  \"transport\": {\n    \"unicast\": {\n");
         let _ = writeln!(out, "      \"open_timeout\": {},", self.open_timeout_ms);
         let _ = writeln!(out, "      \"accept_timeout\": {},", self.accept_timeout_ms);
         let _ = writeln!(out, "      \"accept_pending\": {},", self.accept_pending);
@@ -8811,6 +8820,49 @@ mod tests {
         assert_eq!(again.config.gateway_south, read.config.gateway_south);
         // A document the reader refuses is refused whole, not read as the preset.
         assert!(ZenohNodeConfig::from_json5(r#"{ gateway: { south: 7 } }"#).is_err());
+    }
+
+    /// The emitter states `gateway/south` where the build reads it back: the preset only under
+    /// the region hats, and a partition in every build, which a build without them refuses by
+    /// the key's name rather than reading it as the preset.
+    #[test]
+    fn the_south_partition_is_emitted_where_the_build_reads_it() {
+        let preset = ZenohNodeConfig::default().to_json5();
+        let document = wz_session_core::json5::parse(&preset).expect("the emitter writes JSON5");
+        assert_eq!(
+            document.get("gateway").is_some(),
+            cfg!(feature = "routing-router-hat"),
+            "{preset}"
+        );
+        let read = ZenohNodeConfig::from_json5(&preset).expect("the preset reads back");
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+
+        let partitioned = ZenohNodeConfig {
+            gateway_south: south(r#"[{ filters: [{ modes: ["peer"] }] }]"#).expect("a partition"),
+            ..ZenohNodeConfig::default()
+        };
+        let written = partitioned.to_json5();
+        assert!(written.contains("\"gateway\""), "{written}");
+        let again = ZenohNodeConfig::from_json5(&written);
+        #[cfg(feature = "routing-router-hat")]
+        assert_eq!(
+            again
+                .expect("the partition reads back")
+                .config
+                .gateway_south,
+            partitioned.gateway_south
+        );
+        #[cfg(not(feature = "routing-router-hat"))]
+        assert!(
+            matches!(
+                again,
+                Err(ConfigIngestError::NotInBuild {
+                    path: "gateway/south",
+                    ..
+                })
+            ),
+            "{again:?}"
+        );
     }
 
     /// `transport/multicast/compression/enabled` reaches the config's field, is named and not
