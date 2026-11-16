@@ -4920,7 +4920,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let wait_us = self.params.tx_queue.wait_before_drop_us;
         let granted = self.with_conduit_link(wire_reliability, route, |link| {
             link.link_driver()
-                .block_first_acquire(qos.priority(), wait_us)
+                .block_first_acquire_for(wire_reliability, qos.priority(), wait_us)
         });
         if !granted {
             #[cfg(feature = "transport-stats")]
@@ -4994,8 +4994,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
             }),
         );
-        self.with_conduit_link(Reliability::from_reliable_bool(reliable), route, |link| {
-            link.link_driver().block_first_release(qos.priority())
+        let class = Reliability::from_reliable_bool(reliable);
+        self.with_conduit_link(class, route, |link| {
+            link.link_driver()
+                .block_first_release_for(class, qos.priority())
         });
     }
 
@@ -5180,7 +5182,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // only a control frame stamps here, which is what keeps the emitter to one keepalive
         // per interval while the writer is behind, and a data frame waiting in the queue is
         // not activity the peer can hear.
-        if priority == Priority::Control || !link.link_driver().reports_wire_writes() {
+        //
+        // A frame of a class the link carries apart ([`BoxedLinkDriver::carries_apart`]) is
+        // not the link's line speaking: the peer leases that carriage on its own, the driver
+        // reports its writes per class, and a stamp here would hold the link's own keepalive
+        // back while its streams are silent.
+        let driver = link.link_driver();
+        if !driver.carries_apart(reliability)
+            && (priority == Priority::Control || !driver.reports_wire_writes())
+        {
             R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
         }
 
@@ -10145,8 +10155,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 return false;
             }
             let mut left = deadline.get();
+            // The room of the queue this message's class leaves by: a best-effort message on a
+            // link that carries it apart never waits for its streams' room.
             let answer = self.with_conduit_link(wire_reliability, priority, |link| {
-                link.link_driver().wait_for_room(priority, left.ask())
+                link.link_driver()
+                    .wait_for_room_for(wire_reliability, priority, left.ask())
             });
             left.spend(answer.waited_us);
             deadline.set(left);
@@ -10881,7 +10894,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // congestion drop.
             if emitted > 0 {
                 let answer = self.with_conduit_link(reliability, priority, |link| {
-                    link.link_driver().wait_for_room(priority, deadline.ask())
+                    link.link_driver()
+                        .wait_for_room_for(reliability, priority, deadline.ask())
                 });
                 deadline.spend(answer.waited_us);
                 if answer.room == crate::link::LinkRoom::Congested {
@@ -11721,7 +11735,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let priority = self.conduit_priority(priority);
         let reliability = Reliability::from_reliable_bool(reliable);
         Ok(self.with_conduit_link(reliability, priority, |link| {
-            link.link_driver().try_reserve_room(priority)
+            link.link_driver()
+                .try_reserve_room_for(reliability, priority)
         }))
     }
 
@@ -14962,6 +14977,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // path ([`BoxedLinkDriver::send_urgent`]).
             self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
+    }
+
+    /// [`Self::send_keep_alive`] for the carriage that frames of `class` leave by, on a link
+    /// that carries that class apart ([`BoxedLinkDriver::carries_apart`]): upstream's companion
+    /// link writes its own KeepAlive when its own tracker runs out
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `let message: TransportMessage = KeepAlive.into();`), whatever its main link carries.
+    /// The open batches are not drained first: the keepalive carries no sequence number, and
+    /// the frames it may pass are the other carriage's or the companion's own best-effort ones.
+    #[cfg(feature = "transport-keepalive")]
+    pub(crate) fn send_keep_alive_apart(&self, class: Reliability) {
+        R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
+        let bytes = crate::handshake_encode::encode_keep_alive();
+        self.send_wire_urgent_this_link(&bytes, class);
     }
 
     /// A4 — record one declaration for replay and send it, as ONE step: `entry` goes at the end of

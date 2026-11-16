@@ -821,6 +821,38 @@ pub trait BoxedLinkDriver {
         Some(RoomPermit::trivial())
     }
 
+    /// [`Self::wait_for_room`] for a frame of one reliability class: the room of
+    /// the queue that frame leaves by. A link that carries best-effort frames
+    /// apart ([`Self::carries_apart`]) answers for that carriage and not for its
+    /// streams' queue, as upstream's companion link has a transmission pipeline
+    /// of its own (`io/zenoh-transport/src/unicast/universal/transport.rs` @
+    /// `associated_link.map(|l| TransportLinkUnicastUniversal::new(self, l, &self.priority_tx));`).
+    /// The session asks this one, since it always knows the class.
+    ///
+    /// The default is the link with one queue for both classes. A driver that
+    /// WRAPS another must forward this.
+    fn wait_for_room_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+        wait: RoomWait,
+    ) -> RoomAnswer {
+        let _ = class;
+        self.wait_for_room(priority, wait)
+    }
+
+    /// [`Self::try_reserve_room`] for a frame of one reliability class, as
+    /// [`Self::wait_for_room_for`] is for [`Self::wait_for_room`]. A driver that
+    /// WRAPS another must forward this.
+    fn try_reserve_room_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+    ) -> Option<RoomPermit> {
+        let _ = class;
+        self.try_reserve_room(priority)
+    }
+
     /// R2952 (open-debt item 835) — take this link's block-first slot for
     /// `priority`, waiting up to `wait_us` for it: zenoh's per-link,
     /// per-priority `block_first_waiters`
@@ -842,6 +874,29 @@ pub trait BoxedLinkDriver {
     /// `block_first_notifier.notify()` after the background push.
     fn block_first_release(&self, priority: crate::qos::Priority) {
         let _ = priority;
+    }
+
+    /// [`Self::block_first_acquire`] for a message of one reliability class: the
+    /// slot of the link that message leaves by, as upstream keeps one set of
+    /// waiters per transport link, the companion's apart from its main link's
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @
+    /// `if transport_link.block_first_waiters[priority as usize]`). A driver that
+    /// WRAPS another must forward this and [`Self::block_first_release_for`].
+    fn block_first_acquire_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+        wait_us: u64,
+    ) -> bool {
+        let _ = class;
+        self.block_first_acquire(priority, wait_us)
+    }
+
+    /// [`Self::block_first_release`] for the class [`Self::block_first_acquire_for`]
+    /// was asked for.
+    fn block_first_release_for(&self, class: Reliability, priority: crate::qos::Priority) {
+        let _ = class;
+        self.block_first_release(priority)
     }
 
     /// R2924 — give the link's outbound queue the shape its established
@@ -918,6 +973,9 @@ pub trait BoxedLinkDriver {
     /// Only for a message that may overtake queued frames: a Frame or Fragment carries a
     /// sequence number the receiver checks, and reordering one is a lost message.
     ///
+    /// On a link that carries a class apart ([`Self::carries_apart`]), `reliability` names the
+    /// carriage the message goes on: the keepalive of that carriage is sent with its class.
+    ///
     /// The default is the driver with no queue to pass, where this is the send it always was.
     fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         self.send_prioritized(bytes, reliability, crate::qos::Priority::Control)
@@ -951,6 +1009,35 @@ pub trait BoxedLinkDriver {
     /// the hand-over stamp that overstates the line's activity.
     fn ms_since_wire_write(&self) -> Option<u64> {
         None
+    }
+
+    /// Whether frames of `class` leave by a carriage of their own that the peer
+    /// leases on its own: a QUIC link's datagram companion, which upstream runs
+    /// as a link with its own transmit task and keepalive
+    /// (`io/zenoh-transport/src/unicast/universal/transport.rs` @
+    /// `associated_link.start_tx(transport, al_consumer, keep_alive);`) and its
+    /// own receive lease, whose expiry ends the main link with it
+    /// (`io/zenoh-transport/src/unicast/universal/transport.rs` @
+    /// `// Associated link must also be closed. run both close calls, return whichever failed first`).
+    ///
+    /// The session keeps such a carriage alive by its own clock: it reads the
+    /// carriage's last write from [`Self::ms_since_wire_write_for`], sends it a
+    /// keepalive through [`Self::send_urgent`] with `class`, and does not count
+    /// its frames as the link's own line activity. The default is a link with one
+    /// carriage. A driver that WRAPS another must forward this.
+    fn carries_apart(&self, class: Reliability) -> bool {
+        let _ = class;
+        false
+    }
+
+    /// [`Self::ms_since_wire_write`] of the carriage that frames of `class`
+    /// leave by: on a link that carries `class` apart ([`Self::carries_apart`]),
+    /// how long ago that carriage last wrote, `None` before its first write.
+    /// The default is the link with one carriage. A driver that WRAPS another
+    /// must forward this.
+    fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
+        let _ = class;
+        self.ms_since_wire_write()
     }
 
     fn open_blocking(&self);

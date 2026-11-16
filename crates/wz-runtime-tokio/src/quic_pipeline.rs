@@ -31,7 +31,10 @@
 //! best-effort frame on a datagram and every other on the streams' queue, and
 //! the read driver reads the datagrams beside the streams. No second queue
 //! orders the datagrams: quinn takes one without waiting, and the session's
-//! conduits already hand frames over in priority order.
+//! conduits already hand frames over in priority order. A best-effort frame is
+//! never held back by the streams' room, and the session keeps the companion
+//! alive by its own last write and keepalive, since the peer leases it on its
+//! own (`BoxedLinkDriver::carries_apart`).
 //!
 //! ## QUIC endpoint lifecycle (the wz keep-alive wrinkle)
 //!
@@ -81,8 +84,8 @@ use crate::stream_link::{write_wire, writer_task, StreamReadDriver, StreamWriteD
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, RxStorage, TxFrame};
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkKind, LinkSendOutcome, LinkSubject,
-    RoomAnswer, RoomPermit, RoomWait, TxQueueShape, TxSlot, TxSlotGrant,
+    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkKind, LinkRoom, LinkSendOutcome,
+    LinkSubject, RoomAnswer, RoomPermit, RoomWait, TxQueueShape, TxSlot, TxSlotGrant,
 };
 use wz_session_core::locator::{QuicAlpn, QuicStreamChoice, QuicStreams};
 use wz_session_core::qos::Priority;
@@ -736,28 +739,30 @@ impl BoxedLinkDriver for QuicWriteDriver {
         self.streams.reports_wire_writes()
     }
 
-    // Each half is a link the peer leases on its own (upstream's companion has
-    // its RX lease and its keepalive), so the line is as idle as the half that
-    // spoke longest ago. A companion that has not spoken yet answers nothing,
-    // and the session then measures from its own stamps, as for a link that has
-    // written nothing.
     fn ms_since_wire_write(&self) -> Option<u64> {
-        let streams = self.streams.ms_since_wire_write()?;
-        match &self.datagrams {
-            None => Some(streams),
-            Some(companion) => Some(streams.max(companion.ms_since_send()?)),
+        self.streams.ms_since_wire_write()
+    }
+
+    // The companion is a line the peer leases on its own, so the session keeps it
+    // alive by its own last write.
+    fn carries_apart(&self, class: Reliability) -> bool {
+        self.companion_for(class).is_some()
+    }
+
+    fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
+        match self.companion_for(class) {
+            Some(companion) => companion.ms_since_send(),
+            None => self.streams.ms_since_wire_write(),
         }
     }
 
-    // A message that carries no sequence number, the keepalive, goes on the
-    // companion as well as on the streams: the peer's lease of the companion
-    // runs on what reaches it, and a peer whose companion hears nothing for a
-    // lease ends the pair.
+    // The class names the line: the companion's keepalive is sent with the
+    // best-effort class and goes on a datagram alone, every other urgent message
+    // on the streams.
     fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
-        let outcome = self.streams.send_urgent(bytes, reliability);
-        match &self.datagrams {
-            Some(companion) if matches!(outcome, LinkSendOutcome::Sent) => companion.send(bytes),
-            _ => outcome,
+        match self.companion_for(reliability) {
+            Some(companion) => companion.send(bytes),
+            None => self.streams.send_urgent(bytes, reliability),
         }
     }
 
@@ -791,6 +796,49 @@ impl BoxedLinkDriver for QuicWriteDriver {
 
     fn block_first_release(&self, priority: Priority) {
         self.streams.block_first_release(priority)
+    }
+
+    // A best-effort frame on the companion never waits for the streams' room:
+    // quinn takes a datagram without waiting, so the companion's queue, which
+    // upstream keeps as a pipeline of its own beside its main link's, is never
+    // full.
+    fn wait_for_room_for(
+        &self,
+        class: Reliability,
+        priority: Priority,
+        wait: RoomWait,
+    ) -> RoomAnswer {
+        match self.companion_for(class) {
+            Some(_) => RoomAnswer::at_once(LinkRoom::Free),
+            None => self.streams.wait_for_room(priority, wait),
+        }
+    }
+
+    fn try_reserve_room_for(&self, class: Reliability, priority: Priority) -> Option<RoomPermit> {
+        match self.companion_for(class) {
+            Some(_) => Some(RoomPermit::trivial()),
+            None => self.streams.try_reserve_room(priority),
+        }
+    }
+
+    // Upstream's block-first waiters are per link, and the companion's push never
+    // waits, so its slot is always free.
+    fn block_first_acquire_for(
+        &self,
+        class: Reliability,
+        priority: Priority,
+        wait_us: u64,
+    ) -> bool {
+        match self.companion_for(class) {
+            Some(_) => true,
+            None => self.streams.block_first_acquire(priority, wait_us),
+        }
+    }
+
+    fn block_first_release_for(&self, class: Reliability, priority: Priority) {
+        if self.companion_for(class).is_none() {
+            self.streams.block_first_release(priority)
+        }
     }
 
     fn shape_tx_queue(&self, shape: TxQueueShape) {

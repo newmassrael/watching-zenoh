@@ -3255,15 +3255,55 @@ pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
 /// FSM starts it on `Established` entry and stops it on the exit, so a
 /// session in `Closing` arms no keepalive wake on either drive loop and the
 /// tokio pacer ends.
+///
+/// On a link that carries best-effort frames apart
+/// ([`BoxedLinkDriver::carries_apart`]), the earlier of the link's own deadline
+/// and its companion's, each by its own clock.
 #[cfg(feature = "transport-keepalive")]
 pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
+    keepalive_deadlines(actions)?.earliest()
+}
+
+/// The keepalive deadlines of one link: its own, and, when it carries
+/// best-effort frames apart, its companion's, which the peer leases on its
+/// own. Upstream runs each as a link with its own transmit task, each of which
+/// writes a KeepAlive when ITS tracker runs out
+/// (`io/zenoh-transport/src/unicast/universal/transport.rs` @
+/// `associated_link.start_tx(transport, al_consumer, keep_alive);`), so the
+/// traffic of one never stands in for the other's keepalive.
+#[cfg(feature = "transport-keepalive")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeepaliveDeadlines {
+    /// The link's own: `None` before it has a baseline.
+    link: Option<u64>,
+    /// The companion's: `None` on a link without one.
+    companion: Option<u64>,
+}
+
+#[cfg(feature = "transport-keepalive")]
+impl KeepaliveDeadlines {
+    fn earliest(self) -> Option<u64> {
+        match (self.link, self.companion) {
+            (Some(link), Some(companion)) => Some(link.min(companion)),
+            (deadline, None) | (None, deadline) => deadline,
+        }
+    }
+}
+
+/// [`KeepaliveDeadlines`] of `actions`' link, `None` while its keepalive worker
+/// is not running.
+#[cfg(feature = "transport-keepalive")]
+fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> Option<KeepaliveDeadlines> {
     if !R::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed) {
         return None;
     }
     let outbound = R::with_mutex_mut(&actions.link.last_outbound_at, |g| *g);
     let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
+    let now = actions.clock.now_monotonic_ms();
     // A driver with a queue between hand-over and write reports when its writer last finished
     // a write, and that is when the line spoke (the stamp above then holds only the control
     // frames, which are the keepalives themselves). Folded in as a stamp on the session's
@@ -3272,12 +3312,25 @@ pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
     let written = if driver.reports_wire_writes() {
         driver
             .ms_since_wire_write()
-            .map(|ago| actions.clock.now_monotonic_ms().saturating_sub(ago))
+            .map(|ago| now.saturating_sub(ago))
     } else {
         None
     };
     let interval = actions.keepalive_interval_ms();
-    max_stamp(max_stamp(established, outbound), written).map(|b| b.saturating_add(interval))
+    let link =
+        max_stamp(max_stamp(established, outbound), written).map(|b| b.saturating_add(interval));
+    // The companion's line is its own last write and nothing the session stamps: its frames
+    // never stamp the link's (`emit_on_link`), and the link's never stand in for it.
+    let class = crate::reliability::Reliability::BestEffort;
+    let companion = if driver.carries_apart(class) {
+        let written = driver
+            .ms_since_wire_write_for(class)
+            .map(|ago| now.saturating_sub(ago));
+        max_stamp(established, written).map(|b| b.saturating_add(interval))
+    } else {
+        None
+    };
+    Some(KeepaliveDeadlines { link, companion })
 }
 
 /// R311kx — run one keepalive TX deadline check: when the link's keepalive
@@ -3294,6 +3347,10 @@ pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
 /// Shared by both drive loops (the AP `tokio::select!` sleep arm and the
 /// lwIP busy-poll compare), exactly as [`check_lease_deadline`] is. No
 /// FSM access — a KeepAlive emit is not a session-state trigger.
+///
+/// On a link that carries best-effort frames apart, the companion's deadline
+/// is checked as well, and its KeepAlive goes on the companion alone
+/// ([`BoxedLinkDriver::carries_apart`]).
 #[cfg(feature = "transport-keepalive")]
 pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
@@ -3303,15 +3360,29 @@ pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     if !R::with_mutex_mut(&actions.link.transport_available, |g| *g) {
         return K::Inactive;
     }
-    match keepalive_wake_deadline(actions) {
-        // The worker is not running: never started, or stopped by the
-        // machine's exit from Established.
-        None => K::Inactive,
-        Some(deadline_ms) if now_ms >= deadline_ms => {
-            actions.send_keep_alive();
-            K::Emitted
-        }
-        Some(_) => K::WithinInterval,
+    // `None`: the worker is not running, never started or stopped by the
+    // machine's exit from Established.
+    let Some(deadlines) = keepalive_deadlines(actions) else {
+        return K::Inactive;
+    };
+    if deadlines.earliest().is_none() {
+        return K::Inactive;
+    }
+    let due = |deadline: Option<u64>| deadline.is_some_and(|at| now_ms >= at);
+    let link_due = due(deadlines.link);
+    let companion_due = due(deadlines.companion);
+    if link_due {
+        actions.send_keep_alive();
+    }
+    // Each line by its own clock: the companion's keepalive goes when its own
+    // deadline passes, whether or not the link's did.
+    if companion_due {
+        actions.send_keep_alive_apart(crate::reliability::Reliability::BestEffort);
+    }
+    if link_due || companion_due {
+        K::Emitted
+    } else {
+        K::WithinInterval
     }
 }
 

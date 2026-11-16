@@ -1242,13 +1242,16 @@ async fn next_frame(reader: &mut wz_runtime_tokio::quic_pipeline::QuicReadDriver
 /// negotiate `zenoh-ms-mr`, the protocol with both: a stream per priority and
 /// the datagram companion. A reliable frame leaves on its stream behind its
 /// length, a best-effort one as one datagram with no length in front, a
-/// best-effort batch past the companion's bound is refused, and a keepalive
-/// reaches both halves, each of which the peer leases on its own.
+/// best-effort batch past the companion's bound is refused, each line's
+/// keepalive goes on that line alone and the companion's last write is its own,
+/// and a full streams lane never holds back the companion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mixed_reliability_pair_puts_best_effort_frames_on_datagrams() {
     use wz_runtime_tokio::quic_pipeline::{wire_quic_stream, MIXED_RELIABILITY_MTU};
     use wz_runtime_tokio::Reliability;
-    use wz_session_core::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome};
+    use wz_session_core::link::{
+        BoxedLinkDriver, LinkDropCause, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait,
+    };
     use wz_session_core::locator::{QuicStreamChoice, QuicStreams};
     use wz_session_core::qos::Priority;
 
@@ -1289,10 +1292,12 @@ async fn a_mixed_reliability_pair_puts_best_effort_frames_on_datagrams() {
         b"reliable",
         "a reliable frame on the bidirectional stream"
     );
+    assert!(client_out.carries_apart(Reliability::BestEffort));
+    assert!(!client_out.carries_apart(Reliability::Reliable));
     assert_eq!(
-        client_out.ms_since_wire_write(),
+        client_out.ms_since_wire_write_for(Reliability::BestEffort),
         None,
-        "the companion has not spoken, so the line is not yet heard on both halves"
+        "the companion has not spoken, whatever the streams wrote"
     );
 
     assert!(matches!(
@@ -1318,23 +1323,52 @@ async fn a_mixed_reliability_pair_puts_best_effort_frames_on_datagrams() {
         "a best-effort batch past the companion's bound is refused, not split"
     );
 
+    assert!(
+        client_out
+            .ms_since_wire_write_for(Reliability::BestEffort)
+            .is_some(),
+        "the companion's write is its own"
+    );
+
+    // Each line's keepalive goes on that line alone.
     assert!(matches!(
-        client_out.send_urgent(b"keepalive", Reliability::Reliable),
+        client_out.send_urgent(b"stream-keepalive", Reliability::Reliable),
         LinkSendOutcome::Sent
     ));
-    assert_eq!(read_frame(&mut server.recv).await, b"keepalive");
+    assert!(matches!(
+        client_out.send_urgent(b"companion-keepalive", Reliability::BestEffort),
+        LinkSendOutcome::Sent
+    ));
+    assert_eq!(read_frame(&mut server.recv).await, b"stream-keepalive");
     let datagram = tokio::time::timeout(Duration::from_secs(5), server.connection.read_datagram())
         .await
         .expect("the companion's keepalive arrives")
         .expect("a datagram");
-    assert_eq!(&datagram[..], b"keepalive");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while client_out.ms_since_wire_write().is_none() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("once both halves have spoken the line reports when");
+    assert_eq!(&datagram[..], b"companion-keepalive");
+
+    // A full streams lane holds back the streams' frames and never the
+    // companion's.
+    let mut held = Vec::new();
+    while let Some(permit) =
+        client_out.try_reserve_room_for(Reliability::Reliable, Priority::DEFAULT)
+    {
+        assert!(held.len() < 4096, "the streams' lane is bounded");
+        held.push(permit);
+    }
+    let permit = client_out
+        .try_reserve_room_for(Reliability::BestEffort, Priority::DEFAULT)
+        .expect("the companion has room while the streams' lane is full");
+    assert!(!permit.is_held(), "and holds nothing for it");
+    assert_eq!(
+        client_out.wait_for_room_for(
+            Reliability::BestEffort,
+            Priority::DEFAULT,
+            RoomWait::Drop { wait_us: 0 },
+        ),
+        RoomAnswer::at_once(LinkRoom::Free)
+    );
+    assert!(client_out.block_first_acquire_for(Reliability::BestEffort, Priority::DEFAULT, 0));
+    drop(held);
 }
 
 /// Two ends with `multistream=0` and `mixed_rel=1` negotiate `zenoh-mr`: one
