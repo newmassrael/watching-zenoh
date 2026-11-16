@@ -4031,6 +4031,10 @@ pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     "id",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
+    // The frame half of the InitSyn's `sn_res` byte, behind the `S` flag upstream sets for any
+    // width off its 32-bit default (`commons/zenoh-codec/src/transport/init.rs` @
+    // `if resolution != &Resolution::default() || batch_size != &batch_size::UNICAST {`).
+    "transport/link/tx/sequence_number_resolution",
     "transport/shared_memory/enabled",
     "transport/unicast/lowlatency",
     "transport/unicast/compression/enabled",

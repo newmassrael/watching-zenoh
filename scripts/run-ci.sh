@@ -22601,8 +22601,12 @@ layer_z_zenohd_interop() {
     # real zenohd with the same document first, each key's effect on zenohd's
     # own frame the positive control, and the demo's frame held to zenohd's.
     # Counted on the file's `#[ignore]` tests: 13 before the leg, 14 after.
+    # Raises 14 -> 15 for LEG 15: `transport/unicast/open_timeout` read off the
+    # far end of a silent link, zenohd closing it at each document's bound first
+    # and the demo held to the same window. Counted on the file's `#[ignore]`
+    # tests: 14 before the leg, 15 after.
     wz_test_args wz-integration-tests wz_reads_a_stock_zenohd_config
-    _runci_guarded_test Z 14 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 15 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2222 (open-debt items 568 + 569, and the lane hole they exposed) — the
