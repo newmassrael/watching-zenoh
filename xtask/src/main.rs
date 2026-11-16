@@ -190,6 +190,7 @@ fn regen_codecs(root: &Path) {
         let scxml_path = resource_dir.join(format!("{stem}.scxml"));
         let content = std::fs::read_to_string(&scxml_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", scxml_path.display()));
+        assert_xsd_validates_in_process(&content, stem);
 
         let output = match compile_forge_with_imports(
             &content,
@@ -326,6 +327,26 @@ const CODEC_GATES: &[(&str, &str)] = &[
     ("linkstate", "codec-linkstate"),
     ("linkstate_list", "codec-linkstate"),
 ];
+
+/// Refuse to generate `label` in this process if SCE would parse it without
+/// validating it against its XSD.
+///
+/// The in-process compile validates through `validate_or_skip`, which answers
+/// `NotValidated` -- and the compile then goes on, after a warning -- when the
+/// schema is not found or the crate was built without its `xsd` feature. Asking
+/// the same function here is asking about the compile itself: the schema path is
+/// resolved once per process and the feature is fixed at build time, so the two
+/// calls cannot get different answers. A document the schema REJECTS is left to
+/// the compile, which reports it among the refusals it collects.
+fn assert_xsd_validates_in_process(content: &str, label: &str) {
+    use sce_build::forge::xsd_validator::{validate_or_skip, XsdOutcome};
+    if let Ok(XsdOutcome::NotValidated(reason)) = validate_or_skip(content, label) {
+        panic!(
+            "xtask: {label} would be generated without XSD validation: {}",
+            reason.as_str()
+        );
+    }
+}
 
 /// Generate the `Node` deployment (SCE ADR 0077 section 7): the profile that
 /// holds every field of every codec of the set inline, at the capacity
