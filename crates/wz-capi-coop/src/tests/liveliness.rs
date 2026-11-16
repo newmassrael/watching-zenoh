@@ -70,16 +70,21 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
     let bare = engine
         .declare_liveliness_token_on_wire("demo/alive/b".to_owned(), WireKey::literal(), None)
         .expect("the engine has liveliness");
+    // The session hands out its entity ids in a u32 space; the router reads a declared id at
+    // wire width, so the comparison widens what the session handed out.
+    let (named_on_wire, bare_on_wire) = (u64::from(named), u64::from(bare));
     until(&engine, "the router to hold both tokens", || {
         router.seen(|s| {
-            s.tokens.contains(&(named, "demo/alive/a".to_owned()))
-                && s.tokens.contains(&(bare, "demo/alive/b".to_owned()))
+            s.tokens
+                .contains(&(named_on_wire, "demo/alive/a".to_owned()))
+                && s.tokens
+                    .contains(&(bare_on_wire, "demo/alive/b".to_owned()))
         })
     });
 
     engine.undeclare_liveliness_token(named);
     until(&engine, "the named retraction to reach the router", || {
-        router.seen(|s| s.tokens == [(bare, "demo/alive/b".to_owned())])
+        router.seen(|s| s.tokens == [(bare_on_wire, "demo/alive/b".to_owned())])
     });
     engine.undeclare_liveliness_token(bare);
     until(&engine, "the bare retraction to reach the router", || {
@@ -173,6 +178,7 @@ fn a_lost_link_takes_the_routers_tokens_and_a_new_one_is_told_the_sessions() {
     let token = engine
         .declare_liveliness_token_on_wire("demo/mine".to_owned(), WireKey::literal(), None)
         .expect("the engine has liveliness");
+    let token = u64::from(token);
     router.send(Command::DeclareToken(6, "demo/theirs"));
     until(&engine, "the router's token to be heard", || {
         *heard.lock().unwrap() == [put("demo/theirs")]
