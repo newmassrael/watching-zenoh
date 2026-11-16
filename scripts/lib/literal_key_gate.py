@@ -91,16 +91,25 @@ derivable and that the exception rests on: the row's package must declare
 point -- it reds if someone makes the crate publishable, and it does not
 pretend to prove the crate never ships.
 
-## Known blind spot, stated rather than implied
+## The named-constant form (R4500, open-debt item 109)
 
-The needle reads a literal written AT the call. A key laid out as a named
-constant and passed as `KEY.to_vec()` is the same defect and does not match.
-Measured on the tree this round: every `SigningKey::new(` occurrence outside
-the needle is either an entropy buffer being moved in, a length-rejection test
-argument, or doc prose, so widening the needle to literal-argument forms
-(`vec![`, an array, a byte string) left the site count unchanged at 12 while
-closing three spellings the shell form could not see. The constant-indirection
-form remains open.
+The needle first read only a literal written AT the call, and a key laid out as
+a named constant and passed as `KEY.to_vec()` is the same defect. A call whose
+argument is a path now resolves its last segment against the package's `const`
+and immutable `static` items, and is a site when one of that name has a literal
+initializer (an array, a byte string, `include_bytes!` of a checked-in file).
+That pass also found that the byte-string spelling the needle claimed had never
+matched: the needle ran on the masked text, where a string's quotes are blanked
+with its content. The argument is now read from the raw text at the masked
+call's offset.
+
+## Known blind spots, stated rather than implied
+
+A constant of another package, a `let` binding, and a key that reaches the call
+through a function parameter are not followed: a `let mut` buffer is how an
+entropy fill is written (`let mut key = [0u8; 32]` and then filled), so
+following bindings would refuse the correct form, and following parameters
+means following callers.
 """
 
 from __future__ import annotations
@@ -114,10 +123,24 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# A construction whose argument is written as a literal AT the call. The three
-# admitted openers are the spellings a `Vec<u8>` literal takes in Rust: the
-# `vec!` macro, an array (usually with `.to_vec()`), and a byte string.
-NEEDLE = re.compile(r"SigningKey\s*::\s*new\s*\(\s*(?:vec!\s*\[|\[|b?\")")
+# A construction, found on the MASKED text so a call quoted in a comment is not
+# one. What its argument is is read from the RAW text at the same offset: the
+# mask blanks a string literal's quotes along with its content, so an opener
+# looked for in the masked text could never see a byte string, which the first
+# form of this needle claimed to.
+CALL = re.compile(r"SigningKey\s*::\s*new\s*\(\s*")
+# A literal argument: the `vec!` macro, an array (usually with `.to_vec()`), a
+# byte string (raw or not), or a checked-in file through `include_bytes!`.
+LITERAL = re.compile(r"&?\s*(?:vec!\s*\[|\[|\*?b?r?#*\"|include_bytes!\s*\()")
+# A named argument: a path whose last segment is not a call or a macro.
+NAMED_ARG = re.compile(r"&?\s*(?:[A-Za-z_]\w*\s*::\s*)*([A-Za-z_]\w*)\b(?!\s*[!(])")
+# A `const` or immutable `static` item, up to its initializer, found on the
+# masked text; `static mut` is excluded because a buffer filled from entropy at
+# run time is declared that way and is not a literal key.
+CONST_ITEM = re.compile(
+    r"\b(?:const|static)\s+(?!mut\b)([A-Za-z_]\w*)\s*:[^=]*=\s*"
+)
+CONST_HINT = re.compile(r"\b(?:const|static)\s+\w+\s*:[^=]*=\s*&?\s*(?:vec!|\[|\*?b?r?#*\"|include_bytes!)")
 
 # Files whose literal keys no cfg predicate gates. Each row is a count, watched
 # in both directions. The reason is prose on purpose: a row here is a judgement
@@ -486,11 +509,55 @@ def tracked(root: Path) -> list[str]:
     return [line for line in result.stdout.split("\n") if line]
 
 
+def crate_of(root: Path, path: Path) -> str:
+    """The package directory a source belongs to (`crates/<name>`, `deploy/<name>`)."""
+    parts = path.relative_to(root).parts
+    return "/".join(parts[:2])
+
+
+def literal_constants(root: Path, texts: dict[Path, str]) -> dict[str, set[str]]:
+    """Per package, the names of the `const` / immutable `static` items whose
+    initializer is a literal key spelling.
+
+    Package-wide rather than per file, because a key constant is as often
+    declared in a module of its own as beside its use. Two items of one name in
+    one package make the name literal if either is: the gate errs toward a
+    finding."""
+    out: dict[str, set[str]] = {}
+    # Only packages that construct a key can use one, and masking is the cost:
+    # a raw-text prefilter (sound, since masking only blanks) keeps it to the
+    # few files that could hold such an item.
+    users = {crate_of(root, p) for p, t in texts.items() if HAS_SITE in t}
+    for path, text in texts.items():
+        if crate_of(root, path) not in users or not CONST_HINT.search(text):
+            continue
+        masked = mask(text)
+        for m in CONST_ITEM.finditer(masked):
+            if LITERAL.match(text, m.end()):
+                out.setdefault(crate_of(root, path), set()).add(m.group(1))
+    return out
+
+
+def literal_sites(text: str, constants: set[str]) -> list[int]:
+    """Offsets of the constructions whose argument is a literal, or a constant
+    of the package whose initializer is one."""
+    hits = []
+    for m in CALL.finditer(mask(text)):
+        if LITERAL.match(text, m.end()):
+            hits.append(m.start())
+            continue
+        named = NAMED_ARG.match(text, m.end())
+        if named and named.group(1) in constants:
+            hits.append(m.start())
+    return hits
+
+
 def evaluate(root: Path, files: list[Path], exempt: dict[str, int]):
     """(failures, counts) over `files`. Pure enough for the selftest to drive."""
     failures: list[str] = []
     texts = {p: p.read_text(encoding="utf-8", errors="replace") for p in files}
     only_test = test_only_files(files, texts)
+    consts = literal_constants(root, texts)
     total = gated = 0
     ungated: dict[str, list[int]] = {}
 
@@ -498,7 +565,7 @@ def evaluate(root: Path, files: list[Path], exempt: dict[str, int]):
         text = texts[path]
         if HAS_SITE not in text:
             continue
-        hits = [m.start() for m in NEEDLE.finditer(mask(text))]
+        hits = literal_sites(text, consts.get(crate_of(root, path), set()))
         if not hits:
             continue
         total += len(hits)
@@ -611,6 +678,23 @@ LIFETIME = (
     "fn k() { SigningKey::new(vec![7u8; 32]); }\n"
 )
 INNER = "#![cfg(test)]\nfn k() { SigningKey::new(vec![7u8; 32]); }\n"
+BYTES = 'fn k() { SigningKey::new(b"0123456789abcdef0123456789abcdef".to_vec()); }\n'
+INCLUDED = 'fn k() { SigningKey::new(include_bytes!("key.bin").to_vec()); }\n'
+CONST_KEY = "const KEY: [u8; 32] = [7u8; 32];\nfn k() { SigningKey::new(KEY.to_vec()); }\n"
+STATIC_KEY = (
+    'pub static COOKIE_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";\n'
+    "fn k() { SigningKey::new(crate::COOKIE_KEY.to_vec()); }\n"
+)
+GATED_CONST = (
+    "const KEY: [u8; 32] = [7u8; 32];\n"
+    "#[cfg(test)]\nmod tests {\n    fn k() { SigningKey::new(super::KEY.to_vec()); }\n}\n"
+)
+PARAM_KEY = "fn k(key: &[u8]) { SigningKey::new(key.to_vec()); }\n"
+ENTROPY_STATIC = (
+    "static mut KEY: [u8; 32] = [0u8; 32];\n"
+    "fn k() { SigningKey::new(KEY.to_vec()); }\n"
+)
+TAKEN = "fn k(buf: &mut Vec<u8>) { SigningKey::new(std::mem::take(buf)); }\n"
 
 FILE_CASES = [
     ("a cfg(test) module is gated", GATED, 1, 0),
@@ -622,6 +706,14 @@ FILE_CASES = [
     ("a needle in a doc comment is not a site", QUOTED, 0, 0),
     ("a lifetime does not open a literal", LIFETIME, 0, 1),
     ("an inner cfg(test) gates the whole file", INNER, 1, 0),
+    ("a byte string argument is a literal", BYTES, 0, 1),
+    ("a checked-in file is a literal", INCLUDED, 0, 1),
+    ("a const with a literal initializer is a literal", CONST_KEY, 0, 1),
+    ("a static byte string reached by path is a literal", STATIC_KEY, 0, 1),
+    ("a literal const used only under cfg(test) is gated", GATED_CONST, 1, 0),
+    ("a parameter is not a literal", PARAM_KEY, 0, 0),
+    ("a static mut buffer is not a literal", ENTROPY_STATIC, 0, 0),
+    ("a moved buffer is not a literal", TAKEN, 0, 0),
 ]
 
 MANIFEST = '[package]\nname = "p"\nversion = "0.0.0"\npublish = false\n'
