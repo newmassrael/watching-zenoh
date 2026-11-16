@@ -202,13 +202,17 @@ def named_features(features: dict[str, list[str]], texts: list[str]) -> set[str]
     return named
 
 
-def reduced_sets(
+def reduced_points(
     package: dict, named: set[str]
-) -> list[tuple[str, list[str]]]:
-    """Every largest set without one feature it holds, one per distinct compiled crate.
+) -> list[tuple[str, str, list[str], list[str]]]:
+    """`[(label, largest set, given up, kept)]`: every largest set without one feature it holds,
+    one per distinct compiled crate.
 
     `named` is what decides which items the crate compiles; a reduced set whose named features are
-    those of a largest set, or of a reduced set already listed, is dropped.
+    those of a largest set, or of a reduced set already listed, is dropped. `given up` names every
+    feature whose giving up compiles that crate: the one in the label, then those whose reduced
+    set was dropped as its duplicate. A reader that asks "which configuration gives up `g`" finds
+    `g` there even when another feature's label stands for it.
     """
     features: dict[str, list[str]] = package["features"]
     largest = largest_sets(package)
@@ -216,19 +220,34 @@ def reduced_sets(
     def identity(members: list[str]) -> frozenset[str]:
         return frozenset(named.intersection(members))
 
-    seen = {identity(members) for _, members in largest}
-    reduced: list[tuple[str, list[str]]] = []
+    largest_identities = {identity(members) for _, members in largest}
+    by_identity: dict[frozenset[str], tuple[str, str, list[str], list[str]]] = {}
+    reduced: list[tuple[str, str, list[str], list[str]]] = []
     for set_name, members in largest:
         for given_up in members:
             if given_up not in named:
                 continue
             kept = [f for f in members if given_up not in implied_features(features, f)]
             key = identity(kept)
-            if key in seen:
+            if key in largest_identities:
                 continue
-            seen.add(key)
-            reduced.append((f"{set_name}-without-{given_up}", kept))
+            if key in by_identity:
+                aliases = by_identity[key][2]
+                if given_up not in aliases:
+                    aliases.append(given_up)
+                continue
+            point = (f"{set_name}-without-{given_up}", set_name, [given_up], kept)
+            by_identity[key] = point
+            reduced.append(point)
     return reduced
+
+
+def reduced_sets(
+    package: dict, named: set[str]
+) -> list[tuple[str, list[str]]]:
+    """Every largest set without one feature it holds, one per distinct compiled crate:
+    `reduced_points` without the provenance."""
+    return [(label, kept) for label, _, _, kept in reduced_points(package, named)]
 
 
 def reduced_arguments(package: dict) -> list[tuple[str, list[str]]]:
@@ -372,6 +391,14 @@ def selftest() -> int:
     }
     labels = [label for label, _ in reduced_sets(twin, {"a", "b", "c"})]
     assert labels == ["no-a-without-b", "no-a-without-c", "no-b-without-c"], labels
+    # `no-b` without `a` keeps `c` alone, as `no-a` without `b` does: the dropped duplicate's
+    # given-up feature is listed on the point that stands for it.
+    points = reduced_points(twin, {"a", "b", "c"})
+    assert [(set_name, given) for _, set_name, given, _ in points] == [
+        ("no-a", ["b", "a"]),
+        ("no-a", ["c"]),
+        ("no-b", ["c"]),
+    ], points
     labels = [label for label, _ in reduced_sets(twin, {"a", "b"})]
     assert labels == ["no-a-without-b"], labels
     # `no-b` without `a` compiles what `no-a` compiles when only `a` is named.

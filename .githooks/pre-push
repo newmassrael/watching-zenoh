@@ -2662,12 +2662,25 @@ fi
 # and included on the hosted side. R311y821 MEASURED the cost the debt recorded
 # as unknown: 49 of 53 members are already clean bare, so this is seconds per
 # changed crate rather than the sweep's ~2min.
+#
+# With a diff base it also clippies the REDUCED points of each changed crate
+# (open-debt items 339 and 730): each largest set the crate declares without
+# one feature its changed files name, capped by WZ_REDUCED_POINTS_MAX, the
+# rest printed as deferred. Without a base nothing names the changed files, and
+# that is said rather than read as a pass.
+_g6_range=()
+if [[ -n "$diff_base" ]]; then
+    _g6_range=(--range "$diff_base..$local_sha")
+else
+    echo "pre-push: [gate 6] no diff base, so the reduced points are NOT graded here"
+fi
 echo "pre-push: reduced feature combination (Layer C1cf, subset): ${pkgs[*]}"
-if ! bash scripts/lib/reduced-features-gate.sh "${pkgs[@]}"; then
+if ! bash scripts/lib/reduced-features-gate.sh "${_g6_range[@]}" "${pkgs[@]}"; then
     echo "" >&2
-    echo "pre-push: [gate 6] a changed crate does not build with its default features" >&2
-    echo "          off — fix the reduced combination, or place the crate in a" >&2
-    echo "          named tier in scripts/lib/reduced-features-gate.sh." >&2
+    echo "pre-push: [gate 6] a changed crate does not build clean with its default" >&2
+    echo "          features off, or at a reduced point in a file this push changed" >&2
+    echo "          — fix the cfg, or place the crate in a named tier in" >&2
+    echo "          scripts/lib/reduced-features-gate.sh." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi

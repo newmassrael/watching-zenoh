@@ -12163,7 +12163,12 @@ layer_c1ch_capi_c_config_surface() {
 # push touches: a crate can be pushed clean and then broken by a CHANGE
 # ELSEWHERE — R311y809's defect was in the crate that LINKS to the one the diff
 # touched, which is exactly what a changed-crate filter cannot reach.
+#
+# The reduced POINTS (open-debt items 339 and 730) are graded at push time only,
+# over the files a push changed; this lane runs their selector's selftest so a
+# change to it is judged even when no push grades a point.
 layer_c1cf_reduced_features() {
+    python3 scripts/lib/reduced_points_gate.py --selftest || return 1
     bash scripts/lib/reduced-features-gate.sh || return 1
 }
 

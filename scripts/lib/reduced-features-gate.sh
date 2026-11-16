@@ -40,9 +40,23 @@
 # NEW crate is refused until it is placed in one of the named tiers. That is
 # this project's own rule — pin the set, not the count.
 #
+# ## The bare point is one point; `--range` adds the reduced ones
+#
+# Bare is the smallest point and the class also lives between the points: a
+# build with quic on and udp off (open-debt item 730, the third `SocketAddr`
+# import of this class), or default features plus one (item 339, an
+# `unused_mut` the bare build never compiles). Given the push's range, the
+# pre-push shape also clippies the crate's REDUCED points, each largest set the
+# crate declares without one feature its changed files name, through
+# `reduced_points_gate.py`. Its docstring says why that family, how it bounds
+# the cost and what it does not reach. The sweep grades the bare point only:
+# the reduced points of a crate nobody changed are Layer C1bzr's to compile.
+#
 # Usage:
 #   reduced-features-gate.sh            # every workspace member (the sweep)
-#   reduced-features-gate.sh pkg [pkg…] # only these (the pre-push shape)
+#   reduced-features-gate.sh pkg [pkg…] # only these, bare point
+#   reduced-features-gate.sh --range A..B pkg [pkg…]
+#                                       # the pre-push shape: bare and reduced
 set -uo pipefail
 
 # Tier 2: bare is checked LIB-ONLY. Their test targets need the alloc-backed
@@ -79,6 +93,7 @@ profile_of() {
     done
 }
 
+lib_dir="$(cd "$(dirname "$0")" && pwd)" || exit 1
 cd "$(dirname "$0")/../../crates" || exit 1
 
 # R2585 — `--list-members` prints what the SWEEP would build, one `<pkg> <tier>`
@@ -92,6 +107,17 @@ list_members=0
 if [[ "${1:-}" == "--list-members" ]]; then
     list_members=1
     shift
+fi
+
+range=""
+if [[ $list_members -eq 0 && "${1:-}" == "--range" ]]; then
+    if [[ -z "${2:-}" || $# -lt 3 ]]; then
+        echo "  reduced-features FAIL: --range takes a range and the crates the push" \
+             "changed; a range with no crate grades nothing" >&2
+        exit 1
+    fi
+    range="$2"
+    shift 2
 fi
 
 if [[ $# -gt 0 ]]; then
@@ -170,6 +196,14 @@ if [[ $# -eq 0 ]]; then
             fail=1
         fi
     done
+fi
+
+if [[ -n "$range" ]]; then
+    if ! python3 "$lib_dir/reduced_points_gate.py" check --range "$range" "${members[@]}"; then
+        echo "  reduced-features FAIL: a reduced point of a changed crate is not clean" \
+             "in the files the push changed (see the reduced-points lines above)"
+        fail=1
+    fi
 fi
 
 # A population of zero is the failure mode this project keeps meeting: a filter
