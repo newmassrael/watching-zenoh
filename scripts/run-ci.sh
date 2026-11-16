@@ -1430,6 +1430,18 @@ layer_0_preflight_lints() {
     # one that PASSES fails the lane until it is taken off this list, so the
     # list can only shrink. A name here that is no longer a workspace fails too.
     local -a fmt_owed=(conformance/differential conformance/differential-shm oracles)
+    # ONE FORMATTER for every workspace: the rustfmt of the product's pinned toolchain
+    # (`rust-toolchain.toml` at the root, whose components carry it), named with `+` so a
+    # workspace's own toolchain file does not choose it. Formatting is a property of the
+    # source, not of the compiler that builds it: `crates/wz-fuzz` pins a minimal nightly for
+    # libFuzzer's instrumentation and for nothing else, which has no rustfmt, and a second
+    # rustfmt would let two workspaces be held to two styles.
+    local fmt_channel
+    fmt_channel="$(sed -n 's/^ *channel *= *"\([^"]*\)".*/\1/p' "${repo_root}/rust-toolchain.toml" | head -1)"
+    if [[ -z "$fmt_channel" ]]; then
+        echo "  Layer0 FAIL: ${repo_root}/rust-toolchain.toml names no channel, so fmt has no pinned rustfmt to run" >&2
+        return 1
+    fi
     # R311y415 — accumulate rather than fail-fast. A `return 1` on the first
     # dirty workspace costs one full hosted round-trip PER dirty workspace;
     # reporting all of them is one push instead of N.
@@ -1459,7 +1471,7 @@ layer_0_preflight_lints() {
             [[ "$fdir" == "$owed" ]] && owed_here=1
         done
         if (( owed_here == 1 )); then
-            if (cd "$fdir" && cargo fmt --all -- --check --color=never >/dev/null 2>&1); then
+            if (cd "$fdir" && cargo "+${fmt_channel}" fmt --all -- --check --color=never >/dev/null 2>&1); then
                 echo "  Layer0 FAIL: ${fdir} is fmt-clean now; remove it from fmt_owed so it stays graded" >&2
                 fmt_rc=1
             else
@@ -1467,12 +1479,12 @@ layer_0_preflight_lints() {
             fi
             continue
         fi
-        if ! (cd "$fdir" && cargo fmt --all -- --check --color=never); then
+        if ! (cd "$fdir" && cargo "+${fmt_channel}" fmt --all -- --check --color=never); then
             # R311y415 — ` FAIL: ` exactly, not the older ` FAIL `: that is
             # the token y414's GitHub `::error` extractor lifts. With the
             # old spelling every Layer 0 red produced an EMPTY annotation
             # body, the same defect y414 fixed for the count guards.
-            echo "  Layer0 FAIL: fmt --check ${fdir} — run \`(cd ${fdir} && cargo fmt --all)\`" >&2
+            echo "  Layer0 FAIL: fmt --check ${fdir} — run \`(cd ${fdir} && cargo +${fmt_channel} fmt --all)\`" >&2
             fmt_rc=1
         fi
     done
