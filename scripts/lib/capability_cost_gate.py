@@ -649,7 +649,14 @@ CASES: tuple[Case, ...] = (
     # 2026-11-15 -- the loops' heartbeats and their watcher, as `pico-peer`'s note of this day
     # takes apart: 4,420,270 -> 4,451,052 on pc2 (+30,782). Chosen; the hosted reading at
     # `c42ab17ced` (4,423,858) and that growth, 4,454,640, and 3,500, to the hundred.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_590_900,
+    # 2026-11-17 -- hosted run 43914611055 (`65ec9acd16`) read 4,592,024, 1,124 over. On pc2 the
+    # budget's own tree (`4ef678910d`) reads 4,583,800 and `65ec9acd16` 4,588,276 (+4,476). The
+    # symbol diff by owning module: the dialled handshake held to `open_timeout` alone
+    # (`wz_capi_core::drive` +2,703, `accept_loop::dial_face` +897), the receive pool's settle
+    # (`frame_arena` +842), the handshake ext chains staged in upstream's order (`ext_chain`
+    # +522); the multicast member table's strategy type nets to nothing (`multicast_glue`
+    # +1,564, `multicast_dispatch` -1,606). Chosen growth; the hosted reading and 3,500.
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_595_600,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
