@@ -14,8 +14,10 @@
 //! reads the same on either; a `tls/` dial is the host's (`tls-mbedtls`), which an image refuses as
 //! a stack without a secure channel does.
 
+// Each system's answers are a module of its own name, and the one this build runs on is re-exported
+// below: the rest of the crate and `scouting` name the items, never the module.
 #[cfg(feature = "engine-coop")]
-mod host {
+mod posix_host {
     /// The host's sockets as the session's links.
     pub(crate) type Links = wz_runtime_posix::links::PosixLinks;
     /// The host's monotonic clock.
@@ -56,7 +58,7 @@ mod host {
     not(feature = "engine-coop"),
     not(feature = "std")
 ))]
-mod host {
+mod zephyr_host {
     /// The kernel's tick rate as the image's build states it (`CONFIG_SYS_CLOCK_TICKS_PER_SEC`,
     /// handed to cargo by `deploy/zephyr-common/wz_zephyr_board.cmake`), so the clock is the
     /// kernel's and not a number written here.
@@ -99,7 +101,14 @@ mod host {
     pub(crate) type Datagram = wz_runtime_zephyr::net::ZephyrUdpSocket;
 }
 
-pub(crate) use host::*;
+#[cfg(feature = "engine-coop")]
+pub(crate) use posix_host::*;
+#[cfg(all(
+    feature = "os-zephyr",
+    not(feature = "engine-coop"),
+    not(feature = "std")
+))]
+pub(crate) use zephyr_host::*;
 
 /// Scouting over one datagram socket of the host (`scout-mcu`), as zenoh-pico scouts where its
 /// platform has no interface iterator: the window is `wz-capi-coop`'s `scout_datagram`, asked over
@@ -110,7 +119,7 @@ mod scouting {
 
     use wz_session_core::scouting_host::ScoutedHello;
 
-    use super::host;
+    use super::{clock, Datagram};
     use crate::prelude::*;
 
     /// What one datagram of a scout is read into: zenoh-pico's multicast batch as the build states
@@ -126,8 +135,8 @@ mod scouting {
         budget_ms: u64,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        wz_capi_coop::scout_datagram::run_scout::<host::Datagram, _>(
-            &host::clock(),
+        wz_capi_coop::scout_datagram::run_scout::<Datagram, _>(
+            &clock(),
             SocketAddr::new(group, port),
             what,
             zid,
@@ -144,8 +153,8 @@ mod scouting {
         zid: Vec<u8>,
         budget_ms: u64,
     ) -> Option<ScoutedHello> {
-        wz_capi_coop::scout_datagram::scout_first::<host::Datagram, _>(
-            &host::clock(),
+        wz_capi_coop::scout_datagram::scout_first::<Datagram, _>(
+            &clock(),
             SocketAddr::new(group, port),
             what,
             zid,
