@@ -1449,7 +1449,7 @@ impl<'a> CaptureReport<'a> {
                     r.mode.name(),
                     r.answers,
                     r.mismatched.len(),
-                    r.unjudged_answers,
+                    r.unjudged_answers(),
                     r.answers_in_scope(),
                     r.closed_at.is_some(),
                     r.cancelled_at.is_some(),

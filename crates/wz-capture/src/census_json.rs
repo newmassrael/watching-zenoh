@@ -528,7 +528,7 @@ pub fn interests_json(
         let _ = write!(
             out,
             ",\"unjudged_answers\":{},\"answers_in_scope\":{}",
-            r.unjudged_answers,
+            r.unjudged_answers(),
             r.answers_in_scope(),
         );
         out.push_str(",\"flow\":");
