@@ -59,9 +59,10 @@ use tokio_rustls::rustls::{
 // is shared from quic_pipeline; this module owns only the datagram-vs-stream
 // delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
+use crate::quic_config::{client_offering, datagram_alpn, server_offering};
 use crate::quic_pipeline::{
     accept_quic_connection, connect_quic_client, quic_server_endpoint, tls_client_crypto,
-    tls_server_crypto,
+    tls_server_crypto, StreamAllowance,
 };
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, RxStorage, TxFrame};
@@ -399,9 +400,10 @@ pub async fn dial_quic_datagram(
 ) -> io::Result<QuicDatagramLink> {
     let (endpoint, connection) = connect_quic_client(
         addr,
-        tls_client_crypto(client_config)?,
+        tls_client_crypto(client_offering(client_config, datagram_alpn()))?,
         server_name,
         link_socket,
+        StreamAllowance::Datagrams,
     )
     .await?;
     Ok(QuicDatagramLink {
@@ -428,12 +430,17 @@ pub async fn bind_quic_datagram(
     server_config: Arc<RustlsServerConfig>,
     link_socket: &crate::link_socket::LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
-    // Datagram-only: max_bidi = 0 (the shared quic_server_endpoint also pins
-    // uni = 0). The QUIC handshake rides crypto frames, not application streams,
-    // so it completes; datagrams are on by default (TransportConfig default sets
-    // datagram_receive_buffer_size = Some). The datagram mirror of bind_quic's
-    // max_bidi = 1.
-    quic_server_endpoint(addr, tls_server_crypto(server_config)?, 0, link_socket).await
+    // Datagram-only: no stream of either kind. The QUIC handshake rides crypto
+    // frames, not application streams, so it completes; datagrams are on by
+    // default (TransportConfig default sets datagram_receive_buffer_size =
+    // Some). It offers the legacy protocol alone, as upstream's datagram link.
+    quic_server_endpoint(
+        addr,
+        tls_server_crypto(server_offering(server_config, datagram_alpn()))?,
+        StreamAllowance::Datagrams,
+        link_socket,
+    )
+    .await
 }
 
 /// Accept ONE inbound QUIC datagram connection from a *borrowed* server

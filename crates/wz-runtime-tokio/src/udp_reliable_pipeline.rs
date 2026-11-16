@@ -7,8 +7,8 @@
 //! Upstream builds the variant from the same client and server builders as its
 //! QUIC link, with `.security(false)`
 //! (`io/zenoh-links/zenoh-link-udp/src/reliability.rs` @ `} = QuicClientBuilder::new(endpoint).security(false).await?;`),
-//! so the link it yields is that link: one bidirectional stream, the
-//! StreamEnvelope framing, MTU `BatchSize::MAX`. This module is therefore not a
+//! so the link it yields is that link: its streams, the StreamEnvelope
+//! framing, MTU `BatchSize::MAX`. This module is therefore not a
 //! pipeline of its own. It hands [`crate::quic_pipeline`]'s dial and listen
 //! seams the plaintext crypto from the crate-private `quic_plaintext` in place of the
 //! rustls config, and everything after the handshake — accept, the stream,
@@ -27,12 +27,15 @@ use wz_session_core::link::LinkKind;
 
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::link_socket::LinkSocket;
+use crate::quic_config::alpn_offer;
 use crate::quic_pipeline::{
     open_quic_stream, quic_server_endpoint, wire_stream_over_quic, QuicLink, QuicReadDriver,
+    StreamAllowance,
 };
 use crate::quic_plaintext::{plaintext_client_crypto, plaintext_server_crypto};
 use crate::stream_link::StreamWriteDriver;
 use crate::writer_queue::WriterHandle;
+use wz_session_core::locator::QuicStreams;
 
 /// Dial a reliable UDP link to `addr`: a plaintext QUIC connection and its one
 /// bidirectional stream, returned as the same [`QuicLink`] a `quic/...` dial
@@ -42,11 +45,30 @@ pub async fn dial_udp_reliable(
     server_name: &str,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<QuicLink> {
-    open_quic_stream(addr, plaintext_client_crypto()?, server_name, link_socket).await
+    dial_udp_reliable_with_streams(addr, server_name, link_socket, QuicStreams::DEFAULT).await
+}
+
+/// [`dial_udp_reliable`] for a locator whose stream keys are `streams`: the
+/// protocols it offers, and so whether the link it yields has a stream per
+/// priority, are the QUIC link's for the same keys.
+pub async fn dial_udp_reliable_with_streams(
+    addr: SocketAddr,
+    server_name: &str,
+    link_socket: &LinkSocket<'_>,
+    streams: QuicStreams,
+) -> io::Result<QuicLink> {
+    open_quic_stream(
+        addr,
+        plaintext_client_crypto(alpn_offer(streams))?,
+        server_name,
+        link_socket,
+        streams,
+    )
+    .await
 }
 
 /// Bind a reliable UDP listener at `addr`: a plaintext QUIC server endpoint
-/// allowing ONE bidirectional stream, as the QUIC link's does. Accept on it
+/// allowing the streams the QUIC link's does. Accept on it
 /// with [`crate::quic_pipeline::accept_quic_on`] (or the split
 /// `accept_quic_incoming` / `complete_quic_accept` halves): accepting is
 /// crypto-agnostic, the endpoint already carries the session.
@@ -54,7 +76,22 @@ pub async fn bind_udp_reliable(
     addr: SocketAddr,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
-    quic_server_endpoint(addr, plaintext_server_crypto()?, 1, link_socket).await
+    bind_udp_reliable_with_streams(addr, link_socket, QuicStreams::DEFAULT).await
+}
+
+/// [`bind_udp_reliable`] for a listener whose stream keys are `streams`.
+pub async fn bind_udp_reliable_with_streams(
+    addr: SocketAddr,
+    link_socket: &LinkSocket<'_>,
+    streams: QuicStreams,
+) -> io::Result<Endpoint> {
+    quic_server_endpoint(
+        addr,
+        plaintext_server_crypto(alpn_offer(streams))?,
+        StreamAllowance::Streamed(streams),
+        link_socket,
+    )
+    .await
 }
 
 /// R2810 — wire a dialed or accepted reliable UDP link into the session's

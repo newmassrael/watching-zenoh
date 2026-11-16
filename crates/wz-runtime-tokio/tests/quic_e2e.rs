@@ -1007,3 +1007,165 @@ async fn an_expiring_client_chain_closes_the_listener_that_asked_for_it() {
     )
     .await;
 }
+
+/// A self-signed `localhost` server config and a client config that trusts it,
+/// through the production builders.
+fn loopback_quic_configs() -> (
+    Arc<tokio_rustls::rustls::ServerConfig>,
+    Arc<tokio_rustls::rustls::ClientConfig>,
+) {
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+    let server = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+        .expect("build quic server config");
+    let client = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
+        .expect("build quic client config");
+    (server, client)
+}
+
+/// The application protocol `connection` negotiated by ALPN.
+fn negotiated(connection: &quinn::Connection) -> Vec<u8> {
+    connection
+        .handshake_data()
+        .expect("a completed handshake")
+        .downcast::<quinn::crypto::rustls::HandshakeData>()
+        .expect("rustls handshake data")
+        .protocol
+        .expect("a negotiated protocol")
+}
+
+/// One StreamEnvelope frame off `recv`: the u16 LE length, then the payload.
+async fn read_frame(recv: &mut quinn::RecvStream) -> Vec<u8> {
+    let mut len = [0u8; 2];
+    recv.read_exact(&mut len).await.expect("a frame length");
+    let mut payload = vec![0u8; usize::from(u16::from_le_bytes(len))];
+    recv.read_exact(&mut payload)
+        .await
+        .expect("a frame payload");
+    payload
+}
+
+/// Two wz ends with the default stream keys negotiate `zenoh-ms`, the first
+/// protocol of the server's list (upstream's default list), and each opens its
+/// own stream per priority. Before the session's shape every frame leaves on
+/// the bidirectional stream, where the peer's handshake reads it, whatever its
+/// priority; after a shape with QoS a Background frame leaves on the
+/// Background stream, which the peer finds by its number (Background - 1),
+/// as upstream's acceptor maps it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_default_quic_link_carries_each_priority_on_its_own_stream() {
+    use wz_runtime_tokio::quic_pipeline::{dial_quic, wire_quic_stream};
+    use wz_runtime_tokio::Reliability;
+    use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, TxPipeline, TxQueueShape};
+    use wz_session_core::qos::Priority;
+
+    let (server_config, client_config) = loopback_quic_configs();
+    let endpoint = bind_quic(
+        "127.0.0.1:0".parse().expect("loopback addr"),
+        server_config,
+        &LinkSocket::NONE,
+    )
+    .await
+    .expect("bind quic server endpoint");
+    let addr = endpoint.local_addr().expect("endpoint local addr");
+    // The accept completes once the dialer writes on the bidirectional stream.
+    let accept = tokio::spawn(async move {
+        let link = accept_quic_on(&endpoint).await.expect("accept quic peer");
+        (endpoint, link)
+    });
+
+    let client = dial_quic(addr, client_config, "localhost", &LinkSocket::NONE)
+        .await
+        .expect("dial quic");
+    assert_eq!(negotiated(&client.connection), b"zenoh-ms");
+    assert!(
+        client.priority_send.is_some(),
+        "the dialer opened its priority streams"
+    );
+    let (_client_in, client_out, _client_writer) = wire_quic_stream(client, 64 * 1024);
+
+    assert!(matches!(
+        client_out.send_prioritized(b"before-shape", Reliability::Reliable, Priority::Background),
+        LinkSendOutcome::Sent
+    ));
+    let (_endpoint, mut server) = accept.await.expect("the accept task");
+    assert!(
+        server.priority_send.is_some(),
+        "the acceptor opened its own priority streams"
+    );
+    assert_eq!(
+        read_frame(&mut server.recv).await,
+        b"before-shape",
+        "on the bidirectional stream"
+    );
+
+    client_out.shape_tx_queue(TxQueueShape {
+        sizes: [TxQueueShape::DEFAULT_SIZE; Priority::NUM],
+        qos: true,
+        batch_bytes: u16::MAX as usize,
+        queue_unit_bytes: u16::MAX as usize,
+        pipeline: TxPipeline::DEFAULT,
+    });
+    assert!(matches!(
+        client_out.send_prioritized(b"background", Reliability::Reliable, Priority::Background),
+        LinkSendOutcome::Sent
+    ));
+    let background_index = u64::from(Priority::Background.wire_byte() - 1);
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let recv = server
+                .connection
+                .accept_uni()
+                .await
+                .expect("a priority stream");
+            if recv.id().index() == background_index {
+                break recv;
+            }
+        }
+    })
+    .await
+    .expect("the Background stream arrives");
+    assert_eq!(read_frame(&mut stream).await, b"background");
+}
+
+/// A listener whose keys say `multistream=0` offers the single-stream protocols
+/// alone, so a default dialer negotiates `zenoh` and neither end opens a
+/// priority stream: the link is the one bidirectional stream it always was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listener_without_multistream_keeps_the_link_on_one_stream() {
+    use wz_runtime_tokio::quic_pipeline::{bind_quic_with_streams, dial_quic};
+    use wz_session_core::locator::{QuicStreamChoice, QuicStreams};
+
+    let (server_config, client_config) = loopback_quic_configs();
+    let endpoint = bind_quic_with_streams(
+        "127.0.0.1:0".parse().expect("loopback addr"),
+        server_config,
+        &LinkSocket::NONE,
+        QuicStreams {
+            multistream: QuicStreamChoice::Disabled,
+            mixed_rel: QuicStreamChoice::Disabled,
+        },
+    )
+    .await
+    .expect("bind quic server endpoint");
+    let addr = endpoint.local_addr().expect("endpoint local addr");
+    let accept = tokio::spawn(async move {
+        let link = accept_quic_on(&endpoint).await.expect("accept quic peer");
+        (endpoint, link)
+    });
+
+    let mut client = dial_quic(addr, client_config, "localhost", &LinkSocket::NONE)
+        .await
+        .expect("dial quic");
+    assert_eq!(negotiated(&client.connection), b"zenoh");
+    assert!(client.priority_send.is_none(), "no priority stream to open");
+    client
+        .send
+        .write_all(b"x")
+        .await
+        .expect("a byte on the bidirectional stream");
+    let (_endpoint, server) = accept.await.expect("the accept task");
+    assert!(server.priority_send.is_none(), "nor on the accepting end");
+}

@@ -653,10 +653,9 @@ pub enum LocatorParseError {
     /// are distinct namespaces and the message has to say which one was wrong.
     BadMetadataValue { key: &'static str, value: String },
     /// A METADATA value upstream accepts and asks for something this build does
-    /// not implement: today `multistream=1` and `mixed_rel=1` on a streamed QUIC
-    /// link, which ask for only the multi-stream or mixed-reliability ALPN
-    /// protocols. Refused at parse rather than dialled with the single-stream
-    /// protocols the value excludes.
+    /// not implement: `mixed_rel=1` on a streamed QUIC link, which asks for only
+    /// the mixed-reliability ALPN protocols. Refused at parse rather than
+    /// dialled with the protocols the value excludes.
     UnsupportedMetadataValue { key: &'static str, value: String },
 }
 
@@ -1572,11 +1571,11 @@ impl QuicAlpn {
         matches!(self, QuicAlpn::MixedRel | QuicAlpn::MultiStreamMixedRel)
     }
 
-    /// Whether this build serves the protocol once it is negotiated. Neither the
-    /// stream per priority nor the datagram companion is served yet, so only the
-    /// single-stream protocols are.
+    /// Whether this build serves the protocol once it is negotiated: the
+    /// single-stream protocols and the stream per priority, not the datagram
+    /// companion.
     pub const fn is_served(self) -> bool {
-        !self.is_multistream() && !self.is_mixed_rel()
+        !self.is_mixed_rel()
     }
 }
 
@@ -4122,14 +4121,15 @@ mod tests {
         );
     }
 
-    /// `1` asks for only the protocols this build does not implement, so it is
-    /// refused as unsupported rather than dialled with the single-stream ones.
+    /// `mixed_rel=1` asks for only the protocols with the datagram companion,
+    /// which this build does not serve, so it is refused as unsupported rather
+    /// than dialled with the others; with `multistream=1` beside it as well.
     #[test]
     fn a_stream_key_asking_for_what_this_build_lacks_is_refused() {
         for (text, key) in [
-            ("quic/1.2.3.4:7447?multistream=1", "multistream"),
             ("quic/1.2.3.4:7447?mixed_rel=1", "mixed_rel"),
-            ("udp/1.2.3.4:7447?rel=1;multistream=1", "multistream"),
+            ("quic/1.2.3.4:7447?multistream=1;mixed_rel=1", "mixed_rel"),
+            ("udp/1.2.3.4:7447?rel=1;mixed_rel=1", "mixed_rel"),
         ] {
             assert_eq!(
                 parse_locator(text).err(),
@@ -4196,24 +4196,42 @@ mod tests {
     /// the single-stream pair for every accepted setting.
     #[test]
     fn this_build_offers_the_protocols_it_serves() {
-        use QuicStreamChoice::{Auto, Disabled};
-        for (multistream, mixed_rel) in [
-            (Auto, Disabled),
-            (Disabled, Disabled),
-            (Auto, Auto),
-            (Disabled, Auto),
-        ] {
+        use QuicAlpn::{Legacy, MultiStream, SingleStream};
+        use QuicStreamChoice::{Auto, Disabled, Enabled};
+        let cases: [(QuicStreamChoice, QuicStreamChoice, &[QuicAlpn]); 6] = [
+            (Auto, Disabled, &[MultiStream, SingleStream, Legacy]),
+            (Disabled, Disabled, &[SingleStream, Legacy]),
+            (Enabled, Disabled, &[MultiStream]),
+            (Auto, Auto, &[MultiStream, SingleStream, Legacy]),
+            (Disabled, Auto, &[SingleStream, Legacy]),
+            (Enabled, Auto, &[MultiStream]),
+        ];
+        for (multistream, mixed_rel, offer) in cases {
             let streams = QuicStreams {
                 multistream,
                 mixed_rel,
             };
-            assert_eq!(
-                streams.offer(),
-                alloc::vec![QuicAlpn::SingleStream, QuicAlpn::Legacy],
-                "{streams:?}"
-            );
+            assert_eq!(streams.offer(), offer, "{streams:?}");
         }
         assert_eq!(QuicStreams::default(), QuicStreams::DEFAULT);
+    }
+
+    /// `multistream=1` is served, so it is accepted on both streamed links.
+    #[test]
+    fn a_multistream_only_link_is_accepted() {
+        for text in [
+            "quic/1.2.3.4:7447?multistream=1",
+            "udp/1.2.3.4:7447?rel=1;multistream=1",
+        ] {
+            assert_eq!(
+                parse_locator(text).expect(text).quic_streams,
+                QuicStreams {
+                    multistream: QuicStreamChoice::Enabled,
+                    mixed_rel: QuicStreamChoice::Disabled,
+                },
+                "{text}"
+            );
+        }
     }
 
     /// A negotiated token names its protocol and its features; a token that is

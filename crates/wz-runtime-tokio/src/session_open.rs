@@ -167,8 +167,8 @@ use tokio_rustls::TlsStream;
 // threaded via `DialConfig.quic`.
 #[cfg(feature = "transport-link-quic")]
 use crate::quic_pipeline::{
-    accept_quic_incoming, arm_expiry_close, bind_quic, complete_quic_accept, dial_quic,
-    wire_quic_stream, QuicLink, QuicReadDriver,
+    accept_quic_incoming, arm_expiry_close, bind_quic_with_streams, complete_quic_accept,
+    dial_quic_with_streams, wire_quic_stream, QuicLink, QuicReadDriver,
 };
 // The bound QUIC server endpoint `BoundListener::Quic` carries (R311y401) — quinn's
 // `Endpoint` owns the baked-in server crypto config, so the accept variant needs no
@@ -183,7 +183,9 @@ use quinn::{Endpoint, Incoming};
 // read driver unchanged; only the crypto (at dial and bind) and the name the
 // wired link carries (`wire_udp_reliable`) are its own.
 #[cfg(feature = "transport-link-udp-reliable")]
-use crate::udp_reliable_pipeline::{bind_udp_reliable, dial_udp_reliable, wire_udp_reliable};
+use crate::udp_reliable_pipeline::{
+    bind_udp_reliable_with_streams, dial_udp_reliable_with_streams, wire_udp_reliable,
+};
 
 // R311y8 — the QUIC DATAGRAM arm, like udp/ws, rides this tcp+unicast-gated
 // module as an additive DATAGRAM transport. Reuses `DialConfig.quic` (same
@@ -1036,7 +1038,7 @@ pub enum BoundListener {
     /// A bound QUIC server [`Endpoint`] (R311y401) — QUIC is UDP-based but
     /// CONNECTION-oriented, so unlike the udp DEMUX (one socket demuxing N sources)
     /// one bound endpoint yields a per-peer `Connection` via `accept`. The quinn
-    /// `Endpoint` OWNS the server crypto config (baked in at [`bind_quic`] from
+    /// `Endpoint` OWNS the server crypto config (baked in at [`bind_quic_with_streams`] from
     /// [`AcceptConfig::quic`]), so this variant carries ONLY the endpoint — unlike
     /// [`Self::Tls`], which carries a separate `Arc<ServerConfig>` alongside its
     /// `TcpListener`. [`Self::accept_raw`] does only the cheap connection ARRIVAL
@@ -2300,11 +2302,12 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Quic => {
                 let client_config = quic_dial_client_config(ip.tls(), cfg.quic.as_ref()).await?;
                 let server_name = quic_dial_server_name(cfg.quic.as_ref(), ip.addr);
-                let link = dial_quic(
+                let link = dial_quic_with_streams(
                     ip.addr,
                     client_config,
                     &server_name,
                     &cfg.link_socket(ip.socket(), ip.proto).await?,
+                    ip.quic_streams,
                 )
                 .await?;
                 // R2600 — arm the expiry watcher HERE, where the locator that
@@ -2368,10 +2371,11 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // read a datagram as a malformed packet.
             #[cfg(feature = "transport-link-udp-reliable")]
             Proto::UdpReliable => Ok(DialedLink::UdpReliable(Box::new(
-                dial_udp_reliable(
+                dial_udp_reliable_with_streams(
                     ip.addr,
                     &ip.addr.ip().to_string(),
                     &cfg.link_socket(ip.socket(), ip.proto).await?,
+                    ip.quic_streams,
                 )
                 .await?,
             ))),
@@ -2428,10 +2432,13 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // R2944 — the QoS metadata is the ESTABLISHMENT's input, not the
             // link's: the dial caller stages it into the link's offer.
             qos: _,
-            // The stream keys choose a QUIC link's offer; this build's QUIC
-            // dial serves the single-stream protocols alone
-            // (`QuicAlpn::is_served`), which every accepted value includes.
-            quic_streams: _,
+            // The stream keys choose the offer of the quic-family arms below,
+            // the reliable udp one included (its feature implies quic's); the
+            // same cfg-twin as `tls`, for the same reason.
+            #[cfg(feature = "transport-link-quic")]
+            quic_streams,
+            #[cfg(not(feature = "transport-link-quic"))]
+                quic_streams: _,
         } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(
@@ -2564,7 +2571,13 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 let addrs = resolve_locator_addrs(&host, port).await?;
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 let link = first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
-                    dial_quic(addr, client_config.clone(), &host, link_socket)
+                    dial_quic_with_streams(
+                        addr,
+                        client_config.clone(),
+                        &host,
+                        link_socket,
+                        quic_streams,
+                    )
                 })
                 .await?;
                 // R2600 — a NAMED locator carries the policy exactly as a
@@ -2620,7 +2633,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 Ok(DialedLink::UdpReliable(Box::new(
                     first_reachable(addrs, &format!("udp/{host}:{port}?rel=1"), |addr| {
-                        dial_udp_reliable(addr, &host, link_socket)
+                        dial_udp_reliable_with_streams(addr, &host, link_socket, quic_streams)
                     })
                     .await?,
                 )))
@@ -3422,10 +3435,11 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 let server_config =
                     quic_accept_server_config(ip.tls(), cfg.quic.as_ref(), "quic").await?;
                 Ok(BoundListener::Quic(
-                    bind_quic(
+                    bind_quic_with_streams(
                         ip.addr,
                         server_config,
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
+                        ip.quic_streams,
                     )
                     .await?,
                     // R2600 — the policy is read HERE, where the locator is, and
@@ -3473,7 +3487,12 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // certificate is one the process makes for itself.
             #[cfg(feature = "transport-link-udp-reliable")]
             Proto::UdpReliable => Ok(BoundListener::UdpReliable(
-                bind_udp_reliable(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
+                bind_udp_reliable_with_streams(
+                    ip.addr,
+                    &cfg.link_socket(ip.socket(), ip.proto).await?,
+                    ip.quic_streams,
+                )
+                .await?,
             )),
             #[cfg(not(feature = "transport-link-udp-reliable"))]
             Proto::UdpReliable => Err(unsupported(
@@ -3508,9 +3527,12 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // links it accepts: upstream seeds an accepted link from that
             // link's own src endpoint, not from the listen endpoint.
             qos: _,
-            // As on the dial side: this build's QUIC listener serves the
-            // single-stream protocols alone, which every accepted value includes.
-            quic_streams: _,
+            // The stream keys choose the offer of the quic-family listeners
+            // below; the same cfg-twin as on the dial side.
+            #[cfg(feature = "transport-link-quic")]
+            quic_streams,
+            #[cfg(not(feature = "transport-link-quic"))]
+                quic_streams: _,
         } => match proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
                 bind_tcp_host(
@@ -3588,7 +3610,12 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 Ok(BoundListener::Quic(
                     first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
-                        bind_quic(addr, server_config.clone(), link_socket)
+                        bind_quic_with_streams(
+                            addr,
+                            server_config.clone(),
+                            link_socket,
+                            quic_streams,
+                        )
                     })
                     .await?,
                     // R2600 — a NAMED listen tail carries the policy too.
@@ -3628,7 +3655,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 Ok(BoundListener::UdpReliable(
                     first_reachable(addrs, &format!("udp/{host}:{port}?rel=1"), |addr| {
-                        bind_udp_reliable(addr, link_socket)
+                        bind_udp_reliable_with_streams(addr, link_socket, quic_streams)
                     })
                     .await?,
                 ))
@@ -7105,7 +7132,7 @@ mod tests {
             None,
         )
         .expect("build quic server config");
-        let ep = bind_quic(
+        let ep = crate::quic_pipeline::bind_quic(
             "127.0.0.1:0".parse().expect("loopback addr"),
             server_config,
             &LinkSocket::NONE,
@@ -7374,7 +7401,7 @@ mod tests {
                 );
         assert_eq!(
             config.alpn_protocols,
-            vec![crate::quic_config::QUIC_ALPN.to_vec()],
+            crate::quic_config::alpn_offer(wz_session_core::locator::QuicStreams::DEFAULT),
             "the fallback config must be a real QUIC client config, ALPN included"
         );
     }
