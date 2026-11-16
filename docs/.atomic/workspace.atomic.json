@@ -4105,7 +4105,7 @@
     "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets": {
       "intent": "12 named timers (link / handshake / scout / lease / keepalive / closing / batch / reassembly / accept-rate / cookie). R61b: Hal time-mock for delayed-send coverage carry.",
       "inputs_bullets": [
-        "link.open_timeout (5s) / init_ack_timeout / open_ack_timeout (2s) / scout_timeout (1s)",
+        "link.open_timeout (5s) / opening_timeout (10s, InitSyn to OpenAck, one bound) / scout_timeout (1s)",
         "lease (10s, negotiated) / keepalive_interval (lease/3) / closing_timeout (100ms)",
         "batch_timer (1ms AP / 5ms MCU) / reassembly_timeout (500ms per peer-priority-reliability-sn_base)",
         "accept_rate_window (1s) / accepting_inactivity_timeout (1s)",
@@ -4114,7 +4114,9 @@
       "caveats_bullets": [
         "R311fa: handshake send-delay timers fire only when the open loop pumps Engine::tick (50ms cadence).",
         "R311fa: per-phase timeout transitions are child-scoped; SCE never auto-cancels a stale delayed send.",
-        "R311fa: pre-Established Closing(generic) maps to OpenError::HandshakeTimeout (peer Close count 0)."
+        "R311fa: pre-Established Closing(generic) maps to OpenError::HandshakeTimeout (peer Close count 0).",
+        "Opening: ONE host deadline armed on Opening entry, not reset by InitAck; raises the child's event.",
+        "Opening bound = node's open_timeout (zenoh, pico: 10s); no shorter init_ack/open_ack step window."
       ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
