@@ -3801,9 +3801,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// Install [`Self::ingress_gate`] on `dispatcher`. A dispatcher is built anew on every
     /// re-join, so call this on each one before its drive loop spins.
     #[cfg(feature = "access-acl-multicast")]
-    pub fn install_ingress_gate<const MAX_PEERS: usize>(
+    pub fn install_ingress_gate<
+        Grow: wz_session_core::multicast_dispatch::TableGrowth,
+        const MAX_PEERS: usize,
+    >(
         &self,
-        dispatcher: &mut wz_session_core::multicast_dispatch::MulticastDispatcher<MAX_PEERS>,
+        dispatcher: &mut wz_session_core::multicast_dispatch::MulticastDispatcher<MAX_PEERS, Grow>,
     ) where
         R: 'static,
         Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>: Send + Sync + 'static,

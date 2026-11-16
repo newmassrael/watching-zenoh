@@ -5,8 +5,9 @@
 //! session-level [`session_fsm_multicast`](crate::session_fsm_multicast)
 //! Engine plus a bounded pool of per-peer
 //! [`multicast_peer`](crate::multicast_peer) Engines (the §3.2
-//! `multicast_peer_table`): fixed rows, and on a heap host whose config lets
-//! the table grow, rows added past them up to `transport/multicast/max_sessions`.
+//! `multicast_peer_table`): fixed rows, and for a host that builds a table that
+//! grows ([`TableGrowth`]), rows added past them up to
+//! `transport/multicast/max_sessions`.
 //!
 //! This is the handshake-free multicast sibling of
 //! [`reassembly_dispatch`](crate::reassembly_dispatch): the two engine-free
@@ -116,9 +117,10 @@ use crate::multicast_peer::{
 // no-alloc MCU profile (run-ci Layer G.12).
 use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
-use crate::multicast_peer_rows::PeerRows;
 #[cfg(feature = "alloc")]
-use crate::multicast_peer_rows::RowIndex;
+pub use crate::multicast_peer_rows::GrowingTable;
+pub use crate::multicast_peer_rows::{FixedTable, TableGrowth};
+use crate::multicast_peer_rows::{PeerRows, RowIndex};
 #[cfg(all(feature = "reassembly", feature = "storage-profile"))]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
 #[cfg(feature = "reassembly")]
@@ -215,26 +217,18 @@ pub struct MulticastConfig {
     /// a new member while its table holds this many
     /// (`io/zenoh-transport/src/multicast/rx.rs` @
     /// `if zread!(self.peers).len() >= self.manager.config.multicast.max_sessions {`).
-    /// See [`MulticastDispatcher::member_cap`] for what a table makes of it.
+    /// See [`MulticastDispatcher::member_cap`] for what a table makes of it, which depends on
+    /// whether the table grows ([`TableGrowth`]).
     pub max_sessions: Option<usize>,
-    /// Whether the table may add rows past its fixed `MAX_PEERS` to hold a stated
-    /// [`Self::max_sessions`]: a host with an allocator, whose group may be as large as its
-    /// configuration says. Without it the fixed rows are the table, and a stated cap above them
-    /// is refused by [`MulticastDispatcher::stated_cap_fits`] rather than held to fewer.
-    #[cfg(feature = "alloc")]
-    pub growable: bool,
 }
 
 impl MulticastConfig {
     /// Construct an explicit config. See the field docs for the no-`Default`
-    /// rationale. No cap is stated and the table does not grow, so it holds as many members as
-    /// it has fixed rows.
+    /// rationale. No cap is stated, so a table holds as many members as it has fixed rows.
     pub const fn new(lease_ms: u64) -> Self {
         Self {
             lease_ms,
             max_sessions: None,
-            #[cfg(feature = "alloc")]
-            growable: false,
         }
     }
 
@@ -242,16 +236,6 @@ impl MulticastConfig {
     pub const fn with_max_sessions(self, max_sessions: Option<usize>) -> Self {
         Self {
             max_sessions,
-            ..self
-        }
-    }
-
-    /// This config with a table that grows past its fixed rows to a stated cap
-    /// ([`Self::growable`]).
-    #[cfg(feature = "alloc")]
-    pub const fn growing(self) -> Self {
-        Self {
-            growable: true,
             ..self
         }
     }
@@ -910,18 +894,19 @@ impl PeerSlot {
 }
 
 /// The multicast Router: one session-level FSM plus a pool of per-peer FSMs (the §3.2
-/// `multicast_peer_table`): `MAX_PEERS` fixed rows, and on a heap build whose config lets the
-/// table grow ([`MulticastConfig::max_sessions`]), rows added past them up to the stated cap. See
-/// the module docs for the division of labour with the engine-free FSMs.
-pub struct MulticastDispatcher<const MAX_PEERS: usize> {
+/// `multicast_peer_table`): `MAX_PEERS` fixed rows, and when `Grow` is a table that grows
+/// ([`TableGrowth`]), rows added past them up to the cap its config states
+/// ([`MulticastConfig::max_sessions`]). The host that builds the dispatcher names `Grow`; the
+/// default, [`FixedTable`], holds nothing for growth, so a host that never names another links
+/// none of it. See the module docs for the division of labour with the engine-free FSMs.
+pub struct MulticastDispatcher<const MAX_PEERS: usize, Grow: TableGrowth = FixedTable> {
     session: Engine<SessionFsmMulticastPolicy<SessionBinding>>,
-    peers: PeerRows<PeerSlot, MAX_PEERS>,
+    peers: PeerRows<PeerSlot, MAX_PEERS, Grow>,
     /// The row of each member by the address its datagrams come from, kept by a table that grows
-    /// ([`MulticastConfig::growable`]) and absent from one that does not, which scans its few
-    /// rows. Every datagram is attributed through [`Self::find_by_src`], so a grown table answers
-    /// it without walking a thousand rows.
-    #[cfg(feature = "alloc")]
-    by_src: RowIndex<SocketAddr>,
+    /// and an empty type in one that does not, which scans its few rows. Every datagram is
+    /// attributed through [`Self::find_by_src`], so a grown table answers it without walking a
+    /// thousand rows.
+    by_src: Grow::Index<SocketAddr>,
     config: MulticastConfig,
     /// Set by the session machine's `enter_running` duty and cleared by its
     /// `release_multicast_link`: whether peers, frames and fragments are
@@ -967,7 +952,20 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize> {
 pub type MulticastIngressGate =
     alloc::boxed::Box<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
 
-impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
+// A table that does not grow holds no grown row and no index: both are empty types, so nothing a
+// table that grows keeps (a vector, a hash map, its hasher's seed) is reachable from it.
+const _: () = {
+    assert!(
+        core::mem::size_of::<<FixedTable as TableGrowth>::Rows<PeerSlot>>() == 0,
+        "a fixed table holds grown rows"
+    );
+    assert!(
+        core::mem::size_of::<<FixedTable as TableGrowth>::Index<SocketAddr>>() == 0,
+        "a fixed table holds an index"
+    );
+};
+
+impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, Grow> {
     /// Build a Router with an Idle session and `MAX_PEERS` free slots over
     /// `config`.
     pub fn new(config: MulticastConfig) -> Self {
@@ -999,12 +997,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 ),
             );
             let peers = &mut *addr_of_mut!((*at).peers)
-                .cast::<MaybeUninit<PeerRows<PeerSlot, MAX_PEERS>>>();
+                .cast::<MaybeUninit<PeerRows<PeerSlot, MAX_PEERS, Grow>>>();
             PeerRows::init_in(peers, |cell| {
                 PeerSlot::init_in(cell);
             });
-            #[cfg(feature = "alloc")]
-            addr_of_mut!((*at).by_src).write(RowIndex::for_table(config.growable));
+            addr_of_mut!((*at).by_src)
+                .write(<Grow::Index<SocketAddr> as RowIndex<SocketAddr>>::empty());
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).running).write(false);
             addr_of_mut!((*at).join_refusals).write(0);
@@ -1034,8 +1032,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let Self {
             session: _,
             peers: _,
-            #[cfg(feature = "alloc")]
-                by_src: _,
+            by_src: _,
             config: _,
             running: _,
             join_refusals: _,
@@ -1470,7 +1467,6 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     pub fn active_peers(&self) -> usize {
         // A table that grows counts its members in its index: every Join asks this against the
         // cap, and a scan of a thousand rows per beacon is the cost the index is there to remove.
-        #[cfg(feature = "alloc")]
         if let Some(members) = self.by_src.members() {
             return members;
         }
@@ -1623,11 +1619,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             }
             // No member is left to hold an index past the fixed rows, so the grown ones go
             // before the rest are made free.
-            #[cfg(feature = "alloc")]
-            {
-                self.peers.shed_grown();
-                self.by_src.cleared();
-            }
+            self.peers.shed_grown();
+            self.by_src.cleared();
             for peer in self.peers.iter_mut() {
                 peer.reset_in_place();
             }
@@ -1731,7 +1724,6 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             return JoinOutcome::Refused(JoinRefuse::PeerTableFull);
         };
         self.peers[idx].admit(src, zid, baseline, qos_next_sns, now_ms);
-        #[cfg(feature = "alloc")]
         self.by_src.admitted(src, idx);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         if let Some(tags) = &mut self.member_tags {
@@ -1750,18 +1742,18 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// How many members the table may hold at once. A config that states no cap
     /// ([`MulticastConfig::max_sessions`] `None`) leaves the fixed rows the bound, so a table grows
     /// only to a cap a configuration asked for. A stated cap is held as it is by a table that grows
-    /// (`MulticastConfig::growable`) and is the lesser of it and the fixed rows otherwise, which
+    /// ([`TableGrowth::GROWS`]) and is the lesser of it and the fixed rows otherwise, which
     /// [`Self::stated_cap_fits`] refuses and [`Self::create`] does not bring up, rather than leave
     /// the table holding fewer than the configuration says.
     pub fn member_cap(&self) -> usize {
         let Some(stated) = self.config.max_sessions else {
             return MAX_PEERS;
         };
-        #[cfg(feature = "alloc")]
-        if self.config.growable {
-            return stated;
+        if Grow::GROWS {
+            stated
+        } else {
+            stated.min(MAX_PEERS)
         }
-        stated.min(MAX_PEERS)
     }
 
     /// Whether this table can hold the cap its config states: `Err` when the config asks for more
@@ -1771,11 +1763,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let Some(stated) = self.config.max_sessions else {
             return Ok(());
         };
-        #[cfg(feature = "alloc")]
-        if self.config.growable {
-            return Ok(());
-        }
-        if stated <= MAX_PEERS {
+        if Grow::GROWS || stated <= MAX_PEERS {
             Ok(())
         } else {
             Err(MaxSessionsBeyondTable {
@@ -1812,16 +1800,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         if let Some(idx) = self.peers.iter().position(PeerSlot::is_free) {
             return Some(idx);
         }
-        #[cfg(feature = "alloc")]
-        if self.config.growable {
-            // SAFETY: `PeerSlot::init_in` writes a whole slot into the cell it is given.
-            return Some(unsafe {
-                self.peers.grow_with(|cell| {
-                    PeerSlot::init_in(cell);
-                })
-            });
+        // SAFETY: `PeerSlot::init_in` writes a whole slot into the cell it is given.
+        unsafe {
+            self.peers.grow_with(|cell| {
+                PeerSlot::init_in(cell);
+            })
         }
-        None
     }
 
     /// How many JOINs the node's rule refused for what they advertise: another protocol version,
@@ -2127,7 +2111,6 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
                 self.retire_member(idx);
                 self.peers[idx].evict(reason, on_lost);
-                #[cfg(feature = "alloc")]
                 self.by_src.left(&src);
                 true
             }
@@ -2190,7 +2173,6 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 self.member_retractions.extend(member.retractions());
             }
             // The address is read before the eviction clears it.
-            #[cfg(feature = "alloc")]
             if let Some(src) = slot.src {
                 self.by_src.left(&src);
             }
@@ -2203,7 +2185,6 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// The row of the member at `src`: by the index of a table that grows, and by a scan of the
     /// rows of one that does not.
     fn find_by_src(&self, src: SocketAddr) -> Option<usize> {
-        #[cfg(feature = "alloc")]
         if let Some(found) = self.by_src.lookup(&src) {
             if let Some(idx) = found {
                 debug_assert!(
@@ -2275,8 +2256,9 @@ pub fn ingest_multicast_fragment<
     const CAP: usize,
     S,
     F,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     src: SocketAddr,
     reliable: bool,
@@ -2312,8 +2294,9 @@ pub fn ingest_multicast_fragment_qos<
     const CAP: usize,
     S,
     F,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     src: SocketAddr,
     reliable: bool,
@@ -2359,8 +2342,9 @@ pub(crate) fn ingest_multicast_fragment_counted<
     S,
     F,
     C,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     src: SocketAddr,
     reliable: bool,
@@ -2552,8 +2536,9 @@ pub(crate) fn ingest_multicast_fragment_in_place<
     const CAP: usize,
     S,
     F,
+    Grow: TableGrowth,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     src: SocketAddr,
     reliable: bool,
@@ -2644,8 +2629,8 @@ pub(crate) fn ingest_multicast_fragment_in_place<
         )
     )
 ))]
-pub(crate) fn count_received_network_messages<const MAX_PEERS: usize, C>(
-    dispatcher: &MulticastDispatcher<MAX_PEERS>,
+pub(crate) fn count_received_network_messages<const MAX_PEERS: usize, C, Grow: TableGrowth>(
+    dispatcher: &MulticastDispatcher<MAX_PEERS, Grow>,
     src: SocketAddr,
     outcome: &crate::driver_loop::DriverLoopOutcome,
     count: &mut C,
@@ -2737,7 +2722,21 @@ mod tests {
     }
 
     fn running_with<const N: usize>(config: MulticastConfig) -> MulticastDispatcher<N> {
-        let mut d = MulticastDispatcher::<N>::new(config);
+        running_table::<N, FixedTable>(config)
+    }
+
+    /// A running dispatcher of `N` fixed rows that grows past them to the cap `config` states.
+    #[cfg(feature = "alloc")]
+    fn running_growing<const N: usize>(
+        config: MulticastConfig,
+    ) -> MulticastDispatcher<N, GrowingTable> {
+        running_table::<N, GrowingTable>(config)
+    }
+
+    fn running_table<const N: usize, Grow: TableGrowth>(
+        config: MulticastConfig,
+    ) -> MulticastDispatcher<N, Grow> {
+        let mut d = MulticastDispatcher::<N, Grow>::new(config);
         assert_eq!(d.create(), OPEN_LINK);
         assert_eq!(d.notify_link_ready(), NO_LINK_DUTY);
         assert_eq!(d.session_state(), SessionFsmMulticastState::Running);
@@ -3511,11 +3510,7 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn a_growing_table_admits_past_its_rows_to_the_stated_cap() {
-        let mut d = running_with::<1>(
-            MulticastConfig::new(5_000)
-                .with_max_sessions(Some(3))
-                .growing(),
-        );
+        let mut d = running_growing::<1>(MulticastConfig::new(5_000).with_max_sessions(Some(3)));
         assert_eq!(d.member_cap(), 3);
         assert_eq!(d.stated_cap_fits(), Ok(()));
         for n in 0..3u8 {
@@ -3559,7 +3554,7 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn a_growing_table_with_no_stated_cap_holds_its_rows() {
-        let mut d = running_with::<2>(MulticastConfig::new(5_000).growing());
+        let mut d = running_growing::<2>(MulticastConfig::new(5_000));
         assert_eq!(d.member_cap(), 2);
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
@@ -3576,11 +3571,7 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn the_src_index_follows_each_place_a_row_changes_hands() {
-        let mut d = running_with::<1>(
-            MulticastConfig::new(5_000)
-                .with_max_sessions(Some(4))
-                .growing(),
-        );
+        let mut d = running_growing::<1>(MulticastConfig::new(5_000).with_max_sessions(Some(4)));
         let (a, b, c) = (member_src(0), member_src(1), member_src(2));
         assert_eq!(d.ingest_join(&[1], a, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(d.ingest_join(&[2], b, sn0(), 0), JoinOutcome::Admitted);
@@ -3608,10 +3599,15 @@ mod tests {
     }
 
     /// A table that does not grow keeps no index, on a build with an allocator too: it finds its
-    /// members by a scan of its rows and allocates nothing for them.
-    #[cfg(feature = "alloc")]
+    /// members by a scan of its rows and allocates nothing for them. It is the table a dispatcher
+    /// is when its host names no growth.
     #[test]
     fn a_table_that_does_not_grow_keeps_no_index() {
+        assert_eq!(
+            core::any::TypeId::of::<MulticastDispatcher<4>>(),
+            core::any::TypeId::of::<MulticastDispatcher<4, FixedTable>>(),
+            "the default is the table that does not grow"
+        );
         let mut d = running_dispatcher::<4>(5_000);
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(
@@ -3640,11 +3636,8 @@ mod tests {
             (seed >> 33) % bound
         };
         for round in 0..8 {
-            let mut d = running_with::<2>(
-                MulticastConfig::new(5_000)
-                    .with_max_sessions(Some(6))
-                    .growing(),
-            );
+            let mut d =
+                running_growing::<2>(MulticastConfig::new(5_000).with_max_sessions(Some(6)));
             let mut now = 0u64;
             for step in 0..200 {
                 let k = draw(pool.len() as u64) as usize;

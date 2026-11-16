@@ -142,7 +142,9 @@ use wz_session_core::multicast_dispatch::MulticastLinkDuties;
 /// that reaches wz only through this crate (the demo's `--sessions` group
 /// session is one) can build the dispatcher and the profile that
 /// [`drive_multicast_session_with_shutdown`] takes.
-pub use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
+pub use wz_session_core::multicast_dispatch::{
+    FixedTable, GrowingTable, MulticastConfig, MulticastDispatcher, TableGrowth,
+};
 use wz_session_core::multicast_join::encode_join;
 /// Open-debt item 900 — the group profile a member advertises; see the
 /// re-export of [`MulticastDispatcher`] above for why it is public here.
@@ -573,8 +575,8 @@ where
 /// machine with `link.ready` or `link.lost`, whose own duties are performed in
 /// turn. An open's failure is returned after the machine has heard
 /// `link.lost`.
-async fn perform_link_duties<D, B, Fut, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+async fn perform_link_duties<D, B, Fut, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     link: &mut MulticastLink<D, B>,
     mut duties: MulticastLinkDuties,
 ) -> std::io::Result<()>
@@ -623,8 +625,8 @@ where
 /// on the members that its table does not grow to hold
 /// ([`MulticastDispatcher::stated_cap_fits`]), before anything is bound and with
 /// the session left Idle.
-pub async fn open_multicast_session<'l, D, B, Fut, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+pub async fn open_multicast_session<'l, D, B, Fut, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     link: &'l mut MulticastLink<D, B>,
 ) -> std::io::Result<&'l D>
 where
@@ -677,8 +679,8 @@ where
 /// multicast to the group, and a frame past the group batch budget leaves as a
 /// `T_MID_FRAGMENT` chain (R311ko). A publish-free caller passes a producer
 /// nobody else holds.
-pub async fn drive_multicast_session<D, B, Fut, T, F, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+pub async fn drive_multicast_session<D, B, Fut, T, F, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     cfg: MulticastDriveConfig<'_>,
     link: &mut MulticastLink<D, B>,
     clock: &T,
@@ -732,8 +734,16 @@ where
 /// On stop the dispatcher's `stop()` runs before the return, so the peer table
 /// is cleared and the link closed exactly as on the link-loss path — a
 /// `Stopped` outcome never leaves peers or an open link behind.
-pub async fn drive_multicast_session_with_shutdown<D, B, Fut, T, F, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+pub async fn drive_multicast_session_with_shutdown<
+    D,
+    B,
+    Fut,
+    T,
+    F,
+    Grow: TableGrowth,
+    const MAX_PEERS: usize,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     cfg: MulticastDriveConfig<'_>,
     link: &mut MulticastLink<D, B>,
     clock: &T,
@@ -852,9 +862,10 @@ pub async fn drive_multicast_session_with_membership<
     G,
     H,
     R,
+    Grow: TableGrowth,
     const MAX_PEERS: usize,
 >(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     cfg: MulticastDriveConfig<'_>,
     link: &mut MulticastLink<D, B>,
     clock: &T,
@@ -920,8 +931,19 @@ where
 /// so what the loop queued — a departing Close included — is written before
 /// the outcome is reported.
 #[allow(clippy::too_many_arguments)]
-async fn drive_multicast_session_inner<D, B, Fut, T, F, G, H, R, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+async fn drive_multicast_session_inner<
+    D,
+    B,
+    Fut,
+    T,
+    F,
+    G,
+    H,
+    R,
+    Grow: TableGrowth,
+    const MAX_PEERS: usize,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     cfg: MulticastDriveConfig<'_>,
     link: &mut MulticastLink<D, B>,
     clock: &T,
@@ -1000,8 +1022,19 @@ where
 
 /// The loop itself: receive, beacon, sweep, and queue what goes out on `tx`.
 #[allow(clippy::too_many_arguments)]
-async fn drive_multicast_session_running<D, B, Fut, T, F, G, H, R, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+async fn drive_multicast_session_running<
+    D,
+    B,
+    Fut,
+    T,
+    F,
+    G,
+    H,
+    R,
+    Grow: TableGrowth,
+    const MAX_PEERS: usize,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     cfg: MulticastDriveConfig<'_>,
     link: &mut MulticastLink<D, B>,
     clock: &T,
@@ -1758,12 +1791,13 @@ pub struct GroupFaceSeams<F, G, H> {
 pub const GROUP_FACE_ROWS: usize = 32;
 
 /// The dispatcher of one join of a group face of `params`: a table of [`GROUP_FACE_ROWS`] rows
-/// that grows to the cap the profile states, and holds those rows when it states none.
-pub fn group_face_dispatcher(params: &MulticastParams) -> MulticastDispatcher<GROUP_FACE_ROWS> {
+/// that grows ([`GrowingTable`]) to the cap the profile states, and holds those rows when it
+/// states none.
+pub fn group_face_dispatcher(
+    params: &MulticastParams,
+) -> MulticastDispatcher<GROUP_FACE_ROWS, GrowingTable> {
     MulticastDispatcher::new(
-        MulticastConfig::new(params.lease_ms)
-            .with_max_sessions(params.max_sessions)
-            .growing(),
+        MulticastConfig::new(params.lease_ms).with_max_sessions(params.max_sessions),
     )
 }
 
@@ -2364,8 +2398,8 @@ impl GroupRejoin {
 /// — re-joins through this same wait. `on_open_failure` hears each failed
 /// re-open with the wait before the next try; it is where a caller reports it.
 #[allow(clippy::too_many_arguments)]
-pub async fn rejoin_group_session<D, B, Fut, N, T, R, const MAX_PEERS: usize>(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+pub async fn rejoin_group_session<D, B, Fut, N, T, R, Grow: TableGrowth, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     mut new_dispatcher: N,
     link: &mut MulticastLink<D, B>,
     clock: &T,
@@ -2378,7 +2412,7 @@ where
     D: MulticastLinkDriver,
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
-    N: FnMut() -> MulticastDispatcher<MAX_PEERS>,
+    N: FnMut() -> MulticastDispatcher<MAX_PEERS, Grow>,
     T: TimeSource,
     R: FnMut(&std::io::Error, u64),
 {
@@ -4726,8 +4760,8 @@ mod tests {
     /// reassembly-aware wrapper takes a caller-owned Router this test has no
     /// use for (no fragments are involved), so the non-reassembly entry point
     /// is called directly in both builds.
-    fn dispatch_multicast_inbound_under_test<const MAX_PEERS: usize>(
-        dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    fn dispatch_multicast_inbound_under_test<Grow: TableGrowth, const MAX_PEERS: usize>(
+        dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
         params: &MulticastParams,
         bytes: &[u8],
         src: SocketAddr,
