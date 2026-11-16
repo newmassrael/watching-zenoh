@@ -3669,16 +3669,6 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          off a frame today only by a unit test that calls the setter directly.",
     ),
     (
-        "transport/link/tx/sequence_number_resolution",
-        KIND_NOT_YET_READ,
-        "expands to `--sn-resolution`. The width rides the InitSyn's `sn_res` byte \
-         (`handshake_encode.rs` @ `sn_res: pack_sn_res(caps.seq_num_res, caps.req_id_res)`, \
-         upstream `init.rs` behind the `S` flag) and the Join of a group the router hat \
-         holds, so a fixture pair of 32 and 16 bits shows two codes. The demo's own test \
-         `the_width_a_config_names_reaches_the_init_the_node_sends` reads it off the \
-         encoded InitSyn; no leg of the wire sweep does yet.",
-    ),
-    (
         "gateway/south",
         KIND_NOT_YET_READ,
         "expands to `--gateway-south <partition>`. A custom partition makes a \
