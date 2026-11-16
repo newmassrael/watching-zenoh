@@ -68,18 +68,27 @@ from artifact_root import artifact  # noqa: E402  (a sibling: where products are
 # The pinned triple. Edit each half deliberately -- see the module doc.
 EXPECTED_VERSION = 1
 
-EXPECTED_SYMBOLS = {
-    "wz_replay_abi_version",
+# Each symbol maps to the revision that first exported it, so a consumer reads
+# here what its pinned revision can call (`--history` prints the table) and a
+# finding names the revision of the symbol it is about. DERIVED as the dissect
+# pin's are: the commit that first wrote a symbol into this file (`git log
+# --reverse -S'"<symbol>"' -- scripts/lib/capi_replay_abi_pin.py`) and
+# `EXPECTED_VERSION` as that commit left the file. Every symbol here came with
+# the file's first commit, at revision 1, and the revision has not moved since
+# (`git log -G'^EXPECTED_VERSION' -- scripts/lib/capi_replay_abi_pin.py` names
+# that commit alone).
+EXPECTED_SYMBOLS: dict[str, int] = {
+    "wz_replay_abi_version": 1,
     # The record layout, reported by the artifact so a binding in any language
     # can check its own `sizeof` against it.
-    "wz_replay_emission_layout",
+    "wz_replay_emission_layout": 1,
     # The cheap door: is this schedule playable at all.
-    "wz_replay_schedule_check",
+    "wz_replay_schedule_check": 1,
     # The plan half proper -- delays and their sources, and the whole-plan
     # refusal that still shows the plan.
-    "wz_replay_plan_delays",
+    "wz_replay_plan_delays": 1,
     # The mutation half, answered in the same door for both of its operands.
-    "wz_replay_mutate",
+    "wz_replay_mutate": 1,
 }
 
 # `size, align, offset(delay_millis), offset(source), offset(reserved)`.
@@ -105,8 +114,61 @@ def header_revision(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def pin_findings(pinned: dict[str, int], pinned_version: int) -> list[str]:
+    """What is wrong with the table itself, with no artifact to read: a symbol
+    pinned at a revision the pin has not reached, or below the first."""
+    findings = []
+    for name, since in sorted(pinned.items()):
+        if since > pinned_version:
+            findings.append(
+                f"{name} is pinned since revision {since}, after the pinned "
+                f"revision {pinned_version}"
+            )
+        elif since < 1:
+            findings.append(f"{name} is pinned since revision {since}; revisions start at 1")
+    return findings
+
+
+def drift_findings(
+    symbols: set[str], version: int, pinned: dict[str, int], pinned_version: int
+) -> list[str]:
+    """Each symbol the artifact and the pin disagree about, with its revision:
+    a lost symbol names the revision that promised it, and a new one the
+    revision it has to be pinned at -- the build's when the revision moved, the
+    next when it did not, because then the move is what is missing."""
+    lines = []
+    new_at = version if version > pinned_version else pinned_version + 1
+    for name in sorted(set(pinned) - symbols):
+        lines.append(
+            f"PIN NAMES `{name}` (since revision {pinned[name]}) and the "
+            "artifact does not export it"
+        )
+    for name in sorted(symbols - set(pinned)):
+        lines.append(
+            f"artifact exports `{name}` and the pin does not name it -- pin it "
+            f"as \"{name}\": {new_at}. A new symbol is a new question a consumer "
+            "can ask, which is exactly what the revision answers -- move both."
+        )
+    return lines
+
+
+def history(pinned: dict[str, int]) -> str:
+    """The table a consumer reads: each revision and the symbols it brought."""
+    by_revision: dict[int, list[str]] = {}
+    for name, since in pinned.items():
+        by_revision.setdefault(since, []).append(name)
+    return "\n".join(
+        f"revision {since}: {', '.join(sorted(by_revision[since]))}"
+        for since in sorted(by_revision)
+    )
+
+
 def selftest() -> int:
-    """The define is read; a prose mention with a number after it is NOT."""
+    """The define is read; a prose mention with a number after it is NOT.
+
+    And the revision arms: a finding names the revision of the symbol it is
+    about, an impossible table is refused, and the table this file pins is not.
+    """
     cases = [
         ("#define WZ_REPLAY_ABI_REVISION 7\n", 7),
         (" * compare it against WZ_REPLAY_ABI_REVISION 3 before reading\n", None),
@@ -122,6 +184,48 @@ def selftest() -> int:
                 file=sys.stderr,
             )
             return 1
+
+    pinned = {"wz_replay_a": 1, "wz_replay_b": 3}
+    drift_cases = [
+        ({"wz_replay_a", "wz_replay_b"}, 3, []),
+        ({"wz_replay_a", "wz_replay_b", "wz_replay_c"}, 4, ['"wz_replay_c": 4.']),
+        ({"wz_replay_a", "wz_replay_b", "wz_replay_c"}, 3, ['"wz_replay_c": 4.']),
+        ({"wz_replay_a"}, 3, ["`wz_replay_b` (since revision 3)"]),
+    ]
+    for symbols, version, wanted in drift_cases:
+        got = drift_findings(symbols, version, pinned, 3)
+        if len(got) != len(wanted) or not all(w in g for w, g in zip(wanted, got)):
+            print(
+                f"capi-replay-abi-pin: selftest FAIL -- symbols {sorted(symbols)} "
+                f"at revision {version} gave {got}, expected lines containing {wanted}",
+                file=sys.stderr,
+            )
+            return 1
+    for table, version, count in [
+        ({"wz_replay_a": 1, "wz_replay_b": 3}, 3, 0),
+        ({"wz_replay_a": 1, "wz_replay_b": 4}, 3, 1),
+        ({"wz_replay_a": 0}, 3, 1),
+    ]:
+        if len(pin_findings(table, version)) != count:
+            print(
+                f"capi-replay-abi-pin: selftest FAIL -- table {table} at revision "
+                f"{version} misjudged",
+                file=sys.stderr,
+            )
+            return 1
+    if history({"wz_replay_b": 3, "wz_replay_a": 1}) != (
+        "revision 1: wz_replay_a\nrevision 3: wz_replay_b"
+    ):
+        print("capi-replay-abi-pin: selftest FAIL -- the history table", file=sys.stderr)
+        return 1
+    own = pin_findings(EXPECTED_SYMBOLS, EXPECTED_VERSION)
+    if own:
+        print(
+            "capi-replay-abi-pin: selftest FAIL -- this file's own table:\n  "
+            + "\n  ".join(own),
+            file=sys.stderr,
+        )
+        return 1
     print("capi-replay-abi-pin: selftest OK")
     return 0
 
@@ -214,14 +318,13 @@ def main() -> int:
             "does not would read this library through a header describing "
             "another. They move together or not at all."
         )
-    for name in sorted(EXPECTED_SYMBOLS - symbols):
-        problems.append(f"  - PIN NAMES `{name}` and the artifact does not export it")
-    for name in sorted(symbols - EXPECTED_SYMBOLS):
-        problems.append(
-            f"  - artifact exports `{name}` and the pin does not name it. A new "
-            "symbol is a new question a consumer can ask, which is exactly what "
-            "the revision answers -- move both."
-        )
+    problems.extend(
+        f"  - {line}" for line in pin_findings(EXPECTED_SYMBOLS, EXPECTED_VERSION)
+    )
+    problems.extend(
+        f"  - {line}"
+        for line in drift_findings(symbols, version, EXPECTED_SYMBOLS, EXPECTED_VERSION)
+    )
     if version != EXPECTED_VERSION:
         problems.append(
             f"  - revision is {version}, pinned at {EXPECTED_VERSION}"
@@ -253,9 +356,12 @@ def main() -> int:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--selftest"]:
         sys.exit(selftest())
+    if sys.argv[1:] == ["--history"]:
+        print(history(EXPECTED_SYMBOLS))
+        sys.exit(0)
     if sys.argv[1:]:
         print(
-            f"usage: {pathlib.Path(__file__).name} [--selftest]",
+            f"usage: {pathlib.Path(__file__).name} [--selftest | --history]",
             file=sys.stderr,
         )
         sys.exit(2)

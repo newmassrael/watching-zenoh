@@ -33,7 +33,9 @@ mod windows;
 #[cfg(windows)]
 use windows as platform;
 
-pub use platform::{cleanup_orphaned_segments, OwnedSegment, PeerSegment, PeerSegmentRw};
+pub use platform::{
+    cleanup_orphaned_segments, OwnedSegment, PeerSegment, PeerSegmentRw, SegmentObject,
+};
 #[cfg(unix)]
 pub use unix::segment_path;
 

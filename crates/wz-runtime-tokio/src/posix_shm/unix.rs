@@ -17,15 +17,41 @@
 //!   then linked to its protocol name, so no sweep ever finds it unlocked;
 //! * the LIFETIME: every segment object is entered in the process's registry
 //!   (`lifetime`), whose first entry sweeps the orphans and whose exit stage
-//!   removes what no other process holds, as upstream's `Cleanup` does.
+//!   removes what no other process holds, as upstream's `Cleanup` does;
+//! * the LAST HOLDER OUT: an object that lets go of a segment removes its name
+//!   only when it can take the exclusive lock, so the name lives for as long as
+//!   anyone maps the object, creator or reader, as upstream's
+//!   (`commons/zenoh-shm/src/shm/unix.rs` @ `impl<ID: SegmentID> Drop for SegmentImpl<ID> {`);
+//! * the PROVIDER'S LIVENESS: a reader that keeps a mapping can no longer learn
+//!   that its provider is gone from the name, so the provider holds a second
+//!   lock for as long as it lives and a reader asks whether anyone holds it.
+//!
+//! # The liveness lock, and why it is not a watchdog bit
+//!
+//! Upstream's watchdog runs the other way: holders confirm a bit every 50 ms and
+//! the PROVIDER validates it, so the provider learns that its holders died
+//! (`commons/zenoh-shm/src/watchdog/confirmator.rs` @
+//! `WatchdogConfirmator::new(Duration::from_millis(50));`), and a reader keeps a
+//! segment it mounted for its own whole life
+//! (`commons/zenoh-shm/src/reader.rs` @ `// fastest path: try to get access to already mounted SHM segment`).
+//! wz's readers let go of a dead provider's segments, which needs the reverse
+//! signal, and a bit of the provider's in the segment would move the segment
+//! layout a zenoh peer reads. The kernel keeps that signal without one: the
+//! provider takes an open-file-description read lock on the segment's first
+//! byte (`F_OFD_SETLK`), the kernel holds it exactly as long as the provider's
+//! file is open, through a crash too, and a reader in ANY process asks with
+//! `F_OFD_GETLK` whether some other open file holds it. Record locks and the
+//! `flock` the segment protocol uses do not see each other, so a zenoh peer's
+//! protocol is untouched. Only wz providers take the lock, so a reader trusts
+//! its absence only for a segment it found locked when it opened it; a segment
+//! a zenoh provider made, or one made where the lock cannot be taken, keeps
+//! being judged by its name.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
-#[cfg(target_os = "linux")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
@@ -93,6 +119,92 @@ fn lock_shared(file: &File) -> io::Result<()> {
     }
 }
 
+/// The record-lock range of the provider's liveness lock, the segment's first
+/// byte, with the lock type `kind`.
+#[cfg(target_os = "linux")]
+fn liveness_range(kind: libc::c_int) -> libc::flock {
+    // SAFETY: `flock` is a plain C struct of integers, for which all-zero is a value.
+    let mut range: libc::flock = unsafe { std::mem::zeroed() };
+    range.l_type = kind as libc::c_short;
+    range.l_whence = libc::SEEK_SET as libc::c_short;
+    range.l_start = 0;
+    range.l_len = 1;
+    range
+}
+
+/// Take the provider's liveness lock on `file`, held for as long as this open file
+/// lives (its descriptors and its mappings). Best-effort: a kernel that refuses it leaves a segment
+/// its readers judge by its name, which is how they judge a zenoh provider's.
+fn hold_liveness(file: &File) {
+    #[cfg(target_os = "linux")]
+    {
+        let range = liveness_range(libc::F_RDLCK);
+        // SAFETY: `fcntl` reads the `flock` the pointer names for the length of the
+        // call; the descriptor is valid for the borrow of `file`.
+        let _ = unsafe {
+            libc::fcntl(
+                file.as_raw_fd(),
+                libc::F_OFD_SETLK,
+                &range as *const libc::flock,
+            )
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = file;
+}
+
+/// Whether some open file other than `file` holds the segment's liveness lock:
+/// `Some(true)` its provider lives, `Some(false)` no provider holds it, `None`
+/// when the kernel could not be asked.
+fn provider_holds_liveness(file: &File) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut probe = liveness_range(libc::F_WRLCK);
+        // SAFETY: `fcntl` reads and writes the `flock` the pointer names for the
+        // length of the call; the descriptor is valid for the borrow of `file`.
+        let rc = unsafe {
+            libc::fcntl(
+                file.as_raw_fd(),
+                libc::F_OFD_GETLK,
+                &mut probe as *mut libc::flock,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        Some(probe.l_type != libc::F_UNLCK as libc::c_short)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// Remove the name `path` when no one but `file`'s holder holds the object and
+/// the name still names it: upstream's rule for a segment its holder lets go of
+/// (`commons/zenoh-shm/src/shm/unix.rs` @ `impl<ID: SegmentID> Drop for SegmentImpl<ID> {`).
+///
+/// The exclusive lock is asked of `file`'s own open file, so this holder's shared
+/// lock does not stand in its way and any other holder's does. On Linux a refused
+/// conversion also drops the shared lock, which is why only a holder about to close
+/// its file asks.
+fn remove_if_unshared(file: &File, path: &Path) {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `flock` takes a borrowed fd and returns an error code; the fd is
+    // valid for the borrow of `file`.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return;
+    }
+    let (Ok(held), Ok(named)) = (file.metadata(), std::fs::metadata(path)) else {
+        return;
+    };
+    if (held.dev(), held.ino()) == (named.dev(), named.ino()) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// R2954 — remove every POSIX shm segment no process holds any more: upstream's
 /// `cleanup_orphaned_segments` (`commons/zenoh-shm/src/posix_shm/cleanup.rs` @
 /// `fn cleanup_orphaned_segments_inner() -> ZResult<()> {`), which zenoh-c
@@ -156,29 +268,19 @@ fn cleanup_orphaned_segments_where(wanted: impl Fn(SweptName) -> bool) {
 /// and a new segment been published under the same name, and that one is live.
 #[cfg(target_os = "linux")]
 fn remove_if_dangling(path: &Path) {
-    use std::os::unix::fs::MetadataExt;
-
-    let Ok(file) = OpenOptions::new().read(true).write(true).open(path) else {
-        return;
-    };
-    // SAFETY: `flock` takes a borrowed fd and returns an error code; the fd is
-    // valid for the borrow, and the lock it may take is released when `file`
-    // closes at the end of this function.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return;
-    }
-    let (Ok(locked), Ok(named)) = (file.metadata(), std::fs::metadata(path)) else {
-        return;
-    };
-    if (locked.dev(), locked.ino()) == (named.dev(), named.ino()) {
-        let _ = std::fs::remove_file(path);
+    // The lock `remove_if_unshared` may take is released when `file` closes at
+    // the end of this function.
+    if let Ok(file) = OpenOptions::new().read(true).write(true).open(path) {
+        remove_if_unshared(&file, path);
     }
 }
 
-/// A segment THIS process created: mapped read-write, and unlinked on drop.
+/// A segment THIS process created: mapped read-write, and unlinked by the last
+/// holder to let go of it, this value or a reader.
 ///
-/// The file is held so the shared lock lives as long as the segment does —
-/// `flock` locks are released when the last fd for the open file closes.
+/// The file is held so the shared lock and the liveness lock live as long as the
+/// segment does — both belong to the open file, which goes when its last fd is
+/// closed and its last mapping unmapped, and both go with it.
 pub struct OwnedSegment {
     /// Taken from `as_mut_ptr` at creation, so it carries the right to write; the
     /// mapping it points into lives exactly as long as `map`. A POOL's chunks are
@@ -237,6 +339,7 @@ impl OwnedSegment {
             };
             let path = segment_path(id);
             let published = lock_shared(&file)
+                .map(|()| hold_liveness(&file))
                 .and_then(|()| file.set_len(len as u64))
                 .and_then(|()| std::fs::hard_link(&staging, &path));
             let _ = std::fs::remove_file(&staging);
@@ -336,11 +439,36 @@ impl OwnedSegment {
 
 impl Drop for OwnedSegment {
     fn drop(&mut self) {
-        // Best-effort unlink, matching upstream's cleanup registration. A
-        // failure leaves a stale object in /dev/shm, which reads as "absent" to
-        // any peer once no one maps it; it is not worth panicking in a drop.
-        let _ = std::fs::remove_file(&self.path);
+        // A reader that still maps the segment keeps its name, and removes it
+        // when it lets go last. Its liveness lock goes when the file closes right
+        // after, which is how that reader learns this provider is gone.
+        remove_if_unshared(&self._file, &self.path);
     }
+}
+
+/// One segment object: the id it was opened under and the device and inode of
+/// the object. A holder that saw an object's provider go remembers it by this,
+/// because the same id may later name another object.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SegmentObject {
+    id: u64,
+    identity: (u64, u64),
+}
+
+impl SegmentObject {
+    /// Whether the object's id still names it.
+    pub fn is_named(&self) -> bool {
+        names_object(self.id, self.identity)
+    }
+}
+
+/// Whether the name of segment `id` still names the object of `identity`.
+fn names_object(id: u64, identity: (u64, u64)) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(segment_path(id))
+        .map(|meta| (meta.dev(), meta.ino()) == identity)
+        .unwrap_or(false)
 }
 
 /// A segment ANOTHER process created, opened by id and mapped read-only.
@@ -351,8 +479,17 @@ pub struct PeerSegment {
     /// can be reused after its owner exits, so a holder that keeps the mapping for reuse asks
     /// [`Self::is_current`] before it trusts one.
     identity: (u64, u64),
+    /// Whether the provider held its liveness lock when this was opened, which is
+    /// what lets the lock's absence later mean the provider is gone.
+    signalled: bool,
     _registration: Registration,
     _file: File,
+}
+
+impl Drop for PeerSegment {
+    fn drop(&mut self) {
+        remove_if_unshared(&self._file, &segment_path(self.id));
+    }
 }
 
 impl PeerSegment {
@@ -378,6 +515,7 @@ impl PeerSegment {
             map,
             id,
             identity,
+            signalled: provider_holds_liveness(&file) == Some(true),
             _registration: Registration::new(id, &file, identity),
             _file: file,
         })
@@ -388,9 +526,26 @@ impl PeerSegment {
         &self.map
     }
 
-    /// Whether the name this segment was opened by still names the same object: false once its
-    /// owner has unlinked it, or unlinked it and another process has made a new segment under
-    /// the same id. The twin of [`PeerSegmentRw::is_current`].
+    /// Whether the provider of this segment is still there: its name still names
+    /// this object, and, when the provider signalled its liveness at open, it
+    /// still does. The question a holder that keeps the mapping for reuse asks
+    /// before it trusts one. The twin of [`PeerSegmentRw::provider_is_live`].
+    pub fn provider_is_live(&self) -> bool {
+        let lapsed = self.signalled && provider_holds_liveness(&self._file) == Some(false);
+        self.is_current() && !lapsed
+    }
+
+    /// The object this maps.
+    pub fn object(&self) -> SegmentObject {
+        SegmentObject {
+            id: self.id,
+            identity: self.identity,
+        }
+    }
+
+    /// Whether the name this segment was opened by still names the same object: false once the
+    /// last holder has unlinked it, or unlinked it and another process has made a new segment
+    /// under the same id. The twin of [`PeerSegmentRw::is_current`].
     pub fn is_current(&self) -> bool {
         use std::os::unix::fs::MetadataExt;
 
@@ -422,9 +577,17 @@ pub struct PeerSegmentRw {
     /// A segment name can be reused after its owner exits, and a mapping of the
     /// old object would read a dead provider's headers as if they were live.
     identity: (u64, u64),
+    /// Whether the provider held its liveness lock when this was opened.
+    signalled: bool,
     _map: MmapMut,
     _registration: Registration,
     _file: File,
+}
+
+impl Drop for PeerSegmentRw {
+    fn drop(&mut self) {
+        remove_if_unshared(&self._file, &segment_path(self.id));
+    }
 }
 
 // SAFETY: `ptr` points into `_map`, which this value owns and which is `Send`; the
@@ -459,6 +622,7 @@ impl PeerSegmentRw {
             len,
             id,
             identity,
+            signalled: provider_holds_liveness(&file) == Some(true),
             _map: map,
             _registration: Registration::new(id, &file, identity),
             _file: file,
@@ -467,15 +631,31 @@ impl PeerSegmentRw {
 
     /// Whether the name this segment was opened by still names the same object.
     ///
-    /// False once its owner has unlinked it, or unlinked it and another process
-    /// has made a new segment under the same id. A holder that keeps a mapping
-    /// for reuse asks this before it trusts one.
+    /// False once the last holder has unlinked it, or unlinked it and another
+    /// process has made a new segment under the same id.
     pub fn is_current(&self) -> bool {
         use std::os::unix::fs::MetadataExt;
 
         std::fs::metadata(segment_path(self.id))
             .map(|m| (m.dev(), m.ino()) == self.identity)
             .unwrap_or(false)
+    }
+
+    /// Whether the provider of this segment is still there, as
+    /// [`PeerSegment::provider_is_live`] judges it. A holder that keeps a mapping
+    /// for reuse asks this before it trusts one: a mapping of a dead provider's
+    /// metadata would read its headers as if they were live.
+    pub fn provider_is_live(&self) -> bool {
+        let lapsed = self.signalled && provider_holds_liveness(&self._file) == Some(false);
+        self.is_current() && !lapsed
+    }
+
+    /// The object this maps.
+    pub fn object(&self) -> SegmentObject {
+        SegmentObject {
+            id: self.id,
+            identity: self.identity,
+        }
     }
 
     /// The segment's size in bytes.
@@ -626,52 +806,157 @@ mod tests {
         );
     }
 
-    /// R3039 -- a cached mapping is trusted only while its name still names the
-    /// object it was opened as: true while its owner holds the segment, false once
-    /// the owner has unlinked it, and false again if another segment is made under
-    /// the same id (a new inode), which is the case a reader that keeps a mapping
-    /// must not read a dead provider's headers through.
+    /// R3039 -- a kept mapping is trusted only while its provider is live, and a
+    /// reader learns the provider is gone from its liveness lock, not from the
+    /// name: the name outlives the provider for as long as the reader maps it,
+    /// and no other segment can take the id meanwhile. The reader that lets go
+    /// last removes the name.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_mapping_is_current_only_while_its_name_names_its_object() {
+    fn a_mapping_is_trusted_only_while_its_provider_is_live() {
         let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
         let id = owner.id();
         let peer = PeerSegmentRw::open(id).expect("open writable");
-        assert!(peer.is_current(), "the owner still holds the segment");
+        assert!(
+            peer.provider_is_live(),
+            "the provider still holds the segment"
+        );
         assert_eq!(peer.len(), 64);
 
         drop(owner);
-        assert!(!peer.is_current(), "the owner unlinked it");
-
-        // The same id, made again: a different object under the same name. A real
-        // segment rather than a file written by hand, so no sweep can take it.
-        let successor = OwnedSegment::create(64, || id).expect("make another segment of that id");
         assert!(
-            !peer.is_current(),
-            "the name now names a different inode, so the mapping is of a dead object"
+            !peer.provider_is_live(),
+            "a reader did not see its provider go"
         );
-        drop(successor);
+        assert!(
+            peer.is_current(),
+            "the provider's drop removed a name a reader still maps"
+        );
+        assert!(
+            OwnedSegment::create(64, || id).is_err(),
+            "another segment took an id a reader still maps"
+        );
+
+        drop(peer);
+        assert!(
+            !segment_path(id).exists(),
+            "the last holder to let go left the name"
+        );
     }
 
-    /// The read-only mapping of a DATA segment is trusted on the same terms as the writable one of
-    /// a metadata segment: while its name names its object, and not after the owner unlinks it or
-    /// another segment is made under the same id.
+    /// The read-only mapping of a DATA segment is trusted on the same terms as the
+    /// writable one of a metadata segment.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_read_only_mapping_is_current_only_while_its_name_names_its_object() {
+    fn a_read_only_mapping_is_trusted_only_while_its_provider_is_live() {
         let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
         let id = owner.id();
         let peer = PeerSegment::open(id).expect("open read-only");
-        assert!(peer.is_current(), "the owner still holds the segment");
+        assert!(
+            peer.provider_is_live(),
+            "the provider still holds the segment"
+        );
 
         drop(owner);
-        assert!(!peer.is_current(), "the owner unlinked it");
-
-        let successor = OwnedSegment::create(64, || id).expect("make another segment of that id");
         assert!(
-            !peer.is_current(),
-            "the name now names a different inode, so the mapping is of a dead object"
+            !peer.provider_is_live(),
+            "a reader did not see its provider go"
         );
-        drop(successor);
+        assert!(
+            peer.is_current(),
+            "the provider's drop removed a name a reader still maps"
+        );
+
+        drop(peer);
+        assert!(
+            !segment_path(id).exists(),
+            "the last holder to let go left the name"
+        );
+    }
+
+    /// Two readers stand in for two processes (a lock belongs to an open file, so
+    /// two open files conflict within one process as across two): each sees the
+    /// provider go on its own, neither's drop takes the name from the other, and
+    /// the last one out removes it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_reader_sees_the_provider_go_and_the_last_one_out_removes_the_name() {
+        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let id = owner.id();
+        let first = PeerSegment::open(id).expect("one reader");
+        let second = PeerSegmentRw::open(id).expect("another reader");
+
+        drop(owner);
+        assert!(!first.provider_is_live(), "the first reader did not see it");
+        assert!(
+            !second.provider_is_live(),
+            "the second reader did not see it"
+        );
+
+        drop(first);
+        assert!(
+            segment_path(id).exists(),
+            "a reader's drop removed a name another reader maps"
+        );
+        drop(second);
+        assert!(
+            !segment_path(id).exists(),
+            "the last holder to let go left the name"
+        );
+    }
+
+    /// A provider that never signals its liveness, as a zenoh provider does not,
+    /// is judged by its name: alive while the name names its object. A file locked
+    /// by hand stands in for it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_provider_that_signals_nothing_is_judged_by_its_name() {
+        // The process's first segment sweeps the whole directory; made here, that
+        // sweep is over before the stand-in below exists unlocked for an instant.
+        let _first = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let id = (1u64 << 42) + u64::from(std::process::id());
+        let path = segment_path(id);
+        std::fs::write(&path, [0u8; 64]).expect("the stand-in provider's segment");
+        let provider = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open the stand-in");
+        lock_shared(&provider).expect("the stand-in's shared lock");
+
+        let peer = PeerSegment::open(id).expect("open read-only");
+        assert!(
+            peer.provider_is_live(),
+            "a provider that never signalled was read as gone"
+        );
+        std::fs::remove_file(&path).expect("the stand-in leaves");
+        assert!(
+            !peer.provider_is_live(),
+            "a name that no longer names the object was trusted"
+        );
+        drop(peer);
+        drop(provider);
+    }
+
+    /// The owner's drop keeps a name a reader maps, and removes the name of a
+    /// segment no one else maps.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_owner_removes_the_name_only_when_no_one_else_maps_it() {
+        let alone = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let alone_path = segment_path(alone.id());
+        drop(alone);
+        assert!(
+            !alone_path.exists(),
+            "an unshared segment outlived its owner"
+        );
+
+        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let path = segment_path(owner.id());
+        let reader = PeerSegment::open(owner.id()).expect("open read-only");
+        drop(owner);
+        assert!(path.exists(), "the owner removed a name a reader maps");
+        drop(reader);
+        assert!(!path.exists(), "the reader, last out, left the name");
     }
 }

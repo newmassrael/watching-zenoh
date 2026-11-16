@@ -147,166 +147,178 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # Revision 16 is such a bump too: the clock rule `wz_capi_c.h` states changed. `z_timestamp_new`
 # gives a program the node clock's time whatever its standing, and the clock-quality-stamping
 # policy holds back only the data the node stamps. No symbol moved.
+#
+# Each door maps to the revision that first exported it, so a consumer reads here
+# what its pinned revision can call (`--history` prints the table by revision)
+# and a finding names the revision of the door it is about. The numbers were
+# DERIVED: for each door, the commit that first wrote it into this file (`git log
+# --reverse -S'"<door>"' -- scripts/lib/capi_c_abi_pin.py`) and
+# `EXPECTED_REVISION` as that commit left the file (`git show
+# <commit>:scripts/lib/capi_c_abi_pin.py`); this gate made the two move in one
+# commit from its first day. The doors of the file's first commit are 1, the
+# revision that commit introduced with the revision door. A new door is pinned at
+# the revision its own commit moves `EXPECTED_REVISION` to, which `pin_findings`
+# holds.
 EXPECTED_REVISION = 16
-EXPECTED_SYMBOLS = {
+EXPECTED_SYMBOLS: dict[str, int] = {
     # R2301 (item 634) — the revision door itself.
-    "wz_capi_c_abi_version",
+    "wz_capi_c_abi_version": 1,
     # Revision 14 — the sender of a declared segment profile (`segment-sender`, off by default and
     # on in the lane's build): the owned handle's set, the put options' default, the two doors that
     # hand the pieces on (to a publisher, to a callback), and the internal pair.
-    "wz_capi_c_segment_sender_new",
-    "wz_capi_c_segment_put_options_default",
-    "wz_capi_c_segment_sender_put",
-    "wz_capi_c_segment_sender_split",
-    "wz_capi_c_segment_sender_next",
-    "wz_capi_c_segment_sender_set",
-    "wz_capi_c_segment_sender_loan",
-    "wz_capi_c_segment_sender_drop",
-    "wz_capi_c_internal_segment_sender_null",
-    "wz_capi_c_internal_segment_sender_check",
+    "wz_capi_c_segment_sender_new": 14,
+    "wz_capi_c_segment_put_options_default": 14,
+    "wz_capi_c_segment_sender_put": 14,
+    "wz_capi_c_segment_sender_split": 14,
+    "wz_capi_c_segment_sender_next": 14,
+    "wz_capi_c_segment_sender_set": 14,
+    "wz_capi_c_segment_sender_loan": 14,
+    "wz_capi_c_segment_sender_drop": 14,
+    "wz_capi_c_internal_segment_sender_null": 14,
+    "wz_capi_c_internal_segment_sender_check": 14,
     # Revision 13 — the links of a liveliness token and a liveliness subscriber (`switch-doors`).
-    "wz_capi_c_liveliness_declare_token_ext",
-    "wz_capi_c_liveliness_declare_subscriber_ext",
+    "wz_capi_c_liveliness_declare_token_ext": 13,
+    "wz_capi_c_liveliness_declare_subscriber_ext": 13,
     # Revision 12 — the statements of a call beyond the zenoh-c options: the links an entity may
     # use, a publish's retry and all-or-none form, a query's target node (`switch-doors`, off by
     # default and on in the lane's build). The three `_default` functions, then the seven doors.
-    "wz_capi_c_entity_ext_default",
-    "wz_capi_c_publish_ext_default",
-    "wz_capi_c_query_ext_default",
-    "wz_capi_c_put_ext",
-    "wz_capi_c_delete_ext",
-    "wz_capi_c_declare_publisher_ext",
-    "wz_capi_c_get_ext",
-    "wz_capi_c_declare_querier_ext",
-    "wz_capi_c_declare_subscriber_ext",
-    "wz_capi_c_declare_queryable_ext",
+    "wz_capi_c_entity_ext_default": 12,
+    "wz_capi_c_publish_ext_default": 12,
+    "wz_capi_c_query_ext_default": 12,
+    "wz_capi_c_put_ext": 12,
+    "wz_capi_c_delete_ext": 12,
+    "wz_capi_c_declare_publisher_ext": 12,
+    "wz_capi_c_get_ext": 12,
+    "wz_capi_c_declare_querier_ext": 12,
+    "wz_capi_c_declare_subscriber_ext": 12,
+    "wz_capi_c_declare_queryable_ext": 12,
     # Revision 11 — the identity a client presents over TLS, made on the computer it runs on
     # (`identity-make`, off by default and on in the lane's build, as the observation plane is).
-    "wz_capi_c_identity_make",
+    "wz_capi_c_identity_make": 11,
     # Revision 10 — a node's lifecycle verbs from a client: the key a verb is asked by and the
     # answer read back (`lifecycle-doors`, off by default and on in the lane's build).
-    "wz_capi_c_lifecycle_key",
-    "wz_capi_c_lifecycle_read",
+    "wz_capi_c_lifecycle_key": 10,
+    "wz_capi_c_lifecycle_read": 10,
     # Revision 9 — the conformance digest of the build (decision C15), in every build.
-    "wz_capi_c_conformance_digest",
+    "wz_capi_c_conformance_digest": 9,
     # The observation plane (revision 8): the clock a program registers, the event log, the
     # supervisor and the resource snapshot. Each is a feature that is off in a build made as the
     # reference is, so the lane builds the library with all four on (`layer_c1ch_capi_c_config_surface`
     # in run-ci.sh) and the set below is that build's.
-    "wz_capi_c_clock_source_register",
-    "wz_capi_c_clock_source_unregister",
-    "wz_capi_c_clock_report",
-    "wz_capi_c_event_emit",
-    "wz_capi_c_event_read",
-    "wz_capi_c_event_release",
-    "wz_capi_c_event_dropped",
-    "wz_capi_c_supervision_set_hook",
-    "wz_capi_c_supervision_start",
-    "wz_capi_c_supervision_feed",
-    "wz_capi_c_supervision_stop",
-    "wz_capi_c_supervision_check",
-    "wz_capi_c_supervision_healthy",
-    "wz_capi_c_supervision_state",
-    "wz_capi_c_snapshot_set_source",
-    "wz_capi_c_snapshot_poll",
-    "wz_capi_c_snapshot_size",
-    "wz_capi_c_snapshot_read",
+    "wz_capi_c_clock_source_register": 8,
+    "wz_capi_c_clock_source_unregister": 8,
+    "wz_capi_c_clock_report": 8,
+    "wz_capi_c_event_emit": 8,
+    "wz_capi_c_event_read": 8,
+    "wz_capi_c_event_release": 8,
+    "wz_capi_c_event_dropped": 8,
+    "wz_capi_c_supervision_set_hook": 8,
+    "wz_capi_c_supervision_start": 8,
+    "wz_capi_c_supervision_feed": 8,
+    "wz_capi_c_supervision_stop": 8,
+    "wz_capi_c_supervision_check": 8,
+    "wz_capi_c_supervision_healthy": 8,
+    "wz_capi_c_supervision_state": 8,
+    "wz_capi_c_snapshot_set_source": 8,
+    "wz_capi_c_snapshot_poll": 8,
+    "wz_capi_c_snapshot_size": 8,
+    "wz_capi_c_snapshot_read": 8,
     # R311y540 — the drop-in's half of the layout gate.
-    "wz_capi_c_layout",
-    "wz_capi_c_layout_name",
+    "wz_capi_c_layout": 1,
+    "wz_capi_c_layout_name": 1,
     # R2172 (item 548) — which config keys wz's JSON5 reader honours.
-    "wz_capi_c_config_honoured",
-    "wz_capi_c_config_honoured_count",
+    "wz_capi_c_config_honoured": 1,
+    "wz_capi_c_config_honoured_count": 1,
     # R2797 — the same question asked BY NAME, in
     # three words. The two doors above enumerate, and the honoured set is
     # infinite, so an enumeration could never be the whole answer.
-    "wz_capi_c_config_disposition",
+    "wz_capi_c_config_disposition": 2,
     # R2300 (item 631) — emitting a stock-zenoh config and judging one (`config-verdict`, on by
     # default, as are the rows doors and `wz_capi_c_config_device_requires` below).
-    "wz_capi_c_config_to_json5",
-    "wz_capi_c_config_validate",
-    "wz_capi_c_config_validate_for_build",
-    "wz_capi_c_config_validate_topology",
-    "wz_capi_c_config_validate_topology_with_external",
-    "wz_capi_c_config_link_scheme",
-    "wz_capi_c_config_link_scheme_count",
-    "wz_capi_c_config_zenoh_link_scheme",
-    "wz_capi_c_config_zenoh_link_scheme_count",
+    "wz_capi_c_config_to_json5": 1,
+    "wz_capi_c_config_validate": 1,
+    "wz_capi_c_config_validate_for_build": 1,
+    "wz_capi_c_config_validate_topology": 1,
+    "wz_capi_c_config_validate_topology_with_external": 1,
+    "wz_capi_c_config_link_scheme": 1,
+    "wz_capi_c_config_link_scheme_count": 1,
+    "wz_capi_c_config_zenoh_link_scheme": 1,
+    "wz_capi_c_config_zenoh_link_scheme_count": 1,
     # R2932 — zenoh-ext's group membership (revision 3). The pin reads the
     # DEFAULT build, which is the unstable arm these doors live on.
-    "wz_capi_c_member_options_default",
-    "wz_capi_c_member_new",
-    "wz_capi_c_member_id",
-    "wz_capi_c_member_info",
-    "wz_capi_c_member_lease_ms",
-    "wz_capi_c_member_liveliness",
-    "wz_capi_c_member_refresh_ratio",
-    "wz_capi_c_member_loan",
-    "wz_capi_c_member_clone",
-    "wz_capi_c_member_drop",
-    "wz_capi_c_internal_member_null",
-    "wz_capi_c_internal_member_check",
-    "wz_capi_c_closure_member",
-    "wz_capi_c_internal_closure_member_null",
-    "wz_capi_c_internal_closure_member_check",
-    "wz_capi_c_closure_member_loan",
-    "wz_capi_c_closure_member_call",
-    "wz_capi_c_closure_member_drop",
-    "wz_capi_c_closure_group_event",
-    "wz_capi_c_internal_closure_group_event_null",
-    "wz_capi_c_internal_closure_group_event_check",
-    "wz_capi_c_closure_group_event_loan",
-    "wz_capi_c_closure_group_event_call",
-    "wz_capi_c_closure_group_event_drop",
-    "wz_capi_c_group_event_kind",
-    "wz_capi_c_group_event_member_id",
-    "wz_capi_c_group_event_member",
-    "wz_capi_c_group_join",
-    "wz_capi_c_group_group_id",
-    "wz_capi_c_group_local_member_id",
-    "wz_capi_c_group_size",
-    "wz_capi_c_group_view",
-    "wz_capi_c_group_leader",
-    "wz_capi_c_group_subscribe",
-    "wz_capi_c_group_wait_for_view_size",
-    "wz_capi_c_group_loan",
-    "wz_capi_c_group_drop",
-    "wz_capi_c_internal_group_null",
-    "wz_capi_c_internal_group_check",
+    "wz_capi_c_member_options_default": 3,
+    "wz_capi_c_member_new": 3,
+    "wz_capi_c_member_id": 3,
+    "wz_capi_c_member_info": 3,
+    "wz_capi_c_member_lease_ms": 3,
+    "wz_capi_c_member_liveliness": 3,
+    "wz_capi_c_member_refresh_ratio": 3,
+    "wz_capi_c_member_loan": 3,
+    "wz_capi_c_member_clone": 3,
+    "wz_capi_c_member_drop": 3,
+    "wz_capi_c_internal_member_null": 3,
+    "wz_capi_c_internal_member_check": 3,
+    "wz_capi_c_closure_member": 3,
+    "wz_capi_c_internal_closure_member_null": 3,
+    "wz_capi_c_internal_closure_member_check": 3,
+    "wz_capi_c_closure_member_loan": 3,
+    "wz_capi_c_closure_member_call": 3,
+    "wz_capi_c_closure_member_drop": 3,
+    "wz_capi_c_closure_group_event": 3,
+    "wz_capi_c_internal_closure_group_event_null": 3,
+    "wz_capi_c_internal_closure_group_event_check": 3,
+    "wz_capi_c_closure_group_event_loan": 3,
+    "wz_capi_c_closure_group_event_call": 3,
+    "wz_capi_c_closure_group_event_drop": 3,
+    "wz_capi_c_group_event_kind": 3,
+    "wz_capi_c_group_event_member_id": 3,
+    "wz_capi_c_group_event_member": 3,
+    "wz_capi_c_group_join": 3,
+    "wz_capi_c_group_group_id": 3,
+    "wz_capi_c_group_local_member_id": 3,
+    "wz_capi_c_group_size": 3,
+    "wz_capi_c_group_view": 3,
+    "wz_capi_c_group_leader": 3,
+    "wz_capi_c_group_subscribe": 3,
+    "wz_capi_c_group_wait_for_view_size": 3,
+    "wz_capi_c_group_loan": 3,
+    "wz_capi_c_group_drop": 3,
+    "wz_capi_c_internal_group_null": 3,
+    "wz_capi_c_internal_group_check": 3,
     # The config verdict as ROWS (revision 4): a table of
     # (variant, node, key path, endpoint) read a column at a time from an owned
     # handle, for a caller that attaches each reason to the field it is about.
     # The three doors, then the handle's own set, then one accessor per column.
-    "wz_capi_c_config_validate_rows",
-    "wz_capi_c_config_validate_for_build_rows",
-    "wz_capi_c_config_validate_topology_rows",
-    "wz_capi_c_config_verdict_len",
-    "wz_capi_c_config_verdict_finding_count",
-    "wz_capi_c_config_verdict_row_finding",
-    "wz_capi_c_config_verdict_row_variant",
-    "wz_capi_c_config_verdict_row_message",
-    "wz_capi_c_config_verdict_row_node",
-    "wz_capi_c_config_verdict_row_key",
-    "wz_capi_c_config_verdict_row_endpoint",
-    "wz_capi_c_config_verdict_loan",
-    "wz_capi_c_config_verdict_drop",
-    "wz_capi_c_internal_config_verdict_null",
-    "wz_capi_c_internal_config_verdict_check",
+    "wz_capi_c_config_validate_rows": 4,
+    "wz_capi_c_config_validate_for_build_rows": 4,
+    "wz_capi_c_config_validate_topology_rows": 4,
+    "wz_capi_c_config_verdict_len": 4,
+    "wz_capi_c_config_verdict_finding_count": 4,
+    "wz_capi_c_config_verdict_row_finding": 4,
+    "wz_capi_c_config_verdict_row_variant": 4,
+    "wz_capi_c_config_verdict_row_message": 4,
+    "wz_capi_c_config_verdict_row_node": 4,
+    "wz_capi_c_config_verdict_row_key": 4,
+    "wz_capi_c_config_verdict_row_endpoint": 4,
+    "wz_capi_c_config_verdict_loan": 4,
+    "wz_capi_c_config_verdict_drop": 4,
+    "wz_capi_c_internal_config_verdict_null": 4,
+    "wz_capi_c_internal_config_verdict_check": 4,
     # The sender of an end-to-end protected message (revision 5): an owned
     # handle that keeps the message's counter. Ungated, like the config verdict.
-    "wz_capi_c_e2e_sender_new",
-    "wz_capi_c_e2e_sender_wrap",
-    "wz_capi_c_e2e_sender_next",
-    "wz_capi_c_e2e_sender_set",
-    "wz_capi_c_e2e_sender_loan",
-    "wz_capi_c_e2e_sender_drop",
-    "wz_capi_c_internal_e2e_sender_null",
-    "wz_capi_c_internal_e2e_sender_check",
+    "wz_capi_c_e2e_sender_new": 5,
+    "wz_capi_c_e2e_sender_wrap": 5,
+    "wz_capi_c_e2e_sender_next": 5,
+    "wz_capi_c_e2e_sender_set": 5,
+    "wz_capi_c_e2e_sender_loan": 5,
+    "wz_capi_c_e2e_sender_drop": 5,
+    "wz_capi_c_internal_e2e_sender_null": 5,
+    "wz_capi_c_internal_e2e_sender_check": 5,
     # What one message may weigh (revision 6), asked before it is sent. Ungated.
-    "wz_capi_c_session_max_message_bytes",
+    "wz_capi_c_session_max_message_bytes": 6,
     # What an open of a config would ask of the operating system (revision 7), as the manifest's
     # facility vocabulary. Ungated.
-    "wz_capi_c_config_device_requires",
+    "wz_capi_c_config_device_requires": 7,
 }
 
 PREFIX = "wz_capi_c_"
@@ -411,8 +423,64 @@ def header_revision(text: str) -> int:
     return int(m.group(1))
 
 
+def pin_findings(pinned: dict[str, int], pinned_revision: int) -> list[str]:
+    """What is wrong with the table itself, with no artifact to read: a door
+    pinned at a revision the pin has not reached, or below the first. A revision
+    that brought no door is not a finding, since a memory-rule change moves the
+    revision alone."""
+    findings = []
+    for name, since in sorted(pinned.items()):
+        if since > pinned_revision:
+            findings.append(
+                f"{name} is pinned since revision {since}, after the pinned "
+                f"revision {pinned_revision}"
+            )
+        elif since < 1:
+            findings.append(f"{name} is pinned since revision {since}; revisions start at 1")
+    return findings
+
+
+def drift_findings(
+    built: set[str], revision: int, pinned: dict[str, int], pinned_revision: int
+) -> list[str]:
+    """Each door the artifact and the pin disagree about, with its revision.
+
+    A pinned door the build lost names the revision that promised it, so the
+    reader knows which consumers it breaks. An exported door nobody pinned is
+    named with the revision it has to be pinned at: the one the build answers
+    when the revision has moved, the next one when it has not, because then the
+    move is what is missing -- a new door under the old revision is a library
+    whose version cannot answer the only question a new door raises.
+    """
+    lines = []
+    new_at = revision if revision > pinned_revision else pinned_revision + 1
+    for name in sorted(built - set(pinned)):
+        lines.append(
+            f"{name} is exported and NOT in the pin -- pin it as \"{name}\": "
+            f"{new_at} and move EXPECTED_REVISION to {new_at} in the same edit"
+        )
+    for name in sorted(set(pinned) - built):
+        lines.append(
+            f"{name} is in the pin (since revision {pinned[name]}) and NOT "
+            "exported. A removal is an ABI event too: drop it from "
+            "EXPECTED_SYMBOLS and move EXPECTED_REVISION in the same edit."
+        )
+    return lines
+
+
+def history(pinned: dict[str, int]) -> str:
+    """The table a consumer reads: each revision and the doors it brought."""
+    by_revision: dict[int, list[str]] = {}
+    for name, since in pinned.items():
+        by_revision.setdefault(since, []).append(name)
+    return "\n".join(
+        f"revision {since}: {', '.join(sorted(by_revision[since]))}"
+        for since in sorted(by_revision)
+    )
+
+
 def run(cdylibs: list[pathlib.Path]) -> int:
-    findings: list[str] = []
+    findings: list[str] = list(pin_findings(EXPECTED_SYMBOLS, EXPECTED_REVISION))
 
     by_profile: dict[str, set[str]] = {}
     revisions: dict[str, int] = {}
@@ -481,21 +549,12 @@ def run(cdylibs: list[pathlib.Path]) -> int:
                 "reads."
             )
 
-        for name in sorted(built - EXPECTED_SYMBOLS):
-            findings.append(
-                f"{name} is exported by the {profile} build and NOT in the pin. "
-                "Add it to EXPECTED_SYMBOLS and move EXPECTED_REVISION in the "
-                "SAME edit -- a new door under the old revision is a library "
-                "whose version cannot answer the only question a new door raises."
-            )
-        for name in sorted(EXPECTED_SYMBOLS - built):
-            findings.append(
-                f"{name} is in the pin and NOT exported by the {profile} build. "
-                "A removal is an ABI event too: drop it from EXPECTED_SYMBOLS "
-                "and move EXPECTED_REVISION in the same edit."
-            )
-
         got = revisions[profile]
+        findings.extend(
+            f"the {profile} build: {line}"
+            for line in drift_findings(built, got, EXPECTED_SYMBOLS, EXPECTED_REVISION)
+        )
+
         if got != EXPECTED_REVISION:
             findings.append(
                 f"the {profile} library reports revision {got} and the pin says "
@@ -565,6 +624,50 @@ def selftest() -> int:
         print("selftest: the pin is empty and agrees with anything", file=sys.stderr)
         return 1
 
+    # The revision arms: a finding names the revision of the door it is about,
+    # an impossible table is refused, and the table this file pins is not.
+    pinned = {"wz_capi_c_a": 1, "wz_capi_c_b": 3}
+    drift_cases = [
+        ({"wz_capi_c_a", "wz_capi_c_b"}, 3, []),
+        (
+            {"wz_capi_c_a", "wz_capi_c_b", "wz_capi_c_c"},
+            4,
+            ['"wz_capi_c_c": 4 and move EXPECTED_REVISION to 4'],
+        ),
+        (
+            {"wz_capi_c_a", "wz_capi_c_b", "wz_capi_c_c"},
+            3,
+            ['"wz_capi_c_c": 4 and move EXPECTED_REVISION to 4'],
+        ),
+        ({"wz_capi_c_a"}, 3, ["wz_capi_c_b is in the pin (since revision 3)"]),
+    ]
+    for built, revision, wanted in drift_cases:
+        got = drift_findings(built, revision, pinned, 3)
+        if len(got) != len(wanted) or not all(w in g for w, g in zip(wanted, got)):
+            print(
+                f"selftest: doors {sorted(built)} at revision {revision} gave "
+                f"{got}, expected lines containing {wanted}",
+                file=sys.stderr,
+            )
+            return 1
+    for table, revision, count in [
+        ({"wz_capi_c_a": 1, "wz_capi_c_b": 3}, 3, 0),
+        ({"wz_capi_c_a": 1, "wz_capi_c_b": 4}, 3, 1),
+        ({"wz_capi_c_a": 0}, 3, 1),
+    ]:
+        if len(pin_findings(table, revision)) != count:
+            print(f"selftest: table {table} at revision {revision} misjudged", file=sys.stderr)
+            return 1
+    if history({"wz_capi_c_b": 3, "wz_capi_c_a": 1}) != (
+        "revision 1: wz_capi_c_a\nrevision 3: wz_capi_c_b"
+    ):
+        print("selftest: the history table", file=sys.stderr)
+        return 1
+    own = pin_findings(EXPECTED_SYMBOLS, EXPECTED_REVISION)
+    if own:
+        print("selftest: this file's own table:\n  " + "\n  ".join(own), file=sys.stderr)
+        return 1
+
     # R2309 (item 637) — the profile axis. Driven over SETS, because the shape
     # that matters is one no build on this machine currently produces: a door
     # present in one profile and absent from the other. That is precisely what
@@ -615,9 +718,12 @@ if __name__ == "__main__":
     try:
         if "--selftest" in sys.argv[1:]:
             sys.exit(selftest())
+        if sys.argv[1:] == ["--history"]:
+            print(history(EXPECTED_SYMBOLS))
+            sys.exit(0)
         if not args:
             print(
-                "usage: capi_c_abi_pin.py <libwz_capi_c.so>... | --selftest\n"
+                "usage: capi_c_abi_pin.py <libwz_capi_c.so>... | --selftest | --history\n"
                 "  one path per cargo profile; "
                 f"{', '.join(sorted(REQUIRED_PROFILES))} are required",
                 file=sys.stderr,

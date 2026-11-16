@@ -30,7 +30,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-use super::segment_path;
+use super::{names_object, segment_path};
 
 /// One live segment object of this process.
 struct Held {
@@ -120,15 +120,6 @@ impl Registry {
     fn holds(&self, id: u64) -> bool {
         self.held().values().any(|entry| entry.id == id)
     }
-}
-
-/// Whether the name of segment `id` still names the object of `identity`.
-fn names_object(id: u64, identity: (u64, u64)) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    std::fs::metadata(segment_path(id))
-        .map(|meta| (meta.dev(), meta.ino()) == identity)
-        .unwrap_or(false)
 }
 
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
@@ -321,6 +312,9 @@ mod tests {
         let registry = Registry::opened_with(|| ());
         registry.register(id, reader._file.as_raw_fd(), identity_of(&reader._file));
         drop(owner);
+        // The reader keeps the name; take it from under the reader, as a hand or a
+        // foreign sweep could, so another segment can be made under the id.
+        std::fs::remove_file(segment_path(id)).expect("take the name");
         let successor = OwnedSegment::create(64, || id).expect("another segment of that id");
 
         registry.release_unshared();
