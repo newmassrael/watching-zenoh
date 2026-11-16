@@ -4678,6 +4678,29 @@ layer_c0i_impact_ref_gate() {
         echo "  C0i prose precondition: home-path refusal NOT ARMED here" \
             "(\$HOME is $HOME, which the check skips by design)"
     fi
+    # Items 182 and 221 -- the bullet-shape and tree-citation preconditions
+    # refuse on every host (neither skips), so their refusal is the witness. A
+    # hard-wrapped changes file and a carry citing a line past the end of
+    # run-ci.sh must each be refused, by that precondition and not another.
+    printf 'The gate reads every line and\nrefuses the ones that continue a sentence.\n' >"$c0i_prose"
+    if bash scripts/append-round.sh --check-only --impact "$real" \
+        --changes-file "$c0i_prose" >"$c0i_out" 2>&1 \
+        || ! grep -q 'round-prose-shape: FAIL' "$c0i_out"; then
+        echo "  Layer C0i FAIL: a hard-wrapped bullet file was not refused by its shape (item 182):" >&2
+        sed 's/^/    /' "$c0i_out" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    printf 'Carry: see scripts/run-ci.sh:99999999 for the next step.\n' >"$c0i_prose"
+    if bash scripts/append-round.sh --check-only --impact "$real" \
+        --carry-file "$c0i_prose" >"$c0i_out" 2>&1 \
+        || ! grep -q 'tree-citation: FAIL' "$c0i_out"; then
+        echo "  Layer C0i FAIL: a carry citing a line past the end of run-ci.sh was not refused by the citation check (item 221):" >&2
+        sed 's/^/    /' "$c0i_out" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    echo "  C0i prose precondition: a wrapped bullet file and an unresolved tree citation are refused"
     rm -f "$c0i_prose" "$c0i_out"
 
     # A ROUND CARRIED AS A DESCRIPTOR (`scripts/file-round.sh`, the script the queue
