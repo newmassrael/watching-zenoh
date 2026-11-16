@@ -8988,6 +8988,12 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # negotiation declares one.
     _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range \
         || return 1
+    # The links an aggregating node opens to a node a discovery plane found, one for each
+    # priority range and reliability among its locators: the eight cases of the plan
+    # (`accept_loop::discovered_links`) and the loop that dials it. Both need multilink and
+    # the module gate, which only this feature set combines.
+    _runci_guarded_test C1ba 9 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- discovered_links an_aggregating_node_dials_a_found_node \
+        || return 1
     _runci_guarded_test C1ba 5 cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
         || return 1
     (cd crates \
