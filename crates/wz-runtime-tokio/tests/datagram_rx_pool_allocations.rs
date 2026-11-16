@@ -36,6 +36,13 @@
 //! windows: 35 of 40 runs on two cores with four test threads failed, with
 //! counts from 1 to 1343. The two controls at the end pin both halves of the
 //! attribution. Host-test level.
+//!
+//! Under `runtime-tokio-uring` on Linux the dial read half reads through the
+//! node's `io_uring` reactor, whose worker is a thread of its own: it arms
+//! each read, receives the datagram and builds the frame the link is handed.
+//! The measurement adopts that worker too (`UringReactor::run_on_worker`), so a
+//! dialed datagram counts what BOTH threads allocate for it, and a third
+//! control pins that the worker's allocation is seen.
 #![cfg(all(feature = "runtime-zero-copy", feature = "transport-link-udp"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -52,6 +59,12 @@ use wz_runtime_tokio::runtime_pool::WzRuntime;
 use wz_runtime_tokio::udp_pipeline::{
     bind_udp_demux, dial_udp, wire_udp_demuxed, wire_udp_socket, UdpDemux, UdpWriteDriver,
 };
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+use wz_runtime_tokio::uring_reactor::UringReactor;
 use wz_runtime_tokio::writer_queue::WriterHandle;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, RxFrame, UdpDriver};
 
@@ -175,6 +188,35 @@ impl Measurement {
             .spawn(async move { OWNER.with(|owner| owner.set(Some(tally))) })
             .await
             .expect("the acceptor's worker takes the tally");
+    }
+
+    /// The node's ring worker works for this measurement from here on: it
+    /// reads every dialed datagram and builds the frame the link is handed, on
+    /// a thread no runtime of this measurement owns. Adopted, and outliving
+    /// the measurement, as the acceptor's worker is. A host that cannot give
+    /// the node a ring reads its dialed links through tokio, so there is no
+    /// worker to adopt.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    async fn adopt_the_ring_worker(&self) {
+        let Some(reactor) = UringReactor::node() else {
+            return;
+        };
+        let tally = self.tally;
+        let (adopted, done) = tokio::sync::oneshot::channel::<()>();
+        reactor
+            .run_on_worker(Box::new(move || {
+                OWNER.with(|owner| owner.set(Some(tally)));
+                let _ = adopted.send(());
+            }))
+            .expect("the ring's worker takes the closure");
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("the ring's worker runs the closure")
+            .expect("the ring's worker takes the tally");
     }
 
     /// The allocations this measurement's threads make while `f` runs.
@@ -346,8 +388,9 @@ async fn round(
 
 /// Allocations over one measured run, after an unmeasured run of the same shape
 /// (the link's first datagrams settle what is built once per link: the pool
-/// tables, the runtime's own state). Everything, the runtime included, is built
-/// and torn down while this test holds [`SERIAL`].
+/// tables, the runtime's own state, and under the ring the reactor, its worker
+/// and the link's attach). Everything, the runtime included, is built and torn
+/// down while this test holds [`SERIAL`].
 fn measure(path: Path, payload: &'static [u8], frames: usize, mode: Mode) -> usize {
     let _one = serial();
     let measurement = Measurement::new();
@@ -357,6 +400,16 @@ fn measure(path: Path, payload: &'static [u8], frames: usize, mode: Mode) -> usi
         let mut link = link(path).await;
         let mut held = Vec::with_capacity(frames);
         round(&mut link, payload, frames, mode, &mut held).await;
+        // After the first run, which is what starts the node's ring when a
+        // dialed link is its first reader.
+        #[cfg(all(
+            feature = "runtime-tokio-uring",
+            feature = "transport-link-tcp",
+            target_os = "linux"
+        ))]
+        {
+            measurement.adopt_the_ring_worker().await;
+        }
         measurement
             .count(round(&mut link, payload, frames, mode, &mut held))
             .await
@@ -496,6 +549,50 @@ fn the_window_counts_an_allocation_on_the_acceptors_worker() {
     assert_eq!(
         count, 1,
         "the acceptor's worker allocated once inside the window"
+    );
+}
+
+/// CONTROL for the ring worker's adoption: an allocation the node's ring
+/// worker makes inside the window is counted, exactly once. Without it every
+/// dial-path zero above could be the worker going uncounted, which is how a
+/// per-datagram allocation on that thread went unseen. The closure is handed
+/// to the worker, and parks it, before the window opens, so the one allocation
+/// in the window is the closure's.
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+#[test]
+fn the_window_counts_an_allocation_on_the_ring_worker() {
+    let _one = serial();
+    let measurement = Measurement::new();
+    let rt = measurement.runtime();
+    let count = rt.block_on(async {
+        let reactor = UringReactor::node().expect(
+            "this build reads a dialed link through the node's ring, so the host gives one",
+        );
+        measurement.adopt_the_ring_worker().await;
+        let go = Arc::new(Barrier::new(2));
+        let done = Arc::new(Barrier::new(2));
+        let (worker_go, worker_done) = (go.clone(), done.clone());
+        reactor
+            .run_on_worker(Box::new(move || {
+                worker_go.wait();
+                drop(std::hint::black_box(Box::new([0u8; 64])));
+                worker_done.wait();
+            }))
+            .expect("the ring's worker takes the closure");
+        measurement
+            .count(async {
+                go.wait();
+                done.wait();
+            })
+            .await
+    });
+    assert_eq!(
+        count, 1,
+        "the ring's worker allocated once inside the window"
     );
 }
 

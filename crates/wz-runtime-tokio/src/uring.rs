@@ -60,10 +60,15 @@
 //! | TCP, unix-domain stream, unixpipe, vsock | any run of the byte stream | the length prefixes, across reads |
 //! | connected UDP | exactly one datagram | nothing: the read is the frame |
 //!
-//! The datagram row needs no other submission: a read of a datagram socket
-//! returns one datagram, and a slot is wider than any, so a read that fills it
-//! is the one sign of a truncation. `crate::uring_reactor` gives the framing
-//! and why upstream's multishot receive over provided buffers is not adopted.
+//! A read of a datagram socket returns one datagram, and a slot is wider than
+//! any, so a read that fills it is the one sign of a truncation. The datagram
+//! row's slot comes from the datagram receive pool (`crate::link_rx_datagram`),
+//! whose large class is this same table, so it is still a registered slot
+//! ([`FixedSlotRing::registered_slot`]); with that class out the pool gives a
+//! small slot, read the ordinary way, or none, and the read is then a receive
+//! of no bytes ([`FixedSlotRing::submit_discard`]). `crate::uring_reactor`
+//! gives the framing and why upstream's multishot receive over provided
+//! buffers is not adopted.
 //!
 //! ⚠ R2747 — THIS PARAGRAPH USED TO PRESCRIBE THE REPAIR, AND THE
 //! PRESCRIPTION WAS WRONG. It said selecting the path "needs the length-prefix
@@ -418,21 +423,86 @@ impl FixedSlotRing {
             return Ok((0, buf_index as u64));
         }
 
+        // SAFETY: `dst` is the first byte of the registered region named by
+        // `buf_index`, with `len` bytes of room proven above, and the frame
+        // holds that slot for this read alone.
+        let key = unsafe { self.submit_read_fixed_at(fd, dst, len, buf_index) }?;
+        Ok((len, key))
+    }
+
+    /// The `buf_index` of the registered slot whose FIRST BYTE is `dst`, or
+    /// `None` when `dst` is not one.
+    ///
+    /// For a reader that holds a slot of this ring's table through another
+    /// owner than [`Self::take_slot`]: the datagram receive pool is built over
+    /// the same table, so the slot a datagram read is armed in may be a
+    /// registered one, and the table's own answer says whether it is.
+    pub fn registered_slot(&self, dst: *const u8) -> Option<usize> {
+        self.arena
+            .slot_of(dst)
+            .filter(|&buf_index| buf_index < self.registered)
+    }
+
+    /// PUSH one `IORING_OP_READ_FIXED` of `len` bytes into `dst`, keyed, as
+    /// [`Self::submit_read_fixed`] keys its reads, by the slot's `buf_index`,
+    /// which is returned.
+    ///
+    /// # Safety
+    ///
+    /// `dst` is the first byte of the slot [`Self::registered_slot`] answered
+    /// `buf_index` for, and `len` is at most a slot's width. The slot is held
+    /// for this read alone and stays unmoved and untouched by anyone else until
+    /// the completion carrying the returned key has been reaped.
+    pub unsafe fn submit_read_fixed_at(
+        &mut self,
+        fd: RawFd,
+        dst: *mut u8,
+        len: usize,
+        buf_index: usize,
+    ) -> io::Result<u64> {
         let entry = opcode::ReadFixed::new(types::Fd(fd), dst, len as u32, buf_index as u16)
             .offset(u64::MAX) // -1: read at the file's current position
             .build()
             .user_data(buf_index as u64);
-
-        // SAFETY: `dst` is the first byte of the registered region named by
-        // `buf_index`, with `len` bytes of room proven above; the fd is the
-        // caller's and the queue is not shared, so nothing else is mid-push.
+        // SAFETY: the caller's contract above is `push`'s: the destination
+        // lies inside the registered region `buf_index` names and outlives the
+        // read. The queue is not shared, so nothing else is mid-push.
         unsafe {
             self.ring
                 .submission()
                 .push(&entry)
                 .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "io_uring SQ full"))?;
         }
-        Ok((len, buf_index as u64))
+        Ok(buf_index as u64)
+    }
+
+    /// PUSH one `IORING_OP_RECV` of NO bytes under `key`: it completes when
+    /// the next datagram arrives and consumes it into nothing.
+    ///
+    /// What a datagram read with nowhere to land submits, as the socket read
+    /// of `crate::link_rx_datagram` receives a datagram into an empty buffer
+    /// when no class has a slot. A `READ` of no bytes would not do: a read of
+    /// zero bytes on a socket returns at once and receives nothing (`read(2)`
+    /// keeps the System V rule), where a receive of zero bytes takes the
+    /// datagram off the queue.
+    ///
+    /// # Safety
+    ///
+    /// `key` must not collide with a live slot key (see
+    /// [`Self::FIRST_FREE_KEY`]) or with [`Self::CANCEL_KEY`]: a reactor routes
+    /// the completion, and the destination of every other read, by it.
+    pub unsafe fn submit_discard(&mut self, fd: RawFd, key: u64) -> io::Result<()> {
+        let entry = opcode::Recv::new(types::Fd(fd), std::ptr::null_mut(), 0)
+            .build()
+            .user_data(key);
+        // SAFETY: a receive of no bytes names no memory the kernel may write,
+        // and the queue is not shared, so nothing else is mid-push.
+        unsafe {
+            self.ring
+                .submission()
+                .push(&entry)
+                .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "io_uring SQ full"))
+        }
     }
 
     /// PUSH one ORDINARY `IORING_OP_READ` into `buf` under `key`.

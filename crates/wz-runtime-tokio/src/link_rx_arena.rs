@@ -135,6 +135,17 @@ impl LinkRxArena {
             .and_then(|slots| slots.slot_index_of_ptr(addr))
     }
 
+    /// The table itself, for the datagram receive pool a ring reader builds
+    /// over the slots its ring registered.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-udp",
+        target_os = "linux"
+    ))]
+    pub(crate) fn table(&self) -> Arc<NodeTable> {
+        Arc::clone(&self.table)
+    }
+
     /// Lifecycle state the emit records for `idx`, for tests that adjudicate
     /// against the generated FSM instead of against this module's bookkeeping.
     pub fn slot_state(&self, idx: usize) -> Option<crate::session_rx_pool_ap::SlotState> {

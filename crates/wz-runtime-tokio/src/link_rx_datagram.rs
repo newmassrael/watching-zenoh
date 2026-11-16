@@ -50,6 +50,39 @@
 //! costs (both near 0.6 us from a Python loop on loopback, loop overhead
 //! included).
 //!
+//! ## A read armed before its datagram: copy-break
+//!
+//! A completion reader (`crate::uring_reactor`, a connected UDP link read
+//! through the node's `io_uring` ring) hands the kernel its destination when it
+//! ARMS the read, before the datagram exists, so it cannot ask the length
+//! first. `UnsizedRead` is that read's slot, and it lands by the same size
+//! rule (`is_small`): the read goes into a slot of the large class, which
+//! holds any datagram, and a datagram the rule calls small is then copied into
+//! a slot of the small class and the large slot goes home at once. That is a
+//! network driver's receive copy-break (Linux `rx_copybreak`), for the same
+//! reason: a buffer posted before the length is known has to be the widest,
+//! and a small frame copied out of it frees the wide one for the next read
+//! instead of holding it for as long as a sample of the frame lives. The copy
+//! is at most a small slot's width; a datagram past it is handed up where the
+//! kernel wrote it, uncopied.
+//!
+//! Upstream reads a datagram link the same way it reads a stream, a multishot
+//! receive over buffers of one size it provides to the kernel
+//! (`commons/zenoh-uring/src/linux/api/reader/mod.rs` @
+//! `let recv = opcode::RecvMulti::new(types::Fd(fd), group_id)`), so a kept
+//! sample of a small datagram holds one of those buffers whole: it has no size
+//! class to keep. Asking for readiness first and choosing the class then, as
+//! the socket read above does, would cost the ring a second submission and the
+//! length query per datagram; the copy-break costs a copy of at most 1471
+//! bytes and keeps one submission.
+//!
+//! The dry arms follow the socket read's: with the large class out the read is
+//! armed into a small slot, and a datagram that fills it is refused as no class
+//! having room for it; with both out the read consumes the next datagram into
+//! nothing and it is counted refused. The choice is made when the read is
+//! armed rather than when the datagram arrives, so the first datagram after a
+//! dry spell may still be refused.
+//!
 //! ## A dry pool refuses, and counts
 //!
 //! A datagram neither class has a slot for is read into nothing (a zero-length
@@ -453,6 +486,25 @@ pub enum DatagramRead {
 type Small = crate::session_rx_pool_ap_small::SessionRxPoolApSmall;
 type Large = crate::session_rx_pool_ap::SessionRxPoolAp;
 
+/// THE SIZE RULE every read of this pool takes its class by: a datagram of
+/// `len` bytes is small when it is strictly shorter than a small slot, whose
+/// last byte is the truncation witness.
+fn is_small(len: usize) -> bool {
+    len < <Small as RxTable>::SLOT_SIZE
+}
+
+/// Slot `idx` of `class` holds a datagram of `n` bytes: the completion edge,
+/// then the datagram as a range of the slot, adopting the one reference the
+/// edge counted. `None` when the emit refused the edge or the slot does not
+/// hold `n` bytes, and the slot is not lent.
+fn hand_up<T: RxTable>(class: &Arc<RxClass<T>>, idx: usize, n: usize) -> Option<RxBytes> {
+    if !class.complete(idx) {
+        return None;
+    }
+    let home: Arc<dyn RxSlotHome> = class.clone();
+    RxBytes::leased(home, idx, 0..n)
+}
+
 /// The node's datagram receive pool: the small class and the large one (the
 /// node's link-RX table), and the datagrams refused for want of a slot.
 pub struct DatagramRxPool {
@@ -466,13 +518,60 @@ impl DatagramRxPool {
     /// THE NODE's pool, built on the first datagram a UDP link receives: a
     /// small class of its own and the node's link-RX table as the large one.
     pub fn node() -> &'static DatagramRxPool {
-        static NODE: OnceLock<DatagramRxPool> = OnceLock::new();
-        NODE.get_or_init(|| Self {
+        Self::node_shared()
+    }
+
+    /// [`Self::node`] as the shared handle a reader that outlives one call
+    /// keeps (the node's ring reader).
+    pub(crate) fn node_shared() -> &'static Arc<DatagramRxPool> {
+        static NODE: OnceLock<Arc<DatagramRxPool>> = OnceLock::new();
+        NODE.get_or_init(|| {
+            Arc::new(Self {
+                small: Arc::new(RxClass::private()),
+                large: Arc::new(RxClass::over(crate::link_rx_pool::node_table())),
+                refused: AtomicU64::new(0),
+                truncated: AtomicU64::new(0),
+            })
+        })
+    }
+
+    /// A pool whose large class is `large`, the link-RX table a ring reader
+    /// registered, so the slots its datagram reads land in are the ones the
+    /// kernel already holds; its small class is its own.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    pub(crate) fn over_table(large: Arc<NodeTable>) -> Self {
+        Self {
             small: Arc::new(RxClass::private()),
-            large: Arc::new(RxClass::over(crate::link_rx_pool::node_table())),
+            large: Arc::new(RxClass::over(large)),
             refused: AtomicU64::new(0),
             truncated: AtomicU64::new(0),
-        })
+        }
+    }
+
+    /// A slot for a read issued before its datagram's length is known: the
+    /// large class's, or the small class's while the large one is out, or none
+    /// (the module's "copy-break" section gives the rule).
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    pub(crate) fn arm_unsized(self: &Arc<Self>) -> UnsizedRead {
+        let armed = match self.large.arm() {
+            Some((idx, base)) => Some(UnsizedSlot::Large { idx, base }),
+            None => self
+                .small
+                .arm()
+                .map(|(idx, base)| UnsizedSlot::Small { idx, base }),
+        };
+        UnsizedRead {
+            pool: Arc::clone(self),
+            armed,
+        }
     }
 
     /// A PRIVATE pool with tables of its own, for a caller that owns its node
@@ -504,9 +603,7 @@ impl DatagramRxPool {
 
     /// One attempt: `WouldBlock` when no datagram was waiting after all.
     pub fn try_recv_from(&self, socket: &UdpSocket) -> io::Result<DatagramRead> {
-        let small =
-            pending_datagram_len(socket).is_ok_and(|len| len < <Small as RxTable>::SLOT_SIZE);
-        if small {
+        if pending_datagram_len(socket).is_ok_and(is_small) {
             if let Some(read) = self.receive_into(&self.small, socket) {
                 return read;
             }
@@ -540,22 +637,13 @@ impl DatagramRxPool {
         // valid for `SLOT_SIZE` bytes; nothing else holds its address.
         let buf = unsafe { std::slice::from_raw_parts_mut(base, T::SLOT_SIZE) };
         let read = match socket.try_recv_from(buf) {
-            Ok((n, src)) if n < T::SLOT_SIZE => {
-                if !class.complete(idx) {
-                    return Some(Ok(DatagramRead::Refused {
-                        src: Some(src),
-                        cause: Refusal::Fault,
-                    }));
-                }
-                let home: Arc<dyn RxSlotHome> = class.clone();
-                match RxBytes::leased(home, idx, 0..n) {
-                    Some(bytes) => Ok(DatagramRead::Frame { bytes, src }),
-                    None => Ok(DatagramRead::Refused {
-                        src: Some(src),
-                        cause: Refusal::Fault,
-                    }),
-                }
-            }
+            Ok((n, src)) if n < T::SLOT_SIZE => match hand_up(class, idx, n) {
+                Some(bytes) => Ok(DatagramRead::Frame { bytes, src }),
+                None => Ok(DatagramRead::Refused {
+                    src: Some(src),
+                    cause: Refusal::Fault,
+                }),
+            },
             Ok((_, src)) => {
                 class.abandon(idx);
                 self.truncated.fetch_add(1, Ordering::Relaxed);
@@ -644,6 +732,120 @@ impl DatagramRxPool {
 impl Default for DatagramRxPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The slot a read issued before its datagram's length is known writes into
+/// (`DatagramRxPool::arm_unsized`), held until the read returns.
+///
+/// `land` hands the datagram up by the size rule. Dropped without
+/// landing (the read failed, was cancelled, or its link left), the slot goes
+/// home through the completion edge as a read that landed nothing, which is
+/// only sound once the reader has finished writing it: the caller keeps this
+/// value for exactly as long as the read is outstanding.
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+pub(crate) struct UnsizedRead {
+    pool: Arc<DatagramRxPool>,
+    /// `None` when no class had a slot: the read consumes the datagram into
+    /// nothing.
+    armed: Option<UnsizedSlot>,
+}
+
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+enum UnsizedSlot {
+    /// A slot of the large class, which holds any datagram.
+    Large { idx: usize, base: *mut u8 },
+    /// A slot of the small class, armed because the large class was out.
+    Small { idx: usize, base: *mut u8 },
+}
+
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+impl UnsizedRead {
+    /// Where the read writes and the room it has there, a whole slot; `None`
+    /// when it has no slot and must consume the datagram into nothing.
+    pub(crate) fn destination(&self) -> Option<(*mut u8, usize)> {
+        match self.armed.as_ref()? {
+            UnsizedSlot::Large { base, .. } => Some((*base, <Large as RxTable>::SLOT_SIZE)),
+            UnsizedSlot::Small { base, .. } => Some((*base, <Small as RxTable>::SLOT_SIZE)),
+        }
+    }
+
+    /// The read returned `n` bytes: the datagram, as a range of a slot of the
+    /// class `is_small` picks for it, or `None` when it was refused (counted
+    /// by the pool as the socket read counts it).
+    ///
+    /// The caller has seen the read return, so the reader has finished writing
+    /// the slot.
+    pub(crate) fn land(mut self, n: usize) -> Option<RxBytes> {
+        match self.armed.take() {
+            None => {
+                self.pool.refused.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            Some(UnsizedSlot::Small { idx, .. }) => {
+                if n >= <Small as RxTable>::SLOT_SIZE {
+                    // Armed here only because the large class was out, so a
+                    // datagram this slot cannot hold had no class with room.
+                    self.pool.small.abandon(idx);
+                    self.pool.refused.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                hand_up(&self.pool.small, idx, n)
+            }
+            Some(UnsizedSlot::Large { idx, .. }) => {
+                if n >= <Large as RxTable>::SLOT_SIZE {
+                    self.pool.large.abandon(idx);
+                    self.pool.truncated.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                let landed = hand_up(&self.pool.large, idx, n)?;
+                if !is_small(n) {
+                    return Some(landed);
+                }
+                // The copy-break. With the small class out the datagram stays
+                // where it landed, as the socket read keeps a small datagram in
+                // the large class then.
+                let Some((small, base)) = self.pool.small.arm() else {
+                    return Some(landed);
+                };
+                // SAFETY: `base` is the first byte of a small slot armed for
+                // this write alone and valid for its `SLOT_SIZE` bytes, more
+                // than the `n` written; nothing reads it before `hand_up`.
+                let copy = unsafe { std::slice::from_raw_parts_mut(base, n) };
+                copy.copy_from_slice(&landed);
+                // The large slot's last range: it goes home here, before the
+                // small one is lent.
+                drop(landed);
+                hand_up(&self.pool.small, small, n)
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+impl Drop for UnsizedRead {
+    fn drop(&mut self) {
+        match self.armed.take() {
+            Some(UnsizedSlot::Large { idx, .. }) => self.pool.large.abandon(idx),
+            Some(UnsizedSlot::Small { idx, .. }) => self.pool.small.abandon(idx),
+            None => {}
+        }
     }
 }
 
@@ -929,5 +1131,189 @@ mod tests {
         assert_eq!(pool.truncated(), 1);
         assert_eq!(pool.stats(RxClassId::Small).abandoned, 1);
         balanced(&pool, RxClassId::Small);
+    }
+
+    /// What the kernel does with a read armed through `arm_unsized` when
+    /// `datagram` arrives: it writes as much as the slot has room for and
+    /// returns that count, or consumes it into nothing and returns 0. The
+    /// landing is the code under test.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    fn read_unsized(pool: &Arc<DatagramRxPool>, datagram: &[u8]) -> Option<RxBytes> {
+        let read = pool.arm_unsized();
+        let n = match read.destination() {
+            Some((dst, room)) => {
+                let n = datagram.len().min(room);
+                // SAFETY: `dst` is the first byte of the slot armed for this
+                // read alone, valid for `room` bytes.
+                unsafe { std::slice::from_raw_parts_mut(dst, n) }.copy_from_slice(&datagram[..n]);
+                n
+            }
+            None => 0,
+        };
+        read.land(n)
+    }
+
+    /// THE SIZE RULE HOLDS FOR A READ ARMED BEFORE ITS DATAGRAM: each one is
+    /// handed up in the class the socket read would have picked, a small one
+    /// copied out of the large slot it landed in, which is home at once.
+    ///
+    /// CONTROL: return `landed` from `UnsizedRead::land` before the copy-break
+    /// and the class assertion reds on the 1-byte datagram, which then stays in
+    /// the large class.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn an_unsized_read_lands_in_the_class_the_socket_read_picks() {
+        let pool = Arc::new(DatagramRxPool::new());
+        let small = <Small as RxTable>::SLOT_SIZE;
+        for (len, expected) in [
+            (1usize, RxClassId::Small),
+            (63, RxClassId::Small),
+            (small - 1, RxClassId::Small),
+            (small, RxClassId::Large),
+            (20_000, RxClassId::Large),
+            (65_507, RxClassId::Large),
+        ] {
+            let payload: Vec<u8> = (0..len).map(|i| (i * 3 + len) as u8).collect();
+            let bytes = read_unsized(&pool, &payload).expect("a datagram with room is handed up");
+            assert_eq!(&bytes[..], &payload[..], "a datagram of {len} bytes");
+            assert!(bytes.is_leased(), "a datagram of {len} bytes is a slot");
+            let (class, _) = pool
+                .slot_of(bytes.as_ptr())
+                .expect("the bytes ARE a slot, by the pool's own answer");
+            assert_eq!(class, expected, "a datagram of {len} bytes");
+            assert_eq!(pool.live(expected), 1, "a datagram of {len} bytes");
+            let other = match expected {
+                RxClassId::Small => RxClassId::Large,
+                RxClassId::Large => RxClassId::Small,
+            };
+            assert_eq!(
+                pool.live(other),
+                0,
+                "a datagram of {len} bytes holds one slot, of its own class"
+            );
+            drop(bytes);
+        }
+        // The empty datagram is small, as the socket read takes it.
+        let empty = read_unsized(&pool, &[]).expect("an empty datagram is a frame");
+        assert!(empty.is_empty() && empty.is_leased());
+        assert_eq!(pool.live(RxClassId::Small), 1);
+        assert_eq!(pool.live(RxClassId::Large), 0);
+        drop(empty);
+        balanced(&pool, RxClassId::Small);
+        balanced(&pool, RxClassId::Large);
+        assert_eq!((pool.refused(), pool.truncated()), (0, 0));
+    }
+
+    /// A read that fills its whole large slot is a truncation, refused and
+    /// counted as the socket read counts one, and the slot goes home.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn an_unsized_read_that_fills_its_slot_is_a_counted_truncation() {
+        let pool = Arc::new(DatagramRxPool::new());
+        let whole = vec![9u8; <Large as RxTable>::SLOT_SIZE + 1];
+        assert!(read_unsized(&pool, &whole).is_none());
+        assert_eq!(pool.truncated(), 1);
+        assert_eq!(pool.refused(), 0);
+        assert_eq!(pool.stats(RxClassId::Large).abandoned, 1);
+        balanced(&pool, RxClassId::Large);
+        balanced(&pool, RxClassId::Small);
+    }
+
+    /// With the large class out a read is armed into a small slot: a small
+    /// datagram lands there, and one the slot cannot hold is refused as having
+    /// no class with room (not as a truncation).
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn with_the_large_class_out_an_unsized_read_takes_a_small_slot() {
+        let pool = Arc::new(DatagramRxPool::new());
+        let large: Vec<usize> = (0..pool.capacity(RxClassId::Large))
+            .map(|_| pool.large.arm().expect("a free slot").0)
+            .collect();
+        let bytes = read_unsized(&pool, b"small").expect("a small slot holds it");
+        assert_eq!(&bytes[..], b"small");
+        assert_eq!(
+            pool.slot_of(bytes.as_ptr()).map(|s| s.0),
+            Some(RxClassId::Small)
+        );
+        drop(bytes);
+        assert!(read_unsized(&pool, &[1u8; 2000]).is_none());
+        assert_eq!(pool.refused(), 1, "no class had room for it");
+        assert_eq!(pool.truncated(), 0);
+        for idx in large {
+            pool.large.abandon(idx);
+        }
+        balanced(&pool, RxClassId::Small);
+        balanced(&pool, RxClassId::Large);
+    }
+
+    /// With both classes out the read has no slot: it consumes the datagram
+    /// into nothing and the pool counts it refused, as the socket read does.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn with_both_classes_out_an_unsized_read_consumes_into_nothing_and_counts() {
+        let pool = Arc::new(DatagramRxPool::new());
+        let large: Vec<usize> = (0..pool.capacity(RxClassId::Large))
+            .map(|_| pool.large.arm().expect("a free slot").0)
+            .collect();
+        let small: Vec<usize> = (0..pool.capacity(RxClassId::Small))
+            .map(|_| pool.small.arm().expect("a free slot").0)
+            .collect();
+        let read = pool.arm_unsized();
+        assert!(read.destination().is_none(), "no class has a slot");
+        assert!(read.land(0).is_none());
+        assert_eq!(pool.refused(), 1);
+        for idx in large {
+            pool.large.abandon(idx);
+        }
+        for idx in small {
+            pool.small.abandon(idx);
+        }
+        balanced(&pool, RxClassId::Small);
+        balanced(&pool, RxClassId::Large);
+    }
+
+    /// An unsized read dropped without landing (the read failed, was
+    /// cancelled, or its link left) sends its slot home as a read that landed
+    /// nothing. CONTROL: empty `UnsizedRead`'s `Drop` and the slot stays out.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn an_unsized_read_dropped_unlanded_sends_its_slot_home() {
+        let pool = Arc::new(DatagramRxPool::new());
+        let read = pool.arm_unsized();
+        assert_eq!(
+            pool.free_slots(RxClassId::Large),
+            pool.capacity(RxClassId::Large) - 1
+        );
+        drop(read);
+        assert_eq!(
+            pool.free_slots(RxClassId::Large),
+            pool.capacity(RxClassId::Large)
+        );
+        assert_eq!(pool.stats(RxClassId::Large).abandoned, 1);
+        balanced(&pool, RxClassId::Large);
     }
 }
