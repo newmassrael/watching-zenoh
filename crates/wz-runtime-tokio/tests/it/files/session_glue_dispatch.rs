@@ -241,6 +241,10 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // R121f1 — patch-ext entry trails the cookie field. Last two
     // bytes of the InitAck wire = [0x27 (INIT_PATCH | ENC_ZINT),
     //                              VLE(the NEGOTIATED level)].
+    // Last by upstream's encode order, not by staging order: zenoh writes
+    // the InitAck extensions qos, shm, auth, mlink, lowlatency, compression,
+    // patch, region (`commons/zenoh-codec/src/transport/init.rs` @
+    // `// Extensions`), and this node carries no region name.
     //
     // R311y838 — the value is 0x00 here, and the contrast with the InitSyn
     // assertion above (which stays `_Z_CURRENT_PATCH`) is now this pair's

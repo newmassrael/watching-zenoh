@@ -20,10 +20,9 @@ use alloc::vec::Vec;
 /// How many extension entries a session can have staged on ONE of its four
 /// handshake chains at once, derived from what this build can stage.
 ///
-/// Every stager replaces an entry by its extension id before it adds one (the
-/// `retain` then `push` of `stage_capability`, the replace-in-place of the patch
-/// stager), so a chain holds at most one entry per kind of extension the build
-/// can stage. The kinds are counted from the features that stage them: the patch
+/// Every stager replaces an entry by its extension id before it adds one
+/// (`stage_in_canonical_order`), so a chain holds at most one entry per kind
+/// of extension the build can stage. The kinds are counted from the features that stage them: the patch
 /// level, the region name and the remote bound are staged by every build that
 /// has the handshake; the rest each by the feature that owns them. Capacity for
 /// one more than the count is not kept: an entry that would not fit is a
@@ -76,6 +75,62 @@ impl ExtChainBuf {
     pub fn remove(&mut self, at: usize) -> ExtEntryOwned {
         self.0.remove(at)
     }
+
+    /// Insert `entry` at `at`, shifting the rest up. The capacity argument is
+    /// `push`'s: a stager that removed its own id first always has room.
+    pub fn insert(&mut self, at: usize, entry: ExtEntryOwned) {
+        if self.0.insert(at, entry).is_err() {
+            panic!("a handshake ext chain holds one entry per staged extension kind");
+        }
+    }
+}
+
+/// Make `entry` the one entry of extension id `id` on a staged handshake chain,
+/// or, for `None`, take every entry of that id off it.
+///
+/// The entry goes where upstream's encoder writes it. zenoh writes the Init and
+/// Open chains field by field in ascending id order (qos / qos_link 0x1, shm
+/// 0x2, auth 0x3, mlink 0x4, lowlatency 0x5, compression 0x6, patch or remote
+/// bound 0x7, region name 0x8:
+/// `commons/zenoh-codec/src/transport/init.rs` @ `// Extensions` and
+/// `commons/zenoh-codec/src/transport/open.rs` @ `// Extensions`), so keeping
+/// the chain sorted by id is what makes every wz encoder of it emit that order,
+/// whichever stager ran first. Equal ids keep their arrival order; a chain has
+/// at most one, since each id names one field of the message.
+///
+/// Removal keys on the 4-bit id field rather than the identity: the unit `QoS`
+/// and the z64 `QoSLink` share id 0x1 and zenoh refuses to emit both, so a
+/// re-stage of either form must replace the other.
+#[cfg(feature = "session-unicast")]
+pub(crate) fn stage_in_canonical_order(
+    chain: &mut ExtChainBuf,
+    id: u8,
+    entry: Option<ExtEntryOwned>,
+) {
+    chain.retain(|e| e.ext_id() != id);
+    if let Some(entry) = entry {
+        debug_assert_eq!(entry.ext_id(), id, "a stager staged another id's entry");
+        let at = canonical_position(chain, id);
+        chain.insert(at, entry);
+    }
+}
+
+/// Where an entry of id `id` belongs in `chain`: after every entry whose id is
+/// not greater, so a stable insert leaves a sorted chain sorted.
+#[cfg(feature = "session-unicast")]
+fn canonical_position(chain: &[ExtEntryOwned], id: u8) -> usize {
+    chain
+        .iter()
+        .position(|e| e.ext_id() > id)
+        .unwrap_or(chain.len())
+}
+
+/// Put a chain handed over whole into the order
+/// [`stage_in_canonical_order`] keeps, so a seeded chain and a staged one are
+/// written alike. Stable, so entries of one id keep the order they came in.
+#[cfg(all(not(feature = "session-slot"), feature = "session-unicast"))]
+pub(crate) fn sort_into_canonical_order(chain: &mut ExtChainBuf) {
+    chain.sort_by_key(|e| e.ext_id());
 }
 
 #[cfg(all(feature = "session-slot", feature = "session-unicast"))]
@@ -631,6 +686,109 @@ mod tests {
         assert_eq!(
             encode_ext_chain_into(&mut fixed, &entries),
             Err(sce_forge_runtime::codec::CodecError::BufferOverflow)
+        );
+    }
+}
+
+// Every staged chain, on both forms. The fixed form holds as few as three
+// entries, so the tests that run on it stage no more than three.
+#[cfg(all(test, feature = "session-unicast"))]
+mod canonical_order_tests {
+    use super::*;
+    use crate::transport_profile::ExtEntryOwnedVariant;
+
+    /// A unit entry whose header is its id: the order rule reads the id only,
+    /// so the body is immaterial.
+    fn unit(id: u8) -> ExtEntryOwned {
+        ExtEntryOwned {
+            header: id,
+            body: ExtEntryOwnedVariant::CodecZenohExtUnit(wz_codecs::ext_unit::ExtUnit {}),
+        }
+    }
+
+    /// The z64 form of an id, as `QoSLink` is beside the unit `QoS` on 0x1.
+    fn z64(id: u8, value: u64) -> ExtEntryOwned {
+        ExtEntryOwned {
+            header: id | crate::ext_header::EXT_ENC_Z64,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint { value }),
+        }
+    }
+
+    fn stage(chain: &mut ExtChainBuf, entry: ExtEntryOwned) {
+        let id = entry.ext_id();
+        stage_in_canonical_order(chain, id, Some(entry));
+    }
+
+    /// The InitSyn send stages its entries in this order onto a chain seeded
+    /// with the patch entry: auth, multilink, lowlatency, QoS, compression,
+    /// SHM, region name. zenoh writes them qos, shm, auth, mlink, lowlatency,
+    /// compression, patch, region (`commons/zenoh-codec/src/transport/init.rs`
+    /// @ `// Extensions`), which is ascending id.
+    #[cfg(not(feature = "session-slot"))]
+    #[test]
+    fn entries_staged_in_send_order_sit_in_upstreams_encode_order() {
+        let mut chain: ExtChainBuf = alloc::vec![crate::extpatch::encode_patch_ext()];
+        for id in [0x03, 0x04, 0x05, 0x01, 0x06, 0x02, 0x08] {
+            stage(&mut chain, unit(id));
+        }
+        assert!(
+            chain
+                .iter()
+                .map(|e| e.ext_id())
+                .eq([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
+            "the staged chain is in zenoh's field order: {chain:?}"
+        );
+    }
+
+    /// Re-staging an id replaces whatever form it had, in its place: the unit
+    /// QoS and the z64 QoSLink share 0x1, and zenoh never emits both.
+    #[test]
+    fn restaging_an_id_replaces_its_entry_in_place() {
+        let mut chain = ExtChainBuf::default();
+        stage(&mut chain, unit(0x08));
+        stage(&mut chain, crate::extpatch::encode_patch_ext_at(1));
+        stage(&mut chain, unit(0x01));
+        stage(&mut chain, z64(0x01, 9));
+        assert!(
+            chain.iter().map(|e| e.ext_id()).eq([0x01, 0x07, 0x08]),
+            "one entry per id, ascending: {chain:?}"
+        );
+        assert_eq!(
+            chain[0].header,
+            0x01 | crate::ext_header::EXT_ENC_Z64,
+            "the z64 form replaced the unit one"
+        );
+    }
+
+    /// `None` takes the id off and leaves the rest in order; an id the chain
+    /// does not hold leaves it untouched.
+    #[test]
+    fn staging_none_takes_the_id_off() {
+        let mut chain = ExtChainBuf::default();
+        stage(&mut chain, unit(0x08));
+        stage(&mut chain, unit(0x01));
+        stage(&mut chain, crate::extpatch::encode_patch_ext_at(1));
+        stage_in_canonical_order(&mut chain, 0x07, None);
+        assert!(chain.iter().map(|e| e.ext_id()).eq([0x01, 0x08]));
+        stage_in_canonical_order(&mut chain, 0x05, None);
+        assert!(chain.iter().map(|e| e.ext_id()).eq([0x01, 0x08]));
+    }
+
+    /// A chain handed over whole is ordered by the 4-bit id, not the header
+    /// byte, and stably: two entries of one id keep the order they came in.
+    #[cfg(not(feature = "session-slot"))]
+    #[test]
+    fn a_chain_handed_over_whole_is_sorted_by_id_stably() {
+        let mut chain: ExtChainBuf = alloc::vec![unit(0x08), z64(0x01, 3), unit(0x07), unit(0x01)];
+        sort_into_canonical_order(&mut chain);
+        assert!(
+            chain.iter().map(|e| e.header).eq([
+                0x01 | crate::ext_header::EXT_ENC_Z64,
+                0x01,
+                0x07,
+                0x08
+            ]),
+            "{chain:?}"
         );
     }
 }

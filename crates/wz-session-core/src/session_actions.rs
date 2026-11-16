@@ -6203,8 +6203,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Absent under `session-slot`, where the four chains are arrays of the
     /// session's own storage and the stagers fill them one entry per extension
     /// kind: a caller there has no vector to hand over.
+    ///
+    /// The entries are held in upstream's encode order, ascending extension
+    /// id (stable, so entries of one id keep the order given): the stagers
+    /// keep that order, and a chain handed over whole is written as theirs is.
     #[cfg(not(feature = "session-slot"))]
-    pub fn set_ext_chain(&self, role: ExtChainRole, entries: Vec<ExtEntryOwned>) {
+    pub fn set_ext_chain(&self, role: ExtChainRole, mut entries: Vec<ExtEntryOwned>) {
+        crate::ext_chain::sort_into_canonical_order(&mut entries);
         R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);
     }
 
@@ -6995,10 +7000,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) {
         let ext = R::with_mutex_mut(&self.auth, produce).ok().flatten();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| e.ext_id() != crate::extauth::AUTH_EXT_ID);
-            if let Some(ext) = ext {
-                chain.push(ext);
-            }
+            crate::ext_chain::stage_in_canonical_order(chain, crate::extauth::AUTH_EXT_ID, ext);
         });
     }
 
@@ -7140,10 +7142,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             slot.as_mut().and_then(|d| produce(d).ok().flatten())
         });
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| e.ext_id() != crate::extmultilink::MULTILINK_EXT_ID);
-            if let Some(ext) = ext {
-                chain.push(ext);
-            }
+            crate::ext_chain::stage_in_canonical_order(
+                chain,
+                crate::extmultilink::MULTILINK_EXT_ID,
+                ext,
+            );
         });
     }
 
@@ -7641,34 +7644,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// not empty, when it does not. The removal arm is what makes that true
     /// for a session whose identity was cleared after a first Init staged one.
     ///
-    /// In-place replacement rather than retain+push, the shape
-    /// `stage_negotiated_patch` uses, so chain position does not move under a
-    /// re-stage. (That method is private, so this is deliberately NOT an
-    /// intra-doc link: a `pub` item's doc linking a private one is a broken
-    /// link the C1bz budget counts, which is how this round found it.)
+    /// The entry takes its place in upstream's encode order wherever the other
+    /// stagers put theirs (`ext_chain::stage_in_canonical_order`, crate-private
+    /// and so not an intra-doc link from this `pub` item). A name that does not
+    /// encode leaves the chain as it was.
     pub fn stage_local_region(&self, role: ExtChainRole) {
-        let name = self.local_region();
+        let entry = match self.local_region() {
+            Some(name) => match crate::extregion::encode_region_name_ext(&name) {
+                Ok(entry) => Some(entry),
+                Err(_) => return,
+            },
+            None => None,
+        };
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            let want = crate::ext_header::ext_eid(crate::extregion::REGION_NAME_EXT_HEADER);
-            let at = chain
-                .iter()
-                .position(|e| crate::ext_header::ext_eid(e.header) == want);
-            match (name, at) {
-                (Some(name), Some(at)) => {
-                    if let Ok(entry) = crate::extregion::encode_region_name_ext(&name) {
-                        chain[at] = entry;
-                    }
-                }
-                (Some(name), None) => {
-                    if let Ok(entry) = crate::extregion::encode_region_name_ext(&name) {
-                        chain.push(entry);
-                    }
-                }
-                (None, Some(at)) => {
-                    chain.remove(at);
-                }
-                (None, None) => {}
-            }
+            crate::ext_chain::stage_in_canonical_order(
+                chain,
+                crate::extregion::REGION_NAME_EXT_ID,
+                entry,
+            );
         });
     }
 
@@ -7784,12 +7777,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn stage_local_remote_bound(&self, role: ExtChainRole) {
         let bound = self.local_remote_bound();
-        let want = crate::ext_header::ext_eid(crate::extbound::REMOTE_BOUND_EXT_HEADER);
+        let entry = bound.map(crate::extbound::encode_remote_bound_ext);
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| crate::ext_header::ext_eid(e.header) != want);
-            if let Some(bound) = bound {
-                chain.push(crate::extbound::encode_remote_bound_ext(bound));
-            }
+            crate::ext_chain::stage_in_canonical_order(
+                chain,
+                crate::ext_header::ext_id(crate::extbound::REMOTE_BOUND_EXT_HEADER),
+                entry,
+            );
         });
     }
 
@@ -7910,38 +7904,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `transport.c:142-148`), which is the same rule wz itself enforces as an
     /// initiator ([`Self::init_ack_patch_acceptable`]).
     ///
-    /// ## Replaced IN PLACE, not cleared and pushed
+    /// ## Where the entry sits
     ///
-    /// Unlike `stage_capability` (a code span, not a link: it is private and
-    /// cfg-gated on the four capability features, so a link would dangle in
-    /// every subset that lacks them), whose entry is present only when the
-    /// capability is still offered, this entry is unconditional — so the
-    /// position it already holds in the chain is the wire order wz has emitted
-    /// since R121f1, and only the VALUE byte is this round's business. pico
-    /// likewise assigns into the message it already built rather than
-    /// re-appending.
-    ///
-    /// ⚠ That position is a CONSERVATISM WITH NO WITNESS, measured rather than
-    /// assumed: swapping this for `stage_capability`'s `retain` + `push` (which
-    /// moves the entry to the chain's end whenever another ext was staged
-    /// above) reds NOTHING across `wz-session-core`, `wz-runtime-tokio` and
-    /// `wz-integration-tests`. Nothing should — an ext chain is order-free to
-    /// both reference decoders, which walk it by header id. So this is the
-    /// cheaper of two correct forms, chosen to avoid an unforced change to
-    /// bytes the layer3 fixtures pin, and not a property any gate defends.
+    /// Where upstream's encoder writes it: after compression and before the
+    /// region name (`ext_chain::stage_in_canonical_order`). Both reference
+    /// decoders walk a chain by header id, so the position is not what they
+    /// judge; it is what makes wz's InitAck the bytes a zenoh acceptor would
+    /// have sent. That function's unit tests hold the rule, and the
+    /// compression end-to-end tests hold it on both Init messages' wire.
     ///
     /// The level is read BEFORE the chain guard is taken: both are per-profile
     /// mutexes and the MCU profile's is a non-reentrant critical section (the
     /// 2b-① discipline the Init encode sites follow for the same reason).
     #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
     fn stage_negotiated_patch(&self, role: ExtChainRole) {
-        let level = self.negotiated_patch();
+        let entry = crate::extpatch::encode_patch_ext_at(self.negotiated_patch());
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            let entry = crate::extpatch::encode_patch_ext_at(level);
-            match chain.iter().position(|e| e.ext_id() == entry.ext_id()) {
-                Some(at) => chain[at] = entry,
-                None => chain.push(entry),
-            }
+            crate::ext_chain::stage_in_canonical_order(
+                chain,
+                crate::extpatch::PATCH_EXT_ID,
+                Some(entry),
+            );
         });
     }
 
@@ -8534,11 +8517,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// establishment offers share, replacing the three near-identical
     /// `stage_X_send` bodies): the prior entry with this id is dropped first so a
     /// re-handshake never duplicates it (the slots persist across
-    /// `reset_for_reopen`), then `build`'s ext is pushed iff `offer`. The
-    /// per-capability `build` fn (e.g. [`crate::extlowlatency::encode_lowlatency_ext`])
-    /// is the single source of both the id (which drives the idempotent retain)
-    /// and the content — invoked once for the id (a 1-byte unit ext) and again to
-    /// push, so no id param is threaded.
+    /// `reset_for_reopen`), then `build`'s ext is placed in upstream's encode
+    /// order iff `offer`. The per-capability `build` fn (e.g.
+    /// [`crate::extlowlatency::encode_lowlatency_ext`]) is the single source of
+    /// both the id (which drives the idempotent replace) and the content, so no
+    /// id param is threaded.
     ///
     /// Gated on the UNION of the three capabilities' send-action callers, so a
     /// subset build that compiles none does not carry it as dead code under
@@ -8572,10 +8555,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) {
         let produced = self.is_shm().then(|| produce(self)).flatten();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| e.ext_id() != crate::extshm::SHM_ESTABLISHMENT_EXT_ID);
-            if let Some(ext) = produced {
-                chain.push(ext);
-            }
+            crate::ext_chain::stage_in_canonical_order(
+                chain,
+                crate::extshm::SHM_ESTABLISHMENT_EXT_ID,
+                produced,
+            );
         });
     }
 
@@ -8610,12 +8594,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         any(feature = "session-unicast-open", feature = "session-unicast-accept",),
     ))]
     fn stage_capability(&self, role: ExtChainRole, offer: bool, build: impl Fn() -> ExtEntryOwned) {
-        let ext_id = build().ext_id();
+        // Built once, outside the chain's guard: the QoS form reads the link
+        // metadata under a mutex of its own, and the MCU profile's mutexes do
+        // not nest.
+        let entry = build();
+        let ext_id = entry.ext_id();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| e.ext_id() != ext_id);
-            if offer {
-                chain.push(build());
-            }
+            crate::ext_chain::stage_in_canonical_order(chain, ext_id, offer.then_some(entry));
         });
     }
 
