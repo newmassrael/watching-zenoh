@@ -115,6 +115,20 @@ netns_topology_down() {
     return 0
 }
 
+# Whether `ip` and the privilege a namespace needs are here: the absence (code
+# 2) half of `up` and `reattach`, with NETNS_TOPOLOGY_WHY set when they are not.
+_netns_tools_present() {
+    if ! command -v ip >/dev/null 2>&1; then
+        NETNS_TOPOLOGY_WHY="no \`ip\` on PATH (iproute2 absent)"
+        return 1
+    fi
+    if [[ "${WZ_NETNS_SANDBOX:-}" != 1 ]] && ! sudo -n true 2>/dev/null; then
+        NETNS_TOPOLOGY_WHY="no non-interactive sudo; a netns needs CAP_NET_ADMIN"
+        return 1
+    fi
+    return 0
+}
+
 # netns_topology_up <tag> <host-cidr> <peer-cidr>
 #
 # Leaves a netns `wzns<tag>` reachable at <peer-cidr> from <host-cidr> on this
@@ -122,18 +136,9 @@ netns_topology_down() {
 # arm it with a trap BEFORE calling this.
 netns_topology_up() {
     local tag="$1" host_cidr="$2" peer_cidr="$3"
-    local ns="wzns$1" host peer
-    host="$(_netns_ifname "$tag")0"
-    peer="$(_netns_ifname "$tag")1"
+    local ns="wzns$1"
 
-    if ! command -v ip >/dev/null 2>&1; then
-        NETNS_TOPOLOGY_WHY="no \`ip\` on PATH (iproute2 absent)"
-        return 2
-    fi
-    if [[ "${WZ_NETNS_SANDBOX:-}" != 1 ]] && ! sudo -n true 2>/dev/null; then
-        NETNS_TOPOLOGY_WHY="no non-interactive sudo; a netns needs CAP_NET_ADMIN"
-        return 2
-    fi
+    _netns_tools_present || return 2
 
     # From here the tools ARE present, so every failure below is a defect (4)
     # rather than an absence (2). That boundary is the whole point of the split.
@@ -142,18 +147,60 @@ netns_topology_up() {
         NETNS_TOPOLOGY_WHY="\`ip netns add $ns\` failed with the privilege available"
         return 4
     fi
+    _netns_topology_link "$tag" "$host_cidr" "$peer_cidr" || return 4
+    if ! netns_priv ip netns exec "$ns" ip link set lo up 2>/dev/null; then
+        NETNS_TOPOLOGY_WHY="\`ip link set lo up\` failed in $ns"
+        return 4
+    fi
+    NETNS_TOPOLOGY_WHY=""
+    return 0
+}
+
+# The veth pair of `wzns<tag>` and the addressing of both ends: one shape for the
+# first build and for a re-attach, so a re-attached link is the link `up` built.
+# Returns 1 with NETNS_TOPOLOGY_WHY set; its callers decide the code.
+_netns_topology_link() {
+    local tag="$1" host_cidr="$2" peer_cidr="$3"
+    local ns="wzns$1" host peer
+    host="$(_netns_ifname "$tag")0"
+    peer="$(_netns_ifname "$tag")1"
     if ! netns_priv ip link add "$host" type veth peer name "$peer" netns "$ns" 2>/dev/null; then
         NETNS_TOPOLOGY_WHY="\`ip link add $host type veth\` failed"
-        return 4
+        return 1
     fi
     if ! netns_priv ip addr add "$host_cidr" dev "$host" 2>/dev/null \
         || ! netns_priv ip link set "$host" up 2>/dev/null \
         || ! netns_priv ip netns exec "$ns" ip addr add "$peer_cidr" dev "$peer" 2>/dev/null \
-        || ! netns_priv ip netns exec "$ns" ip link set "$peer" up 2>/dev/null \
-        || ! netns_priv ip netns exec "$ns" ip link set lo up 2>/dev/null; then
+        || ! netns_priv ip netns exec "$ns" ip link set "$peer" up 2>/dev/null; then
         NETNS_TOPOLOGY_WHY="addressing $host/$peer failed after both links existed"
+        return 1
+    fi
+    return 0
+}
+
+# netns_topology_reattach <tag> <host-cidr> <peer-cidr>
+#
+# Puts the veth pair of an existing `wzns<tag>` back after its host end was
+# deleted, as an interface that was unplugged is plugged in again: the same
+# names and addresses, new devices. The namespace, and whatever runs in it, are
+# kept. Codes as `up`'s: 2 when the tools are absent, 4 when there is no such
+# namespace or the pair is still there (a re-attach of a link that was never
+# removed is a caller's defect, not something to paper over) or the build failed.
+netns_topology_reattach() {
+    local tag="$1" host_cidr="$2" peer_cidr="$3"
+    local ns="wzns$1" host
+    host="$(_netns_ifname "$tag")0"
+
+    _netns_tools_present || return 2
+    if ! netns_priv ip netns exec "$ns" true 2>/dev/null; then
+        NETNS_TOPOLOGY_WHY="no namespace $ns to re-attach a link to"
         return 4
     fi
+    if netns_priv ip link show "$host" >/dev/null 2>&1; then
+        NETNS_TOPOLOGY_WHY="$host still exists; only a removed link is re-attached"
+        return 4
+    fi
+    _netns_topology_link "$tag" "$host_cidr" "$peer_cidr" || return 4
     NETNS_TOPOLOGY_WHY=""
     return 0
 }
@@ -292,6 +339,23 @@ _netns_selftest_body() {
             echo "  netns-topology selftest: built wznsst, peer reaches the host end"
         else
             echo "  netns-topology selftest FAIL: built, but the peer cannot reach 10.252.0.1" >&2
+            return 1
+        fi
+        # A re-attach: refused while the link stands, then the removed link back
+        # and reachable again from the namespace that outlived it.
+        if netns_topology_reattach st 10.252.0.1/30 10.252.0.2/30; then
+            echo "  netns-topology selftest FAIL: re-attached a link that was never removed" >&2
+            return 1
+        fi
+        netns_priv ip link del "$(_netns_ifname st)0" 2>/dev/null
+        if ! netns_topology_reattach st 10.252.0.1/30 10.252.0.2/30; then
+            echo "  netns-topology selftest FAIL: re-attach: $NETNS_TOPOLOGY_WHY" >&2
+            return 1
+        fi
+        if netns_priv ip netns exec wznsst ping -c1 -W2 10.252.0.1 >/dev/null 2>&1; then
+            echo "  netns-topology selftest: re-attached the removed link, peer reaches the host end"
+        else
+            echo "  netns-topology selftest FAIL: re-attached, but the peer cannot reach 10.252.0.1" >&2
             return 1
         fi
         netns_topology_down st

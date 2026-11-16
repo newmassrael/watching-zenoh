@@ -92,6 +92,9 @@ FOREIGN_ROOTS = {
     # Open-debt items 911 and 913 — the CLIs built with `Z_FEATURE_RAWETH_TRANSPORT=1`, the
     # reference for wz's `raweth-transport` build.
     "zenoh_pico_reth_cli_binary": "pico",
+    # Open-debt item 173 — the CLIs built with `Z_FEATURE_FRAGMENTATION=0`, the one stock
+    # initiator that announces no protocol patch level: a feature-variant pico oracle.
+    "zenoh_pico_nofrag_cli_binary": "pico",
     "zenohd_binary": "zenohd",
     "zenohd_unixpipe_binary": "zenohd",
     "zenohd_vsock_binary": "zenohd",

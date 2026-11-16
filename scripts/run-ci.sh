@@ -18277,6 +18277,20 @@ layer_ewire_pico_wire_dissection() {
         -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewire: the census resolved an id to the path zenoh-pico declared"
+    # Open-debt item 173 — the acceptor's patch answer to the one stock initiator that
+    # announces no level, pico built with Z_FEATURE_FRAGMENTATION=0 (its own arm of
+    # build-zenoh-pico-cli.sh), and the stock pico as the control. The arm is guarded on its
+    # own binary: an older oracle build without it refuses under WZ_PICO_REQUIRE.
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli-nofrag/z_put ]]; then
+        _pico_cli_unavailable "Layer Ewire (fragmentation-disabled arm)" || return 1
+        return 0
+    fi
+    wz_test_args wz-integration-tests pico_nofrag_patch_answer
+    _runci_guarded_test "Ewire patch answer to a pre-patch pico" 2 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewire: wz answered each stock pico's patch level with min(CURRENT, announced)"
 }
 
 # Layer Ero — Layer Ewire, and the oracle build it needs, in a READ-ONLY checkout.
@@ -21169,6 +21183,19 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         _runci_guarded_test "M sessions file: zenohd client + group peer" 1 \
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
+    fi
+    # Open-debt item 902 — a group session of a demo PROCESS over a device that is removed and
+    # re-attached: link lost, a re-join refused while the device is absent, rejoined once it is
+    # back, a member admitted over the re-joined link. Needs the demo built above with
+    # `locator-iface` (its `#iface=` tail) and a namespace, behind the probe of the `#join=` leg.
+    # Count-guarded at 1: the leg is `#[ignore]`, so a rename would select zero and pass.
+    if (( netns_rc != 0 )); then
+        echo "Layer M SKIP group session re-joins a re-attached device (no network namespace on this host)"
+    else
+        wz_test_args wz-integration-tests wz_ap_demo_group_rejoin_netns
+        _runci_guarded_test "M group session re-joins a re-attached device" 1 \
+            "${netns_wrap[@]}" cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     fi
 
     # R2854 (`adminspace-metrics`, `transport-stats`) — a router PROCESS serves
@@ -24438,9 +24465,12 @@ layer_e6h_adminspace_config_hotreload() {
         _pico_cli_unavailable "Layer E6h (pico config-hotreload z_put/z_get)" || return 1
         return 0
     fi
+    # Two legs: the storage lifecycle and (open-debt item 781) the volume lifecycle with its
+    # cascade. Count-guarded, because both are `#[ignore]` and a rename would select zero.
     wz_test_args wz-integration-tests wz_storage_host_config_hotreload_pico
-    (cd crates && cargo test -p wz-integration-tests \
-        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
+    _runci_guarded_test "E6h config-hotreload storage and volume lifecycles" 2 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2787 — the storage manager's DECLARATIVE document, written by a pico client
     # below `@/<zid>/peer/config/plugins/storage_manager/`. A SECOND build, and it
     # must come after the test above: the storage host applies a config-key write

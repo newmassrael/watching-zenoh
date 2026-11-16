@@ -24,14 +24,14 @@
 //! # What this does not witness
 //!
 //! The re-join that follows a lost group link (`serve_group`, `GroupRejoin`) is
-//! witnessed by its own paused-time tests; this leg ends where the link reports
-//! `Lost`, which is the seam item 900's re-join loop was waiting on.
+//! witnessed by its own paused-time tests and, in a process over a removed and
+//! re-attached interface, by `wz_ap_demo_group_rejoin_netns`; this leg ends where
+//! the link reports `Lost`, which is the seam item 900's re-join loop was waiting on.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use wz_integration_tests::bounded::BoundedOutput as _;
-use wz_integration_tests::common::{netns_privileged, NetnsPair};
+use wz_integration_tests::common::NetnsPair;
 use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::udp_pipeline::{dial_udp, wire_udp_socket};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, McastSocketConfig, UdpDriver};
@@ -57,21 +57,6 @@ const SILENT_FOR: Duration = Duration::from_millis(600);
 /// is immediate where it works; this bounds a test waiting for one that never
 /// comes.
 const LOST_WITHIN: Duration = Duration::from_secs(5);
-
-/// Delete the host end of the pair, as a hot-unplugged or reconfigured
-/// interface is deleted. The peer end goes with it.
-fn remove_the_interface(ns: &NetnsPair) {
-    let out = netns_privileged("ip")
-        .args(["link", "del", "dev", &ns.host_iface()])
-        .output_bounded()
-        .expect("run ip link del");
-    assert!(
-        out.status.success(),
-        "ip link del {} failed: {}",
-        ns.host_iface(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a network namespace; Layer M runs via --ignored after probing for one"]
@@ -106,7 +91,7 @@ async fn in_a_netns_a_group_link_whose_interface_is_removed_is_lost_at_its_next_
         other => panic!("the link carries its own group datagram while up; got {other:?}"),
     }
 
-    remove_the_interface(&ns);
+    ns.detach();
 
     // The premise: the read half has nothing to say about a removed interface.
     let silent = tokio::time::timeout(SILENT_FOR, link.poll_event()).await;
@@ -150,7 +135,7 @@ async fn in_a_netns_a_dial_link_whose_route_is_removed_is_lost_at_its_next_write
         "a link nobody has written to is quiet; got {quiet:?}"
     );
 
-    remove_the_interface(&ns);
+    ns.detach();
 
     // The premise, again: the read half stays silent for the removal itself.
     let silent = tokio::time::timeout(SILENT_FOR, read.poll_event()).await;

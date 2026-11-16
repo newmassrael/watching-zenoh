@@ -67,8 +67,7 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// Run a fresh one-shot pico `z_get` on `<root>/plugins/**` and return its stdout
@@ -181,36 +180,49 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
     let _ = child.child_mut().wait_bounded();
 }
 
-// wz-proves: adminspace-config-hotreload wz->pico
-#[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features adminspace-config-hotreload + zenoh-pico z_get/z_put CLIs); Layer E6h runs via --ignored"]
-fn wz_storage_host_config_hotreload_state_flip_via_pico() {
-    let demo = wz_ap_demo_binary();
-    let z_get = zenoh_pico_cli_binary("z_get");
-    let z_put = zenoh_pico_cli_binary("z_put");
+/// The running `--storage-host`: its process, the reader of its log, its admin root
+/// (`@/<zid>/peer`) and the address a pico client dials.
+struct StorageHost {
+    child: ChildGuard,
+    log: std::fs::File,
+    root: String,
+    addr: String,
+}
+
+impl StorageHost {
+    /// Wait up to 15 s for the host to log `line`, which is how every apply is observed: a
+    /// positive edge, waited on after the driving pico process has exited.
+    fn expect_log(&mut self, line: &str, what: &str) {
+        if let Err(c) = wait_for_substring(&mut self.log, line, Duration::from_secs(15)) {
+            let _ = self.child.child_mut().kill();
+            let _ = self.child.child_mut().wait_bounded();
+            panic!("storage host never logged {line:?} within 15s ({what})\n--- host ---\n{c}");
+        }
+    }
+
+    fn stop(mut self) {
+        let _ = self.child.child_mut().kill();
+        let _ = self.child.child_mut().wait_bounded();
+    }
+}
+
+/// Start `wz-ap-demo --storage-host` on a fresh port and read its admin root off its
+/// readiness line.
+fn start_storage_host(demo: &Path) -> StorageHost {
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());
-
-    // ── the wz storage host: multi-accepts per-client Sessions, hosts the admin GET
-    //    + config-write subscriber, applies storage-add/-del via RuntimeStorageManager.
     let h_stderr = tempfile::tempfile().expect("tempfile for storage-host stderr");
     let h_writer = h_stderr
         .try_clone()
         .expect("dup storage-host stderr handle");
-    let mut h_reader = h_stderr;
-
-    let mut h_child = ChildGuard::wrap(
+    let mut log = h_stderr;
+    let mut child = ChildGuard::wrap(
         "wz-ap-demo --storage-host (adminspace-config-hotreload)",
-        Command::new(&demo)
+        Command::new(demo)
             .arg("--storage-host")
             .arg(&addr)
-            // R2374 — INERT on this lane's build and passed anyway. Layer E6h
-            // compiles `adminspace-config-hotreload` without `adminspace-write`,
-            // so `admin_write_permit` is the constant `true` and the PUTs below
-            // are permitted either way. The flag is here so that adding the write
-            // gate to this lane later cannot silently deny them — which is
-            // exactly what it did to three AP-FULL fixtures the moment the
-            // storage host stopped passing a literal permit.
+            // Inert on this lane's build (see the state-flip test), passed so a write gate
+            // added to the lane later cannot silently deny the PUTs.
             .arg("--config-write-permit")
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
@@ -218,32 +230,171 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
             .spawn()
             .expect("spawn wz-ap-demo storage host"),
     );
-
-    let ready = wait_for_substring(
-        &mut h_reader,
+    let captured = match wait_for_substring(
+        &mut log,
         "adminspace config GET at ",
         Duration::from_secs(5),
-    );
-    let captured = match ready {
+    ) {
         Ok(c) => c,
         Err(c) => {
-            let _ = h_child.child_mut().kill();
-            let _ = h_child.child_mut().wait_bounded();
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait_bounded();
             panic!("storage host never became ready within 5s\n--- host ---\n{c}");
         }
     };
-    let config_key = captured
+    let root = captured
         .lines()
         .find_map(|l| {
             l.split_once("adminspace config GET at ")
                 .map(|(_, rest)| rest.trim().to_string())
         })
-        .expect("storage host logged the admin config keyexpr");
-    let root = config_key
+        .expect("storage host logged the admin config keyexpr")
         .strip_suffix("/config")
         .expect("config key ends with /config")
         .to_string();
     drop(port_res);
+    StorageHost {
+        child,
+        log,
+        root,
+        addr,
+    }
+}
+
+/// Open-debt item 781 — the VOLUME lifecycle, driven by the same stock pico client over the
+/// same wire as the storage one below.
+///
+/// The decoder (`volume-add` / `volume-del`) and the manager (`register_volume`,
+/// `remove_volume`'s cascade) each have unit witnesses; the storage host's dispatch arms that
+/// join them are reached only through a process, so this is their witness:
+///
+/// 1. `volume-add archive@memory` registers a volume the pico GET then reads back under
+///    `status/plugins/storage_manager/volumes/archive`; `volume-add bogus@nosuchbackend` is
+///    refused by name and never listed.
+/// 2. `storage-add vault@archive:vault/**` mounts a storage on that volume, and the status
+///    sub-tree reports `"volume":"archive"` for it.
+/// 3. `volume-del archive` takes `vault` with it (upstream's `kill_volume` cascade), while a
+///    storage on the built-in `mem` volume (`keep`) survives: it keeps the sub-tree served, so
+///    the two absences read after the cascade are measurements and not a sub-tree that went
+///    away whole.
+// wz-proves: adminspace-config-hotreload wz->pico
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features adminspace-config-hotreload + zenoh-pico z_get/z_put CLIs); Layer E6h runs via --ignored"]
+fn wz_storage_host_config_hotreload_volume_lifecycle_via_pico() {
+    let demo = wz_ap_demo_binary();
+    let z_get = zenoh_pico_cli_binary("z_get");
+    let z_put = zenoh_pico_cli_binary("z_put");
+    let mut host = start_storage_host(&demo);
+    let (root, addr) = (host.root.clone(), host.addr.clone());
+    let status_root = format!("{root}/status/plugins/storage_manager");
+    let memory_capability = r#"{"capability":{"history":"Latest","persistence":"Volatile"}}"#;
+
+    pico_put(
+        &z_put,
+        &format!("{root}/config/volume-add"),
+        "archive@memory",
+        &addr,
+    );
+    host.expect_log(
+        "registered storage volume 'archive' (backend 'memory')",
+        "volume-add archive@memory",
+    );
+    pico_put(
+        &z_put,
+        &format!("{root}/config/volume-add"),
+        "bogus@nosuchbackend",
+        &addr,
+    );
+    host.expect_log(
+        "volume-add 'bogus' refused",
+        "a volume on a backend this build does not carry",
+    );
+    pico_put(
+        &z_put,
+        &format!("{root}/config/storage-add"),
+        "keep:keep/**",
+        &addr,
+    );
+    host.expect_log(
+        "spawned live storage 'keep' — storage_manager Started",
+        "storage-add on the built-in volume",
+    );
+    pico_put(
+        &z_put,
+        &format!("{root}/config/storage-add"),
+        "vault@archive:vault/**",
+        &addr,
+    );
+    host.expect_log(
+        "spawned live storage 'vault' — storage_manager Started (volume 'archive')",
+        "storage-add on the added volume",
+    );
+
+    let out_added = pico_get_output(&z_get, &format!("{status_root}/**"), &addr);
+    assert_eq!(
+        pico_body_at(
+            &out_added,
+            &format!("{status_root}/volumes/archive"),
+            "after volume-add"
+        ),
+        memory_capability,
+        "the volume a pico client added is listed with its backend's capability"
+    );
+    assert_eq!(
+        pico_body_at(
+            &out_added,
+            &format!("{status_root}/storages/vault"),
+            "after storage-add on the added volume"
+        ),
+        r#"{"key_expr":"vault/**","volume":"archive"}"#,
+        "the storage is mounted on the volume the client named"
+    );
+    assert!(
+        !pico_replied_at(&out_added, &format!("{status_root}/volumes/bogus")),
+        "a refused volume-add must register nothing\n--- z_get ---\n{out_added}"
+    );
+
+    pico_put(
+        &z_put,
+        &format!("{root}/config/volume-del"),
+        "archive",
+        &addr,
+    );
+    host.expect_log(
+        "unregistered storage volume 'archive', despawning vault — storage_manager Started",
+        "volume-del archive with a storage on it",
+    );
+
+    let out_removed = pico_get_output(&z_get, &format!("{status_root}/**"), &addr);
+    for kept in ["storages/keep", "volumes/mem"] {
+        assert!(
+            pico_replied_at(&out_removed, &format!("{status_root}/{kept}")),
+            "`{kept}` is not on the removed volume and must still be served (control)\n\
+             --- z_get ---\n{out_removed}"
+        );
+    }
+    for gone in ["volumes/archive", "storages/vault"] {
+        assert!(
+            !pico_replied_at(&out_removed, &format!("{status_root}/{gone}")),
+            "`{gone}` must go with `volume-del archive`\n--- z_get ---\n{out_removed}"
+        );
+    }
+
+    host.stop();
+}
+
+// wz-proves: adminspace-config-hotreload wz->pico
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features adminspace-config-hotreload + zenoh-pico z_get/z_put CLIs); Layer E6h runs via --ignored"]
+fn wz_storage_host_config_hotreload_state_flip_via_pico() {
+    let demo = wz_ap_demo_binary();
+    let z_get = zenoh_pico_cli_binary("z_get");
+    let z_put = zenoh_pico_cli_binary("z_put");
+
+    // ── the wz storage host: multi-accepts per-client Sessions, hosts the admin GET
+    //    + config-write subscriber, applies storage-add/-del via RuntimeStorageManager.
+    let mut host = start_storage_host(&demo);
+    let (root, addr) = (host.root.clone(), host.addr.clone());
 
     // ── (1) BEFORE any storage-add: storage_manager is Loaded (compiled, not live) ──
     let out_before = pico_get_plugins_output(&z_get, &root, &addr);
@@ -258,19 +409,10 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
     );
     // BARRIER: the host's REAL add_storage apply (waited after the z_put exits — a
     // positive edge, the apply happens on the host as it drains the config-write).
-    let spawned = wait_for_substring(
-        &mut h_reader,
+    host.expect_log(
         "spawned live storage 'demo' — storage_manager Started",
-        Duration::from_secs(15),
+        "the config-hotreload add_storage on a pico-encoded PUT",
     );
-    if let Err(c) = spawned {
-        let _ = h_child.child_mut().kill();
-        let _ = h_child.child_mut().wait_bounded();
-        panic!(
-            "storage host never applied the pico storage-add within 15s — the \
-             config-hotreload add_storage did not run on a pico-encoded PUT\n--- host ---\n{c}"
-        );
-    }
 
     // ── (3) AFTER storage-add: storage_manager flips to Started ──
     let out_added = pico_get_plugins_output(&z_get, &root, &addr);
@@ -313,19 +455,10 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
 
     // ── (4) pico z_put storage-del: wz calls RuntimeStorageManager::remove_storage ──
     pico_put(&z_put, &format!("{root}/config/storage-del"), "demo", &addr);
-    let despawned = wait_for_substring(
-        &mut h_reader,
+    host.expect_log(
         "despawned 'demo' — storage_manager Loaded",
-        Duration::from_secs(15),
+        "the config-hotreload remove_storage on a pico-encoded PUT",
     );
-    if let Err(c) = despawned {
-        let _ = h_child.child_mut().kill();
-        let _ = h_child.child_mut().wait_bounded();
-        panic!(
-            "storage host never applied the pico storage-del within 15s — the \
-             config-hotreload remove_storage did not run on a pico-encoded PUT\n--- host ---\n{c}"
-        );
-    }
 
     // ── (5) AFTER storage-del: storage_manager reverts to Loaded ──
     let out_removed = pico_get_plugins_output(&z_get, &root, &addr);
@@ -343,8 +476,5 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
         "the removed storage must stop being advertised\n--- z_get ---\n{out_status_removed}"
     );
 
-    let _ = h_child.child_mut().kill();
-    let _ = h_child.child_mut().wait_bounded();
-    // Surface the host log on a post-mortem failure hunt (unused on the green path).
-    let _ = read_captured(&mut h_reader);
+    host.stop();
 }

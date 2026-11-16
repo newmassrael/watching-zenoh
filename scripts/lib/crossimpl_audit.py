@@ -1170,7 +1170,16 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # a real pico OpenSyn replayed on another handshake is refused by the `preset-ap-full` acceptor
 # (`session-unicast-accept pico->wz partial`): 3 tests x 1 atom = 3. Measured by
 # `audit-crossimpl-proof.sh` (`measured 1091, declared 1088`).
-FOREIGN_ADJUDICATOR_LINKS = 1091
+# Open-debt item 173 -- 1091 -> 1093, RISING by two: `pico_nofrag_patch_answer.rs`, where the
+# InitSyn of a pico built with `Z_FEATURE_FRAGMENTATION=0` (no patch level) and of the stock pico
+# (CURRENT) are each answered by a wz acceptor whose InitAck is read off the relayed wire
+# (`session-unicast-accept pico->wz partial`): 2 tests x 1 atom = 2. Counted from the diff, not
+# yet measured.
+# Open-debt item 781 -- 1093 -> 1094: the volume leg of `wz_storage_host_config_hotreload_pico.rs`,
+# where a stock pico client adds a volume, mounts a storage on it and deletes the volume, and
+# reads the cascade back through the status sub-tree (`adminspace-config-hotreload wz->pico`):
+# 1 test x 1 atom = 1. Counted from the diff, not yet measured.
+FOREIGN_ADJUDICATOR_LINKS = 1094
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
