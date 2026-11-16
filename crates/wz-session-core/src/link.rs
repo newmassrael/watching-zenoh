@@ -973,6 +973,22 @@ pub trait BoxedLinkDriver {
         DEFAULT_LINK_MTU
     }
 
+    /// [`Self::link_mtu`] for the frames of one reliability class. A link that
+    /// carries best-effort frames apart from reliable ones (a QUIC link with a
+    /// datagram companion: its streams take reliable frames of any size, its
+    /// datagrams best-effort frames of a fixed one) answers each class's bound,
+    /// and the session sizes, batches and fragments each class's frames by its
+    /// own, as upstream sizes the companion link's batches by the companion's
+    /// MTU (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+    /// `let mtu = state.transport.batch_size.min(best_effort.get_mtu());`).
+    ///
+    /// The default is the link that carries both classes the same way. A
+    /// driver that WRAPS another must forward this.
+    fn link_mtu_for(&self, class: Reliability) -> usize {
+        let _ = class;
+        self.link_mtu()
+    }
+
     /// The largest single frame this link can RECEIVE, in bytes: the bound
     /// the session's own batch advertisement is capped by, so a peer is never
     /// invited to send a batch the link has no room to take. zenoh caps the
@@ -1007,6 +1023,20 @@ pub trait BoxedLinkDriver {
     /// to the wire with no length in front of it.
     fn batch_length_prefixed(&self) -> bool {
         false
+    }
+
+    /// [`Self::batch_length_prefixed`] for the frames of one reliability class:
+    /// a QUIC link with a datagram companion writes its reliable batches behind
+    /// the length on its streams and its best-effort batches bare, one to a
+    /// datagram, as upstream's companion link is not streamed
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+    /// `is_streamed: best_effort.is_streamed(),`).
+    ///
+    /// The default is the link that frames both classes the same way. A driver
+    /// that WRAPS another must forward this.
+    fn batch_length_prefixed_for(&self, class: Reliability) -> bool {
+        let _ = class;
+        self.batch_length_prefixed()
     }
 
     /// R311y453 — the LINK-DERIVED SUBJECT of this driver's transport: what the

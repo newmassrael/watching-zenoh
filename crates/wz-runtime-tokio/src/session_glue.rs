@@ -3927,6 +3927,77 @@ mod negotiated_mtu_tests {
             "the largest frame must fill the batch up to the length's room"
         );
     }
+
+    /// On a link that carries its best-effort frames on a datagram companion,
+    /// each class is sized by its own carriage: a reliable frame fills the
+    /// negotiated batch up to the stream's length, a best-effort frame fills the
+    /// companion's bound with no length in front and fragments past it. A link
+    /// without a companion sizes both classes the same.
+    #[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
+    #[test]
+    fn a_datagram_companion_bounds_the_best_effort_frames_alone() {
+        use crate::Reliability;
+        const BATCH: usize = 512;
+        const COMPANION: usize = 100;
+        let length = wz_session_core::link::STREAM_BATCH_LENGTH_BYTES;
+        let (actions, driver) = crate::test_fixtures::recording_actions_with_datagram_companion(
+            fixture_session_init_params(),
+            COMPANION,
+        );
+        let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, BATCH as u16);
+        actions.handle_inbound(&wire).expect("parse InitAck");
+        assert_eq!(
+            actions.negotiated_tx_limits_for(Reliability::Reliable).0,
+            BATCH - length
+        );
+        assert_eq!(
+            actions.negotiated_tx_limits_for(Reliability::BestEffort).0,
+            COMPANION
+        );
+        assert_eq!(actions.batch_envelope_bytes_for(Reliability::BestEffort), 0);
+        assert_eq!(actions.batch_envelope_bytes(), length);
+
+        let mut longest = [0usize; 2];
+        for size in 40..=300 {
+            for reliable in [true, false] {
+                let before = driver.frame_count();
+                actions
+                    .send_push_literal("home/sensor/bulk", &vec![0x5A; size], reliable)
+                    .expect("send push");
+                let (class, bound) = if reliable {
+                    (Reliability::Reliable, BATCH - length)
+                } else {
+                    (Reliability::BestEffort, COMPANION)
+                };
+                for i in before..driver.frame_count() {
+                    let frame = driver.frame_bytes(i).len();
+                    assert_eq!(driver.frame_reliability(i), class, "a {size}-byte value");
+                    assert!(
+                        frame <= bound,
+                        "a {size}-byte {class:?} value left a {frame}-byte frame, past {bound}"
+                    );
+                    longest[usize::from(reliable)] = longest[usize::from(reliable)].max(frame);
+                }
+            }
+        }
+        assert_eq!(
+            longest[0], COMPANION,
+            "a best-effort frame fills the companion"
+        );
+        assert!(
+            longest[1] > COMPANION,
+            "a reliable frame is not held to the companion's bound"
+        );
+
+        let (plain, _) =
+            crate::test_fixtures::recording_actions_length_prefixed(fixture_session_init_params());
+        plain.handle_inbound(&wire).expect("parse InitAck");
+        assert_eq!(
+            plain.negotiated_tx_limits_for(Reliability::BestEffort),
+            plain.negotiated_tx_limits_for(Reliability::Reliable),
+            "a link without a companion sizes both classes the same"
+        );
+    }
 }
 
 /// R311ke — unicast RX SN gate: handshake seeding + the reassembly

@@ -757,6 +757,10 @@ where
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu())
     }
 
+    fn link_mtu_for(&self, class: Reliability) -> usize {
+        R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu_for(class))
+    }
+
     fn link_rx_capacity(&self) -> usize {
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_rx_capacity())
     }
@@ -764,6 +768,12 @@ where
     fn batch_length_prefixed(&self) -> bool {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).batch_length_prefixed()
+        })
+    }
+
+    fn batch_length_prefixed_for(&self, class: Reliability) -> bool {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).batch_length_prefixed_for(class)
         })
     }
 
@@ -951,12 +961,20 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         R::link_driver(&self.inner.borrow()).link_mtu()
     }
 
+    fn link_mtu_for(&self, class: Reliability) -> usize {
+        R::link_driver(&self.inner.borrow()).link_mtu_for(class)
+    }
+
     fn link_rx_capacity(&self) -> usize {
         R::link_driver(&self.inner.borrow()).link_rx_capacity()
     }
 
     fn batch_length_prefixed(&self) -> bool {
         R::link_driver(&self.inner.borrow()).batch_length_prefixed()
+    }
+
+    fn batch_length_prefixed_for(&self, class: Reliability) -> bool {
+        R::link_driver(&self.inner.borrow()).batch_length_prefixed_for(class)
     }
 
     fn shape_tx_queue(&self, shape: crate::link::TxQueueShape) {
