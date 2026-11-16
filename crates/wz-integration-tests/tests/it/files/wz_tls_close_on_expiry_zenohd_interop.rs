@@ -152,7 +152,8 @@ fn observe(dialer: Dialer, close: Option<bool>) -> (Seen, String) {
     std::fs::write(&cert, cert_pem).expect("write the certificate");
     std::fs::write(&key, key_pem).expect("write the key");
 
-    let (tcp_reservation, tls_port) = PortReservation::pick_pair();
+    let tcp_reservation = PortReservation::pick();
+    let tls_port = tcp_reservation.next_port();
     let tcp_port = tcp_reservation.port();
     let mut listener = spawn_zenohd_tcp_tls(
         tcp_port,
