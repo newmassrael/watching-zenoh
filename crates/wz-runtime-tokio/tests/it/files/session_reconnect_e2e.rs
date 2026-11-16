@@ -11,8 +11,10 @@
 //! (pico `_z_client_reopen_task_fn` cache-walk parity).
 //!
 //! Engines are driven on the current task (the `tokio::join!` pattern of
-//! `accept_and_open_session.rs`); iteration caps bound every loop so a
-//! regression fails fast instead of hanging.
+//! `accept_and_open_session.rs`); iteration caps bound every loop, and
+//! `drive_against_peer` bounds the one wait a cap cannot reach — a peer
+//! accepting a re-dial that never comes — so a regression fails fast instead
+//! of hanging.
 //!
 //! The subscriber scenario is the canonical shape (declared via
 //! `send_declare_subscriber`); `queryable_declares_replay_after_link_loss_and_reconnect`
@@ -43,6 +45,80 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
+
+/// How long each half of `drive_against_peer` may wait before the scenario
+/// is a failure rather than a hang.
+const SCENARIO_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run a supervisor's `drive` against the peer side of a reconnect, and return
+/// the drive's outcome with what the peer saw.
+///
+/// The peer side starts with `listener.accept()`, which has no end of its own.
+/// Joined with a `drive` that returns before it re-dials (it gave up, ran out
+/// of iterations, or never reached the reopen loop), it would wait for good
+/// and the assertion on the outcome would never run. So the supervisor
+/// returning first is the failure, carried with its outcome, and each wait is
+/// bounded by `SCENARIO_DEADLINE`. The peer raises the stop flag as it
+/// finishes, so in a passing run the peer is always first.
+async fn drive_against_peer<P: std::future::Future>(
+    drive: impl std::future::Future<Output = ReconnectDriveOutcome>,
+    peer: P,
+) -> (ReconnectDriveOutcome, P::Output) {
+    let mut drive = std::pin::pin!(drive);
+    let raced = async {
+        tokio::select! {
+            biased;
+            seen = peer => seen,
+            outcome = &mut drive => panic!(
+                "the supervisor returned {outcome:?} before the peer saw the reconnect"
+            ),
+        }
+    };
+    let Ok(seen) = tokio::time::timeout(SCENARIO_DEADLINE, raced).await else {
+        panic!("neither the supervisor nor the peer finished within {SCENARIO_DEADLINE:?}");
+    };
+    let Ok(outcome) = tokio::time::timeout(SCENARIO_DEADLINE, drive).await else {
+        panic!("the supervisor did not return within {SCENARIO_DEADLINE:?} of the peer finishing");
+    };
+    (outcome, seen)
+}
+
+/// A supervisor that returns while the peer still waits fails the scenario,
+/// naming the outcome, instead of leaving the peer waiting.
+#[tokio::test]
+#[should_panic(expected = "before the peer saw the reconnect")]
+async fn a_supervisor_that_returns_before_the_peer_fails_the_scenario() {
+    let _ = drive_against_peer(
+        async { ReconnectDriveOutcome::Stopped },
+        std::future::pending::<()>(),
+    )
+    .await;
+}
+
+/// A peer that finishes first hands back what it saw, and the supervisor is
+/// then driven to its own outcome.
+#[tokio::test]
+async fn a_peer_that_finishes_first_waits_for_the_supervisors_outcome() {
+    let stop = AtomicBool::new(false);
+    let (outcome, seen) = drive_against_peer(
+        async {
+            while !stop.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+            ReconnectDriveOutcome::Stopped
+        },
+        async {
+            stop.store(true, Ordering::Release);
+            7_u8
+        },
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReconnectDriveOutcome::Stopped),
+        "got {outcome:?}"
+    );
+    assert_eq!(seen, 7);
+}
 
 /// Drive an already-Established acceptor session in single-iteration chunks
 /// until at least one inbound `Declare` network message is observed; return
@@ -215,7 +291,7 @@ async fn assert_declare_replays_after_link_loss(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_server = stop.clone();
     let timeouts = SessionTimeouts::spec_defaults();
-    let (drive_outcome, declares_conn2) = tokio::join!(
+    let (drive_outcome, declares_conn2) = drive_against_peer(
         client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}),
         async {
             let (server_conn2, declares) = accept_and_collect_declares(&listener).await;
@@ -227,7 +303,8 @@ async fn assert_declare_replays_after_link_loss(
             drop(server_conn2);
             declares
         },
-    );
+    )
+    .await;
 
     assert!(
         matches!(drive_outcome, ReconnectDriveOutcome::Stopped),
@@ -848,7 +925,7 @@ async fn assert_paced_replay_tells_the_peer_everything(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_server = stop.clone();
     let timeouts = SessionTimeouts::spec_defaults();
-    let (outcome, declares_conn2) = tokio::join!(
+    let (outcome, declares_conn2) = drive_against_peer(
         client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}),
         async {
             let (stream, _peer) = listener.accept().await.expect("accept");
@@ -868,7 +945,8 @@ async fn assert_paced_replay_tells_the_peer_everything(
             drop(opened);
             declares
         },
-    );
+    )
+    .await;
     assert!(
         matches!(outcome, ReconnectDriveOutcome::Stopped),
         "supervisor must observe the stop flag, got {outcome:?}"
@@ -1031,7 +1109,7 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
     // supervisor resumes the reopen loop and replays the cache.
     let listener = TcpListener::from_std(port.listen()).expect("the same number, listening again");
     let stop_for_server = stop;
-    let (drive_outcome, declares_conn2) = tokio::join!(
+    let (drive_outcome, declares_conn2) = drive_against_peer(
         client.drive(&timeouts, &stop_for_server, Some(ITER_CAP), |_| {}),
         async {
             let (server_conn2, declares) = accept_and_collect_declares(&listener).await;
@@ -1039,7 +1117,8 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
             drop(server_conn2);
             declares
         },
-    );
+    )
+    .await;
     assert!(
         matches!(drive_outcome, ReconnectDriveOutcome::Stopped),
         "resumed supervisor must run to the stop flag, got {drive_outcome:?}"
@@ -1194,7 +1273,7 @@ mod tls_reconnect {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_server = stop.clone();
         let timeouts = SessionTimeouts::spec_defaults();
-        let (drive_outcome, declares_conn2) = tokio::join!(
+        let (drive_outcome, declares_conn2) = super::drive_against_peer(
             client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}),
             async {
                 let (server_conn2, declares) =
@@ -1203,7 +1282,8 @@ mod tls_reconnect {
                 drop(server_conn2);
                 declares
             },
-        );
+        )
+        .await;
 
         assert!(
             matches!(drive_outcome, ReconnectDriveOutcome::Stopped),
@@ -1339,7 +1419,7 @@ mod ws_reconnect {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_server = stop.clone();
         let timeouts = SessionTimeouts::spec_defaults();
-        let (drive_outcome, declares_conn2) = tokio::join!(
+        let (drive_outcome, declares_conn2) = super::drive_against_peer(
             client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}),
             async {
                 let (server_conn2, declares) = accept_ws_and_collect_declares(&listener).await;
@@ -1347,7 +1427,8 @@ mod ws_reconnect {
                 drop(server_conn2);
                 declares
             },
-        );
+        )
+        .await;
 
         assert!(
             matches!(drive_outcome, ReconnectDriveOutcome::Stopped),

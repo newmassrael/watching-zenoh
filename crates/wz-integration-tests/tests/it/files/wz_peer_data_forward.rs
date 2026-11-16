@@ -144,6 +144,15 @@ fn wz_peer_mesh_confirms_a_reciprocal_edge_between_two_wz_peers() {
         "peer: reciprocal mesh link confirmed",
         Duration::from_secs(15),
     );
+    // Then on the ACCEPTOR's own confirmation. B's does not imply A's: A forms
+    // the edge only when it has ingested B's link-state, and terminating B first
+    // can take B away before that flood is processed, leaving A with no edge to
+    // report (a hosted run failed exactly so, A ending at 0 graph edges).
+    let a_edge = wait_for_substring(
+        &mut a_reader,
+        "peer: reciprocal mesh link confirmed",
+        Duration::from_secs(15),
+    );
 
     graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
@@ -158,6 +167,13 @@ fn wz_peer_mesh_confirms_a_reciprocal_edge_between_two_wz_peers() {
              two wz peers in the DEFAULT linkstate mode must converge a mutual graph \
              edge, and this is the only positive witness of that left in the tree\n\
              --- peer-B stderr ---\n{c}"
+        )
+    });
+    a_edge.unwrap_or_else(|c| {
+        panic!(
+            "peer-A (the ACCEPTOR) never confirmed the reciprocal mesh link with \
+             peer-B within 15s of B confirming it — the edge is symmetric, so A \
+             must form it too\n--- peer-A stderr ---\n{c}"
         )
     });
     // BOTH sides, from their shutdown summaries: an edge is mutual or it is not

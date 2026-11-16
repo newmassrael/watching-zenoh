@@ -108,13 +108,18 @@ use wz_integration_tests::wire_tap::{
     sweep_single_byte_damage, synthesise_pcap, tap_proxy, Recording, Side,
 };
 use wz_session_core::inbound::InboundFrame;
-// R2277 (open-debt item 613) — `NetworkMessage` is no longer named here. It was
-// imported for a `record_name` helper whose eight `match` arms each spelled a
-// message name, which is the defect item 613 filed: `dissect_batch` supplies the
-// words now, and the decoder is used only for its COUNT, as the dissector's
-// independent second opinion.
+// R2277 (open-debt item 613) — record NAMES are not spelled from `NetworkMessage`
+// here: a `record_name` helper whose eight `match` arms each spelled a message
+// name was the defect item 613 filed, and `dissect_batch` supplies the words. The
+// decoder is used for its COUNT, as the dissector's independent second opinion,
+// and for the CONTENT of the routed `Push` (its key and payload), which no record
+// name can say.
+use wz_codecs::push::PushOwnedVariant;
+use wz_codecs::wireexpr::WireexprOwnedVariant;
 use wz_session_core::network_message::parse_frame_payload;
+use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::passive::Direction;
+use wz_session_core::put_payload::{layout, PutPayload};
 
 /// The synthesised endpoint ports. They are NOT the real ones (the real dialer
 /// port is ephemeral and the proxy sits between), and they are named here
@@ -306,6 +311,73 @@ fn records_on(
         names.extend(walked);
     }
     (names, failures, disagreements)
+}
+
+/// One `Push` a half sent, by what it carried: the wire expression's scope id
+/// (0 for a literal key) and suffix, and for a `Put` its payload bytes.
+#[derive(Debug, PartialEq, Eq)]
+struct CarriedPush {
+    scope: u64,
+    suffix: String,
+    put_payload: Option<Vec<u8>>,
+}
+
+impl CarriedPush {
+    fn of(push: &wz_session_core::wire::PushOwned) -> Self {
+        let (scope, suffix) = match &push.keyexpr.body {
+            WireexprOwnedVariant::WireexprNonlocal(w) => (
+                u64::from(w.id),
+                w.suffix
+                    .as_ref()
+                    .map(|s| s.as_text().into_inner().to_string()),
+            ),
+            WireexprOwnedVariant::WireexprLocal(w) => (
+                u64::from(w.id),
+                w.suffix
+                    .as_ref()
+                    .map(|s| s.as_text().into_inner().to_string()),
+            ),
+        };
+        let put_payload = match &push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => Some(match layout(put) {
+                PutPayload::Inline(bytes) => bytes.to_vec(),
+                PutPayload::Sliced(slices) => slices
+                    .iter()
+                    .flat_map(|s| s.bytes.as_slice().iter().copied())
+                    .collect(),
+            }),
+            _ => None,
+        };
+        Self {
+            scope,
+            suffix: suffix.unwrap_or_default(),
+            put_payload,
+        }
+    }
+}
+
+/// Every `Push` in the record batches the chosen half sent, decoded for its
+/// content. A batch that does not decode is skipped here; `records_on`
+/// reports it.
+fn pushes_on(flow: &wz_capture::FlowDissection, side: Direction) -> Vec<CarriedPush> {
+    let mut pushes = Vec::new();
+    for frame in flow.frames().iter() {
+        if frame.direction != side {
+            continue;
+        }
+        let Ok(InboundFrame::Frame { payload, .. }) = &frame.frame else {
+            continue;
+        };
+        let Ok(records) = parse_frame_payload(payload) else {
+            continue;
+        };
+        for record in &records {
+            if let NetworkMessage::Push(push) = record {
+                pushes.push(CarriedPush::of(push));
+            }
+        }
+    }
+    pushes
 }
 
 /// Every name this witness reports must be a word [`VOCABULARY`] declares.
@@ -873,6 +945,22 @@ fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
         records.iter().any(|r| r == "Push"),
         "zenohd routed a sample to this face and the subscriber fired, but no \
          Push was decoded out of its Frames: {records:?}"
+    );
+    // AND THAT PUSH IS THE PUBLISHED SAMPLE. A record name says the router sent
+    // a Push; only its content says it sent THIS one: the key the publisher
+    // wrote, as a literal (zenohd declared no key expression to this face, which
+    // the vocabulary assertion below holds: no Declare on this leg), and the
+    // value it published, byte for byte.
+    let pushes = pushes_on(flow, Direction::A);
+    let published = CarriedPush {
+        scope: 0,
+        suffix: String::from("demo/routed"),
+        put_payload: Some(b"routed-by-a-real-zenohd".to_vec()),
+    };
+    assert!(
+        pushes.contains(&published),
+        "no Push on zenohd's half carries the published sample ({published:?}); \
+         the router's Pushes were: {pushes:?}"
     );
     // A record whose MID wz does not decode is the one outcome that would be a
     // defect rather than a description, and `Unknown` is how the batch decoder

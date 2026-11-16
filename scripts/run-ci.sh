@@ -6359,8 +6359,10 @@ layer_c1u_cargo_test_tls() {
     # trapped behind either link feature: both sets compile and run it.
     # f0676600a -- 7 -> 9: two cases of the declaration replay's pacing of a reconnect, in the file
     # both transports' legs run (C1v counts the same file, and moves with this one). PRINTED.
+    # 9 -> 11: the two cases of `drive_against_peer`, the bound on a reconnect's peer wait, in
+    # the same file and under no link feature, so C1v moves with it.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1u 9 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1u 11 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3463 — 6 -> 8. The two witnesses of decision D9 of
     # docs/session-lifecycle-intent.md: over mutual TLS a peer that claims the zid its
@@ -6424,8 +6426,9 @@ layer_c1v_cargo_test_ws() {
         || return 1
     # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
     # f0676600a -- 7 -> 9, with C1u, same commit, same reason. PRINTED.
+    # 9 -> 11, with C1u, same commit, same reason.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1v 9 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1v 11 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R2355 — the MULTI-PEER ws accept, which no lane ran until now. The
     # `transport-link-ws` registry entry carried "the multi-peer `--router ws/`
@@ -6849,6 +6852,13 @@ layer_c1bb_cargo_test_qos() {
     # the other link, and when its lender leaves the set. MEASURED: 16 passed.
     _runci_guarded_test C1bb 16 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
+    # The `QoSLink` arm of the establishment-extension rejects: the Close reason
+    # an acceptor sends for a body it cannot read, and the control that a readable
+    # one is answered. The file is gated on `session-extqos`, which no default run
+    # builds. 2 = the file's two cases, counted from the source.
+    wz_test_args wz-runtime-tokio init_qos_link_reject
+    _runci_guarded_test C1bb 2 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast "${WZ_TEST_ARGS[@]}" --quiet \
+        || return 1
     # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
     # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
     # default feature of wz-runtime-tokio: the three cases this round adds are
@@ -7161,7 +7171,9 @@ layer_c1ax_cargo_test_routing_namespace() {
     # with its outcome. Printed number; the label moves with the value.
     # Session duties made causal: 5 -> 6, `a_group_whose_first_join_fails_ends_failed`
     # (the first join's bind now runs in the session). Derived, not printed.
-    _runci_guarded_test "C1AX sessions_run group 6" 6 \
+    # 6 -> 7, `a_member_that_stops_is_reported_closed_by_the_other` (the stopping
+    # member's Close reaches the one that stays). Derived, not printed.
+    _runci_guarded_test "C1AX sessions_run group 7" 7 \
         cargo test -p wz-ap-demo --features transport-multicast --bin wz-ap-demo sessions_run --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
