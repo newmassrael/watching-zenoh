@@ -76,10 +76,7 @@ where
             // The same derivation the in-dispatch responder makes, from the
             // same parameters, so a held reply is admitted exactly as an
             // immediate one would be.
-            accept: view
-                .parameters()
-                .and_then(|bytes| core::str::from_utf8(bytes).ok())
-                .map_or(ReplyKeyExpr::MatchingQuery, ReplyKeyExpr::from_parameters),
+            accept: ReplyKeyExpr::from_parameter_bytes(view.parameters()),
             qos: view.qos(),
         }
     }

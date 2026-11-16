@@ -3258,7 +3258,7 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
             .map(|_| ());
         #[cfg(feature = "transport-batching")]
         if qos.is_express() {
-            self.flush_open_batch();
+            self.flush_express(qos.priority());
         }
     }
     #[cfg(feature = "codec-response-final")]
@@ -11136,8 +11136,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R311jq — drain the open batch frames to the link, if any. Private
     /// emit engine shared by [`Self::batch_flush`] / [`Self::batch_stop`] /
-    /// the pre-CLOSE drain in [`Self::send_close_with_reason`] / the
-    /// express post-dispatch flush. Keeps the `active` flag untouched.
+    /// the pre-CLOSE drain in [`Self::send_close_with_reason`]. An express
+    /// message drains less (`Self::flush_express`). Keeps the `active` flag
+    /// untouched.
     /// The emit runs INSIDE the batch lock so a drain cannot interleave
     /// with a concurrent absorb's flush (frame order is wire-visible —
     /// the peer's half-window SN check drops reordered frames).
@@ -11159,6 +11160,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // its frames keep their SN order, and the order across conduits is the
         // walk's.
         self.drain_conduits(|_| true, true);
+    }
+
+    /// The drain an express message asks for, once it is staged on `priority`'s conduit: that
+    /// conduit and every more urgent one, ascending, and none of the less urgent ones.
+    ///
+    /// zenoh moves only the express message's own batch out of its stage
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express()`),
+    /// so a less urgent conduit keeps batching across it. The more urgent conduits go first
+    /// because the ascending walk is the whole of wz's temporal priority
+    /// ([`Self::flush_open_batch`]): an express Data message must not overtake a RealTime one
+    /// staged before it. `priority` is the one the message was dispatched on, mapped exactly as
+    /// the dispatch maps it, so a session that negotiated no QoS drains its one conduit.
+    ///
+    /// Gated on exactly the senders that carry an express bit, one arm per sender's own gate.
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            all(feature = "codec-push", feature = "alloc"),
+            all(feature = "codec-response", feature = "alloc"),
+            all(feature = "codec-response", feature = "storage-profile"),
+            all(feature = "codec-request", feature = "storage-profile"),
+        )
+    ))]
+    fn flush_express(&self, priority: Priority) {
+        let band = TxConduits::<R>::conduit_index(self.conduit_priority(priority));
+        self.drain_conduits(|idx| idx <= band, true);
     }
 
     /// [`Self::flush_open_batch`] for the link's writer, which must never WAIT for a conduit's
@@ -11644,7 +11671,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 Ok(Dispatched::Sent) => {
                     #[cfg(feature = "transport-batching")]
                     if express {
-                        self.flush_open_batch();
+                        self.flush_express(priority);
                     }
                     #[cfg(not(feature = "transport-batching"))]
                     let _ = express;
@@ -11845,7 +11872,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             .map(|_| ());
         #[cfg(feature = "transport-batching")]
         if sent.is_ok() && express {
-            self.flush_open_batch();
+            self.flush_express(priority);
         }
         #[cfg(not(feature = "transport-batching"))]
         let _ = express;
@@ -11994,7 +12021,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.dispatch_push(priority, *push, reliable)?;
                 #[cfg(feature = "transport-batching")]
                 if express {
-                    self.flush_open_batch();
+                    self.flush_express(priority);
                 }
                 #[cfg(not(feature = "transport-batching"))]
                 let _ = express;
@@ -12359,7 +12386,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // express publish; only after a response that left.
         #[cfg(feature = "transport-batching")]
         if qos.is_express() && ended == Dispatched::Sent {
-            self.flush_open_batch();
+            self.flush_express(qos.priority());
         }
         Ok(ended)
     }
@@ -12459,19 +12486,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_transport_tx_flush_buffer` right after the encode). The
     /// `send_push_*_with_meta_*` senders call this after their dispatch;
     /// the express bit is only derivable where QoS metadata exists, which
-    /// today is the Push metadata path.
+    /// today is the Push metadata path. `priority` is the band the sender
+    /// dispatched on; the drain is `Self::flush_express`'s.
     #[cfg(all(feature = "alloc", feature = "codec-push"))]
-    fn flush_batch_if_express(&self, meta: &PushMetadata) {
+    fn flush_batch_if_express(&self, priority: Priority, meta: &PushMetadata) {
         #[cfg(feature = "transport-batching")]
         if meta
             .qos
             .as_ref()
             .is_some_and(crate::sample::QosLevel::is_express)
         {
-            self.flush_open_batch();
+            self.flush_express(priority);
         }
         #[cfg(not(feature = "transport-batching"))]
-        let _ = meta;
+        let _ = (priority, meta);
     }
 
     /// R239 — outbound `Request.request_id` generator. Returns the
@@ -12726,7 +12754,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(feature = "transport-batching")]
         if express {
-            self.flush_open_batch();
+            self.flush_express(priority);
         }
         #[cfg(not(feature = "transport-batching"))]
         let _ = express;
@@ -13059,7 +13087,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let push = build_push_literal_with_meta(keyexpr_suffix, value, meta)?;
             self.dispatch_push(Priority::DEFAULT, push, reliable)?;
-            self.flush_batch_if_express(meta);
+            self.flush_batch_if_express(Priority::DEFAULT, meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -13083,7 +13111,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta)?;
             self.dispatch_push(Priority::DEFAULT, push, reliable)?;
-            self.flush_batch_if_express(meta);
+            self.flush_batch_if_express(Priority::DEFAULT, meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -13109,7 +13137,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let push = build_push_del_literal_with_meta(keyexpr_suffix, meta)?;
             self.dispatch_push(Priority::DEFAULT, push, reliable)?;
-            self.flush_batch_if_express(meta);
+            self.flush_batch_if_express(Priority::DEFAULT, meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -13133,7 +13161,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta)?;
             self.dispatch_push(Priority::DEFAULT, push, reliable)?;
-            self.flush_batch_if_express(meta);
+            self.flush_batch_if_express(Priority::DEFAULT, meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -14636,7 +14664,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         .map(|_| ())?;
         #[cfg(feature = "transport-batching")]
         if qos.is_express() {
-            self.flush_open_batch();
+            self.flush_express(qos.priority());
         }
         Ok(())
     }

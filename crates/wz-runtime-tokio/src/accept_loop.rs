@@ -8335,6 +8335,145 @@ mod tests {
         drop(intent_tx);
     }
 
+    /// A dial to a found node that opens ends the node's outage: the next time the node is
+    /// down, the wait before its next dial starts again from `period_init_ms`, as zenoh's
+    /// `period` dies with the connect that succeeded.
+    ///
+    /// The wait grows a hundredfold per retry. The node is found behind a locator that refuses
+    /// and is dialled 100 ms later at the one that answers, which leaves a 10 s wait grown for
+    /// it. That face is closed and the node is found again at a new address, once more behind a
+    /// refusing locator. A loop that forgot the grown wait when the first dial opened links the
+    /// new address 100 ms after the refusal; one that kept it waits 10 s.
+    ///
+    /// The directory offers the most recently confirmed locator first and a gossip discovery
+    /// confirms its list in order, so the refusing locator is listed last to be dialled first.
+    #[cfg(all(feature = "routing-peer", target_os = "linux"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage() {
+        let (first_listener, first_addr) = bind_loopback().await;
+        let (second_listener, second_addr) = bind_loopback().await;
+        let (peer_listener, _peer_addr) = bind_loopback().await;
+        let dead = wz_runtime_tokio_test_support::refusing_port();
+        let dead_addr = dead.addr();
+
+        let (first_stop_tx, first_stop_rx) = watch::channel(false);
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let first = accept_loop(
+            first_listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(first_stop_rx),
+            |_event: &AcceptEvent| {},
+            &NoOpForwarder,
+        );
+        let second = accept_loop(
+            second_listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(stop_rx.clone()),
+            |_event: &AcceptEvent| {},
+            &NoOpForwarder,
+        );
+
+        let found_at = |addr: SocketAddr| DialIntent {
+            zid: vec![0xAA; 4],
+            locators: vec![format!("tcp/{addr}"), format!("tcp/{dead_addr}")],
+            origin: DialIntentOrigin::Gossip,
+        };
+        let (intent_tx, intent_rx) = tokio::sync::mpsc::unbounded_channel();
+        intent_tx
+            .send(found_at(first_addr))
+            .expect("buffer the first discovery");
+        // `true` for a face that came up, `false` for one that went down.
+        let (face_tx, mut face_rx) = tokio::sync::mpsc::unbounded_channel();
+        let on_event = move |event: &AcceptEvent| match event {
+            AcceptEvent::FaceUp(_) => {
+                let _ = face_tx.send(true);
+            }
+            AcceptEvent::FaceDown(..) => {
+                let _ = face_tx.send(false);
+            }
+            _ => {}
+        };
+        let peer = peer_loop(
+            FaceSources {
+                listeners: vec![peer_listener],
+                dial_targets: vec![],
+                dial_config: Arc::new(DialConfig::default()),
+                dial_intents: Some(intent_rx),
+                mcast_ingress: None,
+                mcast_members: None,
+                mcast_group_subs: None,
+                reconcile: None,
+                offer: SessionOffer::universal(),
+                retry: RetryPolicy {
+                    period_init_ms: 100,
+                    period_max_ms: 0,
+                    period_increase_factor: 100.0,
+                },
+                stats: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
+                max_sessions: usize::MAX,
+                accept: AcceptBounds::default(),
+                ceiling: None,
+                peer_board: None,
+            },
+            peer_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(stop_rx),
+            on_event,
+            &NoOpForwarder,
+        );
+
+        let script = async {
+            assert_eq!(
+                face_rx.recv().await,
+                Some(true),
+                "the node is linked at its first address"
+            );
+            let _ = first_stop_tx.send(true);
+            assert_eq!(
+                face_rx.recv().await,
+                Some(false),
+                "its face goes down with the node"
+            );
+            let found = tokio::time::Instant::now();
+            intent_tx
+                .send(found_at(second_addr))
+                .expect("the second discovery");
+            assert_eq!(
+                face_rx.recv().await,
+                Some(true),
+                "the node is linked at its new address"
+            );
+            let waited = found.elapsed();
+            let _ = stop_tx.send(true);
+            waited
+        };
+        let (_first, _second, summary, waited) =
+            tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::join!(first, second, peer, script)
+            })
+            .await
+            .expect("both discoveries are linked and every loop ends");
+
+        assert!(
+            waited < Duration::from_secs(5),
+            "the second outage waited {waited:?} after its refusal: the 10 s grown in the \
+             first outage outlived the dial that ended it"
+        );
+        assert_eq!(
+            (summary.gossip_dialed, summary.established),
+            (2, 2),
+            "two discoveries, each dialled once and linked"
+        );
+        drop(intent_tx);
+    }
+
     /// An aggregating node dials a node a discovery plane found once for each pair of priority
     /// range and reliability among the locators it knows for it (`discovered_links`): two
     /// locators of one pair are one dial, and a locator that declares another band is a second.

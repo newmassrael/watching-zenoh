@@ -11724,13 +11724,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .map(|relative| view.under(relative));
         // R311y834 — the acceptance is read off the query's own selector parameters, as the
         // requester's gate reads them; a query with none keeps the guarantee.
-        let accept = view
-            .parameters()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .map_or(
-                wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
-                wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
-            );
+        let accept = wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameter_bytes(
+            view.parameters(),
+        );
         let mut dispatched = 0;
         // The whole query, which each job carries: its call shows it under the key it names.
         let whole = &view;

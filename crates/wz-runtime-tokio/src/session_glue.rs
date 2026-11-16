@@ -4917,6 +4917,69 @@ mod batch_tx_tests {
         assert_eq!(count, 2, "both messages coalesced into the one frame");
     }
 
+    /// An express message drains its own conduit and the more urgent ones, in
+    /// ascending band, and leaves the less urgent conduits batching: zenoh
+    /// moves out only the express message's own batch
+    /// (`io/zenoh-transport/src/common/pipeline.rs`), and wz's ascending walk
+    /// keeps the express Data message behind the RealTime one staged before it.
+    /// A drain of every conduit sends the Background frame too (three frames);
+    /// a drain of the express conduit alone lets Data overtake RealTime.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn an_express_message_drains_through_its_own_band_and_no_further() {
+        use wz_session_core::qos::Priority;
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions.batch_start().expect("batch_start");
+
+        actions
+            .send_push_literal_qos("home/bg", b"BGBGBGBG", true, Priority::Background)
+            .expect("background push");
+        actions
+            .send_push_literal_qos("home/rt", b"RTRTRTRT", true, Priority::RealTime)
+            .expect("realtime push");
+        assert_eq!(driver.frame_count(), 0, "both conduits are still open");
+
+        actions
+            .send_plain_put_qos(
+                0,
+                Some("home/ex"),
+                b"EXEXEXEX",
+                None,
+                true,
+                true,
+                Priority::Data,
+            )
+            .expect("a session with no namespace sends the plain put")
+            .expect("express push");
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "the express message took its own conduit and the more urgent one"
+        );
+        let (p0, n0, body0) = frame_band(&driver.frame_bytes(0));
+        let (p1, n1, body1) = frame_band(&driver.frame_bytes(1));
+        assert_eq!(
+            (p0, p1),
+            (Priority::RealTime, Priority::Data),
+            "the more urgent conduit leaves first"
+        );
+        assert_eq!((n0, n1), (1, 1));
+        assert!(body0.windows(8).any(|w| w == b"RTRTRTRT"));
+        assert!(body1.windows(8).any(|w| w == b"EXEXEXEX"));
+        assert_eq!(
+            actions.batch_staged_messages(Priority::Background),
+            1,
+            "the less urgent conduit keeps batching across the express message"
+        );
+
+        actions.batch_flush().expect("batch_flush");
+        assert_eq!(driver.frame_count(), 3);
+        let (p2, n2, body2) = frame_band(&driver.frame_bytes(2));
+        assert_eq!((p2, n2), (Priority::Background, 1));
+        assert!(body2.windows(8).any(|w| w == b"BGBGBGBG"));
+    }
+
     /// A link whose writer pulls what the session stages: it keeps the flush the session
     /// installs, and runs it when the test says the writer fell idle.
     struct IdleFlushLink {

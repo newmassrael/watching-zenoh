@@ -3192,15 +3192,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         }
         // R311y834 — resolved ONCE per inbound query beside the other
         // projections, because it is a property of the query rather than of any
-        // matched queryable. Non-UTF-8 parameters cannot spell the ASCII
-        // `_anyke` token, so they read as `MatchingQuery`.
-        let accept_mode = match parameters_view {
-            Some(bytes) => match core::str::from_utf8(bytes) {
-                Ok(params) => ReplyKeyExpr::from_parameters(params),
-                Err(_) => ReplyKeyExpr::MatchingQuery,
-            },
-            None => ReplyKeyExpr::MatchingQuery,
-        };
+        // matched queryable.
+        let accept_mode = ReplyKeyExpr::from_parameter_bytes(parameters_view);
         let mut matched = 0;
         // The query's key is read once for every queryable it is matched against.
         let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
