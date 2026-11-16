@@ -24960,6 +24960,14 @@ layer_e9_apfull_preset_pico() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}apfull_preset_peer_forwards_between_two_real_pico_clients" || return 1
+    # Open-debt item 179 -- a real pico's OpenSyn, replayed by the test on a second
+    # handshake of the same `--peer` node, must get no OpenAck; the same bytes are
+    # admitted on the handshake they were minted for, which is the control.
+    wz_test_args wz-integration-tests apfull_preset_pico_interop
+    _runci_guarded_test "E9 preset acceptor refuses a replayed cookie" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}apfull_preset_acceptor_refuses_a_real_pico_open_syn_replayed_on_another_handshake" || return 1
     # R311y481 — the QUERY PLANE legs, on the SAME preset build above. Each is the
     # first live-foreign witness for an atom whose only prior claim was
     # `codec-parity` (query-selector-parameters / query-attachment /

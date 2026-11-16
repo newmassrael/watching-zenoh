@@ -63,14 +63,18 @@
 //! expose. The per-atom proofs remain where they already live, on their narrow
 //! lanes.
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub,
-    spawn_subscribed_zsub, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, spawn_publishing_zpub, spawn_subscribed_zsub, wait_for_substring,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
+use wz_session_core::wire_const::{FLAG_T_INIT_A, FLAG_T_OPEN_A, T_MID_INIT, T_MID_OPEN};
 
 /// How long the foreign exchange gets. Generous because the lane runs under
 /// full-run-ci process pressure, and `wait_for_substring` returns the instant the
@@ -260,4 +264,226 @@ fn apfull_preset_peer_forwards_between_two_real_pico_clients() {
              forwarder\n--- AP-full peer stderr ---\n{c}"
         );
     }
+}
+
+/// How long one framed handshake message gets to arrive.
+const HANDSHAKE_STEP: Duration = Duration::from_secs(10);
+
+/// How long a replayed OpenSyn is watched for an OpenAck. The acceptor answers
+/// an admitted OpenSyn at once (the control below measures that on the same
+/// run), so this is several times what an answer takes.
+const REPLAY_WINDOW: Duration = Duration::from_secs(3);
+
+fn header(message: &[u8]) -> Option<u8> {
+    message.first().copied()
+}
+
+fn is_init(message: &[u8], ack: bool) -> bool {
+    header(message).is_some_and(|h| h & 0x1F == T_MID_INIT && (h & FLAG_T_INIT_A != 0) == ack)
+}
+
+fn is_open(message: &[u8], ack: bool) -> bool {
+    header(message).is_some_and(|h| h & 0x1F == T_MID_OPEN && (h & FLAG_T_OPEN_A != 0) == ack)
+}
+
+/// Write one message with the streamed-link envelope: a 2-byte little-endian
+/// length, then the bytes.
+fn write_framed(stream: &mut TcpStream, message: &[u8]) {
+    let len = u16::try_from(message.len()).expect("a handshake message fits the envelope");
+    stream
+        .write_all(&len.to_le_bytes())
+        .expect("write the length prefix");
+    stream.write_all(message).expect("write the message");
+    stream.flush().expect("flush the message");
+}
+
+/// Read one enveloped message, or `None` at the end of the stream or when
+/// `deadline` passes first.
+fn read_framed_until(stream: &mut TcpStream, deadline: Instant) -> Option<Vec<u8>> {
+    let left = deadline.checked_duration_since(Instant::now())?;
+    stream
+        .set_read_timeout(Some(left.max(Duration::from_millis(1))))
+        .ok()?;
+    let mut len = [0u8; 2];
+    stream.read_exact(&mut len).ok()?;
+    let mut message = vec![0u8; usize::from(u16::from_le_bytes(len))];
+    stream.read_exact(&mut message).ok()?;
+    Some(message)
+}
+
+/// Every message `stream` carries until it ends or `deadline` passes.
+fn read_all_until(stream: &mut TcpStream, deadline: Instant) -> Vec<Vec<u8>> {
+    let mut messages = Vec::new();
+    while let Some(message) = read_framed_until(stream, deadline) {
+        messages.push(message);
+    }
+    messages
+}
+
+/// Accept one connection, or panic once `deadline` passes: a pico that never
+/// dials must fail this leg, not hang it.
+fn accept_until(listener: &TcpListener, deadline: Instant) -> TcpStream {
+    listener
+        .set_nonblocking(true)
+        .expect("a non-blocking accept");
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("a blocking accepted stream");
+                return stream;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the real zenoh-pico z_put never dialled the relay"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("accept the real zenoh-pico z_put: {e}"),
+        }
+    }
+}
+
+/// Open-debt item 179 — a cookie echoed on a handshake it was not minted for is
+/// refused, witnessed with bytes a real zenoh-pico wrote.
+///
+/// The FSM-level twin (`session_fsm_accepting_path.rs`) replays a cookie wz's
+/// own acceptor minted inside one process, against an OpenSyn this tree
+/// crafted. Here the OpenSyn is a real pico's, captured off the wire, and the
+/// acceptor is the composed AP-full node behind its accept loop. No stock
+/// binary can be asked to replay a stale cookie, so the replayer is this test:
+/// it relays a real pico's handshake to the node on link A, recording pico's
+/// InitSyn and OpenSyn on the way, then plays those two messages on a second
+/// link B.
+///
+/// Both halves are asserted on the same bytes and the same node: on A, the
+/// handshake the OpenSyn belongs to, it is admitted; on B, whose InitAck minted
+/// another cookie, it gets no OpenAck. So the refusal is the cookie binding and
+/// not a broken acceptor or a malformed message. The relay on A does not pause:
+/// the node's acceptor gives a whole handshake one second.
+///
+/// `--peer`, not `--listen`: a one-shot listener is consumed by its first
+/// accept, and this leg needs a second link.
+// wz-proves: session-unicast-accept pico->wz partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features preset-ap-full + zenoh-pico CLI); Layer E9 runs via --ignored"]
+fn apfull_preset_acceptor_refuses_a_real_pico_open_syn_replayed_on_another_handshake() {
+    let demo = wz_ap_demo_binary();
+    // A stale demo would grade yesterday's acceptor, and a refusal from it would
+    // read as today's.
+    assert_demo_binary_newer_than_sources(&demo);
+    let z_put = zenoh_pico_cli_binary("z_put");
+
+    let stderr = tempfile::tempfile().expect("tempfile for AP-full peer stderr");
+    let (mut peer_guard, mut peer_reader, port) = spawn_on_ephemeral_port(
+        &demo,
+        &["--peer", "127.0.0.1:0"],
+        "peer: listening on 127.0.0.1:",
+        "wz-ap-demo (preset-ap-full, --peer, cookie replay target)",
+        stderr,
+    );
+
+    // The relay pico dials instead of the node.
+    let relay = TcpListener::bind("127.0.0.1:0").expect("bind the relay");
+    let relay_port = relay.local_addr().expect("relay address").port();
+    let pico_out = tempfile::tempfile().expect("tempfile for z_put output");
+    let mut pico = ChildGuard::wrap(
+        "z_put (zenoh-pico, through the replaying relay)",
+        Command::new(&z_put)
+            .args([
+                "-k",
+                "demo/apfull/replay",
+                "-v",
+                "a-handshake-to-replay",
+                "-e",
+                &format!("tcp/127.0.0.1:{relay_port}"),
+                "-m",
+                "client",
+            ])
+            .stdout(Stdio::from(pico_out.try_clone().expect("dup z_put stdout")))
+            .stderr(Stdio::from(pico_out.try_clone().expect("dup z_put stderr")))
+            .spawn()
+            .expect("spawn zenoh-pico z_put"),
+    );
+    let mut from_pico = accept_until(&relay, Instant::now() + HANDSHAKE_STEP);
+
+    // LINK A, THE CONTROL: relay pico's handshake to the node and record pico's
+    // OpenSyn on the way. The node admits it here, on the handshake whose cookie
+    // it echoes. Relayed without a pause: the node's acceptor gives a whole
+    // handshake one second.
+    let mut link_a = TcpStream::connect(("127.0.0.1", port)).expect("dial the node (link A)");
+    let init_syn = read_framed_until(&mut from_pico, Instant::now() + HANDSHAKE_STEP)
+        .expect("the real pico opens with an InitSyn");
+    assert!(
+        is_init(&init_syn, false),
+        "pico's first message: {init_syn:02X?}"
+    );
+    write_framed(&mut link_a, &init_syn);
+    let init_ack_a = read_framed_until(&mut link_a, Instant::now() + HANDSHAKE_STEP)
+        .expect("the node answers pico's InitSyn on link A");
+    assert!(
+        is_init(&init_ack_a, true),
+        "link A's answer: {init_ack_a:02X?}"
+    );
+    write_framed(&mut from_pico, &init_ack_a);
+    let open_syn = read_framed_until(&mut from_pico, Instant::now() + HANDSHAKE_STEP)
+        .expect("the real pico echoes the cookie in an OpenSyn");
+    assert!(
+        is_open(&open_syn, false),
+        "pico's second message: {open_syn:02X?}"
+    );
+    write_framed(&mut link_a, &open_syn);
+    let control_answer = read_framed_until(&mut link_a, Instant::now() + HANDSHAKE_STEP);
+    if let Some(answer) = &control_answer {
+        write_framed(&mut from_pico, answer);
+    }
+    drop(link_a);
+    drop(from_pico);
+    let _ = pico.child_mut().kill();
+    let _ = pico.child_mut().wait();
+
+    // LINK B, THE REPLAY: pico's own InitSyn mints a new cookie, then the OpenSyn
+    // that echoes link A's.
+    let mut link_b = TcpStream::connect(("127.0.0.1", port)).expect("dial the node (link B)");
+    write_framed(&mut link_b, &init_syn);
+    let init_ack_b = read_framed_until(&mut link_b, Instant::now() + HANDSHAKE_STEP);
+    if init_ack_b.is_some() {
+        write_framed(&mut link_b, &open_syn);
+    }
+    let replay_answers = read_all_until(&mut link_b, Instant::now() + REPLAY_WINDOW);
+    drop(link_b);
+
+    graceful_terminate(peer_guard.child_mut(), Duration::from_secs(5));
+    let peer_log = read_captured(&mut peer_reader);
+
+    assert!(
+        control_answer.as_deref().is_some_and(|m| is_open(m, true)),
+        "the control failed: pico's OpenSyn was not admitted even on the handshake \
+         it was minted for, so a refusal on link B would say nothing about the cookie. \
+         link A answered {control_answer:02X?}\n--- AP-full peer stderr ---\n{peer_log}"
+    );
+    let Some(init_ack_b) = init_ack_b else {
+        panic!(
+            "the node did not answer pico's InitSyn on link B, so the replay was never \
+             made\n--- AP-full peer stderr ---\n{peer_log}"
+        );
+    };
+    assert!(
+        is_init(&init_ack_b, true),
+        "link B's answer: {init_ack_b:02X?}"
+    );
+    assert_ne!(
+        init_ack_b, init_ack_a,
+        "the two handshakes must mint different cookies, or the replay cannot be \
+         told from an honest open"
+    );
+    let headers: Vec<Option<u8>> = replay_answers.iter().map(|m| header(m)).collect();
+    assert!(
+        !replay_answers.iter().any(|m| is_open(m, true)),
+        "a real pico's OpenSyn, echoing the cookie of another handshake, was admitted \
+         on link B: the replay the per-handshake cookie closes is open. \
+         link B answered headers {headers:02X?}\n--- AP-full peer stderr ---\n{peer_log}"
+    );
 }
