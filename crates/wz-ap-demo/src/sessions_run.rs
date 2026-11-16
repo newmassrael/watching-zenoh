@@ -1058,6 +1058,93 @@ mod group_rejoin_tests {
         );
     }
 
+    /// A member that stops announces its departure: the member that stays
+    /// reports it lost as `Closed`, the Close read off the group, and not as
+    /// `LeaseExpired`, the same loss inferred from silence a lease later. Only
+    /// A is stopped, so B's report can come from nothing but what A sent on
+    /// its way out. A Close that A queued and the group never carried leaves B
+    /// to its lease, and the line below then says `LeaseExpired`.
+    #[tokio::test(start_paused = true)]
+    async fn a_member_that_stops_is_reported_closed_by_the_other() {
+        let bus = GroupBus::new(ENDPOINT);
+        let (stop_a_tx, stop_a_rx) = watch::channel(false);
+        let (stop_b_tx, stop_b_rx) = watch::channel(false);
+        let (a_lines, b_lines) = (Lines::default(), Lines::default());
+        let (zid_a, zid_b) = (vec![0xA1, 0x01], vec![0xB2, 0x02]);
+        let (hex_a, hex_b) = (zid_to_zenoh_hex(&zid_a), zid_to_zenoh_hex(&zid_b));
+
+        let a = {
+            let mut stop = stop_a_rx;
+            let lines = a_lines.clone();
+            let mut first = Some(bus.attach(addr(4_001), Arc::new(Notify::new())));
+            let bind_a = move || {
+                std::future::ready(
+                    first
+                        .take()
+                        .ok_or_else(|| io::Error::other("a never re-binds")),
+                )
+            };
+            async move {
+                serve_group(
+                    ENDPOINT,
+                    &group_params(zid_a, 100, 1_000),
+                    bind_a,
+                    None,
+                    &mut stop,
+                    |line| lines.borrow_mut().push(line.to_string()),
+                )
+                .await
+            }
+        };
+        let b = {
+            let mut stop = stop_b_rx;
+            let lines = b_lines.clone();
+            let mut first = Some(bus.attach(addr(4_002), Arc::new(Notify::new())));
+            let bind_b = move || {
+                std::future::ready(
+                    first
+                        .take()
+                        .ok_or_else(|| io::Error::other("b never re-binds")),
+                )
+            };
+            async move {
+                serve_group(
+                    ENDPOINT,
+                    &group_params(zid_b, 100, 1_000),
+                    bind_b,
+                    None,
+                    &mut stop,
+                    |line| lines.borrow_mut().push(line.to_string()),
+                )
+                .await
+            }
+        };
+        let script = async {
+            until(&a_lines, &format!("peer arrived {hex_b}"), 1).await;
+            until(&b_lines, &format!("peer arrived {hex_a}"), 1).await;
+            stop_a_tx.send(true).unwrap();
+            until(&b_lines, &format!("peer lost {hex_a}"), 1).await;
+            stop_b_tx.send(true).unwrap();
+        };
+        let (end_a, end_b, ()) = tokio::join!(a, b, script);
+
+        assert_eq!(end_a, SessionEnd::Closed);
+        assert_eq!(end_b, SessionEnd::Closed);
+        let lost: Vec<String> = b_lines
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("peer lost"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            lost,
+            [format!("peer lost {hex_a} (Closed)")],
+            "B must learn of A's stop from A's Close; the session said {:#?}",
+            b_lines.borrow()
+        );
+        assert_eq!(count(&b_lines, "link lost"), 0, "B's link was never cut");
+    }
+
     /// A stop that arrives while the group is down — every re-bind failing —
     /// closes the session at the signal, not one backoff later, and each
     /// failed re-bind was reported with its wait.

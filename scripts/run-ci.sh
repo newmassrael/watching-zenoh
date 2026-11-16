@@ -7164,7 +7164,9 @@ layer_c1ax_cargo_test_routing_namespace() {
     # with its outcome. Printed number; the label moves with the value.
     # Session duties made causal: 5 -> 6, `a_group_whose_first_join_fails_ends_failed`
     # (the first join's bind now runs in the session). Derived, not printed.
-    _runci_guarded_test "C1AX sessions_run group 6" 6 \
+    # 6 -> 7, `a_member_that_stops_is_reported_closed_by_the_other` (the stopping
+    # member's Close reaches the one that stays). Derived, not printed.
+    _runci_guarded_test "C1AX sessions_run group 7" 7 \
         cargo test -p wz-ap-demo --features transport-multicast --bin wz-ap-demo sessions_run --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
