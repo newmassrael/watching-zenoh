@@ -648,6 +648,12 @@ pub enum LocatorParseError {
     /// A separate variant from [`Self::BadConfigValue`] because the two spans
     /// are distinct namespaces and the message has to say which one was wrong.
     BadMetadataValue { key: &'static str, value: String },
+    /// A METADATA value upstream accepts and asks for something this build does
+    /// not implement: today `multistream=1` and `mixed_rel=1` on a streamed QUIC
+    /// link, which ask for only the multi-stream or mixed-reliability ALPN
+    /// protocols. Refused at parse rather than dialled with the single-stream
+    /// protocols the value excludes.
+    UnsupportedMetadataValue { key: &'static str, value: String },
 }
 
 /// Parse a zenoh locator `proto/addr:port` into a [`ParsedLocator`].
@@ -686,6 +692,9 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     // a name to `classify_named_ip`, which would otherwise meet the bad value
     // with no channel to report it on.
     let proto = reliability_adjusted_proto(proto, parts.metadata)?;
+    // Before the address parse for the same reason: a DNS-named locator is routed
+    // on by `BadAddress` and has no channel left to report a bad value on.
+    check_quic_streams(proto, parts.metadata)?;
     let addr = SocketAddr::from_str(parts.address)
         .map_err(|_| LocatorParseError::BadAddress(parts.address.to_string()))?;
     Ok(ParsedLocator {
@@ -1400,6 +1409,59 @@ fn reliability_adjusted_proto(proto: Proto, metadata: &str) -> Result<Proto, Loc
         (Proto::Udp, Some(LocatorReliability::Reliable)) => Proto::UdpReliable,
         _ => proto,
     })
+}
+
+/// zenoh `Metadata::MULTISTREAM` metadata key
+/// (`commons/zenoh-protocol/src/core/endpoint.rs` @ `pub const MULTISTREAM: &'static str = "multistream";`).
+const LOCATOR_MULTISTREAM_KEY: &str = "multistream";
+
+/// zenoh `Metadata::MIXED_RELIABILITY` metadata key
+/// (`commons/zenoh-protocol/src/core/endpoint.rs` @ `pub const MIXED_RELIABILITY: &'static str = "mixed_rel";`).
+const LOCATOR_MIXED_RELIABILITY_KEY: &str = "mixed_rel";
+
+/// The two stream keys of a STREAMED QUIC link, `quic/` and `udp/...?rel=1`, read
+/// as upstream reads them where it computes the link's ALPN offer: `multistream`
+/// defaults to `auto` and `mixed_rel` to `0`, each takes `auto`, `0` or `1`, and
+/// any other value refuses the endpoint
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @
+/// `s => Err(zerror!("Invalid multistream config: {s}").into()),` and @
+/// `s => Err(zerror!("Invalid mixed-reliability config: {s}").into()),`). The
+/// datagram links (`quic-datagram`, plain `udp`) do not read them, as upstream's
+/// `is_streamed() == false` arm does not.
+///
+/// `auto` and `0` leave this build's offer as it is, the single-stream protocols,
+/// which is what upstream offers with both off and what it falls back to with
+/// `auto` against a peer that does not offer more. `1` asks for the multi-stream
+/// or mixed-reliability protocols alone, which this build does not implement, so
+/// it is refused as [`LocatorParseError::UnsupportedMetadataValue`] rather than
+/// dialled with the protocols it excludes.
+fn check_quic_streams(proto: Proto, metadata: &str) -> Result<(), LocatorParseError> {
+    match proto {
+        Proto::Quic | Proto::UdpReliable => {}
+        // Wildcard-free: a scheme added to `Proto` has to say whether it is streamed.
+        Proto::Tcp | Proto::Udp | Proto::Tls | Proto::Ws | Proto::QuicDatagram => return Ok(()),
+    }
+    for (key, default) in [
+        (LOCATOR_MULTISTREAM_KEY, "auto"),
+        (LOCATOR_MIXED_RELIABILITY_KEY, "0"),
+    ] {
+        match lookup_param(metadata, key).unwrap_or(default) {
+            "auto" | "0" => {}
+            "1" => {
+                return Err(LocatorParseError::UnsupportedMetadataValue {
+                    key,
+                    value: "1".to_string(),
+                })
+            }
+            other => {
+                return Err(LocatorParseError::BadMetadataValue {
+                    key,
+                    value: other.to_string(),
+                })
+            }
+        }
+    }
+    Ok(())
 }
 
 // ─── serial locator leaf ───
@@ -3829,6 +3891,84 @@ mod tests {
                 .proto,
             Proto::Tcp
         );
+    }
+
+    /// A streamed QUIC link reads `multistream` and `mixed_rel` as upstream
+    /// does: `auto` and `0` are accepted on both, absent ones take their
+    /// defaults, and a value upstream refuses is refused, numeric and named.
+    #[test]
+    fn a_streamed_quic_link_reads_its_stream_keys_as_upstream() {
+        for text in [
+            "quic/1.2.3.4:7447",
+            "quic/1.2.3.4:7447?multistream=auto",
+            "quic/1.2.3.4:7447?multistream=0;mixed_rel=0",
+            "quic/1.2.3.4:7447?mixed_rel=auto",
+            "udp/1.2.3.4:7447?rel=1;multistream=0",
+        ] {
+            assert!(parse_locator(text).is_ok(), "{text}");
+        }
+        for (text, key, value) in [
+            ("quic/1.2.3.4:7447?multistream=yes", "multistream", "yes"),
+            ("quic/1.2.3.4:7447?multistream=", "multistream", ""),
+            ("quic/1.2.3.4:7447?mixed_rel=2", "mixed_rel", "2"),
+            ("udp/1.2.3.4:7447?rel=1;mixed_rel=on", "mixed_rel", "on"),
+            (
+                "quic/example.org:7447?multistream=true",
+                "multistream",
+                "true",
+            ),
+        ] {
+            assert_eq!(
+                parse_any_locator(text),
+                Err(AnyLocatorError::Ip(LocatorParseError::BadMetadataValue {
+                    key,
+                    value: value.to_string(),
+                })),
+                "{text}"
+            );
+        }
+        // `multistream` is read before `mixed_rel`, as upstream reads them.
+        assert_eq!(
+            parse_locator("quic/1.2.3.4:7447?mixed_rel=x;multistream=y").err(),
+            Some(LocatorParseError::BadMetadataValue {
+                key: "multistream",
+                value: "y".to_string(),
+            })
+        );
+    }
+
+    /// `1` asks for only the protocols this build does not implement, so it is
+    /// refused as unsupported rather than dialled with the single-stream ones.
+    #[test]
+    fn a_stream_key_asking_for_what_this_build_lacks_is_refused() {
+        for (text, key) in [
+            ("quic/1.2.3.4:7447?multistream=1", "multistream"),
+            ("quic/1.2.3.4:7447?mixed_rel=1", "mixed_rel"),
+            ("udp/1.2.3.4:7447?rel=1;multistream=1", "multistream"),
+        ] {
+            assert_eq!(
+                parse_locator(text).err(),
+                Some(LocatorParseError::UnsupportedMetadataValue {
+                    key,
+                    value: "1".to_string(),
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    /// The datagram links do not read the stream keys, as upstream's datagram
+    /// arm does not, so no value of them refuses one.
+    #[test]
+    fn a_datagram_link_does_not_read_the_stream_keys() {
+        for text in [
+            "quic/1.2.3.4:7447?rel=0;multistream=yes",
+            "quic-datagram/1.2.3.4:7447?mixed_rel=1",
+            "udp/1.2.3.4:7447?multistream=1",
+            "tcp/1.2.3.4:7447?multistream=yes",
+        ] {
+            assert!(parse_locator(text).is_ok(), "{text}");
+        }
     }
 
     #[test]
