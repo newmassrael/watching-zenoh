@@ -3329,11 +3329,11 @@ pub async fn accept_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Resu
 /// `Unsupported`, and every scheme has a `#[cfg(not(feature))]` twin for a build
 /// without its backend.
 pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result<BoundListener> {
+    // Every scheme has a listen path, so a refusal is per-scheme material or a
+    // backend left out of the build, and `detail` names both the scheme and what
+    // it lacks; a common prefix could only restate or contradict that.
     fn unsupported(detail: &str) -> io::Error {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("listen/accept is wired only for tcp; {detail}"),
-        )
+        io::Error::new(io::ErrorKind::Unsupported, detail)
     }
     // R2592 — `cfg` is read by every IP arm now (its per-link-kind defaults).
     match locator {

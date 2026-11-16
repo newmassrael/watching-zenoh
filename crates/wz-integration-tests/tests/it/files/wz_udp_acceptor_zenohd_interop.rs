@@ -40,8 +40,8 @@
 //!
 //! Feature-gate RED (as for the ws/tls/unixsock siblings, author-witnessed): a demo
 //! built WITHOUT the udp transport rejects the `udp/` listen with a typed
-//! `Unsupported` ("listen/accept is wired only for tcp; udp acceptor requires the
-//! transport-link-udp feature", session_open.rs) — it never binds, so
+//! `Unsupported` ("udp acceptor requires the transport-link-udp feature",
+//! session_open.rs) — it never binds, so
 //! `spawn_on_ephemeral_port` panics ("did not bind within 10s"). NOTE the
 //! two-feature trap: the demo's default preset-ap-client enables udp via BOTH
 //! `transport-link-udp` AND `locator-udp` (`locator-udp = ["transport-link-udp"]`),

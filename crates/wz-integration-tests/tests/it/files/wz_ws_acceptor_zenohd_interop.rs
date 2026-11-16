@@ -29,7 +29,7 @@
 //!
 //! Discriminator (binds to the ws acceptor, not the shared tcp accept): a
 //! `wz-ap-demo` built WITHOUT the `ws` feature rejects a `ws/...` listen with a
-//! typed `Unsupported` ("listen/accept is wired only for tcp") — it never binds,
+//! typed `Unsupported` ("ws acceptor requires the transport-link-ws feature") — it never binds,
 //! so there is no acceptor for zenohd to dial and the subscriber never fires.
 //! Only `--features ws` compiles the RFC6455 accept path.
 //!
