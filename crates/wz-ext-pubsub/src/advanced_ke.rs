@@ -117,7 +117,8 @@ pub fn history_get_ke(base: &str) -> String {
 /// namespace covering every publisher). The single SSOT for this KE across its
 /// consumers (R311y102 review): the heartbeat-beacon DATA subscriber (which
 /// decodes each publisher's last-sn beacon), the late-publisher LIVELINESS
-/// subscriber (which fires on each publisher's `@adv` token Put/Delete), and —
+/// subscriber (which fires on each publisher's `@adv` token Put/Delete), the
+/// `ze_advanced_subscriber_detect_publishers` doors of both C ABIs, and —
 /// R2816 — `AdvancedSubscriber::detect_publishers`, upstream's
 /// `zenoh-ext/src/advanced_subscriber.rs` @ `.declare_subscriber(self.subscriber.key_expr() / KE_ADV_PREFIX / KE_PUB / KE_STARSTAR)`.
 ///
