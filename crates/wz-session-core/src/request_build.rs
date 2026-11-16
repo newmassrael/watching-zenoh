@@ -598,7 +598,8 @@ fn query_chain(
 /// gone.
 ///
 /// Upstream is `BudgetType::new(l.value as u32)` over a `NonZeroU32`
-/// (`zenoh-codec` `network/request.rs:216-219`), which is why the setter
+/// (`commons/zenoh-codec/src/network/request.rs`
+/// @ `ext_limit = ext::BudgetType::new(l.value as u32);`), which is why the setter
 /// refuses zero: a low word of zero collapses the extension to `None` and the
 /// query runs with no budget at all. That second half is what the dissector's
 /// `absent_to_receiver` reports, and it is bound to the same fact.

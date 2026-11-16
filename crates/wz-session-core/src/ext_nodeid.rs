@@ -210,8 +210,8 @@ pub fn set_z64_ext<S: ExtEntryStorage>(
 /// R311y901, open-debt item 410. The dissector reports what a receiver acts on
 /// rather than what the wire said, and for this row that means narrowing to 16
 /// bits — upstream's `From<ZExtZ64> for NodeIdType` is `ext.value as u16`
-/// (`network/mod.rs:594-600`) and [`read_source`] below performs the identical
-/// narrowing. The width therefore appeared in TWO places that nothing held
+/// (`commons/zenoh-protocol/src/network/mod.rs` @ `node_id: ext.value as u16,`)
+/// and [`read_source`] below performs the identical narrowing. The width therefore appeared in TWO places that nothing held
 /// together: the cast here, and a `16` literal in `dissect::read_node_id_z64`.
 /// Either could move alone, and the report would be wrong by the difference
 /// while every test stayed green.
