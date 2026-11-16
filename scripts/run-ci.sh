@@ -7162,8 +7162,11 @@ layer_c1bd_locator_iface() {
 #
 # R311y414 — both test steps were BARE; they now carry anchored count guards
 # with the MEASURED counts (6 unit / 2 e2e).
+# 6 -> 7 unit: a batch written by `compress_batch` is the batch the compressed-batch document reads
+# (`every_batch_written_here_is_the_batch_the_document_reads`); the hosted run of 3148fdfc84
+# printed 7.
 layer_c1ae_cargo_test_compression() {
-    _runci_guarded_test C1ae 6 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
+    _runci_guarded_test C1ae 7 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
         || return 1
     wz_test_args wz-runtime-tokio compression_e2e
     _runci_guarded_test C1ae 2 cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
