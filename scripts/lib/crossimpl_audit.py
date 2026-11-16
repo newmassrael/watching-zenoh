@@ -1161,7 +1161,16 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # learn a wz client's `@/<zid>/client/**` queryable and route another client's GET to it,
 # tagged `adminspace-core wz->zenohd partial`: 1 test x 1 atom = 1. The zenohd-client
 # control and the all-wz leg declare `none`. Counted from the diff, not yet measured.
-FOREIGN_ADJUDICATOR_LINKS = 1088
+# Open-debt item 175 and two interop legs -- 1088 -> 1091, RISING by three:
+# `zenoh_close_scope_foreign_witness.rs`, where a stock `z_get` closing an established session to
+# zenohd writes the Close wz's scope derivation is read against (`codec-close zenoh->wz partial`);
+# the consolidation leg of `reply_qos_zenohd_differential.rs`, where a stock zenoh queryable
+# answering the same query through zenohd adjudicates the consolidation field of wz's reply
+# (`query-reply wz->zenoh partial`); and the replay leg of `apfull_preset_pico_interop.rs`, where
+# a real pico OpenSyn replayed on another handshake is refused by the `preset-ap-full` acceptor
+# (`session-unicast-accept pico->wz partial`): 3 tests x 1 atom = 3. Measured by
+# `audit-crossimpl-proof.sh` (`measured 1091, declared 1088`).
+FOREIGN_ADJUDICATOR_LINKS = 1091
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
