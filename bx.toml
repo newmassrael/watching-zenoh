@@ -93,7 +93,15 @@ workspace_dir = "crates"
 # have it placed on a machine that has it.
 
 min_ram_gb = 16
-min_free_gb = 20
+
+# THE DISK A RUN OF THIS REPOSITORY TAKES, MEASURED. One full `bash scripts/run-ci.sh` on a build
+# machine took the disk from 295 GB free to 126 GB free, 169 GB, of which 151 GB was build output
+# left in the checkout (the run before it left 153 GB, 140 GB of that in `crates/target`). bx gives
+# a slot what it declares here, less what the slot already holds, and refuses a machine that cannot
+# give it, so a floor below the measured cost admits a machine the run then fills: a shared disk
+# reached 100% with 4.9 GB free that way. 170 is the measured drop rounded up; raise it with the
+# next measurement that exceeds it rather than guessing ahead of one.
+min_free_gb = 170
 
 # THE ZEPHYR TOOLCHAIN the Qz and Qzk lanes build the kit's images with, asked of a machine only for a
 # run whose command line names one of those lanes (`needed_by`): a run of any other layer goes to a
