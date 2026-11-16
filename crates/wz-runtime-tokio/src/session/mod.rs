@@ -6642,10 +6642,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // Under `aggregation/publishers` the interest names the aggregate that
         // includes the key, and every publisher under it shares the one
         // interest (`zenoh/src/api/session.rs` @ `.aggregated_publishers`).
+        //
+        // A publisher whose destination is its own session alone asks nothing:
+        // no remote subscriber can match it, and upstream declares no interest
+        // for one (`zenoh/src/api/session.rs` @ `let declared_pub = (destination != Locality::SessionLocal)`).
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        let interest_key = self.publisher_interest_key(&keyexpr);
+        let interest_key = options
+            .allowed_destination
+            .allows_remote()
+            .then(|| self.publisher_interest_key(&keyexpr));
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.acquire_matching_interest(MatchingPlane::Subscribers, &interest_key);
+        if let Some(key) = &interest_key {
+            self.acquire_matching_interest(MatchingPlane::Subscribers, key);
+        }
         Publisher {
             session: self.clone(),
             keyexpr,

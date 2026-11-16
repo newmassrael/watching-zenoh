@@ -82,9 +82,11 @@ pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     /// The key this publisher's subscribers interest stands on: [`Self::keyexpr`], or the
     /// `aggregation/publishers` aggregate that includes it, as the session decided at declare.
     /// Kept so the clone and the drop take and release the reference the declare took, whatever
-    /// the session's aggregation says later.
+    /// the session's aggregation says later. `None` for a publisher whose destination is its own
+    /// session alone, which asks no neighbour for anything, as upstream's declares no interest
+    /// for one (`zenoh/src/api/session.rs` @ `let declared_pub = (destination != Locality::SessionLocal)`).
     #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-    pub(super) interest_key: String,
+    pub(super) interest_key: Option<String>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
@@ -95,10 +97,10 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
         // without it, "retract when a handle drops" would cut a live
         // publisher's interest the moment any clone went out of scope.
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.session.acquire_matching_interest(
-            crate::session::MatchingPlane::Subscribers,
-            &self.interest_key,
-        );
+        if let Some(key) = &self.interest_key {
+            self.session
+                .acquire_matching_interest(crate::session::MatchingPlane::Subscribers, key);
+        }
         Self {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
@@ -118,10 +120,10 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
 impl<R: SessionRuntime, T: TimeSource> Drop for Publisher<R, T> {
     fn drop(&mut self) {
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.session.release_matching_interest(
-            crate::session::MatchingPlane::Subscribers,
-            &self.interest_key,
-        );
+        if let Some(key) = &self.interest_key {
+            self.session
+                .release_matching_interest(crate::session::MatchingPlane::Subscribers, key);
+        }
     }
 }
 
