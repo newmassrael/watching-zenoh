@@ -1389,8 +1389,8 @@ layer_0_preflight_lints() {
     # replaced the list and then missed every layout they did not reach.
     #
     # Open-debt item 495 -- BOTH DISCOVERIES READ THE WHOLE INDEX, AND NEITHER
-    # HAS A HAND-KEPT FLOOR. The deploy globs (`deploy/*/ deploy/*/*/`) and the
-    # shellcheck pathspec below each carried a minimum count that had to be
+    # HAS A HAND-KEPT FLOOR. The deploy globs (`deploy/*/ deploy/*/*/`) and
+    # the shellcheck pathspec below each carried a minimum count that had to be
     # bumped by hand; it drifted three times, and the globs had left seven
     # workspaces ungated (four under conformance/, crates/wz-fuzz, oracles,
     # xtask) while the floor stayed satisfied. A workspace is now any tracked
