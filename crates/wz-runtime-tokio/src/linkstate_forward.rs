@@ -715,7 +715,14 @@ pub(crate) fn stamped(stamp: Result<(), CodecError>, what: &str) -> Result<(), C
 /// local sink, never a data forward target), an empty tree direction, an
 /// exhausted hop budget (`hop <= 1`), a chain with no room for the re-stamp
 /// ([`stamped`]), or a carrier the literal-normalize rejects.
-pub(crate) fn compute_push_forward(
+///
+/// The route is computed on `push` as it arrived; the carrier is built from
+/// what `carried` gives, which it is asked for only once the children are known
+/// and the budget allows a hop, and `None` from it drops the Push. That is where
+/// the forward-path stamp is taken ([`ForwardStamp`](crate::node_clock::ForwardStamp)),
+/// which must not be taken for a Push routed nowhere.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_push_forward<'c>(
     net: &LinkstateNetwork,
     subs: &LinkstatepeerInterest<()>,
     cached: Cached<'_, DataRoutes>,
@@ -723,6 +730,7 @@ pub(crate) fn compute_push_forward(
     inbound_link: Option<LinkId>,
     push: &PushOwned,
     keyexpr: &str,
+    carried: impl FnOnce() -> Option<&'c PushOwned>,
 ) -> Option<DataForward> {
     // Resolve the source (tree root) + this node's psid for it — the same seam a
     // sourced Declare uses; both flood along the source's tree.
@@ -749,7 +757,7 @@ pub(crate) fn compute_push_forward(
     // to a literal (a downstream child does not share this inbound link's alias
     // table, so an aliased id would be unresolvable there; wz keeps no outbound
     // alias table, so it always emits id == 0) — the same B1 normalize inline.
-    let mut carrier = push.clone();
+    let mut carrier = carried()?.clone();
     stamped(
         set_push_source(&mut carrier, out_node_id)
             .and_then(|()| set_push_hoplimit(&mut carrier, hop - 1)),
@@ -785,6 +793,11 @@ pub(crate) fn compute_push_forward(
 /// codec failure propagates as `Err`, and so does a re-injected sample whose chain
 /// has no room for the stamps ([`stamped`]).
 ///
+/// `build` is called only once the route has a destination, and `Ok(None)` from
+/// it is a Push the node does not send (the forward-path stamp's drop verdict,
+/// [`ForwardStamp`](crate::node_clock::ForwardStamp), which is taken there and
+/// must not be taken for a Push routed nowhere): this returns `Ok(None)` too.
+///
 /// R2901 (open-debt item 828) — unless `to_gateways`: then a keyexpr no remote
 /// peer subscribes to still yields the carrier, with an empty child set,
 /// because the caller owes it to its gateway faces whatever the subscription
@@ -796,7 +809,7 @@ pub(crate) fn compute_self_publish_forward(
     keyexpr: &str,
     wire: bool,
     to_gateways: bool,
-    build: impl FnOnce() -> Result<PushOwned, CodecError>,
+    build: impl FnOnce() -> Result<Option<PushOwned>, CodecError>,
 ) -> Result<Option<DataForward>, CodecError> {
     let self_zid = *net.self_zid();
     // R2236 (open-debt item 588) found that a gossip subsystem's edgeless graph
@@ -811,7 +824,9 @@ pub(crate) fn compute_self_publish_forward(
     if children.is_empty() && !to_gateways {
         return Ok(None);
     }
-    let mut carrier = build()?;
+    let Some(mut carrier) = build()? else {
+        return Ok(None);
+    };
     // Self-originated: node_id 0 removes the ext_nodeid, so a downstream hop
     // resolves the source to THIS node (its inbound neighbour) and floods along
     // self's tree. Fresh hop budget = node_count (the by-construction

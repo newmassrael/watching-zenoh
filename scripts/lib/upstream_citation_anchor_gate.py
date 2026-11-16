@@ -748,7 +748,10 @@ ROOTLESS_STALE_LINE_BUDGET = 0
 ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "auth": 5,
     "codec": 4,
-    "dispatcher": 48,
+    # 48 -> 47: the router forwarder's note on its forward-path stamp, rewritten when the
+    # stamp moved to the first route with a destination, cites the dispatcher's
+    # `if !route.is_empty()` with its root in place of a root-less line citation.
+    "dispatcher": 47,
     "establishment": 33,
     "ext": 13,
     "lowlatency": 3,
@@ -889,7 +892,9 @@ def rootless_undeclared_budget() -> int:
 # under `unicast` and `universal` (the receiver's session-scope branch, the
 # link's own close) now carry their root. (Written without their spellings on
 # purpose.)
-ROOTLESS_TOTAL_BUDGET = 475
+# 475 -> 474, the `dispatcher` row 48 -> 47: the router forwarder's stamp note now cites
+# the dispatcher's empty-route test with its root and a needle.
+ROOTLESS_TOTAL_BUDGET = 474
 
 #: The pico axis's two legacy forms, held both ways like `LINE_BUDGET`. MEASURED
 #: when the axis landed, by reading `PICO_LINE_CITE` and the plain path pattern

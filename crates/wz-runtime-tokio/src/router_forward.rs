@@ -415,6 +415,7 @@ use crate::linkstate_forward::{
     Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore,
     DataRoutes, QueryCandidate, QueryRoutes,
 };
+use crate::node_clock::ForwardStamp;
 #[cfg(feature = "routing-token-tables")]
 use crate::persistent_map::PersistentSet;
 use crate::persistent_map::{AssignedKeyMap, PersistentMap};
@@ -3510,6 +3511,19 @@ struct HostedSubscriber {
     /// both.
     origin: wz_session_core::locality::Locality,
     handler: Arc<Hosted<HostedSubscriberHandler>>,
+}
+
+impl HostedSubscriber {
+    /// Whether the subscriber is handed a publication whose key splits into `target_chunks`,
+    /// made by the node's own session when `from_local` and by a face otherwise.
+    fn takes(&self, target_chunks: &[&str], from_local: bool) -> bool {
+        keyexpr_intersects_target(&self.keyexpr, target_chunks)
+            && if from_local {
+                self.origin.allows_local()
+            } else {
+                self.origin.allows_remote()
+            }
+    }
 }
 
 impl Tables {
@@ -8416,43 +8430,38 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push) else {
             return;
         };
-        // R311y450 — the §5.18 forward-path stamp, applied ONCE here, before ANY
-        // of the four blocks below fans out. zenoh stamps at a single point
-        // (`treat_timestamp!` at `dispatcher/pubsub.rs:328`) and hands the one
-        // stamped `msg` to every out-face in `route`, so a Put that fans to two
-        // meshes plus three client faces carries ONE timestamp, not five. Every
-        // block below therefore takes the stamped `push`.
+        // The §5.18 forward-path stamp, taken ONCE, by the first block below whose
+        // route has a destination. zenoh treats the timestamp at a single point,
+        // inside `if !route.is_empty()`
+        // (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `if !route.is_empty() {`),
+        // and hands the one stamped `msg` to every out-face in `route`, so a Put
+        // that fans to two meshes plus three client faces carries ONE timestamp,
+        // and a Put routed nowhere is neither minted for nor absorbed: an absorb
+        // moves this node's clock, and the next stamp it gives shows it. Here the
+        // route is computed block by block, so each block asks
+        // [`ForwardStamp::for_egress`] once its own route has a destination,
+        // before its filters judge the faces, as upstream's filters come after
+        // the stamp. The first to ask takes the stamp and every later block is
+        // given the same Push.
         //
-        // Deliberately NOT inside `compute_push_forward`: `forward_push_tier`
-        // calls that core once PER TIER-NET, so a stamp there would give the
+        // Deliberately NOT one stamp per block or per tier-net: `forward_push_tier`
+        // runs once PER TIER-NET, and a stamp of its own would give the
         // router-mesh leg and the peer-mesh leg of one Put different timestamps.
         //
-        // One divergence, stated: zenoh stamps INSIDE `if !route.is_empty()`,
-        // after computing the route, whereas this is before the blocks that
-        // compute theirs. So a Put with no interested route still advances this
-        // node's logical counter. That is HLC-internal — a counter advance is not
-        // wire-visible, and the counter is monotonic either way — and hoisting the
-        // stamp is what buys the single-timestamp guarantee across four
-        // independently-routed blocks.
-        // R2626 — the DROP arm, at the same single stamp point the paragraph
-        // above defends. zenoh's spelling is a bare `return` out of
-        // `route_data`, so no destination is reached; here that means none of
-        // the four blocks below runs, which is the same statement. The
-        // stamp itself is `NodeHlc`'s.
-        let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
-            return;
-        };
-        let push: &PushOwned = &stamped;
-        // The arrival of a data message, by the timestamp it is routed with (the stamp above
-        // included): the start of the lines [`Self::crosses`] and [`Self::egress_to_face`] write
-        // for it (debt item 934).
+        // The drop arm (`drop_future_timestamp`) is given to every block that
+        // asks, so none sends anything, as zenoh's bare `return` out of
+        // `route_data` reaches no destination.
+        let stamp = crate::node_clock::ForwardStamp::relayed(&self.node_hlc, push);
+        // The arrival of a data message, by the timestamp it arrived with: the start of the lines
+        // [`Self::crosses`] and [`Self::egress_to_face`] write for it (debt item 934), which name
+        // it as it is routed, stamp included.
         route_event!(
             "node {} receives from face {:?} (remote {:?}, region {:?}): {}",
             self.own_zid,
             inbound,
             self.tables.faces.get(&inbound).and_then(|s| s.peer_zid),
             tier,
-            Crossing::Push(push)
+            Crossing::Push(stamp.received())
         );
         // R2879 (open-debt item 751, step 5) — the origin and the forwarder, as
         // the inbound region's net names them: what the inter-region filter
@@ -8475,7 +8484,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // so a relayed Put keeps its priority end-to-end. The mcast-group egress
         // (broadcast_to_mcast_groups) is the one remaining DEFAULT wire egress — the
         // 2-channel mcast plane has no per-priority conduit (residual, not inert).
-        self.forward_push_tier(inbound, tier, reliable, priority, push);
+        self.forward_push_tier(inbound, tier, reliable, priority, &stamp);
         // Blocks 1 & 2 — the filtered cross-mesh bridge (a received-frame transit
         // re-injected into the other mesh; preserves the band).
         let origin = (src_zid.as_ref(), fwd_zid.as_ref());
@@ -8497,7 +8506,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // briefly both bridge (self-healing; the two-router cross-impl e2e proof is
         // I3c).
         if !inbound_is_mcast || self.mcast_ingress_federates(origin.0) {
-            self.bridge_push_cross_mesh(tier, reliable, priority, push, &keyexpr, origin);
+            self.bridge_push_cross_mesh(tier, reliable, priority, &stamp, &keyexpr, origin);
         }
         // Block 3 — local client delivery. A peer-sourced copy is delivered
         // here only by the router that carries it north; every other router
@@ -8507,7 +8516,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let defer = tier != NORTH_REGION
             && !is_leaf(tier, self.tables.node_mode)
             && !self.crosses(
-                Crossing::Push(push),
+                Crossing::Push(stamp.routed()),
                 tier,
                 NORTH_REGION,
                 origin.0,
@@ -8522,7 +8531,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 priority,
                 express: false,
             },
-            push,
+            &stamp,
             &keyexpr,
             defer,
         );
@@ -8537,7 +8546,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // block terminates the Put in-process: nothing leaves, so there is nothing to
         // duplicate, and gating it would mean a router that is not master for a
         // keyexpr silently ignores what it was told over its own admin space.
-        self.dispatch_local_subscribers(reliable, push, &keyexpr);
+        self.dispatch_local_subscribers(reliable, &stamp, &keyexpr);
         // Client-sourced mesh re-injection, into both meshes (R2879: the router leg
         // is no longer master-gated; a broker hat has no gateway view). A multicast
         // ingress is not a client's Put and never takes this path: it is a Put from
@@ -8551,7 +8560,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     priority,
                     express: false,
                 },
-                push,
+                &stamp,
                 &keyexpr,
             );
         }
@@ -8567,10 +8576,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // ingress face is NOT re-broadcast to a group — `false` on the unicast path
         // here, `true` on the [`route_mcast_ingress`](Self::route_mcast_ingress) path.
         #[cfg(feature = "router-multicast-faces")]
-        self.broadcast_to_mcast_groups(
+        self.broadcast_routed_push_to_mcast_groups(
             reliable,
             priority,
-            push,
+            &stamp,
             &keyexpr,
             GroupEgressSource {
                 from_group: inbound_is_mcast,
@@ -8578,6 +8587,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 origin: origin.0,
             },
         );
+    }
+
+    /// [`broadcast_to_mcast_groups`](Self::broadcast_to_mcast_groups) for a Push this router
+    /// relays, which takes its stamp when a group is attached: an attached group is a destination
+    /// of the route whether or not the echo guard or the gateway gate then turns it away, as
+    /// zenoh's groups are in `route` before `egress_filter` judges them.
+    #[cfg(feature = "router-multicast-faces")]
+    fn broadcast_routed_push_to_mcast_groups(
+        &self,
+        reliable: bool,
+        priority: Priority,
+        stamp: &ForwardStamp<'_>,
+        keyexpr: &str,
+        source: GroupEgressSource<'_>,
+    ) {
+        if self.mcast_groups.read().is_empty() {
+            return;
+        }
+        let Some(push) = stamp.for_egress() else {
+            return;
+        };
+        self.broadcast_to_mcast_groups(reliable, priority, push, keyexpr, source);
     }
 
     /// Attach a multicast drive loop's producer as an EGRESS group face (the wz
@@ -8939,7 +8970,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound_tier: Region,
         reliable: bool,
         priority: Priority,
-        push: &PushOwned,
+        stamp: &ForwardStamp<'_>,
         keyexpr: &str,
         (src_zid, fwd_zid): (Option<&Zid>, Option<&Zid>),
     ) {
@@ -8973,12 +9004,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     priority,
                     express: false,
                 },
-                push,
+                stamp,
                 keyexpr,
                 &gateways,
                 |dst| {
                     self.crosses(
-                        Crossing::Push(push),
+                        Crossing::Push(stamp.routed()),
                         inbound_tier,
                         target_tier,
                         src_zid,
@@ -9009,8 +9040,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         tier: Region,
         reliable: bool,
         priority: Priority,
-        push: &PushOwned,
+        stamp: &ForwardStamp<'_>,
     ) {
+        let push = stamp.received();
         // R2889 (open-debt item 751, step 8b) — not within a region the pin's
         // PEER hat serves: that hat routes a Push to its own faces only when the
         // Push came from ANOTHER region
@@ -9056,6 +9088,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             inbound_link,
             push,
             &keyexpr,
+            || stamp.for_egress(),
         ) else {
             return;
         };
@@ -9101,7 +9134,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound: FaceId,
         inbound_tier: Region,
         egress: Egress,
-        push: &PushOwned,
+        stamp: &ForwardStamp<'_>,
         keyexpr: &str,
         defer: bool,
     ) {
@@ -9110,6 +9143,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             priority,
             express,
         } = egress;
+        // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
+        // the published K, excluding the inbound face (never echo a client's own
+        // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects_target`
+        // SSOT the mesh data route reads through `interested_remote` — a client
+        // subscribing `demo/**` must receive a `demo/data` Push, NOT just an exact
+        // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
+        // wildcard client sub, re-opening the very gap C3 closes).
+        // R2909 — through each broker hat's client-leg cache ([`client_route`]).
+        let wire = wireexpr_names_a_declaration(&stamp.received().keyexpr.body);
+        let names = |k: &str| self.names_a_resource(k);
         // The caller decides `defer` from the crossing filter: a router that
         // does not carry a peer-source Push north does not deliver it either,
         // since the carrier's copy comes back to it as a ROUTER source.
@@ -9124,18 +9167,35 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // suppressed, not a vacuous defer on a router hosting no clients.
             if self.any_client_sub() {
                 self.deferred_client_delivery.bump();
+                // The deferred faces are destinations of the route all the same, as
+                // zenoh's client faces are in `route` before its region filter turns
+                // them away, so a Put one of them subscribes takes the stamp.
+                let routed = self.client_regions().any(|(_, hat)| {
+                    !client_route(
+                        &hat.subs,
+                        Cached {
+                            routes: &hat.client_routes,
+                            names_a_resource: &names,
+                        },
+                        keyexpr,
+                        wire,
+                    )
+                    .is_empty()
+                });
+                if routed {
+                    let _ = stamp.for_egress();
+                }
             }
             return;
         }
         if !self.any_client_sub() {
             return;
         }
-        // Re-literalize once (payload / encoding / attachment preserved, literal
-        // keyexpr for the client leaf); the fan-out clones it per matching client.
-        // `keyexpr` is resolved once by the [`route_push`](Self::route_push) head.
-        let Ok(mut carrier) = reliteralize_push(push, keyexpr) else {
-            return;
-        };
+        // Re-literalized once, from the stamped Push, by the first region whose route
+        // has a client (payload / encoding / attachment preserved, literal keyexpr for
+        // the client leaf); the fan-out clones it per matching client. `keyexpr` is
+        // resolved once by the [`route_push`](Self::route_push) head.
+        //
         // A client subscriber is a LEAF, not a routing-graph node: reset the Push's
         // routing source node-id to 0 (set_push_source(_, 0) omits the ext, zenoh's
         // omit-on-DEFAULT). reliteralize_push PRESERVES the inbound push's ext_nodeid;
@@ -9145,24 +9205,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // mandatory ext_nodeid id 0x03). Faithful to zenoh pubsub.rs (a client-sub
         // data-route direction node-id is NodeId::default()=0). The DATA-plane twin of
         // the R311y179 forward_request_to_client_queryables source-reset fix.
-        if stamped(
-            set_push_source(&mut carrier, 0),
-            "a Push for the client faces",
-        )
-        .is_err()
-        {
-            return;
-        }
-        // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
-        // the published K, excluding the inbound face (never echo a client's own
-        // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects_target`
-        // SSOT the mesh data route reads through `interested_remote` — a client
-        // subscribing `demo/**` must receive a `demo/data` Push, NOT just an exact
-        // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
-        // wildcard client sub, re-opening the very gap C3 closes).
-        // R2909 — through each broker hat's client-leg cache ([`client_route`]).
-        let wire = wireexpr_names_a_declaration(&push.keyexpr.body);
-        let names = |k: &str| self.names_a_resource(k);
+        let carry = || -> Option<PushOwned> {
+            let mut carrier = reliteralize_push(stamp.for_egress()?, keyexpr).ok()?;
+            stamped(
+                set_push_source(&mut carrier, 0),
+                "a Push for the client faces",
+            )
+            .ok()?;
+            Some(carrier)
+        };
+        let mut carrier: Option<PushOwned> = None;
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
         // QoS-negotiated client observes the same band the mesh legs carry (zenoh
@@ -9187,6 +9239,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if clients.is_empty() {
                 continue;
             }
+            if carrier.is_none() {
+                carrier = carry();
+            }
+            // A Push the node drops, or one that cannot be re-literalized, goes to no
+            // client of any region.
+            let Some(carrier) = carrier.as_ref() else {
+                return;
+            };
             // The route IS the target list: only those faces are asked, so the
             // cost follows the subscribers and not the faces the router holds.
             let _ = self.fan_out_to_faces_qos(
@@ -9227,7 +9287,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         source_tier: Region,
         egress: Egress,
-        push: &PushOwned,
+        stamp: &ForwardStamp<'_>,
         keyexpr: &str,
     ) {
         // `keyexpr` is the literal already resolved against the inbound (client)
@@ -9247,9 +9307,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // multicast.)
             // R2901 — and, on a peer node, every gateway of the hat: the source is south.
             let gateways = self.gateways_owed(tier, keyexpr, false);
-            self.self_publish_into_tier(tier, egress, push, keyexpr, &gateways, |dst| {
+            self.self_publish_into_tier(tier, egress, stamp, keyexpr, &gateways, |dst| {
                 self.crosses(
-                    Crossing::Push(push),
+                    Crossing::Push(stamp.routed()),
                     source_tier,
                     tier,
                     None,
@@ -9277,7 +9337,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         tier: Region,
         egress: Egress,
-        push: &PushOwned,
+        stamp: &ForwardStamp<'_>,
         keyexpr: &str,
         gateways: &[FaceId],
         admits: impl Fn(&Zid) -> bool,
@@ -9293,6 +9353,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // R2908 — both callers hand over the RECEIVED push, so whether it named
         // a declared keyexpr is read off it here.
         let names = |k: &str| self.names_a_resource(k);
+        // The carrier is built from the stamped Push, asked for only once the tier's route has a
+        // destination (the stamp's rule, at [`route_push`](Self::route_push)).
         let carrier_children = compute_self_publish_forward(
             &hat.net,
             &hat.subs,
@@ -9301,12 +9363,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 names_a_resource: &names,
             },
             keyexpr,
-            wireexpr_names_a_declaration(&push.keyexpr.body),
+            wireexpr_names_a_declaration(&stamp.received().keyexpr.body),
             !gateways.is_empty(),
-            || reliteralize_push(push, keyexpr),
+            || {
+                stamp
+                    .for_egress()
+                    .map(|push| reliteralize_push(push, keyexpr))
+                    .transpose()
+            },
         );
         let Ok(Some((carrier, children))) = carrier_children else {
-            return; // no interested mesh sub / no tree direction / build err
+            return; // no interested mesh sub / no tree direction / dropped / build err
         };
         // R311y224 — preserve the received band on the cross-mesh / client->mesh
         // re-inject: this seam RELITERALIZES a RECEIVED frame (`reliteralize_push`),
@@ -11039,7 +11106,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// ([`enqueue_self_echo`](Self::enqueue_self_echo), [`drain_self_echo`](Self::drain_self_echo)).
     /// It became reachable when a node could publish ([`publish`](Self::publish)): a hosted
     /// subscriber that publishes echoes into its own pattern.
-    fn dispatch_local_subscribers(&self, reliable: bool, push: &PushOwned, keyexpr: &str) {
+    fn dispatch_local_subscribers(&self, reliable: bool, stamp: &ForwardStamp<'_>, keyexpr: &str) {
         // Cheap exit before any payload work: the overwhelmingly common case is a
         // router hosting no subscribers at all.
         if self.tables.local_subscribers.is_empty() {
@@ -11048,9 +11115,42 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // A build that reads neither a Put nor a Del makes no sample of a push
         // (`wz_session_core::pubsub::sample_of_push`), so its hosted subscribers are handed none.
         #[cfg(not(any(feature = "pubsub-put", feature = "pubsub-delete")))]
-        let _ = (reliable, push, keyexpr);
+        let _ = (reliable, stamp, keyexpr);
         #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        self.deliver_routed_push_to_hosted(reliable, stamp, keyexpr);
+    }
+
+    /// The node's own session is a destination of the route of a Push only when one of the
+    /// subscribers it hosts takes it, and only then is the stamp taken for it; the stamped Push is
+    /// then delivered ([`deliver_push_to_hosted`](Self::deliver_push_to_hosted)).
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    fn deliver_routed_push_to_hosted(
+        &self,
+        reliable: bool,
+        stamp: &ForwardStamp<'_>,
+        keyexpr: &str,
+    ) {
+        if !self.hosts_a_subscriber_of(keyexpr) {
+            return;
+        }
+        let Some(push) = stamp.for_egress() else {
+            return;
+        };
         self.deliver_push_to_hosted(reliable, push, keyexpr);
+    }
+
+    /// Whether a subscriber this router hosts is handed a publication of `keyexpr` that a face
+    /// made: the subscribers [`deliver_to_hosted_subscribers`](Self::deliver_to_hosted_subscribers)
+    /// hands it to, a subscriber of the node's own session counted only for a key inside its
+    /// namespace.
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    fn hosts_a_subscriber_of(&self, keyexpr: &str) -> bool {
+        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+        let inside_namespace = self.fwd.relative_key(keyexpr).is_some();
+        self.tables
+            .local_subscribers
+            .iter()
+            .any(|sub| sub.takes(&target_chunks, false) && (inside_namespace || !sub.namespaced))
     }
 
     /// The delivery half of [`dispatch_local_subscribers`](Self::dispatch_local_subscribers): the
@@ -11221,14 +11321,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let target_chunks: Vec<&str> = full.keyexpr().split('/').collect();
             locals
                 .iter()
-                .filter(|sub| keyexpr_intersects_target(&sub.keyexpr, &target_chunks))
-                .filter(|sub| {
-                    if from_local {
-                        sub.origin.allows_local()
-                    } else {
-                        sub.origin.allows_remote()
-                    }
-                })
+                .filter(|sub| sub.takes(&target_chunks, from_local))
                 .map(|sub| (sub.namespaced, Arc::clone(&sub.handler)))
                 .collect()
         };
@@ -11477,6 +11570,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         let push: &PushOwned = &stamped;
+        let settled = ForwardStamp::settled(push);
         // `reliable` follows the inbound frame for a relayed message; a publication of the
         // node's own session is as reliable as its publisher asked it to be.
         let egress = Egress {
@@ -11489,7 +11583,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 LOCAL_FACE,
                 Region::Local,
                 egress,
-                push,
+                &settled,
                 keyexpr,
                 false,
             );
@@ -11498,7 +11592,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.deliver_to_hosted_subscribers(true, own, Some(own_relative));
         }
         if destination.allows_remote() {
-            self.publish_client_push_into_meshes(Region::Local, egress, push, keyexpr);
+            self.publish_client_push_into_meshes(Region::Local, egress, &settled, keyexpr);
             #[cfg(feature = "router-multicast-faces")]
             self.broadcast_to_mcast_groups(
                 reliable,
@@ -23762,6 +23856,85 @@ mod tests {
             "a document that disables timestamping for this node's role must \
              reach the forward-path gate — a stamp here is wz stamping where a \
              stock zenohd would relay bare",
+        );
+    }
+
+    /// A physical clock that never moves: the only thing that can carry the router's clock past
+    /// a time ahead of it is absorbing that time.
+    #[cfg(all(feature = "time-hlc", feature = "pubsub-timestamp"))]
+    struct FrozenEpoch;
+
+    #[cfg(all(feature = "time-hlc", feature = "pubsub-timestamp"))]
+    impl wz_session_core::epoch::EpochSource for FrozenEpoch {
+        fn try_since_epoch(
+            &self,
+        ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable>
+        {
+            Ok(wz_session_core::epoch::SinceEpoch {
+                secs: 1_700_000_000,
+                nanos: 0,
+            })
+        }
+    }
+
+    /// Relay a Put carrying a time a quarter of a second ahead of a router whose clock is
+    /// frozen, with a client subscribing its key or with none, and answer with the router's next
+    /// stamp, the time the Put carried and the frames the subscriber's face was sent.
+    #[cfg(all(feature = "time-hlc", feature = "pubsub-timestamp"))]
+    fn relay_a_put_ahead_of_the_clock(subscribed: bool) -> (u64, u64, usize) {
+        let mut fwd = RouterForwarder::new(zid(0x01));
+        fwd.node_hlc = crate::node_clock::NodeHlc::for_node_over_source(
+            zid(0x01).as_slice(),
+            WhatAmI::Router,
+            crate::node_clock::TimestampingEnabled::default(),
+            FrozenEpoch,
+        );
+        let (publisher, _sink_publisher) = face(zid(0xAA), WIRE_CLIENT);
+        let (subscriber, sink_subscriber) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &publisher);
+        fwd.register(FaceId(1), &subscriber);
+        if subscribed {
+            forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        }
+        sink_subscriber.reset();
+        let ahead = fwd.node_hlc.stamp().expect("a router stamps").time + (1u64 << 30);
+        let meta = wz_session_core::metadata::PushMetadata {
+            timestamp: Some(wz_session_core::sample::TimestampHint {
+                time: ahead,
+                zid: vec![0xAA],
+            }),
+            ..Default::default()
+        };
+        let push = wz_session_core::push_build::build_push_literal_with_meta(
+            "demo/data",
+            b"payload",
+            &meta,
+        )
+        .expect("build stamped put");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        let next = fwd.node_hlc.stamp().expect("a router stamps").time;
+        (next, ahead, sink_subscriber.frame_count())
+    }
+
+    /// A Put this router routes nowhere leaves its clock alone, as upstream treats the timestamp
+    /// only once the route is not empty; the same Put with a subscriber is absorbed. The two arms
+    /// differ in the subscription alone, so the first cannot pass on a timestamp the clock would
+    /// have refused anyway.
+    #[cfg(all(feature = "time-hlc", feature = "pubsub-timestamp"))]
+    #[test]
+    fn a_put_routed_nowhere_does_not_move_the_routers_clock() {
+        let (next, ahead, sent) = relay_a_put_ahead_of_the_clock(false);
+        assert_eq!(sent, 0, "no face subscribes, so nothing is sent");
+        assert!(
+            next < ahead,
+            "a Put with no destination must not be absorbed into the router's clock"
+        );
+
+        let (next, ahead, sent) = relay_a_put_ahead_of_the_clock(true);
+        assert_eq!(sent, 1, "the subscribing client is sent the Put");
+        assert!(
+            next > ahead,
+            "the same Put with a destination is absorbed: the router's next stamp sorts after it"
         );
     }
 
