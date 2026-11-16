@@ -83,21 +83,6 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCE_CODEGEN="$ROOT/vendor/sce/target/release/sce-codegen"
 
-# R311y756 — THE TWO RESOURCE DIRECTORIES, NAMED RATHER THAN SEARCHED.
-#
-# sce-codegen looks for its Jinja2 templates and its XSD schemas relative to
-# wherever it thinks it is installed, and falls back through several guesses. On
-# a build host every guess missed: `Cannot find Jinja2 templates` killed all six
-# backends and `schemas/sce-forge.xsd not found` silently DOWNGRADED validation
-# to "parsed structurally, sce: attributes unchecked" — a warning, which is the
-# worse half, because a gate that quietly stops checking still prints green.
-#
-# Both live in the vendored checkout this script already resolves, so both are
-# stated. `export`, because the binary reads them from the environment, and only
-# when unset — a caller who has a reason to point elsewhere still can.
-export SCE_TEMPLATE_DIR="${SCE_TEMPLATE_DIR:-$ROOT/vendor/sce/tools/codegen/templates}"
-export SCE_SCHEMAS_DIR="${SCE_SCHEMAS_DIR:-$ROOT/vendor/sce/schemas}"
-
 if [[ $# -lt 1 || $# -gt 2 ]]; then
     echo "usage: $0 <scxml> [<sce-upstream-fixture>]" >&2
     exit 2
@@ -229,28 +214,23 @@ emit() {
         extra_args+=("--deploy" "$ROOT/deploy/codec_node.yaml")
     fi
 
-    # R311y756 — NAME THE WORKSPACE ROOT; do not let it be discovered.
+    # NAME THE WORKSPACE ROOT AND ITS RESOURCES; do not let them be discovered.
     #
-    # sce-codegen resolves it as `--workspace-root` -> `$SCE_WORKSPACE_ROOT` ->
-    # `CARGO_MANIFEST_DIR/..` (baked in when the binary was compiled) -> a walk up
-    # from the cwd. Every one of those is a fact about the MACHINE rather than
-    # about this repository, and on 2026-08-12 the last three all missed on a
-    # build host: all six backends failed with `workspace root not detected`, and
-    # the Jinja2 templates under it went unfound with them, taking Layers B, B2
-    # and C1 down. The same tree passes here, which is the signature of a gate
-    # that depends on where it runs.
-    #
-    # This script already knows the answer — `$ROOT/vendor/sce` is the vendored
-    # checkout it just ran the binary out of — so it says it. One argument turns
-    # an ambient lookup into a stated fact.
-    "$SCE_CODEGEN" generate \
-        --workspace-root "$ROOT/vendor/sce" \
+    # sce-codegen resolves the root as `--workspace-root` -> `$SCE_WORKSPACE_ROOT`
+    # -> `CARGO_MANIFEST_DIR/..` (baked in when the binary was compiled) -> a walk
+    # up from the cwd, and its templates and schemas on paths of their own. Each
+    # of those is a fact about the MACHINE rather than about this repository. The
+    # door names all three from the vendored checkout this script already runs
+    # the binary out of, and refuses a run that did not validate against the XSD
+    # (codes 125 and 126, which the table below prints as a failed emit).
+    local code=0
+    sce_codegen_spawn "$SCE_CODEGEN" "$ROOT/vendor/sce" "$stderr_file" \
+        generate \
         --language "$backend" \
         --output-dir "$out" \
         "${extra_args[@]}" \
         "$scxml" \
-        >/dev/null 2>"$stderr_file"
-    local code=$?
+        >/dev/null || code=$?
     echo "$code"
 }
 

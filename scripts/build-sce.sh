@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCE_DIR="$ROOT/vendor/sce"
 # The binary is a product of the vendor/sce workspace, so it is built where the artifact root
 # puts that workspace's products (scripts/lib/artifact-root.sh; the cargo shim it puts on PATH
-# gives the workspace that target directory), and `wz_codegen_build::locate_sce_codegen` reads
+# gives the workspace that target directory), and `wz_codegen_build::SceCodegen::locate` reads
 # it there under the same rule.
 # shellcheck source=scripts/lib/artifact-root.sh
 source "$ROOT/scripts/lib/artifact-root.sh"

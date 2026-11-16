@@ -2300,6 +2300,16 @@ layer_c0_test_discipline() {
     # which turns four correct bare arms into false positives, so that term is
     # doing the work rather than sitting there.
     _runci_leg census_arm_gate_lint -- python3 scripts/lib/census_arm_gate_lint.py
+    # Carries N58 and N62 -- sce-codegen is SPAWNED through one door per
+    # language (wz_codegen_build::SceCodegen, sce_codegen_spawn in
+    # scripts/lib/sce-codegen-oracle.sh), which names the workspace, the
+    # templates and the schemas and refuses a run that did not validate against
+    # the XSD. A site that names fewer of them inherits the machine's answer and
+    # reds only where that answer is wrong, which is never where it was written.
+    # The selftest holds each spawn shape and the doors' agreement on the
+    # warning text, then the lint reads every tracked script and crate.
+    _runci_leg sce_codegen_spawn_lint.selftest -- python3 scripts/lib/sce_codegen_spawn_lint.py --selftest
+    _runci_leg sce_codegen_spawn_lint --after sce_codegen_spawn_lint.selftest -- python3 scripts/lib/sce_codegen_spawn_lint.py
     # R311y616 (§7.13) — the LITERAL-WIRE-FLAG lint, scoped to wz-capture.
     # R311y615 named `wire_const::FLAG_N_N` for the network `N` bit and shipped
     # it with ONE consumer while four fixtures beside it kept writing `0x20`;

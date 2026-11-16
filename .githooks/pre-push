@@ -1120,6 +1120,10 @@ round_fed_gates=(
     # Round-fed by the tracked scripts, gates and crate sources it reads. MEASURED: 0.68s,
     # a text read of 2166 files, no build.
     "artifact_root_lint.py"
+    # Carries N58 and N62 -- a spawn of sce-codegen past its two doors (SceCodegen,
+    # sce_codegen_spawn). Round-fed by the tracked scripts, workflows, hooks and crate
+    # sources it reads. A text read, no build.
+    "sce_codegen_spawn_lint.py"
     "store_reader_lane_lint.py"
     # R2578 -- the tracked corpus, which the first cut of the population rule
     # did not name. Ordered cheapest-first inside this group so a form error
