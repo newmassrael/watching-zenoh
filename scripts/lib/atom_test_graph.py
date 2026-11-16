@@ -699,8 +699,8 @@ def dep_ownership(atoms=None):
     return owned
 
 
-def ownership(atoms=None):
-    """atom -> {symbol}: the symbols each feature's cfg sites gate. Derived."""
+def cfg_ownership():
+    """atom -> {symbol}: ARM 1 alone, the symbols each feature's cfg sites gate."""
     owned = {}
     for path in _rs_files():
         try:
@@ -709,9 +709,35 @@ def ownership(atoms=None):
             continue
         for f, syms in _scan_lines(lines).items():
             owned.setdefault(f, set()).update(syms)
+    return owned
+
+
+def ownership(atoms=None):
+    """atom -> {symbol}: ARM 1 and ARM 3 together. Derived."""
+    owned = cfg_ownership()
     for f, syms in dep_ownership(atoms).items():
         owned.setdefault(f, set()).update(syms)
     return owned
+
+
+#: The arm that credited an atom's reach, in `credit_arm`'s words.
+ARM_CFG = "cfg"
+ARM_DEP = "crate-api"
+
+
+def credit_arm(cfg_owned, reached):
+    """Which arm a test's reach rests on: `ARM_CFG` when a test names a symbol the
+    atom's own cfg gates, `ARM_DEP` when it names only the public API of a crate
+    the feature pulls (ARM 3), `None` when it names nothing.
+
+    Open-debt item 660. The two are not the same strength: ARM 1 points at the
+    code the feature elides, ARM 3 at any public item of a whole crate (1089
+    symbols for one atom), so a COMPLETE resting on ARM 3 says a test touches the
+    crate, not that one runs the residual. One verdict word hid which it was.
+    """
+    if not reached:
+        return None
+    return ARM_CFG if reached & cfg_owned else ARM_DEP
 
 
 def _test_is_ignored(lines, k):
@@ -891,9 +917,26 @@ def _reached(owned, regions):
 
 def graph(atoms=None):
     """atom -> (owned_symbols, symbols_a_test_names). Derived, nothing authored."""
-    owned = ownership(atoms)
+    credited, _dep_features = graph_with_arms(atoms)
+    return {a: (owned, reached) for a, (owned, reached, _arm) in credited.items()}
+
+
+def graph_with_arms(atoms=None):
+    """(atom -> (owned, reached, arm), the features ARM 3 owns anything for).
+
+    `arm` is `credit_arm`'s. The second value is ARM 3's population: empty, the
+    arm graded nothing, and every dep-forward atom is back where R2365 found it.
+    """
+    cfg = cfg_ownership()
+    dep = dep_ownership(atoms)
     regions = [idents for _p, idents in _test_regions()]
-    return {a: (syms, _reached(syms, regions)) for a, syms in owned.items()}
+    out = {}
+    for a in cfg.keys() | dep.keys():
+        own_cfg = cfg.get(a, set())
+        owned = own_cfg | dep.get(a, set())
+        reached = _reached(owned, regions)
+        out[a] = (owned, reached, credit_arm(own_cfg, reached))
+    return out, set(dep)
 
 
 # ── Self-check ─────────────────────────────────────────────────────────────────
@@ -1219,6 +1262,18 @@ def _selftest():
        sorted(_reached(pub_syms, [{"bind"}, {"Sock"}])), ["Sock"])
     eq("ARM3 reach twin: a bare free fn is reached by its bare name, as before",
        sorted(_reached(pub_syms, [{"dial"}])), ["dial"])
+
+    # Open-debt item 660: which arm a reach rests on. A test naming a cfg-gated
+    # symbol is ARM 1's even when it also names crate API; one naming only the
+    # crate's API is ARM 3's; one naming nothing is neither.
+    _gated = {"emit_final"}
+    eq("credit arm: a cfg-gated symbol named is ARM 1",
+       credit_arm(_gated, {"emit_final", "Sock"}), ARM_CFG)
+    eq("credit arm: only crate API named is ARM 3",
+       credit_arm(_gated, {"Sock", "Sock::bind"}), ARM_DEP)
+    eq("credit arm: an atom with no cfg symbol reached through its crate is ARM 3",
+       credit_arm(set(), {"Sock"}), ARM_DEP)
+    eq("credit arm: nothing named is no arm", credit_arm(_gated, set()), None)
 
     # ARM 2, the DEFECT (R311y344): a test that never runs is not a test. This
     # module harvested every identifier in a test file without ever looking at

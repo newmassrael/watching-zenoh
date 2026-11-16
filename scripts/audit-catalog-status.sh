@@ -376,14 +376,23 @@ import atom_test_graph  # noqa: E402
 # someone remembers to run it is the skip-is-green defect one level up.
 fail_selftest = atom_test_graph._selftest()
 
-_atg = atom_test_graph.graph(set(atoms))
+_atg_arms, _dep_features = atom_test_graph.graph_with_arms(set(atoms))
+_atg = {_a: (_o, _r) for _a, (_o, _r, _arm) in _atg_arms.items()}
 fail_untested_complete = []
+# Open-debt item 660: a COMPLETE whose test names only the public API of a crate
+# the feature pulls (ARM 3) is a weaker claim than one naming the atom's own
+# gated code (ARM 1), and the verdict printed both as one word. The arm is now
+# printed per COMPLETE atom; an ARM 3 that owns nothing for any feature FAILS,
+# because the dep-forward atoms would then be ungradable again.
+complete_by_arm = {atom_test_graph.ARM_CFG: [], atom_test_graph.ARM_DEP: []}
 for _a in sorted(atoms):
     if impl_tag(_a) != "COMPLETE":
         continue
-    _owned, _ref = _atg.get(_a, (set(), set()))
+    _owned, _ref, _arm = _atg_arms.get(_a, (set(), set(), None))
     if not _ref:
         fail_untested_complete.append((_a, len(_owned)))
+    else:
+        complete_by_arm[_arm].append(_a)
 
 # R2386 — invariant #7: an `active` atom must OWN a symbol, not merely be NAMED
 # in a gate.
@@ -648,6 +657,21 @@ if fail_untested_complete:
     print("      that (R311y339-y341 spent three rounds proving it); a test can.")
     print("      Either write a test that exercises this atom's own gated code,")
     print("      or the tag is PARTIAL and the residual is 'unproven by any lane'.")
+
+print("  invariant #6 arms: %d COMPLETE atom(s) rest on a test naming their own"
+      " cfg-gated code (ARM 1), %d only on a test naming their crate's API (ARM 3,"
+      " %d feature(s) owned that way)"
+      % (len(complete_by_arm[atom_test_graph.ARM_CFG]),
+         len(complete_by_arm[atom_test_graph.ARM_DEP]), len(_dep_features)))
+for _a in complete_by_arm[atom_test_graph.ARM_DEP]:
+    print("    - %s  COMPLETE by crate API only: a test touches the crate; none"
+          " names a symbol this atom's cfg gates" % _a)
+
+if not _dep_features:
+    ok = False
+    print("FAIL: invariant #6's ARM 3 owns nothing for any feature, so every")
+    print("      atom implemented by an optional dependency is ungradable again.")
+    print("      Fix the derivation (atom_test_graph.dep_ownership); do not retag.")
 
 if _active_pop == 0:
     ok = False
