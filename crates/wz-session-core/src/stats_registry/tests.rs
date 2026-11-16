@@ -581,6 +581,13 @@ fn a_multicast_congestion_drop_is_observed_and_not_counted_sent() {
 /// `stats/filters`: a filter list holds each key once and at most
 /// `StatsKeyMatch::CAPACITY` keys, and matches a key expression against every
 /// filter it intersects.
+///
+/// The expected names read `**` and `*` as wildcards; a build without them
+/// reads both as literal chunks, so this holds only where both are built.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn a_filter_list_matches_every_key_its_message_meets() {
     let keys = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
@@ -624,6 +631,9 @@ fn a_filter_list_matches_every_key_its_message_meets() {
 /// A classified payload counts under the keys its class matched, into the very
 /// series S5 of the golden pins against the pin's encoder; a class matched
 /// against no filter counts under none.
+///
+/// `a/b` meets `a/**` only where `**` is a wildcard.
+#[cfg(feature = "keyexpr-wildcard-double")]
 #[test]
 fn a_classified_payload_counts_under_the_keys_its_class_matched() {
     let filters =
