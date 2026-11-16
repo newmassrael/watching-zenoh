@@ -179,6 +179,8 @@ use wz_session_core::transport_mode::SessionOffer;
 #[cfg(any(feature = "transport-multilink", feature = "codec-push"))]
 use wz_session_core::qos::Priority;
 
+#[cfg(feature = "transport-multilink")]
+mod discovered_links;
 mod intake;
 
 /// Monotonic identifier the face loop assigns to each link it opens — zenoh's
@@ -4350,6 +4352,55 @@ where
                         // R311y205 (transport-multilink) — a `max_links > 1` node
                         // dials the discovered peer with the 0x4-negotiating variant
                         // (aggregation), else the byte-identical single-link dial.
+                        //
+                        // An aggregating node opens a link for each pair of priority range
+                        // and reliability among the locators it knows for the node, as
+                        // upstream's connect does (see `discovered_links`); each is retained
+                        // with its band for the partial-loss re-add (R311y212, R311y219).
+                        #[cfg(feature = "transport-multilink")]
+                        if max_links > 1 {
+                            let candidates = target
+                                .expected_zid
+                                .map(|zid| {
+                                    candidate_locators(&directory, &zid, clock.now_monotonic_ms())
+                                })
+                                .unwrap_or_default();
+                            let links = discovered_links::discovered_peer_links(
+                                target,
+                                &candidates,
+                                max_links,
+                            );
+                            for (n, target) in links.into_iter().enumerate() {
+                                let id = if n == 0 {
+                                    id
+                                } else {
+                                    summary.dialed += 1;
+                                    FaceId::mint(&mut next_id)
+                                };
+                                let band = multilink_priority_range(id);
+                                ml_dial_endpoints.insert(id, (target.clone(), band));
+                                opening.push(Box::pin(dial_face_multilink(
+                                    id,
+                                    target,
+                                    Arc::clone(&dial_config),
+                                    offer,
+                                    band,
+                                    params.clone(),
+                                    clock,
+                                    tick_interval_ms,
+                                )) as OpenFuture);
+                            }
+                        } else {
+                            opening.push(Box::pin(dial_face(
+                                id,
+                                target,
+                                Arc::clone(&dial_config),
+                                params.clone(),
+                                offer,
+                                clock,
+                                tick_interval_ms,
+                            )) as OpenFuture);
+                        }
                         #[cfg(not(feature = "transport-multilink"))]
                         opening.push(Box::pin(dial_face(
                             id,
@@ -4360,70 +4411,12 @@ where
                             clock,
                             tick_interval_ms,
                         )));
-                        #[cfg(feature = "transport-multilink")]
-                        opening.push(if max_links > 1 {
-                            // R311y212 — retain the discovered-peer dial endpoint for
-                            // partial-loss re-add (aggregating dials only). R311y219 —
-                            // retain the priority band.
-                            ml_dial_endpoints
-                                .insert(id, (target.clone(), multilink_priority_range(id)));
-                            Box::pin(dial_face_multilink(
-                                id,
-                                target,
-                                Arc::clone(&dial_config),
-                                offer,
-                                multilink_priority_range(id),
-                                params.clone(),
-                                clock,
-                                tick_interval_ms,
-                            )) as OpenFuture
-                        } else {
-                            Box::pin(dial_face(
-                                id,
-                                target,
-                                Arc::clone(&dial_config),
-                                params.clone(),
-                                offer,
-                                clock,
-                                tick_interval_ms,
-                            )) as OpenFuture
-                        });
                     }
                     DialDecision::AlreadyHeld => {
-                        // R311y205 (transport-multilink) — the aggregation relax of
-                        // the "already held -> skip" dedup: when `max_links > 1` and
-                        // the held peer's session still has room, a second dialed
-                        // link to it is opened to AGGREGATE rather than suppressed.
-                        #[cfg(feature = "transport-multilink")]
-                        if max_links > 1 {
-                            let room = ml_sessions
-                                .get(&intent.zid)
-                                .map(|(_, _, core_handle)| core_handle.link_count() < max_links)
-                                .unwrap_or(false);
-                            if room {
-                                if let Some(target) = first_dialable_locator(&intent.locators) {
-                                    let id = FaceId::mint(&mut next_id);
-                                    summary.dialed += 1;
-                                    // R311y212 — retain the aggregation-relax dial
-                                    // endpoint for partial-loss re-add. R311y219 —
-                                    // retain the priority band.
-                                    ml_dial_endpoints
-                                        .insert(id, (target.clone(), multilink_priority_range(id)));
-                                    opening.push(Box::pin(dial_face_multilink(
-                                        id,
-                                        target,
-                                        Arc::clone(&dial_config),
-                                        offer,
-                                        multilink_priority_range(id),
-                                        params.clone(),
-                                        clock,
-                                        tick_interval_ms,
-                                    ))
-                                        as OpenFuture);
-                                    continue;
-                                }
-                            }
-                        }
+                        // An aggregating node too: its links to a node are the ones the
+                        // dial above planned when the node was found, and finding the node
+                        // again adds none, as upstream connects only to a peer it holds no
+                        // session to (`discovered_links`).
                         log::debug!(
                             "autoconnect: already hold a face to peer {:02x?}; \
                              skipping redundant dial",
@@ -8337,6 +8330,98 @@ mod tests {
         );
         assert_eq!(summary.established, 1, "the face to the node is up");
         drop(intent_tx);
+    }
+
+    /// An aggregating node dials a node a discovery plane found once for each pair of priority
+    /// range and reliability among the locators it knows for it (`discovered_links`): two
+    /// locators of one pair are one dial, and a locator that declares another band is a second.
+    /// The dials are counted when they are made, before any of them opens.
+    #[cfg(all(feature = "routing-peer", feature = "transport-multilink"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_aggregating_node_dials_a_found_node_once_for_each_pair_of_its_locators() {
+        for (second, dials) in [("", 1), ("?prio=4-7", 2)] {
+            let (acc_listener, acc_addr) = bind_loopback().await;
+            let (peer_listener, _peer_addr) = bind_loopback().await;
+            let (go_tx, go_rx) = watch::channel(false);
+            // The found node aggregates links too, as a node whose locators name bands does.
+            let acceptor = peer_loop(
+                FaceSources {
+                    listeners: vec![acc_listener],
+                    dial_targets: vec![],
+                    dial_config: Arc::new(DialConfig::default()),
+                    dial_intents: None,
+                    mcast_ingress: None,
+                    mcast_members: None,
+                    mcast_group_subs: None,
+                    reconcile: None,
+                    offer: SessionOffer::universal(),
+                    retry: RetryPolicy::constant(1000),
+                    stats: None,
+                    max_links: 2,
+                    max_sessions: usize::MAX,
+                    accept: AcceptBounds::default(),
+                    ceiling: None,
+                    peer_board: None,
+                },
+                acceptor_params(),
+                TokioTime::new(),
+                DEFAULT_OPEN_TICK_MS,
+                shutdown_on(go_rx.clone()),
+                |_event: &AcceptEvent| {},
+                &NoOpForwarder,
+            );
+            let (intent_tx, intent_rx) = tokio::sync::mpsc::unbounded_channel();
+            intent_tx
+                .send(DialIntent {
+                    zid: vec![0xAA; 4],
+                    locators: vec![format!("tcp/{acc_addr}"), format!("tcp/{acc_addr}{second}")],
+                    origin: DialIntentOrigin::Gossip,
+                })
+                .expect("buffer the dial-intent");
+            let on_event = move |event: &AcceptEvent| {
+                if let AcceptEvent::FaceUp(_) = event {
+                    let _ = go_tx.send(true);
+                }
+            };
+            let peer = peer_loop(
+                FaceSources {
+                    listeners: vec![peer_listener],
+                    dial_targets: vec![],
+                    dial_config: Arc::new(DialConfig::default()),
+                    dial_intents: Some(intent_rx),
+                    mcast_ingress: None,
+                    mcast_members: None,
+                    mcast_group_subs: None,
+                    reconcile: None,
+                    offer: SessionOffer::universal(),
+                    retry: RetryPolicy::constant(1000),
+                    stats: None,
+                    max_links: 2,
+                    max_sessions: usize::MAX,
+                    accept: AcceptBounds::default(),
+                    ceiling: None,
+                    peer_board: None,
+                },
+                peer_params(),
+                TokioTime::new(),
+                DEFAULT_OPEN_TICK_MS,
+                shutdown_on(go_rx.clone()),
+                on_event,
+                &NoOpForwarder,
+            );
+            let summary = tokio::time::timeout(Duration::from_secs(20), async {
+                let (_acc, peer) = tokio::join!(acceptor, peer);
+                peer
+            })
+            .await
+            .expect("the found node's face is up within 20s");
+            assert_eq!(
+                (summary.dialed, summary.gossip_dialed),
+                (dials, 1),
+                "one discovery; locators tcp/{acc_addr} and tcp/{acc_addr}{second}"
+            );
+            drop(intent_tx);
+        }
     }
 
     /// The mesh keystone: a peer holds a DIALED face and an ACCEPTED face at

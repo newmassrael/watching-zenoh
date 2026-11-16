@@ -121,18 +121,19 @@ fn assert_routed(received_text: &str, key: &str, value: &str) {
     );
 }
 
-/// Assert the wz router's OWN forward counter rose — the Put transited THROUGH
-/// the router's `RoutingForwarder`, not around it. `forwarded 0 sample(s)` would
+/// Assert the wz router's OWN relay counter rose — the Put transited THROUGH
+/// the router's `RoutingForwarder`, not around it. `0 data push(es) relayed` would
 /// mean the pico sub fired off a path the star topology forbids; a
-/// `routing-router`-only (`NoOpForwarder`) build emits no `forwarded` clause at
+/// `routing-router`-only (`NoOpForwarder`) build emits no `relayed` clause at
 /// all (the discriminator).
 fn assert_router_forwarded(router_stderr: &str) {
-    // R2886 — `--router` is the router hat; its summary counts pushes taken in.
+    // `--router` is the router hat; its summary counts the pushes it sent on
+    // apart from the pushes it took in.
     assert!(
-        router_stderr.contains("data push(es) forwarded")
-            && !router_stderr.contains(" 0 data push(es) forwarded"),
-        "the wz router summary must report a non-zero push count — the router \
-         did not carry the pico sample\n--- router stderr ---\n{router_stderr}"
+        router_stderr.contains("data push(es) relayed")
+            && !router_stderr.contains(" 0 data push(es) relayed"),
+        "the wz router summary must report a non-zero relayed push count — the \
+         router did not carry the pico sample\n--- router stderr ---\n{router_stderr}"
     );
 }
 

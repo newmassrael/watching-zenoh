@@ -7982,13 +7982,13 @@ async fn run_router_hat_until(
                         forwarder.ingested()
                     );
                 }
-                // Transit witness: a Push crossed this router. The peers know only
+                // Arrival witness: a Push reached this router. The peers know only
                 // THIS router's address (no autoconnect), so a rise proves the data
-                // plane routed THROUGH here — not around it.
+                // plane reached here; whether it left again is the relay witness below.
                 let seen = forwarder.data_seen();
                 if seen > last_data_seen {
                     last_data_seen = seen;
-                    log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
+                    log::info!("wz-ap-demo router-hat: received mesh data ({seen} push(es))");
                 }
                 // The sessions this router admits, from what it has measured of its own
                 // keepalives (`session_ceiling` above works it out at each admission). A host
@@ -8046,7 +8046,7 @@ async fn run_router_hat_until(
                         );
                     }
                 }
-                // R2904 — the RELAY witness: a Push LEFT this router. `forwarded
+                // R2904 — the RELAY witness: a Push LEFT this router. `received
                 // mesh data` above counts what arrived, and since R2901 a wz peer
                 // default-sends its own data to its gateway, so arrival no longer
                 // implies relay.
@@ -8197,7 +8197,7 @@ async fn run_router_hat_until(
         "wz-ap-demo router-hat: shutdown; dialed {}, accepted {}, served {} \
          peer(s), peak {} concurrent face(s), ingested {} link-state(s), peak \
          routers-net {} node(s), peak peers-net {} node(s), {} data push(es) \
-         forwarded",
+         received, {} data push(es) relayed",
         summary.dialed,
         summary.accepted,
         summary.established,
@@ -8205,12 +8205,14 @@ async fn run_router_hat_until(
         forwarder.ingested(),
         peak_routers,
         peak_peers,
-        forwarder.data_seen()
+        forwarder.data_seen(),
+        forwarder.data_sent()
     );
     // Deterministic shutdown witnesses (the run_peer counterparts): a router that
-    // INGESTED a neighbour's link-state converged over the wire, and one that
-    // FORWARDED any Push carried transit — both emitted unconditionally at
-    // teardown so a test need not race the 250 ms app tick.
+    // INGESTED a neighbour's link-state converged over the wire, one that RECEIVED
+    // any Push, and one that RELAYED any — each emitted unconditionally at teardown
+    // so a test need not race the 250 ms app tick. A router receives pushes it
+    // correctly declines to relay, so the last is the transit proof.
     if forwarder.ingested() > 0 {
         log::info!(
             "wz-ap-demo router-hat: learned mesh topology (ingested {} \
@@ -8222,7 +8224,7 @@ async fn run_router_hat_until(
     }
     if forwarder.data_seen() > 0 {
         log::info!(
-            "wz-ap-demo router-hat: forwarded mesh data ({} push(es))",
+            "wz-ap-demo router-hat: received mesh data ({} push(es))",
             forwarder.data_seen()
         );
     }

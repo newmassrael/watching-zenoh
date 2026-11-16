@@ -351,7 +351,7 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
         (&r2_cap, &r1_cap)
     };
     assert!(
-        other_cap.contains("router-hat: forwarded mesh data"),
+        other_cap.contains("router-hat: received mesh data"),
         "the router that did not federate never received the DR's carried copy over the \
          router mesh\n--- DR ---\n{dr_cap}\n--- other ---\n{other_cap}"
     );

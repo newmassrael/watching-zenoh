@@ -3011,8 +3011,11 @@ pub struct RouterForwarder {
     /// and, where the inter-region filter admits it, BRIDGED to the other mesh (C4,
     /// `bridge_push_cross_mesh`).
     data_seen: Counter,
-    /// R2904 — running total of data `Push` messages this router SENT on, on any
-    /// leg: the relay witness [`data_seen`](Self#structfield.data_seen) is not.
+    /// R2904 — running total of data `Push` messages this router SENT on to a
+    /// face, on any leg: the relay witness [`data_seen`](Self#structfield.data_seen)
+    /// is not. Counted where a send to a face is decided (`egress_to_face`, and the
+    /// release of what a face held); the copy handed to a multicast group does not
+    /// pass there and is not counted.
     /// Until R2901 the two coincided in the topologies that asserted on them,
     /// because a wz peer sent a router only what its graph route pointed at; since
     /// R2901 a peer default-sends its own data to its gateway, as the pin's peer
@@ -5487,12 +5490,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Total data `Push` messages received across all faces — the data-plane
-    /// TRANSIT witness.
+    /// ARRIVAL witness.
     /// Raised once at the `Push` dispatch arm, immediately before
-    /// [`route_push`](Self::route_push) routes it — on EVERY inbound Push, so a
-    /// pure router that hosts no subscription still counts a Push it forwarded —
-    /// the "delivery went THROUGH this router" proof the ACTIVATION harness
-    /// asserts on.
+    /// [`route_push`](Self::route_push) routes it — on EVERY inbound Push,
+    /// whether or not the router then sends it anywhere: a router receives pushes
+    /// it correctly declines to relay, so that a Push went THROUGH this router is
+    /// [`data_sent`](Self::data_sent)'s to say.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
     }
@@ -17086,6 +17089,7 @@ mod tests {
             .expect("build push");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
         assert_eq!(fwd.data_seen.get(), 1, "the Push is counted");
+        assert_eq!(fwd.data_sent(), 0, "received and relayed nowhere");
         assert_eq!(
             sink_r.frame_count(),
             0,
@@ -17138,6 +17142,11 @@ mod tests {
             sink_r.frame_count(),
             1,
             "bridged to the router-tier subscriber"
+        );
+        assert_eq!(
+            fwd.data_sent(),
+            1,
+            "relayed once, to the one face it went to"
         );
     }
 

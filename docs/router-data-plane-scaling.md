@@ -13,7 +13,9 @@ Setup: `wz-ap-demo --router-hat` (release profile, thin LTO, one codegen unit, `
 `router-hat-router`) pinned to two cores of one host; clients are `wz-ap-demo --sessions` processes on
 other cores of the same host, each session subscribing to its own key and publishing to its neighbour's.
 CPU time is the router process's user plus system time from `/proc/<pid>/stat`; the number of messages
-forwarded is the router's own `forwarded mesh data (N push(es))` counter. The offered load is 12.8k
+forwarded is the router's own `received mesh data (N push(es))` counter, each message having one
+subscriber (the line was named `forwarded mesh data` until the received and relayed counts were
+told apart). The offered load is 12.8k
 messages per second in every row, so the rows differ in the number of subscribers and in nothing else.
 
 | Subscribers | CPU per forwarded message, steady | With 16 sessions/s joining and leaving |

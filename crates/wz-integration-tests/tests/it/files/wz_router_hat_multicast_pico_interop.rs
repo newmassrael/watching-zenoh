@@ -273,7 +273,7 @@ fn wz_router_hat_multicast_egress_reaches_pico_zsub() {
 
     // Teardown: kill the publisher + z_sub directly; graceful_terminate the router
     // (SIGTERM) so it flushes its latched shutdown witnesses. With the long-lived
-    // publisher the "forwarded mesh data" witness also fires in-run on the router's
+    // publisher the "received mesh data" witness also fires in-run on the router's
     // ~250 ms app tick, but the graceful path keeps the flush deterministic.
     let _ = pub_child.child_mut().kill();
     let _ = pub_child.child_mut().wait();
@@ -318,8 +318,8 @@ fn wz_router_hat_multicast_egress_reaches_pico_zsub() {
     // (`:2317`) — not around it. The wz publisher and pico never knew each other's
     // address, so this pins the delivery to the router's egress route.
     assert!(
-        r_captured.contains("router-hat: forwarded mesh data"),
-        "the wz router-hat never forwarded a Push — the wz Put did not transit \
+        r_captured.contains("router-hat: received mesh data"),
+        "the wz router-hat never received a Push — the wz Put did not transit \
          `route_push`, so the multicast egress delivery did not exercise the router's \
          data route\n--- router-hat stderr ---\n{r_captured}"
     );

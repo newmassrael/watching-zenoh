@@ -296,7 +296,7 @@ fn wz_router_hat_region_peers_exchange_data_directly() {
     // R did not carry the data within its peer region.
     //
     // R2904 — asserted on the RELAY witness, `relayed mesh data`, and no longer
-    // on `forwarded mesh data`, which counts what ARRIVES. The old proxy held
+    // on `received mesh data`, which counts what ARRIVES. The old proxy held
     // only while a wz peer sent R nothing: R is P2's gateway, and since R2901 P2
     // default-sends its own Put to its gateway exactly as the pin's peer does
     // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
@@ -531,8 +531,8 @@ fn wz_router_hat_federates_data_across_two_routers() {
         ("router-hat-2", &r2_captured),
     ] {
         assert!(
-            captured.contains("router-hat: forwarded mesh data"),
-            "{label} never forwarded a Push — the federated delivery did not transit \
+            captured.contains("router-hat: received mesh data"),
+            "{label} never received a Push — the federated delivery did not transit \
              it, so it did not cross the router mesh\n--- {label} stderr ---\n{captured}"
         );
         assert!(
@@ -672,7 +672,7 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
     );
     // Transit pin: R's OWN query counter rose (it counts every inbound Request before
     // routing), so the query transited THROUGH R — the query-plane twin of test #2's
-    // `forwarded mesh data` data-transit pin. Latched shutdown witness (emitted on
+    // `received mesh data` data-transit pin. Latched shutdown witness (emitted on
     // `>0`), so it cannot race the app tick.
     assert!(
         r_captured.contains("router-hat: routed a query"),
@@ -872,7 +872,7 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
         // BOTH — issuer -> R1 (client-tier Request) -> R2 (router-tier transit
         // Request) -> queryable. This makes the cross-mesh query transit self-evident
         // from the routers' own logs, not inferred from topology + reply arrival alone
-        // (the query-plane twin of test #4's per-router `forwarded mesh data` pin).
+        // (the query-plane twin of test #4's per-router `received mesh data` pin).
         assert!(
             captured.contains("router-hat: routed a query"),
             "{label} never routed a query — the federated query did not transit it, \
