@@ -542,7 +542,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // runs the closure's `drop`, which is how this get completes without a
         // reply; the call still answers `Z_OK`
         // (`vendor/zenoh-pico/src/api/api.c` @
-        // `} else if (closure.drop != NULL) { closure.drop(closure.context); }`).
+        // `} else if (closure.drop != NULL) {`).
         // The bytes and the token were consumed above, as upstream's cleanup does.
         // pico checks the session first, then the write filter, and on either refusal runs
         // the closure's `drop` (`z_querier_get_with_parameters_substr`, `should_proceed`); a

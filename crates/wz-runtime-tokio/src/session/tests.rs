@@ -1895,7 +1895,7 @@ fn session_new_auto_wires_set_own_zid_from_params() {
     // guard without an explicit hook against the FSM
     // open-handshake completion event. Mirrors zenoh-pico's
     // `_z_session_init` which stamps `_local_zid` at session
-    // creation (vendor/zenoh-pico/src/session/session.c).
+    // creation (`vendor/zenoh-pico/src/session/utils.c` @ `zn->_local_zid = *zid;`).
     let (session, _driver) = build_session();
     // The `fixture_session_init_params()` SSOT seeds zid = [0x01; 4];
     // this test only pins that whatever zid the params carry is the

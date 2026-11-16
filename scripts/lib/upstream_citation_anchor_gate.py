@@ -132,6 +132,16 @@ Item 581 condition (3). Three ways this refuses instead of passing:
     needles would otherwise be a branch nothing ever takes. That arm was
     genuinely empty before this round; it is populated by migrating the
     seventeen wrong-today citations, which is what makes the check live.
+
+## The second upstream and the basename axis (open-debt items 697, 708, 724)
+
+Everything above is about zenoh's Rust tree. zenoh-pico is cited by its
+in-tree submodule path and gets the same three forms and the same two-way
+ratchet on its own axis, resolved against the submodule when it is checked out
+at the commit this tree records. A file name with a line number and no
+directory is the third axis: the ones naming no file this checkout tracks are
+held by a ratchet, since such a token can only be a claim about another tree.
+`pico_verdict` says which of these refuses.
 """
 
 from __future__ import annotations
@@ -410,6 +420,45 @@ def resolved_spans(text: str) -> list[tuple[int, int]]:
     form masked, so the union names no path outside what `scan` grades.
     """
     return sorted(m.span() for form in RESOLVED_FORMS for m in form.finditer(text))
+
+
+#: THE SECOND UPSTREAM (open-debt items 697 and 724). Every form above is the
+#: zenoh-Rust axis: its roots are that workspace's top-level directories and its
+#: path ends in `.rs`, so a citation of zenoh-pico -- C, cited by its in-tree
+#: path under the submodule -- fell into no bucket at all, and this gate's own
+#: summary still said every occurrence was classified. Rewriting a pico line
+#: citation into the anchored form moved no number, which is how that was
+#: found. The pico axis is its own set of forms rather than one more root in
+#: `UPSTREAM_ROOTS`, because both halves of `_PATH` -- the root vocabulary and
+#: the extension -- are zenoh-Rust's.
+#:
+#: The extension set is the C one plus the configure template the pico build
+#: generates its config header from; the trailing guard refuses a longer
+#: extension, so the template is never read as the header it generates.
+#:
+#: These forms are NOT in `RESOLVED_FORMS`: that tuple tells other readers which
+#: spans this file resolves against the pinned zenoh checkout, and the pico
+#: forms resolve against the submodule instead (`pico_checkout`).
+PICO_ROOT = "vendor/zenoh-pico"
+_PICO_PATH = rf"{re.escape(PICO_ROOT)}/[\w/.-]+\.(?:c|h|h\.in)(?![\w-]|\.\w)"
+PICO_ANCHOR_CITE = re.compile(
+    rf"`({_PICO_PATH})`{_LEADER}@{_LEADER}`([^`\n]{{1,200}})`"
+)
+PICO_LINE_CITE = re.compile(rf"(?<![\w/.-])({_PICO_PATH}):(\d+)")
+PICO_BARE_CITE = re.compile(rf"(?<![\w/.-])({_PICO_PATH})(?!:\d)")
+
+#: THE BASENAME AXIS (open-debt item 708). A file name with a line number and
+#: no directory names neither a tree nor a place in it: every form above needs
+#: a `/`, so such a token sat in no bucket and not even in the root-less
+#: residue, and the rot it carries is the worst kind -- a line that is still in
+#: range and lands on plausible code. Which upstream a basename means can only
+#: be read from its sentence, so the axis does not guess one. It counts the
+#: basenames that name NO file this checkout tracks: such a token can only be
+#: a claim about another tree (or about a file that is gone), and the repair is
+#: always the rooted, anchored form. A basename this checkout also tracks is a
+#: claim about either tree and is not counted; that residue is the sentence-
+#: level judgement this axis cannot make.
+BASENAME_LINE_CITE = re.compile(r"(?<![\w/.-])([\w-]+\.(?:rs|c|h)):(\d+)")
 
 
 #: BUDGETS. Measured, frozen, and checked in BOTH directions -- see the module
@@ -834,6 +883,26 @@ def rootless_undeclared_budget() -> int:
 # the establishment-reject tests that came with it were written with now carry
 # their root and a needle.
 ROOTLESS_TOTAL_BUDGET = 478
+
+#: The pico axis's two legacy forms, held both ways like `LINE_BUDGET`. MEASURED
+#: when the axis landed, by reading `PICO_LINE_CITE` and the plain path pattern
+#: with GNU grep over `tracked_files()`: 796 pico path tokens, of which 311 carry
+#: a line, 359 sit in an anchored citation (`PICO_ANCHOR_CITE`, read with the
+#: file as one record so a wrapped citation counts), and 126 are bare. Every one
+#: of the 359 needles and every line and bare path was then looked up in the
+#: submodule at the gitlink's commit; seven did not resolve and were repaired in
+#: the same commit, so the axis lands with no finding. Part of the bare count is
+#: not prose: a build or test script naming a pico source file is a bare token
+#: too, and is held by the same ratchet, since a path that moved breaks it the
+#: same way.
+PICO_LINE_BUDGET = 311
+PICO_BARE_BUDGET = 126
+#: The basename axis, held both ways. MEASURED with the same grep: 2079
+#: `BASENAME_LINE_CITE` tokens over `tracked_files()`, of which 1188 name a file
+#: no `git ls-files` path ends in (530 `.c`, 280 `.h`, 378 `.rs`). Tracking a
+#: new file whose name one of them uses moves that token out of this count; the
+#: refusal says so, and the number moves down with it.
+BASENAME_LINE_BUDGET = 1188
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
@@ -1430,6 +1499,174 @@ def scan(
     return counts, findings
 
 
+class PicoCheckout(typing.NamedTuple):
+    """What the pico axis can resolve against in one tree."""
+
+    #: The submodule's working tree, when it is at the recorded commit.
+    ref: pathlib.Path | None
+    #: Whether this tree's index records the submodule at all.
+    recorded: bool
+    #: Why `ref` is None, for the notice.
+    why: str
+
+
+def pico_checkout(root: pathlib.Path) -> PicoCheckout:
+    """The submodule checkout the pico axis resolves against.
+
+    It is used only at the commit the index records for it: a submodule left at
+    another commit would grade every citation against the wrong source, the
+    mistake `upstream_root` refuses for the zenoh pin. Whether the index records
+    it at all decides whether the axis has a subject (see `pico_verdict`).
+    """
+    try:
+        staged = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-s", "--", PICO_ROOT],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+    except (OSError, subprocess.CalledProcessError):
+        staged = []
+    if len(staged) < 2 or staged[0] != "160000":
+        return PicoCheckout(None, False, f"this tree records no {PICO_ROOT} submodule")
+    sub = root / PICO_ROOT
+    if not (sub / ".git").exists():
+        return PicoCheckout(None, True, f"{PICO_ROOT} is not checked out here")
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(sub), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return PicoCheckout(None, True, f"{PICO_ROOT} has no readable HEAD")
+    if head != staged[1]:
+        return PicoCheckout(
+            None, True,
+            f"{PICO_ROOT} is checked out at {head[:10]} and this tree records "
+            f"{staged[1][:10]}",
+        )
+    return PicoCheckout(sub, True, "")
+
+
+def scan_pico(
+    files: list[str], root: pathlib.Path, pico_ref: pathlib.Path | None
+) -> tuple[dict[str, int], list[Finding]]:
+    """The pico axis: every occurrence in one of three buckets, and, when
+    `pico_ref` is the submodule's checkout, a finding for each citation it does
+    not support. The anchored spans are masked before the other two forms read
+    the text, and the line spans before the bare form, as `scan` does."""
+    counts = {"anchored": 0, "line": 0, "bare": 0}
+    findings: list[Finding] = []
+    cache: dict[str, str | None] = {}
+
+    def source(path: str) -> str | None:
+        if path not in cache:
+            f = pico_ref / path[len(PICO_ROOT) + 1:] if pico_ref else None
+            cache[path] = f.read_text(errors="replace") if f and f.is_file() else None
+        return cache[path]
+
+    blank = lambda _m: " " * len(_m.group(0))  # noqa: E731
+    for rel in files:
+        try:
+            text = (root / rel).read_text(errors="replace")
+        except (OSError, UnicodeError):
+            continue
+        spans: list[tuple[int, int]] = []
+        for m in PICO_ANCHOR_CITE.finditer(text):
+            counts["anchored"] += 1
+            spans.append(m.span())
+            if pico_ref is None:
+                continue
+            body = source(m.group(1))
+            if body is None:
+                findings.append(Finding(
+                    rel, f"anchor cites `{m.group(1)}`, which the submodule does not have"))
+            elif m.group(2) not in body:
+                findings.append(Finding(
+                    rel, f"anchor `{m.group(2)}` does not occur in `{m.group(1)}` "
+                    "at the submodule's commit"))
+        masked = list(text)
+        for a, b in spans:
+            for i in range(a, b):
+                masked[i] = " "
+        rest = "".join(masked)
+        for m in PICO_LINE_CITE.finditer(rest):
+            counts["line"] += 1
+            if pico_ref is None:
+                continue
+            body = source(m.group(1))
+            if body is None:
+                findings.append(Finding(
+                    rel, f"`{m.group(1)}:{m.group(2)}` names a file the submodule does not have"))
+            elif int(m.group(2)) > len(body.splitlines()):
+                findings.append(Finding(
+                    rel, f"`{m.group(1)}:{m.group(2)}` is past the end of that file "
+                    f"({len(body.splitlines())} lines) at the submodule's commit"))
+        for m in PICO_BARE_CITE.finditer(PICO_LINE_CITE.sub(blank, rest)):
+            counts["bare"] += 1
+            if pico_ref is not None and source(m.group(1)) is None:
+                findings.append(Finding(
+                    rel, f"`{m.group(1)}` names a file the submodule does not have"))
+    return counts, findings
+
+
+def tracked_names(root: pathlib.Path) -> set[str]:
+    """The file name of every path `git ls-files` lists, the skipped trees
+    included: a basename this checkout tracks anywhere is a claim about it."""
+    out = subprocess.run(
+        ["git", "-C", str(root), "ls-files"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    return {p.rsplit("/", 1)[-1] for p in out}
+
+
+def scan_basenames(files: list[str], root: pathlib.Path, names: set[str]) -> int:
+    """`BASENAME_LINE_CITE` tokens whose file name is not in `names`."""
+    n = 0
+    for rel in files:
+        try:
+            text = (root / rel).read_text(errors="replace")
+        except (OSError, UnicodeError):
+            continue
+        n += sum(1 for m in BASENAME_LINE_CITE.finditer(text) if m.group(1) not in names)
+    return n
+
+
+def pico_verdict(
+    counts: dict[str, int],
+    findings: list[Finding],
+    basenames: int,
+    recorded: bool,
+) -> tuple[int, list[str]]:
+    """`(rc, refusals)` for the pico and basename axes, read against the module's
+    budgets at call time so the selftest can drive every branch."""
+    refusals: list[str] = []
+    if recorded and sum(counts.values()) == 0:
+        refusals.append(
+            f"this tree records the {PICO_ROOT} submodule and the pico axis found "
+            "ZERO citations of it -- the pattern stopped matching, which a green "
+            "run would hide")
+    if recorded and counts["anchored"] == 0:
+        refusals.append(
+            "no pico citation uses the anchored form, so the half of the pico axis "
+            "that RESOLVES a needle has no subject and could never fail")
+    for f in findings:
+        refusals.append(f"{f.where}: {f.detail}")
+    for name, got, budget in (
+        ("pico line-form", counts["line"], PICO_LINE_BUDGET),
+        ("pico bare", counts["bare"], PICO_BARE_BUDGET),
+        ("foreign basename line-form", basenames, BASENAME_LINE_BUDGET),
+    ):
+        if got > budget:
+            refusals.append(
+                f"{got} {name} citation(s), budget {budget}. This commit ADDED one. "
+                "Write it as `<rooted path>` @ `<needle>`; never raise the budget.")
+        elif got < budget:
+            refusals.append(
+                f"{got} {name} citation(s), budget {budget}. This commit REMOVED one "
+                "(or, for a basename, tracked a file of that name): lower the "
+                f"budget to {got} in this same commit so the ratchet holds.")
+    return (1 if refusals else 0), refusals
+
+
 def _rootless_finding(
     rel: str,
     path: str,
@@ -1798,6 +2035,28 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
                 file=sys.stderr,
             )
         rc = 1
+    # The second upstream and the basename axis (open-debt items 697, 708,
+    # 724). The pico submodule is in-tree, so its citations are resolved
+    # whenever it is checked out at the recorded commit, in either arm.
+    pico = pico_checkout(root)
+    pico_counts, pico_findings = scan_pico(files, root, pico.ref)
+    basenames = scan_basenames(files, root, tracked_names(root))
+    print(
+        f"  upstream-citation-anchor: pico axis -- {sum(pico_counts.values())} "
+        f"citation(s) of {PICO_ROOT}: {pico_counts['anchored']} anchored, "
+        f"{pico_counts['line']} line-form (budget {PICO_LINE_BUDGET}), "
+        f"{pico_counts['bare']} bare (budget {PICO_BARE_BUDGET}); "
+        + ("resolved against the submodule at its recorded commit"
+           if pico.ref is not None else f"FORM only: {pico.why}")
+        + f". Basename axis -- {basenames} line citation(s) of a file name this "
+        f"checkout does not track (budget {BASENAME_LINE_BUDGET})."
+    )
+    pico_rc, pico_refusals = pico_verdict(
+        pico_counts, pico_findings, basenames, pico.recorded
+    )
+    for line in pico_refusals:
+        print(f"  upstream-citation-anchor: FAIL -- {line}", file=sys.stderr)
+    rc = rc or pico_rc
     if not resolve and not resolution_arm_is_wired(root):
         print(
             "  upstream-citation-anchor: FAIL -- this run DEFERRED resolution "
@@ -1819,12 +2078,15 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
             "EXACTLY ONE of the directories the pin gives its segment, every "
             "path marked @ REMOVED is still ABSENT there, and all four legacy "
             "forms plus the three root-less ratchets sit exactly on their "
-            "budget."
+            "budget; the pico and basename ratchets too."
             if resolve
-            else "  upstream-citation-anchor: OK (FORM) -- every occurrence is "
-            "classified and all four legacy forms sit exactly on their budget. "
-            "Nothing here was resolved against upstream, so neither the "
-            "root-less paths nor the stale-line ratchet was graded."
+            else "  upstream-citation-anchor: OK (FORM) -- every zenoh-Rust "
+            "occurrence and every rooted pico occurrence is classified, and "
+            "all four legacy forms and the pico and basename ratchets sit "
+            "exactly on their budget. Nothing here was resolved against the "
+            "zenoh pin, so neither the root-less paths nor the stale-line "
+            "ratchet was graded. A pico path written without its in-tree root, "
+            "and a basename this checkout also tracks, are in no bucket."
         )
     return rc
 
@@ -2478,6 +2740,9 @@ def selftest() -> int:
             "ROOTLESS_STALE_LINE_BUDGET",
             "ROOTLESS_RESIDUE_BY_SEGMENT",
             "ROOTLESS_TOTAL_BUDGET",
+            "PICO_LINE_BUDGET",
+            "PICO_BARE_BUDGET",
+            "BASENAME_LINE_BUDGET",
         )
         keep = {name: globals()[name] for name in _BUDGETS}
 
@@ -2792,6 +3057,91 @@ def selftest() -> int:
                 f"declared {double}"
             )
 
+        # 13. THE PICO AND BASENAME AXES (open-debt items 697, 708, 724). The
+        #     paths are assembled for the reason case 8 gives. The CONTROL is
+        #     the dead needle: the same fixture with its needle broken must
+        #     turn the verdict from 0 to 1, or a pico axis that resolved nothing
+        #     would pass exactly as one that resolved everything.
+        PICO_SRC = _p(PICO_ROOT, "src", "net", "filtering.c")
+        PICO_CFG = _p(PICO_ROOT, "include", "zenoh-pico", "config.h.in")
+        pico_ref = base / "pico"
+        (pico_ref / "src" / "net").mkdir(parents=True)
+        (pico_ref / "src" / "net" / "filtering.c").write_text(
+            "int a;\nint pico_keeper(void) { return 0; }\nint b;\n")
+        (pico_ref / "include" / "zenoh-pico").mkdir(parents=True)
+        (pico_ref / "include" / "zenoh-pico" / "config.h.in").write_text("#define X 1\n")
+        psrc = base / "pico_src"
+        psrc.mkdir()
+
+        def pico_text(body: str, pref: pathlib.Path | None = pico_ref):
+            (psrc / "f.rs").write_text(body)
+            return scan_pico(["f.rs"], psrc, pref)
+
+        good = (f"// `{PICO_SRC}` @\n// `int pico_keeper(void)`\n"
+                f"// {PICO_SRC}:2 and {PICO_CFG}\n")
+        c, f = pico_text(good)
+        if c != {"anchored": 1, "line": 1, "bare": 1} or f:
+            failures.append(
+                "pico axis: a wrapped anchor, a line and a template path must "
+                f"count one each with no finding, got {c} {f}")
+        saved = {k: globals()[k] for k in _BUDGETS[-3:]}
+        try:
+            globals().update(PICO_LINE_BUDGET=0, PICO_BARE_BUDGET=0, BASENAME_LINE_BUDGET=0)
+            if pico_verdict(c, f, 0, True)[0] != 1:
+                failures.append("pico axis: budgets of 0 must refuse one line and one bare")
+            globals().update(PICO_LINE_BUDGET=1, PICO_BARE_BUDGET=1)
+            if pico_verdict(c, f, 0, True)[0] != 0:
+                failures.append("pico axis: a clean fixture on budget refused: "
+                                f"{pico_verdict(c, f, 0, True)[1]}")
+            dead_c, dead_f = pico_text(good.replace("pico_keeper", "pico_gone"))
+            if pico_verdict(dead_c, dead_f, 0, True)[0] != 1:
+                failures.append("pico axis: a DEAD needle did not turn the verdict to 1")
+            past_c, past_f = pico_text(good.replace(":2 ", ":9 "))
+            if pico_verdict(past_c, past_f, 0, True)[0] != 1:
+                failures.append("pico axis: a line past the end did not refuse")
+            form_c, form_f = pico_text(good.replace("pico_keeper", "pico_gone"), None)
+            if form_f or form_c != c:
+                failures.append(
+                    "pico axis: with no checkout it must count the same and "
+                    f"resolve nothing, got {form_c} {form_f}")
+            if pico_verdict({"anchored": 0, "line": 0, "bare": 0}, [], 0, True)[0] != 1:
+                failures.append(
+                    "pico axis: a tree that records the submodule and cites none "
+                    "of it must refuse")
+            if pico_verdict({"anchored": 0, "line": 1, "bare": 1}, [], 0, False)[0] != 0:
+                failures.append(
+                    "pico axis: a tree with no submodule must not demand an anchor")
+            # The basename ratchet, both ways, over a name the fixture tracks
+            # and one it does not. Assembled for the reason case 8 gives.
+            base_body = ("// " + "orchestrator.rs" + ":" + "12 and "
+                         + "f.rs" + ":" + "3\n")
+            (psrc / "f.rs").write_text(base_body)
+            n = scan_basenames(["f.rs"], psrc, {"f.rs"})
+            if n != 1:
+                failures.append(f"basename axis: one foreign name expected, got {n}")
+            if pico_verdict({"anchored": 1, "line": 1, "bare": 1}, [], n, True)[0] != 1:
+                failures.append("basename axis: one token over a budget of 0 did not refuse")
+            globals()["BASENAME_LINE_BUDGET"] = 2
+            if pico_verdict({"anchored": 1, "line": 1, "bare": 1}, [], n, True)[0] != 1:
+                failures.append("basename axis: one token under a budget of 2 did not refuse")
+        finally:
+            globals().update(saved)
+        # The axis is wired into `run()`: a fixture tree with one pico line and
+        # budgets of 0 refuses, and the same tree on budget passes.
+        pico_repo = git_fixture(
+            "repo_pico", f"// `{UNICAST}` @ `fn keeper()`\n// {PICO_SRC}:2\n" + MARK)
+        for label, got, want in (
+            ("a pico line over a budget of 0", verdict(pico_repo, ref, True, 0, 0), 1),
+            ("a pico line on budget",
+             verdict(pico_repo, ref, True, 0, 0, PICO_LINE_BUDGET=1), 0),
+        ):
+            if got != want:
+                failures.append(f"run() on {label}: expected rc={want}, got {got}")
+        if PICO_BARE_CITE.search(own) or PICO_LINE_CITE.search(own) or PICO_ANCHOR_CITE.search(own):
+            failures.append(
+                "this file writes a pico path literal; assemble it from segments "
+                "so the gate does not cite the submodule")
+
     # R2615 — `resolve_mode`, the hook's opportunistic decision, graded on all
     # SIX combinations rather than the two the hook happens to take. The mode
     # lived in `main()` for exactly as long as it took to notice that nothing
@@ -2895,7 +3245,13 @@ def selftest() -> int:
         "both arms (green). Mutation-checked: skipping markdown in the residue "
         "tally reds three of them, and disabling the residue and conservation "
         "ratchets reds both red rows; and `resolved_spans` grades an anchored "
-        "and a declared root-less path and neither a residue token nor a wz path"
+        "and a declared root-less path and neither a residue token nor a wz path. "
+        "The pico and basename axes (items 697, 708, 724): a wrapped pico "
+        "anchor, a line and a template path counted once each; a DEAD needle "
+        "and a line past the end turning the verdict to 1 (the control); no "
+        "checkout counting the same and resolving nothing; a recorded submodule "
+        "with no citation refused; the basename ratchet both ways; and run() "
+        "refusing a pico line over budget and passing it on budget"
     )
     return 0
 
