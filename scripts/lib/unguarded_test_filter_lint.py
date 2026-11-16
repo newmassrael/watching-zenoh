@@ -456,9 +456,18 @@ _ONE_ARM_PINNED = (
     "a `-- --list` count between the two runs pins the filter in the arm with "
     "neither feature; the two runs themselves are not counted -- " + _PREDATES
 )
+_EXECUTED_SET = (
+    "both runs write one log that `own_space_witness_lint.py --executed` "
+    "reads, and it fails unless every witness derived from the source is in "
+    "cargo's executed list -- a set held by name, stronger than a count"
+)
+_LOOPED_EXACT = (
+    "one `--exact` run per name of a loop, and nothing counts what each "
+    "selected; " + _PREDATES
+)
 
 # (lane function, filter words) -> (members, reason). Derived by reading
-# run-ci.sh: 21 unguarded filtered runs in 13 lane functions, every other
+# run-ci.sh: 23 unguarded filtered runs in 14 lane functions, every other
 # filtered run being wrapped, counted by hand, or a `--list`.
 EXEMPT: dict[tuple[str, str], tuple[int, str]] = {
     ("layer_c1aa_cargo_test_unixsock", "locator"): (1, _PREDATES),
@@ -477,6 +486,11 @@ EXEMPT: dict[tuple[str, str], tuple[int, str]] = {
      "push_metadata_drops_qos"): (1, _PREDATES),
     ("layer_c1bk_cargo_test_query_pub_field_gates", "pub_field"): (1, _LIST_PINNED),
     ("layer_c1bw_analyze_cli", "kind_name"): (1, _LIST_PINNED),
+    ("layer_c1own_own_space_witnesses", "own_space"): (2, _EXECUTED_SET),
+    ("layer_e7b_router_connect_reconcile",
+     "${WZ_TEST_PREFIX}$e7b_test"): (1, _LOOPED_EXACT),
+    ("layer_e7b2_router_connect_add_over_the_wire",
+     "${WZ_TEST_PREFIX}$e7b2_test"): (1, _LOOPED_EXACT),
 }
 
 
