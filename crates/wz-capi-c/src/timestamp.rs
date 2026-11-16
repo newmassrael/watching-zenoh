@@ -277,7 +277,9 @@ mod tests {
 
     /// A node whose clock is not trusted stamps none of its data under `trusted-only`, and a
     /// program that asks for the time is given the clock's all the same: one clock, so what the
-    /// program is given and what the node stamps once the clock is trusted interleave.
+    /// program is given and what the node stamps once the clock is trusted interleave. Only a
+    /// build whose node holds a clock (`timestamping`, the runtime's `time-hlc`) can ask it.
+    #[cfg(feature = "timestamping")]
     #[test]
     fn a_trusted_only_node_gives_a_program_the_time_of_the_clock_it_stamps_data_with() {
         use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
