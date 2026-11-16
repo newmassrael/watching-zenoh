@@ -113,8 +113,8 @@ impl AdvancedPublisherPlane for PicoPlane {
     }
 
     /// Always: a pico session stamps from its own clock and zid with no
-    /// configuration to consult (`vendor/zenoh-pico/src/net/session.c` @
-    /// `z_timestamp_new`), where zenoh's node clock exists only when
+    /// configuration to consult (`vendor/zenoh-pico/src/api/api.c` @
+    /// `z_result_t z_timestamp_new(`), where zenoh's node clock exists only when
     /// `timestamping` is enabled for the node's role. A cache without miss
     /// detection sequences by timestamp, so refusing it here would refuse a
     /// program pico runs.

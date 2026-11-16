@@ -3984,8 +3984,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// against a future FSM `Established` event. Mirrors
     /// zenoh-pico's `_z_session_init` which stamps the local zid
     /// into `_z_session_t._local_zid` at session creation —
-    /// `vendor/zenoh-pico/src/session/session.c` (`_z_session_init`
-    /// initializes `_local_zid` before any RX/TX driver runs).
+    /// `vendor/zenoh-pico/src/session/utils.c` @ `zn->_local_zid = *zid;`
+    /// (`_z_session_init` sets it before any RX/TX driver runs).
     ///
     /// Silent skip on `zid.is_empty()` so test fixtures that
     /// construct a Session with a placeholder `SessionInitParams`

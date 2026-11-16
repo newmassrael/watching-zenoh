@@ -412,6 +412,59 @@ fail_unowning_active = [
 ]
 _active_pop = sum(1 for _a in atoms if atoms[_a] == "active")
 
+# Open-debt item 673 -- invariant #8, REPORT-ONLY: a PARTIAL atom should still
+# name a LIVE residual. #6 holds COMPLETE to a test; nothing held PARTIAL to the
+# work it claims remains, so an atom whose named residuals were all paid stayed
+# PARTIAL and stayed in REMAINING WORK. A reason is an append-only log of
+# rounds, so what it says LAST is what it says now. Mechanically:
+#
+#   * a residual MARK is `REMAINING` (not the audit's own `REMAINING WORK`),
+#     `RESIDUAL`/`RESIDUALS`, or `What remains`, in that spelling;
+#   * a CLOSE mark is `IS NOW COMPLETE`, `nothing remains`, or a REMAINING
+#     clause that says none;
+#   * the residual is LIVE when the reason cites a `debt-` entry whose own
+#     reason opens `OPEN`, or when its LAST mark is a residual mark.
+#
+# It reports and never fails, because a list that has emptied is not yet a
+# measurement that the atom is whole: COMPLETE is a claim about every axis of
+# the atom, and "nobody named a new residual" reads the same as "there is
+# none". What it gives is the candidate list a round re-measures.
+_RESIDUAL_MARK = re.compile(
+    r"\bREMAINING\b(?! WORK)|\bRESIDUALS?\b|\b[Ww]hat remains\b")
+_CLOSE_MARK = re.compile(
+    r"\bIS NOW COMPLETE\b|\b[Nn]othing remains\b|\bNOTHING REMAINS\b"
+    r"|\bREMAINING\b(?! WORK)[^.]{0,20}\b(?:none|nothing|NONE|NOTHING)\b")
+_DEBT_REF = re.compile(r"\bdebt-[a-z0-9][a-z0-9-]*[a-z0-9]")
+_open_debts = {
+    inventory_kinds.entry_id(e)
+    for e in entries
+    if inventory_kinds.entry_id(e)
+    and inventory_kinds.is_debt(inventory_kinds.entry_id(e))
+    and inventory_kinds.reason_head_tag(e.get("reason")) == "OPEN"
+}
+
+def residual_state(text):
+    """`(live, why)` for one PARTIAL reason, by the rule above."""
+    cited = sorted(set(_DEBT_REF.findall(text)) & _open_debts)
+    if cited:
+        return True, "cites open %s" % ", ".join(cited)
+    marks = [(m.start(), "close") for m in _CLOSE_MARK.finditer(text)]
+    marks += [(m.start(), "residual") for m in _RESIDUAL_MARK.finditer(text)
+              if not any(c.start() <= m.start() < c.end()
+                         for c in _CLOSE_MARK.finditer(text))]
+    if not marks:
+        return False, "names no residual and cites no open debt entry"
+    last = max(marks)
+    if last[1] == "close":
+        return False, "its last residual statement closes it"
+    return True, "its last statement names a residual"
+
+_partial = sorted(a for a in atoms if impl_tag(a) == "PARTIAL")
+report_no_live_residual = [
+    (a, why) for a in _partial
+    for live, why in [residual_state(reason.get(a, ""))] if not live
+]
+
 ok = True
 active_n = sum(1 for a in atoms if atoms[a] == "active")
 print("=== catalog status truthfulness audit ===")
@@ -507,6 +560,12 @@ print("  REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) %s: %s" % (
     if unaudited else
     "= %d  [EXACT -- every atom's impl axis is tagged]" % len(remaining),
     ", ".join(remaining) if remaining else "(none)"))
+# Invariant #8 (item 673), report-only: printed, never a FAIL.
+print("  invariant #8 (report-only): %d of %d PARTIAL atom(s) name no live residual%s"
+      % (len(report_no_live_residual), len(_partial),
+         "" if _partial else " -- there is no PARTIAL atom to judge"))
+for _a, _why in report_no_live_residual:
+    print("    - %s  (%s; re-measure it: COMPLETE needs a test, see #6)" % (_a, _why))
 
 # R2628 — the same numbers, for a PROGRAM. `scripts/lib/loop_milestone.py`
 # judges an agent loop's milestone as "REMAINING WORK fell below the baseline

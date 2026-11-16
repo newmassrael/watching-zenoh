@@ -64,8 +64,8 @@ impl PicoSessionExt {
     ///
     /// The clock STAMPS whatever the role, which is pico's: its timestamps come
     /// from the session's own clock and zid unconditionally
-    /// (`vendor/zenoh-pico/src/net/session.c` @ `_z_timestamp_t z_timestamp_new`
-    /// calls no configuration), where zenoh's node clock exists only for a
+    /// (`vendor/zenoh-pico/src/api/api.c` @ `z_result_t z_timestamp_new(`
+    /// reads no configuration), where zenoh's node clock exists only for a
     /// router by default. An advanced publisher that stamps timestamps — a cache
     /// without miss detection — is refused on a clock that does not exist, so
     /// the clock a pico session has is the one it must be given.

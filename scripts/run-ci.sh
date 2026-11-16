@@ -3516,6 +3516,13 @@ layer_c0_test_discipline() {
     # is not a mechanism. The floor is PER SPELLING, so a parser that stopped
     # recognising the helper cannot hide behind the bare guards' coverage.
     _runci_leg count_guard_lint -- python3 scripts/lib/count_guard_lint.py
+    # The other half of what the guard is for: a `cargo test <filter>` that
+    # asserts no count at all exits 0 having selected nothing, and the lane's
+    # summed decline reading cannot see one zero-selecting leg beside legs that
+    # ran. Every filtered run is wrapped, counted by hand, or an exemption row
+    # with its reason; the rows only shrink. Read off this file, no build.
+    _runci_leg unguarded_test_filter_lint.selftest -- python3 scripts/lib/unguarded_test_filter_lint.py --selftest
+    _runci_leg unguarded_test_filter_lint --after unguarded_test_filter_lint.selftest -- python3 scripts/lib/unguarded_test_filter_lint.py --check
     # R2167 (no register item) — the SELFTEST of the gate that covers what the
     # line above declares out of scope. `count_guard_lint` skips 189 of 291
     # guards because a `#[cfg]`-gated count is not derivable without a build,

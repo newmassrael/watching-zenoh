@@ -48,19 +48,29 @@ structurally blind to this class anyway, since a stale guard lives in
 
 A test count is only statically derivable when the test set does not depend on
 the build configuration. So a guard is IN SCOPE only when it selects ONE test
-file with `-p PKG --test BIN`, that file has no `#[cfg(...)]` on any test
-function or enclosing module, and the invocation applies no substring filter.
-The one filtered shape that IS derivable is `--exact NAME`, which names the test
-and is therefore checked directly against the file's declarations — the rename
-this gate exists to catch.
+file with `-p PKG --test BIN` and that file has no `#[cfg(...)]` on any test
+function or enclosing module. `--exact NAME` names the test and is checked
+directly against the file's declarations — the rename this gate exists to catch.
+
+Open-debt item 400 -- a SUBSTRING filter is derivable too, on such a file, and
+leaving it out of scope is how three hand-written numbers went stale in one
+round with this lint green. libtest's rule is plain: a test runs when its full
+name (`mod::path::fn`) contains ANY filter and no `--skip` word. In a merged
+target the full name is `files::<file>::<path>` and `wz_test_args`' third word
+reaches libtest as `files::<file>::<word>`, so the filter is read back with
+that prefix. The module path of each test is walked from the file with string
+literals blanked, and a walk that disagrees with the attribute census puts the
+guard out of scope rather than publishing a count from it. A filter the shell
+assembles (a variable, a quote) stays out of scope.
 
 Everything else is reported as OUT OF SCOPE **with the reason that applies to
 it**, and counted. An unexplained skip is how a gate becomes decorative, and a
 LUMPED reason is the same failure one step later: 134 of the skips are `--lib`
 selections whose census would have to span every module in a crate's `src/`,
 19 name no cargo target at all, 17 are feature-dependent test files, 9 name a
-test through a shell variable, and 6 apply a substring filter. Those five
-numbers are auditable; one total of 185 would not be.
+test through a shell variable, and 6 applied a substring filter (now in scope
+where the file is countable, item 400). Those numbers are auditable; one total
+of 185 would not be.
 
 The in-scope set must be NON-EMPTY **per spelling**. A joint floor would still
 be cleared by the bare guards alone, so a parser that stopped recognising
@@ -121,6 +131,8 @@ VALUE_FLAGS = frozenset(
 )
 # A name is derivable only when the shell has not put it there.
 SHELL_EXPANSION_RE = re.compile(r"[$`\"']")
+# A filter word as libtest receives it: a test path or a piece of one.
+PLAIN_NAME_RE = re.compile(r"^[A-Za-z0-9_:]+$")
 
 
 def mapped_logical_lines(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
@@ -271,6 +283,95 @@ def libtest_selection(toks: list[str], start: int) -> tuple[bool, list[str], boo
             filters.append(t)
             i += 1
     return exact_mode, filters, has_skip
+
+
+def skip_words(toks: list[str], start: int) -> list[str]:
+    """The value of every `--skip` from `start` onward."""
+    return [toks[i + 1] for i in range(start, len(toks) - 1) if toks[i] == "--skip"]
+
+
+MOD_OPEN_RE = re.compile(r"\bmod\s+([A-Za-z_]\w*)\s*\{")
+FN_NAME_RE = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
+
+
+def test_paths(path: Path) -> list[tuple[str, bool]]:
+    """`(path within the file, ignored)` for every `#[test]` fn of `path`.
+
+    The path is the chain of inline `mod NAME {` blocks around the attribute,
+    then the fn name: what libtest prints after the target's own prefix. Braces
+    are counted with string and char literals blanked, since `format!("{x}")`
+    would otherwise move every module boundary after it.
+    """
+    return test_paths_of(path.read_text())
+
+
+def test_paths_of(source: str) -> list[tuple[str, bool]]:
+    """`test_paths` over a source text."""
+    text = rust_comments.strip_comments(source, blank_literals=True)
+    opens = {m.end() - 1: m.group(1) for m in MOD_OPEN_RE.finditer(text)}
+    lines = text.split("\n")
+    line_mods: list[tuple[str, ...]] = []
+    stack: list[tuple[str, int]] = []
+    depth = 0
+    pos = 0
+    for ln in lines:
+        line_mods.append(tuple(name for name, _ in stack))
+        for k, ch in enumerate(ln):
+            if ch == "{":
+                name = opens.get(pos + k)
+                if name is not None:
+                    stack.append((name, depth))
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if stack and stack[-1][1] == depth:
+                    stack.pop()
+        pos += len(ln) + 1
+    out: list[tuple[str, bool]] = []
+    for i, line in enumerate(lines):
+        attr = TEST_ATTR_RE.search(line)
+        if not attr:
+            continue
+        j = i
+        while j > 0 and lines[j - 1].lstrip().startswith("#["):
+            j -= 1
+        k = i
+        while k + 1 < len(lines) and lines[k + 1].lstrip().startswith("#["):
+            k += 1
+        ignored = "#[ignore" in "\n".join(lines[j:k + 1])
+        # The first `fn` after the block is the test's own; an attribute whose
+        # string spans lines can put it several lines down.
+        rest = line[attr.end():] + "\n" + "\n".join(lines[i + 1:k + 12])
+        fn = FN_NAME_RE.search(rest)
+        if fn is None:
+            continue
+        out.append(("::".join(line_mods[i] + (fn.group(1),)), ignored))
+    return out
+
+
+def substring_selection(
+    paths: list[tuple[str, bool]],
+    filters: list[str],
+    skips: list[str],
+    ignored_run: bool,
+    merged_stem: str | None,
+) -> int:
+    """How many of `paths` libtest runs for these filters and skips.
+
+    `merged_stem` is the file's name when it is compiled into a merged target,
+    where every test's full name starts `files::<stem>::` and the file's own
+    filter word reaches libtest with that prefix in front of it.
+    """
+    prefix = f"files::{merged_stem}::" if merged_stem else ""
+    wanted = [prefix + f for f in filters]
+    n = 0
+    for inner, ignored in paths:
+        if ignored != ignored_run:
+            continue
+        full = prefix + inner
+        if any(f in full for f in wanted) and not any(s in full for s in skips):
+            n += 1
+    return n
 
 
 def macro_rules_line_spans(lines: list[str]) -> list[tuple[int, int]]:
@@ -492,12 +593,65 @@ def _filter_beside_array_selftest() -> None:
     )
 
 
+_SUBSTRING_FIXTURE = """\
+#[test]
+fn shm_top() {
+    let open = "{";
+    let _ = open;
+}
+mod shm_mod {
+    #[test]
+    fn inner() {}
+    #[test] #[ignore]
+    fn ignored_shm() {}
+}
+mod other {
+    #[tokio::test]
+    async fn the_shm_witness() {}
+    #[test]
+    fn unrelated() {}
+}
+"""
+
+
+def _substring_selection_selftest() -> None:
+    """Item 400: the module walk and libtest's matching rule over a fixture.
+
+    The `"{"` literal is there because a walk that counted it would leave every
+    later test one module too deep; the merged case is there because a filter
+    that reaches libtest behind `files::<file>::` matches only from the start.
+    """
+    paths = test_paths_of(_SUBSTRING_FIXTURE)
+    want_paths = [
+        ("shm_top", False), ("shm_mod::inner", False),
+        ("shm_mod::ignored_shm", True), ("other::the_shm_witness", False),
+        ("other::unrelated", False),
+    ]
+    assert paths == want_paths, (
+        f"count-guard lint: the module walk read {paths}, expected {want_paths}"
+    )
+    cases = [
+        (["shm"], [], False, None, 3),
+        (["shm"], [], True, None, 1),
+        (["shm"], ["witness"], False, None, 2),
+        (["shm"], [], False, "f", 2),
+        (["other", "inner"], [], False, None, 3),
+    ]
+    for filters, skips, ignored_run, stem, want in cases:
+        got = substring_selection(paths, filters, skips, ignored_run, stem)
+        assert got == want, (
+            f"count-guard lint: filters {filters} skip {skips} ignored={ignored_run} "
+            f"merged={stem} select {got}, expected {want}"
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     _filter_beside_array_selftest()
+    _substring_selection_selftest()
     beside = filters_beside_the_array(RUNCI.read_text())
 
     # A test file named by `wz_test_args <crate> <file>` and `"${WZ_TEST_ARGS[@]}"` is read as the
@@ -662,18 +816,48 @@ def main() -> int:
                 )
             continue
 
-        # Anything else narrows the set in a way this script would have to
-        # re-implement libtest's substring matching to predict.
-        if filters or has_skip:
-            why = "--skip" if has_skip else f"the filter `{' '.join(filters)}`"
-            note(
-                out_of_scope,
-                f"{where}: {binary} — {why} narrows the set by substring match",
-            )
-            continue
         plain, ignored, why_not = test_fn_census(path)
         if why_not is not None:
             note(out_of_scope, f"{where}: {binary} — {why_not}")
+            continue
+
+        # Open-debt item 400 -- a substring filter or `--skip` on a countable
+        # file is libtest's own rule applied to the names the file declares.
+        if filters or has_skip:
+            skips = skip_words(toks, toks.index("--test") + 2)
+            # Only a plain test-path word is read: a variable or a quote is
+            # assembled by the shell, and a `)` or `;` glued to a word is the
+            # shell's, so the word libtest gets is not the one written here.
+            assembled = [w for w in filters + skips if not PLAIN_NAME_RE.match(w)]
+            if assembled:
+                note(
+                    out_of_scope,
+                    f"{where}: {binary} — `{' '.join(assembled)}` is not a plain "
+                    f"test-path word, so the set it selects is not on disk",
+                )
+                continue
+            paths = test_paths(path)
+            if len(paths) != plain + ignored:
+                note(
+                    out_of_scope,
+                    f"{where}: {binary} — the module walk found {len(paths)} "
+                    f"test(s) where the attribute census found {plain + ignored}",
+                )
+                continue
+            merged_stem = path.stem if path.parent.name == "files" else None
+            got = substring_selection(
+                paths, filters, skips, "--ignored" in toks, merged_stem
+            )
+            sel = " ".join(filters) + (f" --skip {' '.join(skips)}" if skips else "")
+            note(in_scope, f"{where}: {binary} {sel} guards {want}, file selects {got}")
+            if got != want:
+                failures.append(
+                    f"{where}: the guard expects `{want} passed` from `--test "
+                    f"{binary}` narrowed by `{sel}`, but the tests "
+                    f"{path.relative_to(REPO_ROOT)} declares select {got}. A test "
+                    f"whose name the filter matches joins the run silently; move "
+                    f"the number in this commit, or rename the test."
+                )
             continue
         got = ignored if "--ignored" in toks else plain
         kind = "#[ignore]d" if "--ignored" in toks else "plain"

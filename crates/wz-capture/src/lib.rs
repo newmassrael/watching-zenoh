@@ -5083,7 +5083,7 @@ impl DissectionLimits {
             //
             // The measurement also bounds what is left to judge. `_z_send_serial`
             // is reachable only after `_z_connect_serial` returns OK
-            // (`vendor/zenoh-pico/.../serial_protocol.c:255-280`), so the number
+            // (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c` @ `ret = _z_connect_serial(sock->_sock);`), so the number
             // of DATA frames ahead of a handshake is 0 with bring-up captured and
             // unbounded without it — never a value in between. 256 therefore buys
             // nothing on the first case (any ceiling >= 2 does) and everything on

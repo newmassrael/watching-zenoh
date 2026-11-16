@@ -13,7 +13,7 @@
 //! link before the hold is let go. The dispatch's own Final for that request id waits for the last
 //! hold, so it never overtakes a reply. That is the order zenoh-pico keeps by answering in its read
 //! task before the Final (`vendor/zenoh-pico/src/session/queryable.c` @
-//! `_z_trigger_queryables_impl`), and zenoh keeps by sending the Final when the last `Query` is
+//! `z_result_t _z_trigger_queryables(`), and zenoh keeps by sending the Final when the last `Query` is
 //! dropped (`zenoh/src/api/queryable.rs` @ `impl Drop for QueryInner {`).
 //!
 //! A query the callback keeps ([`CoopHolder::hold_query`]) is one hold more, released when the C
