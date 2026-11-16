@@ -65,6 +65,7 @@ transport/link/tx/queue/size/background	unsurveyed	-	-	-	-	a size other than dat
 transport/link/tx/queue/congestion_control/drop/wait_before_drop	unsurveyed	-	-	-	-	-
 transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments	unsurveyed	-	-	-	-	-
 transport/link/tx/queue/congestion_control/block/wait_before_close	unsurveyed	-	-	-	-	-
+transport/link/tx/queue/batching/time_limit	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_tx_batching_time_limit_twice_and_diff.rs::a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc	capi-c	zenoh-c	statistical	batches per contended burst at 0 and 100 ms, by a sequential sign test at alpha = beta = 0.01
 transport/link/tx/queue/allocation/mode	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_link_resources_twice_and_diff.rs::an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_wz_and_libzenohc	capi-c	zenoh-c	resource	batch-sized heap blocks of the dialling program by phase, under an allocator observer both builds load
 transport/link/rx/buffer_size	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_link_resources_twice_and_diff.rs::a_larger_rx_buffer_size_keeps_more_receive_buffers_on_wz_and_libzenohc	capi-c	zenoh-c	resource	at the default batch size; past it wz divides by the widest batch where upstream divides by the link's
 transport/link/rx/max_message_size	unsurveyed	-	-	-	-	-

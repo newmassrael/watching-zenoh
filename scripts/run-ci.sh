@@ -25948,6 +25948,17 @@ layer_c1cc_api_compat_c() {
             --exact "${WZ_TEST_PREFIX}$leg" \
             || return 1
     done
+    # `batching/time_limit` as a distribution: a contended burst's batches at 0 and at 100 ms,
+    # read through a tap, step by step until Wald's test at alpha = beta = 0.01 decides; the
+    # real library must decide that the longer bound takes fewer batches before wz is asked.
+    wz_test_args wz-integration-tests zenoh_c_tx_batching_time_limit_twice_and_diff
+    _runci_guarded_test \
+        "C1cc a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc" \
+        || return 1
     # R3059 -- a SUBSCRIBER OF THE PUBLISHING SESSION, one C program on both libraries: a
     # chunk put on a literal key and on a declared key is handed to a local subscriber as a
     # shared-memory buffer, a plain-bytes put as a raw one. The legs that put a chunk on the

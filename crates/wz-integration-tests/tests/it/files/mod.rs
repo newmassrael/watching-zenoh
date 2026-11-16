@@ -279,6 +279,7 @@ mod zenoh_c_shm_query_local_twice_and_diff;
 mod zenoh_c_shm_reply_twice_and_diff;
 mod zenoh_c_source_info_twice_and_diff;
 mod zenoh_c_throughput_diff;
+mod zenoh_c_tx_batching_time_limit_twice_and_diff;
 mod zenoh_c_upstream_api_tests_on_wz;
 mod zenoh_close_scope_foreign_witness;
 mod zenoh_config_emit_zenohd_interop;
