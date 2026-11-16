@@ -11734,6 +11734,14 @@ layer_c1g_cargo_test_observer() {
     # set is the acceptor image's (the handshake codecs, the frame, keep-alive, close).
     (cd crates \
         && cargo clippy -p wz-session-core --lib --no-default-features --features no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,session-slot --quiet -- -D warnings) || return 1
+    # The multicast group's receive on the same profile reads a fragment where it lies
+    # (`multicast_rx::in_place_reassembly_tests`, gated on NO `alloc`): a member that
+    # restarts a chain is reported dropped once, as superseded. Every other leg that
+    # builds `multicast_rx` keeps `alloc` (`routing-namespace` implies it), so this is
+    # the one that runs it. The set is the module's own gate with `session-slot` as the
+    # storage profile. 1 = the module's one case, counted from the source, not printed.
+    _runci_guarded_test C1g 1 \
+        cargo test -p wz-session-core --lib --no-default-features --features session-slot,session-multicast,codec-join,codec-frame,codec-close,reassembly,transport-fragmentation --quiet -- multicast_rx::in_place_reassembly_tests || return 1
     # Every combination the selector touches must compile and be clean WITH and
     # WITHOUT it: a symbol the lend-only profile stops using is dead there, and one
     # the heap profile stops using after a refactor is dead there. `--all-features`
