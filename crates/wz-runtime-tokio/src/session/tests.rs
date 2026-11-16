@@ -8042,6 +8042,52 @@ fn the_session_matching_accessor_agrees_with_what_a_declare_does() {
     }
 }
 
+/// A publisher whose destination is its own session alone asks the neighbour
+/// nothing, at declare, clone or drop, as upstream declares no interest for
+/// one; a publisher on the same key that may reach the network asks once.
+/// CONTROL: acquire the interest whatever the destination and the first count
+/// moves.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_session_local_publisher_asks_no_neighbour_for_subscribers() {
+    let (session, driver) = build_session();
+    let before = driver.frame_count();
+
+    let local = session.declare_publisher(
+        "home/temp",
+        PublishOptions::put().with_locality(Locality::SessionLocal),
+    );
+    let clone = local.clone();
+    drop(clone);
+    drop(local);
+    assert_eq!(
+        driver.frame_count(),
+        before,
+        "a session-local publisher emits no Interest and no Final"
+    );
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp"),
+        None,
+        "and holds no reference on the session's table"
+    );
+
+    let remote = session.declare_publisher("home/temp", PublishOptions::put());
+    assert_eq!(
+        driver.frame_count(),
+        before + 1,
+        "a publisher that may reach the network asks once"
+    );
+    assert!(session
+        .matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp")
+        .is_some());
+    drop(remote);
+}
+
 /// R2577 — the refcount, from the side that makes a naive `Drop` wrong: a
 /// CLONE is another live publisher, so it must NOT emit a second Interest, and
 /// dropping it must NOT retract the one the original still needs.

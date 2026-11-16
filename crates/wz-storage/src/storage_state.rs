@@ -241,6 +241,9 @@ pub struct StorageState<B: StorageBackend> {
     /// this log.
     #[cfg(feature = "storage-replication")]
     replication_log: ReplicationLog,
+    /// How many writes the backend refused on either receive path, a captured
+    /// sample or an aligned event ([`refused_writes`](StorageState::refused_writes)).
+    refused_writes: u64,
 }
 
 /// One key's newest accepted event in [`StorageState`]'s newer-wins record:
@@ -289,6 +292,7 @@ impl<B: StorageBackend> StorageState<B> {
             wildcard_deletes: BTreeMap::new(),
             #[cfg(feature = "storage-replication")]
             replication_log: ReplicationLog::default(),
+            refused_writes: 0,
         }
         .hydrated()
     }
@@ -315,6 +319,7 @@ impl<B: StorageBackend> StorageState<B> {
             wildcard_deletes: BTreeMap::new(),
             #[cfg(feature = "storage-replication")]
             replication_log: ReplicationLog::default(),
+            refused_writes: 0,
         }
         .hydrated()
     }
@@ -671,12 +676,27 @@ impl<B: StorageBackend> StorageState<B> {
     ) {
         let outcome = self.apply_sample_inner(view, fallback);
         if outcome.is_err() {
+            self.refused_writes = self.refused_writes.saturating_add(1);
             log::error!(
                 "wz storage: the backend refused the captured sample for keyexpr {:?}; it is \
                  NOT stored and NOT recorded, so a replicating peer still sees it as missing",
                 view.keyexpr()
             );
         }
+    }
+
+    /// How many writes the backend has refused since this state was built:
+    /// samples [`apply_sample`](Self::apply_sample) captured and events an
+    /// alignment round pulled, which the driver loops log and carry on past.
+    ///
+    /// The log line is each refusal's report; this is the one an operator
+    /// can read later, the way a transport's counters are read, for a storage
+    /// that otherwise looks healthy while it persists nothing. A write the
+    /// caller drives itself ([`process_put`](Self::process_put),
+    /// [`process_delete`](Self::process_delete)) returns its refusal instead
+    /// and is not counted. Saturates rather than wraps.
+    pub fn refused_writes(&self) -> u64 {
+        self.refused_writes
     }
 
     /// The capture body [`apply_sample`](Self::apply_sample) logs the outcome
@@ -1786,7 +1806,7 @@ impl<B: StorageBackend> StorageState<B> {
                                 Vec::new(),
                                 None,
                             );
-                            Self::note_aligned_apply(applied, meta.key());
+                            self.note_aligned_apply(applied, meta.key());
                         }
                         // R311wt slice 3 (storage-mgr-wildcard-updates ON): apply
                         // a wildcard event received from a peer. A WildcardDelete
@@ -1804,7 +1824,7 @@ impl<B: StorageBackend> StorageState<B> {
                                 Vec::new(),
                                 None,
                             );
-                            Self::note_aligned_apply(applied, meta.key());
+                            self.note_aligned_apply(applied, meta.key());
                         }
                         #[cfg(feature = "storage-mgr-wildcard-updates")]
                         Action::WildcardPut(_) => missing_puts.push(meta),
@@ -1840,7 +1860,7 @@ impl<B: StorageBackend> StorageState<B> {
                                     payload,
                                     encoding,
                                 );
-                                Self::note_aligned_apply(applied, meta.key());
+                                self.note_aligned_apply(applied, meta.key());
                             }
                             // A Put with no value = the peer skipped it (its
                             // data changed); nothing to apply.
@@ -1853,7 +1873,7 @@ impl<B: StorageBackend> StorageState<B> {
                                 Vec::new(),
                                 None,
                             );
-                            Self::note_aligned_apply(applied, meta.key());
+                            self.note_aligned_apply(applied, meta.key());
                         }
                         // R311wt slice 3: a WildcardPut retrieved WITH its payload
                         // → materialize. A WildcardDelete reaches the Retrieval arm
@@ -1873,7 +1893,7 @@ impl<B: StorageBackend> StorageState<B> {
                                     payload,
                                     encoding,
                                 );
-                                Self::note_aligned_apply(applied, meta.key());
+                                self.note_aligned_apply(applied, meta.key());
                             }
                             // A WildcardPut with no value = the peer skipped it;
                             // nothing to apply (mirrors the plain-Put arm).
@@ -1887,7 +1907,7 @@ impl<B: StorageBackend> StorageState<B> {
                                 Vec::new(),
                                 None,
                             );
-                            Self::note_aligned_apply(applied, meta.key());
+                            self.note_aligned_apply(applied, meta.key());
                         }
                         // storage-aligner WITHOUT storage-mgr-wildcard-updates: skip.
                         #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
@@ -1910,8 +1930,9 @@ impl<B: StorageBackend> StorageState<B> {
     /// in the same place from the other direction
     /// (`storages_mgt/service.rs:361-365`: log, continue the loop).
     #[cfg(feature = "storage-aligner")]
-    fn note_aligned_apply(outcome: Result<(), StorageWriteError>, key: Option<&str>) {
+    fn note_aligned_apply(&mut self, outcome: Result<(), StorageWriteError>, key: Option<&str>) {
         if outcome.is_err() {
+            self.refused_writes = self.refused_writes.saturating_add(1);
             log::error!(
                 "wz storage aligner: the backend refused the aligned event for key {key:?}; \
                  it stays missing on this replica and is pulled again next round"
@@ -2666,6 +2687,62 @@ mod tests {
                 vec![Some(String::from("demo/kept"))],
                 "the digest may advertise only what this replica actually holds"
             );
+        }
+
+        /// A captured sample the backend refuses is counted; an accepted one is
+        /// not, and neither is a write the caller drove itself, whose refusal
+        /// it was handed. CONTROL: drop the increment from `apply_sample` and
+        /// the second count reads 0.
+        #[test]
+        fn a_refused_captured_sample_is_counted_and_nothing_else_is() {
+            use wz_session_core::sample::Sample;
+
+            let (mut s, refuse) = refusing();
+            s.apply_sample(
+                &Sample::new_put("demo/a", vec![1]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            assert_eq!(s.refused_writes(), 0, "an accepted sample is no refusal");
+
+            refuse.set(true);
+            s.apply_sample(
+                &Sample::new_put("demo/b", vec![2]).with_timestamp(ts(11, 1)),
+                || unreachable!(),
+            );
+            assert_eq!(s.refused_writes(), 1, "the refused capture is counted");
+
+            assert!(s
+                .process_put(Some("demo/c"), vec![3], None, ts(12, 1))
+                .is_err());
+            assert_eq!(
+                s.refused_writes(),
+                1,
+                "a write the caller drove returns its refusal and is not counted"
+            );
+        }
+
+        /// An event an alignment round pulled and the backend refused is
+        /// counted too, and stays missing. CONTROL: drop the increment from
+        /// `note_aligned_apply` and the count reads 0.
+        #[cfg(feature = "storage-aligner")]
+        #[test]
+        fn a_refused_aligned_event_is_counted() {
+            let (mut s, refuse) = refusing();
+            refuse.set(true);
+            let config = crate::storage_replication::ReplicationConfig::new(
+                "demo/**", None, 1000, 2, 2, 2, 250,
+            );
+            let followup = s.process_alignment_reply(
+                &config,
+                AlignmentReply::Retrieval(EventMetadata::put(Some("demo/x".into()), ts(10, 1))),
+                Some(RetrievedValue {
+                    payload: vec![1],
+                    encoding: None,
+                }),
+            );
+            assert_eq!(followup, AlignmentFollowup::Done);
+            assert_eq!(s.refused_writes(), 1);
+            assert!(s.get_newest(Some("demo/x")).unwrap().is_none());
         }
     }
 

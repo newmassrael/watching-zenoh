@@ -535,8 +535,8 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
         // R2755 — THE FLAG, NOT A WIDTH READ OFF IT NOW. Handing over a width
         // computed here pinned whatever the flag said at this instant, and this
         // instant is inside the handshake: see [`UringReactor::attach`] for the
-        // measurement. The reactor re-derives the width at each frame boundary,
-        // which is the same rule `poll_framed` follows on the arm below.
+        // measurement. The ring body reads the width as each frame starts, which
+        // is the same rule `poll_framed` follows on the arm below.
         match reactor.attach(fd, Arc::clone(&self.lowlatency)) {
             Ok(rx) => RingChoice::Ring(Box::new(rx)),
             // A reactor whose worker has stopped is not this link's failure to

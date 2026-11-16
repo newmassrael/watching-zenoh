@@ -4745,6 +4745,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// How many network messages wait in the open frame of the conduit
+    /// `priority` rides, 0 when none is open there: pico's batch count, read
+    /// per conduit. A gauge rather than a counter, falling to 0 whenever that
+    /// conduit's frame leaves. Without `transport-qos` every priority reads the
+    /// one conduit.
+    #[cfg(feature = "transport-batching")]
+    pub fn batch_staged_messages(&self, priority: Priority) -> usize {
+        R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+            batch.stage.count
+        })
+    }
+
     /// ARCHITECTURE section 9.1 -- where this session's batch frames were
     /// staged, summed over its conduits: in a lent slot, or on the heap and why.
     #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]

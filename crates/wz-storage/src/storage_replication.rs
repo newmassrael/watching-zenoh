@@ -207,6 +207,36 @@ pub struct ReplicationConfig {
     fingerprint: Fingerprint,
 }
 
+/// A publication cycle that took longer than one interval, so the period the
+/// configuration names cannot be kept: [`ReplicationConfig::post_publication_delay_ms`]'s
+/// refusal.
+///
+/// It is the operator's to fix and nobody else's, which is why its
+/// [`Display`](core::fmt::Display) is upstream's advice word for word (the
+/// replication publisher warns with it each cycle that overruns,
+/// `plugins/zenoh-plugin-storage-manager/src/replication/core.rs` @
+/// `if digest_update_duration > configuration.interval {`): the usual cause is
+/// a propagation delay as long as the interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleOverrun {
+    /// The configured interval.
+    pub interval_ms: u64,
+    /// How long the cycle took, its propagation wait and jitter included.
+    pub cycle_ms: u64,
+}
+
+impl core::fmt::Display for CycleOverrun {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "The duration it took to update and publish the Digest is superior to the \
+             duration of an Interval ({} ms), we recommend increasing the duration of \
+             the latter. Digest update: {} ms",
+            self.interval_ms, self.cycle_ms
+        )
+    }
+}
+
 impl ReplicationConfig {
     /// Builds a [`ReplicationConfig`] and computes its [`Fingerprint`].
     ///
@@ -371,14 +401,19 @@ impl ReplicationConfig {
     /// cycle's own work (the propagation wait, the digest build, the jitter,
     /// the put) took. zenoh core.rs:262-272.
     ///
-    /// `None` means the cycle overran a whole interval; zenoh warns that the
+    /// `Err` means the cycle overran a whole interval; zenoh warns that the
     /// interval is configured too short and re-enters the loop immediately,
-    /// so a caller that gets `None` should not sleep rather than treat it as
-    /// an error. Without this subtraction the period would be `interval +
-    /// work` and a replica would publish strictly less often than configured
-    /// — the drift compounds over a session.
-    pub fn post_publication_delay_ms(&self, cycle_duration_ms: u64) -> Option<u64> {
-        self.interval_ms.checked_sub(cycle_duration_ms)
+    /// so a caller that gets `Err` should report the [`CycleOverrun`] and not
+    /// sleep. Without this subtraction the period would be `interval + work`
+    /// and a replica would publish strictly less often than configured — the
+    /// drift compounds over a session.
+    pub fn post_publication_delay_ms(&self, cycle_duration_ms: u64) -> Result<u64, CycleOverrun> {
+        self.interval_ms
+            .checked_sub(cycle_duration_ms)
+            .ok_or(CycleOverrun {
+                interval_ms: self.interval_ms,
+                cycle_ms: cycle_duration_ms,
+            })
     }
 
     /// Classifies an NTP64 `time` into its `(interval, sub-interval)` bucket.
@@ -1451,18 +1486,24 @@ mod tests {
 
     /// The closing sleep is `interval - cycle_work`, which is what holds the
     /// publication PERIOD at `interval` instead of letting it grow to
-    /// `interval + work` (zenoh core.rs:262-272). `None` is the overrun
-    /// signal, not an error: upstream warns and re-enters immediately.
+    /// `interval + work` (zenoh core.rs:262-272). `Err` is the overrun
+    /// signal: upstream warns and re-enters immediately.
     #[test]
     fn post_publication_delay_holds_the_period_at_one_interval() {
         let config = ReplicationConfig::new("demo/**", None, 1_000, 5, 6, 30, 250);
 
-        assert_eq!(config.post_publication_delay_ms(0), Some(1_000));
-        assert_eq!(config.post_publication_delay_ms(250), Some(750));
-        // A cycle that exactly fills the interval sleeps zero — still Some, so
+        assert_eq!(config.post_publication_delay_ms(0), Ok(1_000));
+        assert_eq!(config.post_publication_delay_ms(250), Ok(750));
+        // A cycle that exactly fills the interval sleeps zero — still Ok, so
         // a caller cannot confuse "no time left" with "overran".
-        assert_eq!(config.post_publication_delay_ms(1_000), Some(0));
-        assert_eq!(config.post_publication_delay_ms(1_001), None);
+        assert_eq!(config.post_publication_delay_ms(1_000), Ok(0));
+        assert_eq!(
+            config.post_publication_delay_ms(1_001),
+            Err(CycleOverrun {
+                interval_ms: 1_000,
+                cycle_ms: 1_001,
+            })
+        );
 
         // The invariant the subtraction exists for: work + closing sleep is
         // one interval, whatever the work was.
@@ -1472,6 +1513,24 @@ mod tests {
                 1_000
             );
         }
+    }
+
+    /// An overrun tells the operator what upstream tells them: that the cycle
+    /// outlasted the interval, both durations, and to lengthen the interval.
+    /// A propagation delay longer than the interval is the configuration that
+    /// produces it every cycle.
+    #[test]
+    fn a_cycle_overrun_reports_upstreams_advice_with_both_durations() {
+        let config = ReplicationConfig::new("demo/**", None, 100, 5, 6, 30, 250);
+        let overrun = config
+            .post_publication_delay_ms(config.propagation_delay_ms() + 3)
+            .expect_err("a propagation delay past the interval overruns it");
+        assert_eq!(
+            alloc::format!("{overrun}"),
+            "The duration it took to update and publish the Digest is superior to the \
+             duration of an Interval (100 ms), we recommend increasing the duration of \
+             the latter. Digest update: 253 ms"
+        );
     }
 
     /// The anti-storm property [`JitterSequence`] actually claims: DISTINCT

@@ -60,8 +60,14 @@ const PEER_LISTEN_MARKER: &str = "peer: listening on 127.0.0.1:";
 /// The line a dialer logs when a candidate endpoint could not be opened.
 const DIAL_REFUSED: &str = "unable to connect to";
 
-/// The text of the refusal a dial gives when it holds no trust store at all.
-const NO_TRUST_STORE: &str = "tls dial requires DialConfig.tls";
+/// The text a dial fails with when the peer's certificate chains to no root it
+/// trusts: with no `root_ca_certificate` that is the public WebPKI roots alone,
+/// which a self-signed acceptor does not chain to.
+const UNTRUSTED_PEER: &str = "invalid peer certificate";
+
+/// The expansion line's spelling of `root_ca_certificate`: present in a
+/// dialer's log exactly when its file named a root.
+const ROOT_CA_FLAG: &str = "\"--tls-ca\"";
 
 /// How long any one node gets to reach the line a leg waits for.
 const BUDGET: Duration = Duration::from_secs(10);
@@ -215,8 +221,10 @@ fn wz_peer_tls_keys_in_two_config_files_establish_a_tls_session() {
     );
 }
 
-/// Without `root_ca_certificate` the dialer has no trust store and does not
-/// establish; with it, against the same acceptor, it does.
+/// Without `root_ca_certificate` the dialer trusts the public roots alone,
+/// which the self-signed acceptor does not chain to, and does not establish:
+/// the dial is made and the certificate refused. With the key, against the
+/// same acceptor, it establishes.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features tls,routing-peer,zenoh-config); Layer Z runs via --ignored"]
 fn wz_peer_tls_dialer_without_root_ca_certificate_key_does_not_establish() {
@@ -240,8 +248,13 @@ fn wz_peer_tls_dialer_without_root_ca_certificate_key_does_not_establish() {
          within {BUDGET:?}\n--- dialer stderr ---\n{bare_text}"
     );
     assert!(
-        bare_text.contains(NO_TRUST_STORE),
-        "the dial failed, but not for want of a trust store\n--- dialer stderr ---\n{bare_text}"
+        bare_text.contains(UNTRUSTED_PEER),
+        "the dial failed, but not on the acceptor's certificate against the public roots\n\
+         --- dialer stderr ---\n{bare_text}"
+    );
+    assert!(
+        !bare_text.contains(ROOT_CA_FLAG),
+        "the bare dialer's file named a root after all\n{bare_text}"
     );
     assert!(
         !bare_text.contains("session Established"),
@@ -297,8 +310,13 @@ fn wz_peer_tls_dialer_with_a_foreign_root_ca_certificate_is_refused() {
          within {BUDGET:?}\n--- dialer stderr ---\n{wrong_text}"
     );
     assert!(
-        !wrong_text.contains(NO_TRUST_STORE),
-        "the foreign root was never loaded: the dial failed for want of a trust store\n\
+        wrong_text.contains(ROOT_CA_FLAG),
+        "the foreign root was never read: the file's root_ca_certificate did not expand\n\
+         --- dialer stderr ---\n{wrong_text}"
+    );
+    assert!(
+        wrong_text.contains(UNTRUSTED_PEER),
+        "the dial failed, but not on the acceptor's certificate against the foreign root\n\
          --- dialer stderr ---\n{wrong_text}"
     );
     assert!(

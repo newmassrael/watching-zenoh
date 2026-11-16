@@ -155,23 +155,106 @@ async fn wz_to_wz_over_tls_reaches_established_and_delivers_put() {
     );
 }
 
-/// R311oc contract (negative): a `tls/...` locator with NO TLS config dials to
-/// a typed `Unsupported` error — a TLS dial is opt-in via `DialConfig.tls`
-/// (the seam cannot verify a peer with no certs). The positive direction
-/// (config present -> dials -> Established) is the main test above.
-#[tokio::test]
-async fn dial_locator_tls_without_config_is_unsupported() {
-    use wz_runtime_tokio::session_open::dial_locator;
-    let locator = parse_any_locator("tls/127.0.0.1:9").expect("parse tls locator");
-    // `DialedLink` is not `Debug`, so destructure rather than `expect_err`.
-    let Err(err) = dial_locator(locator, &DialConfig::default()).await else {
-        panic!("tls dial without config must error, got Ok");
+/// A `tls/...` locator with no trust material anywhere (no locator tail, no
+/// `DialConfig.tls`) DIALS and verifies the peer against the public WebPKI
+/// roots, as the pinned upstream's tls client does with no
+/// `root_ca_certificate`; it is not refused before the handshake.
+///
+/// The acceptor is driven through its handshake, so the dialer is handed the
+/// certificate and the verdict is the trust check's: the self-signed
+/// `localhost` certificate chains to no public root, so the dial fails as an
+/// invalid peer certificate. CONTROL: restore the refusal in
+/// `tls_dial_client_config` and the error is `Unsupported` with no
+/// certificate in it; trust no roots at all and the dial still fails here,
+/// which is why `a_tls_dial_with_the_acceptors_root_establishes_where_the_public_roots_refuse`
+/// beside it shows the same acceptor reachable once its root is supplied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tls_dial_with_no_trust_material_verifies_against_the_public_roots() {
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, TlsAcceptConfig,
     };
-    assert_eq!(
+
+    let (server_config, _client_config) = loopback_tls_configs();
+    let accept_cfg = AcceptConfig::default().with_tls(TlsAcceptConfig { server_config });
+    let mut listener = bind_locator(
+        parse_any_locator("tls/127.0.0.1:0").expect("parse tls listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("bind tls/127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let acc = async move {
+        // The server side sees the client abort on its trust check; the
+        // assertion under test is the DIALER's.
+        if let Ok((accepted, _peer)) = listener.accept_raw().await {
+            let _ = accepted.handshake().await;
+        }
+    };
+    let dial = async {
+        let locator =
+            parse_any_locator(&format!("tls/127.0.0.1:{port}")).expect("parse tls locator");
+        dial_locator(locator, &DialConfig::default()).await
+    };
+    let (_, dialed) = tokio::join!(acc, dial);
+    // `DialedLink` is not `Debug`, so destructure rather than `expect_err`.
+    let Err(err) = dialed else {
+        panic!("a self-signed peer chains to no public root, so the dial must fail");
+    };
+    assert_ne!(
         err.kind(),
         std::io::ErrorKind::Unsupported,
-        "tls dial without DialConfig.tls is Unsupported"
+        "a tls dial with no configured CA is wired, not refused (got {err:?})"
     );
+    assert!(
+        err.to_string().contains("invalid peer certificate"),
+        "the dial must fail on the peer certificate's trust check (got {err})"
+    );
+}
+
+/// The witness's other half: the acceptor
+/// `a_tls_dial_with_no_trust_material_verifies_against_the_public_roots`
+/// refuses is reachable over the same numeric locator once the dialer trusts
+/// its root, so that refusal was the trust store's and not the acceptor's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tls_dial_with_the_acceptors_root_establishes_where_the_public_roots_refuse() {
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, DialedLink, TlsAcceptConfig, TlsDialConfig,
+    };
+
+    let (server_config, client_config) = loopback_tls_configs();
+    let accept_cfg = AcceptConfig::default().with_tls(TlsAcceptConfig { server_config });
+    let dial_cfg = DialConfig::default().with_tls(TlsDialConfig {
+        client_config,
+        server_name: ServerName::try_from("localhost".to_string()).expect("a valid server name"),
+    });
+    let mut listener = bind_locator(
+        parse_any_locator("tls/127.0.0.1:0").expect("parse tls listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("bind tls/127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let acc = async move {
+        let (accepted, _peer) = listener.accept_raw().await.expect("accept a tls peer");
+        accepted
+            .handshake()
+            .await
+            .expect("rustls server handshake with the localhost cert")
+    };
+    let dial = async {
+        let locator =
+            parse_any_locator(&format!("tls/127.0.0.1:{port}")).expect("parse tls locator");
+        dial_locator(locator, &dial_cfg).await
+    };
+    let (accepted, dialed) = tokio::join!(acc, dial);
+    let Ok(dialed) = dialed else {
+        panic!("a dialer trusting the acceptor's own certificate must handshake");
+    };
+    assert!(matches!(dialed, DialedLink::Tls(..)));
+    assert!(matches!(accepted, DialedLink::Tls(..)));
 }
 
 /// R311y601 — a `tls/NAME:port` locator dials, and the name in the LOCATOR is

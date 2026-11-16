@@ -271,9 +271,8 @@ impl DigestPublisher {
                 // TRANSMITS, while the digest still describes the moment the
                 // propagation window closed. Jittering before the build would
                 // move the observation instead.
-                clock
-                    .sleep(config.publication_delay_ms(jitter.next_draw()))
-                    .await;
+                let publication_delay = config.publication_delay_ms(jitter.next_draw());
+                clock.sleep(publication_delay).await;
 
                 // A publish error (e.g. a torn-down link) is non-fatal to the
                 // loop — the next cycle republishes the full current digest.
@@ -281,12 +280,19 @@ impl DigestPublisher {
 
                 // Close the cycle so the PERIOD is interval_ms: the cycle's own
                 // work is subtracted, not added on top (core.rs:262-272).
-                // `None` = the cycle overran an interval, where upstream warns
+                // `Err` = the cycle overran an interval, where upstream warns
                 // and re-enters immediately; re-entering is the honest
-                // response, since sleeping would push the drift further.
+                // response, since sleeping would push the drift further. The
+                // warning is the operator's only sign that the configuration
+                // defeats itself (a propagation delay past the interval
+                // overruns every cycle).
                 let elapsed = clock.now_monotonic_ms().saturating_sub(cycle_start);
-                if let Some(rest) = config.post_publication_delay_ms(elapsed) {
-                    clock.sleep(rest).await;
+                match config.post_publication_delay_ms(elapsed) {
+                    Ok(rest) => clock.sleep(rest).await,
+                    Err(overrun) => log::warn!(
+                        "{overrun} (incl. delay: {} ms)",
+                        publication_delay.saturating_add(config.propagation_delay_ms())
+                    ),
                 }
             }
         }));

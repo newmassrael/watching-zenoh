@@ -2230,38 +2230,25 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 io::ErrorKind::Unsupported,
                 "udp session-open requires the transport-link-udp feature",
             )),
-            // R311oc — `tls/...` dials from the locator when `cfg.tls` supplies
-            // the rustls client config + server name (pico parity: the dial
-            // seam reads `session_cfg`). Absent config => typed `Unsupported`
-            // (no certs to verify the peer), so a TLS dial is opt-in via the
-            // config. `dial_tls` stays the primitive; this arm orchestrates it.
+            // `tls/...` dials with the locator's own material, else the ambient
+            // `cfg.tls`, else the public roots (`tls_dial_client_config`).
+            // `dial_tls` stays the primitive; this arm orchestrates it.
             #[cfg(feature = "transport-link-tls")]
-            // R2606 — the locator's own material is read FIRST, then the
-            // ambient config, which is the layering the quic arms already use.
-            // Clone the rustls config lazily, only when a dial happens
-            // (dial_tls owns its config + name).
-            Proto::Tls => match tls_dial_client_config(ip.tls(), cfg.tls.as_ref()).await? {
-                Some(client_config) => Ok(DialedLink::Tls(
-                    Box::new(
-                        dial_tls(
-                            ip.addr,
-                            client_config,
-                            tls_dial_server_name(cfg.tls.as_ref(), ip.addr)?,
-                            &cfg.link_socket(ip.socket(), ip.proto).await?,
-                        )
-                        .await?,
-                    ),
-                    // R2608 — the dial tail decides whether this link watches
-                    // the PEER's chain, exactly as the quic arms read it, over
-                    // the tls kind's own setting.
-                    cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
-                )),
-                None => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "tls dial requires DialConfig.tls (rustls client config + server name), \
-                     or a locator tail carrying its own certificate material",
-                )),
-            },
+            Proto::Tls => Ok(DialedLink::Tls(
+                Box::new(
+                    dial_tls(
+                        ip.addr,
+                        tls_dial_client_config(ip.tls(), cfg.tls.as_ref()).await?,
+                        tls_dial_server_name(cfg.tls.as_ref(), ip.addr)?,
+                        &cfg.link_socket(ip.socket(), ip.proto).await?,
+                    )
+                    .await?,
+                ),
+                // R2608 — the dial tail decides whether this link watches
+                // the PEER's chain, exactly as the quic arms read it, over
+                // the tls kind's own setting.
+                cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
+            )),
             // With the backend feature off, the same `Unsupported` shape as the
             // udp arm — `tls/...` still parses, only its dial is absent.
             #[cfg(not(feature = "transport-link-tls"))]
@@ -2495,49 +2482,36 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // is `InvalidInput`, NOT `Unsupported`: the transport is wired, the
             // argument is wrong.
             #[cfg(feature = "transport-link-tls")]
-            // R2606 — the locator's own material first, then the ambient
-            // config. The NAME is unchanged: for a named locator the host IS
+            // The locator's own material first, then the ambient config, then
+            // the public roots. The NAME is unchanged: for a named locator the host IS
             // the verified name whatever supplied the certificates, which is
             // upstream's rule and predates this seam.
             Proto::Tls => {
-                match tls_dial_client_config(named_tls_material(&tls), cfg.tls.as_ref()).await? {
-                    Some(client_config) => {
-                        let server_name = ServerName::try_from(host.clone()).map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("tls dial: {host:?} is not a valid TLS server name: {e}"),
-                            )
-                        })?;
-                        // R3976 — the unicast ones only, as zenoh 1.10.2's `tls` dial takes
-                        // them (`get_tcp_addrs`, see [`crate::link_pipeline::only_unicast`]).
-                        let addrs = crate::link_pipeline::only_unicast(
-                            resolve_locator_addrs(&host, port).await?,
-                        )?;
-                        let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                        Ok(DialedLink::Tls(
-                            Box::new(
-                                first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
-                                    dial_tls(
-                                        addr,
-                                        client_config.clone(),
-                                        server_name.clone(),
-                                        link_socket,
-                                    )
-                                })
-                                .await?,
-                            ),
-                            // R2608 — a NAMED tail carries the policy too, the
-                            // twin of the numeric arm above.
-                            cfg.link_defaults
-                                .closes_on_expiration(proto, named_tls_material(&tls)),
-                        ))
-                    }
-                    None => Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "tls dial requires DialConfig.tls (rustls client config + server name), \
-                         or a locator tail carrying its own certificate material",
-                    )),
-                }
+                let client_config =
+                    tls_dial_client_config(named_tls_material(&tls), cfg.tls.as_ref()).await?;
+                let server_name = ServerName::try_from(host.clone()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("tls dial: {host:?} is not a valid TLS server name: {e}"),
+                    )
+                })?;
+                // R3976 — the unicast ones only, as zenoh 1.10.2's `tls` dial takes
+                // them (`get_tcp_addrs`, see [`crate::link_pipeline::only_unicast`]).
+                let addrs =
+                    crate::link_pipeline::only_unicast(resolve_locator_addrs(&host, port).await?)?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                Ok(DialedLink::Tls(
+                    Box::new(
+                        first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
+                            dial_tls(addr, client_config.clone(), server_name.clone(), link_socket)
+                        })
+                        .await?,
+                    ),
+                    // R2608 — a NAMED tail carries the policy too, the
+                    // twin of the numeric arm above.
+                    cfg.link_defaults
+                        .closes_on_expiration(proto, named_tls_material(&tls)),
+                ))
             }
             #[cfg(not(feature = "transport-link-tls"))]
             Proto::Tls => Err(io::Error::new(
@@ -3205,31 +3179,35 @@ fn named_tls_material(tls: &Option<Box<LinkTlsMaterial>>) -> &LinkTlsMaterial {
     tls.as_deref().unwrap_or(&LinkTlsMaterial::NONE)
 }
 
-/// R2606 — the rustls client config a `tls/...` dial uses: the LOCATOR's own
-/// material when its tail carries any, else the ambient `DialConfig.tls`.
-/// `None` means NEITHER supplied one, which the caller turns into the same
-/// `Unsupported` it raised before this seam existed.
+/// The rustls client config a `tls/...` dial uses: the LOCATOR's own material
+/// when its tail carries any, else the ambient `DialConfig.tls`, else the
+/// public WebPKI roots alone with the name verified.
 ///
 /// ONE seam for both tls dial arms — numeric and named — so the layering
-/// cannot drift between them, which is why the quic twin exists in this file
-/// rather than in the config module.
-///
-/// ⚠ DELIBERATELY NOT quic's third layer. `quic_dial_client_config` falls
-/// through to a public-roots config where neither source supplies material
-/// (R2603, open-debt 727); this returns `None` and preserves the refusal. The
-/// premise 727 overturned is scheme-agnostic and tls carries the same refusal,
-/// but that is a BEHAVIOUR change with its own witness to earn, and folding it
-/// into the round that wires the locator material would leave neither change
-/// with a control of its own.
+/// cannot drift between them, and the same three layers as
+/// [`quic_dial_client_config`]: with no configured CA the peer is still
+/// verified, against the public roots, rather than not dialed. That is the
+/// pinned upstream's tls client with no `root_ca_certificate`, which seeds
+/// `webpki_roots::TLS_SERVER_ROOTS` and extends it only when a CA is
+/// configured (`io/zenoh-links/zenoh-link-tls/src/utils.rs` @
+/// `roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),`), and verifies the name
+/// unless told not to (`TLS_VERIFY_NAME_ON_CONNECT_DEFAULT`).
 #[cfg(feature = "transport-link-tls")]
 async fn tls_dial_client_config(
     material: &LinkTlsMaterial,
     ambient: Option<&TlsDialConfig>,
-) -> io::Result<Option<Arc<ClientConfig>>> {
+) -> io::Result<Arc<ClientConfig>> {
     if let Some(config) = crate::tls_config::tls_client_config_from_locator(material).await? {
-        return Ok(Some(config));
+        return Ok(config);
     }
-    Ok(ambient.map(|t| t.client_config.clone()))
+    if let Some(tls) = ambient {
+        return Ok(tls.client_config.clone());
+    }
+    crate::tls_config::client_config_from_pem(
+        None,
+        None,
+        crate::tls_config::ServerNameVerification::Verify,
+    )
 }
 
 /// R2606 — the name a NUMERIC tls dial verifies the peer certificate against:
