@@ -26206,8 +26206,9 @@ layer_c1cc_api_compat_c() {
         || return 1
     # The shared-memory keys a SESSION applies, one config document to the real library's
     # program and to the same program on wz: a put's copy into the session's provider by
-    # `message_size_threshold` and by the `messages` list, read off a real receiver's
-    # `z_bytes_as_loaned_shm`, and the subsystem an `init` open maps where a `lazy` one does
+    # `message_size_threshold`, and a put's, a get value's and a reply's by the `messages` list,
+    # read off a real receiver's `z_bytes_as_loaned_shm`, and the subsystem an `init` open maps
+    # where a `lazy` one does
     # not, read off the program's own `/proc/self/maps`. SKIPs on an oracle without the
     # SHM+unstable arm.
     wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
@@ -26220,11 +26221,11 @@ layer_c1cc_api_compat_c() {
         || return 1
     wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
     _runci_guarded_test \
-        "C1cc the_promoted_messages_list_decides_whether_a_put_travels_as_shared_memory_on_wz_and_libzenohc" 1 \
+        "C1cc the_promoted_messages_list_decides_which_messages_travel_as_shared_memory_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact "${WZ_TEST_PREFIX}the_promoted_messages_list_decides_whether_a_put_travels_as_shared_memory_on_wz_and_libzenohc" \
+        --exact "${WZ_TEST_PREFIX}the_promoted_messages_list_decides_which_messages_travel_as_shared_memory_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
     _runci_guarded_test \

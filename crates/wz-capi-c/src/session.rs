@@ -375,19 +375,19 @@ fn abi_choices(shm_clients: OpenShmClients) -> AbiChoices {
 /// [`wz_capi_core::open_plan::key_state`]: the QoS `qos/publication` gives its publications,
 /// always; shared memory on the shared-memory arm, where its open makes the subsystem when asked;
 /// and, where it also holds the session's provider (that arm with the unstable API), the copy of
-/// a large put. The value of a query and a reply leave as their bytes on this ABI, so the list of
-/// messages a copy is made for is not acted on whole.
+/// a large put, query value and reply (`crate::shm::Promotion`), so that the list of messages a
+/// copy is made for is acted on whole there.
 pub(crate) const SESSION_REACH: wz_capi_core::open_plan::SessionReach =
     wz_capi_core::open_plan::SessionReach {
         publication_qos: true,
         shared_memory: cfg!(feature = "zenoh-c-shared-memory"),
-        promotion: wz_capi_core::session_defaults::PromotedMessages {
-            put: cfg!(all(
-                feature = "zenoh-c-shared-memory",
-                not(feature = "zenoh-c-no-unstable-api")
-            )),
-            query: false,
-            reply: false,
+        promotion: if cfg!(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        )) {
+            wz_capi_core::session_defaults::PromotedMessages::ALL
+        } else {
+            wz_capi_core::session_defaults::PromotedMessages::NONE
         },
     };
 

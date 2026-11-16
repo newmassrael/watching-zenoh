@@ -221,13 +221,19 @@ its own build's fact, asked with `key_state(path, SessionReach)`:
 |---|---|---|---|
 | top crate, `shared-memory` and `unstable` | acted on | acted on, for a put, a query value and a reply | acted on |
 | top crate, `shared-memory` alone | acted on | unmapped: refused by name when not the default (D6) | unmapped, likewise |
-| zenoh-c ABI, shared-memory arm with the unstable API | acted on | acted on, for a put | unmapped: a query value and a reply leave as bytes |
+| zenoh-c ABI, shared-memory arm with the unstable API | acted on | acted on, for a put, a query value and a reply | acted on |
 | a build without shared memory | inert, as upstream's built so | inert | inert |
 
 The C ABI's copy goes into the session's own provider (`z_obtain_shm_provider`'s), which the first
-large put asks for and so starts making; that put and every one while it is made go as bytes, as
-upstream's do. The top crate's copy goes into its family crate's provider (`Promoter`). The two
-providers are the two systems of section 6, and the decision they copy by is one.
+large message asks for and so starts making; that message and every one while it is made go as
+bytes, as upstream's do. A put, a get, a querier's get, a publisher's put and a queryable's Put
+reply each decide through `SessionShm::promote` (`crate::shm::Promotion` for the entities, which
+are used without the session handle). Neither API copies an error reply: upstream's transport
+copies one under `reply` (`io/zenoh-transport/src/common/shm/interop.rs` @
+`ResponseBody::Err(b) => {`), and its codec then writes the payload in line, so the receiver reads
+the same bytes (section 4, rule 7). The top crate's copy goes into its family crate's provider
+(`Promoter`). The two providers are the two systems of section 6, and the decision they copy by is
+one.
 
 ## 6. One shared-memory system per process
 
@@ -279,4 +285,4 @@ memory are measured again in the step that moves them.
 | S7g | the same differential over a multicast group, for a put between two members that join it, two peers and a router with a peer each way (a wz router there is a node, a wz peer the registry): each pair of crates held equal to two upstream members with the sender's shared memory on and off, and the member without shared memory (section 1.2) held by name, upstream's handed no data and wz's handed nothing | landed |
 | S8 | a session in router mode with shared memory: it offers shared memory and reads a descriptor as its configuration says, as every other session of the top crate does (`Engine::open`), since upstream's transport manager makes its shared-memory context whatever the mode (`io/zenoh-transport/src/manager.rs` @ `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`) | landed |
 | S8g | a router node that joins a multicast group carries shared memory there as its configuration says, as an upstream router with a context maps both ways (section 1.2): the group is attached as a shared-memory one (`attach_mcast_group`, from `GroupJoin::is_shm`, which `Engine::open` now reports for a node too); a chunk the relay pass holds goes to such a group as a descriptor with one reference for the group and to any other as its bytes (`ShmRelay::for_group`, the relay of the unicast faces); and a descriptor a member sends is held and mapped where the group is a shared-memory one and refused where it is not (`open_shm_relay_message`) | landed |
-| S9 | the session's own keys on every session of the engine: `mode` makes the subsystem at the end of the open of the registry and of a node (`init_shared_memory`, `shm_provider::init`), and the zenoh-c ABI copies a large `z_put` and `z_publisher_put` into its session provider by the decision the top crate takes (`ShmPromotion::admits`, `SessionShm::promote`) | landed for the put; the query value and the reply of the zenoh-c ABI owed, which leave as bytes |
+| S9 | the session's own keys on every session of the engine: `mode` makes the subsystem at the end of the open of the registry and of a node (`init_shared_memory`, `shm_provider::init`), and the zenoh-c ABI copies a large `z_put`, `z_publisher_put`, get value, querier value and Put reply into its session provider by the decision the top crate takes (`ShmPromotion::admits`, `SessionShm::promote`) | landed |

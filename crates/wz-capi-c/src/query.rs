@@ -60,6 +60,63 @@ use wz_session_core::link_restriction::LinkRestriction;
 /// The Rust-side wrapper a queryable's per-face callbacks share.
 pub(crate) type CQueryClosure = FfiClosure<z_closure_query_callback_t>;
 
+/// What a queryable copies a large reply into its session's provider by, kept from the
+/// declaration because a reply is made without the session handle. On a build without the
+/// session's provider there is nothing to copy into, so the type is uninhabited and every
+/// queryable holds `None`.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+type ReplyPromotion = crate::shm::Promotion;
+/// See the shared-memory spelling: there is no provider on this arm. Not `Copy`, so that the
+/// clones the shared-memory arm needs are not needless here.
+#[cfg(not(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+)))]
+#[derive(Clone)]
+enum ReplyPromotion {}
+
+/// What the queryables `session` declares copy a large reply by: `None` for a session opened
+/// without a provider.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+fn reply_promotion(session: &SessionHandle) -> Option<ReplyPromotion> {
+    crate::shm::Promotion::of(session)
+}
+/// See the shared-memory spelling: a build without a provider copies no reply.
+#[cfg(not(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+)))]
+fn reply_promotion(_session: &SessionHandle) -> Option<ReplyPromotion> {
+    None
+}
+
+/// The buffer of shared memory a Put reply whose payload is `payload` is sent from: the chunk the
+/// payload is, or the copy `promotion` makes of a large payload of plain bytes, as upstream's
+/// transport makes one for a reply (`io/zenoh-transport/src/common/shm/interop.rs` @
+/// `let p = if policy.reply {`). `None` is a reply sent as its bytes.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+fn reply_buffer(
+    payload: &Outbound,
+    promotion: Option<&ReplyPromotion>,
+) -> Option<wz_session_core::extshm::ShmSendHandle> {
+    match payload {
+        Outbound::Chunk(chunk) => Some(chunk.send_handle()),
+        Outbound::Bytes(_) => promotion?.promote(
+            wz_capi_core::session_defaults::PromotedMessage::Reply,
+            payload,
+        ),
+    }
+}
+
 // SAFETY: the same argument as `crate::sub`'s, for the same reason: one
 // queryable's `CQueryClosure` is shared across per-face callbacks, so it must be
 // `Sync` for each callback to be `Send`. The wrapper only reads its fields, and
@@ -150,13 +207,14 @@ fn emit_held(
     #[cfg_attr(not(feature = "router-node"), allow(unused_variables))]
     query_qos: wz_runtime_tokio::sample::QosLevel,
     reply: PendingReply,
+    promotion: Option<&ReplyPromotion>,
 ) {
     match held {
         HeldRoute::Face(held) => {
             let qos = held.qos();
             held.reply(|out| {
                 let mut out = out;
-                flush_one(&mut out, reply, qos);
+                flush_one(&mut out, reply, qos, promotion);
             });
         }
         // A node's held query carries the QoS of the query it was handed, which the marshal
@@ -167,7 +225,7 @@ fn emit_held(
             held.reply(&mut |out| {
                 if let Some(reply) = reply.take() {
                     let mut out = out;
-                    flush_one(&mut out, reply, query_qos);
+                    flush_one(&mut out, reply, query_qos, promotion);
                 }
             });
         }
@@ -239,11 +297,22 @@ unsafe fn reply_source_info(
 /// (`zenoh-c/src/queryable.rs` @ `reply = reply.express(options.is_express);`);
 /// upstream applies neither the options' congestion control nor their
 /// priority to a reply, so neither is applied here.
+///
+/// `promotion` is what the queryable copies a large Put reply into its session's provider by
+/// (`reply_buffer`); it is decided here, as the reply is sent, as upstream's transport decides
+/// it as the reply leaves.
 fn flush_one(
     out: &mut &mut dyn ReplyOut,
     reply: PendingReply,
     query_qos: wz_runtime_tokio::sample::QosLevel,
+    promotion: Option<&ReplyPromotion>,
 ) {
+    // A build without the session's provider holds no promotion.
+    #[cfg(not(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    )))]
+    let _ = promotion;
     let express_over = |express: Option<bool>| express.map(|e| query_qos.with_express(e));
     match reply {
         // R311y563 — ONE seam carries all four arms now
@@ -265,16 +334,14 @@ fn flush_one(
             // R3062 -- a chunk of shared memory goes out AS the chunk: the session core stages
             // the buffer, sends its descriptor to a face that negotiated shared memory and its
             // bytes to one that did not, and hands a requester of this very session the chunk.
-            // The `payload` argument is the chunk's bytes either way, so a sink that cannot
-            // stage a buffer answers with them and loses nothing.
+            // A large payload of bytes the session copies goes out as the copy, whose bytes a
+            // requester of this session is handed. The `payload` argument is the bytes either
+            // way, so a sink that cannot stage a buffer answers with them and loses nothing.
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
                 not(feature = "zenoh-c-no-unstable-api")
             ))]
-            let shared = match &payload {
-                Outbound::Chunk(chunk) => Some(chunk.send_handle()),
-                Outbound::Bytes(_) => None,
-            };
+            let shared = reply_buffer(&payload, promotion);
             let meta = ReplyMeta::new()
                 .with_encoding(encoding.as_ref())
                 .with_timestamp(timestamp.as_ref())
@@ -422,6 +489,10 @@ pub(crate) struct QueryMarshal {
     session: Option<QueryRoute>,
     /// Present only on an ESCAPED marshal: the query held past its dispatch.
     deferred: Option<HeldRoute>,
+    /// What the queryable copies a large reply into its session's provider by, on a marshal the
+    /// dispatch built and on its escaped copy. `None` on one built outside a dispatch and for a
+    /// session without a provider.
+    promotion: Option<ReplyPromotion>,
     /// Reply accumulator.
     ///
     /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
@@ -473,6 +544,7 @@ impl QueryMarshal {
             is_local: view.is_local(),
             session: None,
             deferred: None,
+            promotion: None,
             replies: UnsafeCell::new(Vec::new()),
         }
     }
@@ -554,15 +626,24 @@ impl QueryMarshal {
             // again.
             session: None,
             deferred: Some(held),
+            // A reply to the escaped copy is copied as one made in the callback is.
+            promotion: self.promotion.clone(),
             replies: UnsafeCell::new(Vec::new()),
         }
+    }
+
+    /// Bind what the queryable copies a large reply by. Called only by the dispatch.
+    fn with_promotion(mut self, promotion: Option<ReplyPromotion>) -> Self {
+        self.promotion = promotion;
+        self
     }
 
     /// Flush the accumulated replies into the dispatch's [`ReplyOut`].
     fn flush(&mut self, mut out: &mut dyn ReplyOut) {
         let qos = self.qos;
+        let promotion = self.promotion.as_ref();
         for reply in self.replies.get_mut().drain(..) {
-            flush_one(&mut out, reply, qos);
+            flush_one(&mut out, reply, qos, promotion);
         }
     }
 
@@ -570,7 +651,7 @@ impl QueryMarshal {
     /// an escaped one.
     fn push_reply(&self, reply: PendingReply) {
         match self.deferred.as_ref() {
-            Some(held) => emit_held(held, self.qos, reply),
+            Some(held) => emit_held(held, self.qos, reply, self.promotion.as_ref()),
             // SAFETY: see the `replies` field docs — the accumulator is touched
             // only from the callback's own thread.
             None => unsafe { (*self.replies.get()).push(reply) },
@@ -629,12 +710,15 @@ unsafe fn query_marshal<'a>(query: *const z_loaned_query_t) -> Option<&'a QueryM
 fn make_queryable_callback(
     closure: Arc<CQueryClosure>,
     session: QueryRoute,
+    promotion: Option<ReplyPromotion>,
 ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
     move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
         let Some(call) = closure.call else {
             return;
         };
-        let mut marshal = QueryMarshal::new(view).with_session(session.clone());
+        let mut marshal = QueryMarshal::new(view)
+            .with_session(session.clone())
+            .with_promotion(promotion.clone());
         // Bind AFTER the move out of `new` — final address only here.
         marshal.bind();
         let query_ptr = marshal.as_loaned();
@@ -916,6 +1000,7 @@ pub(crate) unsafe fn declare_queryable_on(
 
         let declared = ke.clone();
         let closure = Arc::new(cclosure);
+        let promotion = reply_promotion(held);
         // A build without `router-node` holds the registry alone, and the match has the one arm.
         #[cfg_attr(
             not(feature = "router-node"),
@@ -938,6 +1023,7 @@ pub(crate) unsafe fn declare_queryable_on(
                         Box::new(make_queryable_callback(
                             closure.clone(),
                             QueryRoute::Face(face.clone()),
+                            promotion.clone(),
                         )) as Box<_>
                     }),
                 ) else {
@@ -965,6 +1051,7 @@ pub(crate) unsafe fn declare_queryable_on(
                     Box::new(make_queryable_callback(
                         closure,
                         QueryRoute::Node(node.node_query_holder()),
+                        promotion,
                     )),
                 );
                 QueryableHolder::Node {
@@ -1958,10 +2045,15 @@ mod tests {
         let mut tap = QosTap::default();
         {
             let mut out: &mut dyn ReplyOut = &mut tap;
-            flush_one(&mut out, put(Some(true)), query_qos);
-            flush_one(&mut out, del(Some(true)), query_qos);
-            flush_one(&mut out, put(None), query_qos);
-            flush_one(&mut out, del(Some(false)), query_qos.with_express(true));
+            flush_one(&mut out, put(Some(true)), query_qos, None);
+            flush_one(&mut out, del(Some(true)), query_qos, None);
+            flush_one(&mut out, put(None), query_qos, None);
+            flush_one(
+                &mut out,
+                del(Some(false)),
+                query_qos.with_express(true),
+                None,
+            );
         }
         let expressed = query_qos.with_express(true);
         assert_eq!(
@@ -1982,6 +2074,140 @@ mod tests {
             tap.seen[3],
             Some(query_qos),
             "is_express=false clears an express query's bit"
+        );
+    }
+
+    /// A `ReplyOut` that records, for each keyed Put reply, the bytes of the buffer of shared
+    /// memory it was staged from, or `None` for a reply staged as its bytes.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    #[derive(Default)]
+    struct SharedTap {
+        seen: Vec<Option<Vec<u8>>>,
+    }
+
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    impl ReplyOut for SharedTap {
+        fn reply(&mut self, _payload: &[u8]) {}
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+        fn reply_keyed_meta(
+            &mut self,
+            _keyexpr: &str,
+            _payload: &[u8],
+            meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+            self.seen
+                .push(meta.shared.map(|shared| shared.bytes().to_vec()));
+            Ok(())
+        }
+        fn reply_keyed_del_meta(
+            &mut self,
+            _keyexpr: &str,
+            _meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+            Ok(())
+        }
+    }
+
+    /// A Put reply of `len` bytes of plain payload.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    fn plain_put_reply(len: usize) -> PendingReply {
+        PendingReply::Put {
+            keyexpr: "a/b".to_owned(),
+            payload: Outbound::Bytes(crate::bytes::Payload::Owned(vec![3u8; len])),
+            encoding: None,
+            attachment: None,
+            timestamp: None,
+            source_info: None,
+            express: None,
+        }
+    }
+
+    /// A reply of plain bytes from the threshold up is staged from the session's copy, as
+    /// upstream's transport copies a reply; one below the threshold, one whose kind the list does
+    /// not name and one for a queryable without a promotion are staged as their bytes.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    #[test]
+    fn a_large_reply_is_copied_into_the_sessions_provider_as_the_configuration_says() {
+        use wz_capi_core::session_defaults::{PromotedMessages, ShmPromotion};
+        let replies = crate::shm::Promotion::ready_for_test(ShmPromotion {
+            threshold: 64,
+            messages: PromotedMessages::ALL,
+        });
+        let not_replies = crate::shm::Promotion::ready_for_test(ShmPromotion {
+            threshold: 64,
+            messages: PromotedMessages {
+                put: true,
+                query: true,
+                reply: false,
+            },
+        });
+        let qos = wz_runtime_tokio::sample::QosLevel::default();
+        let mut tap = SharedTap::default();
+        {
+            let mut out: &mut dyn ReplyOut = &mut tap;
+            flush_one(&mut out, plain_put_reply(128), qos, Some(&replies));
+            flush_one(&mut out, plain_put_reply(64), qos, Some(&replies));
+            flush_one(&mut out, plain_put_reply(63), qos, Some(&replies));
+            flush_one(&mut out, plain_put_reply(128), qos, Some(&not_replies));
+            flush_one(&mut out, plain_put_reply(128), qos, None);
+        }
+        assert_eq!(
+            tap.seen,
+            vec![Some(vec![3u8; 128]), Some(vec![3u8; 64]), None, None, None],
+            "above and at the threshold copied; below it, with reply off the list and with no \
+             promotion, sent as bytes"
+        );
+    }
+
+    /// A queryable's marshal stages its replies by the promotion the dispatch bound to it, and
+    /// an escaped copy keeps it, so that a reply made after the callback is copied too.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    #[test]
+    fn a_queryables_marshal_copies_its_large_replies_and_its_escaped_copy_keeps_the_promotion() {
+        use wz_capi_core::session_defaults::{PromotedMessages, ShmPromotion};
+        let promotion = crate::shm::Promotion::ready_for_test(ShmPromotion {
+            threshold: 64,
+            messages: PromotedMessages::ALL,
+        });
+        let view = SourcedQuery { source_info: None };
+        let mut marshal = QueryMarshal::new(&view).with_promotion(Some(promotion));
+        marshal.push_reply(plain_put_reply(128));
+        let mut tap = SharedTap::default();
+        marshal.flush(&mut tap);
+        assert_eq!(tap.seen, vec![Some(vec![3u8; 128])]);
+
+        let shared = wz_capi_core::faces::SharedSession::new(
+            wz_runtime_tokio::runtime_impl::TokioTime::new(),
+            vec![0x11; 16],
+        )
+        .expect("test host entropy");
+        let escaped = marshal.deep_copy_deferred(HeldRoute::Face(TokioHeldQuery::Unicast(
+            shared.local_session().hold_query(&marshal),
+        )));
+        assert!(
+            escaped.promotion.is_some(),
+            "the escaped copy must copy its replies as the borrowed one does"
         );
     }
 

@@ -385,7 +385,7 @@ pub(crate) struct PublisherState {
         feature = "zenoh-c-shared-memory",
         not(feature = "zenoh-c-no-unstable-api")
     ))]
-    promotion: Option<crate::shm::PutPromotion>,
+    promotion: Option<crate::shm::Promotion>,
 }
 
 impl Drop for PublisherState {
@@ -610,7 +610,7 @@ pub(crate) struct NodePublisher {
         feature = "zenoh-c-shared-memory",
         not(feature = "zenoh-c-no-unstable-api")
     ))]
-    promotion: Option<crate::shm::PutPromotion>,
+    promotion: Option<crate::shm::Promotion>,
 }
 
 #[cfg(feature = "router-node")]
@@ -853,7 +853,7 @@ pub(crate) unsafe fn declare_publisher_stated(
                         feature = "zenoh-c-shared-memory",
                         not(feature = "zenoh-c-no-unstable-api")
                     ))]
-                    promotion: crate::shm::PutPromotion::of(held),
+                    promotion: crate::shm::Promotion::of(held),
                 }));
                 boxed.bind();
                 // SAFETY: the caller's contract; the slot was gravestoned above.
@@ -907,7 +907,7 @@ pub(crate) unsafe fn declare_publisher_stated(
                 feature = "zenoh-c-shared-memory",
                 not(feature = "zenoh-c-no-unstable-api")
             ))]
-            promotion: crate::shm::PutPromotion::of(held),
+            promotion: crate::shm::Promotion::of(held),
         }));
         // Bind AFTER the box, never before: the cached view must point at the
         // state's final address.
@@ -950,49 +950,52 @@ pub unsafe extern "C" fn z_publisher_put(
             not(feature = "router-node"),
             allow(clippy::infallible_destructuring_match)
         )]
-        let state =
-            match held {
-                PublisherHandle::Registry(state) => state,
-                // The put starts from the options the publisher was declared with, as the
-                // publisher of the registry does.
-                #[cfg(feature = "router-node")]
-                PublisherHandle::Node(node) => {
-                    let publish = overrides.apply(node.base.clone());
-                    // A large plain payload the session copies into its provider, as a put made
-                    // on the session itself is.
-                    #[cfg(all(
-                        feature = "zenoh-c-shared-memory",
-                        not(feature = "zenoh-c-no-unstable-api")
-                    ))]
-                    if let Some(handle) = node.promotion.as_ref().and_then(|promotion| {
-                        promotion.promote(&payload, || node.node.has_shm_peer())
-                    }) {
-                        return crate::put::node_publish_handle(
-                            &node.node,
-                            &node.keyexpr.keyexpr,
-                            handle,
-                            &publish,
-                        );
-                    }
-                    return crate::put::node_publish_payload(
+        let state = match held {
+            PublisherHandle::Registry(state) => state,
+            // The put starts from the options the publisher was declared with, as the
+            // publisher of the registry does.
+            #[cfg(feature = "router-node")]
+            PublisherHandle::Node(node) => {
+                let publish = overrides.apply(node.base.clone());
+                // A large plain payload the session copies into its provider, as a put made
+                // on the session itself is.
+                #[cfg(all(
+                    feature = "zenoh-c-shared-memory",
+                    not(feature = "zenoh-c-no-unstable-api")
+                ))]
+                if let Some(handle) = node.promotion.as_ref().and_then(|promotion| {
+                    promotion.promote(
+                        wz_capi_core::session_defaults::PromotedMessage::Put,
+                        &payload,
+                    )
+                }) {
+                    return crate::put::node_publish_handle(
                         &node.node,
                         &node.keyexpr.keyexpr,
-                        &payload,
+                        handle,
                         &publish,
                     );
                 }
-            };
+                return crate::put::node_publish_payload(
+                    &node.node,
+                    &node.keyexpr.keyexpr,
+                    &payload,
+                    &publish,
+                );
+            }
+        };
         // A large plain payload the session copies into its provider, as a put made on the
         // session itself is. Asked before the plain lane, which sends bytes.
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
-        if let Some(handle) = state
-            .promotion
-            .as_ref()
-            .and_then(|promotion| promotion.promote(&payload, || state.shared.has_shm_peer()))
-        {
+        if let Some(handle) = state.promotion.as_ref().and_then(|promotion| {
+            promotion.promote(
+                wz_capi_core::session_defaults::PromotedMessage::Put,
+                &payload,
+            )
+        }) {
             let publish = overrides.apply(state.base.clone());
             return match crate::put::publish_promoted(
                 &state.shared,
