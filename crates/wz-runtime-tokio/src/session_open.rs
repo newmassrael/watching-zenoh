@@ -6689,42 +6689,63 @@ mod tests {
     }
 
     // ── dial-side contract: `tcp` and (R311y524) `udp` dial a NAME; ws/tls
-    //    still surface a typed `Unsupported` BEFORE any I/O (no resolver, no
-    //    socket) — a clean extension point, not a silent fallback.
+    //    dial one where their link is built, and surface a typed `Unsupported`
+    //    BEFORE any I/O (no resolver, no socket) where it is not.
     //
     //    `udp` LEFT this list at R311y524 because pico resolves a named UDP
     //    endpoint through `getaddrinfo(.., SOCK_DGRAM, IPPROTO_UDP)`
     //    (`src/link/transport/udp/udp_posix.c:32-40`), so refusing one was a
     //    parity gap. The positive arm is the test below.
     ///
-    /// R2900 — ws is asserted only where its name dial is NOT wired: with
-    /// `transport-link-ws` on, the ws arm resolves and connects (`first_reachable`
-    /// over `dial_ws`), so a network-less `Unsupported` is the wrong expectation
-    /// there. The test asserted it in every build and went red under
-    /// `--all-features`, the ws dial reaching the network and answering
-    /// `NetworkUnreachable`. tls stays in every build: with no certificate
-    /// material it refuses before resolving, whichever way its feature is set,
-    /// so no build leaves this test asserting nothing.
+    /// A named `ws` or `tls` dial is refused only by a build without its link.
+    /// With the link it resolves the name and connects, and a `tls` dial with
+    /// no certificate material is no exception: it verifies the peer against
+    /// the public roots rather than refusing to dial, so it reaches the peer
+    /// and fails on what the peer does. The wired arm dials a loopback name
+    /// and asserts that the listener behind it was reached, which needs no
+    /// network and is what a refusal before any I/O can never produce; the
+    /// listener drops what it accepts, so the handshake fails at once.
     #[tokio::test]
-    async fn ws_and_tls_named_dial_is_unsupported_without_io() {
-        let unwired: Vec<&str> = [
-            (!cfg!(feature = "transport-link-ws")).then_some("ws/example.org:7447"),
-            Some("tls/example.org:7447"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        for s in unwired {
-            // DialedLink holds live streams (not Debug), so match rather than
-            // expect_err; these must surface Unsupported before any I/O.
-            match dial_endpoint(s, &DialConfig::default()).await {
-                Err(e) => assert_eq!(
+    async fn a_named_ws_or_tls_dial_is_refused_only_without_its_link() {
+        for (scheme, wired) in [
+            ("ws", cfg!(feature = "transport-link-ws")),
+            ("tls", cfg!(feature = "transport-link-tls")),
+        ] {
+            if !wired {
+                let s = format!("{scheme}/example.org:7447");
+                // DialedLink holds live streams (not Debug), so match rather
+                // than expect_err.
+                match dial_endpoint(&s, &DialConfig::default()).await {
+                    Err(e) => assert_eq!(
+                        e.kind(),
+                        io::ErrorKind::Unsupported,
+                        "{s} should be Unsupported (its link is not built)"
+                    ),
+                    Ok(_) => panic!("{s} must not dial (its link is not built)"),
+                }
+                continue;
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback listener");
+            let port = listener.local_addr().expect("listener addr").port();
+            let reached = tokio::spawn(async move { listener.accept().await.map(drop) });
+            let s = format!("{scheme}/localhost:{port}");
+            if let Err(e) = dial_endpoint(&s, &DialConfig::default()).await {
+                assert_ne!(
                     e.kind(),
                     io::ErrorKind::Unsupported,
-                    "{s} should be Unsupported (name dial not wired for it)"
-                ),
-                Ok(_) => panic!("{s} must not dial (name dial not wired for it)"),
+                    "{s} was refused before dialing ({e}), yet its link is built"
+                );
             }
+            let Ok(accepted) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), reached).await
+            else {
+                panic!("{s} never reached the listener its name resolves to");
+            };
+            accepted
+                .expect("the accept task ran to its end")
+                .expect("the listener accepted the dial");
         }
     }
 
