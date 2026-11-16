@@ -4589,6 +4589,65 @@ layer_c0i_impact_ref_gate() {
         return 1
     fi
 
+    # THE TWO PROSE PRECONDITIONS WERE CALLED (open-debt item 797). Both can
+    # skip by design on a runner (`$HOME` is a shared CI home; no pinned
+    # upstream checkout), so their REFUSAL cannot be the witness there. What
+    # each always prints is: the home-path check `home-paths: N prose file(s)
+    # scanned` or `home-paths: skipped`, the citation check `ledger-citation: N
+    # prose file(s)` or `ledger-citation: SKIP`. A clean prose file must pass
+    # and draw one line of each, so a precondition that stopped being reached
+    # fails here on every host. Where the home-path check can refuse (a
+    # developer's `$HOME`), its refusal is driven too; where it cannot, that
+    # arm says it is not armed rather than passing.
+    local c0i_prose c0i_out
+    c0i_prose="$(mktemp)"
+    c0i_out="$(mktemp)"
+    printf 'A Layer C0i control: plain prose, no path and no citation.\n' >"$c0i_prose"
+    if ! bash scripts/append-round.sh --check-only --impact "$real" \
+        --decision-file "$c0i_prose" >"$c0i_out" 2>&1; then
+        echo "  Layer C0i FAIL: a clean prose file was refused under --check-only:" >&2
+        sed 's/^/    /' "$c0i_out" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    if ! grep -Eq 'home-paths: (1 prose file\(s\) scanned|skipped)' "$c0i_out"; then
+        echo "  Layer C0i FAIL: the home-path precondition printed neither its scan" \
+            "nor its skip for a run that handed it prose, so it was not called" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    if ! grep -Eq 'ledger-citation: (1 prose file\(s\)|SKIP)' "$c0i_out"; then
+        echo "  Layer C0i FAIL: the citation precondition printed neither its scan" \
+            "nor its skip for a run that handed it prose, so it was not called" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    grep -E 'home-paths: |ledger-citation: ' "$c0i_out" | sed 's/^ */  C0i prose precondition: /'
+    # shellcheck disable=SC1091  # constant path, resolved at run time
+    source scripts/lib/home-path-scan.sh || {
+        rm -f "$c0i_prose" "$c0i_out"
+        echo "  Layer C0i FAIL: scripts/lib/home-path-scan.sh is unreadable" >&2
+        return 1
+    }
+    local c0i_home_state=0
+    wz_home_path_term_state || c0i_home_state=$?
+    if [[ "$c0i_home_state" -eq 0 ]]; then
+        printf 'A Layer C0i fixture naming %s/somewhere.\n' "$HOME" >"$c0i_prose"
+        if bash scripts/append-round.sh --check-only --impact "$real" \
+            --decision-file "$c0i_prose" >/dev/null 2>&1; then
+            echo "  Layer C0i FAIL: prose naming this machine's home directory was" \
+                "accepted, and a frozen entry naming it costs a push that can" \
+                "never pass (pre-push gate 0b)" >&2
+            rm -f "$c0i_prose" "$c0i_out"
+            return 1
+        fi
+        echo "  C0i prose precondition: a home path in the prose is refused"
+    else
+        echo "  C0i prose precondition: home-path refusal NOT ARMED here" \
+            "(\$HOME is $HOME, which the check skips by design)"
+    fi
+    rm -f "$c0i_prose" "$c0i_out"
+
     # A ROUND CARRIED AS A DESCRIPTOR (`scripts/file-round.sh`, the script the queue
     # integrator's `file-round` action runs). The descriptor's reader refuses every
     # malformed form (its own selftest), and the script refuses a file that is not
@@ -5527,6 +5586,61 @@ EOF
         return 1
     fi
 
+    # A KILLED INSTALL SAYS WHETHER BYTES ARRIVED (open-debt items 317 and 354).
+    # Run 32225317455 was killed at 900s while its log showed `Get:` lines still
+    # arriving, and the message called it an outage. Two arms, one stand-in: it
+    # writes 4096 bytes into `partial/` and hangs (a slow mirror), or hangs
+    # having written nothing (one that sends nothing). Each kill must name its
+    # own case, and the step's last line must give the archive's byte total.
+    local slow_dir slow_env slow_err slow_stub
+    slow_dir="$(mktemp -d)"
+    slow_env="$(mktemp)"
+    slow_err="$(mktemp)"
+    slow_stub="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$archives' '$dirty_dir' '$warm_dir' '$slow_dir'; rm -f '$argv_log' '$stub' '$marker' '$ghenv' '$warm_calls' '$slow_env' '$slow_err' '$slow_stub'" RETURN
+    cat >"$slow_stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    update) exit 0 ;;
+    install)
+      if [[ -n "${WZ_STUB_BYTES:-}" ]]; then
+        head -c "$WZ_STUB_BYTES" /dev/zero >"$WZ_TEST_ARCHIVES/partial/slow.deb"
+      fi
+      sleep 30 ;;
+  esac
+done
+exit 0
+EOF
+    chmod +x "$slow_stub"
+    local bytes want_kill
+    for bytes in 4096 ""; do
+        rm -rf "${slow_dir:?}"/*
+        : >"$slow_env"
+        if WZ_STUB_BYTES="$bytes" WZ_TEST_ARCHIVES="$slow_dir" GITHUB_ENV="$slow_env" \
+            WZ_APT_ARCHIVES="$slow_dir" WZ_APT_CMD="$slow_stub" WZ_APT_DEADLINE=2 \
+            WZ_APT_KILL_AFTER=1 bash "$script" cmake >/dev/null 2>"$slow_err"; then
+            echo "  Layer C0g FAIL: an install killed by its deadline was reported as" \
+                "success on the byte-count arm" >&2
+            return 1
+        fi
+        want_kill="NO BYTES ARRIVED"
+        [[ -n "$bytes" ]] && want_kill="SLOW, NOT AN OUTAGE: ${bytes} bytes arrived"
+        if ! grep -q "$want_kill" "$slow_err"; then
+            echo "  Layer C0g FAIL: a kill after ${bytes:-no} bytes did not say" \
+                "'${want_kill}'. A slow mirror read as an outage sends the reader to" \
+                "the mirror instead of the ceiling (run 32225317455)" >&2
+            return 1
+        fi
+        if ! grep -q "the archive holds ${bytes:-0} bytes (${bytes:-0} of them in partial/)" \
+            "$slow_err"; then
+            echo "  Layer C0g FAIL: the step did not print the archive's byte total" \
+                "(${bytes:-0}), so no run says whether a cold archive is converging" >&2
+            return 1
+        fi
+    done
+
     # AND THE CEILING MUST BE THE ONLY ROAD. A bounded script that half the
     # workflow routes around bounds half the workflow, and the next apt step
     # anyone adds will be written the way the thirteen that were here already
@@ -5809,50 +5923,16 @@ layer_c0d_doclink_dependents() {
 # LITERAL line, so a shell variable there would capture as nothing and drop the
 # whole set from the closure. What can be removed is the silence.
 #
-# The invariant, stated as the lane states it: the FIRST and LAST `--features`
-# sets in `layer_z_zenohd_interop` are the same SET (order-insensitive, since
-# only membership reaches cargo). Everything between them is a deliberate
-# one-leg rebuild and is not compared.
+# The invariant was Layer Z's alone: its FIRST and LAST feature statements are
+# one SET. Open-debt item 212 asked for every lane, and the sweep found that
+# only Z restores. So the rule is now general and declared: every lane that
+# builds one artifact with two different feature statements says whether it
+# restores (first and last must be one set), is staged or only compiles, and a
+# new pair with no declaration fails. The population, the three shapes and the
+# table are `scripts/lib/lane_build_restore_gate.py`'s.
 layer_c0f_lane_demo_feature_restore() {
-    local script="scripts/run-ci.sh"
-    local sets
-    sets="$(awk '
-        /^layer_z_zenohd_interop\(\) \{/ { inside = 1 }
-        inside && /^\}/ { inside = 0 }
-        inside && /cargo build -p wz-ap-demo/ {
-            if (match($0, /--features [A-Za-z0-9_,\/-]+/)) {
-                print substr($0, RSTART + 11, RLENGTH - 11)
-            }
-        }
-    ' "$script")"
-
-    local count
-    count="$(printf '%s\n' "$sets" | grep -c . || true)"
-    # POPULATION, not exit status: an awk that matched nothing would print
-    # nothing and every comparison below would trivially hold. This lane exists
-    # because a silent zero is exactly how the class it gates went unnoticed.
-    if [[ "$count" -lt 2 ]]; then
-        echo "  Layer C0f FAIL: found $count wz-ap-demo build(s) with a feature list inside" \
-            "layer_z_zenohd_interop — expected the opening build and its restore, so either" \
-            "the lane was restructured or this reader stopped matching it" >&2
-        return 1
-    fi
-
-    local first last
-    first="$(printf '%s\n' "$sets" | head -n 1 | tr ',' '\n' | sort -u | paste -sd, -)"
-    last="$(printf '%s\n' "$sets" | tail -n 1 | tr ',' '\n' | sort -u | paste -sd, -)"
-    if [[ "$first" != "$last" ]]; then
-        echo "  Layer C0f FAIL: layer_z_zenohd_interop opens its wz-ap-demo build with one" \
-            "feature set and restores a DIFFERENT one, so every leg past the restore runs a" \
-            "binary the lane did not mean to build" >&2
-        echo "    opened:   $first" >&2
-        echo "    restored: $last" >&2
-        echo "    fix: make the restore line's --features identical to the opening line's" >&2
-        return 1
-    fi
-
-    echo "  C0f: layer Z opens and restores the same wz-ap-demo feature set ($count build(s) read)"
-    return 0
+    python3 scripts/lib/lane_build_restore_gate.py --selftest || return 1
+    python3 scripts/lib/lane_build_restore_gate.py --check scripts/run-ci.sh || return 1
 }
 
 layer_c0e_inventory_tag_reader() {
@@ -8551,6 +8631,16 @@ layer_c1ag_cargo_test_transport_compose() {
 #       It is not a substitute for this lane — E9 proves the composition
 #       interoperates, not that `time-hlc` WITH routing composes as a clippy-clean
 #       seam, which is what the combo below is for.
+#
+# The LAST clippy arm is the publish stamp's feature-OFF arm with a clock in
+# the build: `time-hlc` on, `pubsub-timestamp` off. Every other runtime clippy
+# above keeps the defaults, which carry `pubsub-timestamp`, so the
+# `not(feature = "pubsub-timestamp")` arms of `resolve_publish_timestamp` and
+# `stamps_publishes` were judged with `time-hlc` only where some unrelated lane
+# happened to drop the default. Named here, a future lane that adds
+# `pubsub-timestamp` to its own arms cannot take that judgement away. The
+# loopback pieces are the ones Layer C1bj's metadata-OFF arm uses, so the
+# stamp's two consumers are compiled with the field dropped.
 layer_c1ah_cargo_test_time_hlc() {
     # The two modules live in `wz-node-time` (the tokio crate re-exports them), so
     # their unit tests run THERE: the same filters under `wz-runtime-tokio` select
@@ -8590,7 +8680,9 @@ layer_c1ah_cargo_test_time_hlc() {
             --features time-hlc,ext-pubsub-advanced-cache --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features time-hlc,routing-router-hat,routing-peer,routing-accept --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features \
+            --features time-hlc,transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --quiet -- -D warnings)
 }
 
 # ─── Layer C1ai — liveliness-history: §5.10 CURRENT-state-replay request gate ─
@@ -11890,6 +11982,35 @@ layer_c1h_arbitrary_subset_matrix() {
     _runci_lane_did C1h "$ran" "arbitrary subset(s) of ${#subsets[@]}"
 }
 
+# ─── Layer C1sb — the switchboard crates, each selected by name ─────────
+#
+# `wz-switchboard-codegen` (the golden emission of the dispatch table),
+# `wz-switchboard-example` and `wz-ap-demo-app` (the committed generated
+# statechart, codec and dispatch, driven through the value path) were reached
+# only by Layer C1's unfiltered `cargo test --workspace`, where a target that
+# stops compiling its tests, or a `#[cfg]` that elides a module, shows up as a
+# smaller total among thousands and nothing else. Each run here is pinned to
+# the count its target holds, so losing one test is a red that names the
+# crate.
+#
+# The counts are the `#[test]` functions of each target, none of them gated
+# by anything but `#[cfg(test)]` and none `#[ignore]`d, and the included
+# `out/` artifacts carry no tests of their own: codegen 29 (one `tests`
+# module), example 15 (`tests` 9, `ap_dynamic_tests` 6), the demo app's lib 4
+# and its `fan_out_value_path` file 4. `--lib` keeps doctests out of the
+# count.
+layer_c1sb_switchboard_crates() {
+    _runci_guarded_test "C1sb wz-switchboard-codegen" 29 \
+        cargo test -p wz-switchboard-codegen --lib --quiet || return 1
+    _runci_guarded_test "C1sb wz-switchboard-example" 15 \
+        cargo test -p wz-switchboard-example --lib --quiet || return 1
+    _runci_guarded_test "C1sb wz-ap-demo-app lib" 4 \
+        cargo test -p wz-ap-demo-app --lib --quiet || return 1
+    wz_test_args wz-ap-demo-app fan_out_value_path
+    _runci_guarded_test "C1sb wz-ap-demo-app fan_out_value_path" 4 \
+        cargo test -p wz-ap-demo-app "${WZ_TEST_ARGS[@]}" --quiet || return 1
+}
+
 # ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─
 #
 # R311ep: scouting-active is off by default (scouting is opt-in per
@@ -12179,7 +12300,12 @@ layer_c1ch_capi_c_config_surface() {
 # push touches: a crate can be pushed clean and then broken by a CHANGE
 # ELSEWHERE — R311y809's defect was in the crate that LINKS to the one the diff
 # touched, which is exactly what a changed-crate filter cannot reach.
+#
+# The reduced POINTS (open-debt items 339 and 730) are graded at push time only,
+# over the files a push changed; this lane runs their selector's selftest so a
+# change to it is judged even when no push grades a point.
 layer_c1cf_reduced_features() {
+    python3 scripts/lib/reduced_points_gate.py --selftest || return 1
     bash scripts/lib/reduced-features-gate.sh || return 1
 }
 
@@ -14224,47 +14350,61 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # configuration. Every failing configuration is listed before the lane fails, so
 # one run names all of them, and each configuration's seconds are printed in the
 # cost table's row form.
+#
+# On the leg ledger: the two selftests are independent gates (the feature-set
+# reader and the shard planner), so a red in the first must not hide the
+# second. The plan leans on the planner's selftest, and the clippy sweep on the
+# plan and on the reader's selftest, because the configurations it clippies are
+# the sets that reader returns.
 layer_c1bf_cargo_clippy_all_features() {
     local shards="${WZ_ALLFEAT_SHARDS:-1}" shard="${WZ_ALLFEAT_SHARD:-0}"
-    local members plan crate label args_line started ran=0
-    local -a args failed=()
-    # The control group first: what decides the configurations and their shards is held
-    # in both directions before it is trusted.
-    python3 scripts/lib/doc_feature_sets.py --selftest || return 1
-    python3 scripts/lib/allfeat_clippy_plan.py --selftest || return 1
-    members="$(_c1bz_members)"
-    if [[ -z "$members" ]]; then
-        echo "  C1bf FAIL: cargo metadata listed no workspace member"
-        return 1
-    fi
-    plan="$(python3 scripts/lib/allfeat_clippy_plan.py plan --shard "$shard" --shards "$shards")" || {
-        echo "  C1bf FAIL: no plan for shard $shard of $shards (the line above says why)"
-        return 1
-    }
-    # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
-    while read -r crate label args_line; do
-        [[ -n "$crate" ]] || continue
-        read -r -a args <<<"$args_line"
-        started=$SECONDS
-        # The plan line carries the targets before the features: `--all-targets`, or the
-        # selectors the set declares (`clippy-targets`).
-        if ! (cd crates && cargo clippy -p "$crate" "${args[@]}" \
-            --quiet -- -D warnings); then
-            failed+=("$crate ($label)")
+    local plan=""
+    _c1bf_plan() {
+        local members
+        members="$(_c1bz_members)"
+        if [[ -z "$members" ]]; then
+            echo "  C1bf FAIL: cargo metadata listed no workspace member"
+            return 1
         fi
-        echo "  C1bf cost: $crate $label $((SECONDS - started))"
-        ran=$((ran + 1))
-    done <<<"$plan"
-    if [[ $ran -eq 0 ]]; then
-        echo "  C1bf FAIL: shard $shard of $shards ran no configuration"
-        return 1
-    fi
-    if [[ ${#failed[@]} -gt 0 ]]; then
-        echo "  C1bf FAIL: ${#failed[@]} of $ran configuration(s) do not pass clippy -D warnings:"
-        printf '    - %s\n' "${failed[@]}"
-        return 1
-    fi
-    _runci_lane_did C1bf "$ran" "configuration(s) of shard $shard of $shards clippied, at the targets each declares"
+        plan="$(python3 scripts/lib/allfeat_clippy_plan.py plan --shard "$shard" --shards "$shards")" || {
+            echo "  C1bf FAIL: no plan for shard $shard of $shards (the line above says why)"
+            return 1
+        }
+    }
+    _c1bf_clippy() {
+        local crate label args_line started ran=0
+        local -a args failed=()
+        # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
+        while read -r crate label args_line; do
+            [[ -n "$crate" ]] || continue
+            read -r -a args <<<"$args_line"
+            started=$SECONDS
+            # The plan line carries the targets before the features: `--all-targets`, or the
+            # selectors the set declares (`clippy-targets`).
+            if ! (cd crates && cargo clippy -p "$crate" "${args[@]}" \
+                --quiet -- -D warnings); then
+                failed+=("$crate ($label)")
+            fi
+            echo "  C1bf cost: $crate $label $((SECONDS - started))"
+            ran=$((ran + 1))
+        done <<<"$plan"
+        if [[ $ran -eq 0 ]]; then
+            echo "  C1bf FAIL: shard $shard of $shards ran no configuration"
+            return 1
+        fi
+        if [[ ${#failed[@]} -gt 0 ]]; then
+            echo "  C1bf FAIL: ${#failed[@]} of $ran configuration(s) do not pass clippy -D warnings:"
+            printf '    - %s\n' "${failed[@]}"
+            return 1
+        fi
+        echo "  C1bf: $ran configuration(s) of shard $shard of $shards clippied, at the targets each declares"
+    }
+    _runci_legs_open C1bf || return 1
+    _runci_leg doc-feature-sets-selftest -- python3 scripts/lib/doc_feature_sets.py --selftest
+    _runci_leg allfeat-plan-selftest -- python3 scripts/lib/allfeat_clippy_plan.py --selftest
+    _runci_leg plan --after allfeat-plan-selftest -- _c1bf_plan
+    _runci_leg clippy --after doc-feature-sets-selftest,plan -- _c1bf_clippy
+    _runci_legs_close
 }
 # ─── Layer C1bn — the PASSIVE-DISSECTION feature set, RUN ────────────
 #
@@ -18346,12 +18486,12 @@ layer_ewirez_zenohd_wire_dissection() {
     # has no `Shm` ext compiled in at all; the variant that does installs
     # `zenohd` ALONE, so the dialer is a SECOND zenohd rather than an example.
     #
-    # The oracle is NOT provisioned in hosted CI (no `zenohd-shm` in ci.yml), so
-    # the test SKIPs where it is absent and this lane's guard would then see zero
-    # passed. `+` rather than `1` is wrong here for the same reason: a skip
-    # prints `1 passed` because the skip is a `return` inside the test. That is
-    # stated rather than hidden — this leg is a LOCAL witness until the variant
-    # is provisioned, which is open-debt item 484.
+    # The test returns early where the oracle is absent, and a `return` inside
+    # a test prints `1 passed`, so this lane's count guard cannot tell a skip
+    # from a run. The `interop` job closes that by provisioning the
+    # shared-memory zenohd and setting WZ_ZENOHD_SHM_REQUIRE on this step,
+    # which turns the absence into a panic inside `zenohd_shm_binary`; a
+    # machine that has not built the variant still skips, and says so.
     wz_test_args wz-integration-tests zenoh_shm_body_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh shm bodies" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
@@ -18911,6 +19051,21 @@ layer_f_codec_footprint() {
     bash scripts/measure-codec-footprint.sh || return 1
 }
 
+# Open-debt item 549 — which libclang bound G.6's bindings on THIS host. A
+# hosted runner and a developer machine bind different ones, so the same G.6
+# verdict is two measurements; each arm now prints its own. The value is what
+# the loaded library reports (`bindgen::clang_version()` in lwip-sys's build
+# script, which keeps it in the build's `output` file, so a warm build that
+# does not rerun the script still has it). A record, not a verdict.
+_g6_libclang_record() {
+    local t="$1" outputs=() seen
+    shopt -s nullglob
+    outputs=("$WZ_ARTIFACTS"/crates/target/"$t"/debug/build/lwip-sys-*/output)
+    shopt -u nullglob
+    seen="$(sed -n 's/^wz-libclang: //p' "${outputs[@]}" /dev/null | sort -u | paste -sd';' -)"
+    echo "  G.6 libclang $t: ${seen:-not recorded (no lwip-sys build output for $t names one)}"
+}
+
 # ─── Layer G — cross-compile cortex-m wz-runtime-core lib build ────
 #
 # Default gate (R311pt — opt-in axis retired). Phase W mechanical
@@ -19106,8 +19261,10 @@ layer_g_cross_compile_cortex_m() {
                     --target "$t" --no-default-features \
                     --features runtime-coop --quiet); then
             echo "  G.6 cross-real lwip-sys $t OK"
+            _g6_libclang_record "$t"
         else
             echo "  G.6 cross-real lwip-sys $t FAIL" >&2
+            _g6_libclang_record "$t"
             fail=1
         fi
         # G.7 (R311ih) static-scouting synth on the MCU profile. Proves
@@ -21755,7 +21912,16 @@ layer_z_zenohd_interop() {
     # step 7 moved the broker from the single-net peer forwarder to the region-hat
     # forwarder (`router_forward::brokered_interest`); no local run reaches this
     # leg, so it is the one to read in the first hosted run after that move.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
+    # `routing-routes` is on this line so that the one artifact path
+    # `crates/target/debug/wz-ap-demo` never holds a Layer Z build that Layers
+    # E5 and E5z would reject: their line is `routing-routes`, and the BUILD
+    # FEATURES banner their fixtures read names the demo's own keys. It changes
+    # no code here: no source gates on `routing-routes` since the route table was
+    # retired (Layer E3 records the same), and its two edges, `routing-router`
+    # and the runtime's `routing-peer`, are both on this line already. So the
+    # Layer Z binary is a superset of E5's in keys as well as in code. Both
+    # restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -21827,8 +21993,9 @@ layer_z_zenohd_interop() {
     # zenohd's default is `zenoh/default`, so the stock binary above has no
     # `init::ext::Shm` compiled in and can neither send the challenge nor react to
     # wz's offer. Built by `ZENOHD_SHM=1 scripts/build-zenohd.sh` into
-    # target/zenohd-shm/; ABSENT is a SKIP inside the test (the vsock precedent —
-    # hosted CI does not provision a source build for this).
+    # target/zenohd-shm/; ABSENT is a SKIP inside the test on a machine that has
+    # not built it, and a FAIL under WZ_ZENOHD_SHM_REQUIRE, which the hosted
+    # `interop` job sets because it provisions this oracle for this lane.
     #
     # The demo is rebuilt with `session-extshm` for these two legs alone, and the
     # test asserts the BUILD FEATURES line rather than trusting this invocation
@@ -21872,7 +22039,8 @@ layer_z_zenohd_interop() {
     # drives the wz node IN PROCESS through the library entry points and spawns
     # no demo, so it needs no feature restatement and cannot disturb the shared
     # `--bin` path. ABSENT oracle is a SKIP inside each leg, as for establishment
-    # (hosted CI provisions no source build), which is why this carries a COUNT:
+    # (a FAIL under the hosted job's WZ_ZENOHD_SHM_REQUIRE), and a skip still
+    # prints `ok`, which is why this carries a COUNT:
     # four legs must report, so a dropped `#[ignore]` or a rename cannot select
     # zero tests and pass. R3038: leg 3 was a PIN of the provider-lifecycle
     # defect of open-debt item 823 (6) until the provider held a chunk by
@@ -21979,8 +22147,8 @@ layer_z_zenohd_interop() {
     # R2203 adds `time-hlc` (open-debt item 220): the fourth proof shape reads a
     # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
     # false unconditionally so both documents answer `bare`. Both restatements
-    # carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
+    # carry it. `routing-routes` likewise, for the reason at the opening build.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
@@ -23610,7 +23778,8 @@ layer_e5_router_forward() {
 # The demo build here is `--features routing-routes`, matching E5's line rather
 # than Layer Z's wider one. Two lanes writing ONE binary path at different
 # feature sets is a documented misdiagnosis shape in this file; these two agree,
-# and Layer Z's build (which lacks routing-routes) runs in its own invocation.
+# and Layer Z's build carries `routing-routes` too, so whichever of the three
+# wrote the path last, the binary holds every key this lane's fixture reads.
 layer_e5z_router_query_target() {
     (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
     local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
@@ -23641,7 +23810,7 @@ layer_e5z_router_query_target() {
 # `wz_router_forward`. Self-contained wz<->wz (NO external zenohd / pico oracle),
 # so it lives in the primary `ci` job beside E5, NOT the zenohd Layer Z. The
 # `routing-routes,transport-link-unixpipe` build is NOT produced by any other lane
-# (E5 lacks unixpipe; Layer Z's demo build lacks routing-routes), so this lane
+# (E5 lacks unixpipe; Layer Z's carries both but in its own job), so this lane
 # builds its own binary. The test fn is `#![cfg(target_os = "linux")]` (unixpipe is
 # Linux-only) and starts `wz_router_`, so the default Layer E sweep's `--skip
 # wz_router` already excludes it from the oracle-less arbitrary-feature run. The
@@ -27695,6 +27864,7 @@ run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1own layer_c1own_own_space_witnesses || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
+run_layer C1sb layer_c1sb_switchboard_crates || overall=1
 run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
 run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
 run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1

@@ -328,11 +328,19 @@ if [[ "$FOOTPRINT_SHARD" -eq 0 ]]; then
 fi
 
 baseline=$(cat "$TARGET_DIR_BASE/.baseline.size")
+# Every delta below is taken against this number, so a baseline that did not
+# build has nothing to be compared with: it is a failure of the whole run, not
+# a lane to skip.
+if ! [[ "$baseline" =~ ^[0-9]+$ ]]; then
+    echo "  measure-codec-footprint FAIL: the baseline build reads '$baseline'," \
+         "not a size, so no lane can be measured against it" >&2
+    exit 1
+fi
 
 format_delta() {
     local size="$1"
-    if [[ "$size" == "SKIP" ]]; then
-        printf "       SKIP"
+    if [[ "$size" == "SKIP" || "$size" == "DEFECT" ]]; then
+        printf "%11s" "$size"
     else
         printf "%+10d bytes" "$((baseline - size))"
     fi
@@ -351,6 +359,47 @@ if [[ "$FOOTPRINT_SHARD" -eq 0 ]]; then
     printf "  minus-all-codecs delta:       %s\n" "$(format_delta "$minus_all")"
     printf "  handshake-only delta:         %s\n" "$(format_delta "$handshake_only")"
 fi
+
+# The NAMED elision of every measured codec lane: the defined symbols the
+# baseline has and the minus build does not, compared by name with the address
+# and the symbol type cut away. This is the measurement a by-name witness is
+# chosen from, and until it was printed here it had been taken for one codec
+# only, by hand. A lane with none is one whose catalog claim rests on the byte
+# delta alone, which is a difference of two whole binaries and moves with
+# unrelated inlining; such a lane is named UNJUDGED BY NAME when it also has no
+# pinned witness, so the set of codecs the gate below can only judge by bytes
+# is read off every run instead of being re-derived by a person.
+named_symbols() {
+    cut -d' ' -f3- "$1" 2>/dev/null | LC_ALL=C sort -u
+}
+echo ""
+echo "=== Named elision (defined symbols in the baseline, absent from the lane) ==="
+named_base="$TARGET_DIR_BASE/.baseline.names"
+named_symbols "$TARGET_DIR_BASE/.baseline.syms" > "$named_base"
+if [[ ! -s "$named_base" ]]; then
+    echo "  measure-codec-footprint FAIL: the baseline symbol table is empty" \
+         "($TARGET_DIR_BASE/.baseline.syms), so no elision can be read by name" >&2
+    exit 1
+fi
+unjudged_by_name=()
+for codec in "${CODEC_FEATURES[@]}"; do
+    size=$(cat "$TARGET_DIR_BASE/.minus-$codec.size")
+    if ! [[ "$size" =~ ^[0-9]+$ ]]; then
+        printf "  %-26s %s (no binary to read)\n" "$codec:" "$size"
+        continue
+    fi
+    gone=$(LC_ALL=C comm -23 "$named_base" \
+        <(named_symbols "$TARGET_DIR_BASE/.minus-$codec.syms"))
+    count=$(printf '%s' "$gone" | grep -c . || true)
+    if (( count > 0 )); then
+        printf "  %-26s %5d symbol(s), e.g. %s\n" "$codec:" "$count" "$(printf '%s\n' "$gone" | head -n 1)"
+    else
+        printf "  %-26s     0 symbol(s)\n" "$codec:"
+        # Read by the gate below only as a report; whether a witness exists is
+        # decided there from CODEC_ELISION_WITNESS.
+        unjudged_by_name+=("$codec")
+    fi
+done
 
 # R311n — elision regression gate: each codec-* feature must remove a minimum
 # amount of code when its puller-aware minus-<codec> lane runs, or the catalog
@@ -521,9 +570,64 @@ declare -A CODEC_ELISION_WITNESS=(
     [codec-keep-alive]="wz_session_core::inbound::decode_keep_alive"
 )
 
+# The lanes this binary CANNOT express, as a pinned SET. `wz-ap-demo` references
+# consumer features unconditionally, so an exclusion that removes them takes the
+# demo's own source with it and the lane writes SKIP. That is an honest limit of
+# the measurement binary, but a SKIP printed and then passed over is the gate
+# reporting green on lanes it never measured, and nothing said WHICH lanes those
+# were or whether the list was growing. Held both ways: a lane that SKIPs and is
+# not here fails (a lane newly lost to the binary), and a lane here that
+# measured fails too (it is measurable now and owes a floor instead of a place
+# on this list). Read off the R311y879 run, where exactly these four skipped; a
+# smaller test binary cfg-gated against the consumer features is what empties
+# it.
+UNMEASURABLE_LANES=(
+    minus-codec-frame
+    minus-codec-declare
+    minus-all-codecs
+    handshake-only
+)
+
+# 0 when $1 is in UNMEASURABLE_LANES.
+unmeasurable_lane() {
+    local lane
+    for lane in "${UNMEASURABLE_LANES[@]}"; do
+        [[ "$lane" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+# Judge one lane's SKIP against the pinned set; 1 is a failure. Called for a
+# lane that RAN in this shard only, so a shard that does not run a lane cannot
+# read its absence as a measurement.
+judge_skip_pin() {
+    local lane="$1" size="$2"
+    if [[ "$size" == "SKIP" ]]; then
+        if unmeasurable_lane "$lane"; then
+            unmeasured_ran+=("$lane")
+            return 0
+        fi
+        echo "  UNMEASURED $lane ($BIN_NAME does not compile under this exclusion)" >&2
+        echo "    The lane is not in UNMEASURABLE_LANES, so the binary has newly" >&2
+        echo "    lost a profile it could express. Make the demo's reference to" >&2
+        echo "    the excluded feature conditional, or add the lane to the set" >&2
+        echo "    with the reason in the same commit." >&2
+        return 1
+    fi
+    if [[ "$size" =~ ^[0-9]+$ ]] && unmeasurable_lane "$lane"; then
+        echo "  STALE UNMEASURABLE $lane (it measured ${size} bytes)" >&2
+        echo "    The lane is measurable on this binary now. Take it out of" >&2
+        echo "    UNMEASURABLE_LANES and give it what a measured lane is judged" >&2
+        echo "    by, a floor in CODEC_DELTA_FLOOR for a codec lane." >&2
+        return 1
+    fi
+    return 0
+}
+
 SKIP_THRESHOLD=${WZ_FOOTPRINT_NO_THRESHOLD:-0}
 if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
     fail=0
+    unmeasured_ran=()
     for codec in "${CODEC_FEATURES[@]}"; do
         size=$(cat "$TARGET_DIR_BASE/.minus-$codec.size")
         if [[ "$size" == "DEFECT" ]]; then
@@ -544,9 +648,12 @@ if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
             # broken profile rather than an unexpressible one. A future smaller
             # test binary — cfg-gated against the consumer features — closes the
             # remaining lanes (codec-frame / codec-declare / minus-all-codecs /
-            # handshake-only as of R311y435).
+            # handshake-only as of R311y435). Judged against the pinned set
+            # rather than passed over.
+            judge_skip_pin "minus-$codec" "$size" || fail=1
             continue
         fi
+        judge_skip_pin "minus-$codec" "$size" || fail=1
         delta=$((baseline - size))
         floor="${CODEC_DELTA_FLOOR[$codec]-}"
         if [[ -z "$floor" ]]; then
@@ -604,6 +711,40 @@ if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
             fi
         fi
     done
+    # The two whole-catalog lanes run on shard 0 only, and until this block the
+    # gate read neither: a library that stopped compiling under the full
+    # exclusion wrote DEFECT and the run stayed green. They have no floor (no
+    # single codec owns their delta), so what is judged is that they built
+    # what they could and that a SKIP is one the pin expects.
+    if [[ "$FOOTPRINT_SHARD" -eq 0 ]]; then
+        for lane in minus-all-codecs handshake-only; do
+            size=$(cat "$TARGET_DIR_BASE/.${lane}.size")
+            if [[ "$size" == "DEFECT" ]]; then
+                echo "  CATALOG DEFECT $lane (library does not compile; see above)" >&2
+                fail=1
+                continue
+            fi
+            judge_skip_pin "$lane" "$size" || fail=1
+        done
+    fi
+    # What the by-name half could not reach: a measured codec lane that elided
+    # no symbol by name and pins no witness is judged by its byte floor alone.
+    # Reported, not failed: choosing a witness needs the symbol list above, read
+    # on a run, and a red here would only restate that it has not been chosen.
+    unjudged=()
+    for codec in ${unjudged_by_name[@]+"${unjudged_by_name[@]}"}; do
+        [[ -n "${CODEC_ELISION_WITNESS[$codec]-}" ]] || unjudged+=("$codec")
+    done
+    measured=0
+    for codec in "${CODEC_FEATURES[@]}"; do
+        if [[ "$(cat "$TARGET_DIR_BASE/.minus-$codec.size")" =~ ^[0-9]+$ ]]; then
+            measured=$((measured + 1))
+        fi
+    done
+    echo "  lanes: ${measured} of ${#CODEC_FEATURES[@]} codec lane(s) measured;" \
+         "${#unmeasured_ran[@]} unmeasurable on $BIN_NAME as pinned" \
+         "(${unmeasured_ran[*]-none});" \
+         "${#unjudged[@]} measured codec(s) UNJUDGED BY NAME (${unjudged[*]-none})"
     if [[ $fail -ne 0 ]]; then
         echo "  R311n catalog-truthfulness threshold gate failed; investigate above" >&2
         exit 1
