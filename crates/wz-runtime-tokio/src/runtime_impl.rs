@@ -139,6 +139,10 @@ impl Runtime for TokioRuntime {
     // R311di-pre-e — construction-side Mutex/RwLock helpers. The mutex is
     // the session's [`crate::sync::PlainMutex`]; the RwLock stays the std
     // one, which nothing on the per-message path takes.
+    // The caller's place is the lock's class for the lock-order checker of a debug build: every
+    // mutex of the session's generic code is made here, and one class for all of them would read
+    // the orders of two different locks as the orders of one.
+    #[cfg_attr(debug_assertions, track_caller)]
     fn new_mutex<T>(value: T) -> Self::Mutex<T>
     where
         T: Send + 'static,
@@ -151,6 +155,16 @@ impl Runtime for TokioRuntime {
         T: Send + Sync + 'static,
     {
         crate::sync::RwLock::new(value)
+    }
+
+    // A sender's conduit: held while its sender waits for room, which the lock-order checker
+    // of a debug build allows under it and holds its waiting takers to (`crate::sync`).
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn new_mutex_held_across_waits<T>(value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static,
+    {
+        crate::sync::PlainMutex::held_across_waits(value)
     }
 }
 

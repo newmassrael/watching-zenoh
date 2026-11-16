@@ -172,10 +172,10 @@ case "$rc" in
 esac
 
 git fetch -q origin main
-# Every commit of the item landed, put on the tip by the integrator, so origin/main holds
-# all of them and the round it filed. A branch still at the submitted commit moves there
-# and loses nothing; one that gained a commit while the item waited is rebased, and git
-# drops the landed commits as equal patches.
+# Every commit of the item landed, merged onto the tip by the integrator (`strategy = "merge"`
+# in bx.toml), so origin/main holds all of them and the round it filed. A branch still at the
+# submitted commit moves there and loses nothing; one that gained a commit while the item
+# waited is rebased, and git skips the landed commits because origin/main already reaches them.
 if [[ "$(git rev-parse HEAD)" == "$submitted" ]]; then
     git reset -q --keep origin/main
 elif ! git rebase -q origin/main; then

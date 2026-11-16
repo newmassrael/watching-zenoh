@@ -702,7 +702,10 @@ impl<R: SessionRuntime> TxConduits<R> {
             auto: core::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "transport-batching")]
             control_open: core::sync::atomic::AtomicBool::new(false),
-            conduits: core::array::from_fn(|_| R::new_mutex(BatchTx::default())),
+            // A blocking sender keeps its conduit while it waits for room (a chain's fragments
+            // keep their sequence numbers), and a probe takes it without waiting
+            // (`DispatchStage::Probe`): the lock is one held across a wait for an event.
+            conduits: core::array::from_fn(|_| R::new_mutex_held_across_waits(BatchTx::default())),
         }
     }
 

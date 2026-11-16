@@ -1346,8 +1346,13 @@ fn a_message_larger_than_a_destinations_whole_budget_is_held_alone_and_gates_its
     );
     assert_eq!(rig.fwd.egress_held(), 0);
     assert_eq!(rig.fwd.egress_held_bytes(), 0);
-    // A message this large leaves as a chain of fragments, so it is the bytes that are counted:
-    // every byte of the payload is on the link.
+    // A message this large leaves as a chain of fragments, sent off the router's threads, so it is
+    // written after the pass that let it go: it is waited for, and the bytes are counted, every
+    // byte of the payload on the link.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) && rig.link.bytes().len() <= size {
+        std::thread::yield_now();
+    }
     assert!(rig.link.sent() > rig.baseline, "it was written");
     assert!(
         rig.link.bytes().len() > size,
