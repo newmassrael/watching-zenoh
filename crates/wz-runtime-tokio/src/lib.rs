@@ -3168,12 +3168,16 @@ impl TcpDriver {
     ///
     /// This driver carries no session parameters, so its RX pool is upstream's
     /// default `transport/link/rx/buffer_size`; a link opened through
-    /// `session_open` pools the size its session reads instead.
+    /// `session_open` pools the size its session reads instead. No session shapes
+    /// this driver at Established either, so its pool is settled here with the widest
+    /// batch, which every frame a link can carry fits.
     pub fn from_stream(stream: TcpStream) -> Self {
+        let arena = frame_arena::link_arena(wz_session_core::session_init_params::RX_BUFFER_SIZE);
+        frame_arena::link_arena_settler(&arena).settle(u16::MAX as usize);
         Self {
             stream: Some(stream),
             read_state: ReadState::Idle,
-            arena: frame_arena::link_arena(wz_session_core::session_init_params::RX_BUFFER_SIZE),
+            arena,
         }
     }
 

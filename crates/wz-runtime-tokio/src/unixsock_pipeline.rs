@@ -348,15 +348,18 @@ pub fn wire_unixsock_stream(
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).
-    let outbound = Arc::new(StreamWriteDriver::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        // R2548 — EMPTY, matching upstream, which says so in its own words:
-        // `io/zenoh-links/zenoh-link-unixsock_stream/src/unicast.rs` @ `vec![]`, under
-        // a "not supported for now" debug line.
-        addressless_link_subject(LinkKind::UnixsockStream, Vec::new()),
-        endpoints,
-    ));
+    let outbound = Arc::new(
+        StreamWriteDriver::new(
+            tx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // R2548 — EMPTY, matching upstream, which says so in its own words:
+            // `io/zenoh-links/zenoh-link-unixsock_stream/src/unicast.rs` @ `vec![]`, under
+            // a "not supported for now" debug line.
+            addressless_link_subject(LinkKind::UnixsockStream, Vec::new()),
+            endpoints,
+        )
+        .settling_rx(inbound.rx_settler()),
+    );
     (inbound, outbound, writer_handle)
 }
 

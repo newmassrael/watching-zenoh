@@ -198,11 +198,14 @@ pub fn wire_tls_stream(
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; TLS keeps the universal
     // u16 prefix (an always-false flag on the write driver).
-    let outbound = Arc::new(StreamWriteDriver::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        subject,
-        endpoints,
-    ));
+    let outbound = Arc::new(
+        StreamWriteDriver::new(
+            tx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            subject,
+            endpoints,
+        )
+        .settling_rx(inbound.rx_settler()),
+    );
     (inbound, outbound, writer_handle)
 }

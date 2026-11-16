@@ -6800,12 +6800,15 @@ mod tests {
     }
 
     /// `transport/link/rx/buffer_size`, from a session's `LinkRxConf` to the
-    /// pool of the link it wires: three widest batches of storage pool three
-    /// buffers, the default pools upstream's one, and a link wired with no
-    /// session parameters takes that default too.
+    /// pool of the link it wires, divided by the batch the link settles at
+    /// Established: nothing is pooled before that, three widest batches of
+    /// storage pool three buffers on a link of the widest batch, two widest
+    /// batches pool eight on a link of 16000, the default pools upstream's one,
+    /// and a link wired with no session parameters takes that default too.
     #[cfg(not(feature = "runtime-zero-copy"))]
     #[tokio::test]
     async fn a_sessions_rx_buffer_size_sizes_the_pool_of_the_link_it_wires() {
+        const WIDEST: usize = u16::MAX as usize;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");
@@ -6815,23 +6818,43 @@ mod tests {
             #[allow(unreachable_patterns)]
             _ => panic!("a tcp dial wires a tcp read half"),
         };
+        // What the session hands the link's write half at Established, with the
+        // batch the handshake negotiated.
+        let established = |outbound: &Arc<dyn BoxedLinkDriver + Send + Sync>, batch: usize| {
+            let shape = wz_session_core::session_init_params::TxQueueConf::default()
+                .shape(true, batch, batch);
+            BoxedLinkDriver::shape_tx_queue(&**outbound, shape);
+        };
         let endpoint = format!("tcp/127.0.0.1:{port}");
         let cfg = DialConfig::default();
 
         let three = LinkRxConf {
-            buffer_size: 3 * u16::MAX as usize,
+            buffer_size: 3 * WIDEST,
             ..LinkRxConf::default()
         };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, _outbound, _writer) = wire_dialed_link_with_rx(dialed, three);
+        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, three);
+        assert_eq!(pooled(&inbound), 0, "nothing is pooled before the batch");
+        established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 3);
 
+        let two = LinkRxConf {
+            buffer_size: 2 * WIDEST,
+            ..LinkRxConf::default()
+        };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, _outbound, _writer) = wire_dialed_link_with_rx(dialed, LinkRxConf::default());
+        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, two);
+        established(&outbound, 16_000);
+        assert_eq!(pooled(&inbound), 8, "the divisor is the link's batch");
+
+        let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
+        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, LinkRxConf::default());
+        established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 1);
 
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, _outbound, _writer) = wire_dialed_link(dialed);
+        let (inbound, outbound, _writer) = wire_dialed_link(dialed);
+        established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 1);
         drop(listener);
     }

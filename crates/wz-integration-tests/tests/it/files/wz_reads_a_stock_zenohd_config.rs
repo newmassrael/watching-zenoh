@@ -88,6 +88,7 @@ use wz_session_core::dissect::{dissect_transport_message, FieldValue};
 use wz_session_core::handshake_encode::encode_init;
 use wz_session_core::json5::{self, Json5Value};
 use wz_session_core::lease::lease_from_wire;
+use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 /// zenohd prints its resolved config on this line before doing anything else.
@@ -1577,6 +1578,15 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             "transport: { link: { tx: { lease: 3300 } } }",
             "3300",
         ),
+        // Both widths are off upstream's 32-bit default, so a zenohd sets the `S` flag for
+        // either document and the pair can be asked of it too; read as the width's own word.
+        (
+            "transport/link/tx/sequence_number_resolution",
+            r#"transport: { link: { tx: { sequence_number_resolution: "16bit" } } }"#,
+            "16bit",
+            r#"transport: { link: { tx: { sequence_number_resolution: "8bit" } } }"#,
+            "8bit",
+        ),
         // R2086 — the three transport CAPABILITIES, settled by whether the
         // InitSyn offers the extension at all. `true` has to produce the ext and
         // `false` has to produce nothing; a build that offered them
@@ -2266,6 +2276,12 @@ fn every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_docum
             "transport: { link: { tx: { lease: 3300 } } }",
         ),
         (
+            "transport/link/tx/sequence_number_resolution",
+            RunMode::Client,
+            r#"transport: { link: { tx: { sequence_number_resolution: "16bit" } } }"#,
+            r#"transport: { link: { tx: { sequence_number_resolution: "8bit" } } }"#,
+        ),
+        (
             "transport/unicast/lowlatency",
             RunMode::Client,
             "transport: { unicast: { lowlatency: true, qos: { enabled: false } } }",
@@ -2371,6 +2387,136 @@ fn every_key_proven_on_the_wire_is_in_the_frame_zenohd_writes_for_the_same_docum
         ));
     }
 
+    assert!(
+        failures.is_empty(),
+        "{} disagreement(s) between zenohd and the demo on the same documents:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}
+
+/// How much sooner than its bound a node may be seen to give an open up: the acceptor polls every
+/// 20 ms, so the link can be older than this leg's clock says by that and the dial.
+const OPEN_BOUND_EARLY: Duration = Duration::from_millis(200);
+
+/// How much later than its bound a node may be seen to give an open up: the timer firing and the
+/// close reaching this end of the link, on a loaded machine.
+const OPEN_BOUND_LATE: Duration = Duration::from_millis(500);
+
+/// The window a node that gives an open up at `bound` is seen to close its link in.
+fn open_bound_window(bound: Duration) -> (Duration, Duration) {
+    (
+        bound.saturating_sub(OPEN_BOUND_EARLY),
+        bound + OPEN_BOUND_LATE,
+    )
+}
+
+/// How long a node held the link it dialled to this leg's silent acceptor, from `accepted`. Its
+/// InitSyn is read first, so the node is known to be inside its handshake, which only a bound of
+/// its own can end; whatever else it writes is read past until the link closes.
+fn held_until_closed(
+    stream: &mut std::net::TcpStream,
+    accepted: std::time::Instant,
+    source: &str,
+    who: &str,
+) -> Duration {
+    read_stream_frame(stream, source, &format!("{who}'s InitSyn"));
+    let mut sink = [0u8; 256];
+    loop {
+        match stream.read(&mut sink) {
+            Ok(0) => return accepted.elapsed(),
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                return accepted.elapsed()
+            }
+            Err(e) => panic!(
+                "{who} still held the silent link {:?} after it was accepted ({e})\n{source}",
+                accepted.elapsed()
+            ),
+        }
+    }
+}
+
+// wz-proves: none -- the registration gap the legs above record: `zenoh-config`
+// is not an inventory atom, though zenohd adjudicates every reading here.
+/// `transport/unicast/open_timeout`, read off the far end of the link: a node configured only by
+/// a document dials this leg's acceptor, which takes the connection and never answers the
+/// InitSyn, and the leg times how long the node holds that link before it gives the open up.
+/// Upstream bounds one open, the dial and the handshake, by the key and by nothing shorter
+/// (`io/zenoh-transport/src/unicast/manager.rs` @
+/// `tokio::time::timeout(self.config.unicast.open_timeout, async {`). A real zenohd is brought up
+/// on each document first and must close in that document's window, which is the positive
+/// control; the demo, on the same two documents, must close in the same two.
+///
+/// Both bounds sit below the window the demo waits for an InitAck, which upstream has no
+/// counterpart of, so the open's bound is what ends each run on both nodes; the two windows and
+/// that one are disjoint, so a demo that ignored the key would close outside both.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd and a wz-ap-demo built with `--features zenoh-config`"]
+fn a_silent_acceptor_is_given_up_at_the_open_timeout_zenohd_keeps_for_the_same_document() {
+    /// (the fragment, the bound it states in milliseconds)
+    const DOCUMENTS: [(&str, u64); 2] = [
+        ("transport: { unicast: { open_timeout: 300 } }", 300),
+        ("transport: { unicast: { open_timeout: 1300 } }", 1300),
+    ];
+    let init_ack = Duration::from_millis(SessionTimeouts::from_build().init_ack_ms);
+    let windows: Vec<(Duration, Duration)> = DOCUMENTS
+        .iter()
+        .map(|(_, ms)| open_bound_window(Duration::from_millis(*ms)))
+        .collect();
+    assert!(
+        windows[0].1 < windows[1].0 && windows[1].1 < init_ack,
+        "the windows {windows:?} overlap each other or reach the demo's InitAck window \
+         ({init_ack:?}), so a reading inside one would not say which bound ended the open"
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    for ((fragment, _), (early, late)) in DOCUMENTS.iter().zip(&windows) {
+        let in_window = |held: Duration| (*early..=*late).contains(&held);
+
+        let DialledZenohd {
+            guard,
+            mut stream,
+            source,
+            mut capture,
+            config: _config,
+        } = dial_zenohd(fragment, RunMode::Client);
+        let accepted = std::time::Instant::now();
+        let upstream = held_until_closed(&mut stream, accepted, &source, "zenohd");
+        drop(guard);
+        eprintln!("open_timeout `{fragment}`: zenohd closed the silent link after {upstream:?}");
+        assert!(
+            in_window(upstream),
+            "zenohd closed the silent link after {upstream:?}, outside {early:?}..={late:?}, so \
+             this zenohd does not show the bound `{fragment}` states and cannot adjudicate the \
+             demo's\n{}\n{source}",
+            read_captured(&mut capture)
+        );
+
+        let DialledDemo {
+            guard,
+            mut stream,
+            source,
+            drained,
+            config: _config,
+        } = dial_the_demo(fragment, RunMode::Client, None, &[]);
+        let accepted = std::time::Instant::now();
+        let wz = held_until_closed(&mut stream, accepted, &source, "the demo");
+        drop(guard);
+        eprintln!("open_timeout `{fragment}`: the demo closed the silent link after {wz:?}");
+        if !in_window(wz) {
+            failures.push(format!(
+                "for `{fragment}` the demo closed the silent link after {wz:?} where zenohd closed \
+                 it after {upstream:?}, outside {early:?}..={late:?}:\n{}",
+                drained()
+            ));
+        }
+    }
     assert!(
         failures.is_empty(),
         "{} disagreement(s) between zenohd and the demo on the same documents:\n  {}",
@@ -3213,6 +3359,36 @@ fn handshake_field_from_a_config(
 /// one the demo's frames are read with, so a difference between the two nodes' readings is a
 /// difference in what they wrote and not in how this leg read it.
 fn zenohd_handshake_field_from_a_config(key: &str, fragment: &str, run_mode: RunMode) -> String {
+    let DialledZenohd {
+        guard,
+        mut stream,
+        source,
+        capture: _capture,
+        config: _config,
+    } = dial_zenohd(fragment, run_mode);
+    let reading = handshake_field_off_the_link(key, &mut stream, &source, "zenohd");
+    drop(guard);
+    reading
+}
+
+/// A REAL zenohd brought up on ONE [`wire_document`] and caught at its first dial: the zenohd
+/// twin of [`DialledDemo`], so a leg that reads the link reads the two nodes' links alike.
+struct DialledZenohd {
+    /// Kills the child on drop; first, so it dies before its file is unlinked.
+    guard: ChildGuard,
+    /// The accepted loopback link, blocking, with a 20 s read deadline.
+    stream: std::net::TcpStream,
+    /// The document, verbatim, for a failure message.
+    source: String,
+    /// What zenohd printed, for a failure message.
+    capture: File,
+    /// Held so the config file outlives the child that reads it.
+    config: NamedTempFile,
+}
+
+/// Spawn zenohd on a [`wire_document`] that names `fragment`, and return once it has dialled
+/// this leg's acceptor.
+fn dial_zenohd(fragment: &str, run_mode: RunMode) -> DialledZenohd {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback acceptor");
     let port = listener
         .local_addr()
@@ -3226,7 +3402,7 @@ fn zenohd_handshake_field_from_a_config(key: &str, fragment: &str, run_mode: Run
         .set_nonblocking(true)
         .expect("a listener that can be polled");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    let mut stream = loop {
+    let stream = loop {
         match listener.accept() {
             Ok((stream, _)) => break stream,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -3252,9 +3428,13 @@ fn zenohd_handshake_field_from_a_config(key: &str, fragment: &str, run_mode: Run
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .expect("a read deadline");
-    let reading = handshake_field_off_the_link(key, &mut stream, &source, "zenohd");
-    drop(guard);
-    reading
+    DialledZenohd {
+        guard,
+        stream,
+        source,
+        capture,
+        config,
+    }
 }
 
 /// What the handshake a node `who` opened on `stream` carried for `key`, read by this tree's
@@ -3360,6 +3540,9 @@ fn handshake_field_off_the_link(
         // gap rather than reporting the key as missing. That is the arm doing
         // its job: an unreadable field is not an absent one.
         Some(FieldValue::Bits(v)) => v.to_string(),
+        // A code the dissector names in upstream's own words (the `sn_res` widths), compared as
+        // the word: the code behind it is what both nodes wrote, and the word is a bijection of it.
+        Some(FieldValue::Label(word)) => word.to_string(),
         // The zid, spelled as ZENOH prints it and not in the
         // wire's byte order. The frame carries the id as its little-endian bytes;
         // zenoh prints those read as a `u128` in hex, so the text is the bytes
@@ -3444,6 +3627,11 @@ fn wire_reading(key: &str) -> (HandshakeFrame, Reading) {
         "transport/link/tx/batch_size" => (InitSyn, Reading::Value("batch_size")),
         "id" => (InitSyn, Reading::Value("zid")),
         "transport/link/tx/lease" => (OpenSyn, Reading::Value("lease")),
+        // The dissector names each half of `sn_res` by its width's word; the frame half is the
+        // one the key sets, the request-id half has no key upstream.
+        "transport/link/tx/sequence_number_resolution" => {
+            (InitSyn, Reading::Value("sn_res_frame_sn"))
+        }
         "transport/unicast/lowlatency" => (InitSyn, Reading::Presence("low_latency")),
         "transport/unicast/compression/enabled" => (InitSyn, Reading::Presence("compression")),
         "transport/unicast/qos/enabled" => (InitSyn, Reading::Presence("qos")),

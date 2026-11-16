@@ -203,7 +203,7 @@ pub fn wire_vsock_stream(
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).
-    let outbound = Arc::new(StreamWriteDriver::new(
+    let outbound = StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         // R2548 — the pseudo-interface upstream names for this link, as a
@@ -217,7 +217,9 @@ pub fn wire_vsock_stream(
         // vsock link -- matches nothing here.
         addressless_link_subject(LinkKind::Vsock, vec!["vsock".to_string()]),
         endpoints,
-    ));
+    )
+    .settling_rx(inbound.rx_settler());
+    let outbound = Arc::new(outbound);
     (inbound, outbound, writer_handle)
 }
 

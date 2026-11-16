@@ -18207,6 +18207,14 @@ layer_c1bp_plugin_dynamic_loading() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico" || return 1
+    # `plugins_loading/enabled` and `plugins_loading/search_dirs`: the same document to a zenohd
+    # and to this build's storage host, which reads both keys only with `plugin-dynamic-loading`
+    # and takes a `--config` file only with `zenoh-config`. The zenohd is the one the `interop`
+    # job builds before this lane.
+    wz_test_args wz-integration-tests wz_storage_host_plugins_loading_matches_zenohd
+    _runci_guarded_test "C1bp plugins_loading vs zenohd" 2 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
 }
 
 # ─── Layer L — every committed Cargo.lock agrees with its manifests ────
@@ -21125,6 +21133,13 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         _runci_guarded_test "M zenoh-c multicast group on wz" 4 \
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
+        # `transport/multicast/max_sessions` from one config document: upstream's `z_sub.c`
+        # held to one member hears the first `z_pub.c` on its group and not the second, on
+        # libzenohc first and on wz, and the same document without the cap hears both.
+        wz_test_args wz-integration-tests zenoh_c_multicast_max_sessions_twice_and_diff
+        _runci_guarded_test "M zenoh-c multicast member cap" 1 \
+            cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     fi
     # R2586 — the `#join=` key with a FOREIGN sender: pico `z_pub` in its own
     # network namespace publishes to a group wz reaches only through `#join=` on
@@ -22731,8 +22746,12 @@ layer_z_zenohd_interop() {
     # real zenohd with the same document first, each key's effect on zenohd's
     # own frame the positive control, and the demo's frame held to zenohd's.
     # Counted on the file's `#[ignore]` tests: 13 before the leg, 14 after.
+    # Raises 14 -> 15 for LEG 15: `transport/unicast/open_timeout` read off the
+    # far end of a silent link, zenohd closing it at each document's bound first
+    # and the demo held to the same window. Counted on the file's `#[ignore]`
+    # tests: 14 before the leg, 15 after.
     wz_test_args wz-integration-tests wz_reads_a_stock_zenohd_config
-    _runci_guarded_test Z 14 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 15 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2222 (open-debt items 568 + 569, and the lane hole they exposed) — the
@@ -23379,6 +23398,15 @@ layer_z_zenohd_interop() {
     _runci_guarded_test "Z link socket options" 2 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    # `transport/link/tls/close_link_on_expiration` from one config document: zenohd as the
+    # dialer first, then the demo, against a stock zenohd listening under a certificate that
+    # expires seconds later, whose own adminspace says whether the `tls/` link outlived it.
+    # Without the key it does on both, with it on both it does not. The demo needs `tls` and
+    # `zenoh-config`, both in the build above.
+    wz_test_args wz-integration-tests wz_tls_close_on_expiry_zenohd_interop
+    _runci_guarded_test "Z tls close on expiry" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2594 — the QoS a queryable's REPLY carries, adjudicated by a stock zenoh
     # queryable answering the same stock `z_get` through the same zenohd. The
     # expected byte is not written in the test: each run records the stock
@@ -23694,6 +23722,13 @@ layer_z_zenohd_interop() {
         # reddens instead of silently passing.
         wz_test_args wz-integration-tests wz_unixpipe_zenohd_dataplane
         _runci_guarded_test "Z unixpipe dataplane" 4 \
+            env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+        # `transport/link/unixpipe/file_access_mask` from one config document: the mode of the
+        # request FIFO a unixpipe listener creates, zenohd's first and then the demo's, read
+        # with `stat`. Same oracle, same demo build.
+        wz_test_args wz-integration-tests wz_unixpipe_file_mask_zenohd_interop
+        _runci_guarded_test "Z unixpipe file mask" 1 \
             env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     elif [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
@@ -26061,6 +26096,34 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc" \
         || return 1
+    # Two link keys whose effect is on the host and not the wire, one C program on both
+    # libraries with its own allocator entry points: `allocation/mode` read off when the
+    # dialling session's batch-sized heap blocks are made (at the open under `init`, on traffic
+    # under `lazy`), and `rx/buffer_size` off how many receive buffers it keeps. Each document
+    # runs twice per library and the real library must agree with itself first. Needs only the
+    # oracle, not the unstable arm.
+    for leg in \
+        an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_wz_and_libzenohc \
+        a_larger_rx_buffer_size_keeps_more_receive_buffers_on_wz_and_libzenohc; do
+        wz_test_args wz-integration-tests zenoh_c_link_resources_twice_and_diff
+        _runci_guarded_test "C1cc $leg" 1 \
+            cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+            --test-threads=1 \
+            --exact "${WZ_TEST_PREFIX}$leg" \
+            || return 1
+    done
+    # `batching/time_limit` as a distribution: a contended burst's batches at 0 and at 100 ms,
+    # read through a tap, step by step until Wald's test at alpha = beta = 0.01 decides; the
+    # real library must decide that the longer bound takes fewer batches before wz is asked.
+    wz_test_args wz-integration-tests zenoh_c_tx_batching_time_limit_twice_and_diff
+    _runci_guarded_test \
+        "C1cc a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc" \
+        || return 1
     # R3059 -- a SUBSCRIBER OF THE PUBLISHING SESSION, one C program on both libraries: a
     # chunk put on a literal key and on a declared key is handed to a local subscriber as a
     # shared-memory buffer, a plain-bytes put as a raw one. The legs that put a chunk on the
@@ -26140,6 +26203,36 @@ layer_c1cc_api_compat_c() {
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc" \
+        || return 1
+    # The shared-memory keys a SESSION applies, one config document to the real library's
+    # program and to the same program on wz: a put's copy into the session's provider by
+    # `message_size_threshold` and by the `messages` list, read off a real receiver's
+    # `z_bytes_as_loaned_shm`, and the subsystem an `init` open maps where a `lazy` one does
+    # not, read off the program's own `/proc/self/maps`. SKIPs on an oracle without the
+    # SHM+unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
+    _runci_guarded_test \
+        "C1cc the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc" \
+        || return 1
+    wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
+    _runci_guarded_test \
+        "C1cc the_promoted_messages_list_decides_whether_a_put_travels_as_shared_memory_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}the_promoted_messages_list_decides_whether_a_put_travels_as_shared_memory_on_wz_and_libzenohc" \
+        || return 1
+    wz_test_args wz-integration-tests zenoh_c_shm_session_keys_twice_and_diff
+    _runci_guarded_test \
+        "C1cc the_shared_memory_mode_decides_whether_the_open_maps_the_subsystem_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}the_shared_memory_mode_decides_whether_the_open_maps_the_subsystem_on_wz_and_libzenohc" \
         || return 1
     # R3067 -- the ROLES of a session: what `z_open` makes of the endpoints a config states. A
     # peer or router with none opens alone (wz answered -1), a client with none, or with only a
@@ -26530,6 +26623,17 @@ layer_c1cc_api_compat_c() {
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc" \
+        || return 1
+    # `transport/link/tx/queue/batching/enabled`, read off the link a C session writes through
+    # a tap: with the key off no batch carries two puts, with it on a burst shares batches. The
+    # real library must show both first. Needs only the oracle, not the unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_tx_batching_twice_and_diff
+    _runci_guarded_test \
+        "C1cc a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc" \
         || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
@@ -26933,6 +27037,26 @@ layer_c1cd_api_compat_c_attachment() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd" \
+        || return 1
+    # The two `aggregation/*` keys, each against libzenohc with a zenohd's admin space as the
+    # observer: what the router holds for a client's subscribers and publishers is the declaration
+    # the key changes, and only a router reports it. HERE for the zenohd this job builds.
+    for leg in \
+        subscribers_under_a_listed_aggregate_are_declared_as_it_identically_on_wz_and_libzenohc \
+        publishers_under_a_listed_aggregate_ask_as_it_identically_on_wz_and_libzenohc; do
+        wz_test_args wz-integration-tests zenoh_c_declaration_aggregation_twice_and_diff
+        _runci_guarded_test "C1cd $leg" 1 \
+            cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
+    done
+    # `qos/publication` against libzenohc, read off the samples a real library's subscriber
+    # receives. Needs only the zenoh-c oracle; beside the leg above, which builds the same arm.
+    wz_test_args wz-integration-tests zenoh_c_publication_qos_twice_and_diff
+    _runci_guarded_test "C1cd qos/publication" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}a_publication_rule_overwrites_the_qos_of_its_keys_identically_on_wz_and_libzenohc" \
         || return 1
 }
 

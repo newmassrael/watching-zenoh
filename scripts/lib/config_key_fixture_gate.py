@@ -73,7 +73,10 @@ leg that would otherwise notice needs a built zenohd and runs only hosted.
     changing what a node does and whether an upstream implementation was handed
     the same document first. Honoured is a claim about the reader; the table is
     the claim about the behaviour, and the count of keys whose behaviour no
-    upstream run adjudicates may only go down (`UNPROVEN_BUDGET`).
+    upstream run adjudicates may only go down (`UNPROVEN_BUDGET`). Every
+    witnessed row also says what its witness OBSERVES (`OBSERVATIONS`): a key
+    whose effect is not on the wire is witnessed by extending what is observed,
+    never by a verdict that excuses it from being witnessed.
 
 Usage:
     python3 scripts/lib/config_key_fixture_gate.py [--verbose]
@@ -374,7 +377,15 @@ MANIFEST_ROW_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*=\s*\[(.*?)\]", re.S | re.M)
 # column to the honoured surface, its witnesses to tests that exist, and the
 # number of keys no upstream run adjudicates to a budget that only goes down.
 EFFECT_TABLE = REPO_ROOT / "docs" / "config-key-effect-witnesses.tsv"
-EFFECT_HEADER = ("key", "verdict", "witness", "host", "upstream", "note")
+EFFECT_HEADER = (
+    "key",
+    "verdict",
+    "witness",
+    "host",
+    "upstream",
+    "observation",
+    "note",
+)
 # The one verdict that counts as proven: the same document handed to an upstream
 # implementation and to wz, the upstream effect asserted first.
 PROVEN_VERDICT = "differential"
@@ -387,6 +398,19 @@ UPSTREAM_VERDICTS = ("differential", "foreign")
 # keys of `WZ_EXTENSION_HONOURED_KEYS` may carry it.
 EXTENSION_VERDICT = "no-upstream-effect"
 VERDICTS = WITNESSED_VERDICTS + ("reader-only", "unsurveyed", EXTENSION_VERDICT)
+# What a witness observes, one per witnessed row. Conformance is a relation over
+# observable behaviour, and a key whose effect is not on the wire is not thereby
+# unwitnessable: the observation is extended to where the effect is (the heap a
+# node holds, the distribution of what it writes over repeated runs). Naming the
+# observation per row keeps that extension visible and graded, so it cannot turn
+# into an exemption class. The vocabulary, read in the table's header:
+#   wire         the bytes a node writes on a link or a group (a tap, a capture);
+#   delivery     what a node does as its application or a peer sees it, through
+#                an API or the protocol;
+#   resource     what a node holds of its host, read with the host's instruments;
+#   statistical  a distribution over repeated runs, decided by a sequential test
+#                at a stated alpha and beta.
+OBSERVATIONS = ("wire", "delivery", "resource", "statistical")
 # What a witness file must contain to be the upstream side the row names. A
 # structural check: it says the file reaches that implementation at all, and the
 # row's review says the reaching is the positive control.
@@ -487,12 +511,17 @@ def names_the_key(text: str, key: str) -> bool:
 
 def effect_witness_site(
     surface: list[str], extensions: list[str], wire_keys: list[str]
-) -> tuple[list[str], dict[str, list[str]]]:
-    """Grade the effect-witness table. Returns failures and the keys by verdict."""
+) -> tuple[list[str], dict[str, list[str]], dict[str, list[str]]]:
+    """Grade the effect-witness table.
+
+    Returns the failures, the keys by verdict and the witnessed keys by what
+    their witness observes.
+    """
     failures: list[str] = []
     by_verdict: dict[str, list[str]] = {v: [] for v in VERDICTS}
+    by_observation: dict[str, list[str]] = {o: [] for o in OBSERVATIONS}
     if not EFFECT_TABLE.is_file():
-        return [f"{rel(EFFECT_TABLE)} is missing"], by_verdict
+        return [f"{rel(EFFECT_TABLE)} is missing"], by_verdict, by_observation
     rows, problems = effect_rows(EFFECT_TABLE.read_text())
     failures.extend(problems)
     if not rows:
@@ -500,7 +529,7 @@ def effect_witness_site(
             f"{rel(EFFECT_TABLE)} read as EMPTY -- a table of nothing would "
             f"pass every check below"
         )
-        return failures, by_verdict
+        return failures, by_verdict, by_observation
 
     population = surface + extensions
     keys = [row["key"] for row in rows]
@@ -569,7 +598,20 @@ def effect_witness_site(
                     f"{where}: a `{verdict}` row names no witness, so its witness "
                     f"cell is `-`"
                 )
+            if row["observation"] != "-":
+                failures.append(
+                    f"{where}: a `{verdict}` row has no witness to observe "
+                    f"anything, so its observation cell is `-`, not "
+                    f"`{row['observation']}`"
+                )
             continue
+        if row["observation"] in OBSERVATIONS:
+            by_observation[row["observation"]].append(row["key"])
+        else:
+            failures.append(
+                f"{where}: a witnessed row says what its witness observes, one "
+                f"of {', '.join(OBSERVATIONS)}, not `{row['observation']}`"
+            )
         if row["host"] in ("", "-"):
             failures.append(f"{where}: a witnessed row names the wz host it drives")
         path_text, sep, fn = row["witness"].partition("::")
@@ -636,7 +678,7 @@ def effect_witness_site(
             f"{len(unproven)} in this commit, so the number keeps counting what it "
             f"says"
         )
-    return failures, by_verdict
+    return failures, by_verdict, by_observation
 
 
 def drop_guards(src: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
@@ -1093,7 +1135,9 @@ def main() -> int:
     # the day it does.
     surface = deepenable_audit.honoured_surface()
     extensions = deepenable_audit.rust_const("WZ_EXTENSION_HONOURED_KEYS")
-    effect_failures, by_verdict = effect_witness_site(surface, extensions, wire_keys)
+    effect_failures, by_verdict, by_observation = effect_witness_site(
+        surface, extensions, wire_keys
+    )
     failures.extend(effect_failures)
 
     if args.verbose:
@@ -1169,6 +1213,10 @@ def main() -> int:
         f"{rel(EFFECT_TABLE)} -- "
         + ", ".join(f"{v}={len(by_verdict[v])}" for v in VERDICTS)
         + f"; unproven {unproven_count} against a budget of {UNPROVEN_BUDGET}"
+    )
+    print(
+        "  observed by: "
+        + ", ".join(f"{o}={len(by_observation[o])}" for o in OBSERVATIONS)
     )
 
     if failures:

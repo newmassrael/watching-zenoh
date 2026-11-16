@@ -913,15 +913,18 @@ pub fn wire_unixpipe_stream(
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(sender, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).
-    let outbound = Arc::new(StreamWriteDriver::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        // R2548 — EMPTY, matching upstream:
-        // `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `vec![]`,
-        // whose `get_interface_names` logs "not supported" and returns none.
-        addressless_link_subject(LinkKind::Unixpipe, Vec::new()),
-        endpoints,
-    ));
+    let outbound = Arc::new(
+        StreamWriteDriver::new(
+            tx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // R2548 — EMPTY, matching upstream:
+            // `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `vec![]`,
+            // whose `get_interface_names` logs "not supported" and returns none.
+            addressless_link_subject(LinkKind::Unixpipe, Vec::new()),
+            endpoints,
+        )
+        .settling_rx(inbound.rx_settler()),
+    );
     (inbound, outbound, writer_handle)
 }
 

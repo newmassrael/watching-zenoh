@@ -1294,6 +1294,26 @@ pub fn localhost_cert_key_pem() -> (String, String) {
     (issued.cert.pem(), issued.key_pair.serialize_pem())
 }
 
+/// A self-signed certificate and its private key, PEM `(cert_pem, key_pem)`, that stops being
+/// valid at `not_after` (to the second; X.509 carries no finer time). Its names are `localhost`
+/// and the address `127.0.0.1`, so a numeric loopback dial verifies against it whether the dialer
+/// checks the host name it was given or the address: zenoh checks the address, wz the name
+/// `localhost`. For a witness of what a link does when its peer's certificate expires.
+#[cfg(feature = "tls-fixtures")]
+pub fn loopback_cert_key_pem_expiring_at(not_after: std::time::SystemTime) -> (String, String) {
+    let since_epoch = not_after
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("an expiry after the Unix epoch");
+    let key = rcgen::KeyPair::generate().expect("generate a key pair");
+    let mut params =
+        rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .expect("certificate parameters");
+    // `rcgen` names its time type through this helper alone, so no time crate is needed here.
+    params.not_after = rcgen::date_time_ymd(1970, 1, 1) + since_epoch;
+    let issued = params.self_signed(&key).expect("self-sign the certificate");
+    (issued.pem(), key.serialize_pem())
+}
+
 /// An identity as decision D1 of `docs/session-lifecycle-intent.md` reads one: a P-256 key, a
 /// certificate self-signed over it (SAN `localhost`), and the DER `SubjectPublicKeyInfo` of the
 /// key, from which `wz_session_core::credential_identity::zid_from_spki_der` derives the zid the
