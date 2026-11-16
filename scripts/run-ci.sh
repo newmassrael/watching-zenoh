@@ -5787,50 +5787,16 @@ layer_c0d_doclink_dependents() {
 # LITERAL line, so a shell variable there would capture as nothing and drop the
 # whole set from the closure. What can be removed is the silence.
 #
-# The invariant, stated as the lane states it: the FIRST and LAST `--features`
-# sets in `layer_z_zenohd_interop` are the same SET (order-insensitive, since
-# only membership reaches cargo). Everything between them is a deliberate
-# one-leg rebuild and is not compared.
+# The invariant was Layer Z's alone: its FIRST and LAST feature statements are
+# one SET. Open-debt item 212 asked for every lane, and the sweep found that
+# only Z restores. So the rule is now general and declared: every lane that
+# builds one artifact with two different feature statements says whether it
+# restores (first and last must be one set), is staged or only compiles, and a
+# new pair with no declaration fails. The population, the three shapes and the
+# table are `scripts/lib/lane_build_restore_gate.py`'s.
 layer_c0f_lane_demo_feature_restore() {
-    local script="scripts/run-ci.sh"
-    local sets
-    sets="$(awk '
-        /^layer_z_zenohd_interop\(\) \{/ { inside = 1 }
-        inside && /^\}/ { inside = 0 }
-        inside && /cargo build -p wz-ap-demo/ {
-            if (match($0, /--features [A-Za-z0-9_,\/-]+/)) {
-                print substr($0, RSTART + 11, RLENGTH - 11)
-            }
-        }
-    ' "$script")"
-
-    local count
-    count="$(printf '%s\n' "$sets" | grep -c . || true)"
-    # POPULATION, not exit status: an awk that matched nothing would print
-    # nothing and every comparison below would trivially hold. This lane exists
-    # because a silent zero is exactly how the class it gates went unnoticed.
-    if [[ "$count" -lt 2 ]]; then
-        echo "  Layer C0f FAIL: found $count wz-ap-demo build(s) with a feature list inside" \
-            "layer_z_zenohd_interop — expected the opening build and its restore, so either" \
-            "the lane was restructured or this reader stopped matching it" >&2
-        return 1
-    fi
-
-    local first last
-    first="$(printf '%s\n' "$sets" | head -n 1 | tr ',' '\n' | sort -u | paste -sd, -)"
-    last="$(printf '%s\n' "$sets" | tail -n 1 | tr ',' '\n' | sort -u | paste -sd, -)"
-    if [[ "$first" != "$last" ]]; then
-        echo "  Layer C0f FAIL: layer_z_zenohd_interop opens its wz-ap-demo build with one" \
-            "feature set and restores a DIFFERENT one, so every leg past the restore runs a" \
-            "binary the lane did not mean to build" >&2
-        echo "    opened:   $first" >&2
-        echo "    restored: $last" >&2
-        echo "    fix: make the restore line's --features identical to the opening line's" >&2
-        return 1
-    fi
-
-    echo "  C0f: layer Z opens and restores the same wz-ap-demo feature set ($count build(s) read)"
-    return 0
+    python3 scripts/lib/lane_build_restore_gate.py --selftest || return 1
+    python3 scripts/lib/lane_build_restore_gate.py --check scripts/run-ci.sh || return 1
 }
 
 layer_c0e_inventory_tag_reader() {
