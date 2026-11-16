@@ -23888,7 +23888,10 @@ mod tests {
             WhatAmI::Router,
             crate::node_clock::TimestampingEnabled::default(),
             FrozenEpoch,
-        );
+        )
+        // The policy that stamps whatever the build states: under `trusted-only` an
+        // unreferenced clock judges nothing, and neither arm would absorb.
+        .with_trusted_only_stamping(false);
         let (publisher, _sink_publisher) = face(zid(0xAA), WIRE_CLIENT);
         let (subscriber, sink_subscriber) = face(zid(0xBB), WIRE_CLIENT);
         fwd.register(FaceId(0), &publisher);
