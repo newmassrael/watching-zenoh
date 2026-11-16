@@ -510,6 +510,7 @@ impl ReconnectingSession {
                     clock,
                     self.open_max_iters,
                     self.tick_interval_ms,
+                    self.dial_config.handshake_timeouts(),
                 )
                 .await
             })
@@ -852,6 +853,7 @@ pub async fn open_session_with_reconnect(
             clock,
             max_iters,
             tick_interval_ms,
+            dial_config.handshake_timeouts(),
         )
         .await?;
         Ok((swappable, opened))

@@ -432,18 +432,14 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
-/// How long, in milliseconds, a node that has sent its INIT waits for the peer's INIT acknowledgement
-/// before the link is given up: the `init_ack` window of
-/// `session_timeouts::SessionTimeouts::from_build` (built with `session-unicast`). The default is
-/// the 2 seconds docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
-/// size: it sizes no memory.
+/// A per-step window for the INIT phase of the handshake, which nothing reads: an initiator's
+/// handshake is one bound from its InitSyn to the peer's OpenAck, the `opening_ms` of
+/// `session_timeouts::SessionTimeouts`, because neither upstream bounds one step shorter than the
+/// whole open. The declaration still states the limit; it sizes no memory.
 pub const HANDSHAKE_INIT_MS: usize = generated::HANDSHAKE_INIT_MS;
 
-/// How long, in milliseconds, a node that has sent its OPEN waits for the peer's OPEN acknowledgement
-/// before the link is given up: the `open_ack` window of
-/// `session_timeouts::SessionTimeouts::from_build` (built with `session-unicast`). The default is
-/// the 2 seconds docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
-/// size: it sizes no memory.
+/// A per-step window for the OPEN phase of the handshake, which nothing reads, for the reason
+/// [`HANDSHAKE_INIT_MS`] gives. The declaration still states the limit; it sizes no memory.
 pub const HANDSHAKE_OPEN_MS: usize = generated::HANDSHAKE_OPEN_MS;
 
 /// How many bytes of a peer's cookie a session keeps on the `session-slot` profile

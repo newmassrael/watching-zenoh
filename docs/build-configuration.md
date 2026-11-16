@@ -82,12 +82,14 @@ original reproduced by naming it. Three things follow from it:
   configuration; a policy it names outside its profile is Zephyr's own warning that the
   assignment was not honoured, which Zephyr does not make an error. With no policy
   stated every image of the board table builds with the cargo line it had before.
-- **The handshake's windows and cookie buffer**: the INIT and OPEN phases of the unicast
-  handshake wait `HANDSHAKE_INIT_MS` and `HANDSHAKE_OPEN_MS` (2000 each, the session
-  machine's reference values) for the peer's acknowledgement, and the engines hand their
-  drive loops `SessionTimeouts::from_build()`, which is `spec_defaults()` with those two
-  limits (the link-open, accepting and closing windows are unchanged; the pico drop-in's
-  connect and accept timeouts are their own limits). A value of 0 does not compile. On the
+- **The handshake's windows and cookie buffer**: an initiator's handshake, its INIT and OPEN
+  phases together, waits one bound for the peer's acknowledgements, as both upstreams wait:
+  the node's `transport/unicast/open_timeout` where the host has one, upstream's 10 s where it
+  has none (`SessionTimeouts::from_build()`), and the pico drop-in's
+  `PICO_CONNECT_TIMEOUT_MS` (its accept timeout is `PICO_ACCEPT_TIMEOUT_MS`). The declared
+  limits `HANDSHAKE_INIT_MS` and `HANDSHAKE_OPEN_MS` are per-phase windows that nothing
+  reads: a window shorter than the whole bound would end an open sooner than upstream does. On
+  the
   `session-slot` profile a session keeps a peer's cookie in buffers of
   `HANDSHAKE_COOKIE_BYTES` (128), at most the INIT body's cookie capacity (65535) and, for
   a node that accepts, at least the widest cookie it issues; a build outside that does not

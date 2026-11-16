@@ -2664,12 +2664,17 @@ fn acceptor_offer(#[allow(unused)] shm: bool) -> SessionOffer {
 /// partition gives the remote, and a remote the rules refuse fails the
 /// handshake, which is upstream's client (`zenoh/src/net/runtime/mod.rs` @
 /// `move |p| region::compute_transient_bound_of(&p, &config)`).
+///
+/// `timeouts` hold the handshake to the client's open bound
+/// (`DialConfig::handshake_timeouts`), so that bound and not a shorter window
+/// is what gives a silent peer up.
 async fn open_initiator_with_offer(
     offer: SessionOffer,
     dialed: DialedLink,
     params: SessionInitParams,
     clock: TokioTime,
     south_partition: wz::runtime_tokio::region_partition::SouthPartition,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError> {
     initiate_and_open_session_with_staging(
         dialed,
@@ -2682,6 +2687,7 @@ async fn open_initiator_with_offer(
         clock,
         None,
         DEFAULT_OPEN_TICK_MS,
+        timeouts,
     )
     .await
 }
@@ -2753,7 +2759,15 @@ async fn open_initiator_in_connect_phase(
                 let (dialed, offer) = dial_candidate(endpoint, dial_cfg, offer)
                     .await
                     .map_err(OpenError::Dial)?;
-                open_initiator_with_offer(offer, dialed, params, clock, south_partition).await
+                open_initiator_with_offer(
+                    offer,
+                    dialed,
+                    params,
+                    clock,
+                    south_partition,
+                    dial_cfg.handshake_timeouts(),
+                )
+                .await
             };
             match open_within(dial_cfg.open_timeout, open).await {
                 Ok(opened) => Ok(opened),
@@ -10180,6 +10194,7 @@ mod client_partition_tests {
     use crate::args::{demo_session_init_params, NodeKind, TransportTuning};
     use wz::runtime_tokio::region_partition::SouthPartition;
     use wz::runtime_tokio::runtime_impl::TokioTime;
+    use wz::runtime_tokio::session_glue::SessionTimeouts;
     use wz::runtime_tokio::session_open::{
         accept_and_open_session_with_offer, DialedLink, OpenError, OpenedSession, SessionOffer,
         DEFAULT_OPEN_TICK_MS,
@@ -10231,6 +10246,7 @@ mod client_partition_tests {
                 client_params,
                 TokioTime::new(),
                 south,
+                SessionTimeouts::from_build(),
             )
             .await
         };

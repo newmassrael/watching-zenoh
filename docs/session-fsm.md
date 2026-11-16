@@ -344,8 +344,7 @@ All timeouts are named here so they have a single home in
 | Timer | Default | Source |
 |---|---|---|
 | `link.open_timeout` | 5 s | deploy.links[].open_timeout |
-| `init_ack_timeout` | 2 s | deploy.session.handshake_timeout |
-| `open_ack_timeout` | 2 s | deploy.session.handshake_timeout |
+| `opening_timeout` (raised as `init_ack_timeout` / `open_ack_timeout`) | 10 s, ONE bound over the initiator's whole handshake, armed on `Opening` entry and not reset by the InitAck. Neither upstream has a shorter per-step window: zenoh holds one open, its dial and its handshake, to `transport/unicast/open_timeout` (10 s), zenoh-pico both receives to `Z_TRANSPORT_CONNECT_TIMEOUT` (10 s). The host states the node's bound (`SessionTimeouts::with_open_timeout`) | deploy.session.open_timeout |
 | `scout_timeout` | 1 s | deploy.scouting.timeout |
 | `lease` | 10 s (peer), 10 s (client) — negotiated | `OpenSyn/OpenAck.lease` field; deploy.session.lease |
 | `keepalive_interval` | `adopted lease / 3` (the session's `KeepAliveConf` default); an interface that stands for zenoh states `own lease / transport/link/tx/keep_alive` (4), zenoh-pico's build states its `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` | derived; deploy.session.keepalive_ratio |

@@ -322,6 +322,9 @@ impl Dialer {
             self.clock,
             None,
             DEFAULT_OPEN_TICK_MS,
+            // The handshake is held to the open's bound and to no shorter window, so the bound
+            // `open_with` holds the open to is the one that ends it.
+            SessionTimeouts::from_build().with_open_timeout(self.open_timeout),
         )
         .await
         .map_err(|e| match e {

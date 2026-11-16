@@ -63,6 +63,7 @@ use wz_integration_tests::common::{
     wz_ap_demo_binary, zenohd_binary, ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session_glue::SessionTimeouts;
 use wz_runtime_tokio::session_open::{
     initiate_and_open_session_with_staging, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
@@ -611,6 +612,7 @@ async fn zenohd_places_a_wz_router(south: &str) -> (String, Option<Bound>) {
         TokioTime::new(),
         Some(OPEN_ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
+        SessionTimeouts::from_build(),
     )
     .await
     .unwrap_or_else(|e| panic!("wz did not open a session to zenohd: {e:?}"));

@@ -1551,6 +1551,7 @@ async fn dial_face(
                     clock,
                     None,
                     tick_interval_ms,
+                    dial_config.handshake_timeouts(),
                 )
                 .await
             }
@@ -1720,6 +1721,7 @@ async fn dial_face_multilink(
                     clock,
                     None,
                     tick_interval_ms,
+                    dial_config.handshake_timeouts(),
                 )
                 .await
             }
