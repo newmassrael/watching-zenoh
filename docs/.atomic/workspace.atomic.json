@@ -13854,6 +13854,22 @@
         "Open: the next step of the owner's plan for the node's locks: no waiting send under the routing tables (the router's sends at its frame, publish, query and multicast routes) or under the session's state, after which the checker's rule that a lock held across waits is taken only without waiting under another lock is switched on.",
         "Open: the consumer's router stall; the chain's wait under the tables, now removed, matches its shape, and the consumer is told the head to pin."
       ]
+    },
+    "Round 4497": {
+      "decision_summary": "The landing queue merges a landed item onto main instead of replaying its commits (bx.toml [land] strategy = \"merge\", owner decision 2026-11-15). An integration branch that merged several sessions' branches cannot be replayed commit by commit without passing mixed intermediate trees through the pre-commit hook, and the hook is never turned off; a merge keeps every commit with its reason, and the pre-push hook judges the merged tree, which is the tree that lands. The integrator reads [land] from main's current value, so this lands alone and takes effect for the items after it.",
+      "changes_bullets": [
+        "bx.toml [land]: strategy rebase -> merge, with the owner decision and the reason as a comment",
+        "scripts/land.sh: the after-landing comment says the item was merged onto the tip and that origin/main reaches the landed commits"
+      ],
+      "verification_bullets": [
+        "Local at bb7f6a7f22 over origin/main eb14784d20: bash -n and shellcheck -S warning over scripts/land.sh rc 0; reason_review_pin_gate.py --check OK (55 rows). The integrator's hook run judges this item. The first merge-strategy landing is the c2 integration that follows."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Land the c2 integration as a merge item: 294 commits of axes, debts and claims, verified at its target tree (C1bf 100/100, workspace tests, E18 contract, C1v/C1y/C1bo)."
+      ]
     }
   },
   "inventory_entries": {
