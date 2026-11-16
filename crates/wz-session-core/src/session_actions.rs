@@ -563,7 +563,15 @@ pub struct OutOfBandState {
     /// `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session` counts. It is state of this
     /// lock and not a request, so it wakes no one and `Self::any` does not read it.
     pub expiry_run: crate::tx_deadline::ExpiryRun,
-    waker: Option<core::task::Waker>,
+    /// The peer closed this session at session scope (a Close with
+    /// `FLAG_T_CLOSE_S` set, on an established link): every link of the
+    /// transport ends, not only the one the Close arrived on. Sticky, unlike the
+    /// requests above, because it is owed to each link's loop once and not to
+    /// the session once: the loops take it link by link
+    /// ([`SessionLinkActions::take_transport_deleted`]).
+    #[cfg(feature = "transport-multilink")]
+    pub transport_deleted: bool,
+    parked: ParkedLoops,
 }
 
 impl OutOfBandState {
@@ -576,6 +584,43 @@ impl OutOfBandState {
     }
 }
 
+/// The drive loops parked on an [`OutOfBand`], to be woken when a request is
+/// staged. One loop on a session of one link; on an aggregated session every
+/// link's loop parks on the shared core, and a request owed to each of them
+/// (a transport the peer deleted) must reach each, so the set keeps a waker per
+/// loop rather than the last one to park.
+#[derive(Default)]
+struct ParkedLoops {
+    #[cfg(not(feature = "transport-multilink"))]
+    one: Option<core::task::Waker>,
+    #[cfg(feature = "transport-multilink")]
+    every: alloc::vec::Vec<core::task::Waker>,
+}
+
+impl ParkedLoops {
+    fn park(&mut self, waker: &core::task::Waker) {
+        #[cfg(not(feature = "transport-multilink"))]
+        {
+            self.one = Some(waker.clone());
+        }
+        #[cfg(feature = "transport-multilink")]
+        if !self.every.iter().any(|w| w.will_wake(waker)) {
+            self.every.push(waker.clone());
+        }
+    }
+
+    fn wake(self) {
+        #[cfg(not(feature = "transport-multilink"))]
+        if let Some(waker) = self.one {
+            waker.wake();
+        }
+        #[cfg(feature = "transport-multilink")]
+        for waker in self.every {
+            waker.wake();
+        }
+    }
+}
+
 impl<R: SessionRuntime> OutOfBand<R> {
     fn new() -> Self {
         Self {
@@ -583,15 +628,21 @@ impl<R: SessionRuntime> OutOfBand<R> {
         }
     }
 
-    /// Stage a request (`set` marks it) and wake the loop if it is parked.
+    /// Stage a request (`set` marks it) and wake the loops parked on it.
     fn raise(&self, set: impl FnOnce(&mut OutOfBandState)) {
-        let waker = R::with_mutex_mut(&self.state, |s| {
+        let parked = R::with_mutex_mut(&self.state, |s| {
             set(s);
-            s.waker.take()
+            core::mem::take(&mut s.parked)
         });
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+        parked.wake();
+    }
+
+    /// Wake every parked loop with nothing staged: each asks again and parks
+    /// again. What a link leaving an aggregated session costs the loops that
+    /// stay, so the wakers of loops that have ended do not pile up in the set.
+    #[cfg(feature = "transport-multilink")]
+    fn wake_parked(&self) {
+        R::with_mutex_mut(&self.state, |s| core::mem::take(&mut s.parked)).wake();
     }
 
     /// Take a request (`take` reads and clears it).
@@ -602,14 +653,26 @@ impl<R: SessionRuntime> OutOfBand<R> {
     /// Resolves once any request is staged — the branch a parked drive loop
     /// selects on so a request reaches it without waiting for the link.
     /// Taking the request stays the loop's job; this only says there is one.
+    ///
+    /// It does not count a transport the peer deleted, which is owed per link:
+    /// a link's loop selects on [`SessionLinkActions::out_of_band_signalled`].
     pub fn signalled(&self) -> OutOfBandSignalled<'_, R> {
-        OutOfBandSignalled { slot: self }
+        OutOfBandSignalled {
+            slot: self,
+            #[cfg(feature = "transport-multilink")]
+            deletion_owed: false,
+        }
     }
 }
 
 /// The future [`OutOfBand::signalled`] returns.
 pub struct OutOfBandSignalled<'a, R: SessionRuntime> {
     slot: &'a OutOfBand<R>,
+    /// Whether the polling loop's link has yet to take a deleted transport. Read
+    /// when the future is made: only that link's own loop takes it, and the loop
+    /// is the one awaiting this future, so the value cannot move meanwhile.
+    #[cfg(feature = "transport-multilink")]
+    deletion_owed: bool,
 }
 
 impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
@@ -619,11 +682,17 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<()> {
+        #[cfg(feature = "transport-multilink")]
+        let deletion_owed = self.deletion_owed;
         R::with_mutex_mut(&self.slot.state, |s| {
+            #[cfg(feature = "transport-multilink")]
+            if deletion_owed && s.transport_deleted {
+                return core::task::Poll::Ready(());
+            }
             if s.any() {
                 core::task::Poll::Ready(())
             } else {
-                s.waker = Some(cx.waker().clone());
+                s.parked.park(cx.waker());
                 core::task::Poll::Pending
             }
         })
@@ -2259,6 +2328,12 @@ pub struct LinkState<R: SessionRuntime> {
     /// close this transport staged from none. Read it through
     /// [`SessionLinkActions::close_reason`].
     pub close_reason: R::Mutex<Option<CloseReason>>,
+    /// Whether this link's loop has taken the session's deleted transport
+    /// ([`OutOfBandState::transport_deleted`]): set once the loop has raised it,
+    /// and by the link the session-scope Close arrived on, which ends by that
+    /// Close itself. Per link, because the deletion is owed to every link once.
+    #[cfg(feature = "transport-multilink")]
+    pub transport_deletion_taken: R::Mutex<bool>,
     /// R2943 (transport-multilink) — the reliability class this link DECLARED
     /// and negotiated, zenoh's `link.config.reliability`: `None` until a
     /// negotiation settles one. It is the first of the two inputs
@@ -3586,6 +3661,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 keepalive_armed: R::new_mutex(false),
                 lease_armed: R::new_mutex(false),
                 close_reason: R::new_mutex(None),
+                #[cfg(feature = "transport-multilink")]
+                transport_deletion_taken: R::new_mutex(false),
                 #[cfg(feature = "transport-multilink")]
                 declared_reliability: R::new_mutex(None),
                 #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
@@ -7179,6 +7256,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // slots move to the heap stage before the link leaves the set.
         #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
         self.move_lent_batches_off(link);
+        // The departing link's loop may still be parked on this session; the
+        // loops that stay park again when they are woken.
+        self.out_of_band.wake_parked();
         let target: *const LinkState<R> = &**link;
         let mut links = self.links.lock().expect("multilink set mutex");
         links.retain(|l| {
@@ -9322,6 +9402,61 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.core
             .out_of_band
             .take(|s| core::mem::replace(&mut s.close, false))
+    }
+
+    /// The peer closed this session at session scope on THIS link: the whole
+    /// transport ends, and every other link of it is told through the session.
+    ///
+    /// Upstream's receiver deletes the transport on a Close with `session` set
+    /// and removes only the link it arrived on otherwise
+    /// (`io/zenoh-transport/src/unicast/universal/rx.rs` @ `if session {`), and
+    /// its delete closes each remaining link without a Close message of its own
+    /// (`universal/link.rs` @ `self.link.close(None).await`). This link ends by
+    /// the Close itself, so it is marked as having taken the deletion; each
+    /// other link's loop takes it once ([`Self::take_transport_deleted`]) and
+    /// ends as on a peer Close, which writes no frame.
+    #[cfg(feature = "transport-multilink")]
+    pub fn peer_deleted_transport(&self) {
+        R::with_mutex_mut(&self.link.transport_deletion_taken, |taken| *taken = true);
+        self.core.out_of_band.raise(|s| s.transport_deleted = true);
+    }
+
+    /// Whether the peer has deleted this session's transport
+    /// ([`Self::peer_deleted_transport`]): a link of it that leaves is not to be
+    /// re-added, since the others are leaving too.
+    #[cfg(feature = "transport-multilink")]
+    pub fn transport_deleted(&self) -> bool {
+        self.core.out_of_band.take(|s| s.transport_deleted)
+    }
+
+    /// Take the deleted transport for THIS link: true once per link after the
+    /// peer deleted it, and never for the link the deletion arrived on.
+    #[cfg(feature = "transport-multilink")]
+    pub fn take_transport_deleted(&self) -> bool {
+        if !self.transport_deleted() {
+            return false;
+        }
+        R::with_mutex_mut(&self.link.transport_deletion_taken, |taken| {
+            !core::mem::replace(taken, true)
+        })
+    }
+
+    /// [`OutOfBand::signalled`] for this link's loop: it also resolves while the
+    /// peer's deletion of the transport is owed to this link.
+    pub fn out_of_band_signalled(&self) -> OutOfBandSignalled<'_, R> {
+        #[cfg(feature = "transport-multilink")]
+        {
+            let deletion_owed =
+                !R::with_mutex_mut(&self.link.transport_deletion_taken, |taken| *taken);
+            OutOfBandSignalled {
+                slot: &self.core.out_of_band,
+                deletion_owed,
+            }
+        }
+        #[cfg(not(feature = "transport-multilink"))]
+        {
+            self.core.out_of_band.signalled()
+        }
     }
 
     /// R2923 — ask the drive loop to end this session as unresponsive: a
@@ -15247,6 +15382,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The close reason is the closed transport's; the replacement
             // has staged none.
             R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);
+            // A transport the peer deleted is the closed transport's, as its
+            // close reason is: the replacement starts with none to take.
+            #[cfg(feature = "transport-multilink")]
+            {
+                R::with_mutex_mut(&self.link.transport_deletion_taken, |taken| *taken = false);
+                self.core.out_of_band.take(|s| s.transport_deleted = false);
+            }
             // R311kw — the outbound stamp is per-transport: the replacement
             // link starts with no TX history (pico's fresh transport
             // initializes `_transmitted = 0`, unicast/transport.c:65).

@@ -4203,6 +4203,16 @@ where
                                 }
                                 on_event(&AcceptEvent::FaceDown(primary_face, outcome));
                             }
+                        } else if handle.transport_deleted() {
+                            // The peer deleted the transport: the links that remain
+                            // are leaving with this one, so it is not re-added.
+                            log::debug!(
+                                "multilink: link {} left a transport peer {:02x?} deleted; \
+                                 {} link(s) still closing",
+                                face.id.0,
+                                peer_zid,
+                                remaining
+                            );
                         } else if let Some((target, band)) = dead {
                             // R311y212 — PARTIAL loss of a link THIS node DIALED:
                             // re-dial + re-JOIN it onto the surviving shared core so

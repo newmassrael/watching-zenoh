@@ -259,6 +259,46 @@ async fn r2927_a_default_priority_frame_on_a_non_qos_session_is_delivered() {
     assert_eq!(engine.get_current_state(), S::Established);
 }
 
+// A Close at session scope on an established session deletes the transport, as
+// upstream's receiver does (`unicast/universal/rx.rs` @ `if session {`); one at
+// link scope removes only the link it arrived on. Either way that link ends by
+// the Close and is not owed the deletion again.
+#[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_session_scope_close_deletes_the_transport() {
+    for session in [false, true] {
+        let (actions, mut engine) = fresh_setup();
+        drive_to_established(&mut engine);
+        let close = wz_session_core::handshake_encode::encode_close(0, session);
+        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(close))]);
+        let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+        assert!(
+            matches!(outcome, DriverLoopOutcome::AdvancedFsm),
+            "a peer Close advances the link's FSM; got {outcome:?}"
+        );
+        assert_eq!(engine.get_current_state(), S::Closed);
+        assert_eq!(
+            actions.transport_deleted(),
+            session,
+            "the transport is deleted exactly when the Close is at session scope"
+        );
+        assert!(!actions.take_transport_deleted());
+    }
+}
+
+// Before `Established` there is no transport to delete: a Close at session scope
+// during the handshake ends the link and nothing else.
+#[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_scope_close_during_the_handshake_deletes_nothing() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+    let close = wz_session_core::handshake_encode::encode_close(0, true);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(close))]);
+    poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(!actions.transport_deleted());
+}
+
 /// Feed `frames` to the driver loop one at a time and return what each became.
 async fn deliver_frames(
     actions: &Arc<SessionLinkActions>,
