@@ -99,8 +99,8 @@ enum PluginDiff {
 /// library session's config leaves the key off (`Config::default()`), while
 /// zenohd turns it on over whatever its file says
 /// (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`).
-/// [`Self::from_config`] is the library's reading, which is what a host the
-/// file configures takes.
+/// [`Self::from_config`] reads the value a host's configuration carries, which
+/// the daemon reading of a file has already turned on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PluginsLoading {
     /// The key off: a by-name request is left unloaded with upstream's warning.

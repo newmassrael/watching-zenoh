@@ -1540,11 +1540,12 @@ pub struct ZenohNodeConfig {
     pub plugins: Option<Json5Value>,
     /// `plugins_loading/enabled`: whether a plugin the `plugins` section names
     /// with no `__path__` is looked up by name. `None` is an unnamed key, which
-    /// a library session reads as `false` (`Config::default()`); zenohd sets it
-    /// `true` over whatever its file says, a property of that binary and not of
-    /// the document, so the value carried here is the document's. The storage
-    /// host's plugin plane takes it as `PluginsLoading::from_config` reads it,
-    /// wz's `--plugins-loading`.
+    /// a library session reads as `false` (`Config::default()`). Under
+    /// [`ConfigReading::Library`] the value carried here is the document's;
+    /// [`ConfigReading::Daemon`] carries `Some(true)` whatever the document
+    /// says, as zenohd sets it ([`DAEMON_OVERRIDES`]). The storage host's
+    /// plugin plane takes it as `PluginsLoading::from_config` reads it, wz's
+    /// `--plugins-loading`.
     pub plugins_loading_enabled: Option<bool>,
     /// §5.23 `adminspace-core` — `metadata`, the operator's free-form value,
     /// which upstream carries without interpreting and serves as the
@@ -4751,13 +4752,19 @@ pub struct ZenohConfigIngest {
     /// says about `adminspace/enabled`; a permission it leaves unstated takes
     /// zenoh's `PermissionsConf` default (read on, write off).
     ///
-    /// [`ZenohNodeConfig::adminspace`] is a library session's reading, in which
-    /// `enabled: false` leaves no admin space and so no permissions to keep. A
-    /// zenoh daemon turns the admin space on after it loads the file
+    /// Under [`ConfigReading::Library`], `enabled: false` leaves
+    /// [`ZenohNodeConfig::adminspace`] empty and so no permissions to keep.
+    /// [`ConfigReading::Daemon`] turns the admin space on over the file
     /// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`)
-    /// and serves it under the permissions the file states, so a host that
-    /// reads the file as the daemon does needs them apart from `enabled`.
+    /// and serves it under these, which is why they are kept apart from
+    /// `enabled`.
     pub adminspace_permissions: AdminspaceConfig,
+    /// The reading this ingest was made under.
+    pub reading: ConfigReading,
+    /// The named keys whose stated value a [`DaemonWrite::OverTheFile`] row of
+    /// [`DAEMON_OVERRIDES`] replaced, in table order: what the file said and
+    /// the node does not do. Always empty under [`ConfigReading::Library`].
+    pub daemon_overrode: Vec<&'static str>,
 }
 
 impl ZenohConfigIngest {
@@ -4794,12 +4801,11 @@ impl ZenohConfigIngest {
     /// document whose role nobody stated is the one the report said nothing
     /// about.
     ///
-    /// [`read_as`] is read off [`config`] rather than from
-    /// [`LIBRARY_DEFAULT_MODE`], so the sentence states what THIS ingest
-    /// produced. The two are the same value by construction — an unnamed `mode`
-    /// leaves the field at its default, and that default IS the constant — and
-    /// deriving it here rather than restating it is what keeps the report honest
-    /// if they ever stop being.
+    /// [`read_as`] is read off [`config`] rather than from the reading's
+    /// constant, so the sentence states what THIS ingest produced: an unnamed
+    /// `mode` leaves the field at the value the reading started from
+    /// ([`LIBRARY_DEFAULT_MODE`], or [`DAEMON_DEFAULT_MODE`] under
+    /// [`ConfigReading::Daemon`]).
     ///
     /// [`named`]: ZenohConfigIngest::named
     /// [`config`]: ZenohConfigIngest::config
@@ -4807,6 +4813,8 @@ impl ZenohConfigIngest {
     pub fn mode_left_unstated(&self) -> Option<UnstatedMode> {
         (!self.named.contains(&"mode")).then_some(UnstatedMode {
             read_as: self.config.mode,
+            reading: self.reading,
+            a_library_reads: LIBRARY_DEFAULT_MODE,
             a_daemon_reads: DAEMON_DEFAULT_MODE,
         })
     }
@@ -5124,71 +5132,201 @@ pub const LIBRARY_DEFAULT_MODE: WhatAmI = WhatAmI::Peer;
 
 /// The run-mode the SAME silence comes up in when a zenoh DAEMON reads it.
 ///
-/// R2109 (open-debt item 514) — `zenohd` overwrites an absent `mode` before it
-/// builds a runtime at all: `if config.mode().is_none() { config.set_mode(
-/// Some(WhatAmI::Router)) }` (`zenohd/src/main.rs`
-/// @ `config.set_mode(Some(WhatAmI::Router))`).
-/// Measured rather than quoted: handed a one-line `{ listen: [..] }` document, a
-/// real zenohd prints `"mode":"router"` in its own resolved config.
+/// `zenohd` writes it into a configuration whose file names no `mode`, before it
+/// builds a runtime (`zenohd/src/main.rs` @
+/// `config.set_mode(Some(WhatAmI::Router)).unwrap();`). Measured rather than
+/// quoted: handed a one-line `{ listen: [..] }` document, a real zenohd prints
+/// `"mode":"router"` in its own resolved config.
 ///
-/// ## Why wz keeps the LIBRARY reading and states this one
-///
-/// Neither reading is wrong. `wz-ap-demo` is a library node, so the library
-/// default is the correct comparand and R2092 decided it that way. What item
-/// 514 is about is the half that decision does not cover: the zenoh preset owes
-/// drop-in behaviour for zenoh AND for zenohd, and an operator who swaps a zenohd out
-/// for wz with a mode-less file gets a PEER standing where a router used to be
-/// — silently, because nothing in the report mentions a key the file never
-/// named. This constant exists so the report can say it; the sentence is
-/// [`UnstatedMode`], reached through [`ZenohConfigIngest::mode_left_unstated`].
-///
-/// R2109 chose to SAY it rather than to offer a daemon-reading switch. The
-/// switch is expressible — it would be an argv flag, not a `cfg!`, so it would
-/// not fall foul of the line R2091 drew about the same file coming up
-/// differently per BUILD — but it answers a question nobody has asked: this
-/// tree ships no daemon, and a flag that changes a node's role would owe its own
-/// witness on the wire to be worth anything. The harm the register records is
-/// the word "silently", and a line in the report is what removes it.
-///
-/// ## The `--config` form reads the file two ways at once
-///
-/// `wz-ap-demo --config` reads the admin space as zenohd's daemon does: it is
-/// hosted in every mode whatever `adminspace/enabled` says
-/// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`).
-/// The default mode stated here and `plugins_loading/enabled` keep the library
-/// reading R2109 chose. Which reading the whole `--config` form follows is an
-/// open decision for the owner; until it is taken the mix is deliberate, and
-/// this paragraph and the `plugins_loading/enabled` site in `wz-ap-demo`'s
-/// `args.rs` are where it is stated.
+/// [`ConfigReading::Daemon`] reads the silence this way, through the `mode` row
+/// of [`DAEMON_OVERRIDES`]; [`ConfigReading::Library`] reads it as
+/// [`LIBRARY_DEFAULT_MODE`].
 pub const DAEMON_DEFAULT_MODE: WhatAmI = WhatAmI::Router;
+
+/// Which upstream entry point a stock document is read as.
+///
+/// The zenoh library (`zenoh::open`, zenoh-c's `z_open`) applies the document
+/// over its own defaults and nothing else. The zenoh daemon loads the same
+/// document from `--config` and then writes [`DAEMON_OVERRIDES`] into it before
+/// it opens a runtime, so the two read the same bytes as different nodes: a
+/// file that names no `mode` is a peer to the library and a router to the
+/// daemon. wz's library entry points read as [`Self::Library`]; `wz-ap-demo
+/// --config`, wz's daemon entry point, reads as [`Self::Daemon`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigReading {
+    /// The document over upstream's library defaults.
+    Library,
+    /// The document as zenohd reads its `--config` file: in order, the file,
+    /// then every row of [`DAEMON_OVERRIDES`]. zenohd's `--cfg` comes after
+    /// both; wz has no counterpart for it.
+    Daemon,
+}
+
+impl ConfigReading {
+    /// The daemon's writes this reading makes, in zenohd's order.
+    pub fn overrides(self) -> &'static [DaemonOverride] {
+        match self {
+            Self::Library => &[],
+            Self::Daemon => &DAEMON_OVERRIDES,
+        }
+    }
+
+    /// The configuration a document is read over: upstream's defaults with the
+    /// [`DaemonWrite::WhenUnset`] rows written in. Started from rather than
+    /// written after, because the mode-dependent keys resolve against `mode`
+    /// as the document is read, and zenohd's runtime resolves them against the
+    /// mode the daemon chose.
+    fn start(self) -> ZenohNodeConfig {
+        let mut config = ZenohNodeConfig::default();
+        for row in self.overrides() {
+            if let DaemonWrite::WhenUnset(write) = row.write {
+                write(&mut config);
+            }
+        }
+        config
+    }
+
+    /// Make the [`DaemonWrite::OverTheFile`] rows on a read document, and record
+    /// each named key whose stated value one of them replaced.
+    fn write_over_the_file(self, ingest: &mut ZenohConfigIngest) {
+        for row in self.overrides() {
+            if let DaemonWrite::OverTheFile(write) = row.write {
+                let before = ingest.config.clone();
+                write(ingest);
+                if ingest.named.contains(&row.key) && ingest.config != before {
+                    ingest.daemon_overrode.push(row.key);
+                }
+            }
+        }
+    }
+}
+
+/// When zenohd writes a [`DaemonOverride`]'s value, and the write itself.
+#[derive(Debug, Clone, Copy)]
+pub enum DaemonWrite {
+    /// Only into a key the file leaves unset (`if config.<key>().is_none()`
+    /// upstream), so the value is the default the document is read over and a
+    /// file that states the key keeps its own value.
+    WhenUnset(fn(&mut ZenohNodeConfig)),
+    /// After the file is read, whatever the file states.
+    OverTheFile(fn(&mut ZenohConfigIngest)),
+}
+
+/// One value zenohd writes into the configuration it loaded from `--config`
+/// before it opens a runtime with it.
+#[derive(Debug, Clone, Copy)]
+pub struct DaemonOverride {
+    /// The honoured key the write lands on.
+    pub key: &'static str,
+    /// The statement in `zenohd/src/main.rs` that makes the write.
+    pub upstream: &'static str,
+    /// When the write is made, and what it does to wz's configuration.
+    pub write: DaemonWrite,
+}
+
+impl DaemonOverride {
+    /// Whether zenohd writes the value over one the file states.
+    pub fn overrides_the_file(&self) -> bool {
+        matches!(self.write, DaemonWrite::OverTheFile(_))
+    }
+}
+
+/// Every write zenohd makes to the configuration of its `--config` file that
+/// does not come from one of its own command-line flags, in the order
+/// `config_from_args` makes them. The flag-driven writes (`--id`, `--listen`,
+/// `--connect`, `--no-timestamp`, `--no-multicast-scouting`,
+/// `--rest-http-port`, `--plugin`, `--plugin-search-dir`,
+/// `--adminspace-permissions`, `--cfg`) are absent: each answers a flag, and a
+/// file read with no flags is what [`ConfigReading::Daemon`] states. Listen and
+/// connect endpoints and `timestamping/enabled` are not written by the daemon:
+/// their defaults follow the mode, so the `mode` row moves them.
+pub static DAEMON_OVERRIDES: [DaemonOverride; 4] = [
+    // `zenohd/src/main.rs` @ `config.set_mode(Some(WhatAmI::Router)).unwrap();`
+    DaemonOverride {
+        key: "mode",
+        upstream: "config.set_mode(Some(WhatAmI::Router)).unwrap();",
+        write: DaemonWrite::WhenUnset(daemon_mode),
+    },
+    // `zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`
+    DaemonOverride {
+        key: "adminspace/enabled",
+        upstream: "config.adminspace.set_enabled(true).unwrap();",
+        write: DaemonWrite::OverTheFile(daemon_admin_space),
+    },
+    // `zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`
+    DaemonOverride {
+        key: "plugins_loading/enabled",
+        upstream: "config.plugins_loading.set_enabled(true).unwrap();",
+        write: DaemonWrite::OverTheFile(daemon_plugins_loading),
+    },
+    // `zenohd/src/main.rs` @ `config.scouting.multicast.set_enabled(Some(true)).unwrap();`
+    // The library resolves the same silence to the same `true`, so the row
+    // changes no node; it is listed because the daemon makes the write.
+    DaemonOverride {
+        key: "scouting/multicast/enabled",
+        upstream: "config.scouting.multicast.set_enabled(Some(true)).unwrap();",
+        write: DaemonWrite::WhenUnset(daemon_multicast_scouting),
+    },
+];
+
+fn daemon_mode(config: &mut ZenohNodeConfig) {
+    config.mode = DAEMON_DEFAULT_MODE;
+}
+
+fn daemon_multicast_scouting(config: &mut ZenohNodeConfig) {
+    config.multicast_scouting = true;
+}
+
+fn daemon_admin_space(ingest: &mut ZenohConfigIngest) {
+    ingest.config.adminspace = Some(ingest.adminspace_permissions);
+}
+
+fn daemon_plugins_loading(ingest: &mut ZenohConfigIngest) {
+    ingest.config.plugins_loading_enabled = Some(true);
+}
 
 /// What a document's silence about `mode` means — in BOTH readings at once.
 ///
 /// R2109 (open-debt item 514). Two roles rather than one, because the fact IS a
-/// divergence: a line saying only "this node is a peer" reports wz's own
-/// behaviour and gives an operator nothing to act on, and the thing they need to
-/// act on is that the daemon they are replacing read the same bytes the other
-/// way.
+/// divergence: the library and the daemon read the same bytes as different
+/// nodes, and an operator moving a file between the two needs the other reading
+/// as much as the one this node took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnstatedMode {
-    /// The run-mode wz selected — [`LIBRARY_DEFAULT_MODE`], carried as a value
-    /// rather than re-quoted so a reader sees what THIS document actually got.
+    /// The run-mode this ingest selected, carried as a value rather than
+    /// re-quoted so a reader sees what THIS document actually got.
     pub read_as: WhatAmI,
-    /// The run-mode a zenoh DAEMON would have selected from the same silence.
+    /// The reading that selected it.
+    pub reading: ConfigReading,
+    /// The run-mode a zenoh LIBRARY session selects from the same silence.
+    pub a_library_reads: WhatAmI,
+    /// The run-mode a zenoh DAEMON selects from the same silence.
     pub a_daemon_reads: WhatAmI,
 }
 
 impl core::fmt::Display for UnstatedMode {
-    /// The operator's sentence. Both roles are rendered from the values, so a
-    /// round that moves either constant moves this line with it.
+    /// The operator's sentence. Every role is rendered from the values, so a
+    /// change to either constant moves this line with it.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (this, other, other_role) = match self.reading {
+            ConfigReading::Library => (
+                "the zenoh library default",
+                "a zenoh daemon",
+                self.a_daemon_reads,
+            ),
+            ConfigReading::Daemon => (
+                "as a zenoh daemon reads it",
+                "a zenoh library session",
+                self.a_library_reads,
+            ),
+        };
         write!(
             f,
-            "this document names no `mode`, so it is read as `{}` (the zenoh \
-             library default); a zenoh daemon reads the same silence as `{}`. \
-             Name `mode` to make the file say which.",
+            "this document names no `mode`, so it is read as `{}` ({this}); \
+             {other} reads the same silence as `{}`. Name `mode` to make the \
+             file say which.",
             self.read_as.to_str(),
-            self.a_daemon_reads.to_str()
+            other_role.to_str()
         )
     }
 }
@@ -7725,7 +7863,30 @@ impl ZenohNodeConfig {
     /// An absent key takes zenoh's default rather than wz's, because that is
     /// what a partial config means to zenoh: the document says what to change,
     /// not what everything is.
+    ///
+    /// The library's reading, [`ConfigReading::Library`]; a daemon entry point
+    /// reads through [`Self::from_json5_read_as`].
     pub fn from_json5(source: &str) -> Result<ZenohConfigIngest, ConfigIngestError> {
+        Self::from_json5_read_as(source, ConfigReading::Library)
+    }
+
+    /// [`Self::from_json5`] under `reading`: the document is read over
+    /// upstream's defaults with the reading's [`DaemonWrite::WhenUnset`] rows
+    /// written in, and its [`DaemonWrite::OverTheFile`] rows are made on the
+    /// result.
+    pub fn from_json5_read_as(
+        source: &str,
+        reading: ConfigReading,
+    ) -> Result<ZenohConfigIngest, ConfigIngestError> {
+        let mut ingest = Self::read_over(source, reading)?;
+        reading.write_over_the_file(&mut ingest);
+        Ok(ingest)
+    }
+
+    fn read_over(
+        source: &str,
+        reading: ConfigReading,
+    ) -> Result<ZenohConfigIngest, ConfigIngestError> {
         let doc = wz_session_core::json5::parse(source).map_err(ConfigIngestError::Syntax)?;
         if !matches!(doc, Json5Value::Object(_)) {
             return Err(ConfigIngestError::NotAnObject);
@@ -7748,7 +7909,7 @@ impl ZenohNodeConfig {
             });
         }
 
-        let mut out = Self::default();
+        let mut out = reading.start();
         let mut named: Vec<&'static str> = Vec::new();
         // R2081 (open-debt item 500) — keys the document states for OTHER modes.
         // Neither honoured (this node got no instruction) nor ignored (wz reads
@@ -8713,7 +8874,7 @@ impl ZenohNodeConfig {
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here erases the block: a library session has no
         // admin space to apply its permissions to. The ingest keeps them apart
-        // for a host that turns the admin space on over the file.
+        // for the daemon reading, which turns the admin space on over the file.
         let admin_enabled = want_bool(&doc, "adminspace/enabled")?;
         let admin_read = want_bool(&doc, "adminspace/permissions/read")?;
         let admin_write = want_bool(&doc, "adminspace/permissions/write")?;
@@ -8753,6 +8914,8 @@ impl ZenohNodeConfig {
             ignored,
             stated_for_other_modes: other_modes,
             adminspace_permissions,
+            reading,
+            daemon_overrode: Vec::new(),
         })
     }
 }
@@ -12515,6 +12678,220 @@ mod tests {
                 write: false
             }
         );
+    }
+
+    fn read_as_daemon(source: &str) -> ZenohConfigIngest {
+        ZenohNodeConfig::from_json5_read_as(source, ConfigReading::Daemon)
+            .unwrap_or_else(|e| panic!("{source}: {e}"))
+    }
+
+    /// The table is zenohd's writes in zenohd's order, and the library reading
+    /// makes none of them.
+    #[test]
+    fn the_daemon_overrides_are_zenohds_in_its_order_and_the_library_makes_none() {
+        assert!(ConfigReading::Library.overrides().is_empty());
+        let keys: Vec<&str> = ConfigReading::Daemon
+            .overrides()
+            .iter()
+            .map(|row| row.key)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "mode",
+                "adminspace/enabled",
+                "plugins_loading/enabled",
+                "scouting/multicast/enabled"
+            ]
+        );
+        for row in &DAEMON_OVERRIDES {
+            assert!(honours_config_key(row.key), "{}", row.key);
+            assert!(row.upstream.ends_with(".unwrap();"), "{}", row.upstream);
+        }
+        let over_the_file: Vec<&str> = DAEMON_OVERRIDES
+            .iter()
+            .filter(|row| row.overrides_the_file())
+            .map(|row| row.key)
+            .collect();
+        assert_eq!(
+            over_the_file,
+            ["adminspace/enabled", "plugins_loading/enabled"]
+        );
+    }
+
+    /// A document that names no `mode` is a router under the daemon reading and
+    /// a peer under the library's, and the daemon's mode is in place before the
+    /// mode tables resolve: a listen table with only a router row binds under the
+    /// daemon reading and is stated for another mode under the library's. A
+    /// stated `mode` is kept by both.
+    #[test]
+    fn the_daemon_reading_resolves_an_unstated_mode_to_a_router_before_the_mode_tables() {
+        const TABLE: &str = r#"{ listen: { endpoints: { router: ["tcp/10.0.0.1:7447"] } } }"#;
+        let daemon = read_as_daemon(TABLE);
+        assert_eq!(daemon.config.mode, DAEMON_DEFAULT_MODE);
+        assert_eq!(
+            daemon.config.listen,
+            vec![String::from("tcp/10.0.0.1:7447")]
+        );
+        assert!(
+            daemon.named.contains(&"listen/endpoints"),
+            "{:?}",
+            daemon.named
+        );
+        assert!(!daemon.named.contains(&"mode"), "{:?}", daemon.named);
+        assert!(daemon.stated_for_other_modes.is_empty());
+
+        let library = ZenohNodeConfig::from_json5(TABLE).unwrap();
+        assert_eq!(library.config.mode, LIBRARY_DEFAULT_MODE);
+        assert!(library.config.listen.is_empty(), "{:?}", library.config);
+        assert_eq!(library.stated_for_other_modes, vec!["listen/endpoints"]);
+
+        for mode in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+            let doc = format!(r#"{{ mode: "{}" }}"#, mode.to_str());
+            for reading in [ConfigReading::Library, ConfigReading::Daemon] {
+                let ingest = ZenohNodeConfig::from_json5_read_as(&doc, reading).unwrap();
+                assert_eq!(ingest.config.mode, mode, "{doc} under {reading:?}");
+                assert_eq!(ingest.reading, reading);
+                assert!(ingest.mode_left_unstated().is_none(), "{doc}");
+                assert!(ingest.daemon_overrode.is_empty(), "{doc}");
+            }
+        }
+    }
+
+    /// The daemon reading hosts the admin space under the permissions the file
+    /// states, over no block and over `enabled: false`; the file's `false` is
+    /// recorded as overridden and its `true` is not. The library reading of the
+    /// same files hosts none where the file enables none.
+    #[test]
+    fn the_daemon_reading_hosts_the_admin_space_whatever_the_file_says() {
+        const OFF: &str = r#"{ adminspace: { enabled: false,
+                                             permissions: { read: false, write: true } } }"#;
+        let silent = read_as_daemon("{}");
+        assert_eq!(
+            silent.config.adminspace,
+            Some(AdminspaceConfig {
+                read: true,
+                write: false
+            })
+        );
+        assert!(silent.daemon_overrode.is_empty());
+
+        let off = read_as_daemon(OFF);
+        assert_eq!(
+            off.config.adminspace,
+            Some(AdminspaceConfig {
+                read: false,
+                write: true
+            })
+        );
+        assert_eq!(off.daemon_overrode, vec!["adminspace/enabled"]);
+
+        let on = read_as_daemon("{ adminspace: { enabled: true } }");
+        assert!(on.config.adminspace.is_some());
+        assert!(on.daemon_overrode.is_empty(), "{:?}", on.daemon_overrode);
+
+        assert_eq!(
+            ZenohNodeConfig::from_json5("{}").unwrap().config.adminspace,
+            None
+        );
+        let library_off = ZenohNodeConfig::from_json5(OFF).unwrap();
+        assert_eq!(library_off.config.adminspace, None);
+        assert!(library_off.daemon_overrode.is_empty());
+    }
+
+    /// The daemon reading turns plugin lookup by name on whatever the file
+    /// says, without naming the key; a stated `false` is recorded as overridden
+    /// where the build reads the key, and the library reading keeps it.
+    #[test]
+    fn the_daemon_reading_turns_plugin_loading_on_whatever_the_file_says() {
+        const KEY: &str = "plugins_loading/enabled";
+        const OFF: &str = "{ plugins_loading: { enabled: false } }";
+        let silent = read_as_daemon("{}");
+        assert_eq!(silent.config.plugins_loading_enabled, Some(true));
+        assert!(!silent.named.contains(&KEY));
+        assert_eq!(
+            ZenohNodeConfig::from_json5("{}")
+                .unwrap()
+                .config
+                .plugins_loading_enabled,
+            None
+        );
+
+        let off = read_as_daemon(OFF);
+        assert_eq!(off.config.plugins_loading_enabled, Some(true));
+        if config_key_in_build(KEY) {
+            assert_eq!(off.daemon_overrode, vec![KEY]);
+            assert_eq!(
+                ZenohNodeConfig::from_json5(OFF)
+                    .unwrap()
+                    .config
+                    .plugins_loading_enabled,
+                Some(false)
+            );
+            let on = read_as_daemon("{ plugins_loading: { enabled: true } }");
+            assert!(on.daemon_overrode.is_empty(), "{:?}", on.daemon_overrode);
+        } else {
+            // A build without the plugin plane reads `false` as stating
+            // nothing, so there is no stated value to override.
+            assert!(off.daemon_overrode.is_empty(), "{:?}", off.daemon_overrode);
+        }
+    }
+
+    /// The daemon fills an unset multicast switch with `true`, which is the
+    /// library's own reading of the silence, and keeps a stated `false`.
+    #[test]
+    fn the_daemon_reading_fills_an_unset_multicast_switch_and_keeps_a_stated_one() {
+        const OFF: &str = "{ scouting: { multicast: { enabled: false } } }";
+        for reading in [ConfigReading::Library, ConfigReading::Daemon] {
+            let silent = ZenohNodeConfig::from_json5_read_as("{}", reading).unwrap();
+            assert!(silent.config.multicast_scouting, "{reading:?}");
+            let off = ZenohNodeConfig::from_json5_read_as(OFF, reading).unwrap();
+            assert!(!off.config.multicast_scouting, "{reading:?}");
+            assert!(off.daemon_overrode.is_empty(), "{reading:?}");
+        }
+    }
+
+    /// The sentence for a silent `mode` names the role this ingest took, the
+    /// reading that took it, and the other reading's role.
+    #[test]
+    fn the_unstated_mode_sentence_names_the_reading_it_was_read_under() {
+        let library = ZenohNodeConfig::from_json5("{}")
+            .unwrap()
+            .mode_left_unstated()
+            .expect("the document names no mode");
+        assert_eq!(library.read_as, LIBRARY_DEFAULT_MODE);
+        let said = library.to_string();
+        for part in [
+            format!(
+                "read as `{}` (the zenoh library default)",
+                LIBRARY_DEFAULT_MODE.to_str()
+            ),
+            format!(
+                "a zenoh daemon reads the same silence as `{}`",
+                DAEMON_DEFAULT_MODE.to_str()
+            ),
+        ] {
+            assert!(said.contains(&part), "{said}");
+        }
+
+        let daemon = read_as_daemon("{}")
+            .mode_left_unstated()
+            .expect("the document names no mode");
+        assert_eq!(daemon.read_as, DAEMON_DEFAULT_MODE);
+        assert_eq!(daemon.reading, ConfigReading::Daemon);
+        let said = daemon.to_string();
+        for part in [
+            format!(
+                "read as `{}` (as a zenoh daemon reads it)",
+                DAEMON_DEFAULT_MODE.to_str()
+            ),
+            format!(
+                "a zenoh library session reads the same silence as `{}`",
+                LIBRARY_DEFAULT_MODE.to_str()
+            ),
+        ] {
+            assert!(said.contains(&part), "{said}");
+        }
     }
 
     /// The reader takes the JSON5 an operator's file is actually written in,
