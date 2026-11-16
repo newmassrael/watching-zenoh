@@ -5188,12 +5188,17 @@ impl ConfigReading {
 
     /// Make the [`DaemonWrite::OverTheFile`] rows on a read document, and record
     /// each named key whose stated value one of them replaced.
+    ///
+    /// Each write answers whether it changed the one value it owns, so telling a
+    /// replaced value from a restated one compares that value and nothing else.
+    /// Copying and comparing the whole configuration around each write gave the
+    /// same answer and linked the equality of every section into each build
+    /// that reads a document, the C libraries included, which never take this
+    /// reading.
     fn write_over_the_file(self, ingest: &mut ZenohConfigIngest) {
         for row in self.overrides() {
             if let DaemonWrite::OverTheFile(write) = row.write {
-                let before = ingest.config.clone();
-                write(ingest);
-                if ingest.named.contains(&row.key) && ingest.config != before {
+                if write(ingest) && ingest.named.contains(&row.key) {
                     ingest.daemon_overrode.push(row.key);
                 }
             }
@@ -5208,8 +5213,9 @@ pub enum DaemonWrite {
     /// upstream), so the value is the default the document is read over and a
     /// file that states the key keeps its own value.
     WhenUnset(fn(&mut ZenohNodeConfig)),
-    /// After the file is read, whatever the file states.
-    OverTheFile(fn(&mut ZenohConfigIngest)),
+    /// After the file is read, whatever the file states. The write answers
+    /// whether the value it owns is now different from what was read.
+    OverTheFile(fn(&mut ZenohConfigIngest) -> bool),
 }
 
 /// One value zenohd writes into the configuration it loaded from `--config`
@@ -5278,12 +5284,16 @@ fn daemon_multicast_scouting(config: &mut ZenohNodeConfig) {
     config.multicast_scouting = true;
 }
 
-fn daemon_admin_space(ingest: &mut ZenohConfigIngest) {
-    ingest.config.adminspace = Some(ingest.adminspace_permissions);
+fn daemon_admin_space(ingest: &mut ZenohConfigIngest) -> bool {
+    let written = Some(ingest.adminspace_permissions);
+    let read = std::mem::replace(&mut ingest.config.adminspace, written);
+    read != written
 }
 
-fn daemon_plugins_loading(ingest: &mut ZenohConfigIngest) {
-    ingest.config.plugins_loading_enabled = Some(true);
+fn daemon_plugins_loading(ingest: &mut ZenohConfigIngest) -> bool {
+    let written = Some(true);
+    let read = std::mem::replace(&mut ingest.config.plugins_loading_enabled, written);
+    read != written
 }
 
 /// What a document's silence about `mode` means — in BOTH readings at once.
