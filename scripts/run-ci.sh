@@ -6987,7 +6987,10 @@ layer_c1bb_cargo_test_qos() {
     # the module held ten cases before the open frame's per-conduit message
     # count was added (`a_session_without_batching_sends_each_message_as_a_frame_of_its_own`
     # came without a guard move), and that witness is the eleventh.
-    _runci_guarded_test C1bb 11 cargo test -p wz-runtime-tokio --features transport-qos,transport-batching,codec-push,codec-close,transport-unicast --lib batch_tx_tests:: --quiet \
+    # 11 -> 12, counted from the source: the express drain test
+    # (`an_express_message_drains_through_its_own_band_and_no_further`), `cfg(transport-qos)`
+    # inside `batch_tx_tests` like the three R311y835 cases.
+    _runci_guarded_test C1bb 12 cargo test -p wz-runtime-tokio --features transport-qos,transport-batching,codec-push,codec-close,transport-unicast --lib batch_tx_tests:: --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings) \
@@ -10542,7 +10545,11 @@ layer_c1y_cargo_test_routing_peer() {
     # host PRINTED (`24 passed; 797 filtered out`).
     # 24 -> 26: the C1v twin's same +2, the face counter's reserved-face id tests. Read off what
     # the build host PRINTED (`26 passed; 824 filtered out`).
-    _runci_guarded_test "C1y accept_loop" 26 \
+    # 26 -> 27, counted from the source: the node re-dial wait test in `accept_loop::tests`
+    # (`a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage`), gated
+    # `all(routing-peer, target_os = "linux")` as the gossip re-dial test that moved this guard
+    # 21 -> 22 and not C1v's.
+    _runci_guarded_test "C1y accept_loop" 27 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
@@ -11140,7 +11147,10 @@ layer_c1z_cargo_test_storage_driver() {
     # the lane that WATCHES them — `storage-aligner` is the only guarded
     # wz-runtime-tokio subset here that pulls in both the digest publisher and
     # the loopback subscriber the tests observe it through.
-    _runci_guarded_test "C1z storage" 41 \
+    # 41 -> 42, counted from the source: `the_wall_clock_aligns_only_the_first_cycle` in
+    # `storage_replication_service::tests`, gated `all(declare-subscriber, pubsub-allow-loop)` as
+    # the two above are, so this guard moves and the `storage-history` one does not.
+    _runci_guarded_test "C1z storage" 42 \
         cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet || return 1
     wz_test_args wz-runtime-tokio storage_aligner_convergence_e2e
     _runci_guarded_test "C1z storage_aligner_convergence_e2e" 1 \
