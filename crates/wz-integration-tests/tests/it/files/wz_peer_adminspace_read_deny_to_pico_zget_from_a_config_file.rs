@@ -11,9 +11,11 @@
 //! The flag leg proves the denied GET gate from typed words. The step from the
 //! `adminspace` block to those words is covered by argv unit tests that never
 //! start a node. Here the peer is given ONLY `--peer <addr> --config <file>`, so
-//! the admin host that answers pico exists because the FILE'S `enabled: true`
-//! expanded to `--config-queryable`, and the gate that denies exists because the
-//! FILE'S `permissions.read: false` expanded to `--no-admin-read`.
+//! the admin host that answers pico exists because a `--config` run hosts the
+//! admin space as zenohd does over its file (`zenohd/src/main.rs` @
+//! `config.adminspace.set_enabled(true).unwrap();`), which the expansion carries
+//! as `--config-queryable`, and the gate that denies exists because the FILE'S
+//! `permissions.read: false` expanded to `--no-admin-read`.
 //!
 //! ## The control
 //!
@@ -85,7 +87,7 @@ fn query_the_admin_root_of_a_peer_given(document: &str) -> Observed {
     );
 
     // BARRIER (not a sleep): the admin host registered. It exists only if the
-    // file's `adminspace.enabled` reached `--config-queryable`.
+    // `--config` run's expansion reached `--config-queryable`.
     let a_captured = match wait_for_substring(
         &mut a_reader,
         "adminspace config GET at ",
@@ -96,8 +98,8 @@ fn query_the_admin_root_of_a_peer_given(document: &str) -> Observed {
             let _ = a_child.child_mut().kill();
             let _ = a_child.child_mut().wait();
             panic!(
-                "peer A never registered its admin host within 5s, so the file's \
-                 `adminspace.enabled` did not reach `--config-queryable`\n--- A ---\n{c}"
+                "peer A never registered its admin host within 5s, so the \
+                 `--config` run did not reach `--config-queryable`\n--- A ---\n{c}"
             );
         }
     };

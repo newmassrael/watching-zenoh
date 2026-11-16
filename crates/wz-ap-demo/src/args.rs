@@ -808,6 +808,48 @@ pub(crate) fn single_session_admin_refusal(flag: &str) -> Option<&'static str> {
     }
 }
 
+/// How the run-mode a `--config` run selects hosts the admin space the daemon
+/// form turns on (`zenohd/src/main.rs` @
+/// `config.adminspace.set_enabled(true).unwrap();`).
+#[cfg(feature = "zenoh-config")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonAdminHost {
+    /// The run-mode hosts it with no flag: the router host in a build with its
+    /// admin host, and the storage host.
+    Always,
+    /// The run-mode hosts it when `--config-queryable` is on its argv.
+    OnTheFlag,
+    /// The run-mode hosts none; the `&str` names what is missing.
+    Nowhere(&'static str),
+}
+
+/// The admin host of the run-mode `run_flag`, typed or selected by the file;
+/// `None` is a document that selects no run-mode.
+///
+/// The single-session runs answer through `single_session_admin_refusal`, the
+/// same answer `main` refuses a typed `--config-queryable` by, so the flag this
+/// hands over is never one the binary exits(2) on.
+#[cfg(feature = "zenoh-config")]
+fn daemon_admin_host(run_flag: Option<&str>) -> DaemonAdminHost {
+    match run_flag {
+        Some("--router-hat") => {
+            if cfg!(feature = "adminspace-router-linkstate") {
+                DaemonAdminHost::Always
+            } else {
+                DaemonAdminHost::Nowhere(
+                    "an adminspace host (this build's router serves none; \
+                     the adminspace-router-linkstate feature compiles one)",
+                )
+            }
+        }
+        Some("--storage-host") => DaemonAdminHost::Always,
+        Some("--peer") | Some("--client-node") => DaemonAdminHost::OnTheFlag,
+        Some(flag) => single_session_admin_refusal(flag)
+            .map_or(DaemonAdminHost::OnTheFlag, DaemonAdminHost::Nowhere),
+        None => DaemonAdminHost::Nowhere("an adminspace host (this document selects no run-mode)"),
+    }
+}
+
 /// §5.23 `adminspace-core` — the admin space the single-session run `flag`
 /// hosts, read off `args`: `None` without `--config-queryable`.
 ///
@@ -892,9 +934,14 @@ pub(crate) fn split_endpoint_list(raw: &str) -> Vec<String> {
 /// | `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` | `--link-config <kind>#<key>=<n>` (R2593) |
 /// | `transport/link/unixpipe/file_access_mask` | `--link-config unixpipe#file_mask=<n>` |
 /// | `transport/link/tls/close_link_on_expiration: true` | `--link-config <kind>#close_link_on_expiration=true` for tls, quic and quic-datagram |
-/// | an `adminspace` block at all | `--config-queryable` |
+/// | anything, on a run-mode that hosts its adminspace on the flag | `--config-queryable` |
 /// | `adminspace/permissions/read: false` | `--no-admin-read` |
 /// | `adminspace/permissions/write: true` | `--config-writable` `--config-write-permit` |
+///
+/// The adminspace row does not read `adminspace/enabled`: a `--config` run is
+/// the daemon form, and zenohd turns the admin space on after it loads its file
+/// in every mode, over an explicit `enabled: false` too
+/// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`).
 ///
 /// R311y843 added the lower nine rows. R311y842 shipped the reader with only
 /// the upper five wired, so eight of the fourteen keys it reports as
@@ -2646,47 +2693,24 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             blocked,
         );
     }
-    // The run-mode the expanded argv runs, typed or selected by the file, and,
-    // when it is a single-session run that cannot host the admin space a
-    // document enables, the verdict its admin keys get instead of a flag it
-    // would exit(2) on.
+    // The run-mode the expanded argv runs, typed or selected by the file, and
+    // how that run-mode hosts the admin space the daemon form turns on.
     let run_flag = typed_role
         .map(|(flag, _)| flag)
         .or(selected.as_ref().map(|s| s.flag));
-    let admin_withheld = run_flag
-        .and_then(single_session_admin_refusal)
-        .map(KeyEffect::WithheldFromThisRun);
+    let admin_host = daemon_admin_host(run_flag);
     // §5.23 `adminspace-core` — `metadata`, onto `--metadata <value>`: the whole
     // value as JSON5 text, taken VERBATIM like `--plugins`, so nothing is
     // approximated. Every run-mode that hosts an adminspace takes it; the value
     // is served as `local_data`'s `metadata`.
     if named("metadata") {
         // The per-build sink list says whether ANY run-mode of this binary can
-        // serve the value; this says whether THIS run does. `--peer` and
-        // `--storage-host` host an adminspace, `--router-hat` in a build with its
-        // admin host, and a single-session client when this run enables one and
-        // the build compiles its host; any other run is told the value was
-        // withheld rather than reported applied to a node with nowhere to serve it.
-        // The client hosts exactly when `--config-queryable` reaches its argv:
-        // typed, or expanded from an enabled block below.
-        let single_session_host = matches!(run_flag, Some("--connect") | Some("--scout"))
-            && admin_withheld.is_none()
-            && (exp.typed("--config-queryable")
-                || (cfg.adminspace.is_some() && named("adminspace/enabled")));
-        // A boolean rather than a `match`: with the router's admin host compiled
-        // in, the `cfg!` arm is the constant `true`, and clippy then reads the
-        // three arms as a `matches!` (R2859 paid that red in the all-features
-        // lane).
-        let hosts_an_adminspace = matches!(
-            run_flag,
-            Some("--peer") | Some("--client-node") | Some("--storage-host")
-        ) || (run_flag == Some("--router-hat")
-            && cfg!(feature = "adminspace-router-linkstate"))
-            || single_session_host;
-        let blocked = no_sink("metadata").or_else(|| {
-            (!hosts_an_adminspace).then_some(KeyEffect::WithheldFromThisRun(
-                "an adminspace host (this run-mode serves none)",
-            ))
+        // serve the value; this says whether THIS run does. A run that hosts no
+        // admin space is told the value was withheld rather than reported
+        // applied to a node with nowhere to serve it.
+        let blocked = no_sink("metadata").or(match admin_host {
+            DaemonAdminHost::Nowhere(missing) => Some(KeyEffect::WithheldFromThisRun(missing)),
+            DaemonAdminHost::Always | DaemonAdminHost::OnTheFlag => None,
         });
         let value = cfg
             .metadata
@@ -2695,43 +2719,60 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("metadata", "--metadata", value, blocked);
     }
-    // The adminspace block, whose three upstream keys expand to four wz flags.
-    // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
-    // document that names only a permission still describes an admin space —
-    // that is the same reading `from_json5` takes when it builds the Option.
+    // The admin space, which the daemon form hosts in every run-mode that can
+    // host one, whatever the document says about `adminspace/enabled`: zenohd
+    // turns it on after loading its file, over an explicit `enabled: false` as
+    // well, and serves it under the permissions the file states
+    // (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`).
+    // A run-mode that hosts it on `--config-queryable` gains that flag whether
+    // or not the file has an `adminspace` block; the router and storage hosts
+    // serve theirs with no flag.
     //
     // zenoh states the admin space as ONE `permissions.write`; wz splits it
     // into hosting the write subscriber (`--config-writable`) and permitting
     // the write (`--config-write-permit`), so the single upstream key expands
     // to both — either alone yields a node that does not do what the operator's
     // file says, which is why the key's verdict below is the WEAKER of the two.
-    match (&cfg.adminspace, admin_withheld) {
-        (Some(_), Some(withheld)) => {
-            for key in [
-                "adminspace/enabled",
-                "adminspace/permissions/read",
-                "adminspace/permissions/write",
-            ] {
+    let admin_keys = [
+        "adminspace/enabled",
+        "adminspace/permissions/read",
+        "adminspace/permissions/write",
+    ];
+    match admin_host {
+        DaemonAdminHost::Nowhere(missing) => {
+            for key in admin_keys {
                 if named(key) {
-                    exp.record(key, withheld);
+                    exp.record(key, KeyEffect::WithheldFromThisRun(missing));
                 }
             }
         }
-        (Some(admin), None) => {
-            if named("adminspace/enabled") {
-                exp.presence("adminspace/enabled", "--config-queryable", true, None);
+        DaemonAdminHost::Always | DaemonAdminHost::OnTheFlag => {
+            if admin_host == DaemonAdminHost::OnTheFlag && !exp.typed("--config-queryable") {
+                exp.added.push(String::from("--config-queryable"));
             }
+            // The library reading holds no block for `enabled: false`, which is
+            // how the key's `false` is told from its `true` here.
+            if named("adminspace/enabled") {
+                let effect = if cfg.adminspace.is_some() {
+                    KeyEffect::AlreadyTheBehaviour
+                } else {
+                    KeyEffect::OverriddenByTheDaemonForm
+                };
+                exp.record("adminspace/enabled", effect);
+            }
+            let permissions = ingest.adminspace_permissions;
             if named("adminspace/permissions/read") {
                 exp.presence(
                     "adminspace/permissions/read",
                     "--no-admin-read",
-                    !admin.read,
+                    !permissions.read,
                     None,
                 );
             }
             if named("adminspace/permissions/write") {
-                let hosted = exp.decide_presence("--config-writable", admin.write, None);
-                let permitted = exp.decide_presence("--config-write-permit", admin.write, None);
+                let hosted = exp.decide_presence("--config-writable", permissions.write, None);
+                let permitted =
+                    exp.decide_presence("--config-write-permit", permissions.write, None);
                 let effect = if hosted == permitted {
                     hosted
                 } else if hosted.reached_the_node() && permitted.reached_the_node() {
@@ -2742,20 +2783,6 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                     hosted
                 };
                 exp.record("adminspace/permissions/write", effect);
-            }
-        }
-        (None, _) => {
-            // `enabled: false` is read as no admin space at all, and no admin
-            // space is what this binary does with none of the four flags — so
-            // the file's sentence IS this node's behaviour.
-            for key in [
-                "adminspace/enabled",
-                "adminspace/permissions/read",
-                "adminspace/permissions/write",
-            ] {
-                if named(key) {
-                    exp.record(key, KeyEffect::AlreadyTheBehaviour);
-                }
             }
         }
     }
@@ -2961,8 +2988,8 @@ pub(crate) const UNRECORDED_VERDICT: &str = "no decision site spoke for it";
 pub(crate) enum KeyEffect {
     /// The file's value reached the command line, as the flag that carries it.
     Expanded,
-    /// No flag, and none was needed: what the file states is what this binary
-    /// does with the flag absent.
+    /// No flag from this key, and none was needed: what the file states is
+    /// what this node does without it.
     AlreadyTheBehaviour,
     /// The operator typed the same value; the file is redundant, not ignored.
     AlreadyOnTheCommandLine,
@@ -2977,6 +3004,10 @@ pub(crate) enum KeyEffect {
     /// `mode` only: the run-mode these endpoints select announces a different
     /// role than the file asked for.
     NotTheRoleTheseEndpointsSelect,
+    /// `adminspace/enabled: false` only: the daemon form hosts the admin space
+    /// whatever the file says, as zenohd does (`zenohd/src/main.rs` @
+    /// `config.adminspace.set_enabled(true).unwrap();`).
+    OverriddenByTheDaemonForm,
     /// R2099 (open-debt item 512) — the key is a LIST and only SOME of its
     /// members reached the command line.
     ///
@@ -3110,6 +3141,9 @@ impl KeyEffect {
             Self::WithheldFromThisRun(what) => what.into(),
             Self::NotTheRoleTheseEndpointsSelect => {
                 "these endpoints select a run-mode in another role".into()
+            }
+            Self::OverriddenByTheDaemonForm => {
+                "a --config run hosts the adminspace whatever the file says, as zenohd does".into()
             }
             Self::PartlyExpanded { named, carried } => {
                 format!("only {carried} of its {named} endpoints reach this run-mode")
@@ -4269,7 +4303,9 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
         "apfull_adminspace_plane_decoded_by_a_real_pico_z_get, in \
          wz-integration-tests/tests/apfull_adminspace_pico_interop.rs, drives \
          the adminspace with a REAL pico z_get and decodes the reply, which \
-         is the effect of the key rather than its value.",
+         is the effect of the key rather than its value. A `--config` run \
+         hosts that adminspace whatever the key says, as zenohd does, so the \
+         key's `false` is reported overridden rather than applied.",
     ),
     (
         "adminspace/permissions/read",
@@ -4703,6 +4739,34 @@ mod stock_config_tests {
             .map(|o| o.expect("--config was on the command line"))
     }
 
+    /// The flag a `--config` run adds so the run-mode `run` hosts the admin
+    /// space zenohd turns on over its file: `--config-queryable` on the mesh
+    /// nodes, and on the single-session client where the build compiles its
+    /// host. Stated here rather than read off `daemon_admin_host`, so the tests
+    /// that use it judge that function instead of repeating it.
+    fn daemon_admin_flags(run: Option<&str>) -> Vec<String> {
+        let on_the_flag = matches!(run, Some("--peer") | Some("--client-node"))
+            || (matches!(run, Some("--connect") | Some("--scout"))
+                && cfg!(feature = "adminspace-core"));
+        if on_the_flag {
+            argv(&["--config-queryable"])
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The honoured keys a `--config` run decides whatever the file says, as
+    /// zenohd does after it loads its file.
+    const KEYS_THE_DAEMON_FORM_DECIDES: [&str; 1] = ["adminspace/enabled"];
+
+    /// `want`, the argv a document's run-mode and endpoints expand to, followed
+    /// by `daemon_admin_flags` for the run-mode it starts with.
+    fn with_daemon_admin(want: &[&str]) -> Vec<String> {
+        let mut out = argv(want);
+        out.extend(daemon_admin_flags(want.first().copied()));
+        out
+    }
+
     /// R2593 — a file's link socket buffers reach `--link-config`, one key per
     /// flag, and a key the operator typed for the same kind is theirs: the file
     /// neither overrides it nor is dropped for the keys the operator left
@@ -5092,6 +5156,229 @@ mod stock_config_tests {
         );
     }
 
+    /// A `--config` run is the daemon form, and zenohd hosts the admin space in
+    /// every mode whatever its file says about `adminspace/enabled`
+    /// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`).
+    /// Each run-mode is asked with no block, with `enabled: true` and with
+    /// `enabled: false`: the mesh nodes, and the client where the build compiles
+    /// its host, gain `--config-queryable` all three times; the router needs no
+    /// flag; and the file's `false` is reported overridden, not applied.
+    #[test]
+    fn the_daemon_form_hosts_the_admin_space_in_every_mode_whatever_the_file_says() {
+        let modes = [
+            (
+                r#"mode: "client", connect: { endpoints: ["tcp/r:7447"] }"#,
+                "--connect",
+            ),
+            (
+                r#"mode: "client", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                   connect: { endpoints: ["tcp/r:7447"] }"#,
+                "--client-node",
+            ),
+            (
+                r#"mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] }"#,
+                "--peer",
+            ),
+            (
+                r#"mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] }"#,
+                "--router-hat",
+            ),
+        ];
+        for (endpoints, run) in modes {
+            let on_the_flag = !daemon_admin_flags(Some(run)).is_empty();
+            let hosts = if run == "--router-hat" {
+                cfg!(feature = "adminspace-router-linkstate")
+            } else {
+                on_the_flag
+            };
+            for (block, enabled) in [
+                ("", None),
+                (", adminspace: { enabled: true }", Some(true)),
+                (", adminspace: { enabled: false }", Some(false)),
+            ] {
+                let doc = format!("{{ {endpoints}{block} }}");
+                let ex = expand(&["--config", "z.json5"], &doc)
+                    .unwrap_or_else(|e| panic!("{run}{block}: {e}"));
+                assert_eq!(
+                    ex.added.first().map(String::as_str),
+                    Some(run),
+                    "{block}: {:?}",
+                    ex.added
+                );
+                let queryables = ex
+                    .added
+                    .iter()
+                    .filter(|a| *a == "--config-queryable")
+                    .count();
+                assert_eq!(
+                    queryables,
+                    usize::from(on_the_flag),
+                    "{run}{block}: {:?}",
+                    ex.added
+                );
+                let effect = ex.effect("adminspace/enabled");
+                match enabled {
+                    None => assert_eq!(effect, None, "{run}: the key is not named"),
+                    Some(_) if !hosts => assert!(
+                        matches!(effect, Some(KeyEffect::WithheldFromThisRun(_))),
+                        "{run}{block}: {effect:?}"
+                    ),
+                    Some(true) => {
+                        assert_eq!(effect, Some(KeyEffect::AlreadyTheBehaviour), "{run}{block}")
+                    }
+                    Some(false) => {
+                        assert_eq!(
+                            effect,
+                            Some(KeyEffect::OverriddenByTheDaemonForm),
+                            "{run}{block}"
+                        );
+                        assert!(
+                            !ex.applied().contains(&"adminspace/enabled"),
+                            "{run}: the file's `false` did not reach the node"
+                        );
+                        assert!(
+                            ex.read_but_not_applied_with_reasons()
+                                .iter()
+                                .any(|l| l.starts_with("adminspace/enabled (")
+                                    && l.contains("as zenohd does")),
+                            "{run}: {:?}",
+                            ex.read_but_not_applied_with_reasons()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// zenohd keeps the permissions its file states when it turns the admin
+    /// space on over `enabled: false`, so a disabled block still expands to the
+    /// read and write flags it names.
+    #[test]
+    fn a_disabled_block_still_states_the_permissions_the_daemon_form_serves() {
+        let doc = r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                       adminspace: { enabled: false,
+                                     permissions: { read: false, write: true } } }"#;
+        let ex = expand(&["--config", "z.json5"], doc).expect("a valid file");
+        assert_eq!(
+            ex.added,
+            argv(&[
+                "--peer",
+                "tcp/127.0.0.1:0",
+                "--config-queryable",
+                "--no-admin-read",
+                "--config-writable",
+                "--config-write-permit",
+            ])
+        );
+        assert_eq!(
+            ex.effect("adminspace/enabled"),
+            Some(KeyEffect::OverriddenByTheDaemonForm)
+        );
+        for key in [
+            "adminspace/permissions/read",
+            "adminspace/permissions/write",
+        ] {
+            assert_eq!(
+                ex.effect(key),
+                Some(KeyEffect::Expanded),
+                "{key}: {:?}",
+                ex.effects
+            );
+        }
+    }
+
+    /// The flag is added once, never beside a typed one; the one-shot acceptor,
+    /// the storage host and a document that selects no run-mode gain none, the
+    /// last with its `enabled` told why.
+    #[test]
+    fn the_daemon_admin_flag_is_added_once_and_only_where_a_run_mode_hosts_on_it() {
+        let peer = r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] } }"#;
+        let typed =
+            expand(&["--config", "z.json5", "--config-queryable"], peer).expect("a valid file");
+        assert_eq!(typed.added, argv(&["--peer", "tcp/127.0.0.1:0"]));
+
+        let acceptor = expand(
+            &["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"],
+            peer,
+        )
+        .expect("a valid file");
+        assert!(acceptor.added.is_empty(), "{:?}", acceptor.added);
+
+        let storage = r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:7447"] },
+                           plugins: { storage_manager: { storages: { demo:
+                             { key_expr: "demo/**", volume: "memory" } } } } }"#;
+        let host = expand(&["--config", "z.json5"], storage).expect("a valid file");
+        assert_eq!(
+            host.added.first().map(String::as_str),
+            Some("--storage-host")
+        );
+        assert!(
+            !host.added.iter().any(|a| a == "--config-queryable"),
+            "{:?}",
+            host.added
+        );
+
+        let unselected = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "peer", listen: { endpoints: [] }, adminspace: { enabled: true } }"#,
+        )
+        .expect("a valid file");
+        assert!(unselected.added.is_empty(), "{:?}", unselected.added);
+        assert_eq!(
+            unselected.effect("adminspace/enabled"),
+            Some(KeyEffect::WithheldFromThisRun(
+                "an adminspace host (this document selects no run-mode)"
+            ))
+        );
+    }
+
+    /// How each run-mode hosts the daemon form's admin space, including the
+    /// ones that refuse it by build or by run-mode.
+    #[test]
+    fn each_run_mode_states_how_it_hosts_the_daemon_admin_space() {
+        assert_eq!(
+            daemon_admin_host(Some("--peer")),
+            DaemonAdminHost::OnTheFlag
+        );
+        assert_eq!(
+            daemon_admin_host(Some("--client-node")),
+            DaemonAdminHost::OnTheFlag
+        );
+        assert_eq!(
+            daemon_admin_host(Some("--storage-host")),
+            DaemonAdminHost::Always
+        );
+        assert_eq!(
+            daemon_admin_host(Some("--listen")),
+            DaemonAdminHost::Nowhere(
+                single_session_admin_refusal("--listen").expect("the acceptor hosts none")
+            )
+        );
+        for flag in ["--connect", "--scout"] {
+            let want = if cfg!(feature = "adminspace-core") {
+                DaemonAdminHost::OnTheFlag
+            } else {
+                DaemonAdminHost::Nowhere(
+                    single_session_admin_refusal(flag).expect("this build hosts none"),
+                )
+            };
+            assert_eq!(daemon_admin_host(Some(flag)), want, "{flag}");
+        }
+        let router = daemon_admin_host(Some("--router-hat"));
+        if cfg!(feature = "adminspace-router-linkstate") {
+            assert_eq!(router, DaemonAdminHost::Always);
+        } else {
+            assert!(
+                matches!(router, DaemonAdminHost::Nowhere(m) if m.contains("adminspace-router-linkstate")),
+                "{router:?}"
+            );
+        }
+        assert!(matches!(
+            daemon_admin_host(None),
+            DaemonAdminHost::Nowhere(_)
+        ));
+    }
+
     #[test]
     fn no_config_flag_leaves_the_command_line_untouched() {
         let out = expand_stock_zenoh_config(&argv(&["--listen", "127.0.0.1:1"]), |_| {
@@ -5110,6 +5397,9 @@ mod stock_config_tests {
     /// `run_router_hat` reads that set off `--connect` exactly as the peer arm
     /// does. `--router` had no such parse, so those endpoints used to be
     /// dropped on the floor.
+    ///
+    /// Each row is followed by the flag its run-mode hosts the admin space on
+    /// (`with_daemon_admin`), which a `--config` run adds whatever the file says.
     #[test]
     fn each_topology_the_config_can_describe_becomes_the_argv_for_it() {
         for (file, want) in [
@@ -5190,7 +5480,7 @@ mod stock_config_tests {
             ),
         ] {
             let out = expand(&["--config", "z.json5"], file).unwrap();
-            assert_eq!(out.added, argv(&want), "{file}");
+            assert_eq!(out.added, with_daemon_admin(&want), "{file}");
             // The expansion APPENDS; it never rewrites what was already there.
             assert_eq!(&out.argv[..2], &argv(&["--config", "z.json5"])[..]);
         }
@@ -5246,7 +5536,7 @@ mod stock_config_tests {
             ),
         ] {
             let out = expand(&["--config", "z.json5"], file).unwrap();
-            assert_eq!(out.added, argv(&want), "{file}");
+            assert_eq!(out.added, with_daemon_admin(&want), "{file}");
         }
     }
 
@@ -5289,7 +5579,9 @@ mod stock_config_tests {
     }
 
     /// A topology named on the command line wins — the file supplies defaults,
-    /// it does not overrule the operator standing in front of the machine.
+    /// it does not overrule the operator standing in front of the machine. What
+    /// the file adds beside a typed role is only the flag that role hosts its
+    /// admin space on, never a role of its own.
     #[test]
     fn a_role_on_the_command_line_is_not_second_guessed_by_the_file() {
         for role in [
@@ -5314,7 +5606,11 @@ mod stock_config_tests {
                 r#"{ mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
             )
             .unwrap();
-            assert!(out.added.is_empty(), "{role:?} -> {:?}", out.added);
+            assert_eq!(
+                out.added,
+                daemon_admin_flags(role.first().copied()),
+                "{role:?}"
+            );
         }
     }
 
@@ -5375,7 +5671,7 @@ mod stock_config_tests {
         // The ROLE still expands — no role flag was given — so the claim here
         // is about the transport pair only, and stating it that way is what
         // keeps this test from passing for the wrong reason.
-        assert_eq!(out.added, argv(&["--connect", "tcp/r:7447"]));
+        assert_eq!(out.added, with_daemon_admin(&["--connect", "tcp/r:7447"]));
     }
 
     /// A config that cannot work is refused BEFORE anything is started, which
@@ -5445,7 +5741,7 @@ mod stock_config_tests {
         let out = expand(&["--config", "z.json5"], &file).expect("a carried scheme expands");
         assert_eq!(
             out.added,
-            argv(&["--connect", &format!("{carried}/host:7447")])
+            with_daemon_admin(&["--connect", &format!("{carried}/host:7447")])
         );
     }
 
@@ -6636,6 +6932,12 @@ mod stock_config_tests {
 
         reached_nothing.sort_unstable();
         let mut pinned: Vec<&str> = config_keys_the_demo_drops();
+        // A key the daemon form decides over the file reaches nothing by
+        // design: zenohd turns the admin space on whatever `adminspace/enabled`
+        // says (`zenohd/src/main.rs` @
+        // `config.adminspace.set_enabled(true).unwrap();`), so the control
+        // already hosts what the variant asks for.
+        pinned.extend(KEYS_THE_DAEMON_FORM_DECIDES);
         pinned.sort_unstable();
         assert_eq!(
             reached_nothing, pinned,
@@ -8162,7 +8464,10 @@ mod stock_config_tests {
                  scouting: { multicast: { listen: false } } }"#,
         )
         .unwrap();
-        assert_eq!(silent.added, argv(&["--connect", "tcp/r:7447"]));
+        assert_eq!(
+            silent.added,
+            with_daemon_admin(&["--connect", "tcp/r:7447"])
+        );
     }
 
     /// A flag the operator typed is not reported withheld because the run-mode
@@ -8300,7 +8605,7 @@ mod stock_config_tests {
         ] {
             let out = expand(&["--config", "z.json5"], &file)
                 .unwrap_or_else(|e| panic!("{what}: the fixture is not readable: {e}"));
-            assert_eq!(out.added, argv(&want), "{what}: {file}");
+            assert_eq!(out.added, with_daemon_admin(&want), "{what}: {file}");
         }
 
         // A client that listens and dials keeps both: its mode, its listen list and

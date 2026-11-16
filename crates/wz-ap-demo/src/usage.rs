@@ -163,8 +163,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             a run mode is chosen, so the file's mode and");
     eprintln!("                             endpoints can select it. Prints which keys it read");
     eprintln!("                             and which reached this run, with the reason for each");
-    eprintln!("                             that did not. Requires the `zenoh-config` build");
-    eprintln!("                             feature");
+    eprintln!("                             that did not. As zenohd does, it hosts the node's");
+    eprintln!("                             adminspace in every run-mode that has one, whatever");
+    eprintln!("                             the file says of adminspace/enabled. Requires the");
+    eprintln!("                             `zenoh-config` build feature");
     eprintln!("    --listen <addr>         acceptor mode (e.g. 127.0.0.1:7447); announces the");
     eprintln!("                             zenoh peer role on the wire");
     eprintln!("    --connect <a[,b..]>      initiator mode (HOST:PORT or tcp/|ws/HOST:PORT);");
@@ -601,7 +603,9 @@ pub(crate) fn print_usage() {
     eprintln!("                             warning. zenoh low_pass_filter");
     eprintln!("    --config-queryable       --peer, --client-node: host this node's adminspace,");
     eprintln!("                             answering a GET on @/<zid>/<role>/config with the");
-    eprintln!("                             live configuration. zenoh adminspace/enabled");
+    eprintln!("                             live configuration. zenoh adminspace/enabled;");
+    eprintln!("                             a --config run adds it on every run-mode that");
+    eprintln!("                             hosts its adminspace on it");
     eprintln!("    --config-writable        --peer, --client-node: host the config-write");
     eprintln!("                             subscriber on @/<zid>/<role>/config/**, so a remote");
     eprintln!("                             Put to a config key (e.g. .../config/acl-deny)");

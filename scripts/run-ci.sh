@@ -22609,14 +22609,17 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
-    # §5.23 adminspace-core — THREE legs: a client's `@/<zid>/client` asked by
+    # §5.23 adminspace-core — FOUR legs: a client's `@/<zid>/client` asked by
     # another client through a router. The control is a zenohd client behind a
-    # zenohd router; the two subjects are a wz client behind that router and
-    # behind a wz router, judged by the control's predicate. They ride this
-    # lane's demo build: `routing-peer` composes the demo's `adminspace-core`,
-    # and `router-hat-router` is the wz router.
+    # zenohd router; the subjects are a wz client behind that router and
+    # behind a wz router, and a wz client started from a client config with no
+    # `adminspace` block behind a wz router, which hosts its admin space as
+    # zenohd does over such a file. All are judged by the control's predicate.
+    # They ride this lane's demo build: `routing-peer` composes the demo's
+    # `adminspace-core`, `router-hat-router` is the wz router, and
+    # `zenoh-config` reads the file.
     wz_test_args wz-integration-tests wz_client_adminspace_zenohd_interop
-    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked

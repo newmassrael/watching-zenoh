@@ -11,14 +11,17 @@
 //! which is how a node that listens on nothing is seen to be up. The contract,
 //! row by row, is in `docs/adminspace-client-mode.md`.
 //!
-//! Three legs, one predicate ([`assert_client_root_reply`]) over all of them:
+//! Four legs, one predicate ([`assert_client_root_reply`]) over all of them:
 //!
 //! - the CONTROL: a zenohd router, a zenohd client A, and a wz client B asking.
-//!   It measures upstream rather than restating it, and it is what makes the two
+//!   It measures upstream rather than restating it, and it is what makes the
 //!   wz legs a comparison: the predicate is the shape the control answers with.
 //! - a wz client A behind the same zenohd router: wz's declaration is one a
 //!   stock router learns and routes.
 //! - a wz client A behind a wz router: the whole path is wz's.
+//! - a wz client A started with `--config` on a client file that has no
+//!   `adminspace` block, behind a wz router: the daemon form hosts the admin
+//!   space as zenohd does over the same file, with no flag typed.
 //!
 //! B is a fresh process per attempt and asks until it is answered, because
 //! nothing on the router's side says when it has learned A's queryable; an
@@ -26,9 +29,11 @@
 //! is what a failure prints.
 
 use std::fs::File;
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use tempfile::NamedTempFile;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, demo_log_filter, read_captured, spawn_on_ephemeral_port,
     spawn_zenohd_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary, zenohd_binary,
@@ -89,17 +94,47 @@ fn spawn_zenohd_client(port: u16) -> ChildGuard {
 /// A wz client A of the router at `port`, hosting its admin space. Returns its
 /// guard, its log, and the admin root it logged (`@/<zid>/client`).
 fn spawn_wz_client(port: u16) -> (ChildGuard, File, String) {
+    spawn_hosting_client(
+        "wz-ap-demo (client A, --config-queryable)",
+        &[
+            "--connect",
+            &format!("127.0.0.1:{port}"),
+            "--config-queryable",
+            "--metadata",
+            METADATA_ARG,
+        ],
+    )
+}
+
+/// A stock client config naming the router at `port` and the metadata, with no
+/// `adminspace` block: zenohd turns the admin space on over such a file
+/// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`),
+/// so a `wz-ap-demo --config` started on it must host one too.
+fn client_config_without_an_adminspace_block(port: u16) -> NamedTempFile {
+    let mut file = tempfile::Builder::new()
+        .suffix(".json5")
+        .tempfile()
+        .expect("config tempfile");
+    write!(
+        file,
+        "{{ mode: \"client\", connect: {{ endpoints: [\"tcp/127.0.0.1:{port}\"] }}, \
+         metadata: {METADATA_ARG} }}"
+    )
+    .expect("write config");
+    file.flush().expect("flush config");
+    file
+}
+
+/// A wz client A started on `args`, which must make it host its admin space.
+/// Returns its guard, its log, and the admin root it logged (`@/<zid>/client`).
+fn spawn_hosting_client(label: &'static str, args: &[&str]) -> (ChildGuard, File, String) {
     let stderr = tempfile::tempfile().expect("tempfile for client A's stderr");
     let writer = stderr.try_clone().expect("dup client A's stderr handle");
     let mut log = stderr;
     let mut guard = ChildGuard::wrap(
-        "wz-ap-demo (client A, --config-queryable)",
+        label,
         Command::new(wz_ap_demo_binary())
-            .arg("--connect")
-            .arg(format!("127.0.0.1:{port}"))
-            .arg("--config-queryable")
-            .arg("--metadata")
-            .arg(METADATA_ARG)
+            .args(args)
             .env("RUST_LOG", demo_log_filter())
             .stdout(Stdio::null())
             .stderr(Stdio::from(writer))
@@ -229,6 +264,38 @@ fn a_wz_client_answers_its_client_key_through_a_zenohd_router() {
     assert_demo_binary_newer_than_sources(&wz_ap_demo_binary());
     let (mut router, port) = spawn_zenohd_on_ephemeral_tcp(probe_stderr);
     let (mut client_a, mut a_log, root) = spawn_wz_client(port);
+    let asked = ask(port, &root);
+    let a_captured = read_captured(&mut a_log);
+    let _ = client_a.child_mut().kill();
+    let _ = client_a.child_mut().wait();
+    let _ = router.child_mut().kill();
+    let _ = router.child_mut().wait();
+    let log = asked.unwrap_or_else(|last| {
+        panic!(
+            "no client B was answered by wz client A\n--- B ---\n{last}\n--- A ---\n{a_captured}"
+        )
+    });
+    assert_client_root_reply(&log, &zid_of(&root));
+}
+
+// wz-proves: none -- the shape of the zenohd client control above, reached from a file
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,adminspace-core,zenoh-config); Layer Z runs via --ignored"]
+fn a_wz_client_started_from_a_config_file_answers_its_client_key_through_a_wz_router() {
+    assert_demo_binary_newer_than_sources(&wz_ap_demo_binary());
+    let (mut router, _router_log, port) = spawn_on_ephemeral_port(
+        &wz_ap_demo_binary(),
+        &["--router-hat", "127.0.0.1:0"],
+        "router-hat: listening on 127.0.0.1:",
+        "wz-ap-demo (router)",
+        tempfile::tempfile().expect("tempfile for the router's stderr"),
+    );
+    let config = client_config_without_an_adminspace_block(port);
+    let config_path = config.path().to_str().expect("a UTF-8 tempfile path");
+    let (mut client_a, mut a_log, root) = spawn_hosting_client(
+        "wz-ap-demo (client A, --config alone)",
+        &["--config", config_path],
+    );
     let asked = ask(port, &root);
     let a_captured = read_captured(&mut a_log);
     let _ = client_a.child_mut().kill();

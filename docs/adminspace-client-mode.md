@@ -13,10 +13,17 @@ the pinned tree.
 | zenohd | turns it on whatever `mode` says, so a zenohd started as a client has one | `zenohd/src/main.rs` @ `config.adminspace.set_enabled(true)` |
 | Library client | has none unless its config enables it | (the default above) |
 
-wz: a single-session client of `wz-ap-demo` hosts one with `--config-queryable`,
-which is what a stock config's `adminspace` block expands to; a build without
-the demo's `adminspace-core` feature refuses the flag by name and the config
-expansion withholds the block's keys rather than handing the flag over.
+wz: a single-session client of `wz-ap-demo` hosts one with `--config-queryable`.
+`wz-ap-demo --config <file>` is the daemon form and reads the file as zenohd
+does: it hosts the admin space in every run-mode that has one, whatever the file
+says about `adminspace/enabled` (an explicit `false` included, which the report
+names as overridden), under the permissions the file states. The expansion adds
+`--config-queryable` to the client, the client node and the peer, with or
+without an `adminspace` block; the router host (`adminspace-router-linkstate`)
+and the storage host serve theirs with no flag. A build without the demo's
+`adminspace-core` feature refuses the flag by name, and the expansion hands a
+client none and withholds the block's keys; the one-shot acceptor hosts none in
+any build.
 
 The `zenoh` API preset (`wz-zenoh`) reads the same key the same way: a session
 opened with `adminspace.enabled` hosts the runtime admin space in every mode,
@@ -161,6 +168,7 @@ both sit under the same root.
 | `wz-runtime-tokio` `declare_adminspace_with_config_answers_a_client_under_its_own_role` | a client session answers at `@/<zid>/client` with the host's metadata, and not at `@/<zid>/peer` |
 | `wz-runtime-tokio` `declare_adminspace_with_config_announces_a_clients_queryable_on_the_wire` | the queryable goes out as a declaration naming `@/<zid>/client/**` |
 | `wz-ap-demo` `session_admin_tests`, `a_client_document_enables_its_admin_space_where_the_build_hosts_one`, `an_acceptor_run_has_the_admin_keys_withheld` | the flag, the refusals by run-mode and build, and the config expansion that hands the flag over |
+| `wz-ap-demo` `the_daemon_form_hosts_the_admin_space_in_every_mode_whatever_the_file_says`, `a_disabled_block_still_states_the_permissions_the_daemon_form_serves`, `the_daemon_admin_flag_is_added_once_and_only_where_a_run_mode_hosts_on_it`, `each_run_mode_states_how_it_hosts_the_daemon_admin_space` | a `--config` run hosts the admin space in every mode with no block, `enabled: true` and `enabled: false`, keeps the permissions a disabled block states, and adds the flag once and only where a run-mode hosts on it |
 | `wz-runtime-tokio` `admin_session_of_peer_files_the_row_under_the_named_peer` | the one `sessions[]` row reading both the Session host and the preset's registry use: none before a peer is named, then the peer's zid, its role once announced, no weight |
 | `wz-zenoh` `a_client_answers_its_admin_space_through_its_router` | a preset client on the registry of faces, asked `@/<zid>/client` by another client through a router node: one answer with its zid, metadata, `[]` locators and the router as its one session; nothing under `router`; a client that leaves the switch off answers nothing |
 | `wz-zenoh` `a_peer_node_answers_its_admin_space_under_its_own_role` | a peer on the node engine answers under `peer`, nothing under `router`, and no successor route |
@@ -173,4 +181,4 @@ both sit under the same root.
 | `wz-runtime-tokio` `a_peer_session_answers_its_north_region_and_a_client_session_none` | the Session host's single-hop `north` graph for a peer, and nothing for a client |
 | `wz-ap-demo` `client_node_binary` (3) and the expansion rows `client + listen + connect` | `--client-node` refused without a router and beside `--peer`, bound with one; the client document naming both lists expands to it and applies all three keys |
 | `conformance/differential` `zenoh_api_client_admin_space` (Layer E18) | upstream's crate and wz's as the client, with an upstream router and an upstream asker: the same lines (answered, the root's field names, zid, metadata, locators, the session's field names, peer and role, nothing under `router`), and the control that a client answering nothing is a difference |
-| `wz-integration-tests` `wz_client_adminspace_zenohd_interop` (Layer Z) | a zenohd client behind a zenohd router (the control), a wz client behind it, and a wz client behind a wz router, each asked `@/<zid>/client` by another client and judged by one predicate |
+| `wz-integration-tests` `wz_client_adminspace_zenohd_interop` (Layer Z) | a zenohd client behind a zenohd router (the control), a wz client behind it, a wz client behind a wz router, and a wz client started from a client config with no `adminspace` block behind a wz router, each asked `@/<zid>/client` by another client and judged by one predicate |
