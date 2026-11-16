@@ -135,15 +135,24 @@ _wz_grade_earlier() {
 # $3 — the range being pushed (`<base>..<tip>`), where an acknowledgement row is
 #      read from. Empty means no range is known and nothing can acknowledge a red.
 #
+# $4 — `which` to ASK rather than judge (open-debt item 772): the run that a
+#      refusal would name is recorded in `_WZ_PREVIOUS_RUN_WHICH` and nothing is
+#      refused, so a round can read that run and write its acknowledgement row
+#      BEFORE it pushes. The same derivation answers both, so the answer cannot
+#      drift from the verdict.
+#
 # Returns 0 to proceed, 1 to refuse. A verdict it cannot obtain is announced as
 # NOT RUN and returns 0 — the same trade gate 0 already makes for an unbounded
 # nda-scan range, and for the same reason: `gh` is not a declared prerequisite
 # of a clone of this repository, and a network hiccup must not make pushing
 # impossible. It must never print a green line for a check that did not happen.
+_WZ_PREVIOUS_RUN_WHICH=""
 wz_previous_run_gate() {
     local sha="$1"
     local context="$2"
     local range="${3:-}"
+    local mode="${4:-}"
+    _WZ_PREVIOUS_RUN_WHICH=""
 
     if [[ -z "$sha" ]]; then
         echo "$context: no previous commit to grade (new ref); hosted-verdict gate did NOT run." >&2
@@ -361,6 +370,14 @@ else:
     rid="$(printf '%s' "$rest" | cut -f2)"
     conclusion="$(printf '%s' "$rest" | cut -f3)"
 
+    # Asked, not judged: name the run a refusal would name, and stop here.
+    if [[ "$mode" == "which" ]]; then
+        _WZ_PREVIOUS_RUN_WHICH="$rid"
+        echo "$context: run $rid ($wf, $conclusion, commit ${graded_sha:0:12}) is the run"
+        echo "          a push now has to acknowledge; read it before writing the row."
+        return 0
+    fi
+
     # The acknowledgement is a ROW in docs/hosted-red-acks.md that the range being
     # pushed adds, naming this run (scripts/lib/hosted_red_ack.py states the form).
     # It was an environment variable on the pushing process (WZ_ACK_RED) until
@@ -420,3 +437,28 @@ for j in jobs:
     echo "          earlier push cannot cover the next red)." >&2
     return 1
 }
+
+# Executed rather than sourced: the question gate 2c answers, asked before a
+# push (open-debt item 772). It never refuses; its last line is
+# `WHICH <run id>` when the gate would demand an acknowledgement of that run and
+# `WHICH none` when it would pass.
+#
+#   bash scripts/lib/previous-run-gate.sh --which [<sha>]
+#
+# <sha> defaults to origin/main, the tip a push to main replaces -- the commit
+# the hook grades when the remote names no older one.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    set -uo pipefail
+    cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 2
+    if [[ "${1:-}" != "--which" ]]; then
+        echo "usage: bash scripts/lib/previous-run-gate.sh --which [<sha>]" >&2
+        exit 2
+    fi
+    which_sha="${2:-}"
+    if [[ -z "$which_sha" ]]; then
+        which_sha="$(git rev-parse --verify --quiet origin/main || true)"
+    fi
+    wz_previous_run_gate "$which_sha" 'previous-run-gate --which' '' which || true
+    echo "WHICH ${_WZ_PREVIOUS_RUN_WHICH:-none}"
+    exit 0
+fi
