@@ -1986,6 +1986,22 @@ pub mod common {
         path
     }
 
+    /// A zenoh-pico CLI of the NO-FRAGMENTATION arm (`Z_FEATURE_FRAGMENTATION=0`,
+    /// `target/zenoh-pico-cli-nofrag`): the one stock initiator whose InitSyn announces no
+    /// protocol patch level, which is the input a wz acceptor's patch answer is measured
+    /// against. Checked fresh as [`zenoh_pico_cli_binary`] is.
+    pub fn zenoh_pico_nofrag_cli_binary(name: &str) -> PathBuf {
+        let root = artifact("target/zenoh-pico-cli-nofrag");
+        let path = root.join(name);
+        assert!(
+            path.is_file(),
+            "{name} binary missing at {}; run scripts/build-zenoh-pico-cli.sh first",
+            path.display()
+        );
+        assert_zenoh_pico_oracle_fresh(&root);
+        path
+    }
+
     /// Open-debt item 913 — the MULTICAST-DECLARATIONS arm's `libzenohpico` directory
     /// (`target/zenoh-pico-build-mcdecl/lib`), checked fresh.
     pub fn zenoh_pico_mcdecl_library_dir() -> PathBuf {

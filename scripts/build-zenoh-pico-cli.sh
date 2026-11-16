@@ -58,6 +58,9 @@ INSTALL_DIR_MCDECL="$WZ_ARTIFACTS/target/zenoh-pico-cli-mcdecl"
 # The arm built with Z_FEATURE_RAWETH_TRANSPORT (below), named for the same reason.
 BUILD_DIR_RETH="$WZ_ARTIFACTS/target/zenoh-pico-build-reth"
 INSTALL_DIR_RETH="$WZ_ARTIFACTS/target/zenoh-pico-cli-reth"
+# The arm built with Z_FEATURE_FRAGMENTATION=0 (below), named for the same reason.
+BUILD_DIR_NOFRAG="$WZ_ARTIFACTS/target/zenoh-pico-build-nofrag"
+INSTALL_DIR_NOFRAG="$WZ_ARTIFACTS/target/zenoh-pico-cli-nofrag"
 # The arm upstream's integration workflow builds its API tests with (below), named for the same
 # reason. Only its library is used, so it has a build root and no install root.
 BUILD_DIR_INTEG="$WZ_ARTIFACTS/target/zenoh-pico-build-integration"
@@ -212,7 +215,7 @@ stage_pico_source() {
     chmod -R u+w "$SRC_DIR"
     local dir home
     for dir in "$BUILD_DIR" "${BUILD_DIR}-st" "${BUILD_DIR}-default" "${BUILD_DIR}-local" \
-        "$BUILD_DIR_MCDECL" "$BUILD_DIR_RETH" "$BUILD_DIR_INTEG"; do
+        "$BUILD_DIR_MCDECL" "$BUILD_DIR_RETH" "$BUILD_DIR_NOFRAG" "$BUILD_DIR_INTEG"; do
         [[ -f "$dir/CMakeCache.txt" ]] || continue
         home="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dir/CMakeCache.txt")"
         if [[ "$home" != "$EXAMPLES_DIR" ]]; then
@@ -785,6 +788,40 @@ fi
 # The programs upstream's raweth scenario runs, and the one that lists a member's link.
 RETH_TARGETS=(z_pub z_sub z_info)
 
+# --- the NO-FRAGMENTATION arm ------------------------------------------------
+#
+# The reference arm with `Z_FEATURE_FRAGMENTATION=0` (`-nofrag`; vendor default 1). It is the
+# only stock initiator that announces a protocol patch level below CURRENT: with the switch off
+# pico neither sets `_patch` on its InitSyn nor writes the `0x7` extension
+# (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @ `_z_t_msg_make_init_syn`, the
+# `#if Z_FEATURE_FRAGMENTATION == 1` around `_patch`), so a wz acceptor's answer to a pre-patch
+# peer is reachable from a real program only through this build. The same switch also removes
+# pico's check of that answer (`src/transport/unicast/transport.c` @ the InitAck `_patch`
+# comparison), which is why the leg reads the answer off the wire instead of from pico's verdict.
+cmake -B "${BUILD_DIR_NOFRAG}" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=1 \
+    -DZ_FEATURE_FRAGMENTATION=0 >&2
+
+GENERATED_CONFIG_NOFRAG="${BUILD_DIR_NOFRAG}/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG_NOFRAG" ]]; then
+    echo "build-zenoh-pico-cli: nofrag-arm config.h missing: $GENERATED_CONFIG_NOFRAG" >&2
+    exit 1
+fi
+if ! grep -qx "#define Z_FEATURE_FRAGMENTATION 0" "$GENERATED_CONFIG_NOFRAG"; then
+    echo "build-zenoh-pico-cli: the nofrag arm did NOT take Z_FEATURE_FRAGMENTATION=0" >&2
+    exit 1
+fi
+
+# The initiator the patch-level leg relays.
+NOFRAG_TARGETS=(z_put)
+
 # --- the INTEGRATION arm -----------------------------------------------------
 #
 # The configuration upstream's own integration workflow builds and runs its API tests under
@@ -928,6 +965,17 @@ for bin in "${RETH_TARGETS[@]}"; do
     install -m 0755 "$src" "${INSTALL_DIR_RETH}/$bin"
 done
 
+cmake --build "${BUILD_DIR_NOFRAG}" --target "${NOFRAG_TARGETS[@]}" -j"$(nproc)" >&2
+mkdir -p "${INSTALL_DIR_NOFRAG}"
+for bin in "${NOFRAG_TARGETS[@]}"; do
+    src="${BUILD_DIR_NOFRAG}/$bin"
+    if [[ ! -x "$src" ]]; then
+        echo "build-zenoh-pico-cli: expected nofrag binary missing: $src" >&2
+        exit 1
+    fi
+    install -m 0755 "$src" "${INSTALL_DIR_NOFRAG}/$bin"
+done
+
 # R2326 (unregistered open-debt item 10) — record WHICH vendor/zenoh-pico state
 # produced these artefacts.
 #
@@ -954,6 +1002,8 @@ vendored_oracle_stamp_root "${INSTALL_DIR_MCDECL}" "$_wzpico_token"
 vendored_oracle_stamp_root "${BUILD_DIR_MCDECL}" "$_wzpico_token"
 vendored_oracle_stamp_root "${INSTALL_DIR_RETH}" "$_wzpico_token"
 vendored_oracle_stamp_root "${BUILD_DIR_RETH}" "$_wzpico_token"
+vendored_oracle_stamp_root "${INSTALL_DIR_NOFRAG}" "$_wzpico_token"
+vendored_oracle_stamp_root "${BUILD_DIR_NOFRAG}" "$_wzpico_token"
 vendored_oracle_stamp_root "${BUILD_DIR_INTEG}" "$_wzpico_token"
 
 # R2327b — verify the contract this script has just asserted, HERE, rather than
@@ -974,6 +1024,10 @@ vendored_oracle_assert_fresh "${BUILD_DIR_MCDECL}" build-zenoh-pico-cli \
 vendored_oracle_assert_fresh "${INSTALL_DIR_RETH}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "${BUILD_DIR_RETH}" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "${INSTALL_DIR_NOFRAG}" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "${BUILD_DIR_NOFRAG}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "${BUILD_DIR_INTEG}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1

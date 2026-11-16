@@ -33,6 +33,7 @@ mod pico_initial_interest_twice_and_diff;
 mod pico_keyexpr_declaration_twice_and_diff;
 mod pico_listen_and_connect_twice_and_diff;
 mod pico_local_delivery_upstream_tests_on_wz;
+mod pico_nofrag_patch_answer;
 mod pico_open_failure_on_wz_capi;
 mod pico_option_defaults_twice_and_diff;
 mod pico_peer_multicast_on_wz_capi;

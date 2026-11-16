@@ -18277,6 +18277,20 @@ layer_ewire_pico_wire_dissection() {
         -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewire: the census resolved an id to the path zenoh-pico declared"
+    # Open-debt item 173 — the acceptor's patch answer to the one stock initiator that
+    # announces no level, pico built with Z_FEATURE_FRAGMENTATION=0 (its own arm of
+    # build-zenoh-pico-cli.sh), and the stock pico as the control. The arm is guarded on its
+    # own binary: an older oracle build without it refuses under WZ_PICO_REQUIRE.
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli-nofrag/z_put ]]; then
+        _pico_cli_unavailable "Layer Ewire (fragmentation-disabled arm)" || return 1
+        return 0
+    fi
+    wz_test_args wz-integration-tests pico_nofrag_patch_answer
+    _runci_guarded_test "Ewire patch answer to a pre-patch pico" 2 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewire: wz answered each stock pico's patch level with min(CURRENT, announced)"
 }
 
 # Layer Ero — Layer Ewire, and the oracle build it needs, in a READ-ONLY checkout.
