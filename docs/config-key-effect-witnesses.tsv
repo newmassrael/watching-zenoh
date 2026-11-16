@@ -102,8 +102,12 @@ listen/exit_on_failure	differential	crates/wz-integration-tests/tests/it/files/z
 listen/retry	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
 listen/timeout_ms	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
 plugins	wz-effect	crates/wz-integration-tests/tests/it/files/wz_storage_host_from_config_alone.rs::wz_storage_host_from_a_config_file_alone_hosts_its_storage_and_applies_its_listen_endpoint	storage-host	-	-
+plugins_loading/enabled	differential	crates/wz-integration-tests/tests/it/files/wz_storage_host_plugins_loading_matches_zenohd.rs::wz_storage_host_looks_a_plugin_up_by_name_only_when_enabled_as_zenohd_does	storage-host	zenohd	zenohd also takes the value by --cfg, as its binary sets the key over its file
 metadata	differential	crates/wz-integration-tests/tests/it/files/wz_storage_host_metadata_matches_zenohd.rs::wz_storage_host_serves_its_config_metadata_as_zenohd_does	storage-host	zenohd	the same value served byte for byte
 gateway/south	unsurveyed	-	-	-	-
+plugins_loading/search_dirs	differential	crates/wz-integration-tests/tests/it/files/wz_storage_host_plugins_loading_matches_zenohd.rs::wz_storage_host_searches_the_listed_directories_in_order_as_zenohd_does	storage-host	zenohd	each looks the plugin up under its own ABI's library prefix
+aggregation/subscribers	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_declaration_aggregation_twice_and_diff.rs::subscribers_under_a_listed_aggregate_are_declared_as_it_identically_on_wz_and_libzenohc	capi-c	zenoh-c	read off a zenohd's admin space, the router both clients use
+aggregation/publishers	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_declaration_aggregation_twice_and_diff.rs::publishers_under_a_listed_aggregate_ask_as_it_identically_on_wz_and_libzenohc	capi-c	zenoh-c	read off a zenohd's admin space, the router both clients use
 open/return_conditions/declares	unsurveyed	-	-	-	-
 region_name	unsurveyed	-	-	-	-
 scouting/gossip/autoconnect	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_scouting_twice_and_diff.rs::a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
@@ -118,4 +122,5 @@ transport/shared_memory/transport_optimization/enabled	differential	crates/wz-in
 transport/shared_memory/transport_optimization/pool_size	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_session_shm_provider_twice_and_diff.rs::a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc	capi-c	zenoh-c	-
 transport/unicast/accept_pending	wz-effect	crates/wz-capi-c/tests/it/files/accept_bounds.rs::a_link_past_the_stated_pending_bound_is_closed_at_once	capi-c	-	-
 transport/unicast/accept_timeout	wz-effect	crates/wz-capi-c/tests/it/files/accept_bounds.rs::a_silent_link_is_dropped_when_the_stated_accept_timeout_has_passed	capi-c	-	-
+qos/publication	differential	crates/wz-integration-tests/tests/it/files/zenoh_c_publication_qos_twice_and_diff.rs::a_publication_rule_overwrites_the_qos_of_its_keys_identically_on_wz_and_libzenohc	capi-c	zenoh-c	read off the samples a real library's subscriber receives
 routing/peer/mode	no-upstream-effect	-	-	-	the pinned upstream parses routing/peer and discards it

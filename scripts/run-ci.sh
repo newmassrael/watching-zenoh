@@ -18077,6 +18077,14 @@ layer_c1bp_plugin_dynamic_loading() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico" || return 1
+    # `plugins_loading/enabled` and `plugins_loading/search_dirs`: the same document to a zenohd
+    # and to this build's storage host, which reads both keys only with `plugin-dynamic-loading`
+    # and takes a `--config` file only with `zenoh-config`. The zenohd is the one the `interop`
+    # job builds before this lane.
+    wz_test_args wz-integration-tests wz_storage_host_plugins_loading_matches_zenohd
+    _runci_guarded_test "C1bp plugins_loading vs zenohd" 2 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
 }
 
 # ─── Layer L — every committed Cargo.lock agrees with its manifests ────
@@ -26803,6 +26811,26 @@ layer_c1cd_api_compat_c_attachment() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd" \
+        || return 1
+    # The two `aggregation/*` keys, each against libzenohc with a zenohd's admin space as the
+    # observer: what the router holds for a client's subscribers and publishers is the declaration
+    # the key changes, and only a router reports it. HERE for the zenohd this job builds.
+    for leg in \
+        subscribers_under_a_listed_aggregate_are_declared_as_it_identically_on_wz_and_libzenohc \
+        publishers_under_a_listed_aggregate_ask_as_it_identically_on_wz_and_libzenohc; do
+        wz_test_args wz-integration-tests zenoh_c_declaration_aggregation_twice_and_diff
+        _runci_guarded_test "C1cd $leg" 1 \
+            cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
+    done
+    # `qos/publication` against libzenohc, read off the samples a real library's subscriber
+    # receives. Needs only the zenoh-c oracle; beside the leg above, which builds the same arm.
+    wz_test_args wz-integration-tests zenoh_c_publication_qos_twice_and_diff
+    _runci_guarded_test "C1cd qos/publication" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}a_publication_rule_overwrites_the_qos_of_its_keys_identically_on_wz_and_libzenohc" \
         || return 1
 }
 
