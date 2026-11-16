@@ -12223,8 +12223,11 @@ layer_c1sb_switchboard_crates() {
 # `shake128_is_the_reference_shake128`, the differential test against it. The
 # bare subset has no `alloc`, which is why that test feeds fixed buffers and
 # is the reason this arm caught the first draft of it.
+# 9 -> 10 is `the_checked_derivation_is_zenohs_in_every_build`, the test of the
+# checked derivation the passive observer judges an announced origin with; the
+# pc2 run of the 8e integration branch printed 10.
 layer_c1ca_cargo_test_derived_initial_sn() {
-    _runci_guarded_test C1ca 9 \
+    _runci_guarded_test C1ca 10 \
         cargo test -p wz-session-core --no-default-features --features codec-open-body \
         --lib initial_sn --quiet || return 1
     _runci_guarded_test C1ca 6 \
