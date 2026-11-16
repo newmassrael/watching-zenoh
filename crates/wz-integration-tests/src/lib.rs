@@ -7108,11 +7108,17 @@ pub mod common {
     /// typed `Unsupported` and this probe fails loudly rather than passing on a
     /// TCP fallback. `mk_probe_stderr` is the stderr tempfile factory (see
     /// [`spawn_zenohd_listeners`]).
+    ///
+    /// Open-debt item 571 — the probe's demo is held to the sources here, once,
+    /// for every fixture that starts a zenohd through this wait. A stale demo
+    /// would otherwise fail the probe and the fixture would report "zenohd is
+    /// up but not handshake-ready", which sends the diagnosis to the router.
     pub fn wait_for_zenohd_handshake_ready(
         connect: &str,
         mut mk_probe_stderr: impl FnMut() -> File,
     ) {
         let demo = wz_ap_demo_binary();
+        assert_demo_binary_newer_than_sources(&demo);
         let probe_stderr = mk_probe_stderr();
         let probe_writer = probe_stderr
             .try_clone()
