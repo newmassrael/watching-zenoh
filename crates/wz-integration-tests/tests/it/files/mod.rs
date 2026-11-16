@@ -259,6 +259,7 @@ mod zenoh_c_capi_c_pico_interop;
 mod zenoh_c_config_document_oracle;
 mod zenoh_c_examples_on_wz_capi_c_dropin;
 mod zenoh_c_ext_families_twice_and_diff;
+mod zenoh_c_link_resources_twice_and_diff;
 mod zenoh_c_local_delivery_inline_twice_and_diff;
 mod zenoh_c_local_held_query_twice_and_diff;
 mod zenoh_c_local_queryable_matching_twice_and_diff;

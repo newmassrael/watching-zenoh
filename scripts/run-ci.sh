@@ -25931,6 +25931,23 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc" \
         || return 1
+    # Two link keys whose effect is on the host and not the wire, one C program on both
+    # libraries with its own allocator entry points: `allocation/mode` read off when the
+    # dialling session's batch-sized heap blocks are made (at the open under `init`, on traffic
+    # under `lazy`), and `rx/buffer_size` off how many receive buffers it keeps. Each document
+    # runs twice per library and the real library must agree with itself first. Needs only the
+    # oracle, not the unstable arm.
+    for leg in \
+        an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_wz_and_libzenohc \
+        a_larger_rx_buffer_size_keeps_more_receive_buffers_on_wz_and_libzenohc; do
+        wz_test_args wz-integration-tests zenoh_c_link_resources_twice_and_diff
+        _runci_guarded_test "C1cc $leg" 1 \
+            cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+            --test-threads=1 \
+            --exact "${WZ_TEST_PREFIX}$leg" \
+            || return 1
+    done
     # R3059 -- a SUBSCRIBER OF THE PUBLISHING SESSION, one C program on both libraries: a
     # chunk put on a literal key and on a declared key is handed to a local subscriber as a
     # shared-memory buffer, a plain-bytes put as a raw one. The legs that put a chunk on the
