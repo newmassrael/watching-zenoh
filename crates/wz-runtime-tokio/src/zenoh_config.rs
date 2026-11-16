@@ -4682,6 +4682,23 @@ pub(crate) fn wz_accepts(path: &str) -> bool {
         || DEEPENABLE_UPSTREAM_KEYS.iter().any(under)
 }
 
+/// Whether the leaf `value` at `path` is an empty object at a section of the keys [`wz_accepts`]
+/// takes, `path` not being such a key itself. Upstream reads every section into a struct whose
+/// fields default, so `transport_optimization: {}` is the section with nothing changed; an empty
+/// object at a path that is no section is a key stock zenoh does not know, and is judged as one.
+fn states_nothing_as_an_empty_section(path: &str, value: &Json5Value) -> bool {
+    if !matches!(value, Json5Value::Object(members) if members.is_empty()) || wz_accepts(path) {
+        return false;
+    }
+    let prefix = format!("{path}/");
+    upstream_surface()
+        .chain(WZ_EXTENSION_CONFIG_KEYS.iter().copied())
+        .chain(UPSTREAM_INERT_CONFIG_KEYS.iter().copied())
+        .chain(HONOURED_SUBTREE_LEAVES.iter().copied())
+        .chain(DEEPENABLE_UPSTREAM_KEYS.iter().copied())
+        .any(|known| known.starts_with(&prefix))
+}
+
 /// The result of reading a stock zenoh config: what wz took from it, and —
 /// just as load-bearing — what it did not.
 ///
@@ -7712,8 +7729,15 @@ impl ZenohNodeConfig {
 
         // The ACCEPTANCE BOUNDARY, matched to zenoh's before anything is read.
         // Checked first so a typo is reported as a typo rather than as a
-        // missing value somewhere downstream.
-        let leaves = doc.leaf_paths();
+        // missing value somewhere downstream. An empty section states nothing and is not a key
+        // (`states_nothing_as_an_empty_section`), so it is neither judged nor reported ignored.
+        let mut leaves: Vec<String> = doc
+            .leaf_entries()
+            .into_iter()
+            .filter(|(path, value)| !states_nothing_as_an_empty_section(path, value))
+            .map(|(path, _)| path)
+            .collect();
+        leaves.sort();
         if let Some(unknown) = leaves.iter().find(|p| !wz_accepts(p)) {
             return Err(ConfigIngestError::UnknownKey {
                 path: unknown.clone(),
@@ -11043,6 +11067,31 @@ mod tests {
             0.5,
             "the refusal belongs to the flag parser, which every route goes \
              through -- deciding it twice is how the two answers drift"
+        );
+    }
+
+    /// An empty section states nothing: upstream reads `transport_optimization: {}` into the
+    /// section's defaults, so the document reads as a silent one, with nothing named or ignored.
+    /// An empty object at a path that is no section is a key stock zenoh does not know, and is
+    /// refused as one.
+    #[test]
+    fn an_empty_section_states_nothing_and_an_empty_unknown_key_is_refused() {
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        for doc in [
+            r#"{ transport: { shared_memory: { transport_optimization: {} } } }"#,
+            r#"{ transport: {} }"#,
+            r#"{ scouting: { multicast: {} } }"#,
+        ] {
+            let read = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{doc}: {e}"));
+            assert_eq!(read.config, silent.config, "{doc}");
+            assert_eq!(read.named, silent.named, "{doc}");
+            assert_eq!(read.ignored, silent.ignored, "{doc}");
+        }
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ transport: { not_a_section: {} } }"#).unwrap_err(),
+            ConfigIngestError::UnknownKey {
+                path: String::from("transport/not_a_section")
+            }
         );
     }
 
