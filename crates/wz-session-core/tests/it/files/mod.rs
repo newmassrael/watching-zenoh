@@ -5,6 +5,7 @@
 //! file of `files/` is named here by hand, in order.
 
 mod key_catalogue_model;
+mod multicast_in_place_reassembly;
 mod session_slot_pool_deploy;
 mod slot_observer_cell;
 mod slot_observer_heap;

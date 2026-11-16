@@ -11735,13 +11735,16 @@ layer_c1g_cargo_test_observer() {
     (cd crates \
         && cargo clippy -p wz-session-core --lib --no-default-features --features no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,session-slot --quiet -- -D warnings) || return 1
     # The multicast group's receive on the same profile reads a fragment where it lies
-    # (`multicast_rx::in_place_reassembly_tests`, gated on NO `alloc`): a member that
-    # restarts a chain is reported dropped once, as superseded. Every other leg that
-    # builds `multicast_rx` keeps `alloc` (`routing-namespace` implies it), so this is
-    # the one that runs it. The set is the module's own gate with `session-slot` as the
-    # storage profile. 1 = the module's one case, counted from the source, not printed.
+    # (`multicast_in_place_reassembly`, gated on NO `alloc`): a member that restarts a
+    # chain is reported dropped once, as superseded. Every other leg that builds
+    # `multicast_rx` keeps `alloc` (`routing-namespace` implies it), so this is the one
+    # that runs it. An integration test and not `--lib`: the crate's unit-test modules
+    # name the heap unconditionally and do not compile without `alloc`, while the
+    # library does. The set is the file's own gate with `session-slot` as the storage
+    # profile. 1 = the file's one case, counted from the source, not printed.
+    wz_test_args wz-session-core multicast_in_place_reassembly
     _runci_guarded_test C1g 1 \
-        cargo test -p wz-session-core --lib --no-default-features --features session-slot,session-multicast,codec-join,codec-frame,codec-close,reassembly,transport-fragmentation --quiet -- multicast_rx::in_place_reassembly_tests || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --no-default-features --features session-slot,session-multicast,codec-join,codec-frame,codec-close,reassembly,transport-fragmentation --quiet || return 1
     # Every combination the selector touches must compile and be clean WITH and
     # WITHOUT it: a symbol the lend-only profile stops using is dead there, and one
     # the heap profile stops using after a refactor is dead there. `--all-features`
