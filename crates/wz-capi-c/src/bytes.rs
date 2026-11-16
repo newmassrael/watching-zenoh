@@ -599,17 +599,18 @@ pub(crate) unsafe fn take_outbound(moved: *mut z_moved_bytes_t) -> Option<Outbou
     }
 }
 
-/// The chunk of shared memory a query's value is, when it is one (R3059): the value
-/// `z_get` and `z_querier_get` carry as a descriptor to a peer that negotiated shared
-/// memory. `None` whenever the value is bytes, and on a build without that axis there is
-/// no chunk to be, so the type is uninhabited and the arm that would use it cannot exist.
+/// The buffer of shared memory a query's value is sent from, when it is one: the chunk the
+/// value is (R3059), or the session's copy of a large value of plain bytes
+/// (`crate::get::with_promoted_value`). `z_get` and `z_querier_get` carry it as a descriptor to
+/// a peer that negotiated shared memory. `None` whenever the value is sent as bytes, and on a
+/// build without that axis there is no buffer to be, so the type is uninhabited and the arm
+/// that would use it cannot exist.
 #[cfg(all(
     feature = "query",
     feature = "zenoh-c-shared-memory",
     not(feature = "zenoh-c-no-unstable-api")
 ))]
-pub(crate) type ValueChunk =
-    Option<std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>>;
+pub(crate) type ValueChunk = Option<wz_session_core::extshm::ShmSendHandle>;
 /// See the shared-memory spelling: there is no chunk on this arm.
 #[cfg(all(
     feature = "query",
@@ -641,7 +642,7 @@ pub(crate) unsafe fn take_query_value(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
-        Some(Outbound::Chunk(chunk)) => (None, Some(chunk)),
+        Some(Outbound::Chunk(chunk)) => (None, Some(chunk.send_handle())),
     }
 }
 

@@ -218,6 +218,14 @@ pub(crate) struct QuerierState {
     /// querier is. `Mutex` because the C side may attach one after declaring,
     /// from a different thread than the one that declared.
     matching: Mutex<Option<MatchingHold>>,
+    /// What the session copies a large value into its provider by, kept from the declaration
+    /// because a get on the querier is made without the session handle; `None` for a session
+    /// opened without a provider.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    promotion: Option<crate::shm::Promotion>,
 }
 
 impl QuerierState {
@@ -259,6 +267,12 @@ pub(crate) struct NodeQuerier {
     interest: u64,
     /// A background matching listener, retired with the querier.
     matching: Mutex<Option<MatchingHold>>,
+    /// What the node's session copies a large value into its provider by, as on the registry.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    promotion: Option<crate::shm::Promotion>,
 }
 
 #[cfg(feature = "router-node")]
@@ -408,6 +422,11 @@ pub(crate) unsafe fn declare_querier_stated(
                 keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
                 base: stated.apply(base),
                 matching: Mutex::new(None),
+                #[cfg(all(
+                    feature = "zenoh-c-shared-memory",
+                    not(feature = "zenoh-c-no-unstable-api")
+                ))]
+                promotion: crate::shm::Promotion::of(held),
             }),
             // A node asks as its own face: the querier keeps the node and the options its gets
             // start from.
@@ -429,6 +448,11 @@ pub(crate) unsafe fn declare_querier_stated(
                     base,
                     interest,
                     matching: Mutex::new(None),
+                    #[cfg(all(
+                        feature = "zenoh-c-shared-memory",
+                        not(feature = "zenoh-c-no-unstable-api")
+                    ))]
+                    promotion: crate::shm::Promotion::of(held),
                 })
             }
         });
@@ -684,6 +708,11 @@ unsafe fn querier_get_with_selector(
                 if node.node.is_closed() {
                     return crate::result::Z_ESESSION_CLOSED;
                 }
+                #[cfg(all(
+                    feature = "zenoh-c-shared-memory",
+                    not(feature = "zenoh-c-no-unstable-api")
+                ))]
+                let (opts, value) = promoted_value(node.promotion.as_ref(), opts, value);
                 return crate::get::issue_get_on_node(
                     &node.node,
                     node.keyexpr.literal().to_owned(),
@@ -695,6 +724,11 @@ unsafe fn querier_get_with_selector(
                 );
             }
         };
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        let (opts, value) = promoted_value(state.promotion.as_ref(), opts, value);
         issue_get(
             &state.shared,
             state.keyexpr.literal().to_owned(),
@@ -703,6 +737,26 @@ unsafe fn querier_get_with_selector(
             value,
             closure,
             token,
+        )
+    })
+}
+
+/// The options and the value buffer of a get on a querier once the querier's session has
+/// decided whether to copy the value into its provider, as a get made on the session itself is
+/// (`crate::get::with_promoted_value`).
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+fn promoted_value(
+    promotion: Option<&crate::shm::Promotion>,
+    opts: QueryOptions,
+    value: crate::bytes::ValueChunk,
+) -> (QueryOptions, crate::bytes::ValueChunk) {
+    crate::get::with_promoted_value(opts, value, |bytes| {
+        promotion?.promote_bytes(
+            wz_capi_core::session_defaults::PromotedMessage::Query,
+            bytes,
         )
     })
 }

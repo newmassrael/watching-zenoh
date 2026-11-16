@@ -1958,8 +1958,8 @@ mod config_disposition_tests {
 
     /// A key only a session applies is answered for THIS library's session: the per-key
     /// publication QoS is honoured in every build, the shared-memory subsystem where the library
-    /// has shared memory, the copy's threshold where it also has the session's provider, and the
-    /// list of messages, whose query and reply this library sends as bytes, never. A
+    /// has shared memory, and the copy's threshold and the list of messages it is made for where
+    /// it also has the session's provider, which copies a put, a query's value and a reply. A
     /// shared-memory key in a library without shared memory is out of its build.
     #[test]
     fn a_session_key_is_answered_for_this_librarys_session() {
@@ -1998,7 +1998,14 @@ mod config_disposition_tests {
         );
         assert_eq!(
             ask("transport/shared_memory/transport_optimization/messages"),
-            (Z_OK, not_acted_on)
+            (
+                Z_OK,
+                if provider {
+                    WZ_CAPI_C_CONFIG_HONOURED
+                } else {
+                    not_acted_on
+                }
+            )
         );
         // CONTROL: a key that is not a session's is answered by the reader, as before, in both
         // of the reader's answers. The keys are taken from the reader's own lists, so a key

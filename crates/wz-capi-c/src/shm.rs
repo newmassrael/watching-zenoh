@@ -46,10 +46,15 @@
 //!   own session's get or querier: `z_bytes_as_loaned_shm(z_query_payload(..))` answers a
 //!   buffer, as upstream's does (`zenoh_c_shm_query_local_twice_and_diff` and leg 11 of
 //!   `zenoh_c_shm_and_advanced_on_wz_capi_c`, whose getter is upstream's own `z_get_shm`).
-//!   What is still bytes: a query's reply and the advanced publisher's put, which take the
+//!   What is still bytes: an error reply and the advanced publisher's put, which take the
 //!   chunk's bytes whatever it was built from. A buffer received from a peer is copied
 //!   when it is built into a payload, because its memory is the peer's segment and not
 //!   one of this process's providers.
+//! - **The implicit copy of a large message.** A put, a query's value and a Put reply of
+//!   plain bytes are copied into the session's own provider when the session's
+//!   `transport_optimization` says so, and then go as that copy's descriptor to a peer that
+//!   negotiated shared memory (`SessionShm::promote`, upstream's
+//!   `io/zenoh-transport/src/common/shm/interop.rs` @ `fn wrap_in_place<const ID: u8>(`).
 //!
 //! ⚠ R2970 corrected two sentences that said this ABI's SHM fallback was upstream's
 //! and the reason the two arms of the drop-in test agree. They were wrong then, and
@@ -1667,9 +1672,11 @@ pub unsafe extern "C" fn z_internal_shm_provider_check(
 // `z_obtain_shm_provider` is that ask made from C. The provider is this
 // crate's own segment allocator, as every other provider here is, and what
 // upstream ALSO uses it for, copying a large message into SHM implicitly, it is
-// used for here for a put (`SessionShm::promote`), by the session's
-// `transport_optimization` keys (`SESSION_HONOURED_KEYS` of the runtime's
-// reader); a query's value and a reply leave as their bytes.
+// used for here for a put, a query's value and a Put reply
+// (`SessionShm::promote`), by the session's `transport_optimization` keys
+// (`SESSION_HONOURED_KEYS` of the runtime's reader). An error reply leaves as
+// its bytes, which is what upstream's receiver reads of one it copied: its
+// codec writes the payload of an Err in line (`docs/shm-transport.md`, rule 7).
 
 /// Where the session's provider is in its life, upstream's
 /// `ProviderInitStateInner` without the configuration it no longer needs.
@@ -1794,9 +1801,24 @@ impl SessionShm {
     }
 }
 
+/// The buffer the `bytes` a `message` made on `session` carries are sent from when the session
+/// copies them into its provider ([`SessionShm::promote`]), and `None` when it does not.
+pub(crate) fn promoted(
+    session: &crate::session::SessionHandle,
+    message: wz_capi_core::session_defaults::PromotedMessage,
+    bytes: &[u8],
+) -> Option<wz_session_core::extshm::ShmSendHandle> {
+    session.shm()?.promote(
+        &session.session_defaults().shm_promotion,
+        message,
+        bytes,
+        || session.has_shm_peer(),
+    )
+}
+
 /// The buffer a put of `payload` on `session` is sent from when the session copies it into its
-/// provider ([`SessionShm::promote`]): `None` for a payload that is a chunk already, which is
-/// sent as itself, and for one the session does not copy.
+/// provider ([`promoted`]): `None` for a payload that is a chunk already, which is sent as
+/// itself, and for one the session does not copy.
 pub(crate) fn promoted_put(
     session: &crate::session::SessionHandle,
     payload: &crate::bytes::Outbound,
@@ -1804,47 +1826,100 @@ pub(crate) fn promoted_put(
     let crate::bytes::Outbound::Bytes(bytes) = payload else {
         return None;
     };
-    session.shm()?.promote(
-        &session.session_defaults().shm_promotion,
+    promoted(
+        session,
         wz_capi_core::session_defaults::PromotedMessage::Put,
         bytes,
-        || session.has_shm_peer(),
     )
 }
 
-/// What a publisher keeps of its session to copy a large put into the session's provider, as a
-/// put made on the session itself is ([`promoted_put`]): a publisher's put is made without the
-/// session handle.
+/// What an entity keeps of its session to copy a large payload into the session's provider, as a
+/// message made on the session itself is ([`promoted`]): a publisher's put, a querier's get and a
+/// queryable's reply are made without the session handle.
+///
+/// The session is asked whether some peer could read the copy through a weak reference, because
+/// a queryable lives in the session it would otherwise keep alive.
 #[derive(Clone)]
-pub(crate) struct PutPromotion {
+pub(crate) struct Promotion {
     shm: Arc<SessionShm>,
     promotion: wz_capi_core::session_defaults::ShmPromotion,
+    peer_shares_memory: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
-impl PutPromotion {
-    /// What `session` copies a put by, or `None` for a session opened without a provider.
+impl Promotion {
+    /// What `session` copies a payload by, or `None` for a session opened without a provider.
     pub(crate) fn of(session: &crate::session::SessionHandle) -> Option<Self> {
+        let shm = Arc::clone(session.shm()?);
+        let peer_shares_memory: Arc<dyn Fn() -> bool + Send + Sync> = match session {
+            crate::session::SessionHandle::Registry(state) => {
+                let shared = Arc::downgrade(&state.shared);
+                Arc::new(move || shared.upgrade().is_some_and(|shared| shared.has_shm_peer()))
+            }
+            #[cfg(feature = "router-node")]
+            crate::session::SessionHandle::Node(node) => {
+                let forwarder = Arc::downgrade(&node.shared_forwarder());
+                Arc::new(move || {
+                    forwarder
+                        .upgrade()
+                        .is_some_and(|forwarder| forwarder.has_shm_peer())
+                })
+            }
+        };
         Some(Self {
-            shm: Arc::clone(session.shm()?),
+            shm,
             promotion: session.session_defaults().shm_promotion,
+            peer_shares_memory,
         })
     }
 
-    /// The buffer a put of `payload` is sent from when it is copied, as [`promoted_put`] says.
+    /// The buffer `payload`, carried by a `message`, is sent from when it is copied: `None` for a
+    /// payload that is a chunk already, which is sent as itself, and for one not copied.
     pub(crate) fn promote(
         &self,
+        message: wz_capi_core::session_defaults::PromotedMessage,
         payload: &crate::bytes::Outbound,
-        peer_shares_memory: impl FnOnce() -> bool,
     ) -> Option<wz_session_core::extshm::ShmSendHandle> {
         let crate::bytes::Outbound::Bytes(bytes) = payload else {
             return None;
         };
-        self.shm.promote(
-            &self.promotion,
-            wz_capi_core::session_defaults::PromotedMessage::Put,
-            bytes,
-            peer_shares_memory,
-        )
+        self.promote_bytes(message, bytes)
+    }
+
+    /// The buffer `bytes`, carried by a `message`, are sent from when they are copied.
+    pub(crate) fn promote_bytes(
+        &self,
+        message: wz_capi_core::session_defaults::PromotedMessage,
+        bytes: &[u8],
+    ) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        self.shm
+            .promote(&self.promotion, message, bytes, &*self.peer_shares_memory)
+    }
+}
+
+#[cfg(test)]
+impl Promotion {
+    /// A promotion over `shm` by `promotion`, whose peers are asked through `peer_shares_memory`.
+    pub(crate) fn for_test(
+        shm: Arc<SessionShm>,
+        promotion: wz_capi_core::session_defaults::ShmPromotion,
+        peer_shares_memory: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            shm,
+            promotion,
+            peer_shares_memory: Arc::new(peer_shares_memory),
+        }
+    }
+
+    /// A promotion whose provider is made and ready, so that the first payload it admits is
+    /// copied rather than sent as its bytes while the provider is being made.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    pub(crate) fn ready_for_test(promotion: wz_capi_core::session_defaults::ShmPromotion) -> Self {
+        let shm = SessionShm::from_config(true, true, 1 << 16);
+        // The first ask starts the build, as upstream's does.
+        let _ = shm.try_get();
+        assert!(shm.wait_ready().is_some(), "the provider could not be made");
+        Self::for_test(shm, promotion, || true)
     }
 }
 
@@ -1924,6 +1999,72 @@ mod promotion_tests {
                 .promote(&PUTS_FROM_64, PromotedMessage::Put, &[0u8; 128], || true)
                 .is_none(),
             "a session configured with no provider"
+        );
+    }
+
+    /// What an entity keeps of its session copies each kind of message by the one decision, and
+    /// asks the session's peers only for a payload it would copy.
+    #[test]
+    fn an_entitys_promotion_copies_each_kind_the_list_names_and_asks_its_peers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let ready = ready_session();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&asked);
+        let promotion = Promotion::for_test(
+            ready,
+            ShmPromotion {
+                threshold: 64,
+                messages: PromotedMessages {
+                    put: false,
+                    query: true,
+                    reply: true,
+                },
+            },
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+        );
+        for message in [PromotedMessage::Query, PromotedMessage::Reply] {
+            let copy = promotion
+                .promote_bytes(message, &[4u8; 128])
+                .unwrap_or_else(|| panic!("a large {message:?} the list names is copied"));
+            assert_eq!(copy.bytes(), &[4u8; 128][..]);
+        }
+        assert!(
+            promotion
+                .promote_bytes(PromotedMessage::Put, &[4u8; 128])
+                .is_none(),
+            "a kind the list does not name"
+        );
+        assert!(
+            promotion
+                .promote_bytes(PromotedMessage::Reply, &[4u8; 63])
+                .is_none(),
+            "under the threshold"
+        );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "the peers are asked once for each payload copied and for no other"
+        );
+        let plain = crate::bytes::Outbound::Bytes(crate::bytes::Payload::Owned(vec![4u8; 128]));
+        assert!(promotion.promote(PromotedMessage::Reply, &plain).is_some());
+
+        let refusing = Promotion::for_test(
+            ready_session(),
+            ShmPromotion {
+                threshold: 64,
+                messages: PromotedMessages::ALL,
+            },
+            || false,
+        );
+        assert!(
+            refusing
+                .promote_bytes(PromotedMessage::Query, &[4u8; 128])
+                .is_none(),
+            "no peer could read the copy"
         );
     }
 }

@@ -1141,11 +1141,11 @@ pub(crate) fn issue_get(
     Z_OK
 }
 
-/// Issue one leg of a get: the ordinary query, or the query whose VALUE is a chunk of
-/// shared memory (R3059), which the leg sends as a descriptor where its face negotiated
-/// shared memory and as the chunk's bytes everywhere else, the local leg included. The
-/// one place a get decides which of the two it is, so the legs cannot decide it
-/// differently.
+/// Issue one leg of a get: the ordinary query, or the query whose VALUE is sent from a buffer
+/// of shared memory (R3059, and the session's copy of a large value), which the leg sends as a
+/// descriptor where its face negotiated shared memory and as the buffer's bytes everywhere
+/// else, the local leg included. The one place a get decides which of the two it is, so the
+/// legs cannot decide it differently.
 fn query_leg(
     leg: wz_capi_core::faces::QueryLeg<'_>,
     keyexpr: &str,
@@ -1159,13 +1159,38 @@ fn query_leg(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
-        Some(chunk) => leg.query_shm(keyexpr, opts, &chunk.send_handle(), on_reply),
+        Some(buffer) => leg.query_shm(keyexpr, opts, buffer, on_reply),
         #[cfg(not(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         )))]
         Some(never) => match *never {},
     }
+}
+
+/// The options and the value buffer of a get once its session has decided whether to copy the
+/// value into its provider, as upstream's transport does for a query
+/// (`io/zenoh-transport/src/common/shm/interop.rs` @ `let p = if policy.query {`). A value that
+/// is a chunk already is sent as itself and `promote` is not asked. A value of plain bytes that
+/// `promote` copies leaves the options and rides beside them as the copy, as a chunk does, so
+/// the query does not carry it twice; any other stays in the options and goes as its bytes.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+pub(crate) fn with_promoted_value(
+    mut opts: QueryOptions,
+    value: crate::bytes::ValueChunk,
+    promote: impl FnOnce(&[u8]) -> Option<wz_session_core::extshm::ShmSendHandle>,
+) -> (QueryOptions, crate::bytes::ValueChunk) {
+    if value.is_some() {
+        return (opts, value);
+    }
+    let promoted = opts.payload.as_deref().and_then(promote);
+    if promoted.is_some() {
+        opts.payload = None;
+    }
+    (opts, promoted)
 }
 
 /// R2949 — what one leg's reply callback owns: the C closure, the reply gate,
@@ -1464,18 +1489,35 @@ pub(crate) unsafe fn get_with_selector(
                 if stated != QueryStatement::default() {
                     return Z_EUNAVAILABLE;
                 }
+                #[cfg(all(
+                    feature = "zenoh-c-shared-memory",
+                    not(feature = "zenoh-c-no-unstable-api")
+                ))]
+                let (opts, value) = with_promoted_value(opts, value, |bytes| {
+                    crate::shm::promoted(
+                        held,
+                        wz_capi_core::session_defaults::PromotedMessage::Query,
+                        bytes,
+                    )
+                });
                 return issue_get_on_node(node, ke, params, opts, value, closure, token);
             }
         };
-        issue_get(
-            &state.shared,
-            ke,
-            params,
-            stated.apply(opts),
-            value,
-            closure,
-            token,
-        )
+        let opts = stated.apply(opts);
+        // A large value the session copies into its provider, so that a peer that negotiated
+        // shared memory is sent its descriptor.
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        let (opts, value) = with_promoted_value(opts, value, |bytes| {
+            crate::shm::promoted(
+                held,
+                wz_capi_core::session_defaults::PromotedMessage::Query,
+                bytes,
+            )
+        });
+        issue_get(&state.shared, ke, params, opts, value, closure, token)
     })
 }
 
@@ -1527,27 +1569,23 @@ pub(crate) fn issue_get_on_node(
         _registration: registration.clone(),
     };
     let on_reply = Box::new(move |view: &dyn ReplyView| leg.fire(view));
-    // A value in shared memory goes as the chunk: its descriptor to a face that negotiated shared
-    // memory, its bytes to any other, as a registry's get sends it (`query_leg`).
-    let asked = match &value {
+    // A value sent from shared memory goes as the buffer: its descriptor to a face that
+    // negotiated shared memory, its bytes to any other, as a registry's get sends it
+    // (`query_leg`).
+    let asked = match value {
         None => node.get_numbered(&keyexpr, &opts, None, on_reply, Box::new(|| {})),
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
-        Some(chunk) => node.get_numbered_shm(
-            &keyexpr,
-            &opts,
-            chunk.send_handle(),
-            None,
-            on_reply,
-            Box::new(|| {}),
-        ),
+        Some(buffer) => {
+            node.get_numbered_shm(&keyexpr, &opts, buffer, None, on_reply, Box::new(|| {}))
+        }
         #[cfg(not(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         )))]
-        Some(never) => match *never {},
+        Some(never) => match never {},
     };
     let Ok(id) = asked else {
         return Z_EINVAL;
@@ -1645,6 +1683,87 @@ mod tests {
                 &mut provider as *mut z_owned_shm_provider_t as *mut z_moved_shm_provider_t,
             )
         };
+    }
+
+    /// A query's value of plain bytes from the threshold up leaves the options for the session's
+    /// copy, as upstream's transport copies a query; one below the threshold, one whose kind the
+    /// list does not name and one the session has no promotion for stay in the options; and a
+    /// value that is a chunk already is sent as itself, the promotion not asked.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    #[test]
+    fn a_large_query_value_is_copied_into_the_sessions_provider_as_the_configuration_says() {
+        use wz_capi_core::session_defaults::{PromotedMessage, PromotedMessages, ShmPromotion};
+        let queries = crate::shm::Promotion::ready_for_test(ShmPromotion {
+            threshold: 64,
+            messages: PromotedMessages::ALL,
+        });
+        let not_queries = crate::shm::Promotion::ready_for_test(ShmPromotion {
+            threshold: 64,
+            messages: PromotedMessages {
+                put: true,
+                query: false,
+                reply: true,
+            },
+        });
+        let valued = |len: usize| QueryOptions::default().with_payload(vec![5u8; len]);
+
+        let (opts, value) = with_promoted_value(valued(128), None, |bytes| {
+            queries.promote_bytes(PromotedMessage::Query, bytes)
+        });
+        assert!(
+            opts.payload.is_none(),
+            "a copied value is not carried in the options as well"
+        );
+        assert_eq!(
+            value
+                .expect("a value above the threshold is copied")
+                .bytes(),
+            &[5u8; 128][..]
+        );
+
+        let (opts, value) = with_promoted_value(valued(64), None, |bytes| {
+            queries.promote_bytes(PromotedMessage::Query, bytes)
+        });
+        assert!(opts.payload.is_none());
+        assert!(value.is_some(), "a value at the threshold is copied");
+
+        let (opts, value) = with_promoted_value(valued(63), None, |bytes| {
+            queries.promote_bytes(PromotedMessage::Query, bytes)
+        });
+        assert_eq!(opts.payload.as_deref(), Some(&[5u8; 63][..]));
+        assert!(value.is_none(), "a value below the threshold goes as bytes");
+
+        let (opts, value) = with_promoted_value(valued(128), None, |bytes| {
+            not_queries.promote_bytes(PromotedMessage::Query, bytes)
+        });
+        assert_eq!(opts.payload.as_deref(), Some(&[5u8; 128][..]));
+        assert!(
+            value.is_none(),
+            "a value whose kind the list does not name goes as bytes"
+        );
+
+        let (opts, value) = with_promoted_value(valued(128), None, |_| None);
+        assert_eq!(opts.payload.as_deref(), Some(&[5u8; 128][..]));
+        assert!(
+            value.is_none(),
+            "a session without a promotion copies nothing"
+        );
+
+        let chunk = queries
+            .promote_bytes(PromotedMessage::Query, &[9u8; 128])
+            .expect("a buffer to stand for a chunk");
+        let mut asked = false;
+        let (opts, value) =
+            with_promoted_value(QueryOptions::default(), Some(chunk.clone()), |_| {
+                asked = true;
+                None
+            });
+        assert!(!asked, "a chunk is not offered for a copy");
+        assert!(opts.payload.is_none());
+        assert_eq!(value, Some(chunk), "a chunk is sent as itself");
     }
 
     /// R311y554 — `z_get_options_t.allowed_destination` reaches

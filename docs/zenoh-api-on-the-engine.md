@@ -151,9 +151,8 @@ and the engine begins, what each side owns, which engine, and in what order the 
   the open by `init_shared_memory`, and the copy of a large payload decided by
   `ShmPromotion::admits`. Whether a session acts on each is a fact of its own build, so the state
   of these keys is asked with what the session reaches (`key_state(path, SessionReach)`): this
-  crate reaches all four with `shared-memory` and `unstable`, the zenoh-c ABI the QoS, the
-  subsystem and the copy of a put, and leaves the list of messages unmapped while its query
-  values and replies leave as bytes.
+  crate reaches all four with `shared-memory` and `unstable`, and so does the zenoh-c ABI on its
+  shared-memory arm with the unstable API, which copies a put, a query's value and a reply.
 - **D7. Where upstream and the engine differ, the difference is stated and held, and the default
   is upstream's (C2).** Each is a class of the differential test with the words of both
   behaviours. Known already: the engine's `interfaces` of a link is three-state where upstream's
