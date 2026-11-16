@@ -557,39 +557,6 @@ pub(crate) fn parse_multicast_max_sessions(args: &[String]) -> Result<Option<usi
         .transpose()
 }
 
-#[cfg(all(test, feature = "router-hat-router"))]
-mod multicast_max_sessions_flag_tests {
-    use super::parse_multicast_max_sessions;
-
-    fn argv(words: &[&str]) -> Vec<String> {
-        words.iter().map(|word| word.to_string()).collect()
-    }
-
-    /// Absent is no cap; any count is read, zero included; anything else is refused by the
-    /// flag's name rather than replaced by a default.
-    #[test]
-    fn the_flag_reads_a_count_zero_included_and_refuses_anything_else() {
-        assert_eq!(parse_multicast_max_sessions(&argv(&[])), Ok(None));
-        let flag = "--multicast-max-sessions";
-        assert_eq!(
-            parse_multicast_max_sessions(&argv(&[flag, "1000"])),
-            Ok(Some(1000))
-        );
-        assert_eq!(
-            parse_multicast_max_sessions(&argv(&[flag, "0"])),
-            Ok(Some(0))
-        );
-        for bad in ["-1", "ten", "1.5", ""] {
-            let err = parse_multicast_max_sessions(&argv(&[flag, bad]))
-                .expect_err("a value that is not a count is refused");
-            assert!(
-                err.contains("--multicast-max-sessions expects"),
-                "{bad}: {err}"
-            );
-        }
-    }
-}
-
 /// `--accept-pending <N>` and `--accept-timeout-ms <MS>`: how many inbound links may be
 /// mid-handshake at once and how long each gets, the two keys upstream keeps under
 /// `transport/unicast` (`accept_pending`, `accept_timeout`). Absent, upstream's own, a hundred and
@@ -12452,6 +12419,40 @@ mod session_admin_tests {
     fn the_mesh_run_modes_are_not_refused_here() {
         for flag in ["--peer", "--router-hat", "--storage-host"] {
             assert_eq!(single_session_admin_refusal(flag), None, "{flag}");
+        }
+    }
+}
+
+// Below the emission sites, as every test module of this file is (see `capacity_flag_tests`).
+#[cfg(all(test, feature = "router-hat-router"))]
+mod multicast_max_sessions_flag_tests {
+    use super::parse_multicast_max_sessions;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    /// Absent is no cap; any count is read, zero included; anything else is refused by the
+    /// flag's name rather than replaced by a default.
+    #[test]
+    fn the_flag_reads_a_count_zero_included_and_refuses_anything_else() {
+        assert_eq!(parse_multicast_max_sessions(&argv(&[])), Ok(None));
+        let flag = "--multicast-max-sessions";
+        assert_eq!(
+            parse_multicast_max_sessions(&argv(&[flag, "1000"])),
+            Ok(Some(1000))
+        );
+        assert_eq!(
+            parse_multicast_max_sessions(&argv(&[flag, "0"])),
+            Ok(Some(0))
+        );
+        for bad in ["-1", "ten", "1.5", ""] {
+            let err = parse_multicast_max_sessions(&argv(&[flag, bad]))
+                .expect_err("a value that is not a count is refused");
+            assert!(
+                err.contains("--multicast-max-sessions expects"),
+                "{bad}: {err}"
+            );
         }
     }
 }
