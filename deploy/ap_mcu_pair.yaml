@@ -75,7 +75,7 @@ machines:
         accept_rate_table_capacity: 32
         accepting_inactivity_timeout_ms: 1000
     session:
-      handshake_timeout_ms: 2000
+      open_timeout_ms: 10000
       lease_seconds: 10
       keepalive_ratio: 3
       closing_timeout_ms: 100
@@ -191,7 +191,7 @@ machines:
         accept_rate_table_capacity: 128
         accepting_inactivity_timeout_ms: 1000
     session:
-      handshake_timeout_ms: 2000
+      open_timeout_ms: 10000
       lease_seconds: 10
       keepalive_ratio: 3
       closing_timeout_ms: 100

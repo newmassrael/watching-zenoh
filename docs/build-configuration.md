@@ -82,21 +82,21 @@ original reproduced by naming it. Three things follow from it:
   configuration; a policy it names outside its profile is Zephyr's own warning that the
   assignment was not honoured, which Zephyr does not make an error. With no policy
   stated every image of the board table builds with the cargo line it had before.
-- **The handshake's windows and cookie buffer**: an initiator's handshake, its INIT and OPEN
+- **The handshake's window and cookie buffer**: an initiator's handshake, its INIT and OPEN
   phases together, waits one bound for the peer's acknowledgements, as both upstreams wait:
   the node's `transport/unicast/open_timeout` where the host has one, upstream's 10 s where it
   has none (`SessionTimeouts::from_build()`), and the pico drop-in's
-  `PICO_CONNECT_TIMEOUT_MS` (its accept timeout is `PICO_ACCEPT_TIMEOUT_MS`). The declared
-  limits `HANDSHAKE_INIT_MS` and `HANDSHAKE_OPEN_MS` are per-phase windows that nothing
-  reads: a window shorter than the whole bound would end an open sooner than upstream does. On
-  the
+  `PICO_CONNECT_TIMEOUT_MS` (its accept timeout is `PICO_ACCEPT_TIMEOUT_MS`). No limit states
+  a window for one phase: a window shorter than the whole bound would end an open sooner than
+  upstream does, and the one build with no configuration that dials, the pico drop-in, states
+  its bound through pico's own switch. On the
   `session-slot` profile a session keeps a peer's cookie in buffers of
   `HANDSHAKE_COOKIE_BYTES` (128), at most the INIT body's cookie capacity (65535) and, for
   a node that accepts, at least the widest cookie it issues; a build outside that does not
   compile. A cookie longer than the buffer is not kept, so the node echoes none and the peer
   refuses its OPEN (the node does not report it). The growable profile keeps any length.
-  The Zephyr build passes every limit of the image's Kconfig to cargo, so the three reach an
-  image with no further rule.
+  The Zephyr build passes every limit of the image's Kconfig to cargo, so the cookie limit and
+  pico's connect timeout reach an image with no further rule.
 - **The size of a query a node runs**: `QUERY_PARAMETERS_MAX_BYTES` and
   `QUERY_ATTACHMENT_MAX_BYTES` (0 each, no bound, which is how a node behaved before them)
   bound the selector parameters and the attachment of a query a peer sends. A longer query

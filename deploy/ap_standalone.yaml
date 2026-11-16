@@ -160,7 +160,7 @@ machines:
     # session
     # ---------------------------------------------------------------
     session:
-      handshake_timeout_ms: 2000
+      open_timeout_ms: 10000
       lease_seconds: 10
       keepalive_ratio: 3
       closing_timeout_ms: 100          # OQ-W12 default.

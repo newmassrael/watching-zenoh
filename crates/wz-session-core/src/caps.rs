@@ -432,16 +432,6 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
-/// A per-step window for the INIT phase of the handshake, which nothing reads: an initiator's
-/// handshake is one bound from its InitSyn to the peer's OpenAck, the `opening_ms` of
-/// `session_timeouts::SessionTimeouts`, because neither upstream bounds one step shorter than the
-/// whole open. The declaration still states the limit; it sizes no memory.
-pub const HANDSHAKE_INIT_MS: usize = generated::HANDSHAKE_INIT_MS;
-
-/// A per-step window for the OPEN phase of the handshake, which nothing reads, for the reason
-/// [`HANDSHAKE_INIT_MS`] gives. The declaration still states the limit; it sizes no memory.
-pub const HANDSHAKE_OPEN_MS: usize = generated::HANDSHAKE_OPEN_MS;
-
 /// How many bytes of a peer's cookie a session keeps on the `session-slot` profile
 /// ([`crate::session_init_params::COOKIE_MAX`]): each buffer that holds one is this long. The default
 /// is 128. At most the generated INIT cookie field's 65535 and, for a node that accepts, at least
