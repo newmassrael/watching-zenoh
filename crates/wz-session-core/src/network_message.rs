@@ -2495,10 +2495,8 @@ mod chain_saturation_tests {
 /// this module does not import the axis enums: an unqualified link here is
 /// exactly the shape that cost R2371 its first push. That is a DECIDED default
 /// rather than an
-/// oversight — it is `stats_space_of`'s `None` arm, and R2372 measured that NO
-/// TEST PINS IT (open-debt 662: R2371's prose named
-/// `an_unresolvable_alias_counts_as_user`, which exists in no file, and this
-/// module carries no test module at all). The reasoning: the peer's id
+/// oversight — it is `stats_space_of`'s `None` arm, pinned by this module's
+/// `an_unresolvable_alias_counts_as_user`. The reasoning: the peer's id
 /// space lives on the face (the forwarder's per-face table), not on the session,
 /// so the inbound seam has no table to consult, and counting an unknown
 /// expression as admin would move ADMIN traffic counts on nothing more than an
@@ -4691,6 +4689,60 @@ mod mandatory_extension_rule_tests {
         assert_eq!(
             refuse_unknown_mandatory_ext(parsed).unwrap_err(),
             crate::parse_error::InboundParseError::UnknownMandatoryExt { eid: 0x13 }
+        );
+    }
+}
+
+// The space a key expression is counted in, as `stats_class` classifies it. The
+// module's name avoids the words of the `--lib` filters the count guards select
+// by, so adding it moves none of them.
+#[cfg(all(
+    test,
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+mod alias_space_tests {
+    use super::stats_space_of_key;
+    use crate::stats::StatSpace;
+    use crate::wire_id::ExprId;
+    use alloc::string::String;
+
+    /// An alias the caller's id space cannot resolve counts in the USER space,
+    /// whatever its suffix says: the inbound seam holds no table of the peer's
+    /// ids, and counting an unknown expression as admin would move admin counts
+    /// on nothing more than an alias being used.
+    #[test]
+    fn an_unresolvable_alias_counts_as_user() {
+        let unknown = |_: ExprId| -> Option<String> { None };
+        assert_eq!(stats_space_of_key(7, None, &unknown), StatSpace::User);
+        assert_eq!(
+            stats_space_of_key(7, Some("@/abc/session"), &unknown),
+            StatSpace::User
+        );
+    }
+
+    /// The controls: an alias the space resolves is classified by what it names,
+    /// and a literal key by itself. Without them the case above would also pass
+    /// a classifier that counted everything as user.
+    #[test]
+    fn a_resolved_alias_and_a_literal_key_are_classified_by_their_text() {
+        let admin = |_: ExprId| -> Option<String> { Some(String::from("@/abc")) };
+        assert_eq!(
+            stats_space_of_key(7, Some("/session"), &admin),
+            StatSpace::Admin
+        );
+        let unknown = |_: ExprId| -> Option<String> { None };
+        assert_eq!(
+            stats_space_of_key(0, Some("@/abc/session"), &unknown),
+            StatSpace::Admin
+        );
+        assert_eq!(
+            stats_space_of_key(0, Some("demo/x"), &unknown),
+            StatSpace::User
         );
     }
 }
