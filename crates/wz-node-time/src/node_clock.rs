@@ -745,9 +745,11 @@ impl NodeHlc {
     /// A `Del` body is left alone, faithfully — zenoh guards the whole macro on
     /// `if let PushBody::Put(data)` (`pubsub.rs:181`).
     ///
-    /// Call ONCE per Push, at the head of the forward, BEFORE fan-out: every
-    /// egress leg must carry the SAME timestamp. zenoh stamps at `pubsub.rs:328`
-    /// and fans the one stamped `msg` out to all of `route`.
+    /// Call ONCE per Push, and only once its route has a destination: every
+    /// egress leg must carry the SAME timestamp, and a Put routed nowhere is not
+    /// looked at. zenoh treats the timestamp inside `if !route.is_empty()` and
+    /// fans the one stamped `msg` out to all of `route`. A forwarder takes it
+    /// through [`ForwardStamp`], which holds both rules.
     #[cfg(feature = "codec-push")]
     pub fn treat_timestamp(&self, push: &mut wz_session_core::wire::PushOwned) -> TimestampVerdict {
         self.treat_timestamp_of(push, false)
@@ -830,9 +832,12 @@ impl NodeHlc {
         }
     }
 
-    /// [`stamp_for_every_destination`](Self::stamp_for_every_destination) for the publication of
-    /// this node's own session: a delete is stamped too
-    /// ([`treat_own_timestamp`](Self::treat_own_timestamp)).
+    /// The forward-path stamp over a borrowed Push for the publication of this node's own
+    /// session: a delete is stamped too ([`treat_own_timestamp`](Self::treat_own_timestamp)), and
+    /// it is stamped when it is published, whatever it is then routed to, as upstream's session
+    /// gives a publication its time before handing it to the router
+    /// (`zenoh/src/api/session.rs` @ `let timestamp = timestamp.or_else(|| self.0.runtime.new_timestamp());`).
+    /// What it returns is routed as a [`ForwardStamp::settled`] Push.
     #[cfg(feature = "codec-push")]
     pub fn stamp_own_publication<'a>(
         &self,
@@ -848,14 +853,13 @@ impl NodeHlc {
         }
     }
 
-    /// R2892 — [`treat_timestamp`](Self::treat_timestamp) over a BORROWED Push,
-    /// for the one call each forwarder makes at the head of its forward: the Put
-    /// every destination is then served, borrowed unchanged when this node does
-    /// not stamp, or `None` for the drop verdict. Both forwarders call this, so
-    /// the single stamp point is one function rather than two copies of it; the
-    /// peer forwarder's copy had drifted to cover its mesh leg only.
+    /// R2892 — [`treat_timestamp`](Self::treat_timestamp) over a BORROWED Push:
+    /// the Put every destination is then served, borrowed unchanged when this
+    /// node does not stamp, or `None` for the drop verdict. Reached only through
+    /// [`ForwardStamp::for_egress`], so the single stamp point is one function
+    /// and is taken when a route has a destination, not before.
     #[cfg(feature = "codec-push")]
-    pub fn stamp_for_every_destination<'a>(
+    fn stamp_for_every_destination<'a>(
         &self,
         push: &'a wz_session_core::wire::PushOwned,
     ) -> Option<std::borrow::Cow<'a, wz_session_core::wire::PushOwned>> {
@@ -867,6 +871,81 @@ impl NodeHlc {
             TimestampVerdict::Drop => None,
             TimestampVerdict::Relay => Some(std::borrow::Cow::Owned(carrier)),
         }
+    }
+}
+
+/// The forward-path stamp of one Push a node routes, taken at most once, by the first route
+/// that has a destination for it ([`for_egress`](Self::for_egress)).
+///
+/// Upstream treats the timestamp of a routed Put only once its route is known not to be empty
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `if !route.is_empty() {`), so a Put routed
+/// nowhere is neither stamped nor absorbed, and an absorb is what moves the node's clock: taken
+/// for such a Put, the stamps the node gives afterwards would sort after a time that reached no
+/// one. A forwarder that computes its route in several blocks, one after another, cannot know at
+/// its head whether any will have a destination; each block asks for the stamp once its own route
+/// has one, and the first to ask takes it. Every later block is given the same Push, so one Put
+/// still carries one timestamp to every destination, and the drop verdict is given to every
+/// block the same way, so a dropped Put reaches no destination, as upstream's `return` reaches
+/// none.
+#[cfg(feature = "codec-push")]
+pub struct ForwardStamp<'a> {
+    /// The clock that stamps, `None` for a Push whose stamp is settled already.
+    node: Option<&'a NodeHlc>,
+    received: &'a wz_session_core::wire::PushOwned,
+    taken: core::cell::OnceCell<Option<std::borrow::Cow<'a, wz_session_core::wire::PushOwned>>>,
+}
+
+#[cfg(feature = "codec-push")]
+impl<'a> ForwardStamp<'a> {
+    /// The stamp `node` owes `received`, a Push it relays, not taken yet.
+    pub fn relayed(node: &'a NodeHlc, received: &'a wz_session_core::wire::PushOwned) -> Self {
+        Self {
+            node: Some(node),
+            received,
+            taken: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// `push`, whose stamp is settled already: the publication of the node's own session, which
+    /// is stamped when it is published ([`NodeHlc::stamp_own_publication`]) and is routed as it
+    /// is.
+    pub fn settled(push: &'a wz_session_core::wire::PushOwned) -> Self {
+        Self {
+            node: None,
+            received: push,
+            taken: core::cell::OnceCell::from(Some(std::borrow::Cow::Borrowed(push))),
+        }
+    }
+
+    /// The Push as it arrived, which a route is computed on: the stamp changes its timestamp and
+    /// nothing a route reads.
+    pub fn received(&self) -> &'a wz_session_core::wire::PushOwned {
+        self.received
+    }
+
+    /// The Push as it is routed so far, which a line of the routing log names it by: as it was
+    /// stamped once a route took the stamp, as it arrived before that or when it was dropped.
+    pub fn routed(&self) -> &wz_session_core::wire::PushOwned {
+        self.taken
+            .get()
+            .and_then(Option::as_deref)
+            .unwrap_or(self.received)
+    }
+
+    /// The Push a destination is sent, stamped on the first call and the same on every later
+    /// one, or `None` when the node drops it.
+    pub fn for_egress(&self) -> Option<&wz_session_core::wire::PushOwned> {
+        self.taken
+            .get_or_init(|| match self.node {
+                Some(node) => node.stamp_for_every_destination(self.received),
+                None => Some(std::borrow::Cow::Borrowed(self.received)),
+            })
+            .as_deref()
+    }
+
+    /// Whether a route has taken the stamp, or it was settled when this was made.
+    pub fn is_taken(&self) -> bool {
+        self.taken.get().is_some()
     }
 }
 

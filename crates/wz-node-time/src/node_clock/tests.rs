@@ -760,6 +760,114 @@ mod forward_stamp {
             "and it must survive the relay untouched"
         );
     }
+
+    /// A Put no route asks the stamp for leaves the clock where it was, because upstream treats
+    /// the timestamp only once the route has a destination; the first route that asks absorbs
+    /// it. Both arms take the same Put through the same node, so the unasked arm cannot pass on
+    /// a timestamp the clock refuses either way.
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn a_stamp_no_route_asks_for_leaves_the_clock_alone_and_the_first_ask_absorbs() {
+        let node = frozen_node(&[0x01]);
+        let t0 = node.stamp().expect("stamping").time;
+        // A quarter of a second ahead of the frozen physical clock: inside the drift bound, so
+        // absorbing it is the only thing that can carry the clock past it.
+        let ahead = t0 + (1u64 << 30);
+        let put = stamped_put(ahead, &[0xB2]);
+        {
+            let unasked = ForwardStamp::relayed(&node, &put);
+            assert!(!unasked.is_taken(), "making the stamp takes nothing");
+            assert_eq!(unasked.routed(), &put, "and names the Put as it arrived");
+        }
+        let t1 = node.stamp().expect("stamping").time;
+        assert!(
+            t1 < ahead,
+            "a Put routed nowhere must not move the clock to its timestamp"
+        );
+        assert_eq!(t1 - t0, 1, "nor mint for it (frozen clock: one per mint)");
+
+        let asked = ForwardStamp::relayed(&node, &put);
+        let routed = asked
+            .for_egress()
+            .expect("a Put inside the bound is relayed");
+        assert_eq!(
+            read_push_timestamp(routed).expect("still stamped").time,
+            ahead,
+            "a timestamp inside the bound is absorbed, not replaced"
+        );
+        assert!(
+            node.stamp().expect("stamping").time > ahead,
+            "the first route that asks absorbs the timestamp into the clock"
+        );
+    }
+
+    /// Every route after the first is given the Put the first one stamped, and the clock mints
+    /// once for all of them: one Put carries one timestamp to every destination.
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn every_route_after_the_first_is_given_the_put_the_first_stamped() {
+        let node = frozen_node(&[0x01]);
+        let put = bare_put();
+        let stamp = ForwardStamp::relayed(&node, &put);
+        assert!(
+            read_push_timestamp(stamp.routed()).is_none(),
+            "nothing is stamped before a route asks"
+        );
+        let t0 = node.stamp().expect("stamping").time;
+        let first = stamp.for_egress().expect("relayed").clone();
+        let second = stamp.for_egress().expect("relayed").clone();
+        let t1 = node.stamp().expect("stamping").time;
+        assert_eq!(first, second, "the second route is given the same Put");
+        assert_eq!(
+            read_push_timestamp(&first)
+                .expect("a bare Put is minted a stamp")
+                .time,
+            t0 + 1,
+            "minted by the first ask"
+        );
+        assert_eq!(
+            t1 - t0,
+            2,
+            "the clock minted once for both asks (frozen clock: one per mint)"
+        );
+        assert_eq!(
+            stamp.routed(),
+            &first,
+            "the routing log names the Put as it was stamped"
+        );
+    }
+
+    /// The drop verdict is given to every route that asks, so a dropped Put reaches no
+    /// destination, as upstream's `return` out of the route reaches none.
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn a_dropped_put_is_refused_to_every_route_that_asks() {
+        let node = frozen_node(&[0x01]).with_drop_future_timestamp(true);
+        let t0 = node.stamp().expect("stamping").time;
+        let far = stamped_put(t0 + (10u64 << 32), &[0xB2]);
+        let stamp = ForwardStamp::relayed(&node, &far);
+        assert!(
+            stamp.for_egress().is_none(),
+            "ten seconds past the drift bound with the knob on is dropped"
+        );
+        assert!(
+            stamp.for_egress().is_none(),
+            "and refused to the next route as well"
+        );
+        assert!(stamp.is_taken());
+        assert_eq!(stamp.routed(), &far, "a dropped Put is named as it arrived");
+    }
+}
+
+/// A Push whose stamp is settled is routed as it is: nothing is stamped on its way out.
+#[cfg(feature = "codec-push")]
+#[test]
+fn a_settled_push_is_routed_as_it_is() {
+    let put = wz_session_core::push_build::build_push_literal("demo/hlc", b"v").expect("build put");
+    let stamp = ForwardStamp::settled(&put);
+    assert!(stamp.is_taken(), "a settled stamp has nothing left to take");
+    assert_eq!(stamp.for_egress(), Some(&put));
+    assert_eq!(stamp.routed(), &put);
 }
 
 #[cfg(feature = "time-hlc")]

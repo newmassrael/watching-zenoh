@@ -89,7 +89,8 @@ pub const CURRENT_PATCH: u8 = 1;
 /// that nothing held against this module.
 ///
 /// ⚠ The WIDTH is shared with the dissector; the NARROWING RULE is not, and
-/// that is deliberate. Upstream TRUNCATES (`Self(ext.value as u8)`) and
+/// that is deliberate. Upstream TRUNCATES
+/// (`commons/zenoh-protocol/src/transport/mod.rs` @ `Self(ext.value as u8)`) and
 /// [`peer_patch`] below SATURATES, because a peer announcing something newer
 /// than `u8::MAX` must not wrap to `NO_PATCH`. A gate that bound the two by
 /// value equality would turn that intended divergence into a false red, so the

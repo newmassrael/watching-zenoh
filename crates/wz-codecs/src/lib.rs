@@ -1565,21 +1565,27 @@ mod transport_header_space {
     /// went uncounted for the life of this decision, and item 330 was filed
     /// against exactly that gap.
     ///
-    /// Counted, at zenoh pin `49c8a53`, by reading upstream rather than
-    /// recalling it: `TransportBody::OAM` is constructed nowhere in that tree
-    /// except `TransportBody::rand`'s generator
-    /// (`zenoh-protocol/src/transport/mod.rs:161`). The two live OAM senders
-    /// — `zenoh/src/net/protocol/network.rs:358` and
-    /// `routing/hat/p2p_peer/gossip.rs:229` — both build `NetworkBody::OAM`,
-    /// which is the NETWORK OAM and rides inside a Frame. So a peer of that
-    /// vintage puts no transport OAM on the wire at all, and the frequency
-    /// this refusal costs is zero against that traffic.
+    /// Counted by reading upstream rather than recalling it, first at zenoh
+    /// 1.5.0 and again at the 1.10.2 pin with the same result:
+    /// `TransportBody::OAM` is constructed nowhere in the tree except
+    /// `TransportBody::rand`'s generator
+    /// (`commons/zenoh-protocol/src/transport/mod.rs` @ `8 => TransportBody::OAM(Oam::rand()),`)
+    /// and the codec's own decode and fuzz samples. The two live OAM senders —
+    /// the link-state network (`zenoh/src/net/protocol/network.rs`
+    /// @ `Ok(NetworkBody::OAM(Oam {`) and gossip
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `Ok(NetworkBody::OAM(Oam {`) —
+    /// both build `NetworkBody::OAM`, which is the NETWORK OAM and rides inside
+    /// a Frame. So a peer of either vintage puts no transport OAM on the wire
+    /// at all, and the frequency this refusal costs is zero against that
+    /// traffic.
     ///
     /// ⚠ NOTHING IN THIS WORKSPACE GATES THAT, and the reason is the same one
     /// `wz_session_core::ext_name::DECLARED_EMPTY` states: upstream is a
     /// REFERENCE and not a dependency here, so a check that read it would be
-    /// green on one machine and unrunnable on the next. The pin is written
-    /// into this paragraph so the count can be retaken rather than trusted.
+    /// green on one machine and unrunnable on the next. The anchors above
+    /// hold the senders that were found, not the absence of others; the pins
+    /// the count was taken at are written here so it can be retaken rather
+    /// than trusted.
     /// If a later vintage gains a transport-OAM sender, this half of the
     /// decision is what changes.
     ///

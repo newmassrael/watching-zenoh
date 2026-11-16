@@ -579,8 +579,9 @@ carrier_tables! {
 ///
 /// # The measurement, with the pin it was taken at
 ///
-/// Read directly from upstream at pin `49c8a53` rather than recalled: the
-/// `Reply` struct in `commons/zenoh-protocol/src/zenoh/reply.rs` carries
+/// Read directly from upstream rather than recalled, at zenoh 1.5.0 and again
+/// at the 1.10.2 pin with the same result: the `Reply` struct
+/// (`commons/zenoh-protocol/src/zenoh/reply.rs` @ `pub struct Reply {`) carries
 /// `consolidation`, `payload`, and `ext_unknown: Vec<ZExtUnknown>` — one
 /// extension field, unnamed, so EVERY extension on a Reply is anonymous by
 /// upstream's own count.
@@ -593,7 +594,7 @@ pub const DECLARED_EMPTY: &[(ExtCarrier, &str)] = &[
         ExtCarrier::Reply,
         "upstream's `zenoh::Reply` names no extension and takes any chain into \
          `ext_unknown`, so the emptiness is upstream's own count and not a gap \
-         here (read at pin 49c8a53)",
+         here (read at the 1.10.2 pin)",
     ),
 ];
 
