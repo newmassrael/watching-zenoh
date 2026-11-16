@@ -13908,6 +13908,21 @@
       "carry_forward_bullets": [
         "Open after this round: QUIC mixed-reliability companion (zenoh-mr, zenoh-ms-mr); C ABI SubId, QblId and TokenId as u32 and interest ids' seven callers; the extension-chain keep-ids grammar is requested from SCE for storing profiles; the Declare extension list's one allocation waits on a bounded carrier from SCE; route face handles wait on a measurement on the build host; remaining register items not reached by the axes (testq 167 172 155 159 134 386 484 535 722 728 760 766, node redial forget, interop 160 173 and the 902 sequence, runtime 819 174 195 679 90 741, tooling 400 76 386 673 697 708 724 793 and others) stay in the register; four owner decisions are pending (InitAck patch level, SN masks per preset, consolidation label numbering, unverified-push threshold). The wz-capi-c config_verdict test cannot discriminate in an all-features build; that predates this round."
       ]
+    },
+    "Round 4500": {
+      "decision_summary": "A wz-ap-demo started with --config opens its adminspace in every mode, as zenohd does after reading its file (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`): a file without an adminspace block, or with enabled false, no longer leaves a client-mode run without @/<zid>/client. The consumer measured a client that reached its router and answered nothing at its client key. The file's stated permissions still reach the run. The rest of the --config reading is unchanged: the default mode and plugins_loading keep the library reading of R2109, and the code says that a --config run now reads the file two ways; which reading the whole form follows is an open owner decision.",
+      "changes_bullets": [
+        "wz-ap-demo args.rs: daemon_admin_host decides per run mode how the adminspace is hosted (the flag for peer, client-node, and connect or scout with adminspace-core; always for a linkstate router-hat and a storage host; nowhere for the one-shot acceptor and a document with no run mode); adminspace/enabled false is recorded as overridden by the daemon form; permissions read from the ingest; the typed --config-queryable is not doubled; metadata follows the same host. wz-runtime-tokio zenoh_config.rs: ZenohConfigIngest keeps the stated adminspace permissions; DAEMON_DEFAULT_MODE documents the two readings. usage.rs and docs/adminspace-client-mode.md updated. Layer Z: wz_client_adminspace_zenohd_interop gains a client started from a file with no adminspace block answering its client key through a wz router (Z guard 3 to 4)."
+      ],
+      "verification_bullets": [
+        "On the build machine: cargo fmt --all --check; wz-runtime-tokio zenoh-config lib the_stated_permissions_outlive_a_disabled_block_on_the_ingest 1 passed; wz-ap-demo bin tests with zenoh-config 168, with adminspace-core 169, with the router and hot-reload features 191 passed; clippy -D warnings clean for wz-ap-demo in both feature sets and wz-runtime-tokio zenoh-config; the Layer Z demo built with Layer Z's feature list and files::wz_client_adminspace_zenohd_interop against zenohd 1.10.2 4 passed; reason_review_pin_gate and upstream_citation_anchor_gate OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told the main hash. Open owner decision: whether the --config form follows zenohd's daemon reading as a whole (default mode router, plugins_loading on) or keeps the library reading for those two keys."
+      ]
     }
   },
   "inventory_entries": {
