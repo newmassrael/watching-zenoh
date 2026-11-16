@@ -86,7 +86,7 @@ SUBCOMMANDS = ("generate", "check", "orchestrate", "generate-integration", "read
 _BIN_PATH = r"(?:[^\"'\s]*/)?sce-codegen(?:\{\})?(?:\.exe)?"
 RS_BINARY_RE = re.compile(r'"' + _BIN_PATH + r'"')
 RS_LOCATOR_RE = re.compile(r"\blocate_sce_codegen\s*\(")
-RS_ESCAPE_RE = re.compile(r"Command::new\(\s*&?[\w.]*\bbinary\(\)\s*\)")
+RS_ESCAPE_RE = re.compile(r"Command::new\(\s*&?[\w.]*\.binary\(\)\s*\)")
 RS_LOCATION_RE = re.compile(r'"(?:' + "|".join(re.escape(x) for x in LOCATIONS) + r')"')
 
 SH_INVOKE_RE = re.compile(
@@ -340,6 +340,7 @@ def selftest() -> int:
             'panic!("sce-codegen generate for {stem}: {refusal}");\n'
             "let codegen = wz_codegen_build::SceCodegen::locate(&ws);\n"
             'println!("cargo:rerun-if-changed={}", codegen.binary().display());\n'
+            "let child = Command::new(zenohd_binary()).spawn();\n"
         ),
         "b.sh": (
             "# \"$SCE_CODEGEN\" generate --workspace-root x\n"
