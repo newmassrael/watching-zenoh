@@ -827,7 +827,7 @@ mod tests {
         for (name, id, anchor) in AUTH_METHOD_IDS {
             assert_eq!(
                 needle(anchor),
-                alloc::format!("pub(crate) const {name}: u8 = {id:#x};"),
+                std::format!("pub(crate) const {name}: u8 = {id:#x};"),
                 "{anchor}"
             );
         }
@@ -840,8 +840,8 @@ mod tests {
     #[test]
     fn each_carrier_declares_exactly_what_upstream_declares() {
         for carrier in ALL_CARRIERS {
-            let mut ours: alloc::vec::Vec<u8> = rows(*carrier).iter().map(row_eid).collect();
-            let mut theirs: alloc::vec::Vec<u8> = UPSTREAM_DECLARATIONS
+            let mut ours: std::vec::Vec<u8> = rows(*carrier).iter().map(row_eid).collect();
+            let mut theirs: std::vec::Vec<u8> = UPSTREAM_DECLARATIONS
                 .iter()
                 .filter(|(c, ..)| c == carrier)
                 .map(|(_, id, mandatory, enc, _)| row_eid(&(*id, *mandatory, *enc, "")))
