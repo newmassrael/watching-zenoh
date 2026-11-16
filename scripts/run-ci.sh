@@ -8678,7 +8678,10 @@ layer_c1ah_cargo_test_time_hlc() {
     # 23 -> 25: two tests that landed without moving this guard (hosted run 41411911409 expected
     # 23; the build host printed `25 passed`). 25 -> 28: a112baa068 added the three reply-stamp
     # tests (`node_clock/tests.rs`) and left the guard; the hosted run of d7dc86a826 printed 28.
-    _runci_guarded_test "C1ah node_clock" 28 \
+    # 28 -> 31: three tests gated on `time-hlc` alone (a node that holds no clock gives no reading,
+    # the data stamp names why there is none, trusted-only holds back data stamps and not the
+    # clock); the hosted run of 3148fdfc84 printed 31.
+    _runci_guarded_test "C1ah node_clock" 31 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
