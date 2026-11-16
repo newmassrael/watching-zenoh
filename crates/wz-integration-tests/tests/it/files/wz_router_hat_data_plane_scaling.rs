@@ -205,9 +205,10 @@ fn listening_port(line: &str) -> Option<u16> {
     digits.parse().ok()
 }
 
-/// The running total in `forwarded mesh data (N push(es))`.
+/// The running total in `received mesh data (N push(es))`: the messages the router took in, each
+/// of which goes on to the one session subscribing to its key.
 fn forwarded_pushes(line: &str) -> Option<u64> {
-    let rest = line.split("forwarded mesh data (").nth(1)?;
+    let rest = line.split("received mesh data (").nth(1)?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }

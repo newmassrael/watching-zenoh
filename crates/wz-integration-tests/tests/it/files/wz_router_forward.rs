@@ -202,16 +202,15 @@ fn run_router_forward_e2e(producer_extra: &[&str]) -> (String, String, String) {
         "the forwarded sample must preserve the full 17-byte payload\n--- consumer ---\n{fired_log}"
     );
 
-    // The router's own summary independently confirms it forwarded at least one
-    // sample (a non-zero count — `forwarded 0 sample(s)` would mean the consumer
+    // The router's own summary independently confirms it relayed at least one
+    // push (a non-zero count — `0 data push(es) relayed` would mean the consumer
     // fired off a path other than the router, which the topology forbids).
-    // R2886 — `--router` is the router hat, whose summary counts the pushes the
-    // router took in (open-debt item 827 records that its label says
-    // "forwarded"); the delivery at the consumer above is what proves transit.
+    // `--router` is the router hat, whose summary counts the pushes it took in
+    // and the pushes it sent on apart; the second is the transit count.
     assert!(
-        router_captured.contains("data push(es) forwarded")
-            && !router_captured.contains(" 0 data push(es) forwarded"),
-        "router summary must report a non-zero push count\n--- router stderr ---\n{router_captured}"
+        router_captured.contains("data push(es) relayed")
+            && !router_captured.contains(" 0 data push(es) relayed"),
+        "router summary must report a non-zero relayed push count\n--- router stderr ---\n{router_captured}"
     );
 
     (router_captured, consumer_captured, producer_captured)

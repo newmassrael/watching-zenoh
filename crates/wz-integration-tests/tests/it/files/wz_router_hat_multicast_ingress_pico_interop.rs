@@ -55,7 +55,7 @@
 //! second for 30 s: the router beacons its own JOIN and admits pico's JOIN within a
 //! beacon interval, and each subsequent pico Put re-delivers, so no single
 //! JOIN-admission window is raced ([[feedback-no-flaky-ever]]). NOTE: the router's
-//! `route_mcast_ingress` does not increment the "forwarded mesh data" counter (an
+//! `route_mcast_ingress` does not increment the "received mesh data" counter (an
 //! I2-noted witness gap), so this test gates on the wz subscriber's end-to-end
 //! SUBSCRIBER FIRED, not a router-side transit log.
 //!

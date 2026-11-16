@@ -47,7 +47,7 @@
 //!      advertising a client subscriber's interest ACROSS the router backbone
 //!      into zenohd's routing table, and zenohd routing matching data back over
 //!      the cross-impl mesh. Every hop is cross-impl. Transit-pinned on wz's
-//!      `forwarded mesh data` (it counts every inbound Push it routes) so a
+//!      `received mesh data` (it counts every inbound Push it routes) so a
 //!      green receipt cannot be a direct pub<->sub link — the sub dials only wz,
 //!      the pub only zenohd.
 //!
@@ -376,7 +376,7 @@ fn wz_router_hat_and_zenohd_federate_pico_data_across_the_backbone() {
     let transit = received.is_ok().then(|| {
         wait_for_substring(
             &mut wz_reader,
-            "router-hat: forwarded mesh data",
+            "router-hat: received mesh data",
             Duration::from_secs(5),
         )
     });
@@ -413,7 +413,7 @@ fn wz_router_hat_and_zenohd_federate_pico_data_across_the_backbone() {
         .expect("received implies transit was probed")
         .unwrap_or_else(|c| {
             panic!(
-                "wz-router-hat never logged 'forwarded mesh data' — the pico Put \
+                "wz-router-hat never logged 'received mesh data' —the pico Put \
                  reached the subscriber without transiting wz's router, so the \
                  delivery did not exercise the cross-backbone route\n--- \
                  wz-router-hat stderr ---\n{c}"
@@ -535,7 +535,7 @@ fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
     let transit = received.is_ok().then(|| {
         wait_for_substring(
             &mut wz_reader,
-            "router-hat: forwarded mesh data",
+            "router-hat: received mesh data",
             Duration::from_secs(5),
         )
     });
@@ -571,7 +571,7 @@ fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
         .expect("received implies transit was probed")
         .unwrap_or_else(|c| {
             panic!(
-                "wz-router-hat never logged 'forwarded mesh data' — the Put reached \
+                "wz-router-hat never logged 'received mesh data' —the Put reached \
                  the subscriber without transiting wz's router\n--- wz-router-hat \
                  stderr ---\n{c}"
             )
@@ -854,7 +854,7 @@ fn wz_router_hat_pushes_a_future_subscriber_to_a_pico_publisher() {
     let transit = received.is_ok().then(|| {
         wait_for_substring(
             &mut wz_reader,
-            "router-hat: forwarded mesh data",
+            "router-hat: received mesh data",
             Duration::from_secs(5),
         )
     });
@@ -889,7 +889,7 @@ fn wz_router_hat_pushes_a_future_subscriber_to_a_pico_publisher() {
         .expect("received implies transit was probed")
         .unwrap_or_else(|c| {
             panic!(
-                "wz-router-hat never logged 'forwarded mesh data' — the Put reached \
+                "wz-router-hat never logged 'received mesh data' —the Put reached \
                  the subscriber without transiting wz's router\n--- wz-router-hat \
                  stderr ---\n{c}"
             )
@@ -1671,7 +1671,7 @@ fn wz_router_hat_bridges_a_peer_publish_to_a_zenohd_router_native_sub() {
     let transit = received.is_ok().then(|| {
         wait_for_substring(
             &mut wz_reader,
-            "router-hat: forwarded mesh data",
+            "router-hat: received mesh data",
             Duration::from_secs(5),
         )
     });
@@ -1699,7 +1699,7 @@ fn wz_router_hat_bridges_a_peer_publish_to_a_zenohd_router_native_sub() {
         .expect("received implies transit was probed")
         .unwrap_or_else(|c| {
             panic!(
-                "wz-router-hat never logged 'forwarded mesh data' — the Put reached \
+                "wz-router-hat never logged 'received mesh data' —the Put reached \
                  the subscriber without transiting wz's router bridge\n--- \
                  wz-router-hat stderr ---\n{c}"
             )

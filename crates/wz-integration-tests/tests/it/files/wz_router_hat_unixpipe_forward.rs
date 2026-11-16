@@ -25,7 +25,7 @@
 //! single unixpipe link to the router); the consumer firing its subscriber is a
 //! definitive witness that the router-hat forwarded the Put across the two unixpipe
 //! faces. The router-hat summary independently reports `peak 2 concurrent face(s)`
-//! and `N data push(es) forwarded` (N >= 1).
+//! and `N data push(es) relayed` (N >= 1).
 //!
 //! RED reproductions (each proves the GREEN binds to the unixpipe cross-face route
 //! through the router-hat, not a vehicle):
@@ -280,12 +280,12 @@ fn wz_router_hat_forwards_a_put_between_two_unixpipe_clients() {
         "the forwarded sample must preserve the full 17-byte payload across unixpipe\n--- consumer ---\n{fired_log}"
     );
 
-    // The router-hat's own summary independently confirms it forwarded at least one
+    // The router-hat's own summary independently confirms it relayed at least one
     // data push AND held BOTH unixpipe faces concurrently.
     assert!(
-        router_captured.contains("data push(es) forwarded")
-            && !router_captured.contains("0 data push(es) forwarded"),
-        "router-hat summary must report a non-zero data-push forward count\n--- router stderr ---\n{router_captured}"
+        router_captured.contains("data push(es) relayed")
+            && !router_captured.contains(" 0 data push(es) relayed"),
+        "router-hat summary must report a non-zero relayed data-push count\n--- router stderr ---\n{router_captured}"
     );
     assert!(
         router_captured.contains("peak 2 concurrent"),

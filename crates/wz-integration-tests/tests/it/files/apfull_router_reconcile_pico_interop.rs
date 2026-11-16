@@ -41,7 +41,7 @@
 //! logging mcast-ingress federation activity, which would have made "the sample
 //! crossed" prove nothing about the reconcile. Leg 2 is the calibration that kills
 //! that confound: with `--connect-after` removed and NOTHING else changed, the same
-//! AP-full binary (multicast compiled in, group live) forwards `0 data push(es)` and
+//! AP-full binary (multicast compiled in, group live) relays `0 data push(es)` and
 //! the payload never arrives. The claim in leg 1 therefore binds to the reconcile.
 //!
 //! Both legs pin `--multicast-locator` to a group of their own. The default group is
@@ -247,12 +247,13 @@ fn apfull_reconcile_federation_carries_data_between_two_real_picos() {
         "the payload arrived but not on {pub_key} — the bridged sample carried the \
          wrong keyexpr\n--- pico z_sub stdout ---\n{sub_out}"
     );
-    // The routers must have ACTUALLY forwarded. Latched at shutdown, so it cannot
+    // The routers must have ACTUALLY relayed. Latched at shutdown, so it cannot
     // race the app tick.
     assert!(
-        !r1_captured.contains("0 data push(es) forwarded"),
+        r1_captured.contains("data push(es) relayed")
+            && !r1_captured.contains(" 0 data push(es) relayed"),
         "the pico subscriber got the sample but router-hat-1's latched shutdown \
-         summary reports zero forwarded pushes — the sample did not travel through \
+         summary reports no relayed push — the sample did not travel through \
          R1's forwarder\n--- router-hat-1 ---\n{r1_captured}"
     );
 }
@@ -352,8 +353,8 @@ fn apfull_without_the_reconcile_the_two_picos_cannot_reach_each_other() {
          would make leg 1's claim bind to that path instead\n--- r1 ---\n{r1_captured}"
     );
     assert!(
-        r1_captured.contains("0 data push(es) forwarded"),
-        "router-hat-1 forwarded data with no federation face — leg 1's claim would not \
+        r1_captured.contains(" 0 data push(es) relayed"),
+        "router-hat-1 relayed data with no federation face — leg 1's claim would not \
          be isolating the reconcile\n--- r1 ---\n{r1_captured}"
     );
     assert!(

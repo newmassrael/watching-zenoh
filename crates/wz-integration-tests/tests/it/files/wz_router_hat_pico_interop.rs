@@ -145,7 +145,7 @@ fn wz_router_hat_routes_wz_publish_to_pico_zsub() {
 
     // The pico one-shot + the wz publisher are killed directly; the router is
     // graceful_terminate'd (SIGTERM) so it flushes its LATCHED shutdown witnesses
-    // (`forwarded mesh data` on data_seen > 0). A SIGKILL would skip them, and this
+    // (`received mesh data` on data_seen > 0). A SIGKILL would skip them, and this
     // ~0.1 s test can finish before the router's 250 ms app-tick in-run witness fires
     // — so the router-transit assertion below needs the graceful path.
     let _ = pub_child.child_mut().kill();
@@ -181,10 +181,10 @@ fn wz_router_hat_routes_wz_publish_to_pico_zsub() {
     // Transit pin: the wz router's OWN data counter rose (it counts every inbound
     // Push before routing), so the Put transited THROUGH the router — not around it
     // (the pico client and the wz publisher never knew each other's address). This is
-    // the same `forwarded mesh data` witness the wz<->wz data tests assert on.
+    // the same `received mesh data` witness the wz<->wz data tests assert on.
     assert!(
-        r_captured.contains("router-hat: forwarded mesh data"),
-        "the wz router-hat never forwarded a Push — the wz Put did not transit it, so \
+        r_captured.contains("router-hat: received mesh data"),
+        "the wz router-hat never received a Push — the wz Put did not transit it, so \
          the delivery to pico did not exercise the router's data route\n--- \
          router-hat stderr ---\n{r_captured}"
     );

@@ -291,14 +291,14 @@ fn wz_router_forwards_a_put_between_two_unixpipe_clients() {
         "the forwarded sample must preserve the full 17-byte payload across unixpipe\n--- consumer ---\n{fired_log}"
     );
 
-    // The router's own summary independently confirms it forwarded at least one
-    // sample (`forwarded 0 sample(s)` would mean the consumer fired off a path other
+    // The router's own summary independently confirms it relayed at least one
+    // push (`0 data push(es) relayed` would mean the consumer fired off a path other
     // than the router, which the topology forbids).
     // R2886 — the router hat's summary (see `wz_router_forward.rs`).
     assert!(
-        router_captured.contains("data push(es) forwarded")
-            && !router_captured.contains(" 0 data push(es) forwarded"),
-        "router summary must report a non-zero push count\n--- router stderr ---\n{router_captured}"
+        router_captured.contains("data push(es) relayed")
+            && !router_captured.contains(" 0 data push(es) relayed"),
+        "router summary must report a non-zero relayed push count\n--- router stderr ---\n{router_captured}"
     );
 
     // The headline this test exists to prove over the TCP E5 template: the router
