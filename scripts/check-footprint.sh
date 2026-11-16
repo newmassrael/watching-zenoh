@@ -1130,8 +1130,24 @@ declare -A BASELINE_MC_TEXT=(
     # are therefore the hosted readings plus that growth (73628 + 532, 73760 + 456), a prediction
     # of the hosted reading and not one: a hosted reading that differs moves this again. data is 4
     # and bss 270112 hosted (270120 on the build host) on both. Old: 77848/77720.
-    ["thumbv7m-none-eabi"]=74160
-    ["thumbv7em-none-eabihf"]=74216
+    #
+    # 2026-11-17 -- thumbv7m 74160 -> 78276, thumbv7em-hf 74216 -> 78260 (+4116 / +4044). Hosted
+    # Layer Q read main's 0a230c587c at 82328 / 82544 (run 43825703285, gcc 10.3.1) and failed
+    # the gate on both, +8168 / +8328 over the figures above: growth main shipped while hosted C0
+    # stopped every run at Layer 0, so no reading graded it. A build host (rustc 1.97.0, gcc
+    # 13.2.1; pc2 and pc5 agree to the byte) reads main at 83064 / 83248, so its offset over
+    # hosted is +736 / +704 here, and reads the 8e integration branch at 79012 / 78964, -4052 /
+    # -4284 under main. The figures here are main's hosted readings plus that difference, a
+    # prediction of the hosted reading and not one: a hosted reading that differs moves this
+    # again. By symbol on the build host, against main, nothing grew and the branch dropped
+    # 3790 B of text: hashbrown and foldhash 1754 (the peer table's hash index that no
+    # multicast build reads, now a fixed table on the MCU), `multicast_dispatch` 792,
+    # `mcu_multicast_e2e` 594, `multicast_peer_rows` 410, compiler memset/memmove 232,
+    # `group_drive` 8. What main grew by over the old figures was not separated by symbol at
+    # its reading; the ledger round that lands this records it as main's. data is 4 on both;
+    # bss reads 270112 hosted by the same offset (270120 on the build host). Old: 74160/74216.
+    ["thumbv7m-none-eabi"]=78276
+    ["thumbv7em-none-eabihf"]=78260
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck

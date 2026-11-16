@@ -2163,7 +2163,14 @@
         "R3171: multicast text 64344 (thumbv7m), 64132 (thumbv7em-hf): -1308/-1312 vs R3170",
         "Cause removed: transport-tx-lend is off here, so the encoders write a Vec again",
         "Still +172 vs the last tree before the seam (64172); no symbol diff attributes it",
-        "This image must not enable transport-tx-lend; the unicast MCU images (acceptor, admin) do"
+        "This image must not enable transport-tx-lend; the unicast MCU images (acceptor, admin) do",
+        "Round 4502 text thumbv7m=78276 thumbv7em-hf=78260 (data=4, bss 270112): predicted hosted figures.",
+        "Round 4502 base: hosted main 0a230c587c read 82328/82544, +8168/+8328 that no gate had graded.",
+        "Round 4502 offset: build hosts read main 83064/83248, +736/+704 over hosted; pc2 and pc5 agree.",
+        "Round 4502: this tree reads 79012/78964 on a build host, -4052/-4284 under main; nothing grew.",
+        "Round 4502 symbols: hashbrown+foldhash -1754 (fixed peer table), multicast_dispatch -792.",
+        "Round 4502 symbols: mcu_multicast_e2e -594, multicast_peer_rows -410, memset/memmove -232.",
+        "Round 4502 carry: main's growth over 74160/74216 was not split by symbol when it landed."
       ],
       "impact_scope": [
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
