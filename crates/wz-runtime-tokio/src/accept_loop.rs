@@ -121,8 +121,9 @@ use crate::session_open::{
     dial_locator, mesh_dial_plan, AcceptedLink, AcceptedPeer, BoundListener, DialConfig,
     MeshDialTarget, OpenError, OpenedSession,
 };
-// R2900 — the identity is read where a dial is deduped or re-dialed: the reconcile and multilink
-// substrates, and the re-dial schedule's default key, which every build has.
+// R2900 — the identity is read where a dial is deduped or re-dialed: the multilink re-add keys
+// its re-dial waits by it, and this module's fixtures name it.
+#[cfg(any(test, feature = "transport-multilink"))]
 use crate::session_open::MeshDialKey;
 use wz_session_core::locator::AnyLocator;
 use wz_session_core::locator_directory::{DirectoryZid, Lifetime, LocatorDirectory, LocatorSource};
@@ -1848,19 +1849,22 @@ fn node_dial_target(
 /// already the key both substrates track their dials by.
 ///
 /// Decision D5 — generic over what names a peer (`K`). The `transport-multilink`
-/// per-link re-add keys it by address. The loop's peers
+/// per-link re-add keys it by LINK, its address and the link it is
+/// (`LinkRedialKey`), so links to one address keep a wait each. The loop's peers
 /// ([`crate::loop_peers`], `router-connect-reconcile`) key their own instance
 /// by [`crate::loop_peers::PeerKey`]: a configured endpoint's outage is its
-/// address's, a node's is the node's and not one of its addresses'. The two
-/// instances are two schedules, one per substrate, and a dial belongs to one
-/// substrate (the planner's are its own; the others are the re-add's).
-pub(crate) struct RedialSchedule<K = MeshDialKey> {
+/// address's, a node's is the node's and not one of its addresses'. The
+/// instances are schedules of their own, one per substrate, and a dial belongs to
+/// one substrate (the planner's are its own; the others are the re-add's).
+pub(crate) struct RedialSchedule<K> {
     policy: RetryPolicy,
     /// Only addresses with an outage IN PROGRESS. [`Self::forget`] removes an
     /// address the moment a dial to it succeeds, so this map does not grow with
     /// the mesh — it holds the peers currently down, not the peers ever seen.
-    /// R2900 — keyed by the target's [`MeshDialKey`], the address for the IP
-    /// family and the naming value for the four shapes that have none.
+    /// R2900 — keyed by `K`, which names the target by its
+    /// [`MeshDialKey`](crate::session_open::MeshDialKey) (the address for the IP
+    /// family and the naming value for the four shapes that have none) wherever
+    /// it is an address that is down.
     periods: BTreeMap<K, RetryPeriod>,
 }
 
@@ -1905,18 +1909,55 @@ impl<K: Ord + Clone> RedialSchedule<K> {
     }
 }
 
+/// A multilink link this node dialed, retained so it is re-added while its session lives: the
+/// plan it is dialed by, the priority band it carries, and the link it is.
+///
+/// `link` is the face the link was first dialed as, kept across every re-dial (whose faces are
+/// fresh ids). Its re-dial waits are kept by it, so two links to one address each grow and reset
+/// their own wait: a link whose outage has grown its wait does not lengthen the first re-dial of
+/// another link that has just dropped, and a link that reconnects does not reset the wait of one
+/// still down.
+#[cfg(feature = "transport-multilink")]
+#[derive(Debug, Clone)]
+struct RetainedLink {
+    target: MeshDialTarget,
+    band: (Priority, Priority),
+    link: FaceId,
+}
+
+#[cfg(feature = "transport-multilink")]
+impl RetainedLink {
+    /// The link first dialed as `id` to `target`, with the band a face of that id carries.
+    fn first(id: FaceId, target: MeshDialTarget) -> Self {
+        Self {
+            target,
+            band: multilink_priority_range(id),
+            link: id,
+        }
+    }
+
+    /// What the re-dial waits of this link are kept by: its address and the link it is.
+    fn redial_key(&self) -> LinkRedialKey {
+        (self.target.key.clone(), self.link)
+    }
+}
+
+/// The key of a multilink link's re-dial waits ([`RetainedLink::redial_key`]).
+#[cfg(feature = "transport-multilink")]
+type LinkRedialKey = (MeshDialKey, FaceId);
+
 /// R311y212 (transport-multilink) — schedule a re-dial + re-JOIN of a dropped
 /// aggregated link this node DIALED (its own substrate, NOT gated on
 /// `router-connect-reconcile`). Unlike a configured endpoint, which the loop's
 /// peers hold by its connection machine ([`crate::loop_peers`]), every retained
 /// multilink link is permanently wanted while its session lives. R311y786 — its
-/// waits come from a [`RedialSchedule`] keyed by address: a PER-LINK policy is
-/// still the deferred slice, so N links to one address share that address's
-/// schedule. Re-keys the retained endpoint to a fresh [`FaceId`] BEFORE
+/// waits come from a [`RedialSchedule`] keyed by LINK ([`RetainedLink::redial_key`]),
+/// so of N links to one address each grows and resets its own wait. Re-keys the
+/// retained link to a fresh [`FaceId`] BEFORE
 /// the backoff (so the re-add is tracked across the drop->redial gap and the Err
-/// arm can retry it), carrying the DEAD link's QoS-priority `band` so the
-/// re-added link restores its priority band (a fresh-id band would flip on
-/// parity and collapse the segregation). `announce`
+/// arm can retry it), carrying the DEAD link's QoS-priority band and its link
+/// identity so the re-added link restores its priority band (a fresh-id band
+/// would flip on parity and collapse the segregation) and its own wait. `announce`
 /// controls the log level: the first re-add after a drop logs at `info` (an
 /// operator-visible link flap), retries at `debug`. The re-dial completes into the
 /// SAME `opening` -> [`Step::Opened`] JOIN path, so it aggregates onto the
@@ -1924,16 +1965,15 @@ impl<K: Ord + Clone> RedialSchedule<K> {
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 fn schedule_multilink_redial(
-    target: MeshDialTarget,
+    retained: RetainedLink,
     dial_config: &Arc<DialConfig>,
     offer: SessionOffer,
-    band: (Priority, Priority),
     // R2233 — the retained endpoint is the LOCATOR now, not a bare address: this
     // substrate has no `desired` map to look the dial plan up in (every retained
     // multilink endpoint is permanently wanted), so the plan has to travel with
-    // the retention. Its key is the schedule's key.
-    ml_dial_endpoints: &mut BTreeMap<FaceId, (MeshDialTarget, (Priority, Priority))>,
-    redial: &mut RedialSchedule,
+    // the retention.
+    ml_dial_endpoints: &mut BTreeMap<FaceId, RetainedLink>,
+    redial: &mut RedialSchedule<LinkRedialKey>,
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
     announce: bool,
@@ -1942,11 +1982,12 @@ fn schedule_multilink_redial(
     tick_interval_ms: u64,
 ) {
     let id = FaceId::mint(next_id);
-    // Re-key the retained endpoint to the fresh id BEFORE the backoff, so the
+    let addr = retained.target.key.clone();
+    let backoff_ms = redial.next_ms(&retained.redial_key(), retained.target.retry());
+    let (target, band) = (retained.target.clone(), retained.band);
+    // Re-key the retained link to the fresh id BEFORE the backoff, so the
     // re-add is tracked (a failed re-dial's Err arm finds it and retries).
-    let addr = target.key.clone();
-    ml_dial_endpoints.insert(id, (target.clone(), band));
-    let backoff_ms = redial.next_ms(&addr, target.retry());
+    ml_dial_endpoints.insert(id, retained);
     if announce {
         log::info!(
             "multilink: re-adding dropped link to {addr} in {backoff_ms}ms (face {})",
@@ -2319,7 +2360,7 @@ struct PeerHost<'a> {
     #[cfg(feature = "transport-multilink")]
     max_links: usize,
     #[cfg(feature = "transport-multilink")]
-    ml_dial_endpoints: &'a mut BTreeMap<FaceId, (MeshDialTarget, (Priority, Priority))>,
+    ml_dial_endpoints: &'a mut BTreeMap<FaceId, RetainedLink>,
     dial_config: &'a Arc<DialConfig>,
     params: &'a FaceTemplate,
     offer: SessionOffer,
@@ -2348,7 +2389,7 @@ impl PeerHost<'_> {
                     #[cfg(feature = "transport-multilink")]
                     if self.max_links > 1 && matches!(key, PeerKey::Endpoint(_)) {
                         self.ml_dial_endpoints
-                            .insert(id, (target.clone(), multilink_priority_range(id)));
+                            .insert(id, RetainedLink::first(id, target.clone()));
                         self.opening.push(Box::pin(dial_face_multilink(
                             id,
                             target,
@@ -3258,12 +3299,12 @@ where
     // each gives them. Boxed, because a table of its rows is too large for the
     // loop's future to carry inline.
     let mut directory: Box<LoopDirectory> = Box::new(LoopDirectory::new());
-    // R311y786 — the per-address re-dial waits of the multilink per-link re-add,
+    // R311y786 — the per-link re-dial waits of the multilink per-link re-add,
     // replacing the fixed `RECONNECT_BACKOFF_MS`. Loop-local (not per-face)
     // because the growth must survive the FaceId churn of the retries it is
     // pacing. The loop's peers keep their own (decision D5).
     #[cfg(feature = "transport-multilink")]
-    let mut redial = RedialSchedule::new(retry);
+    let mut redial: RedialSchedule<LinkRedialKey> = RedialSchedule::new(retry);
     // The nodes a discovery plane found whose dial is in flight, by the face the dial will open
     // as, and the waits between the dials of one node that did not open. A dial that fails is
     // made again at the node's next locator, as upstream's `peer_connector_retry` and
@@ -3302,8 +3343,7 @@ where
     // session. An
     // ACCEPTED link has no entry (no re-dial owner — the peer re-dials it).
     #[cfg(feature = "transport-multilink")]
-    let mut ml_dial_endpoints: BTreeMap<FaceId, (MeshDialTarget, (Priority, Priority))> =
-        BTreeMap::new();
+    let mut ml_dial_endpoints: BTreeMap<FaceId, RetainedLink> = BTreeMap::new();
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
     // Decision D5 — the peers the loop is told to hold, each by its connection
@@ -3464,7 +3504,7 @@ where
             // band so a re-add restores it (a fresh-id band would flip on
             // parity). R2233 — retained BEFORE the dial consumes the plan, and
             // it is the plan (scheme included) that is retained now.
-            ml_dial_endpoints.insert(id, (target.clone(), multilink_priority_range(id)));
+            ml_dial_endpoints.insert(id, RetainedLink::first(id, target.clone()));
             Box::pin(dial_face_multilink(
                 id,
                 target,
@@ -3559,8 +3599,8 @@ where
                         // A peer's dial resets its own schedule when its machine
                         // reaches Established (`reset_retry`, decision D5).
                         #[cfg(feature = "transport-multilink")]
-                        if let Some((target, _)) = ml_dial_endpoints.get(&id) {
-                            redial.forget(&target.key);
+                        if let Some(retained) = ml_dial_endpoints.get(&id) {
+                            redial.forget(&retained.redial_key());
                         }
                         // R311qi — capture the remote peer's zid (the routing
                         // identity) from the established session before `opened`
@@ -4126,12 +4166,11 @@ where
                         // `ml_dial_endpoints` above, so no id is dialled again twice.
                         #[cfg(feature = "transport-multilink")]
                         if max_links > 1 {
-                            if let Some((target, band)) = ml_dial_endpoints.remove(&id) {
+                            if let Some(retained) = ml_dial_endpoints.remove(&id) {
                                 schedule_multilink_redial(
-                                    target,
+                                    retained,
                                     &dial_config,
                                     offer,
-                                    band,
                                     &mut ml_dial_endpoints,
                                     &mut redial,
                                     &mut opening,
@@ -4213,7 +4252,7 @@ where
                                 peer_zid,
                                 remaining
                             );
-                        } else if let Some((target, band)) = dead {
+                        } else if let Some(retained) = dead {
                             // R311y212 — PARTIAL loss of a link THIS node DIALED:
                             // re-dial + re-JOIN it onto the surviving shared core so
                             // the aggregate returns to strength. The survivor is
@@ -4230,10 +4269,9 @@ where
                                 remaining
                             );
                             schedule_multilink_redial(
-                                target,
+                                retained,
                                 &dial_config,
                                 offer,
-                                band,
                                 &mut ml_dial_endpoints,
                                 &mut redial,
                                 &mut opening,
@@ -4386,8 +4424,9 @@ where
                                     summary.dialed += 1;
                                     FaceId::mint(&mut next_id)
                                 };
-                                let band = multilink_priority_range(id);
-                                ml_dial_endpoints.insert(id, (target.clone(), band));
+                                let retained = RetainedLink::first(id, target.clone());
+                                let band = retained.band;
+                                ml_dial_endpoints.insert(id, retained);
                                 opening.push(Box::pin(dial_face_multilink(
                                     id,
                                     target,
@@ -5418,6 +5457,46 @@ mod tests {
             s.next_ms(a, no_overrides()),
             400,
             "and the first peer's own growth continues"
+        );
+    }
+
+    /// Two multilink links to one address keep a wait each: a retained link is keyed by the
+    /// link it is, which its re-dials carry, and not by its address alone. Keyed by the address,
+    /// the second link's first re-dial would wait the first link's grown period, and the second
+    /// link reconnecting would reset the wait of the first, still down.
+    #[cfg(feature = "transport-multilink")]
+    #[test]
+    fn two_links_to_one_address_keep_a_wait_each() {
+        let target = || {
+            crate::session_open::mesh_dial_plan(
+                wz_session_core::locator::parse_any_locator("tcp/127.0.0.1:7001")
+                    .expect("tcp locator"),
+            )
+            .expect("ip locator")
+        };
+        let first = RetainedLink::first(FaceId(1), target());
+        let second = RetainedLink::first(FaceId(2), target());
+        assert_eq!(
+            first.target.key, second.target.key,
+            "the fixture is two links to ONE address"
+        );
+        let mut s: RedialSchedule<LinkRedialKey> = RedialSchedule::new(RetryPolicy {
+            period_init_ms: 100,
+            period_max_ms: 0,
+            period_increase_factor: 2.0,
+        });
+        assert_eq!(s.next_ms(&first.redial_key(), no_overrides()), 100);
+        assert_eq!(s.next_ms(&first.redial_key(), no_overrides()), 200);
+        assert_eq!(
+            s.next_ms(&second.redial_key(), no_overrides()),
+            100,
+            "a second link that has just dropped starts at period_init_ms"
+        );
+        s.forget(&second.redial_key());
+        assert_eq!(
+            s.next_ms(&first.redial_key(), no_overrides()),
+            400,
+            "the other link reconnecting leaves this link's growth alone"
         );
     }
 
