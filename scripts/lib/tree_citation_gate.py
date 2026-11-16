@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4500 (no register item) -- a `path:LINE` citation of THIS tree must name a
+"""R4502 (no register item) -- a `path:LINE` citation of THIS tree must name a
 line the tree has.
 
 The items this answers, open-debt items 221 and 255, live in the agent-memory

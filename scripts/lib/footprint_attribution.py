@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4500 (no register item) -- attribute a footprint change between two builds
+"""R4502 (no register item) -- attribute a footprint change between two builds
 by SIZE as well as by delta, and say which growth is inlining.
 
 The item this answers, open-debt item 427, lives in the agent-memory half of

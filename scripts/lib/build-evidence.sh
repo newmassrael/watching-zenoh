@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# R4500 (no register item) -- what a failed BUILD prints: its first error lines,
+# R4502 (no register item) -- what a failed BUILD prints: its first error lines,
 # then its tail.
 #
 # The item this answers, open-debt item 370, lives in the agent-memory half of

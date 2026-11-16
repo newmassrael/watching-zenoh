@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4500 (no register item) -- a ledger bullet file holds one bullet per line,
+"""R4502 (no register item) -- a ledger bullet file holds one bullet per line,
 and a hard-wrapped paragraph is refused before it freezes.
 
 The item this answers, open-debt item 182, lives in the agent-memory half of
