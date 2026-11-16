@@ -9474,7 +9474,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and removes only the link it arrived on otherwise
     /// (`io/zenoh-transport/src/unicast/universal/rx.rs` @ `if session {`), and
     /// its delete closes each remaining link without a Close message of its own
-    /// (`universal/link.rs` @ `self.link.close(None).await`). This link ends by
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `self.link.close(None).await`). This link ends by
     /// the Close itself, so it is marked as having taken the deletion; each
     /// other link's loop takes it once ([`Self::take_transport_deleted`]) and
     /// ends as on a peer Close, which writes no frame.

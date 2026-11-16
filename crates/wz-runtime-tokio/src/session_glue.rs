@@ -4991,7 +4991,8 @@ mod batch_tx_tests {
     /// An express message drains its own conduit and the more urgent ones, in
     /// ascending band, and leaves the less urgent conduits batching: zenoh
     /// moves out only the express message's own batch
-    /// (`io/zenoh-transport/src/common/pipeline.rs`), and wz's ascending walk
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `if !self.batching || $msg.is_express()`), and wz's ascending walk
     /// keeps the express Data message behind the RealTime one staged before it.
     /// A drain of every conduit sends the Background frame too (three frames);
     /// a drain of the express conduit alone lets Data overtake RealTime.

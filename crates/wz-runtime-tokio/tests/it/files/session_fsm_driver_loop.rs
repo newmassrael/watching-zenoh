@@ -260,7 +260,8 @@ async fn r2927_a_default_priority_frame_on_a_non_qos_session_is_delivered() {
 }
 
 // A Close at session scope on an established session deletes the transport, as
-// upstream's receiver does (`unicast/universal/rx.rs` @ `if session {`); one at
+// upstream's receiver does (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+// `if session {`); one at
 // link scope removes only the link it arrived on. Either way that link ends by
 // the Close and is not owed the deletion again.
 #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]

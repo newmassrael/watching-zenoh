@@ -751,15 +751,15 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "dispatcher": 48,
     "establishment": 33,
     "ext": 13,
-    "lowlatency": 4,
+    "lowlatency": 3,
     "memory_backend": 11,
     "protocol": 7,
     "replication": 4,
     "routing": 2,
     "runtime": 1,
     "storages_mgt": 25,
-    "unicast": 76,
-    "universal": 7,
+    "unicast": 75,
+    "universal": 6,
     "zenoh-backend-traits": 8,
     "zenoh-codec": 40,
     "zenoh-config": 12,
@@ -882,7 +882,14 @@ def rootless_undeclared_budget() -> int:
 # without its two root-less citations, and the four root-less `unicast` tokens
 # the establishment-reject tests that came with it were written with now carry
 # their root and a needle.
-ROOTLESS_TOTAL_BUDGET = 478
+# 478 -> 475, the `lowlatency` row 4 -> 3, the `unicast` row 76 -> 75 and the
+# `universal` row 7 -> 6: the inbound dispatch test's note on the link and
+# transport close paths was rewritten without its three root-less line
+# citations, and the two root-less needle citations the close-scope work wrote
+# under `unicast` and `universal` (the receiver's session-scope branch, the
+# link's own close) now carry their root. (Written without their spellings on
+# purpose.)
+ROOTLESS_TOTAL_BUDGET = 475
 
 #: The pico axis's two legacy forms, held both ways like `LINE_BUDGET`. MEASURED
 #: when the axis landed, by reading `PICO_LINE_CITE` and the plain path pattern

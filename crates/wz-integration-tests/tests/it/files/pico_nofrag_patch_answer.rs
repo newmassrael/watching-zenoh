@@ -5,7 +5,8 @@
 //! zenoh-pico program opened.
 //!
 //! wz's acceptor answers `min(CURRENT, the level the InitSyn announced)`, as zenoh
-//! (`io/zenoh-transport/src/unicast/establishment/ext/patch.rs`, `send_init_ack`) and pico
+//! (`io/zenoh-transport/src/unicast/establishment/ext/patch.rs` @
+//! `Ok(min(PatchType::CURRENT, state.patch))`) and pico
 //! (`src/transport/unicast/transport.c`, the InitAck `_patch` cap) do. The in-process witness is
 //! `wz-runtime-tokio`'s `init_ack_patch_level.rs`, which feeds the acceptor InitSyns wz crafted.
 //!
