@@ -1568,7 +1568,8 @@ impl FragmentChains {
             // rather than evict (`ReassemblyConfig::new`), so no capture
             // reaches this arm, and a counter for it would always read zero,
             // which the type's doc names a naming error.
-            Some(DisplacedChain::Evicted) | None => {}
+            Some(DisplacedChain::Evicted) => {}
+            None => {}
         }
     }
 }
