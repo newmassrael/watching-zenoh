@@ -9,10 +9,9 @@
 //! - **TLS 1.3 ONLY** — `with_protocol_versions(&[&TLS13])`, not the TLS
 //!   link's safe-default 1.2 + 1.3 (`quinn::crypto::rustls::QuicClientConfig::
 //!   try_from` rejects a non-1.3 config), and
-//! - **ALPN = `hq-29`** — the application-layer protocol id zenoh-link-quic
-//!   advertises (`io/zenoh-link-commons/src/quic/unicast.rs` @
-//!   `alpn_protocols`),
-//!   so a wz QUIC peer negotiates the same token a zenohd QUIC peer expects.
+//! - **ALPN** — the application protocols zenoh-link-quic offers for the
+//!   link's stream keys ([`alpn_offer`]), so a wz QUIC peer negotiates the
+//!   protocol a zenohd QUIC peer would for the same settings.
 //!
 //! Everything else is shared with the TLS link: the PEM → DER loaders
 //! ([`certs_from_pem`] /
@@ -43,12 +42,50 @@ use crate::tls_config::{
 use crate::tls_config::resolve_optional_pem;
 #[cfg(feature = "transport-unicast")]
 use wz_session_core::locator::LinkTlsMaterial;
+use wz_session_core::locator::{QuicAlpn, QuicStreams};
 
-/// The ALPN protocol id zenoh-link-quic advertises on every QUIC connection
-/// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `alpn_protocols`). Both wz
-/// peers MUST advertise the same token for ALPN negotiation to succeed, and it
-/// must match zenohd's for a future cross-impl QUIC leg.
-pub const QUIC_ALPN: &[u8] = b"hq-29";
+/// The ALPN list a streamed QUIC link offers for its stream keys: the tokens of
+/// [`QuicStreams::offer`], in its order of preference, which is upstream's
+/// `compute_alpn_protocols` less the protocols this build does not serve. The
+/// builders below put the default keys' offer in the config they build; a dial
+/// or a listener replaces it with its own locator's ([`client_offering`],
+/// [`server_offering`]).
+pub fn alpn_offer(streams: QuicStreams) -> Vec<Vec<u8>> {
+    streams
+        .offer()
+        .into_iter()
+        .map(|protocol| protocol.token().to_vec())
+        .collect()
+}
+
+/// The ALPN list of the DATAGRAM link: the legacy protocol alone, as upstream's
+/// datagram builders set it (`io/zenoh-link-commons/src/quic/unicast.rs` @
+/// `client_crypto.client_config.alpn_protocols = vec![PROTOCOL_LEGACY.into()];`).
+pub fn datagram_alpn() -> Vec<Vec<u8>> {
+    vec![QuicAlpn::Legacy.token().to_vec()]
+}
+
+/// `config` offering `alpn`: the config itself when it already does, else a
+/// copy that does. A config is built once and dialled with many locators, and
+/// the offer is each locator's, so the copy is made per dial.
+pub fn client_offering(config: Arc<ClientConfig>, alpn: Vec<Vec<u8>>) -> Arc<ClientConfig> {
+    if config.alpn_protocols == alpn {
+        return config;
+    }
+    let mut config = Arc::unwrap_or_clone(config);
+    config.alpn_protocols = alpn;
+    Arc::new(config)
+}
+
+/// [`client_offering`] for a listener's config.
+pub fn server_offering(config: Arc<ServerConfig>, alpn: Vec<Vec<u8>>) -> Arc<ServerConfig> {
+    if config.alpn_protocols == alpn {
+        return config;
+    }
+    let mut config = Arc::unwrap_or_clone(config);
+    config.alpn_protocols = alpn;
+    Arc::new(config)
+}
 
 /// Map a non-`io` error (rustls builder) into the `io::Result` the QUIC dial /
 /// accept surface speaks — the [`crate::quic_pipeline`] analogue of
@@ -60,7 +97,7 @@ where
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
-/// Build a TLS-1.3 + ALPN-`hq-29` rustls [`ClientConfig`] for a `quic/...` dial
+/// Build a TLS-1.3 rustls [`ClientConfig`], offering the default keys' ALPN, for a `quic/...` dial
 /// from PEM. The QUIC sibling of
 /// [`crate::tls_config::client_config_from_pem`], diverging only in the TLS-1.3
 /// pin and the ALPN; `custom_root_ca_pem` is an ADDITIONAL server-trust anchor
@@ -119,7 +156,7 @@ pub fn quic_client_config_with_verification(
         }
         None => builder.with_no_client_auth(),
     };
-    config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    config.alpn_protocols = alpn_offer(QuicStreams::DEFAULT);
     // R311y578 (G10) — install the session-key sink. Inert in a build
     // without `transport-link-tls-keylog`, and inert even there until
     // `SSLKEYLOGFILE` names a destination (see `crate::tls_keylog`).
@@ -129,7 +166,7 @@ pub fn quic_client_config_with_verification(
     Ok(Arc::new(config))
 }
 
-/// Build a TLS-1.3 + ALPN-`hq-29` rustls [`ServerConfig`] for a QUIC acceptor
+/// Build a TLS-1.3 rustls [`ServerConfig`], offering the default keys' ALPN, for a QUIC acceptor
 /// from PEM. The QUIC sibling of [`crate::tls_config::server_config_from_pem`]:
 /// `cert_chain_pem` + `private_key_pem` are the cert the server presents,
 /// `client_ca_pem` is the optional mTLS knob (require + verify a client cert).
@@ -162,7 +199,7 @@ pub fn quic_server_config_from_pem(
     }
     .with_single_cert(cert_chain, key)
     .map_err(invalid_data)?;
-    config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    config.alpn_protocols = alpn_offer(QuicStreams::DEFAULT);
     // R311y578 (G10) — install the session-key sink, as the three sibling
     // config builders do. See `crate::tls_keylog`.
     config.key_log = crate::tls_keylog::key_log();

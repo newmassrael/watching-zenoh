@@ -8298,9 +8298,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// R299 bug #3 SIGABRT pattern family. The gate rejects pre-emit,
     /// so the wire bytes never leave and the token id allocator state
     /// is unchanged (the id is *consumed* but with no token-id
-    /// bookkeeping leak: `alloc_next_token_id` is a pure counter
-    /// `fetch_add`, and a skipped id has no protocol meaning on
-    /// either side per zenoh-pico's entity-id contract).
+    /// bookkeeping leak: `alloc_next_token_id` is a pure counter, and a
+    /// skipped id has no protocol meaning on either side per zenoh-pico's
+    /// entity-id contract).
+    ///
+    /// Returns `Err(LivelinessAliasError::IdsExhausted)` once the session
+    /// has handed out every `u32` token id; no wire bytes are emitted.
     ///
     /// Returns `Err(LivelinessAliasError::FeatureDisabled)` (R311o)
     /// when the `liveliness-token` feature is disabled on this
@@ -8322,7 +8325,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // the seam) rather than letting the multicast send arm's
             // UnsupportedVariant reach map_decl_err's `other => unreachable!`.
             let actions = self.actions();
-            let token_id = actions.alloc_next_token_id();
+            let token_id = u64::from(
+                actions
+                    .alloc_next_token_id()
+                    .ok_or(LivelinessAliasError::IdsExhausted)?,
+            );
             // declare_token always builds in literal mode (mapping_id = 0,
             // suffix = Some(_)), so the alias-resolution reject variants
             // cannot fire; the `unreachable!()` guards future refactors that
@@ -8466,7 +8473,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     composed
                 }
             };
-            let token_id = actions.alloc_next_token_id();
+            let token_id = u64::from(
+                actions
+                    .alloc_next_token_id()
+                    .ok_or(LivelinessAliasError::IdsExhausted)?,
+            );
             // R311mw (B5b-2b-3) — aliased Declare onto the send seam; same
             // shape as `Session::declare_token`, routed by (mapping_id,
             // inline_suffix) instead of (0, literal). The seam's

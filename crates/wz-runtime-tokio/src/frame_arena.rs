@@ -199,6 +199,12 @@ type FreeList = Mutex<Vec<Box<[u8]>>>;
 /// a dead `Weak`, exactly as upstream's `alloc` hands one an empty `Weak`), so
 /// a burst that outruns the pool costs allocations for the burst and leaves the
 /// steady state untouched.
+///
+/// A clone draws from and returns to the SAME population: the streams of one
+/// multistream link read into one pool, as upstream's per-priority read loops
+/// share theirs (`io/zenoh-transport/src/unicast/universal/link.rs` @
+/// `let pool = pool.clone();`).
+#[derive(Clone)]
 pub struct RecyclingArena {
     free: Arc<FreeList>,
     buf_len: usize,

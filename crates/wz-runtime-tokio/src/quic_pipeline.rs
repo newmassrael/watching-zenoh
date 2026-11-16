@@ -4,11 +4,14 @@
 //! R311xk — QUIC session-open transport pipeline.
 //!
 //! The QUIC sibling of [`crate::tls_pipeline`]. zenoh-link-quic carries a zenoh
-//! batch over ONE bidirectional QUIC stream per connection (unidirectional
-//! streams rejected, `max_concurrent_bidi_streams = 1`), with the SAME
-//! StreamEnvelope length-prefix framing as TCP/TLS (`is_streamed() = true`, MTU
-//! `BatchSize::MAX`, `io/zenoh-links/zenoh-link-quic/src/unicast.rs` @
-//! `fn is_streamed`). So the read/write
+//! batch over a bidirectional QUIC stream (`max_concurrent_bidi_streams = 1`),
+//! and, when the connection negotiates a multistream protocol, carries each
+//! priority above Control on a unidirectional stream of its own, every stream
+//! with the SAME StreamEnvelope length-prefix framing as TCP/TLS
+//! (`is_streamed() = true`, MTU `BatchSize::MAX`,
+//! `io/zenoh-links/zenoh-link-quic/src/unicast.rs` @ `fn is_streamed`). The
+//! protocols a link offers follow its locator's `multistream` and `mixed_rel`
+//! keys ([`crate::quic_config::alpn_offer`]). So the read/write
 //! drivers in [`crate::stream_link`] are reused UNCHANGED: a
 //! [`quinn::RecvStream`] is `AsyncRead`, a [`quinn::SendStream`] is
 //! `AsyncWrite`, and they are ALREADY a split pair (`open_bi`/`accept_bi`
@@ -29,7 +32,7 @@
 //!
 //! ## Certs ride the dial seam (not the locator), like TLS
 //!
-//! QUIC mandates TLS 1.3; its rustls config (TLS-1.3-only + ALPN `hq-29`) is
+//! QUIC mandates TLS 1.3; its rustls config (TLS-1.3-only + the ALPN offer) is
 //! built by [`crate::quic_config`]. The dial needs cert material a `quic/...`
 //! locator cannot carry, so — exactly like TLS (R311oc) — it is threaded via
 //! [`crate::session_open::DialConfig`]`.quic`; a `quic/...` locator with no such
@@ -37,23 +40,32 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use futures_util::stream::{SelectAll, Stream};
+use futures_util::{FutureExt, StreamExt};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
     ClientConfig as QuinnClientConfig, Connection, Endpoint, Incoming, RecvStream, SendStream,
     ServerConfig as QuinnServerConfig, TransportConfig,
 };
+use tokio::io::AsyncWriteExt;
 use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
 };
 
+use crate::frame_arena::{link_arena, LinkArena};
 use crate::link_interfaces::ip_link_subject;
 use crate::link_socket::LinkSocket;
-use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
-use crate::writer_queue::WriterHandle;
-use crate::{LinkDriver, LinkEvent, Reliability, TxFrame};
+use crate::quic_config::{alpn_offer, client_offering, server_offering};
+use crate::stream_link::{write_wire, writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::writer_queue::{OutboundQueue, WriterHandle};
+use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 use wz_session_core::link::LinkKind;
+use wz_session_core::locator::{QuicAlpn, QuicStreamChoice, QuicStreams};
+use wz_session_core::qos::Priority;
 
 /// R2600 — the EARLIEST `not_after` in the peer's certificate chain, as Unix
 /// seconds, or `None` when the peer presented no chain.
@@ -207,10 +219,104 @@ pub struct QuicLink {
     /// The QUIC connection. A `Clone` handle; kept alive because the streams
     /// reference it.
     pub connection: Connection,
-    /// The outbound half of the one bidirectional stream (`AsyncWrite`).
+    /// The outbound half of the bidirectional stream (`AsyncWrite`): the link's
+    /// one stream, or its Control stream on a multistream link.
     pub send: SendStream,
-    /// The inbound half of the one bidirectional stream (`AsyncRead`).
+    /// The inbound half of the bidirectional stream (`AsyncRead`).
     pub recv: RecvStream,
+    /// The streams this end opened for the priorities above Control, when the
+    /// connection negotiated a multistream protocol; `None` on a single-stream
+    /// link. The peer's own come in as it writes on them, so they are the read
+    /// driver's to accept.
+    pub priority_send: Option<PrioritySendStreams>,
+}
+
+/// The unidirectional streams of a multistream link that carry the priorities
+/// above Control, `RealTime` first: upstream's `UniStreams`. Built only by
+/// opening them on a connection that negotiated a multistream protocol.
+pub struct PrioritySendStreams(Vec<SendStream>);
+
+/// One stream per priority above Control; Control rides the bidirectional one.
+const PRIORITY_STREAMS: usize = Priority::NUM - 1;
+
+/// The application streams a QUIC connection allows its peer to open, set on
+/// both ends as upstream's `configure_max_concurrent_streams` sets them
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @
+/// `pub(crate) fn configure_max_concurrent_streams(`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StreamAllowance {
+    /// The datagram link: no stream of either kind.
+    Datagrams,
+    /// A streamed link: the one bidirectional stream, and a unidirectional
+    /// stream per priority above Control unless the keys say `multistream=0`
+    /// (`io/zenoh-link-commons/src/quic/unicast.rs` @
+    /// `fn max_concurrent_uni_streams(&self) -> quinn::VarInt {`).
+    Streamed(QuicStreams),
+}
+
+impl StreamAllowance {
+    fn apply(self, transport: &mut TransportConfig) {
+        let (bidi, uni) = match self {
+            StreamAllowance::Datagrams => (0u8, 0u8),
+            StreamAllowance::Streamed(streams) => {
+                let uni = match streams.multistream {
+                    QuicStreamChoice::Disabled => 0,
+                    QuicStreamChoice::Enabled | QuicStreamChoice::Auto => PRIORITY_STREAMS as u8,
+                };
+                (1, uni)
+            }
+        };
+        transport.max_concurrent_bidi_streams(bidi.into());
+        transport.max_concurrent_uni_streams(uni.into());
+    }
+}
+
+/// The protocol `connection` negotiated by ALPN. Every wz endpoint offers a
+/// non-empty list, so a connection that completed its handshake negotiated one
+/// of them, which quinn guarantees to report; anything else is answered as an
+/// error rather than assumed.
+pub(crate) fn negotiated_protocol(connection: &Connection) -> io::Result<QuicAlpn> {
+    let data = connection
+        .handshake_data()
+        .ok_or_else(|| io_other("the QUIC connection has no handshake data"))?;
+    let data = data
+        .downcast::<quinn::crypto::rustls::HandshakeData>()
+        .map_err(|_| io_other("the QUIC handshake data is not a TLS handshake's"))?;
+    data.protocol
+        .as_deref()
+        .and_then(QuicAlpn::from_token)
+        .ok_or_else(|| io_other("the QUIC connection negotiated no zenoh protocol"))
+}
+
+/// Open this end's priority streams when `connection` negotiated a multistream
+/// protocol: upstream's `UniStreams::try_open`. quinn numbers the streams one
+/// end opens in the order it opens them, and the peer accepts them in that
+/// order, so opening them in priority order is what maps a stream to its
+/// priority without a byte on the wire saying so.
+///
+/// Each is opened without waiting, as upstream opens them: the peer allowed one
+/// per priority when it offered the protocol (`StreamAllowance`), so a stream
+/// that is not there at once never will be.
+fn open_priority_streams(connection: &Connection) -> io::Result<Option<PrioritySendStreams>> {
+    if !negotiated_protocol(connection)?.is_multistream() {
+        return Ok(None);
+    }
+    let mut streams = Vec::with_capacity(PRIORITY_STREAMS);
+    for priority in 1..Priority::NUM {
+        let stream = connection
+            .open_uni()
+            .now_or_never()
+            .ok_or_else(|| {
+                io_other("the QUIC peer allows fewer streams than there are priorities")
+            })?
+            .map_err(io_other)?;
+        // QUIC sends a stream of a HIGHER priority value first, and zenoh's
+        // most urgent priority is its LOWEST number, so the sign is flipped
+        // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `open.set_priority(-(prio as i32))?;`).
+        stream.set_priority(-(priority as i32)).map_err(io_other)?;
+        streams.push(stream);
+    }
+    Ok(Some(PrioritySendStreams(streams)))
 }
 
 /// Inbound read driver of a QUIC link — the shared [`StreamReadDriver`] over a
@@ -240,7 +346,7 @@ impl crate::link_ring_fd::RingReadable for RecvStream {
 }
 
 pub struct QuicReadDriver {
-    inner: StreamReadDriver<RecvStream>,
+    inner: QuicReader,
     // Keep-alive: dropping either before the link closes would tear it down
     // (the RecvStream/SendStream reference the connection; the connection
     // references the endpoint driver). Both are cheap Arc-backed handles.
@@ -248,21 +354,159 @@ pub struct QuicReadDriver {
     _connection: Connection,
 }
 
+/// What a QUIC link reads: its one stream, or every stream of a multistream link.
+enum QuicReader {
+    Single(StreamReadDriver<RecvStream>),
+    Priority(PriorityStreamsReader),
+}
+
 impl LinkDriver for QuicReadDriver {
     async fn open(&mut self) -> io::Result<()> {
-        self.inner.open().await
+        match &mut self.inner {
+            QuicReader::Single(reader) => reader.open().await,
+            // The connection is live, as a single stream's is.
+            QuicReader::Priority(_) => Ok(()),
+        }
     }
 
     async fn send(&mut self, frame: &TxFrame<'_>, reliability: Reliability) -> io::Result<()> {
-        self.inner.send(frame, reliability).await
+        match &mut self.inner {
+            QuicReader::Single(reader) => reader.send(frame, reliability).await,
+            QuicReader::Priority(_) => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "QuicReadDriver does not send; outbound goes via StreamWriteDriver",
+            )),
+        }
     }
 
     async fn close(&mut self) -> io::Result<()> {
-        self.inner.close().await
+        match &mut self.inner {
+            QuicReader::Single(reader) => reader.close().await,
+            QuicReader::Priority(_) => Ok(()),
+        }
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
-        self.inner.poll_event().await
+        match &mut self.inner {
+            QuicReader::Single(reader) => reader.poll_event().await,
+            QuicReader::Priority(reader) => reader.poll_event().await,
+        }
+    }
+}
+
+/// What one of a multistream link's streams yields: a frame or a loss read off
+/// a stream, or a stream the peer opened.
+enum Arrival {
+    Event(LinkEvent),
+    Opened(RecvStream),
+}
+
+/// One source of [`Arrival`]s, boxed once when it joins the reader.
+type Arrivals = Pin<Box<dyn Stream<Item = Arrival> + Send>>;
+
+/// The read side of a multistream link: the bidirectional stream, and each
+/// stream the peer opens for a priority, read as one driver. Upstream reads
+/// each priority's stream in a task of its own and ends the link when any of
+/// them ends (`io/zenoh-transport/src/unicast/universal/link.rs` @
+/// `let (res, _, _) = select_all((Priority::MAX as u8..=Priority::MIN as u8).map(|prio| {`);
+/// here they are polled together by the one driver the session already polls,
+/// so a frame is handed up on the thread that reads it and nothing is spawned.
+///
+/// A frame carries its own priority, so which stream it came on is not handed
+/// up: the streams separate the priorities on the wire, where a lost packet of
+/// one no longer holds up the others.
+struct PriorityStreamsReader {
+    arrivals: SelectAll<Arrivals>,
+    /// The link's one receive pool, which every stream reads into.
+    arena: LinkArena,
+    /// The loss of the first stream that ended, which is the link's.
+    lost: Option<LostCause>,
+}
+
+impl PriorityStreamsReader {
+    fn new(control: RecvStream, connection: Connection, arena: LinkArena) -> Self {
+        let mut arrivals = SelectAll::new();
+        arrivals.push(read_stream(control, arena.clone()));
+        arrivals.push(accept_priority_streams(connection));
+        Self {
+            arrivals,
+            arena,
+            lost: None,
+        }
+    }
+
+    async fn poll_event(&mut self) -> LinkEvent {
+        loop {
+            if let Some(cause) = self.lost {
+                return LinkEvent::Lost { cause };
+            }
+            match self.arrivals.next().await {
+                Some(Arrival::Event(LinkEvent::Lost { cause })) => {
+                    // The link is lost with any of its streams; the rest are
+                    // dropped, and their connection with them once the driver goes.
+                    self.lost = Some(cause);
+                    self.arrivals.clear();
+                }
+                Some(Arrival::Event(event)) => return event,
+                Some(Arrival::Opened(recv)) => {
+                    self.arrivals.push(read_stream(recv, self.arena.clone()));
+                }
+                // Unreachable while the bidirectional stream is read, which
+                // ends only with a loss; answered as the peer gone rather than
+                // a wait for nothing.
+                None => self.lost = Some(LostCause::PeerClosed),
+            }
+        }
+    }
+}
+
+/// The frames of one stream, read by the stream link's framing.
+fn read_stream(recv: RecvStream, arena: LinkArena) -> Arrivals {
+    // A QUIC link keeps the universal u16 prefix: lowlatency is a TCP-path
+    // negotiation, so the flag is a fresh always-false one.
+    let reader = StreamReadDriver::with_arena(recv, Arc::new(AtomicBool::new(false)), arena);
+    Box::pin(futures_util::stream::unfold(
+        reader,
+        |mut reader| async move {
+            let event = reader.poll_event().await;
+            Some((Arrival::Event(event), reader))
+        },
+    ))
+}
+
+/// The streams the peer opens for its priorities, as it opens them: upstream's
+/// `RecvStream::acceptor_task`, which stops once there is one per priority. A
+/// connection that ends stops it too; that loss reaches the session through
+/// the bidirectional stream, so the acceptor ends without an event of its own.
+fn accept_priority_streams(connection: Connection) -> Arrivals {
+    Box::pin(futures_util::stream::unfold(
+        (connection, 0usize),
+        |(connection, accepted)| async move {
+            if accepted == PRIORITY_STREAMS {
+                return None;
+            }
+            let recv = connection.accept_uni().await.ok()?;
+            Some((Arrival::Opened(recv), (connection, accepted + 1)))
+        },
+    ))
+}
+
+/// The writer of a multistream link: the one queue's takes, each written on the
+/// stream of its lane ([`OutboundQueue::next_wire_by_lane`]), so the existing
+/// priority lanes feed the streams and no second scheduler decides the order.
+/// `streams` holds the bidirectional stream first and then one per priority, so
+/// a priority's wire byte is its stream's index.
+///
+/// Ends as [`writer_task`] does, and finishes every stream when the queue is.
+async fn priority_writer_task(mut streams: Vec<SendStream>, mut queue: OutboundQueue) {
+    while let Some((priority, wire)) = queue.next_wire_by_lane().await {
+        let stream = &mut streams[priority.wire_byte() as usize];
+        if !write_wire(stream, &mut queue, wire).await {
+            return;
+        }
+    }
+    for stream in &mut streams {
+        let _ = stream.shutdown().await;
     }
 }
 
@@ -302,7 +546,7 @@ pub(crate) fn tls_server_crypto(
 
 /// Build a client [`Endpoint`] bound to a local socket (the locator's `#bind=`,
 /// else an ephemeral one of `addr`'s family), install the QUIC `crypto` —
-/// the TLS-1.3 + ALPN-`hq-29` rustls config via [`tls_client_crypto`], or
+/// the TLS-1.3 rustls config via [`tls_client_crypto`], or
 /// R2798's plaintext session — and connect
 /// to `addr` (SNI = `server_name`) — the shared QUIC client-handshake SSOT for
 /// BOTH the stream backend ([`dial_quic`]) and the datagram backend
@@ -324,6 +568,7 @@ pub(crate) async fn connect_quic_client(
     crypto: Arc<dyn quinn::crypto::ClientConfig>,
     server_name: &str,
     link_socket: &LinkSocket<'_>,
+    allowance: StreamAllowance,
 ) -> io::Result<(Endpoint, Connection)> {
     let local = link_socket.dial_local_addr(addr);
     let sock = tokio::net::UdpSocket::bind(local).await?;
@@ -340,6 +585,9 @@ pub(crate) async fn connect_quic_client(
     // could reach quinn's transport on this side however it was spelled: the
     // gap was a missing seam, not a missing branch.
     let mut transport = TransportConfig::default();
+    // The streams the server may open, set on this end too, as upstream's
+    // client builder sets them.
+    allowance.apply(&mut transport);
     link_socket.apply_quic_transport(&mut transport);
     quinn_client.transport_config(Arc::new(transport));
     endpoint.set_default_client_config(quinn_client);
@@ -352,15 +600,14 @@ pub(crate) async fn connect_quic_client(
 }
 
 /// Build a server [`Endpoint`] at `addr` presenting the QUIC `crypto` — the
-/// TLS-1.3 + ALPN-`hq-29` rustls config via [`tls_server_crypto`], or R2798's
-/// plaintext session — capping application streams at `max_bidi`
-/// bidirectional + 0 unidirectional — the shared QUIC server-endpoint SSOT for
-/// BOTH the stream backend ([`bind_quic`], `max_bidi = 1` = exactly one
-/// StreamEnvelope stream) and the datagram backend
-/// ([`crate::quic_datagram_pipeline::bind_quic_datagram`], `max_bidi = 0` =
-/// datagram-only). uni is always 0 (wz uses neither). The QUIC handshake rides
-/// crypto frames, not application streams, so it completes regardless of the
-/// limit. Mirrors zenoh's `new_listener` stream-limit setup.
+/// TLS-1.3 rustls config via [`tls_server_crypto`], or R2798's plaintext
+/// session — allowing the application streams `allowance` names — the shared
+/// QUIC server-endpoint SSOT for BOTH the stream backend ([`bind_quic`]: the
+/// bidirectional stream, and a stream per priority unless `multistream=0`) and
+/// the datagram backend ([`crate::quic_datagram_pipeline::bind_quic_datagram`]:
+/// none). The QUIC handshake rides crypto frames, not application streams, so
+/// it completes regardless of the limit. Mirrors zenoh's `new_listener`
+/// stream-limit setup.
 ///
 /// R311y454 — `iface` is the LISTEN-side `#iface=<name>` honor, closing the
 /// residual that only the dial half bound its socket to the named NIC. quinn's
@@ -397,13 +644,12 @@ pub(crate) async fn connect_quic_client(
 pub(crate) async fn quic_server_endpoint(
     addr: SocketAddr,
     crypto: Arc<dyn quinn::crypto::ServerConfig>,
-    max_bidi: u8,
+    allowance: StreamAllowance,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
     let mut sc = QuinnServerConfig::with_crypto(crypto);
     let mut transport = TransportConfig::default();
-    transport.max_concurrent_uni_streams(0u8.into());
-    transport.max_concurrent_bidi_streams(max_bidi.into());
+    allowance.apply(&mut transport);
     // R2598 — the listen half of the locator's quinn transport keys. Upstream
     // configures the MTU on BOTH builders
     // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.configure_mtu(&QuicMtuConfig::try_from(&epconf)?)`,
@@ -436,9 +682,10 @@ pub(crate) async fn accept_quic_connection(endpoint: &Endpoint) -> io::Result<Co
     incoming.await.map_err(io_other)
 }
 
-/// Dial a QUIC connection to `addr` (SNI `server_name`, TLS-1.3 + ALPN-`hq-29`
-/// `client_config` from [`crate::quic_config`]) and open the single bidirectional
-/// stream. Returns a [`QuicLink`] ready for [`wire_quic_stream`]. The primitive
+/// Dial a QUIC connection to `addr` (SNI `server_name`, TLS-1.3
+/// `client_config` from [`crate::quic_config`]) offering the default stream
+/// keys' protocols, and open its streams. Returns a [`QuicLink`] ready for
+/// [`wire_quic_stream`]. The primitive
 /// [`crate::session_open::dial_locator`] calls for a `quic/...` locator carrying
 /// [`crate::session_open::DialConfig`]`.quic`. Mirrors zenoh's `new_link`: the
 /// shared `connect_quic_client` handshake, then `open_bi`.
@@ -448,44 +695,77 @@ pub async fn dial_quic(
     server_name: &str,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<QuicLink> {
-    open_quic_stream(
+    dial_quic_with_streams(
         addr,
-        tls_client_crypto(client_config)?,
+        client_config,
         server_name,
         link_socket,
+        QuicStreams::DEFAULT,
+    )
+    .await
+}
+
+/// [`dial_quic`] for a locator whose stream keys are `streams`: the dial offers
+/// their protocols ([`crate::quic_config::alpn_offer`]) in place of the ones
+/// `client_config` carries, and the link it yields has a stream per priority
+/// when the server chose a multistream protocol.
+pub async fn dial_quic_with_streams(
+    addr: SocketAddr,
+    client_config: Arc<RustlsClientConfig>,
+    server_name: &str,
+    link_socket: &LinkSocket<'_>,
+    streams: QuicStreams,
+) -> io::Result<QuicLink> {
+    open_quic_stream(
+        addr,
+        tls_client_crypto(client_offering(client_config, alpn_offer(streams)))?,
+        server_name,
+        link_socket,
+        streams,
     )
     .await
 }
 
 /// R2798 — the crypto-agnostic body of [`dial_quic`]: the shared
-/// `connect_quic_client` handshake, then `open_bi`. Split out so the
-/// reliable UDP variant, which is this same stream link under a plaintext
-/// session, dials through it instead of repeating it.
+/// `connect_quic_client` handshake, then `open_bi`, then the priority streams
+/// when a multistream protocol was negotiated. Split out so the reliable UDP
+/// variant, which is this same stream link under a plaintext session, dials
+/// through it instead of repeating it. `crypto` already offers `streams`'
+/// protocols; `streams` sets the streams the server may open.
 pub(crate) async fn open_quic_stream(
     addr: SocketAddr,
     crypto: Arc<dyn quinn::crypto::ClientConfig>,
     server_name: &str,
     link_socket: &LinkSocket<'_>,
+    streams: QuicStreams,
 ) -> io::Result<QuicLink> {
-    let (endpoint, connection) =
-        connect_quic_client(addr, crypto, server_name, link_socket).await?;
-    // The initiator opens the one bidirectional stream; the responder
+    let (endpoint, connection) = connect_quic_client(
+        addr,
+        crypto,
+        server_name,
+        link_socket,
+        StreamAllowance::Streamed(streams),
+    )
+    .await?;
+    // The initiator opens the bidirectional stream; the responder
     // `accept_bi`s it (zenoh: open_bi on dial, accept_bi on listen).
     let (send, recv) = connection.open_bi().await.map_err(io_other)?;
+    let priority_send = open_priority_streams(&connection)?;
     Ok(QuicLink {
         endpoint,
         connection,
         send,
         recv,
+        priority_send,
     })
 }
 
 /// Bind a QUIC server [`Endpoint`] at `addr` presenting `server_config` — the
-/// accept-side "listen half" symmetric to [`dial_quic`]. Restricts the connection
-/// to ONE bidirectional stream and ZERO unidirectional (the shared
-/// `quic_server_endpoint` with `max_bidi = 1`), mirroring zenoh's
-/// `new_listener`, so the QUIC link is exactly one StreamEnvelope byte stream.
-/// The caller owns the returned `Endpoint` and loops [`accept_quic_on`] over it.
+/// accept-side "listen half" symmetric to [`dial_quic`], with the default stream
+/// keys ([`bind_quic_with_streams`] takes a locator's). Allows the one
+/// bidirectional stream and a stream per priority, mirroring zenoh's
+/// `new_listener`. The caller owns the returned `Endpoint` and loops
+/// [`accept_quic_on`] over it.
 ///
 /// R311y454 — `iface` is the `#iface=<name>` LISTEN-side bind, the parameter
 /// shape the sibling acceptors already use (`bind_tcp`,
@@ -496,7 +776,25 @@ pub async fn bind_quic(
     server_config: Arc<RustlsServerConfig>,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
-    quic_server_endpoint(addr, tls_server_crypto(server_config)?, 1, link_socket).await
+    bind_quic_with_streams(addr, server_config, link_socket, QuicStreams::DEFAULT).await
+}
+
+/// [`bind_quic`] for a listener whose stream keys are `streams`: it offers their
+/// protocols in place of the ones `server_config` carries, and allows a stream
+/// per priority unless they say `multistream=0`.
+pub async fn bind_quic_with_streams(
+    addr: SocketAddr,
+    server_config: Arc<RustlsServerConfig>,
+    link_socket: &LinkSocket<'_>,
+    streams: QuicStreams,
+) -> io::Result<Endpoint> {
+    quic_server_endpoint(
+        addr,
+        tls_server_crypto(server_offering(server_config, alpn_offer(streams)))?,
+        StreamAllowance::Streamed(streams),
+        link_socket,
+    )
+    .await
 }
 
 /// Accept the ARRIVAL of one inbound QUIC connection attempt from a *borrowed*
@@ -530,11 +828,14 @@ pub async fn accept_quic_incoming(endpoint: &Endpoint) -> io::Result<Incoming> {
 pub async fn complete_quic_accept(incoming: Incoming, endpoint: Endpoint) -> io::Result<QuicLink> {
     let connection = incoming.await.map_err(io_other)?;
     let (send, recv) = connection.accept_bi().await.map_err(io_other)?;
+    // Each end opens its own priority streams, as upstream's acceptor does.
+    let priority_send = open_priority_streams(&connection)?;
     Ok(QuicLink {
         endpoint,
         connection,
         send,
         recv,
+        priority_send,
     })
 }
 
@@ -606,23 +907,44 @@ pub(crate) fn wire_stream_over_quic(
         connection,
         send,
         recv,
+        priority_send,
     } = link;
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
-    let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(send, queue));
+    let arena = link_arena(rx_buffer_size);
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
-    // u16 prefix (an always-false flag on the write driver).
+    // u16 prefix (an always-false flag on the drivers).
+    let (writer_handle, reader) = match priority_send {
+        None => (
+            WriterHandle::spawn(rx, |queue| writer_task(send, queue)),
+            QuicReader::Single(StreamReadDriver::with_arena(
+                recv,
+                Arc::new(AtomicBool::new(false)),
+                arena,
+            )),
+        ),
+        // A lane per stream: the queue's lanes become the link's streams, and
+        // the handshake, queued before the session's shape, stays on the
+        // bidirectional stream where the peer reads it.
+        Some(PrioritySendStreams(priority_streams)) => {
+            let mut streams = Vec::with_capacity(Priority::NUM);
+            streams.push(send);
+            streams.extend(priority_streams);
+            (
+                WriterHandle::spawn(rx.with_stream_lanes(), |queue| {
+                    priority_writer_task(streams, queue)
+                }),
+                QuicReader::Priority(PriorityStreamsReader::new(recv, connection.clone(), arena)),
+            )
+        }
+    };
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
         subject,
         endpoints,
     ));
     let inbound = QuicReadDriver {
-        inner: StreamReadDriver::new(
-            recv,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            rx_buffer_size,
-        ),
+        inner: reader,
         _endpoint: endpoint,
         _connection: connection,
     };

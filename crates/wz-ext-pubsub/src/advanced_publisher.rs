@@ -387,6 +387,11 @@ pub enum AdvancedPublisherError {
     /// entities, for a reason of its own — a key table out of ids, say. The
     /// plane names the reason; a runtime session never raises this.
     Plane(String),
+    /// The session has handed out every `u32` entity id a publisher's
+    /// `SourceInfo` can carry (`commons/zenoh-protocol/src/core/mod.rs` @
+    /// `pub type EntityId = u32;`). Upstream's counter wraps onto ids a live
+    /// entity may still hold; wz refuses the declaration instead.
+    EntityIdsExhausted,
 }
 
 /// A plain publisher a plane declared for an advanced one, with the entity id it

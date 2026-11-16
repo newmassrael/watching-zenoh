@@ -1212,39 +1212,58 @@ where
     // so they leave in the same write. One write per frame was a system call and
     // a lock round per message, and a small-message stream ran fifty times slower
     // than the reference library's for it.
-    while let Some(mut wire) = queue.next_wire_packed().await {
-        // R3239 — on a pooled queue the frame is a slot of the link's transmit
-        // pool, armed when it was taken off its lane: the write that begins here
-        // is the bus master this row has, so the slot is started now and goes
-        // home through the completion edge when the write has ended, by
-        // `recycle_wire` below or by `wire`'s drop on every other way out.
-        wire.begin_write();
-        let write = async {
-            writer.write_all(&wire).await?;
-            writer.flush().await
-        };
-        match queue.guarded(write).await {
-            Some(Ok(())) => {
-                // Written and flushed, so the buffer is free: the next frame a
-                // link lends can be built in it.
-                queue.recycle_wire(wire);
-            }
-            Some(Err(e)) => {
-                log::warn!("wz-runtime-tokio: writer_task write failed: {e}; closing");
-                return;
-            }
-            None => {
-                log::warn!(
-                    "wz-runtime-tokio: writer_task stalled past {} ms draining a sealed \
-                     queue; the peer has stopped reading. Closing with frames undelivered",
-                    crate::writer_queue::WRITER_STALL_MS
-                );
-                return;
-            }
+    while let Some(wire) = queue.next_wire_packed().await {
+        if !write_wire(&mut writer, &mut queue, wire).await {
+            return;
         }
     }
     // Queue finished -> shut the write half cleanly (peer sees EOF, not RST).
     let _ = writer.shutdown().await;
+}
+
+/// Write one take of the queue on `writer` and flush it, under the queue's
+/// teardown bound ([`OutboundQueue::guarded`]): whether the writer goes on. A
+/// failed or stalled write ends it (logged), as a write half that has lost its
+/// peer cannot be written again. The body of [`writer_task`], and of any writer
+/// that chooses among several write halves per take.
+pub(crate) async fn write_wire<W>(
+    writer: &mut W,
+    queue: &mut OutboundQueue,
+    mut wire: crate::writer_queue::WireFrame,
+) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    // R3239 — on a pooled queue the frame is a slot of the link's transmit
+    // pool, armed when it was taken off its lane: the write that begins here
+    // is the bus master this row has, so the slot is started now and goes
+    // home through the completion edge when the write has ended, by
+    // `recycle_wire` below or by `wire`'s drop on every other way out.
+    wire.begin_write();
+    let write = async {
+        writer.write_all(&wire).await?;
+        writer.flush().await
+    };
+    match queue.guarded(write).await {
+        Some(Ok(())) => {
+            // Written and flushed, so the buffer is free: the next frame a
+            // link lends can be built in it.
+            queue.recycle_wire(wire);
+            true
+        }
+        Some(Err(e)) => {
+            log::warn!("wz-runtime-tokio: writer_task write failed: {e}; closing");
+            false
+        }
+        None => {
+            log::warn!(
+                "wz-runtime-tokio: writer_task stalled past {} ms draining a sealed \
+                 queue; the peer has stopped reading. Closing with frames undelivered",
+                crate::writer_queue::WRITER_STALL_MS
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]

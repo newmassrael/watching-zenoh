@@ -11115,6 +11115,30 @@ fn declare_token_returns_handle_with_keyexpr_and_id_one() {
     let _: &LivelinessOptions = token.options();
 }
 
+/// A token id is a `u32` on the wire, so the session hands out `u32::MAX` and
+/// then refuses, with nothing emitted, rather than wrap onto a live token's id.
+#[cfg(feature = "liveliness-token")]
+#[test]
+fn declare_token_is_refused_once_every_u32_token_id_is_spent() {
+    let (session, driver) = build_session();
+    session
+        .actions()
+        .next_outbound_token_id
+        .store(u64::from(u32::MAX), Ordering::Relaxed);
+    let last = session
+        .declare_token("liveliness/last", LivelinessOptions::default())
+        .expect("the last id is free");
+    assert_eq!(last.id(), u64::from(u32::MAX));
+    let frames = driver.frame_count();
+    assert_eq!(
+        session
+            .declare_token("liveliness/past", LivelinessOptions::default())
+            .err(),
+        Some(LivelinessAliasError::IdsExhausted)
+    );
+    assert_eq!(driver.frame_count(), frames, "no DECLARE is emitted");
+}
+
 #[cfg(feature = "liveliness-token")]
 #[test]
 fn declare_token_emits_exactly_one_reliable_wire_frame() {

@@ -43,6 +43,40 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "no_std")]
 use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 
+/// Take the next id of a `u32` id space whose counter is `counter`, or `None` once every id has
+/// been taken. The counter is a `u64` so that it can stand one past `u32::MAX` and stay there:
+/// an id space that wrapped would hand out an id a live declaration may still hold.
+fn take_u32_id(counter: &AtomicU64) -> Option<u32> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+            (id <= u64::from(u32::MAX)).then_some(id + 1)
+        })
+        .ok()
+        .and_then(|id| u32::try_from(id).ok())
+}
+
+#[cfg(test)]
+mod take_u32_id_tests {
+    use super::*;
+
+    #[test]
+    fn a_u32_id_space_hands_out_its_last_id_and_then_nothing() {
+        let counter = AtomicU64::new(u64::from(u32::MAX) - 1);
+        assert_eq!(take_u32_id(&counter), Some(u32::MAX - 1));
+        assert_eq!(take_u32_id(&counter), Some(u32::MAX));
+        assert_eq!(take_u32_id(&counter), None);
+        assert_eq!(take_u32_id(&counter), None, "a spent space stays spent");
+        assert_eq!(counter.load(Ordering::Relaxed), u64::from(u32::MAX) + 1);
+    }
+
+    #[test]
+    fn a_u32_id_space_counts_up_from_where_it_starts() {
+        let counter = AtomicU64::new(1);
+        assert_eq!(take_u32_id(&counter), Some(1));
+        assert_eq!(take_u32_id(&counter), Some(2));
+    }
+}
+
 // R311y215 — Priority threads through the Frame SN mint / conduit select and
 // the ext_qos wire. A cheap Copy value type from the unconditional `qos`
 // module, so it is always in scope even when `transport-qos` does not compile
@@ -2029,10 +2063,12 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// id-spaces per purpose (request / token / interest above), so the
     /// SourceInfo entity id gets its own counter rather than borrowing the
     /// token-id space (R311y71 review: minting a publisher eid from
-    /// `alloc_next_token_id` conflated two id namespaces). `AtomicU32`
-    /// because `SourceInfo.eid` is a `u32` — no truncating `as u32` cast.
+    /// `alloc_next_token_id` conflated two id namespaces).
+    /// `SourceInfo.eid` is a `u32`; the counter is an `AtomicU64` only so that
+    /// it can stand one past `u32::MAX`, which is how
+    /// `Self::alloc_next_entity_id` knows every id is spent.
     /// `Relaxed`; first call returns `0`.
-    pub next_outbound_entity_id: AtomicU32,
+    pub next_outbound_entity_id: AtomicU64,
 
     /// R311y205 (transport-multilink IMPL-2b-iii) — the aggregation link set: the
     /// `R::Shared<LinkState>` of every physical link that carries this ONE logical
@@ -3708,7 +3744,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // From 1: the id 0 is a router's (`alloc_next_token_id`).
                 next_outbound_token_id: AtomicU64::new(1),
                 next_outbound_interest_id: AtomicU64::new(0),
-                next_outbound_entity_id: AtomicU32::new(0),
+                next_outbound_entity_id: AtomicU64::new(0),
                 // R311y205 (IMPL-2b-iii) — the aggregation link set starts
                 // EMPTY. A single-link session (every non-aggregating open,
                 // incl feature-on max_links=1) never registers a link here, so
@@ -12368,8 +12404,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// form (`declare::liveliness_subscriber`); a session that numbered its
     /// first token `0` was read as a router's.
     /// `Relaxed` ordering — uniqueness is the only invariant.
-    pub fn alloc_next_token_id(&self) -> u64 {
-        self.next_outbound_token_id.fetch_add(1, Ordering::Relaxed)
+    ///
+    /// A token id is a `u32` (`commons/zenoh-protocol/src/network/declare.rs`
+    /// @ `pub type TokenId = u32;`): `None` once every one has been handed
+    /// out, where upstream's counter wraps onto ids a live token may hold.
+    pub fn alloc_next_token_id(&self) -> Option<u32> {
+        take_u32_id(&self.next_outbound_token_id)
     }
 
     /// R311y72 — outbound ENTITY id generator (the `SourceInfo.eid` a
@@ -12378,8 +12418,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the token-id counter), the SSOT for "this session's next entity id".
     /// `Relaxed` — uniqueness within the session is the only invariant
     /// (cross-session collisions are keyed out by the accompanying zid).
-    pub fn alloc_next_entity_id(&self) -> u32 {
-        self.next_outbound_entity_id.fetch_add(1, Ordering::Relaxed)
+    /// `None` once every `u32` has been handed out, as for a token id.
+    pub fn alloc_next_entity_id(&self) -> Option<u32> {
+        take_u32_id(&self.next_outbound_entity_id)
     }
 
     /// R279 — outbound liveliness-subscriber `interest_id` generator.

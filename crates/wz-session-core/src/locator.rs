@@ -229,6 +229,10 @@ pub struct ParsedLocator {
     /// neither, which is nearly every locator, and boxed when it does for the
     /// size reason [`Self::retry`] is.
     pub qos: Option<Box<LocatorQosMetadata>>,
+    /// The `multistream` and `mixed_rel` keys of the `?`-metadata span: the
+    /// application protocols a streamed QUIC link offers. [`QuicStreams::DEFAULT`]
+    /// on every other link, which does not read them.
+    pub quic_streams: QuicStreams,
 }
 
 /// R2944 — the QoS metadata an endpoint declares for the link it names:
@@ -648,6 +652,11 @@ pub enum LocatorParseError {
     /// A separate variant from [`Self::BadConfigValue`] because the two spans
     /// are distinct namespaces and the message has to say which one was wrong.
     BadMetadataValue { key: &'static str, value: String },
+    /// A METADATA value upstream accepts and asks for something this build does
+    /// not implement: `mixed_rel=1` on a streamed QUIC link, which asks for only
+    /// the mixed-reliability ALPN protocols. Refused at parse rather than
+    /// dialled with the protocols the value excludes.
+    UnsupportedMetadataValue { key: &'static str, value: String },
 }
 
 /// Parse a zenoh locator `proto/addr:port` into a [`ParsedLocator`].
@@ -686,6 +695,9 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     // a name to `classify_named_ip`, which would otherwise meet the bad value
     // with no channel to report it on.
     let proto = reliability_adjusted_proto(proto, parts.metadata)?;
+    // Before the address parse for the same reason: a DNS-named locator is routed
+    // on by `BadAddress` and has no channel left to report a bad value on.
+    let quic_streams = parse_quic_streams(proto, parts.metadata)?;
     let addr = SocketAddr::from_str(parts.address)
         .map_err(|_| LocatorParseError::BadAddress(parts.address.to_string()))?;
     Ok(ParsedLocator {
@@ -707,6 +719,7 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         // R2944 — METADATA span: the QoS keys are metadata in zenoh, read by
         // the establishment rather than by the link.
         qos: parse_qos_metadata(parts.metadata),
+        quic_streams,
     })
 }
 
@@ -1402,6 +1415,228 @@ fn reliability_adjusted_proto(proto: Proto, metadata: &str) -> Result<Proto, Loc
     })
 }
 
+/// zenoh `Metadata::MULTISTREAM` metadata key
+/// (`commons/zenoh-protocol/src/core/endpoint.rs` @ `pub const MULTISTREAM: &'static str = "multistream";`).
+const LOCATOR_MULTISTREAM_KEY: &str = "multistream";
+
+/// zenoh `Metadata::MIXED_RELIABILITY` metadata key
+/// (`commons/zenoh-protocol/src/core/endpoint.rs` @ `pub const MIXED_RELIABILITY: &'static str = "mixed_rel";`).
+const LOCATOR_MIXED_RELIABILITY_KEY: &str = "mixed_rel";
+
+/// What one stream key of a streamed QUIC link asks for: upstream's
+/// `MultiStreamConfig` and `MixedRelConfig`, which take the same three values
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `pub(crate) enum MultiStreamConfig {`
+/// and @ `pub(crate) enum MixedRelConfig {`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuicStreamChoice {
+    /// `0`: never.
+    Disabled,
+    /// `1`: only the protocols that have it.
+    Enabled,
+    /// `auto`: offered first, and the protocols without it after.
+    Auto,
+}
+
+impl QuicStreamChoice {
+    /// The choice a key's value names, `None` for a value upstream refuses.
+    fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "0" => Some(Self::Disabled),
+            "1" => Some(Self::Enabled),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
+/// The `multistream` and `mixed_rel` keys of a STREAMED QUIC link (`quic/` and
+/// `udp/...?rel=1`): which application protocols the link offers by ALPN, and so
+/// whether it carries each priority on a stream of its own and a best-effort
+/// datagram companion beside its streams.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuicStreams {
+    /// `multistream`: a stream per priority.
+    pub multistream: QuicStreamChoice,
+    /// `mixed_rel`: the best-effort datagram companion.
+    pub mixed_rel: QuicStreamChoice,
+}
+
+impl QuicStreams {
+    /// Both keys absent: `multistream=auto`, `mixed_rel=0`, upstream's defaults
+    /// (`io/zenoh-link-commons/src/quic/unicast.rs` @
+    /// `match metadata.get(Metadata::MULTISTREAM).unwrap_or("auto") {` and @
+    /// `match metadata.get(Metadata::MIXED_RELIABILITY).unwrap_or("0") {`). Also
+    /// what a link that does not read the keys carries.
+    pub const DEFAULT: Self = Self {
+        multistream: QuicStreamChoice::Auto,
+        mixed_rel: QuicStreamChoice::Disabled,
+    };
+
+    /// The protocols upstream offers for these settings, in its order of
+    /// preference: `compute_alpn_protocols`, rule for rule
+    /// (`io/zenoh-link-commons/src/quic/unicast.rs` @
+    /// `fn compute_alpn_protocols(ms_conf: &MultiStreamConfig, mr_conf: &MixedRelConfig) -> Vec<Vec<u8>> {`).
+    pub fn upstream_offer(self) -> Vec<QuicAlpn> {
+        use QuicStreamChoice::{Auto, Disabled, Enabled};
+        let (ms, mr) = (self.multistream, self.mixed_rel);
+        let mut offer = Vec::new();
+        if ms != Disabled && mr != Disabled {
+            offer.push(QuicAlpn::MultiStreamMixedRel);
+        }
+        if matches!(ms, Enabled | Auto) && mr != Enabled {
+            offer.push(QuicAlpn::MultiStream);
+        }
+        if ms != Enabled && matches!(mr, Enabled | Auto) {
+            offer.push(QuicAlpn::MixedRel);
+        }
+        if ms != Enabled && mr != Enabled {
+            offer.push(QuicAlpn::SingleStream);
+            offer.push(QuicAlpn::Legacy);
+        }
+        offer
+    }
+
+    /// What this build offers for these settings: upstream's offer, less the
+    /// protocols it does not serve ([`QuicAlpn::is_served`]). Never empty for
+    /// settings [`parse_locator`] accepts, which refuses a key whose `1` would
+    /// leave nothing.
+    pub fn offer(self) -> Vec<QuicAlpn> {
+        self.upstream_offer()
+            .into_iter()
+            .filter(|protocol| protocol.is_served())
+            .collect()
+    }
+}
+
+impl Default for QuicStreams {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The application protocols a streamed QUIC link negotiates by ALPN
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub const PROTOCOL_LEGACY: &[u8] = b"hq-29";`
+/// and the four constants after it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuicAlpn {
+    /// `zenoh-ms-mr`: a stream per priority, and the datagram companion.
+    MultiStreamMixedRel,
+    /// `zenoh-ms`: a stream per priority.
+    MultiStream,
+    /// `zenoh-mr`: one stream, and the datagram companion.
+    MixedRel,
+    /// `zenoh`: one stream.
+    SingleStream,
+    /// `hq-29`: one stream, the only protocol of zenoh 1.8.0 and before.
+    Legacy,
+}
+
+impl QuicAlpn {
+    /// Every protocol, in upstream's order of preference.
+    pub const ALL: [QuicAlpn; 5] = [
+        QuicAlpn::MultiStreamMixedRel,
+        QuicAlpn::MultiStream,
+        QuicAlpn::MixedRel,
+        QuicAlpn::SingleStream,
+        QuicAlpn::Legacy,
+    ];
+
+    /// The protocol's ALPN token.
+    pub const fn token(self) -> &'static [u8] {
+        match self {
+            QuicAlpn::MultiStreamMixedRel => b"zenoh-ms-mr",
+            QuicAlpn::MultiStream => b"zenoh-ms",
+            QuicAlpn::MixedRel => b"zenoh-mr",
+            QuicAlpn::SingleStream => b"zenoh",
+            QuicAlpn::Legacy => b"hq-29",
+        }
+    }
+
+    /// The protocol a negotiated token names, `None` for a token that is none
+    /// of the five.
+    pub fn from_token(token: &[u8]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|protocol| protocol.token() == token)
+    }
+
+    /// Whether the link carries each priority above Control on a stream of its
+    /// own (upstream's `UniStreams::try_open` opens them for these two).
+    pub const fn is_multistream(self) -> bool {
+        matches!(self, QuicAlpn::MultiStream | QuicAlpn::MultiStreamMixedRel)
+    }
+
+    /// Whether the link has the best-effort datagram companion.
+    pub const fn is_mixed_rel(self) -> bool {
+        matches!(self, QuicAlpn::MixedRel | QuicAlpn::MultiStreamMixedRel)
+    }
+
+    /// Whether this build serves the protocol once it is negotiated: the
+    /// single-stream protocols and the stream per priority, not the datagram
+    /// companion.
+    pub const fn is_served(self) -> bool {
+        !self.is_mixed_rel()
+    }
+}
+
+/// The two stream keys of a STREAMED QUIC link, `quic/` and `udp/...?rel=1`, read
+/// as upstream reads them where it computes the link's ALPN offer: `multistream`
+/// defaults to `auto` and `mixed_rel` to `0`, each takes `auto`, `0` or `1`, and
+/// any other value refuses the endpoint
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @
+/// `s => Err(zerror!("Invalid multistream config: {s}").into()),` and @
+/// `s => Err(zerror!("Invalid mixed-reliability config: {s}").into()),`). The
+/// datagram links (`quic-datagram`, plain `udp`) do not read them, as upstream's
+/// `is_streamed() == false` arm does not, and carry [`QuicStreams::DEFAULT`].
+///
+/// A `1` asks for the protocols that have its feature and nothing else; when this
+/// build serves none of them ([`QuicAlpn::is_served`]) the endpoint is refused as
+/// [`LocatorParseError::UnsupportedMetadataValue`] rather than dialled with the
+/// protocols the value excludes. `auto` and `0` always leave a protocol this build
+/// serves in the offer.
+fn parse_quic_streams(proto: Proto, metadata: &str) -> Result<QuicStreams, LocatorParseError> {
+    match proto {
+        Proto::Quic | Proto::UdpReliable => {}
+        // Wildcard-free: a scheme added to `Proto` has to say whether it is streamed.
+        Proto::Tcp | Proto::Udp | Proto::Tls | Proto::Ws | Proto::QuicDatagram => {
+            return Ok(QuicStreams::DEFAULT)
+        }
+    }
+    let read = |key: &'static str, default: &'static str| {
+        let value = lookup_param(metadata, key).unwrap_or(default);
+        QuicStreamChoice::from_value(value).ok_or_else(|| LocatorParseError::BadMetadataValue {
+            key,
+            value: value.to_string(),
+        })
+    };
+    // Both read before either is judged, as upstream parses both configs before
+    // it computes the offer; `multistream` first, as upstream reads it first.
+    let streams = QuicStreams {
+        multistream: read(LOCATOR_MULTISTREAM_KEY, "auto")?,
+        mixed_rel: read(LOCATOR_MIXED_RELIABILITY_KEY, "0")?,
+    };
+    for (key, choice, asked) in [
+        (
+            LOCATOR_MULTISTREAM_KEY,
+            streams.multistream,
+            QuicAlpn::MultiStream,
+        ),
+        (
+            LOCATOR_MIXED_RELIABILITY_KEY,
+            streams.mixed_rel,
+            QuicAlpn::MixedRel,
+        ),
+    ] {
+        if choice == QuicStreamChoice::Enabled && !asked.is_served() {
+            return Err(LocatorParseError::UnsupportedMetadataValue {
+                key,
+                value: "1".to_string(),
+            });
+        }
+    }
+    Ok(streams)
+}
+
 // ─── serial locator leaf ───
 //
 // R311ny — the `serial/...` locator GRAMMAR is universal: parsing a serial
@@ -2087,6 +2322,10 @@ pub enum AnyLocator {
         /// [`ParsedLocator::qos`]: the metadata belongs to the endpoint, not to
         /// the address shape that spells it.
         qos: Option<Box<LocatorQosMetadata>>,
+        /// The stream keys from the same span, carried like
+        /// [`ParsedLocator::quic_streams`], so a DNS-named QUIC endpoint offers
+        /// the protocols a numeric one does.
+        quic_streams: QuicStreams,
     },
     /// A serial endpoint (`serial/...`) — see [`SerialEndpoint`]. ALWAYS
     /// present (R311ny: the serial locator leaf is ungated), so a
@@ -2242,6 +2481,7 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
                 // R2944 — and the same metadata span, so a DNS-named endpoint
                 // declares its link's QoS metadata as a numeric one does.
                 qos: parse_qos_metadata(metadata),
+                quic_streams: parse_quic_streams(proto, metadata).map_err(AnyLocatorError::Ip)?,
             }),
             None => Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(addr))),
         },
@@ -2890,6 +3130,7 @@ mod tests {
                 retry: None,
                 tls: None,
                 qos: None,
+                quic_streams: QuicStreams::DEFAULT,
             })
         );
     }
@@ -2957,6 +3198,7 @@ mod tests {
                 retry: None,
                 tls: None,
                 qos: None,
+                quic_streams: QuicStreams::DEFAULT,
             })
         );
     }
@@ -3010,6 +3252,7 @@ mod tests {
                 retry: None,
                 tls: None,
                 qos: None,
+                quic_streams: QuicStreams::DEFAULT,
             })
         );
     }
@@ -3035,6 +3278,7 @@ mod tests {
                     retry: None,
                     tls: None,
                     qos: None,
+                    quic_streams: QuicStreams::DEFAULT,
                 }),
                 "{s} should classify as Named"
             );
@@ -3433,6 +3677,7 @@ mod tests {
                     priorities: None,
                     reliability: Some("0".to_string()),
                 })),
+                quic_streams: QuicStreams::DEFAULT,
             })
         );
     }
@@ -3792,6 +4037,7 @@ mod tests {
                     priorities: None,
                     reliability: Some("1".to_string()),
                 })),
+                quic_streams: QuicStreams::DEFAULT,
             })
         );
     }
@@ -3831,6 +4077,212 @@ mod tests {
         );
     }
 
+    /// A streamed QUIC link reads `multistream` and `mixed_rel` as upstream
+    /// does: `auto` and `0` are accepted on both, absent ones take their
+    /// defaults, and a value upstream refuses is refused, numeric and named.
+    #[test]
+    fn a_streamed_quic_link_reads_its_stream_keys_as_upstream() {
+        for text in [
+            "quic/1.2.3.4:7447",
+            "quic/1.2.3.4:7447?multistream=auto",
+            "quic/1.2.3.4:7447?multistream=0;mixed_rel=0",
+            "quic/1.2.3.4:7447?mixed_rel=auto",
+            "udp/1.2.3.4:7447?rel=1;multistream=0",
+        ] {
+            assert!(parse_locator(text).is_ok(), "{text}");
+        }
+        for (text, key, value) in [
+            ("quic/1.2.3.4:7447?multistream=yes", "multistream", "yes"),
+            ("quic/1.2.3.4:7447?multistream=", "multistream", ""),
+            ("quic/1.2.3.4:7447?mixed_rel=2", "mixed_rel", "2"),
+            ("udp/1.2.3.4:7447?rel=1;mixed_rel=on", "mixed_rel", "on"),
+            (
+                "quic/example.org:7447?multistream=true",
+                "multistream",
+                "true",
+            ),
+        ] {
+            assert_eq!(
+                parse_any_locator(text),
+                Err(AnyLocatorError::Ip(LocatorParseError::BadMetadataValue {
+                    key,
+                    value: value.to_string(),
+                })),
+                "{text}"
+            );
+        }
+        // `multistream` is read before `mixed_rel`, as upstream reads them.
+        assert_eq!(
+            parse_locator("quic/1.2.3.4:7447?mixed_rel=x;multistream=y").err(),
+            Some(LocatorParseError::BadMetadataValue {
+                key: "multistream",
+                value: "y".to_string(),
+            })
+        );
+    }
+
+    /// `mixed_rel=1` asks for only the protocols with the datagram companion,
+    /// which this build does not serve, so it is refused as unsupported rather
+    /// than dialled with the others; with `multistream=1` beside it as well.
+    #[test]
+    fn a_stream_key_asking_for_what_this_build_lacks_is_refused() {
+        for (text, key) in [
+            ("quic/1.2.3.4:7447?mixed_rel=1", "mixed_rel"),
+            ("quic/1.2.3.4:7447?multistream=1;mixed_rel=1", "mixed_rel"),
+            ("udp/1.2.3.4:7447?rel=1;mixed_rel=1", "mixed_rel"),
+        ] {
+            assert_eq!(
+                parse_locator(text).err(),
+                Some(LocatorParseError::UnsupportedMetadataValue {
+                    key,
+                    value: "1".to_string(),
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    /// The datagram links do not read the stream keys, as upstream's datagram
+    /// arm does not, so no value of them refuses one.
+    #[test]
+    fn a_datagram_link_does_not_read_the_stream_keys() {
+        for text in [
+            "quic/1.2.3.4:7447?rel=0;multistream=yes",
+            "quic-datagram/1.2.3.4:7447?mixed_rel=1",
+            "udp/1.2.3.4:7447?multistream=1",
+            "tcp/1.2.3.4:7447?multistream=yes",
+        ] {
+            assert!(parse_locator(text).is_ok(), "{text}");
+        }
+    }
+
+    /// The offer upstream computes for every pair of settings, written out from
+    /// `compute_alpn_protocols` as tokens, so a rule or a token that drifts from
+    /// upstream's reds here.
+    #[test]
+    fn the_upstream_offer_is_compute_alpn_protocols_for_every_setting() {
+        use QuicStreamChoice::{Auto, Disabled, Enabled};
+        let cases: [(QuicStreamChoice, QuicStreamChoice, &[&str]); 9] = [
+            (Disabled, Disabled, &["zenoh", "hq-29"]),
+            (Disabled, Enabled, &["zenoh-mr"]),
+            (Disabled, Auto, &["zenoh-mr", "zenoh", "hq-29"]),
+            (Enabled, Disabled, &["zenoh-ms"]),
+            (Enabled, Enabled, &["zenoh-ms-mr"]),
+            (Enabled, Auto, &["zenoh-ms-mr", "zenoh-ms"]),
+            (Auto, Disabled, &["zenoh-ms", "zenoh", "hq-29"]),
+            (Auto, Enabled, &["zenoh-ms-mr", "zenoh-mr"]),
+            (
+                Auto,
+                Auto,
+                &["zenoh-ms-mr", "zenoh-ms", "zenoh-mr", "zenoh", "hq-29"],
+            ),
+        ];
+        for (multistream, mixed_rel, tokens) in cases {
+            let streams = QuicStreams {
+                multistream,
+                mixed_rel,
+            };
+            let offered: Vec<&[u8]> = streams
+                .upstream_offer()
+                .into_iter()
+                .map(QuicAlpn::token)
+                .collect();
+            let expected: Vec<&[u8]> = tokens.iter().map(|token| token.as_bytes()).collect();
+            assert_eq!(offered, expected, "{streams:?}");
+        }
+    }
+
+    /// This build offers upstream's protocols less the ones it does not serve:
+    /// the single-stream pair for every accepted setting.
+    #[test]
+    fn this_build_offers_the_protocols_it_serves() {
+        use QuicAlpn::{Legacy, MultiStream, SingleStream};
+        use QuicStreamChoice::{Auto, Disabled, Enabled};
+        let cases: [(QuicStreamChoice, QuicStreamChoice, &[QuicAlpn]); 6] = [
+            (Auto, Disabled, &[MultiStream, SingleStream, Legacy]),
+            (Disabled, Disabled, &[SingleStream, Legacy]),
+            (Enabled, Disabled, &[MultiStream]),
+            (Auto, Auto, &[MultiStream, SingleStream, Legacy]),
+            (Disabled, Auto, &[SingleStream, Legacy]),
+            (Enabled, Auto, &[MultiStream]),
+        ];
+        for (multistream, mixed_rel, offer) in cases {
+            let streams = QuicStreams {
+                multistream,
+                mixed_rel,
+            };
+            assert_eq!(streams.offer(), offer, "{streams:?}");
+        }
+        assert_eq!(QuicStreams::default(), QuicStreams::DEFAULT);
+    }
+
+    /// `multistream=1` is served, so it is accepted on both streamed links.
+    #[test]
+    fn a_multistream_only_link_is_accepted() {
+        for text in [
+            "quic/1.2.3.4:7447?multistream=1",
+            "udp/1.2.3.4:7447?rel=1;multistream=1",
+        ] {
+            assert_eq!(
+                parse_locator(text).expect(text).quic_streams,
+                QuicStreams {
+                    multistream: QuicStreamChoice::Enabled,
+                    mixed_rel: QuicStreamChoice::Disabled,
+                },
+                "{text}"
+            );
+        }
+    }
+
+    /// A negotiated token names its protocol and its features; a token that is
+    /// none of the five names none.
+    #[test]
+    fn a_negotiated_token_names_its_protocol() {
+        for protocol in QuicAlpn::ALL {
+            assert_eq!(QuicAlpn::from_token(protocol.token()), Some(protocol));
+        }
+        assert_eq!(QuicAlpn::from_token(b"h3"), None);
+        assert_eq!(QuicAlpn::from_token(b""), None);
+        assert!(QuicAlpn::MultiStream.is_multistream() && !QuicAlpn::MultiStream.is_mixed_rel());
+        assert!(QuicAlpn::MultiStreamMixedRel.is_multistream());
+        assert!(QuicAlpn::MultiStreamMixedRel.is_mixed_rel());
+        assert!(QuicAlpn::MixedRel.is_mixed_rel() && !QuicAlpn::MixedRel.is_multistream());
+        assert!(!QuicAlpn::Legacy.is_multistream() && !QuicAlpn::SingleStream.is_mixed_rel());
+    }
+
+    /// The parsed keys ride on the locator, numeric and named alike, and a link
+    /// that does not read them carries the defaults whatever its span says.
+    #[test]
+    fn a_streamed_quic_locator_carries_its_stream_keys() {
+        let declared = QuicStreams {
+            multistream: QuicStreamChoice::Disabled,
+            mixed_rel: QuicStreamChoice::Auto,
+        };
+        let parsed = parse_locator("quic/1.2.3.4:7447?multistream=0;mixed_rel=auto")
+            .expect("a quic locator");
+        assert_eq!(parsed.quic_streams, declared);
+        let reliable =
+            parse_locator("udp/1.2.3.4:7447?rel=1;multistream=0;mixed_rel=auto").expect("rel udp");
+        assert_eq!(reliable.quic_streams, declared);
+        assert_eq!(
+            parse_locator("quic/1.2.3.4:7447")
+                .expect("a quic locator")
+                .quic_streams,
+            QuicStreams::DEFAULT
+        );
+        assert_eq!(
+            parse_locator("udp/1.2.3.4:7447?multistream=0")
+                .expect("a datagram locator")
+                .quic_streams,
+            QuicStreams::DEFAULT,
+            "plain udp does not read the key"
+        );
+        match parse_any_locator("quic/example.org:7447?multistream=0;mixed_rel=auto") {
+            Ok(AnyLocator::Named { quic_streams, .. }) => assert_eq!(quic_streams, declared),
+            other => panic!("expected a named quic locator, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rel_in_the_config_span_does_not_select_the_datagram_link() {
         // DISCRIMINATOR: `rel` is a METADATA key. The same text after `#` is a
@@ -3859,6 +4311,7 @@ mod tests {
                     priorities: None,
                     reliability: Some("0".to_string()),
                 })),
+                quic_streams: QuicStreams::DEFAULT,
             })
         );
     }

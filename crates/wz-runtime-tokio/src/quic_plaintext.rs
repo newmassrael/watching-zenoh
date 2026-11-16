@@ -63,7 +63,6 @@ use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
 };
 
-use crate::quic_config::QUIC_ALPN;
 use crate::quic_pipeline::io_other;
 
 /// A key that protects nothing. Wraps the real key only so the one limit that
@@ -332,19 +331,20 @@ fn self_signed_cert() -> io::Result<&'static SelfSignedCert> {
     })
 }
 
-/// The client crypto for a reliable UDP dial: TLS 1.3 with the same ALPN as
-/// wz's QUIC link, a verifier that trusts any server, no client certificate,
-/// every packet key replaced.
+/// The client crypto for a reliable UDP dial: TLS 1.3 offering `alpn`, a
+/// verifier that trusts any server, no client certificate, every packet key
+/// replaced.
 ///
-/// The ALPN is `QUIC_ALPN` because this IS that link. Upstream offers the
-/// mixed-reliability and multi-stream protocols on this variant too, and wz's
-/// QUIC offers none of them; that gap belongs to the QUIC link and closes for
-/// both at once.
+/// The offer is the QUIC link's for the locator's stream keys
+/// (`crate::quic_config::alpn_offer`) because this IS that link: upstream
+/// computes it in the same builder for both.
 ///
 /// No key-log sink, unlike the four encrypted builders in `crate::quic_config`:
 /// the sink exists to make encrypted traffic readable, and this traffic already
 /// is. Upstream's unsecure config sets none either.
-pub(crate) fn plaintext_client_crypto() -> io::Result<Arc<dyn crypto::ClientConfig>> {
+pub(crate) fn plaintext_client_crypto(
+    alpn: Vec<Vec<u8>>,
+) -> io::Result<Arc<dyn crypto::ClientConfig>> {
     let provider = Arc::new(ring::default_provider());
     let mut tls = RustlsClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&TLS13])
@@ -352,7 +352,7 @@ pub(crate) fn plaintext_client_crypto() -> io::Result<Arc<dyn crypto::ClientConf
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification(provider)))
         .with_no_client_auth();
-    tls.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    tls.alpn_protocols = alpn;
     let quic = QuicClientConfig::try_from(Arc::new(tls)).map_err(io_other)?;
     Ok(Arc::new(PlainTextClientConfig(Arc::new(quic))))
 }
@@ -360,8 +360,11 @@ pub(crate) fn plaintext_client_crypto() -> io::Result<Arc<dyn crypto::ClientConf
 /// The server crypto for a reliable UDP listener: TLS 1.3 presenting the
 /// process's self-signed certificate, no client authentication, every packet
 /// key replaced — including the Initial keys derived before any session
-/// exists (see [`PlainTextServerConfig`]).
-pub(crate) fn plaintext_server_crypto() -> io::Result<Arc<dyn crypto::ServerConfig>> {
+/// exists (see [`PlainTextServerConfig`]). It offers `alpn`, the listener's
+/// offer for its stream keys, as the client does.
+pub(crate) fn plaintext_server_crypto(
+    alpn: Vec<Vec<u8>>,
+) -> io::Result<Arc<dyn crypto::ServerConfig>> {
     let cert = self_signed_cert()?;
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pkcs8.clone()));
     let mut tls = RustlsServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
@@ -370,7 +373,7 @@ pub(crate) fn plaintext_server_crypto() -> io::Result<Arc<dyn crypto::ServerConf
         .with_no_client_auth()
         .with_single_cert(vec![cert.cert.clone()], key)
         .map_err(io_other)?;
-    tls.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    tls.alpn_protocols = alpn;
     let quic = QuicServerConfig::try_from(Arc::new(tls)).map_err(io_other)?;
     Ok(Arc::new(PlainTextServerConfig(Arc::new(quic))))
 }
