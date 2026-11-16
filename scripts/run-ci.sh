@@ -8999,8 +8999,11 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # on B, so a dropped dialed link comes back onto the SAME session. The count
     # guard reddens the lane if a feature-set edit ever cfg-outs the
     # '#![cfg(all(...))]'-gated file to 0 tests (silent green).
+    # 1 -> 2: the same link lost again after a re-add that opened waits the
+    # initial period, the witness of the schedule's reset on a successful dial.
+    # 2 = the file's two cases, counted from the source.
     wz_test_args wz-runtime-tokio session_multilink_readd_e2e
-    _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
         || return 1
