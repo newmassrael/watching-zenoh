@@ -59,6 +59,8 @@ struct Script {
     closed: AtomicBool,
     /// Whether the engine runs periodic jobs.
     no_tickers: AtomicBool,
+    /// Whether the session has handed out every declaration id, so a subscription is refused.
+    ids_spent: AtomicBool,
     /// How many legs a get is issued as.
     legs: Mutex<usize>,
     /// What was declared and retracted, in order.
@@ -149,14 +151,17 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
+        if self.ids_spent.load(Ordering::SeqCst) {
+            return None;
+        }
         let id = self.next_entity_id();
         self.event(format!("declare subscriber {keyexpr}"));
         self.subscriptions
             .lock()
             .unwrap()
             .push((id, keyexpr, wire, sink));
-        id
+        Some(id)
     }
     fn undeclare_subscriber(&self, id: SubId) {
         let known = self
@@ -800,4 +805,22 @@ fn what_is_refused_declares_nothing() {
         Err(HostError::Refused(_))
     ));
     assert!(script.events().is_empty());
+}
+
+/// A session with no declaration id left refuses the subscription, and the subscriber is
+/// refused with it rather than left without its live subscription.
+#[test]
+fn a_session_with_no_id_left_refuses_the_subscriber() {
+    let script = Script::new(1);
+    script.ids_spent.store(true, Ordering::SeqCst);
+    let refused = EngineSubscriber::declare(
+        &engine(&script),
+        "demo/data",
+        AdvancedSubscriberOptions::new(),
+        |_| {},
+    )
+    .map(|_| ());
+    assert_eq!(refused, Err(HostError::IdsExhausted));
+    assert!(script.events().is_empty(), "nothing was declared");
+    assert!(script.subscriptions.lock().unwrap().is_empty());
 }

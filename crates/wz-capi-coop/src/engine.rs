@@ -2268,10 +2268,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         let id = self.next_entity_id();
         let Some(mut guard) = self.live() else {
-            return id;
+            return Some(id);
         };
         let core = &mut guard.0;
         let queue = self.samples.clone();
@@ -2283,7 +2283,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }),
         );
         let Ok(registration) = registration else {
-            return id;
+            return Some(id);
         };
         lock(&self.targets).push((id, Target::Subscriber(Arc::new(Mutex::new(sink())))));
         let entry = SubEntry {
@@ -2303,7 +2303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             self.deliver();
         }
-        id
+        Some(id)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {

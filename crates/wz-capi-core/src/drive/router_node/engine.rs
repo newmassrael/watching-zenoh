@@ -226,7 +226,7 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         // One callback for the node's one data plane, where a registry mints one for each face.
         let host = self
             .forwarder
@@ -237,7 +237,7 @@ impl SessionEngine for RouterState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Held::Plain(host));
-        id
+        Some(id)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {

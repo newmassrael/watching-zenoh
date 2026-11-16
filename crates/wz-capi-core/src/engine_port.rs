@@ -220,15 +220,15 @@ impl SessionEngine for SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
-        SharedSession::declare_subscriber_on_wire(
+    ) -> Option<SubId> {
+        Some(SharedSession::declare_subscriber_on_wire(
             self,
             keyexpr,
             wire,
             allowed_origin,
             retraction,
             sink,
-        )
+        ))
     }
 
     fn undeclare_subscriber(&self, id: SubId) {

@@ -21,18 +21,20 @@ use super::{open, until, CatchAll, Engine, Router};
 fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<AtomicUsize>) {
     let count = Arc::new(AtomicUsize::new(0));
     let into = count.clone();
-    let id = engine.declare_subscriber_on_wire(
-        key.to_owned(),
-        WireKey::literal(),
-        origin,
-        None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |_: &dyn SampleView| {
-                into.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    let id = engine
+        .declare_subscriber_on_wire(
+            key.to_owned(),
+            WireKey::literal(),
+            origin,
+            None,
+            Arc::new(move || {
+                let into = into.clone();
+                Box::new(move |_: &dyn SampleView| {
+                    into.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("a session with ids left declares");
     (id, count)
 }
 

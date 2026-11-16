@@ -158,6 +158,11 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Declare a subscriber on `keyexpr`, announced as `wire`, receiving what `allowed_origin`
     /// admits through callbacks `sink` mints. `retraction` is the key its undeclaration names
     /// beside its id, when the declaring ABI's reference library names one.
+    ///
+    /// `None` when the session has handed out every declaration id it can put on the wire, as
+    /// [`Self::declare_queryable_on_wire`] and [`Self::declare_liveliness_token_on_wire`] answer:
+    /// nothing is declared and nothing is sent, rather than an id a live declaration may still
+    /// hold being handed out again.
     fn declare_subscriber_on_wire(
         &self,
         keyexpr: String,
@@ -165,7 +170,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId;
+    ) -> Option<SubId>;
 
     /// Retract subscriber `id`. Retracting one already retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
