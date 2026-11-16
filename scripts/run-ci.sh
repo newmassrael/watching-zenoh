@@ -435,6 +435,10 @@ source scripts/lib/sce-codegen-oracle.sh
 # executable): a command writes `"${WZ_TEST_ARGS[@]}"` where it wrote `--test <file>`.
 # shellcheck source=scripts/lib/test_target.sh
 source scripts/lib/test_target.sh
+# `wz_build_evidence <log> <lines>` is what a failed build prints: its first error lines, then its
+# tail. `build_evidence_lint.py` refuses a bare `tail` of a build's log.
+# shellcheck source=scripts/lib/build-evidence.sh
+source scripts/lib/build-evidence.sh
 
 # ─── Artefact collection (R311y736, N28) ────────────────────────────
 #
@@ -1964,22 +1968,32 @@ layer_b_verify_codegen() {
         encoding locator ext_zbuf open_body hello ext_envelope msg_del ext_entry)
 
     local fail=0
+    # Each stem's verification is kept, so a failure prints what the run said
+    # instead of running it again; the divergent stems' second run, without the
+    # upstream fixture, used to fail with nothing printed at all.
+    local verify_logs="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/b-verify-codegen"
+    mkdir -p "$verify_logs"
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
         local stem
         stem="$(basename "$scxml" .scxml)"
         local upstream="${SCE_UPSTREAM[$stem]:-}"
         local extra=()
         [[ -n "$upstream" && -f "$upstream" ]] && extra=("$upstream")
+        local vlog="$verify_logs/$stem.log"
 
-        if bash scripts/verify-codegen.sh "$scxml" "${extra[@]}" >/dev/null 2>&1; then
+        if bash scripts/verify-codegen.sh "$scxml" "${extra[@]}" >"$vlog" 2>&1; then
             echo "  $stem OK"
         else
             if [[ " ${LAYER2_KNOWN_DIVERGENCE[*]} " == *" $stem "* ]]; then
                 echo "  $stem L2 MISMATCH (audit-traced KNOWN_DIVERGENCE)"
-                bash scripts/verify-codegen.sh "$scxml" >/dev/null 2>&1 || fail=1
+                if ! bash scripts/verify-codegen.sh "$scxml" >"$vlog" 2>&1; then
+                    echo "  $stem FAIL without the upstream fixture as well" >&2
+                    cat "$vlog" >&2
+                    fail=1
+                fi
             else
                 echo "  $stem FAIL" >&2
-                bash scripts/verify-codegen.sh "$scxml" "${extra[@]}" || true
+                cat "$vlog" >&2
                 fail=1
             fi
         fi
@@ -2069,9 +2083,8 @@ layer_b2_regen_diff() {
     mkdir -p "$(dirname "$xtask_log")"
     if ! cargo build --manifest-path xtask/Cargo.toml --quiet >"$xtask_log" 2>&1; then
         echo "Layer B2 SKIP (xtask build failed — libxml2/sce-build toolchain absent?)"
-        echo "  ── the build's last 20 line(s), so the guess above can be checked ──"
-        tail -20 "$xtask_log"
-        echo "  ── full log: $xtask_log ──"
+        echo "  ── what the build said, so the guess above can be checked ──"
+        wz_build_evidence "$xtask_log" 20
         return 0
     fi
     # R311y756 — KEEP WHAT IT SAID. This discarded both streams and printed four
@@ -2084,8 +2097,7 @@ layer_b2_regen_diff() {
     if ! cargo run --manifest-path xtask/Cargo.toml --quiet -- regen \
         >"$regen_log" 2>&1; then
         echo "Layer B2 FAIL: xtask regen errored — its output follows" >&2
-        tail -40 "$regen_log" >&2
-        echo "  full: $regen_log" >&2
+        wz_build_evidence "$regen_log" 40 >&2
         return 1
     fi
     # R311y911 (open-debt item 424) — ASK WHETHER REGEN'S OUTPUT IS RECORDED,
@@ -11519,7 +11531,7 @@ _c1e_neg_set() {
         echo "  C1e FAIL: the subset build broke while listing \`$module\` (exit $rc)." >&2
         echo "            This is NOT a drift verdict, and the fault is not necessarily" >&2
         echo "            in \`$module\` — the compiler output names the real site:" >&2
-        printf '%s\n' "$out" | tail -20 | sed 's/^/      /' >&2
+        wz_build_evidence - 20 <<<"$out" | sed 's/^/      /' >&2
         return 1
     fi
     printf '%s' "$out" | sed -n "s/^${module}::\(.*\): test\$/\1/p" | sort
@@ -17874,7 +17886,7 @@ layer_c1j_runtime_tokio_subset_behavior() {
                 --features "$feats" --lib -- --list 2>&1); rc=$?
             if [ "$rc" -ne 0 ]; then
                 echo "  C1j FAIL: subset $name did not BUILD (exit $rc) — not a drift verdict:"
-                printf '%s\n' "$out" | tail -20 | sed 's/^/      /'
+                wz_build_evidence - 20 <<<"$out" | sed 's/^/      /'
                 return 1
             fi
             got=$(printf '%s' "$out" \
@@ -27457,9 +27469,7 @@ _qz_west_build() {
         return 0
     fi
     echo "  $label build $app (west) FAIL" >&2
-    echo "  ── the build's last 60 line(s) ──" >&2
-    tail -60 "$west_log" >&2
-    echo "  ── full log: $west_log ──" >&2
+    wz_build_evidence "$west_log" 60 >&2
     return 1
 }
 

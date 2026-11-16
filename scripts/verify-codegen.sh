@@ -479,6 +479,8 @@ INPUT_STEM_FOR_LAYER3="$(extract_stem "$INPUT")"
 # (`tests/layer3_<stem>.rs`, or a module of a merged executable) and fails when there is none.
 # shellcheck source=scripts/lib/test_target.sh
 source "$ROOT/scripts/lib/test_target.sh"
+# shellcheck source=scripts/lib/build-evidence.sh
+source "$ROOT/scripts/lib/build-evidence.sh"
 if wz_test_args wz-integration-tests "layer3_${INPUT_STEM_FOR_LAYER3}" 2>/dev/null; then
     if (cd "$ROOT/crates" && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" \
@@ -490,7 +492,7 @@ if wz_test_args wz-integration-tests "layer3_${INPUT_STEM_FOR_LAYER3}" 2>/dev/nu
     else
         printf "verify-codegen: layer 3 (wire-interop): FAIL (see %s)\n" \
             "$WORK/layer3.log"
-        tail -10 "$WORK/layer3.log"
+        wz_build_evidence "$WORK/layer3.log" 10
         exit 1
     fi
 else

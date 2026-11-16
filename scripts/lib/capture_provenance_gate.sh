@@ -54,6 +54,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/lib/build-evidence.sh
+source "$REPO_ROOT/scripts/lib/build-evidence.sh"
 
 # The oracle set. A rename here without a rename there is the failure mode
 # this list exists to make loud.
@@ -222,7 +224,7 @@ trap 'rm -f "$log"' EXIT
 run_rc=$?
 if [[ $run_rc -ne 0 ]]; then
     echo "  capture-provenance: \`cargo test -p ${CRATE} --lib ${FILTER}\` exited ${run_rc}" >&2
-    tail -40 "$log" >&2
+    wz_build_evidence "$log" 40 >&2
     exit 1
 fi
 grade_transcript "$log" "${EXPECTED[@]}" || exit 1
@@ -233,7 +235,7 @@ grade_transcript "$log" "${EXPECTED[@]}" || exit 1
 run_rc=$?
 if [[ $run_rc -ne 0 ]]; then
     echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_COMPRESSED} --lib ${FILTER_COMPRESSED}\` exited ${run_rc}" >&2
-    tail -40 "$log" >&2
+    wz_build_evidence "$log" 40 >&2
     exit 1
 fi
 grade_transcript "$log" "${EXPECTED_COMPRESSED[@]}" || exit 1
@@ -243,7 +245,7 @@ grade_transcript "$log" "${EXPECTED_COMPRESSED[@]}" || exit 1
 run_rc=$?
 if [[ $run_rc -ne 0 ]]; then
     echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_MIDSESSION} --lib ${FILTER_MIDSESSION}\` exited ${run_rc}" >&2
-    tail -40 "$log" >&2
+    wz_build_evidence "$log" 40 >&2
     exit 1
 fi
 grade_transcript "$log" "${EXPECTED_MIDSESSION[@]}" || exit 1
@@ -253,7 +255,7 @@ grade_transcript "$log" "${EXPECTED_MIDSESSION[@]}" || exit 1
 run_rc=$?
 if [[ $run_rc -ne 0 ]]; then
     echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_DISCOVERY} --lib ${FILTER_DISCOVERY}\` exited ${run_rc}" >&2
-    tail -40 "$log" >&2
+    wz_build_evidence "$log" 40 >&2
     exit 1
 fi
 grade_transcript "$log" "${EXPECTED_DISCOVERY[@]}" || exit 1
@@ -263,7 +265,7 @@ grade_transcript "$log" "${EXPECTED_DISCOVERY[@]}" || exit 1
 run_rc=$?
 if [[ $run_rc -ne 0 ]]; then
     echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_PUBLISHER} --lib ${FILTER_PUBLISHER}\` exited ${run_rc}" >&2
-    tail -40 "$log" >&2
+    wz_build_evidence "$log" 40 >&2
     exit 1
 fi
 grade_transcript "$log" "${EXPECTED_PUBLISHER[@]}"

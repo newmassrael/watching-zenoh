@@ -94,6 +94,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/vendored-oracle.sh"
 # `wz_artifact_dir`: where a product of a tree path is (the rule, scripts/lib/artifact-root.sh).
 # shellcheck source=scripts/lib/artifact-root.sh
 source "$(dirname "${BASH_SOURCE[0]}")/artifact-root.sh"
+# `wz_build_evidence`: what a failed rebuild prints (scripts/lib/build-evidence.sh).
+# shellcheck source=scripts/lib/build-evidence.sh
+source "$(dirname "${BASH_SOURCE[0]}")/build-evidence.sh"
 
 WZ_SCE_DIR="vendor/sce"
 WZ_SCE_CODEGEN_BIN="vendor/sce/target/release/sce-codegen"
@@ -261,9 +264,7 @@ sce_codegen_ensure() {
         # KEEP WHAT IT SAID (R311y756 / R311y889): a build that failed silently
         # costs a second full build to learn anything.
         echo "$label: sce-codegen rebuild FAILED" >&2
-        echo "  -- the rebuild's last 40 line(s) --" >&2
-        tail -40 "$log" >&2
-        echo "  -- full log: $log --" >&2
+        wz_build_evidence "$log" 40 >&2
         return 1
     fi
 
