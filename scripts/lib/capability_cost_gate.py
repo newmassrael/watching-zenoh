@@ -782,7 +782,18 @@ CASES: tuple[Case, ...] = (
     # and its blocking task about +5,700, the condition variable about +2,500, the std mutex and
     # condition variable paths that left about -2,800. Chosen; that reading, the 3,904 the hosted
     # lane read over pc2 at `c42ab17ced`, and 3,500, to the hundred.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_166_300,
+    # 2026-11-17 -- the 8e integration read 6,202,708 on pc5, 36,408 over. TAKEN APART on pc5
+    # against `0a230c587c` built there (6,288,528; `nm -C -S`, text symbols): the face loop
+    # compiled once gave back 112,939 in `accept_loop`; the daemon reading of a config file linked
+    # 25,416 into every build that reads a document, because recording a replaced value cloned and
+    # compared the whole configuration and so pulled in the equality of every section. Each
+    # override now answers for the one value it writes, and that build reads 6,167,768. What
+    # stays is chosen: the config reader's new keys +3,618 (`read_over`), the C ABI's drive
+    # +4,365, router forwarding's per-key stats filters +2,780, the receive pool sized by the
+    # negotiated batch +1,162. pc5 reads the MCU images byte for byte as pc2 does, so the
+    # reading stands for pc2's; that reading, the 1,012 of the 2026-11-16 note, and 3,500, to the
+    # hundred.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_172_300,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -874,7 +885,10 @@ CASES: tuple[Case, ...] = (
     # variable, as `capic-router-node`'s note of this day takes apart: 10,881,977 -> 10,887,773 on
     # pc2. Chosen; that reading, the 5,108 the hosted lane read over pc2 at `c42ab17ced`, and
     # 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_209_900,
+    # 2026-11-17 -- the 8e integration, as `capic-router-node`'s note of this day takes apart:
+    # 11,210,541 on pc5 with the daemon reading's whole-configuration compare removed (11,239,389
+    # with it). Chosen; that reading, the 1,012 of the 2026-11-16 note, and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_215_100,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
