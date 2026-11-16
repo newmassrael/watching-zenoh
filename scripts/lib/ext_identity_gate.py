@@ -132,26 +132,29 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
         "advisories that the session MAY use the capability; the offer comes in "
         "two encodings for shared memory, and the flags read no body",
     ),
-    ("crates/wz-session-core/src/session_actions.rs", "stage_auth_send"): (
+    ("crates/wz-session-core/src/ext_chain.rs", "stage_in_canonical_order"): (
         "outbound",
-        "replaces the auth entry this side stages in its own handshake chain",
+        "replaces the entry of one id on this side's own handshake chain and places it "
+        "where upstream's encoder writes that field, in ascending id order: "
+        "`commons/zenoh-codec/src/transport/init.rs` @ `// Extensions`",
     ),
-    ("crates/wz-session-core/src/session_actions.rs", "stage_multilink_send"): (
+    ("crates/wz-session-core/src/ext_chain.rs", "canonical_position"): (
         "outbound",
-        "replaces the multilink entry this side stages in its own handshake chain",
+        "finds the place of an id on this side's own staged chain, after every entry "
+        "of a lower or equal id, the order upstream's Init and Open encoders write",
+    ),
+    ("crates/wz-session-core/src/ext_chain.rs", "sort_into_canonical_order"): (
+        "outbound",
+        "sorts a chain this side hands over whole into the same ascending id order, "
+        "so a seeded chain is written like a staged one",
+    ),
+    ("crates/wz-session-core/src/session_actions.rs", "stage_local_remote_bound"): (
+        "outbound",
+        "replaces the remote-bound entry this side stages on its own Open chain",
     ),
     ("crates/wz-session-core/src/session_actions.rs", "staged_multilink_ext_count"): (
         "outbound",
         "counts the multilink entries this side staged for sending",
-    ),
-    ("crates/wz-session-core/src/session_actions.rs", "stage_negotiated_patch"): (
-        "outbound",
-        "replaces the patch entry this side stages in its own handshake chain",
-    ),
-    ("crates/wz-session-core/src/session_actions.rs", "stage_shm_challenge"): (
-        "outbound",
-        "replaces the shared-memory entry this side stages, in whichever of its "
-        "two encodings it staged before",
     ),
     ("crates/wz-session-core/src/session_actions.rs", "stage_capability"): (
         "outbound",
