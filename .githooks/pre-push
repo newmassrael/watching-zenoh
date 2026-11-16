@@ -1170,6 +1170,10 @@ round_fed_gates=(
     "capi_c_wz_door_header.py"
     "hook_script_reference_gate.py --check"
     "sn_resolution_words.py --check"
+    # Round-fed through its import of the anchor gate, whose resolver picks the
+    # pinned upstream checkout it reads (open-debt item 718). Two text reads, no
+    # build; it SKIPs, saying so, where no checkout at the pin exists.
+    "transport_stats_surface_gate.py --check"
     "zenoh_c_census_arm_reach.py --check"
     "zenoh_c_oracle_arms.py --check"
     "discard_site_lint.py"

@@ -65,8 +65,16 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
+
+import upstream_citation_anchor_gate as anchor
+import upstream_feature_census as ufc
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+#: The release the upstream half must be read at. Not a copy: the census owns
+#: the pin, and the anchor gate's `checkout_at_pin` is the one reading of it.
+PIN = ufc.UPSTREAM_VERSION
 
 #: Upstream's stats crate, built from SEGMENTS rather than written as one
 #: string. The path is deliberately not spelled as a literal anywhere in this
@@ -109,7 +117,16 @@ _WZ_ARM_RE = re.compile(r"StatMessage::\w+\s*=>\s*\"(?P<label>\w+)\"")
 
 
 def upstream_source() -> pathlib.Path | None:
-    """Upstream's stats module, wherever this machine keeps it."""
+    """Upstream's stats module AT `PIN`, wherever this machine keeps it.
+
+    Open-debt item 718: a hand-kept checkout (`WZ_ZENOH_SRC`, `~/zenoh-ref`) is
+    taken only when `anchor.checkout_at_pin` says it declares `PIN`. These roots
+    came first and carried no version, so a checkout left at an older release
+    graded wz against a surface upstream had already rebuilt -- the exact drift
+    this gate exists to see. After them comes the checkout `upstream_root`
+    resolves, which judges the version itself. A root at another release is
+    passed over, and running out of roots is the absent case `--require` arms.
+    """
     roots: list[pathlib.Path] = []
     env = os.environ.get("WZ_ZENOH_SRC")
     if env:
@@ -117,8 +134,11 @@ def upstream_source() -> pathlib.Path | None:
     roots.append(pathlib.Path.home() / "zenoh-ref")
     for root in roots:
         cand = root / UPSTREAM_REL
-        if cand.is_file():
+        if cand.is_file() and anchor.checkout_at_pin(root, PIN):
             return cand
+    pinned = anchor.upstream_root()
+    if pinned is not None and (pinned / UPSTREAM_REL).is_file():
+        return pinned / UPSTREAM_REL
     return None
 
 
@@ -250,9 +270,9 @@ def cmd_check(require: bool) -> int:
     if src is None:
         if require:
             print(
-                "  transport-stats-surface FAIL -- required, and no zenoh-stats"
-                " source was found (set WZ_ZENOH_SRC, or keep a checkout at"
-                " ~/zenoh-ref).",
+                f"  transport-stats-surface FAIL -- required, and no zenoh-stats"
+                f" source at {PIN} was found (set WZ_ZENOH_SRC to a checkout of"
+                f" {PIN}; a checkout of another release is passed over).",
                 file=sys.stderr,
             )
             return 1
@@ -264,6 +284,9 @@ def cmd_check(require: bool) -> int:
         return 0
     wz = REPO_ROOT / WZ_STATS_REL
     rc, report = grade(src.read_text(encoding="utf-8"), wz.read_text(encoding="utf-8"))
+    # Which release was read is part of the verdict: a green over another
+    # release's surface is the failure item 718 was opened over.
+    report.append(f"  transport-stats-surface: upstream read at {PIN}")
     for line in report:
         print(line, file=sys.stderr if rc else sys.stdout)
     return rc
@@ -361,11 +384,43 @@ def cmd_selftest() -> int:
         if not ok:
             failures += 1
         print(f"  [{'ok' if ok else 'FAIL'}] rc={rc} want={want}  {label}")
+
+    # Open-debt item 718 -- the resolver takes a hand-kept checkout only when it
+    # declares PIN. Both arms, since one arm cannot place the boundary: the same
+    # tree is taken at PIN and passed over at another release. The real
+    # resolver may still answer with this machine's pinned checkout in the
+    # second arm, so the arm asks only whether the FIXTURE was taken.
+    arms = ((PIN, True), ("9.9.8", False))
+    with tempfile.TemporaryDirectory() as scratch:
+        for version, taken in arms:
+            root = pathlib.Path(scratch) / f"zenoh-checkout-{version}"
+            (root / UPSTREAM_REL).parent.mkdir(parents=True, exist_ok=True)
+            (root / UPSTREAM_REL).write_text("// fixture\n")
+            (root / "Cargo.toml").write_text(
+                f'[workspace.package]\nversion = "{version}"\n'
+            )
+            saved = os.environ.get("WZ_ZENOH_SRC")
+            os.environ["WZ_ZENOH_SRC"] = str(root)
+            try:
+                got = upstream_source()
+            finally:
+                if saved is None:
+                    os.environ.pop("WZ_ZENOH_SRC", None)
+                else:
+                    os.environ["WZ_ZENOH_SRC"] = saved
+            ok = (got == root / UPSTREAM_REL) == taken
+            if not ok:
+                failures += 1
+            which = "PIN" if taken else "another release"
+            verdict = "taken" if taken else "passed over"
+            print(f"  [{'ok' if ok else 'FAIL'}] a hand-kept checkout at {which} "
+                  f"is {verdict}")
     if failures:
         print(f"  transport-stats-surface selftest FAIL -- {failures} case(s)",
               file=sys.stderr)
         return 1
-    print(f"  transport-stats-surface selftest: {len(cases)} case(s) all as expected")
+    print(f"  transport-stats-surface selftest: {len(cases) + len(arms)} case(s)"
+          " all as expected")
     return 0
 
 
