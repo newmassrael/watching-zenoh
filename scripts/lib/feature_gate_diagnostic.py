@@ -464,7 +464,11 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "adminspace-core",
             "adminspace-introspection-handlers",
             "adminspace-plugins-handlers",
-            "adminspace-router-linkstate",
+            # `adminspace-router-linkstate` LEAVES this list by the route the runtime's row
+            # records for it (R2684): the text of a region's graph became
+            # `adminspace::single_hop_graph_text`, a `pub fn` under a simple cfg that the
+            # runtime crate calls, so the feature gates a public path here and the probe
+            # derived off the module tree is its decision.
             # The core's fixed backing, forwarded as the shells forward it: a selector that
             # gates nothing in this package.
             "session-slot",
