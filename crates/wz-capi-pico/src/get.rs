@@ -1012,21 +1012,15 @@ fn get_options(
     // pre-y321 comment said the opposite ("it sets the wire ext and nothing
     // else"), which was true then and is retracted now. MONOTONIC is the one
     // mode that deliberately diverges from pico — see the module doc.
-    let resolved = if consolidation == Z_CONSOLIDATION_MODE_AUTO {
-        if parameters_has_time_selector(&parameters) {
-            Z_CONSOLIDATION_MODE_NONE
-        } else {
-            Z_CONSOLIDATION_MODE_LATEST
-        }
-    } else {
-        consolidation
-    };
-    match resolved {
-        Z_CONSOLIDATION_MODE_NONE => opts = opts.with_consolidation(ConsolidationMode::None),
-        Z_CONSOLIDATION_MODE_MONOTONIC => {
-            opts = opts.with_consolidation(ConsolidationMode::Monotonic)
-        }
-        Z_CONSOLIDATION_MODE_LATEST => opts = opts.with_consolidation(ConsolidationMode::Latest),
+    //
+    // The rule is `ConsolidationMode::resolve_auto_on`, the one the Rust API
+    // resolves by; what is pico's here is only the READING of the time range
+    // (`parameters_has_time_selector`, an unanchored `_z_strstr`).
+    let requested = match consolidation {
+        Z_CONSOLIDATION_MODE_AUTO => Some(None),
+        Z_CONSOLIDATION_MODE_NONE => Some(Some(ConsolidationMode::None)),
+        Z_CONSOLIDATION_MODE_MONOTONIC => Some(Some(ConsolidationMode::Monotonic)),
+        Z_CONSOLIDATION_MODE_LATEST => Some(Some(ConsolidationMode::Latest)),
         // Out of pico's enum (a caller writing a raw int). NAMED DIVERGENCE,
         // stated precisely because an earlier comment here got its own citation
         // backwards: pico's encode predicate is `_consolidation !=
@@ -1037,7 +1031,13 @@ fn get_options(
         // `ConsolidationMode` is a closed enum with no raw arm, so it emits no
         // Q_C at all. Garbage in, so not worth an upstream raw-byte escape
         // hatch; named rather than silently "conservative".
-        _ => {}
+        _ => None,
+    };
+    if let Some(requested) = requested {
+        opts = opts.with_consolidation(ConsolidationMode::resolve_auto_on(
+            requested,
+            parameters_has_time_selector(&parameters),
+        ));
     }
 
     if !parameters.is_empty() {
@@ -2090,5 +2090,94 @@ mod tests {
         assert!(parameters_has_time_selector(b"xx_time=1"));
         // ...but a `_time` without the `=` is not the key.
         assert!(!parameters_has_time_selector(b"_time"));
+    }
+
+    /// The consolidation an AUTO `z_get` is given, for `parameters`.
+    fn auto_get_consolidation(parameters: &str) -> Option<ConsolidationMode> {
+        get_options(
+            Z_QUERY_TARGET_BEST_MATCHING,
+            Z_CONSOLIDATION_MODE_AUTO,
+            parameters.as_bytes().to_vec(),
+            0,
+            None,
+            None,
+            PicoQueryQos::defaults(),
+            PicoQueryValueMeta::default(),
+        )
+        .consolidation
+    }
+
+    /// The C ABI and the Rust API resolve AUTO by ONE rule: on every selector
+    /// both upstreams read alike, a default `z_get` is given the mode the Rust
+    /// API's `resolve_auto` gives. They part only where the two READINGS of a
+    /// time range part, and those inputs are pinned to pico's answer, so a
+    /// change to the rule moves both paths and a change to either reading is
+    /// seen here.
+    #[test]
+    fn auto_resolves_by_the_rust_apis_rule_and_differs_only_by_picos_reading() {
+        for parameters in [
+            "",
+            "a=1",
+            "_max=5;_anyke",
+            "_time=[now(-1h)..now()]",
+            "a=1;_time=[..]",
+            "_timeout=5",
+        ] {
+            assert_eq!(
+                auto_get_consolidation(parameters),
+                Some(ConsolidationMode::resolve_auto(None, parameters)),
+                "{parameters:?}: the C ABI and the Rust API must agree"
+            );
+        }
+        // pico's unanchored `_z_strstr` matches inside another key, and does not
+        // match a key with no `=`; zenoh's key match does the opposite.
+        assert_eq!(
+            auto_get_consolidation("xx_time=1"),
+            Some(ConsolidationMode::None)
+        );
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "xx_time=1"),
+            ConsolidationMode::Latest
+        );
+        assert_eq!(
+            auto_get_consolidation("_time"),
+            Some(ConsolidationMode::Latest)
+        );
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "_time"),
+            ConsolidationMode::None
+        );
+    }
+
+    /// A named mode is kept, even under a time range, and a value outside
+    /// pico's enum names no mode at all.
+    #[test]
+    fn a_named_consolidation_is_kept_and_a_raw_one_names_none() {
+        let named = |mode, parameters: &str| {
+            get_options(
+                Z_QUERY_TARGET_BEST_MATCHING,
+                mode,
+                parameters.as_bytes().to_vec(),
+                0,
+                None,
+                None,
+                PicoQueryQos::defaults(),
+                PicoQueryValueMeta::default(),
+            )
+            .consolidation
+        };
+        assert_eq!(
+            named(Z_CONSOLIDATION_MODE_MONOTONIC, "_time=[..]"),
+            Some(ConsolidationMode::Monotonic)
+        );
+        assert_eq!(
+            named(Z_CONSOLIDATION_MODE_LATEST, "_time=[..]"),
+            Some(ConsolidationMode::Latest)
+        );
+        assert_eq!(
+            named(Z_CONSOLIDATION_MODE_NONE, ""),
+            Some(ConsolidationMode::None)
+        );
+        assert_eq!(named(7, ""), None);
     }
 }
