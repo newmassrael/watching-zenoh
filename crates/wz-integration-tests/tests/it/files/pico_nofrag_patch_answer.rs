@@ -34,8 +34,9 @@ use std::time::Duration;
 use wz_capture::Dissection;
 use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, zenoh_pico_nofrag_cli_binary,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    zenoh_pico_nofrag_cli_binary,
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Side};
 use wz_session_core::extpatch::{patch_of_entry, peer_patch, PatchLevel, CURRENT_PATCH, NO_PATCH};
@@ -58,6 +59,7 @@ struct Handshake {
 /// Relay one `z_put` from `z_put` to a listening `wz-ap-demo` and read both Init messages back.
 fn relayed_handshake(z_put: &Path, key: &str) -> Handshake {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let demo_stderr = tempfile::tempfile().expect("tempfile for demo stderr");
     let (mut demo_guard, mut demo_reader, wz_port) = spawn_on_ephemeral_port(
         &demo,

@@ -67,7 +67,8 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
-    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    assert_demo_binary_newer_than_sources, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// Run a fresh one-shot pico `z_get` on `<root>/plugins/**` and return its stdout
@@ -209,6 +210,7 @@ impl StorageHost {
 /// Start `wz-ap-demo --storage-host` on a fresh port and read its admin root off its
 /// readiness line.
 fn start_storage_host(demo: &Path) -> StorageHost {
+    assert_demo_binary_newer_than_sources(demo);
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());
     let h_stderr = tempfile::tempfile().expect("tempfile for storage-host stderr");

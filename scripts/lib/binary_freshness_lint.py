@@ -228,7 +228,13 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # single-net peer forwarder took this number to 218; the call went into `spawn`,
 # where all four legs of that file resolve the demo, so the new leg and the three
 # older ones left the carried bucket at once. 218 measured, 214 after.
-CARRIED_SUBJECT = 214
+# 218 -> 213 (R4502), the same placement four times over. Four legs entered
+# after R3845 with no call and no gate graded them, because hosted C0 stopped
+# at Layer 0 on every run between: both legs of `pico_nofrag_patch_answer.rs`
+# (call in `relayed_handshake`), the QUIC mixed-reliability leg, and the
+# hot-reload volume leg, whose call went into `start_storage_host`, where the
+# file's state-flip leg resolves the demo too. 218 measured, 213 after.
+CARRIED_SUBJECT = 213
 # 24 -> 25 (item 900): `wz_client_and_multicast_peer_sessions_in_one_process_zenohd.rs`
 # reaches `wz-ap-demo` only through `spawn_zenohd*`, whose readiness probe execs
 # it; the sessions under test are in the test process, so the demo is the probe

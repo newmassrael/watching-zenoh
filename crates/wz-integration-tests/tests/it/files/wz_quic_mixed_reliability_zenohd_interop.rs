@@ -33,8 +33,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_zenohd_quic_dialer,
-    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, spawn_zenohd_quic_dialer, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -63,6 +64,7 @@ impl Drop for TempFiles {
 #[ignore = "binary-dep e2e (wz-ap-demo --features quic + zenohd + zenoh-pico z_put); runs via --ignored"]
 fn wz_quic_mixed_reliability_acceptor_outlives_the_lease_via_zenohd() {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let z_put = zenoh_pico_cli_binary("z_put");
 
     let (cert_pem, key_pem) = localhost_cert_key_pem();
