@@ -1179,7 +1179,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # where a stock pico client adds a volume, mounts a storage on it and deletes the volume, and
 # reads the cascade back through the status sub-tree (`adminspace-config-hotreload wz->pico`):
 # 1 test x 1 atom = 1. Counted from the diff, not yet measured.
-FOREIGN_ADJUDICATOR_LINKS = 1094
+# QUIC mixed reliability -- 1094 -> 1095, RISING by one: the new
+# `wz_quic_mixed_reliability_zenohd_interop.rs`, where a stock zenohd dials a wz acceptor with
+# `mixed_rel=1`, holds the pair idle past wz's lease and still delivers a pico put to wz's
+# subscriber, so wz's companion keepalives are adjudicated by zenohd's own companion lease
+# (`transport-link-quic zenohd->wz`): 1 test x 1 atom = 1. Measured by
+# `audit-crossimpl-proof.sh` (`measured 1095, declared 1094`).
+FOREIGN_ADJUDICATOR_LINKS = 1095
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
