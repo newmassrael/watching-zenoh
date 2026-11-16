@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4496 (no register item) -- a multi-process test asserts only on a process
+"""R4499 (no register item) -- a multi-process test asserts only on a process
 it has waited on.
 
 The item this answers, open-debt item 657, lives in the agent-memory half of the
