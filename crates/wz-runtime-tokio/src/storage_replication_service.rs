@@ -225,6 +225,43 @@ impl DigestPublisher {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         Session<R, T, Unicast>: Clone + Send + 'static,
     {
+        Self::spawn_on_aligned_by(
+            handle,
+            session,
+            state,
+            config,
+            local_zid,
+            wall_clock_unix_ms,
+        )
+    }
+
+    /// [`Self::spawn_on`] with the wall-clock reading that aligns the first
+    /// cycle supplied by the caller.
+    ///
+    /// `FnOnce` is the property, not a convenience: the fleet's interval
+    /// boundaries are read from the wall clock exactly once, before the first
+    /// cycle, and every later period is kept by the closing sleep on the
+    /// monotonic clock (zenoh core.rs:161-191 splits the two clocks for the
+    /// same reason). A wall-clock step after start-up therefore cannot
+    /// re-align a running publisher, and a change that re-read the reading
+    /// each cycle would have to change this signature to do it.
+    pub fn spawn_on_aligned_by<R, T, B, W>(
+        handle: tokio::runtime::Handle,
+        session: &Session<R, T, Unicast>,
+        state: Arc<Mutex<StorageState<B>>>,
+        config: ReplicationConfig,
+        local_zid: Vec<u8>,
+        wall_now_unix_ms: W,
+    ) -> Self
+    where
+        R: SessionRuntime + 'static,
+        T: TimeSource + Send + Sync + 'static,
+        B: StorageBackend + Send + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+        W: FnOnce() -> u64 + Send + 'static,
+    {
         let session = session.clone();
         let clock = Arc::clone(session.clock());
         // R2801 — held WEAKLY, for the reason the garbage collector gives
@@ -242,7 +279,7 @@ impl DigestPublisher {
             // period is maintained by the closing sleep below, so the schedule
             // never re-reads a clock that could have been stepped.
             clock
-                .sleep(config.alignment_delay_ms(wall_clock_unix_ms()))
+                .sleep(config.alignment_delay_ms(wall_now_unix_ms()))
                 .await;
 
             let mut jitter = JitterSequence::for_replica(&local_zid);
@@ -765,6 +802,18 @@ mod tests {
     /// before the values.
     #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
     async fn publication_offsets_ms(config: &ReplicationConfig, count: usize) -> Vec<u64> {
+        publication_offsets_aligned_by(config, count, wall_clock_unix_ms).await
+    }
+
+    /// [`publication_offsets_ms`] with the alignment reading supplied, so the
+    /// first cycle's start is known exactly rather than bounded by the real
+    /// wall clock.
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+    async fn publication_offsets_aligned_by(
+        config: &ReplicationConfig,
+        count: usize,
+        wall_now_unix_ms: impl FnOnce() -> u64 + Send + 'static,
+    ) -> Vec<u64> {
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
@@ -805,12 +854,13 @@ mod tests {
         // the reader believes it advanced 600 virtual seconds.
         // A clone: the publisher holds the storage weakly (R2801), so `state`
         // stays alive here as the storage's owner would.
-        let publisher = DigestPublisher::spawn_on(
+        let publisher = DigestPublisher::spawn_on_aligned_by(
             tokio::runtime::Handle::current(),
             &session,
             Arc::clone(&state),
             config.clone(),
             zid,
+            wall_now_unix_ms,
         );
 
         // Virtual time, so this budget costs no wall-clock; it is the
@@ -926,6 +976,47 @@ mod tests {
              propagation wait and jitter: {span} is not within {jitter_bound} \
              of 10000 (dropping the subtraction measured 12651 here, eight \
              jitter-widths away). offsets: {offsets:?}"
+        );
+    }
+
+    /// The wall clock places the FIRST cycle and nothing after it.
+    ///
+    /// Two publishers differ only in the wall-clock reading they align by
+    /// (7 ms and 13 ms before the next interval boundary). Every digest of the
+    /// second lands exactly 6 ms after the matching digest of the first, and
+    /// each digest of the first lands at the instant the schedule derives:
+    /// `alignment + k * interval + propagation + jitter_k`, with the jitter
+    /// drawn from the same per-replica sequence the publisher uses. A
+    /// publisher that re-aligned on a later reading, or kept its period on the
+    /// wall clock, would break the constant shift or the derived instants.
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+    #[tokio::test(start_paused = true)]
+    async fn the_wall_clock_aligns_only_the_first_cycle() {
+        let config = ReplicationConfig::new("demo/**", None, 1_000, 5, 6, 30, 100);
+        let boundary = 1_700_000_000_000u64;
+        let early = publication_offsets_aligned_by(&config, 4, move || boundary - 7).await;
+        let late = publication_offsets_aligned_by(&config, 4, move || boundary - 13).await;
+        assert_eq!(early.len(), 4, "four digests are observed: {early:?}");
+        assert_eq!(late.len(), 4, "four digests are observed: {late:?}");
+
+        let mut jitter = JitterSequence::for_replica(&[0x01]);
+        let derived: Vec<u64> = (0..4u64)
+            .map(|k| {
+                7 + k * config.interval_ms()
+                    + config.propagation_delay_ms()
+                    + config.publication_delay_ms(jitter.next_draw())
+            })
+            .collect();
+        assert_eq!(
+            early, derived,
+            "each digest lands where the reading taken at spawn places it"
+        );
+        let shifts: Vec<u64> = late.iter().zip(&early).map(|(l, e)| l - e).collect();
+        assert_eq!(
+            shifts,
+            vec![6; 4],
+            "a different reading moves every cycle by the same amount and \
+             nothing else: early {early:?}, late {late:?}"
         );
     }
 }
