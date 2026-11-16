@@ -14387,7 +14387,7 @@ layer_c1bf_cargo_clippy_all_features() {
     }
     _c1bf_clippy() {
         local crate label args_line started ran=0
-        local -a args failed=()
+        local -a args failed_sets=()
         # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
         while read -r crate label args_line; do
             [[ -n "$crate" ]] || continue
@@ -14397,7 +14397,7 @@ layer_c1bf_cargo_clippy_all_features() {
             # selectors the set declares (`clippy-targets`).
             if ! (cd crates && cargo clippy -p "$crate" "${args[@]}" \
                 --quiet -- -D warnings); then
-                failed+=("$crate ($label)")
+                failed_sets+=("$crate ($label)")
             fi
             echo "  C1bf cost: $crate $label $((SECONDS - started))"
             ran=$((ran + 1))
@@ -14406,9 +14406,9 @@ layer_c1bf_cargo_clippy_all_features() {
             echo "  C1bf FAIL: shard $shard of $shards ran no configuration"
             return 1
         fi
-        if [[ ${#failed[@]} -gt 0 ]]; then
-            echo "  C1bf FAIL: ${#failed[@]} of $ran configuration(s) do not pass clippy -D warnings:"
-            printf '    - %s\n' "${failed[@]}"
+        if [[ ${#failed_sets[@]} -gt 0 ]]; then
+            echo "  C1bf FAIL: ${#failed_sets[@]} of $ran configuration(s) do not pass clippy -D warnings:"
+            printf '    - %s\n' "${failed_sets[@]}"
             return 1
         fi
         echo "  C1bf: $ran configuration(s) of shard $shard of $shards clippied, at the targets each declares"
