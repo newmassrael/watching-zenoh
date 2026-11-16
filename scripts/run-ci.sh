@@ -5505,6 +5505,61 @@ EOF
         return 1
     fi
 
+    # A KILLED INSTALL SAYS WHETHER BYTES ARRIVED (open-debt items 317 and 354).
+    # Run 32225317455 was killed at 900s while its log showed `Get:` lines still
+    # arriving, and the message called it an outage. Two arms, one stand-in: it
+    # writes 4096 bytes into `partial/` and hangs (a slow mirror), or hangs
+    # having written nothing (one that sends nothing). Each kill must name its
+    # own case, and the step's last line must give the archive's byte total.
+    local slow_dir slow_env slow_err slow_stub
+    slow_dir="$(mktemp -d)"
+    slow_env="$(mktemp)"
+    slow_err="$(mktemp)"
+    slow_stub="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$archives' '$dirty_dir' '$warm_dir' '$slow_dir'; rm -f '$argv_log' '$stub' '$marker' '$ghenv' '$warm_calls' '$slow_env' '$slow_err' '$slow_stub'" RETURN
+    cat >"$slow_stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    update) exit 0 ;;
+    install)
+      if [[ -n "${WZ_STUB_BYTES:-}" ]]; then
+        head -c "$WZ_STUB_BYTES" /dev/zero >"$WZ_TEST_ARCHIVES/partial/slow.deb"
+      fi
+      sleep 30 ;;
+  esac
+done
+exit 0
+EOF
+    chmod +x "$slow_stub"
+    local bytes want_kill
+    for bytes in 4096 ""; do
+        rm -rf "${slow_dir:?}"/*
+        : >"$slow_env"
+        if WZ_STUB_BYTES="$bytes" WZ_TEST_ARCHIVES="$slow_dir" GITHUB_ENV="$slow_env" \
+            WZ_APT_ARCHIVES="$slow_dir" WZ_APT_CMD="$slow_stub" WZ_APT_DEADLINE=2 \
+            WZ_APT_KILL_AFTER=1 bash "$script" cmake >/dev/null 2>"$slow_err"; then
+            echo "  Layer C0g FAIL: an install killed by its deadline was reported as" \
+                "success on the byte-count arm" >&2
+            return 1
+        fi
+        want_kill="NO BYTES ARRIVED"
+        [[ -n "$bytes" ]] && want_kill="SLOW, NOT AN OUTAGE: ${bytes} bytes arrived"
+        if ! grep -q "$want_kill" "$slow_err"; then
+            echo "  Layer C0g FAIL: a kill after ${bytes:-no} bytes did not say" \
+                "'${want_kill}'. A slow mirror read as an outage sends the reader to" \
+                "the mirror instead of the ceiling (run 32225317455)" >&2
+            return 1
+        fi
+        if ! grep -q "the archive holds ${bytes:-0} bytes (${bytes:-0} of them in partial/)" \
+            "$slow_err"; then
+            echo "  Layer C0g FAIL: the step did not print the archive's byte total" \
+                "(${bytes:-0}), so no run says whether a cold archive is converging" >&2
+            return 1
+        fi
+    done
+
     # AND THE CEILING MUST BE THE ONLY ROAD. A bounded script that half the
     # workflow routes around bounds half the workflow, and the next apt step
     # anyone adds will be written the way the thirteen that were here already

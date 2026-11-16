@@ -209,7 +209,23 @@ wz_apt_compose() {
 # a failed `update` is a note about the index the install then used. Emitting
 # `::error::` for both would put a red annotation on a job that went green, and
 # this workspace reads annotations.
+#
+# THE KILL SAYS WHETHER BYTES ARRIVED (open-debt item 317). The message used to
+# call every kill "a package-mirror outage", and run 32225317455 was killed at
+# 900s with a log showing steady `Get:` lines: a mirror that was answering,
+# slowly. An install that fetches into an archive directory is called with
+# `--archive DIR PRIV`, and the archive's byte total is read before and after
+# the call: bytes that arrived mean the mirror was answering and the ceiling
+# was too short for it; none mean it sent nothing. `update` writes the index,
+# not the archive, so it has nothing to count and its kill says so rather than
+# guessing.
 wz_apt_bounded() {
+    local archive="" priv=""
+    if [[ "${1:-}" == "--archive" ]]; then
+        archive="$2"
+        priv="$3"
+        shift 3
+    fi
     local severity="$1"
     local what="$2"
     local deadline="$3"
@@ -218,6 +234,11 @@ wz_apt_bounded() {
     while IFS= read -r word; do
         argv+=("$word")
     done < <(wz_apt_compose "${deadline}" "$@")
+    local before_bytes=0
+    if [[ -n "${archive}" ]]; then
+        before_bytes="$(wz_apt_archive_bytes "${archive}" "${priv}")"
+    fi
+    local began="${SECONDS}"
     local rc=0
     "${argv[@]}" || rc=$?
     # The caller reads WHY it failed, because a refusal is worth another attempt and a
@@ -230,14 +251,45 @@ wz_apt_bounded() {
     # refusing, and send the reader to apt's output to look for a reason that is
     # not there.
     if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
-        cat >&2 <<EOF
-::${severity}::apt: ${what} did not finish within ${deadline}s and was killed.
-This is a package-mirror outage, NOT a lane in this repository being slow. Left
-unbounded it would have kept retrying until this job hit its timeout-minutes and
-was reported \`cancelled\` — the shape run 32160845314 took on three jobs at
-once, where an unreachable azure.archive.ubuntu.com burned twenty-nine minutes
-per job. Re-run the job; if it recurs, the mirror is down.
+        local elapsed=$((SECONDS - began))
+        echo "::${severity}::apt: ${what} did not finish within ${deadline}s and was" \
+            "killed after ${elapsed}s." >&2
+        if [[ -z "${archive}" ]]; then
+            cat >&2 <<EOF
+No archive was measured for this call (an \`update\` writes the package index,
+not the archive, and a run with no archive directory has none), so this does not
+say whether the mirror was unreachable or answering too slowly for ${deadline}s.
+apt's own lines above do: \`Ign:\` and \`Err:\` with no \`Get:\` is a mirror that
+does not answer; \`Get:\` lines that keep arriving are a slow one. Left unbounded
+either would have run until this job hit its timeout-minutes and was reported
+\`cancelled\`, the shape run 32160845314 took on three jobs at once.
 EOF
+            return 1
+        fi
+        local after_bytes grew rate hidden=""
+        after_bytes="$(wz_apt_archive_bytes "${archive}" "${priv}")"
+        grew=$((after_bytes - before_bytes))
+        rate=$((grew / (elapsed > 0 ? elapsed : 1) / 1024))
+        if wz_apt_partial_hidden "${archive}"; then
+            hidden=" (at least: partial/ could not be read, so the file apt was fetching is not counted)"
+        fi
+        echo "apt: the archive held ${before_bytes} bytes before this call and" \
+            "${after_bytes} after it${hidden}." >&2
+        if [[ "${grew}" -gt 0 ]]; then
+            cat >&2 <<EOF
+SLOW, NOT AN OUTAGE: ${grew} bytes arrived in ${elapsed}s (about ${rate} kB/s), so
+the mirror was answering and ${deadline}s was too short for it at that rate. The
+bytes are kept: the archive is saved for the next run, which resumes from them.
+If apt's lines above end in \`Fetched ...\` the fetch had finished and the time
+went to unpacking, which is dpkg and not the mirror.
+EOF
+        else
+            cat >&2 <<EOF
+NO BYTES ARRIVED in ${elapsed}s: the mirror sent nothing this call could count.
+That is an unreachable or stalled mirror, not a lane in this repository being
+slow. Re-run the job; if it recurs, the mirror is down.
+EOF
+        fi
         return 1
     fi
     if [[ "${rc}" -ne 0 ]]; then
@@ -276,14 +328,57 @@ wz_apt_archive_holds_debs() {
 #
 # `GITHUB_ENV` is how a step hands a variable to the steps after it; absent (a
 # developer's machine, the test lane's default) this does nothing at all.
+#
+# It also prints the archive's byte total against the one the step began with
+# (open-debt item 354). A cold archive that cannot be filled in one run is
+# filled across several, and only a number per run says whether it is
+# converging (each run adds bytes) or stuck (each run starts where the last
+# one did); the bytes still in `partial/` are the download a kill cut off.
 wz_apt_mark_dirty() {
     local dir="$1" before="$2"
-    [[ -n "${dir}" && -n "${GITHUB_ENV:-}" ]] || return 0
+    [[ -n "${dir}" ]] || return 0
     local after
     after="$(wz_apt_fingerprint "${dir}")"
+    local began now pending
+    began="$(wz_apt_fingerprint_bytes "${before}")"
+    now="$(wz_apt_fingerprint_bytes "${after}")"
+    pending="$(wz_apt_fingerprint_bytes "${after}" "partial/")"
+    echo "::notice::apt: the archive holds ${now} bytes (${pending} of them in" \
+        "partial/), ${began} when this step began: $((now - began)) this run." >&2
+    [[ -n "${GITHUB_ENV:-}" ]] || return 0
     if [[ "${after}" != "${before}" ]]; then
         echo "WZ_APT_CACHE_DIRTY=true" >>"${GITHUB_ENV}"
     fi
+}
+
+# The bytes a fingerprint lists, or only those under the path prefix `$2`.
+wz_apt_fingerprint_bytes() {
+    local total=0 size path
+    while read -r size path; do
+        if [[ "${size}" =~ ^[0-9]+$ && "${path}" == "${2:-}"* ]]; then
+            total=$((total + size))
+        fi
+    done <<<"$1"
+    echo "${total}"
+}
+
+# The archive's byte total right now, `partial/` included. apt hands
+# `partial/` to `_apt` at mode 0700, so the runner user cannot list it while
+# apt owns it; the directory is handed back first, the same repair the cache
+# save needs, and then read with an unprivileged `find`. Off a runner nothing
+# is root's and the hand-back changes nothing.
+wz_apt_archive_bytes() {
+    local dir="$1" priv="${2:-}"
+    wz_apt_hand_back "${dir}" "${priv}"
+    wz_apt_fingerprint_bytes "$(wz_apt_fingerprint "${dir}")"
+}
+
+# Whether `partial/` exists and still cannot be read after the hand-back, in
+# which case a byte total is a lower bound.
+wz_apt_partial_hidden() {
+    local partial="$1/partial"
+    [[ -d "${partial}" ]] || return 1
+    [[ ! -r "${partial}" || ! -x "${partial}" ]]
 }
 
 # Hand the archive directory back to the user the workflow runs as.
@@ -431,6 +526,10 @@ wz_apt_install() {
             echo "::warning::apt: could not create ${archives}/partial," \
                 "so this install uses apt's default archive directory and will" \
                 "not be cached. Not fatal; the packages still install." >&2
+            # apt was not pointed there, so nothing below may read it as the
+            # archive: a byte count of a directory apt never wrote would report
+            # every kill as "no bytes arrived".
+            archives=""
         fi
     fi
     # Two ceilings, not one. `update` fetches indices and makes no progress at
@@ -542,8 +641,11 @@ wz_apt_install() {
     # WZ_APT_INSTALL_ATTEMPTS, and a second refusal fails the step by name exactly
     # as the first would have -- there is no arm where a package is quietly absent.
     local attempt=1 installed=0
+    # What a killed install reports: the archive's growth, when there is one.
+    local measure=()
+    [[ -n "${archives}" ]] && measure=(--archive "${archives}" "${priv}")
     while :; do
-        if wz_apt_bounded "error" "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
+        if wz_apt_bounded "${measure[@]}" "error" "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
             "${apt[@]}" "${opts[@]}" install -y --no-install-recommends "$@"; then
             installed=1
             break
