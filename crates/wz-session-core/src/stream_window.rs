@@ -268,6 +268,34 @@ impl<C: Carry> RxWindow<C> {
         F: FnMut(&[u8]),
     {
         while !bytes.is_empty() {
+            let used = self.push_frame(bytes, width, on_frame)?;
+            bytes = &bytes[used..];
+        }
+        Ok(())
+    }
+
+    /// Consume `bytes` up to the end of the first frame that completes in them, calling `on_frame`
+    /// for that frame alone, and return how many bytes were consumed (all of them when no frame
+    /// completes).
+    ///
+    /// [`RxWindow::push`] cuts every frame `bytes` holds with one `width`. A reader whose width
+    /// can change between two frames of the same delivery needs this instead: a lowlatency link's
+    /// last handshake frame and first data frame can arrive in one read, and the width of the
+    /// second is known only once the first has been handled. Calling this once per frame, with the
+    /// width read just before, is the sized reader's rule (the width is fixed when the frame
+    /// starts) for bytes the reader did not size. A zero-length batch completes no frame, so the
+    /// bytes after it are cut in the same call.
+    pub fn push_frame<F>(
+        &mut self,
+        mut bytes: &[u8],
+        width: usize,
+        on_frame: &mut F,
+    ) -> Result<usize, WindowError>
+    where
+        F: FnMut(&[u8]),
+    {
+        let total = bytes.len();
+        while !bytes.is_empty() {
             match self.state {
                 State::Between => {
                     self.state = State::Prefix {
@@ -312,9 +340,8 @@ impl<C: Carry> RxWindow<C> {
                     if have == 0 && bytes.len() >= want {
                         // Whole inside this push: lend it.
                         on_frame(&bytes[..want]);
-                        bytes = &bytes[want..];
                         self.state = State::Between;
-                        continue;
+                        return Ok(total - bytes.len() + want);
                     }
                     if have == 0 && !self.carry.begin(want) {
                         self.reset();
@@ -331,10 +358,11 @@ impl<C: Carry> RxWindow<C> {
                     on_frame(self.carry.bytes());
                     self.carry.release();
                     self.state = State::Between;
+                    return Ok(total - bytes.len());
                 }
             }
         }
-        Ok(())
+        Ok(total)
     }
 }
 
@@ -536,6 +564,58 @@ mod tests {
             .unwrap();
         assert_eq!(seen, 1);
         assert!(window.between_frames());
+    }
+
+    /// One delivery holding a two-byte-prefix frame and then a four-byte-prefix one is cut right
+    /// when the width is given per frame: `push_frame` stops after the first frame and says how far
+    /// it read, so the second is cut at the width given for it. A zero-length batch completes no
+    /// frame, so the call that meets one cuts on to the frame after it.
+    #[test]
+    fn push_frame_stops_after_one_frame_so_the_next_can_take_another_width() {
+        let mut bytes = std::vec![2u8, 0, b'h', b's'];
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"lean");
+        let mut window = RxWindow::<FixedCarry<8>>::new();
+        let mut seen = Vec::new();
+
+        let used = window
+            .push_frame(&bytes, 2, &mut |f: &[u8]| seen.push(f.to_vec()))
+            .unwrap();
+        assert_eq!(used, 4, "the first frame and nothing after it");
+        assert_eq!(seen, std::vec![b"hs".to_vec()]);
+        assert!(window.between_frames());
+
+        let used = window
+            .push_frame(&bytes[4..], 4, &mut |f: &[u8]| seen.push(f.to_vec()))
+            .unwrap();
+        assert_eq!(used, 8, "the lean frame, cut at its own width");
+        assert_eq!(seen, std::vec![b"hs".to_vec(), b"lean".to_vec()]);
+
+        // The same delivery through `push` takes one width for both, and the lean prefix's low
+        // half is read as a two-byte length: the frame never arrives whole.
+        let mut window = RxWindow::<FixedCarry<8>>::new();
+        let mut once = Vec::new();
+        window
+            .push(&bytes, 2, &mut |f: &[u8]| once.push(f.to_vec()))
+            .unwrap();
+        assert_ne!(once, std::vec![b"hs".to_vec(), b"lean".to_vec()]);
+
+        // A zero-length batch, then a frame: one call, one frame, every byte consumed.
+        let wire = [0u8, 0, 1, 0, b'z'];
+        let mut window = RxWindow::<FixedCarry<8>>::new();
+        let mut got = Vec::new();
+        let used = window
+            .push_frame(&wire, 2, &mut |f: &[u8]| got.push(f.to_vec()))
+            .unwrap();
+        assert_eq!((used, got), (5, std::vec![b"z".to_vec()]));
+
+        // Bytes that complete no frame are all consumed and carried.
+        let mut window = RxWindow::<FixedCarry<8>>::new();
+        let used = window
+            .push_frame(&wire[2..4], 2, &mut |_: &[u8]| unreachable!())
+            .unwrap();
+        assert_eq!(used, 2);
+        assert!(!window.between_frames());
     }
 
     /// The width is read when a prefix starts: a flip to the wider prefix between two pushes does

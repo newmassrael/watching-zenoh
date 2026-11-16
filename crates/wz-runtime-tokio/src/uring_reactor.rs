@@ -176,9 +176,12 @@ const RING_ENTRIES: u32 = 256;
 
 /// What the worker hands a link for one of its completions.
 enum Delivery {
-    /// The frames that ENDED inside one completion, in wire order. May be
-    /// EMPTY: a completion carrying only part of a frame ends none. Each is a
-    /// range of the completion's slot unless it was assembled across reads.
+    /// A stream completion's bytes, uncut. The link cuts them ([`StreamCut`])
+    /// one frame per [`UringRx::poll_event`], because the prefix width of a
+    /// frame is known only once the session has handled the frame before it.
+    Bytes(Arc<LinkRxFrame>),
+    /// A datagram completion's frame, as a range of its slot. EMPTY when the
+    /// datagram was refused as truncated.
     Frames(Vec<RxBytes>),
     /// The link ended, and why.
     Lost(LostCause),
@@ -186,10 +189,11 @@ enum Delivery {
 
 /// The rule a link's completions are cut into frames by, fixed at attach (see
 /// the module's "Two framings").
+#[derive(Clone, Copy)]
 enum Framing {
-    /// Length-prefixed frames over a byte stream, the prefix width following
-    /// the link's own `lowlatency` flag.
-    Stream { lowlatency: Arc<AtomicBool> },
+    /// Length-prefixed frames over a byte stream, cut by the link
+    /// ([`StreamCut`]), not by the worker.
+    Stream,
     /// One datagram per completion, one frame per datagram.
     Datagram,
 }
@@ -353,16 +357,21 @@ impl UringReactor {
     /// hosted Layer C1bn stops at the `--lib` target and that target was red
     /// for an unrelated reason.
     ///
-    /// The width is now re-derived where [`crate::link_rx_window::RxWindow`]
-    /// already admits one, at a frame boundary, which is `poll_framed`'s rule
-    /// stated for a reader whose reads the kernel sizes.
+    /// The width is read when a frame starts, and a frame starts when the
+    /// session asks for it: the worker hands the link a completion uncut and
+    /// [`UringRx::poll_event`] cuts one frame per call ([`StreamCut`]). That is
+    /// `poll_framed`'s rule exactly, and it holds when one completion carries
+    /// the handshake's last frame and the first lean one: the flag flips while
+    /// the session handles the first, before the second is cut. A worker that
+    /// cut a whole completion at one width read both frames on the 2-byte
+    /// prefix.
     ///
     /// The fd is BORROWED, not owned: the caller's reader half keeps it open,
     /// and the returned [`UringRx`] must not outlive it. That is the same
     /// contract `crate::uring::FixedSlotRing::read_framed` has and it is
     /// upheld the same way — by the driver owning both.
     pub fn attach(&self, fd: RawFd, lowlatency: Arc<AtomicBool>) -> io::Result<UringRx> {
-        self.attach_framed(fd, Framing::Stream { lowlatency }, None)
+        self.attach_framed(fd, Framing::Stream, None, Some(StreamCut::new(lowlatency)))
     }
 
     /// Take a CONNECTED datagram socket's `fd` on, and hand back the read body
@@ -381,7 +390,7 @@ impl UringReactor {
     ///
     /// The fd is BORROWED, under the contract [`Self::attach`] states.
     pub fn attach_datagram(&self, fd: RawFd, peer: SocketAddr) -> io::Result<UringRx> {
-        self.attach_framed(fd, Framing::Datagram, Some(peer))
+        self.attach_framed(fd, Framing::Datagram, Some(peer), None)
     }
 
     fn attach_framed(
@@ -389,6 +398,7 @@ impl UringReactor {
         fd: RawFd,
         framing: Framing,
         src: Option<SocketAddr>,
+        stream: Option<StreamCut>,
     ) -> io::Result<UringRx> {
         let id = self
             .next_id
@@ -406,6 +416,7 @@ impl UringReactor {
             wake: Arc::clone(&self.wake),
             frames,
             src,
+            stream,
             pending: VecDeque::new(),
             armed: false,
             lost: None,
@@ -453,7 +464,11 @@ pub struct UringRx {
     /// datagram socket is connected to, `None` for a stream link, whose frames
     /// carry no source as `crate::poll_framed`'s do not.
     src: Option<SocketAddr>,
-    /// Frames one completion carried that the session has not asked for yet.
+    /// A stream link's cut: its window, its width flag and the completion it
+    /// is cutting. `None` for a datagram link, whose completions arrive cut.
+    stream: Option<StreamCut>,
+    /// Frames a datagram completion carried that the session has not asked
+    /// for yet.
     ///
     /// Bounded BY THE PROTOCOL rather than by a capacity: one read is armed at
     /// a time and the next is armed only once this is empty, so it holds at
@@ -482,10 +497,14 @@ impl UringRx {
     pub async fn poll_event(&mut self) -> LinkEvent {
         loop {
             if let Some(bytes) = self.pending.pop_front() {
-                return LinkEvent::Rx(match self.src {
-                    Some(src) => RxFrame::with_src(bytes, src),
-                    None => RxFrame::new(bytes),
-                });
+                return self.event(bytes);
+            }
+            if let Some(cut) = self.stream.as_mut() {
+                match cut.next_frame() {
+                    Ok(Some(bytes)) => return self.event(bytes),
+                    Ok(None) => {}
+                    Err(cause) => self.lost = Some(cause),
+                }
             }
             if let Some(cause) = self.lost {
                 return LinkEvent::Lost { cause };
@@ -501,6 +520,14 @@ impl UringRx {
                 self.armed = true;
             }
             match self.frames.recv().await {
+                Some(Delivery::Bytes(slot)) => {
+                    self.armed = false;
+                    // Only a stream link is attached with the framing the
+                    // worker answers with uncut bytes.
+                    if let Some(cut) = self.stream.as_mut() {
+                        cut.hold(slot);
+                    }
+                }
                 Some(Delivery::Frames(frames)) => {
                     self.armed = false;
                     self.pending.extend(frames);
@@ -514,11 +541,91 @@ impl UringRx {
         }
     }
 
+    fn event(&self, bytes: RxBytes) -> LinkEvent {
+        LinkEvent::Rx(match self.src {
+            Some(src) => RxFrame::with_src(bytes, src),
+            None => RxFrame::new(bytes),
+        })
+    }
+
     fn ask(&self) -> io::Result<()> {
         self.cmds
             .send(Cmd::Read { id: self.id })
             .map_err(|_| io::Error::other("the uring reactor's worker has stopped"))?;
         self.wake.wake()
+    }
+}
+
+/// What cutting a byte stream into frames carries from one frame to the next,
+/// on the link's side of the channel.
+///
+/// The cut is here and not in the worker because the worker sees a completion
+/// once, while the width of each frame in it is a fact only the session can
+/// settle, by handling the frame before. Cutting one frame per
+/// [`UringRx::poll_event`] reads the width at the instant `crate::poll_framed`
+/// reads it.
+struct StreamCut {
+    /// The link's negotiated-transport flag, read when each frame starts.
+    lowlatency: Arc<AtomicBool>,
+    /// The frame boundaries ACROSS completions.
+    window: RxWindow,
+    /// The completion being cut, and how many of its bytes the window has
+    /// consumed. Dropped the moment it is consumed, so the slot goes home when
+    /// the last frame cut from it drops, and a read is armed only once it is
+    /// gone.
+    held: Option<(Arc<LinkRxFrame>, usize)>,
+}
+
+impl StreamCut {
+    fn new(lowlatency: Arc<AtomicBool>) -> Self {
+        Self {
+            lowlatency,
+            window: RxWindow::new(),
+            held: None,
+        }
+    }
+
+    fn hold(&mut self, slot: Arc<LinkRxFrame>) {
+        self.held = Some((slot, 0));
+    }
+
+    /// The next frame of the held completion, cut at the width the flag names
+    /// now; `None` when the completion ends without completing one (what is
+    /// left of a frame is in the window's carry).
+    ///
+    /// A frame lying whole in the completion is a range of its slot; one the
+    /// window assembled across completions is copied out of the carry, since
+    /// it lies in no one slot. An oversize length prefix loses the link with
+    /// the cause `crate::poll_framed` gives it.
+    fn next_frame(&mut self) -> Result<Option<RxBytes>, LostCause> {
+        let Some((slot, mut at)) = self.held.take() else {
+            return Ok(None);
+        };
+        let whole: &[u8] = AsRef::<[u8]>::as_ref(&*slot);
+        let (base, len) = (whole.as_ptr() as usize, whole.len());
+        let mut cut: Option<RxBytes> = None;
+        while cut.is_none() && at < len {
+            let width = crate::prefix_width(self.lowlatency.load(Ordering::Acquire));
+            let mut collect = |payload: &[u8]| {
+                let start = (payload.as_ptr() as usize).wrapping_sub(base);
+                let lent = start < len && payload.len() <= len - start;
+                cut = Some(if lent {
+                    let storage: Arc<dyn RxStorage> = slot.clone();
+                    RxBytes::shared(storage, start..start + payload.len())
+                        .expect("a payload inside the slot is a range of it")
+                } else {
+                    RxBytes::from(payload.to_vec())
+                });
+            };
+            at += self
+                .window
+                .push_frame(&whole[at..], width, &mut collect)
+                .map_err(|_| LostCause::PeerClosed)?;
+        }
+        if at < len {
+            self.held = Some((slot, at));
+        }
+        Ok(cut)
     }
 }
 
@@ -533,49 +640,9 @@ impl Drop for UringRx {
 /// One attached link, as the worker sees it.
 struct LinkCtx {
     fd: RawFd,
-    /// How this link's completions are cut into frames.
-    cut: Cut,
+    /// How this link's completions are handed up.
+    framing: Framing,
     deliver: frame_chan::UnboundedSender<Delivery>,
-}
-
-/// The worker's state for the rule a link was attached with ([`Framing`]).
-enum Cut {
-    Stream(StreamCut),
-    /// A datagram completion is whole, so there is nothing to carry between
-    /// completions.
-    Datagram,
-}
-
-/// What cutting a byte stream into frames carries from one completion to the
-/// next.
-struct StreamCut {
-    /// R2755 — the prefix width's SOURCE, not the width. See
-    /// [`UringReactor::attach`] for what freezing it cost.
-    lowlatency: Arc<AtomicBool>,
-    /// The width in force for the frame currently being assembled.
-    ///
-    /// Carried rather than recomputed per push because a prefix that is
-    /// already half-read must not widen underneath the window:
-    /// [`deliver_completion`] re-derives it only when
-    /// [`RxWindow::between_frames`] says the window is between frames.
-    width: usize,
-    /// The frame boundaries ACROSS completions. This is the state that makes a
-    /// reader which does not size its reads possible at all, and it lives here
-    /// because the worker is what sees every completion for this link.
-    window: RxWindow,
-}
-
-impl Cut {
-    fn new(framing: Framing) -> Self {
-        match framing {
-            Framing::Stream { lowlatency } => Self::Stream(StreamCut {
-                width: crate::prefix_width(lowlatency.load(Ordering::Acquire)),
-                lowlatency,
-                window: RxWindow::new(),
-            }),
-            Framing::Datagram => Self::Datagram,
-        }
-    }
 }
 
 /// One read the kernel has been given and has not answered yet.
@@ -631,7 +698,7 @@ fn run_worker(mut ring: FixedSlotRing, wake: Arc<WakeFd>, cmds: cmd_chan::Receiv
                         id,
                         LinkCtx {
                             fd,
-                            cut: Cut::new(framing),
+                            framing,
                             deliver,
                         },
                     );
@@ -730,7 +797,7 @@ fn run_worker(mut ring: FixedSlotRing, wake: Arc<WakeFd>, cmds: cmd_chan::Receiv
                 // A cancellation's own completion says nothing about a link:
                 // the read it named reports itself, with `-ECANCELED`.
                 FixedSlotRing::CANCEL_KEY => {}
-                key => deliver_completion(&mut inflight, &mut links, key, completion.result),
+                key => deliver_completion(&mut inflight, &links, key, completion.result),
             }
         }
     }
@@ -801,7 +868,7 @@ fn arm_read(
 /// Route one read completion to the link that asked for it.
 fn deliver_completion(
     inflight: &mut HashMap<u64, InFlight>,
-    links: &mut HashMap<u64, LinkCtx>,
+    links: &HashMap<u64, LinkCtx>,
     key: u64,
     result: i32,
 ) {
@@ -816,7 +883,7 @@ fn deliver_completion(
     let Some(link) = entry.link else {
         return; // detached while its read was in flight
     };
-    let Some(ctx) = links.get_mut(&link) else {
+    let Some(ctx) = links.get(&link) else {
         return;
     };
     // The delivery is built to completion BEFORE it is sent, and the function
@@ -826,7 +893,7 @@ fn deliver_completion(
     // last range of it drops. Sending from inside the function that holds the
     // slot made "the slot is home" depend on whether the worker thread had been
     // scheduled again since the send.
-    let delivery = completion_delivery(entry.frame, result, ctx);
+    let delivery = completion_delivery(entry.frame, result, ctx.framing);
     let _ = ctx.deliver.send(delivery);
 }
 
@@ -837,14 +904,14 @@ fn deliver_completion(
 /// are cut from -- is released before its caller can send anything. The only
 /// handles left on the slot are the ranges inside the returned delivery (none
 /// at all for a lost link, whose slot is home on return).
-fn completion_delivery(frame: LinkRxFrame, result: i32, ctx: &mut LinkCtx) -> Delivery {
+fn completion_delivery(frame: LinkRxFrame, result: i32, framing: Framing) -> Delivery {
     if result < 0 {
         return Delivery::Lost(LostCause::OsError);
     }
     let n = result as usize;
-    match &mut ctx.cut {
-        Cut::Stream(cut) => stream_delivery(frame, n, cut),
-        Cut::Datagram => datagram_delivery(frame, n),
+    match framing {
+        Framing::Stream => stream_delivery(frame, n),
+        Framing::Datagram => datagram_delivery(frame, n),
     }
 }
 
@@ -871,8 +938,9 @@ fn datagram_delivery(mut frame: LinkRxFrame, n: usize) -> Delivery {
     Delivery::Frames(vec![bytes])
 }
 
-/// One byte-stream read: the frames that ended inside it, cut by the window.
-fn stream_delivery(mut frame: LinkRxFrame, n: usize, cut: &mut StreamCut) -> Delivery {
+/// One byte-stream read: its bytes, uncut, for the link to cut as it is asked
+/// for frames ([`StreamCut`]).
+fn stream_delivery(mut frame: LinkRxFrame, n: usize) -> Delivery {
     if n == 0 {
         // EOF. Between frames it is a clean close; anywhere else the peer cut a
         // frame in half — and both lose the link, which is what
@@ -883,52 +951,9 @@ fn stream_delivery(mut frame: LinkRxFrame, n: usize, cut: &mut StreamCut) -> Del
     // R3037 -- THE COMPLETION EDGE, on the row where the bus master is real: the
     // kernel's completion for this read was reaped above, so it has finished
     // writing the slot, and everything handed up from here only reads it.
-    let frame = frame.complete();
-    // R2971 — the completion's slot is handed up WITH the frames that lie in
-    // it: each one is a range of the slot, and the slot goes home when the last
-    // of them drops. Only a frame the window assembled across completions is
-    // copied, out of the window's own carry, because that one does not lie in
-    // this slot at all. `RxWindow::push` passes a whole-in-this-read frame as a
-    // subslice of what it was given, so "is this payload inside the slot" is
-    // the test, and it is a pointer comparison rather than a claim.
-    let slot = Arc::new(frame);
-    let whole: &[u8] = AsRef::<[u8]>::as_ref(&*slot);
-    let (base, len) = (whole.as_ptr() as usize, whole.len());
-    let mut frames: Vec<RxBytes> = Vec::new();
-    let mut collect = |payload: &[u8]| {
-        let start = (payload.as_ptr() as usize).wrapping_sub(base);
-        let lent = start < len && payload.len() <= len - start;
-        frames.push(if lent {
-            let storage: Arc<dyn RxStorage> = slot.clone();
-            RxBytes::shared(storage, start..start + payload.len())
-                .expect("a payload inside the slot is a range of it")
-        } else {
-            RxBytes::from(payload.to_vec())
-        });
-    };
-    // R2755 — RE-DERIVE THE WIDTH AT A FRAME BOUNDARY, and only there. This is
-    // `crate::poll_framed`'s rule ("the width is fixed HERE, at frame start, so
-    // a flag flip cannot widen a prefix that is already half-read") stated for
-    // a reader whose reads the kernel sizes: `between_frames` is the window's
-    // own answer to "could the stream end here without truncating a frame",
-    // which is the same instant.
-    //
-    // ⚠ A completion can carry the LAST universal frame and the FIRST lean one
-    // together, and this reads the flag once for the whole push. That window is
-    // the handshake's final frame and the session's first data frame arriving
-    // in one read, which needs the peer to have written both before either was
-    // reaped; upstream avoids it by dispatching to the ring only after the
-    // transport is established. Recorded rather than claimed closed.
-    if cut.window.between_frames() {
-        cut.width = crate::prefix_width(cut.lowlatency.load(Ordering::Acquire));
-    }
-    match cut.window.push(whole, cut.width, &mut collect) {
-        Ok(()) => Delivery::Frames(frames),
-        // An oversize length prefix. `crate::poll_framed` answers a prefix
-        // naming more than a frame may hold with `Lost { PeerClosed }`, and
-        // the two bodies must agree about what a link means.
-        Err(_) => Delivery::Lost(LostCause::PeerClosed),
-    }
+    // The frames cut from it are ranges of this slot, and the slot goes home
+    // when the last of them drops.
+    Delivery::Bytes(Arc::new(frame.complete()))
 }
 
 /// R2748 — ⚠ these tests each REGISTER THE WHOLE POOL, like `crate::uring`'s
@@ -1095,26 +1120,20 @@ mod tests {
     /// range dropped" and "the slot is home" were two instants whose gap was
     /// the scheduler's. Here the building function runs on this thread, so the
     /// instant after it returns is the instant a link may see the delivery, and
-    /// the arena is read at exactly that point: the ranges inside the delivery
-    /// are the only holders (one slot out), a lost link's slot is already home,
-    /// and dropping the ranges brings the last one back.
+    /// the arena is read at exactly that point: the completion inside the
+    /// delivery is the only holder (one slot out), a lost link's slot is
+    /// already home, and the frames the link cuts from the completion are then
+    /// the slot's only holders, the last of them bringing it back.
     ///
     /// The control is a handle that outlives the function (a leaked clone of
-    /// the slot's `Arc`, or a frame held past its return): the count stays one
-    /// short and this reds on the line naming which delivery it was.
+    /// the slot's `Arc`, or a frame held past its return), or a cut that keeps
+    /// a consumed completion: the count stays one short and this reds on the
+    /// line naming which holder it was.
     #[test]
     fn a_built_delivery_leaves_the_worker_holding_nothing_on_its_slot() {
         use crate::session_rx_pool_ap::SLOT_COUNT;
 
         let arena = LinkRxArena::new();
-        let (deliver, _frames) = frame_chan::unbounded_channel();
-        let mut ctx = LinkCtx {
-            fd: -1,
-            cut: Cut::new(Framing::Stream {
-                lowlatency: universal(),
-            }),
-            deliver,
-        };
         let mut taker = arena.clone();
         let mut filled = |wire: &[u8]| {
             let mut frame = taker.take(SLOT_SIZE);
@@ -1125,37 +1144,44 @@ mod tests {
 
         let mut wire = framed(b"alpha");
         wire.extend_from_slice(&framed(b"beta"));
-        let Delivery::Frames(ranges) =
-            completion_delivery(filled(&wire), wire.len() as i32, &mut ctx)
+        let Delivery::Bytes(slot) =
+            completion_delivery(filled(&wire), wire.len() as i32, Framing::Stream)
         else {
-            panic!("two whole frames are a delivery of frames");
+            panic!("a stream completion is delivered as its bytes");
         };
-        assert_eq!(ranges.len(), 2);
         assert_eq!(
             arena.free_slots(),
             SLOT_COUNT - 1,
-            "the ranges are the slot's only holders"
+            "the delivered completion is the slot's only holder"
         );
-        drop(ranges);
+
+        let mut cut = StreamCut::new(universal());
+        cut.hold(slot);
+        let alpha = cut.next_frame().expect("no oversize prefix");
+        let beta = cut.next_frame().expect("no oversize prefix");
+        assert_eq!(alpha.as_ref().map(|b| b.as_slice()), Some(&b"alpha"[..]));
+        assert_eq!(beta.as_ref().map(|b| b.as_slice()), Some(&b"beta"[..]));
+        assert!(
+            cut.held.is_none(),
+            "a consumed completion is let go with the frame that consumed it"
+        );
+        assert!(matches!(cut.next_frame(), Ok(None)));
+        drop(alpha);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT - 1,
+            "the second frame still holds the slot"
+        );
+        drop(beta);
         assert_eq!(
             arena.free_slots(),
             SLOT_COUNT,
             "the last range is gone, so the slot is home"
         );
 
-        // The three arms that lose the link hand up no range of the slot.
-        let oversize = (u16::MAX as u32 + 1).to_le_bytes();
-        let Cut::Stream(cut) = &mut ctx.cut else {
-            unreachable!("the link was attached as a stream");
-        };
-        cut.lowlatency.store(true, Ordering::Release);
-        cut.width = crate::prefix_width(true);
-        for (what, wire, result) in [
-            ("a read error", &[][..], -5),
-            ("an end of stream", &[][..], 0),
-            ("an oversize prefix", &oversize[..], 4),
-        ] {
-            let delivery = completion_delivery(filled(wire), result, &mut ctx);
+        // The two arms that lose the link in the worker hand up no slot.
+        for (what, result) in [("a read error", -5), ("an end of stream", 0)] {
+            let delivery = completion_delivery(filled(&[]), result, Framing::Stream);
             assert!(
                 matches!(delivery, Delivery::Lost(_)),
                 "{what} loses the link"
@@ -1166,6 +1192,69 @@ mod tests {
                 "{what}: the slot is home before the delivery is sent"
             );
         }
+
+        // The arm that loses the link in the cut lets its completion go too.
+        let oversize = (u16::MAX as u32 + 1).to_le_bytes();
+        let Delivery::Bytes(slot) = completion_delivery(filled(&oversize), 4, Framing::Stream)
+        else {
+            panic!("a stream completion is delivered as its bytes");
+        };
+        let mut cut = StreamCut::new(Arc::new(AtomicBool::new(true)));
+        cut.hold(slot);
+        assert!(matches!(cut.next_frame(), Err(LostCause::PeerClosed)));
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT,
+            "an oversize prefix: the slot is home once the link is lost"
+        );
+    }
+
+    /// ONE COMPLETION CARRYING THE HANDSHAKE'S LAST FRAME AND THE FIRST LEAN
+    /// ONE is cut at each frame's own width.
+    ///
+    /// The flag flips while the session handles the first frame, which is
+    /// after the completion arrived and before the second frame is asked for.
+    /// A cut of the whole completion at the width in force when it arrived
+    /// reads the lean frame's 4-byte prefix as a 2-byte length.
+    ///
+    /// CONTROL: read the width once per held completion (in `hold`) rather
+    /// than per `next_frame`, and the second frame is not `lean`.
+    #[test]
+    fn one_completion_holding_a_universal_and_a_lean_frame_cuts_each_at_its_width() {
+        let arena = LinkRxArena::new();
+        let mut taker = arena.clone();
+        let mut frame = taker.take(SLOT_SIZE);
+        assert!(frame.is_pooled(), "a fresh table lends a slot");
+        let mut wire = framed(b"handshake");
+        wire.extend_from_slice(&4u32.to_le_bytes());
+        wire.extend_from_slice(b"lean");
+        frame.as_mut()[..wire.len()].copy_from_slice(&wire);
+        let Delivery::Bytes(slot) = completion_delivery(frame, wire.len() as i32, Framing::Stream)
+        else {
+            panic!("a stream completion is delivered as its bytes");
+        };
+
+        let lowlatency = universal();
+        let mut cut = StreamCut::new(Arc::clone(&lowlatency));
+        cut.hold(slot);
+        let first = cut.next_frame().expect("no oversize prefix");
+        assert_eq!(
+            first.as_ref().map(|b| b.as_slice()),
+            Some(&b"handshake"[..])
+        );
+
+        // Established: the session is lean from the next frame on.
+        lowlatency.store(true, Ordering::Release);
+        let second = cut.next_frame().expect("no oversize prefix");
+        assert_eq!(
+            second.as_ref().map(|b| b.as_slice()),
+            Some(&b"lean"[..]),
+            "the second frame of the completion is cut at the width in force when it starts"
+        );
+        assert!(
+            second.is_some_and(|b| b.is_shared()),
+            "a frame whole in the completion is a range of its slot"
+        );
     }
 
     /// A DATAGRAM COMPLETION IS ONE FRAME, whatever its first bytes would say
@@ -1178,19 +1267,13 @@ mod tests {
     /// frame and holds no slot. A read that fills the whole slot is a truncated
     /// datagram: no frame, slot home. A failed read loses the link.
     ///
-    /// CONTROL: route `Cut::Datagram` to `stream_delivery` and the first
-    /// assertion reds with two-byte frame `xy`.
+    /// CONTROL: route `Framing::Datagram` to `stream_delivery` and the first
+    /// match reds: the completion comes back uncut, as stream bytes.
     #[test]
     fn a_built_datagram_delivery_is_the_whole_datagram_as_one_frame() {
         use crate::session_rx_pool_ap::SLOT_COUNT;
 
         let arena = LinkRxArena::new();
-        let (deliver, _frames) = frame_chan::unbounded_channel();
-        let mut ctx = LinkCtx {
-            fd: -1,
-            cut: Cut::new(Framing::Datagram),
-            deliver,
-        };
         let mut taker = arena.clone();
         let mut filled = |wire: &[u8]| {
             let mut frame = taker.take(SLOT_SIZE);
@@ -1201,7 +1284,7 @@ mod tests {
 
         let datagram = [0x02u8, 0x00, b'x', b'y', b'z'];
         let Delivery::Frames(frames) =
-            completion_delivery(filled(&datagram), datagram.len() as i32, &mut ctx)
+            completion_delivery(filled(&datagram), datagram.len() as i32, Framing::Datagram)
         else {
             panic!("a datagram is a delivery of frames");
         };
@@ -1212,7 +1295,8 @@ mod tests {
         drop(frames);
         assert_eq!(arena.free_slots(), SLOT_COUNT, "the slot is home");
 
-        let Delivery::Frames(frames) = completion_delivery(filled(&[]), 0, &mut ctx) else {
+        let Delivery::Frames(frames) = completion_delivery(filled(&[]), 0, Framing::Datagram)
+        else {
             panic!("an empty datagram is not the end of a datagram socket");
         };
         assert_eq!(frames.len(), 1, "an empty datagram is one frame");
@@ -1223,7 +1307,8 @@ mod tests {
             "an empty frame holds no slot"
         );
 
-        let Delivery::Frames(frames) = completion_delivery(filled(&[]), SLOT_SIZE as i32, &mut ctx)
+        let Delivery::Frames(frames) =
+            completion_delivery(filled(&[]), SLOT_SIZE as i32, Framing::Datagram)
         else {
             panic!("a truncated datagram is refused, not a lost link");
         };
@@ -1234,7 +1319,7 @@ mod tests {
         assert_eq!(arena.free_slots(), SLOT_COUNT, "the refused slot is home");
 
         assert!(matches!(
-            completion_delivery(filled(&[]), -111, &mut ctx),
+            completion_delivery(filled(&[]), -111, Framing::Datagram),
             Delivery::Lost(LostCause::OsError)
         ));
         assert_eq!(arena.free_slots(), SLOT_COUNT);
@@ -1403,7 +1488,7 @@ mod tests {
 
     /// A frame SPLIT ACROSS TWO COMPLETIONS arrives on the second.
     ///
-    /// The window lives in the worker and survives a completion, which is what
+    /// The window lives in the link and survives a completion, which is what
     /// makes a reader that does not size its reads possible at all. The control
     /// is a window rebuilt per completion: the second half is then read as a
     /// fresh length prefix and the payload never arrives.
@@ -1487,16 +1572,14 @@ mod tests {
     /// flag said during the handshake, so the second frame here was cut at the
     /// wrong offset and no payload ever arrived.
     ///
-    /// ⚠ THE TWO FRAMES ARE IN SEPARATE COMPLETIONS BY CONSTRUCTION — the
-    /// first is read before the second is written — because the flip is only
-    /// honoured at a frame boundary and a single completion carrying both
-    /// would be read at one width. That is the residual `attach`'s doc states;
-    /// this test is deliberately NOT written to hide it.
+    /// The two frames are in separate completions here (the first is read
+    /// before the second is written);
+    /// [`a_width_flip_between_two_frames_of_one_completion_is_honoured`] is the
+    /// same flip inside one completion.
     ///
-    /// CONTROL: take the width at attach again (or drop the `between_frames`
-    /// re-read in the worker) and the second `poll_event` never yields
-    /// `b"lean"` — the 2-byte prefix reads the lean frame's low half as a
-    /// length.
+    /// CONTROL: take the width at attach again and the second `poll_event`
+    /// never yields `b"lean"` — the 2-byte prefix reads the lean frame's low
+    /// half as a length.
     #[tokio::test]
     async fn a_width_flip_at_a_frame_boundary_is_honoured() {
         let arena = LinkRxArena::new();
@@ -1525,6 +1608,45 @@ mod tests {
             payload_of(within(rx.poll_event()).await),
             lean,
             "the width must follow the flag at a frame boundary"
+        );
+
+        drop(rx);
+        drop((wr, rd));
+    }
+
+    /// A WIDTH FLIP BETWEEN TWO FRAMES OF ONE COMPLETION IS HONOURED.
+    ///
+    /// The handshake's last frame and the first lean frame are written in one
+    /// write before the link is polled, so one completion carries both, which
+    /// is the peer having written both before this side reaped either. The
+    /// flag flips after the first frame is handed up, as the open helper flips
+    /// it after the handshake returns.
+    ///
+    /// CONTROL: cut the whole completion when it arrives (in the worker, or in
+    /// `StreamCut::hold`) and the second `poll_event` is not `b"lean"`.
+    #[tokio::test]
+    async fn a_width_flip_between_two_frames_of_one_completion_is_honoured() {
+        let arena = LinkRxArena::new();
+        let reactor = UringReactor::start(arena.clone()).expect("a reactor");
+        let lowlatency = universal();
+
+        let (rd, mut wr) = std::io::pipe().expect("pipe");
+        let lean = b"lean";
+        let mut wire = framed(b"handshake");
+        wire.extend_from_slice(&(lean.len() as u32).to_le_bytes());
+        wire.extend_from_slice(lean);
+        wr.write_all(&wire)
+            .expect("one write, so one read can carry both");
+
+        let mut rx = reactor
+            .attach(rd.as_raw_fd(), Arc::clone(&lowlatency))
+            .expect("attach");
+        assert_eq!(payload_of(within(rx.poll_event()).await), b"handshake");
+        lowlatency.store(true, Ordering::Release);
+        assert_eq!(
+            payload_of(within(rx.poll_event()).await),
+            lean,
+            "the second frame of one completion is cut at the width in force when it starts"
         );
 
         drop(rx);
