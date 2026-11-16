@@ -58,7 +58,11 @@ round with this lint green. libtest's rule is plain: a test runs when its full
 name (`mod::path::fn`) contains ANY filter and no `--skip` word. In a merged
 target the full name is `files::<file>::<path>` and `wz_test_args`' third word
 reaches libtest as `files::<file>::<word>`, so the filter is read back with
-that prefix. The module path of each test is walked from the file with string
+that prefix; with no third word the filter is `files::<file>::` alone, the
+whole file, as no filter at all is every test of a target of its own. A word
+written after `--` reaches libtest bare, beside that file filter, and widens
+the run to other files of the target, so it puts the guard out of scope. The
+module path of each test is walked from the file with string
 literals blanked, and a walk that disagrees with the attribute census puts the
 guard out of scope rather than publishing a count from it. A filter the shell
 assembles (a variable, a quote) stays out of scope.
@@ -290,6 +294,18 @@ def skip_words(toks: list[str], start: int) -> list[str]:
     return [toks[i + 1] for i in range(start, len(toks) - 1) if toks[i] == "--skip"]
 
 
+def filter_sides(toks: list[str], start: int) -> tuple[list[str], list[str]]:
+    """The positional filter words from `start` onward, split at the standalone
+    `--`: `(written before it, written after it)`.
+
+    The two sides reach libtest the same way, but in a merged target only the
+    word before `--` is the one `wz_test_args` puts behind `files::<file>::`; a
+    word after it arrives bare, beside that file filter.
+    """
+    end = toks.index("--", start) if "--" in toks[start:] else len(toks)
+    return libtest_selection(toks[:end], start)[1], libtest_selection(toks, end)[1]
+
+
 MOD_OPEN_RE = re.compile(r"\bmod\s+([A-Za-z_]\w*)\s*\{")
 FN_NAME_RE = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
 
@@ -361,9 +377,15 @@ def substring_selection(
     `merged_stem` is the file's name when it is compiled into a merged target,
     where every test's full name starts `files::<stem>::` and the file's own
     filter word reaches libtest with that prefix in front of it.
+
+    `filters` are the words written before the command's `--`, which is where
+    `wz_test_args` puts the file's test word. With none, libtest runs every
+    test, and a merged target still gets `files::<stem>::` alone, which selects
+    the whole file: either way the empty filter list is one empty word, never
+    an empty selection.
     """
     prefix = f"files::{merged_stem}::" if merged_stem else ""
-    wanted = [prefix + f for f in filters]
+    wanted = [prefix + f for f in filters] or [prefix]
     n = 0
     for inner, ignored in paths:
         if ignored != ignored_run:
@@ -636,12 +658,32 @@ def _substring_selection_selftest() -> None:
         (["shm"], ["witness"], False, None, 2),
         (["shm"], [], False, "f", 2),
         (["other", "inner"], [], False, None, 3),
+        # No filter word, only `--skip`: every test of the file is the base the
+        # skips narrow, in a target of its own and behind `files::<file>::`.
+        ([], ["witness"], False, None, 3),
+        ([], ["witness"], False, "f", 3),
+        ([], ["shm_mod"], False, "f", 3),
+        ([], [], True, "f", 1),
+        ([], ["shm"], True, None, 0),
     ]
     for filters, skips, ignored_run, stem, want in cases:
         got = substring_selection(paths, filters, skips, ignored_run, stem)
         assert got == want, (
             f"count-guard lint: filters {filters} skip {skips} ignored={ignored_run} "
             f"merged={stem} select {got}, expected {want}"
+        )
+    sides = [
+        # A `wz_test_args` file with no test word and two skips after `--`.
+        ("env A=b cargo test -p c --test f -- --ignored --skip x --skip y", ([], [])),
+        ("cargo test -p c --test f w --quiet -- --ignored z --skip x", (["w"], ["z"])),
+        ("cargo test -p c --test f w --quiet", (["w"], [])),
+    ]
+    for line, want_sides in sides:
+        toks = line.split()
+        got_sides = filter_sides(toks, toks.index("--test") + 2)
+        assert got_sides == want_sides, (
+            f"count-guard lint: `{line}` splits its filters as {got_sides}, "
+            f"expected {want_sides}"
         )
 
 
@@ -845,10 +887,27 @@ def main() -> int:
                 )
                 continue
             merged_stem = path.stem if path.parent.name == "files" else None
+            before, after = filter_sides(toks, toks.index("--test") + 2)
+            # libtest runs a test whose name contains ANY filter, so a bare word
+            # beside `files::<file>::` widens the run to the other files of the
+            # target instead of narrowing this one: no count of this file is
+            # the run's count.
+            if merged_stem and after:
+                note(
+                    out_of_scope,
+                    f"{where}: {binary} — `{' '.join(after)}` after `--` reaches "
+                    f"libtest beside `files::{merged_stem}::`, so the run takes "
+                    f"any test of the target whose name holds it",
+                )
+                continue
             got = substring_selection(
-                paths, filters, skips, "--ignored" in toks, merged_stem
+                paths,
+                before if merged_stem else before + after,
+                skips,
+                "--ignored" in toks,
+                merged_stem,
             )
-            sel = " ".join(filters) + (f" --skip {' '.join(skips)}" if skips else "")
+            sel = " ".join(filters + ([f"--skip {' '.join(skips)}"] if skips else []))
             note(in_scope, f"{where}: {binary} {sel} guards {want}, file selects {got}")
             if got != want:
                 failures.append(
