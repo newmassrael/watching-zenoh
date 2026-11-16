@@ -79,6 +79,11 @@ impl Script {
         Arc::new(script)
     }
 
+    /// The next id the script hands out, for every kind it records.
+    fn take_id(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::SeqCst)
+    }
+
     fn event(&self, what: impl Into<String>) {
         self.events.lock().unwrap().push(what.into());
     }
@@ -126,8 +131,8 @@ impl SessionEngine for Script {
     fn now_ms(&self) -> u64 {
         self.now.load(Ordering::SeqCst)
     }
-    fn next_entity_id(&self) -> u64 {
-        self.next.fetch_add(1, Ordering::SeqCst)
+    fn next_entity_id(&self) -> Option<u32> {
+        u32::try_from(self.take_id()).ok()
     }
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         Vec::new()
@@ -155,7 +160,7 @@ impl SessionEngine for Script {
         if self.ids_spent.load(Ordering::SeqCst) {
             return None;
         }
-        let id = self.next_entity_id();
+        let id = self.take_id();
         self.event(format!("declare subscriber {keyexpr}"));
         self.subscriptions
             .lock()
@@ -205,8 +210,8 @@ impl SessionEngine for Script {
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
-    ) -> FilterId {
-        0
+    ) -> Option<FilterId> {
+        Some(0)
     }
     fn write_filter_active(&self, _id: FilterId) -> bool {
         false
@@ -240,7 +245,7 @@ impl SessionEngine for Script {
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
-        let id = self.next_entity_id();
+        let id = self.take_id();
         self.event(format!("declare token {keyexpr}"));
         Some(id)
     }
@@ -254,7 +259,7 @@ impl SessionEngine for Script {
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
-        let id = self.next_entity_id();
+        let id = self.take_id();
         self.event(format!("declare liveliness {keyexpr}"));
         self.liveliness
             .lock()
@@ -298,7 +303,7 @@ impl SessionEngine for Script {
         if self.no_tickers.load(Ordering::SeqCst) {
             return None;
         }
-        let id = self.next_entity_id();
+        let id = self.take_id();
         self.event(format!("start ticker {period_ms}"));
         self.tickers.lock().unwrap().push((id, period_ms, tick));
         Some(id)

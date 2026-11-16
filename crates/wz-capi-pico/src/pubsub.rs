@@ -1223,8 +1223,10 @@ impl PlainPublisher {
         // Interest takes the next, whether or not this build reports the id: pico's
         // `_z_declare_publisher` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
         // `publisher->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before `z_declare_publisher`
-        // creates the filter, and a group the Interest goes to reads the id.
-        let eid = session.engine.next_entity_id();
+        // creates the filter, and a group the Interest goes to reads the id. A session that
+        // has handed out every id refuses the publisher with the code a refused declaration
+        // gets here.
+        let eid = u64::from(session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?);
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // R2962 — the filter is created AFTER the key, because its Interest names
@@ -1235,7 +1237,7 @@ impl PlainPublisher {
             FilterPlane::Subscribers,
             &key,
             declared.counts_local(),
-        );
+        )?;
         let plain = declared
             .apply(&put_options())
             .plain_put_params()

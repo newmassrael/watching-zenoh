@@ -50,9 +50,7 @@ use crate::bytes::{BytesState, Outbound, Payload};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::reply_keyexpr::{parameters_has_anyke, reply_keyexpr_is_covered};
-#[cfg(feature = "router-node")]
-use crate::result::Z_EUNAVAILABLE;
-use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
 use crate::session::{session_handle, SessionHandle};
 use crate::string::view_string_over;
 
@@ -927,7 +925,9 @@ pub(crate) unsafe fn declare_queryable_on(
             SessionHandle::Registry(state) => {
                 // `declare_queryable` is this call with no restriction and the literal wire key,
                 // so a queryable that states no links is declared as it always was.
-                let id = state.shared.declare_queryable_on_links(
+                // A session that has handed out every entity id refuses the queryable with the
+                // code this ABI gives a declaration whose id space is spent.
+                let Some(id) = state.shared.declare_queryable_on_links(
                     ke,
                     WireKey::literal(),
                     complete,
@@ -940,7 +940,9 @@ pub(crate) unsafe fn declare_queryable_on(
                             QueryRoute::Face(face.clone()),
                         )) as Box<_>
                     }),
-                );
+                ) else {
+                    return Z_EUNAVAILABLE;
+                };
                 QueryableHolder::Registry {
                     shared: state.shared.clone(),
                     id,

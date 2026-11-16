@@ -56,6 +56,7 @@ use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
 use crate::prelude::*;
+use crate::result::{ZResult, Z_ERR_GENERIC};
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -136,27 +137,32 @@ impl WriteFilter {
     /// they do for an entity whose destination admits session-local traffic in a build
     /// with the local switch (`vendor/zenoh-pico/src/net/filtering.c` @
     /// `_z_write_filter_session_register`).
+    ///
+    /// Refused with `Z_ERR_GENERIC`, the code a refused declaration gets here, when the session
+    /// has no entity id left for the filter's Interest.
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
         key: &DeclaredKeyexpr,
         count_local: bool,
-    ) -> Self {
+    ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
         // The key goes on the wire as the entity's own declaration: its id and the rest of
         // the key, or the literal when nothing covers it.
         let wire = key.wire(&*shared);
         let ask = interest_form(&shared, session.mode, key, &wire);
         let keyexpr = key.literal().to_owned();
-        let id = shared.declare_write_filter(plane, keyexpr.clone(), &wire, ask, count_local);
-        Self {
+        let id = shared
+            .declare_write_filter(plane, keyexpr.clone(), &wire, ask, count_local)
+            .ok_or(Z_ERR_GENERIC)?;
+        Ok(Self {
             shared,
             id,
             plane,
             keyexpr,
             count_local,
             listeners: Mutex::new(Vec::new()),
-        }
+        })
     }
 
     /// Declare a matching listener on this filter (pico `_z_matching_listener_register` on

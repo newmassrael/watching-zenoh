@@ -854,10 +854,11 @@ impl Engine {
         }
     }
 
-    fn next_entity_id(&self) -> u64 {
+    /// The next entity id, or `None` once the engine has handed out every `u32` one.
+    fn next_entity_id(&self) -> Option<Id> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().next_entity_id(),
-            Engine::Router(router) => router.ids.fetch_add(1, Ordering::Relaxed) + 1,
+            Engine::Router(router) => router.entity_id().ok(),
         }
     }
 
@@ -1189,19 +1190,22 @@ impl Engine {
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
                 // The registry's own door, not the port's: the port has no operation that takes
                 // a set of links, and for no restriction the two declare the same.
-                let id = state.shared.declare_subscriber_on_links(
-                    key.to_owned(),
-                    wire,
-                    tokio_engine::engine_locality(origin),
-                    links,
-                    None,
-                    tokio_engine::subscriber_sink(
-                        callback,
-                        notifier,
-                        #[cfg(feature = "unstable")]
-                        timestamps,
-                    ),
-                );
+                let id = state
+                    .shared
+                    .declare_subscriber_on_links(
+                        key.to_owned(),
+                        wire,
+                        tokio_engine::engine_locality(origin),
+                        links,
+                        None,
+                        tokio_engine::subscriber_sink(
+                            callback,
+                            notifier,
+                            #[cfg(feature = "unstable")]
+                            timestamps,
+                        ),
+                    )
+                    .ok_or_else(|| zerror!("the engine has no entity id left for a subscriber"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a subscriber {id}, which is more than an id holds")
                         .into()
@@ -1262,13 +1266,17 @@ impl Engine {
                 } = publisher;
                 let wire = tokio_engine::wire_key_of(scope, suffix.clone());
                 let ask = tokio_engine::interest_of(scope, suffix, destination);
-                let id = state.shared.as_engine().declare_write_filter(
-                    wz_capi_core::faces::FilterPlane::Subscribers,
-                    key.to_owned(),
-                    &wire,
-                    ask,
-                    destination != Locality::Remote,
-                );
+                let id = state
+                    .shared
+                    .as_engine()
+                    .declare_write_filter(
+                        wz_capi_core::faces::FilterPlane::Subscribers,
+                        key.to_owned(),
+                        &wire,
+                        ask,
+                        destination != Locality::Remote,
+                    )
+                    .ok_or_else(|| zerror!("the engine has no entity id left for a publisher"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a publisher {id}, which is more than an id holds")
                         .into()
@@ -1371,24 +1379,29 @@ impl Engine {
                 });
                 // The registry's own door, not the port's: the port has no operation that takes
                 // a set of links, and for no restriction the two declare the same.
-                Ok(state.shared.declare_port_queryable_on_links(
-                    key.to_owned(),
-                    wire,
-                    complete,
-                    tokio_engine::engine_locality(origin),
-                    links,
-                    None,
-                    tokio_engine::queryable_sink(
-                        callback,
-                        notifier,
-                        zid,
-                        eid,
-                        #[cfg(feature = "unstable")]
-                        timestamps,
-                        #[cfg(all(feature = "unstable", feature = "shared-memory"))]
-                        promotion,
-                    ),
-                ))
+                state
+                    .shared
+                    .declare_port_queryable_on_links(
+                        key.to_owned(),
+                        wire,
+                        complete,
+                        tokio_engine::engine_locality(origin),
+                        links,
+                        None,
+                        tokio_engine::queryable_sink(
+                            callback,
+                            notifier,
+                            zid,
+                            eid,
+                            #[cfg(feature = "unstable")]
+                            timestamps,
+                            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                            promotion,
+                        ),
+                    )
+                    .ok_or_else(|| {
+                        zerror!("the engine has no entity id left for a queryable").into()
+                    })
             }
         }
     }
@@ -1454,15 +1467,19 @@ impl Engine {
                 let ask = tokio_engine::interest_of(scope, suffix, destination);
                 // Which queryables count for the matching of the querier depends on the target
                 // of each query, which the matching slice reads when it asks (slice Z4).
-                let id = state.shared.as_engine().declare_write_filter(
-                    wz_capi_core::faces::FilterPlane::Queryables {
-                        complete_required: false,
-                    },
-                    key.to_owned(),
-                    &wire,
-                    ask,
-                    destination != Locality::Remote,
-                );
+                let id = state
+                    .shared
+                    .as_engine()
+                    .declare_write_filter(
+                        wz_capi_core::faces::FilterPlane::Queryables {
+                            complete_required: false,
+                        },
+                        key.to_owned(),
+                        &wire,
+                        ask,
+                        destination != Locality::Remote,
+                    )
+                    .ok_or_else(|| zerror!("the engine has no entity id left for a querier"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a querier {id}, which is more than an id holds")
                         .into()
@@ -1650,13 +1667,18 @@ impl Engine {
                 let mut options =
                     wz_capi_core::runtime::session::LivelinessSubscriberOptions::default();
                 options.history = history;
-                let id = state.shared.declare_liveliness_subscriber_on_links(
-                    key.to_owned(),
-                    wire,
-                    options,
-                    links,
-                    tokio_engine::liveliness_sink(callback, notifier),
-                );
+                let id = state
+                    .shared
+                    .declare_liveliness_subscriber_on_links(
+                        key.to_owned(),
+                        wire,
+                        options,
+                        links,
+                        tokio_engine::liveliness_sink(callback, notifier),
+                    )
+                    .ok_or_else(|| {
+                        zerror!("the engine has no entity id left for a liveliness subscriber")
+                    })?;
                 Id::try_from(id).map_err(|_| {
                     zerror!(
                         "the engine numbered a liveliness subscriber {id}, which is more than an \
@@ -1754,7 +1776,7 @@ impl Engine {
         match *self {}
     }
 
-    fn next_entity_id(&self) -> u64 {
+    fn next_entity_id(&self) -> Option<Id> {
         match *self {}
     }
 
@@ -4853,8 +4875,10 @@ impl SessionInner {
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
-        let eid = Id::try_from(self.engine.next_entity_id())
-            .map_err(|_| zerror!("the engine has no entity id left for a queryable"))?;
+        let eid = self
+            .engine
+            .next_entity_id()
+            .ok_or_else(|| zerror!("the engine has no entity id left for a queryable"))?;
         let engine_id = self.engine.declare_queryable(QueryableDeclaration {
             key: key_expr.as_str(),
             scope: wire.scope,
@@ -5250,7 +5274,7 @@ impl Session {
     /// Its entities, its callbacks and its closing are its own: what several sessions of a node
     /// share is the node, the identity, the configuration and the clocks.
     pub(crate) fn on(core: RuntimeCore, owns_engine: bool) -> Session {
-        let id = u32::try_from(core.engine.next_entity_id()).unwrap_or(u32::MAX);
+        let id = core.engine.next_entity_id().unwrap_or(u32::MAX);
         #[cfg(feature = "internal")]
         let hlc = core.engine.node_hlc();
         Session(Arc::new(SessionInner {

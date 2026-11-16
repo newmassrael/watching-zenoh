@@ -140,7 +140,7 @@ impl SessionEngine for SharedSession {
         SharedSession::now_ms(self)
     }
 
-    fn next_entity_id(&self) -> u64 {
+    fn next_entity_id(&self) -> Option<wz_session_core::wire_id::EntityId> {
         SharedSession::next_entity_id(self)
     }
 
@@ -221,14 +221,14 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Option<SubId> {
-        Some(SharedSession::declare_subscriber_on_wire(
+        SharedSession::declare_subscriber_on_wire(
             self,
             keyexpr,
             wire,
             allowed_origin,
             retraction,
             sink,
-        ))
+        )
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
@@ -291,7 +291,7 @@ impl SessionEngine for SharedSession {
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
-    ) -> FilterId {
+    ) -> Option<FilterId> {
         SharedSession::declare_write_filter(self, plane, keyexpr, wire, ask, count_local)
     }
 
@@ -344,7 +344,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Option<wz_capi_port::QblId> {
-        Some(self.declare_port_queryable_on_links(
+        self.declare_port_queryable_on_links(
             keyexpr,
             wire,
             complete,
@@ -352,7 +352,7 @@ impl SessionEngine for SharedSession {
             LinkRestriction::Any,
             retraction,
             sink,
-        ))
+        )
     }
 
     #[cfg(feature = "queryable")]
@@ -423,9 +423,7 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        Some(SharedSession::declare_liveliness_subscriber_on_wire(
-            self, keyexpr, wire, options, sink,
-        ))
+        SharedSession::declare_liveliness_subscriber_on_wire(self, keyexpr, wire, options, sink)
     }
 
     #[cfg(feature = "query")]
@@ -528,7 +526,7 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> wz_capi_port::QblId {
+    ) -> Option<wz_capi_port::QblId> {
         // The registry mints a callback per face with the face's own session; the port's
         // callbacks are minted with that session as a `QueryHolder`, beside the node's closed
         // latch, which is what a reply on a kept query checks first.

@@ -2036,13 +2036,15 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         let declared = ke.clone();
         let handle = match &state.host {
             AdvSubHost::Registry(shared) => {
-                let id = shared.declare_liveliness_subscriber(ke, opts, {
+                let Some(id) = shared.declare_liveliness_subscriber(ke, opts, {
                     let closure = Arc::new(cclosure);
                     Arc::new(move || {
                         Box::new(crate::liveliness::make_liveliness_callback(closure.clone()))
                             as Box<_>
                     })
-                });
+                }) else {
+                    return Z_EUNAVAILABLE;
+                };
                 subscriber_state_handle(shared, id, declared)
             }
             // A node's own face is told the tokens of the other faces; the subscription is hosted

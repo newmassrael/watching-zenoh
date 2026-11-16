@@ -276,17 +276,19 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
     let counting = listen(true);
     let blind = listen(false);
     let filter = |count_local: bool| {
-        engine.declare_write_filter(
-            plane,
-            "demo/lq/x".to_owned(),
-            &WireKey::literal(),
-            Some(InterestForm {
-                mapping_id: 0,
-                suffix: Some("demo/lq/x".to_owned()),
-                aggregate: false,
-            }),
-            count_local,
-        )
+        engine
+            .declare_write_filter(
+                plane,
+                "demo/lq/x".to_owned(),
+                &WireKey::literal(),
+                Some(InterestForm {
+                    mapping_id: 0,
+                    suffix: Some("demo/lq/x".to_owned()),
+                    aggregate: false,
+                }),
+                count_local,
+            )
+            .expect("a session with ids left declares")
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);

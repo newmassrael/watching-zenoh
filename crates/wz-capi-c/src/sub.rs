@@ -39,9 +39,7 @@ use crate::abi::{
 };
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
-#[cfg(feature = "router-node")]
-use crate::result::Z_EUNAVAILABLE;
-use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
 use crate::sample::MarshalCache;
 use crate::session::{session_handle, SessionHandle};
 
@@ -456,14 +454,19 @@ pub(crate) unsafe fn declare_subscriber_on(
             SessionHandle::Registry(state) => {
                 // `declare_subscriber` is this call with no restriction and the literal wire key,
                 // so a subscriber that states no links is declared as it always was.
-                let id = state.shared.declare_subscriber_on_links(
+                // A session that has handed out every entity id refuses the subscriber with the
+                // code this ABI gives a declaration whose id space is spent; the closure the
+                // session dropped has run its drop.
+                let Some(id) = state.shared.declare_subscriber_on_links(
                     ke,
                     WireKey::literal(),
                     allowed_origin,
                     links,
                     None,
                     Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
-                );
+                ) else {
+                    return Z_EUNAVAILABLE;
+                };
                 subscriber_state_handle(&state.shared, id, declared)
             }
             // A node hosts the subscription on its data plane, which hands it what its own

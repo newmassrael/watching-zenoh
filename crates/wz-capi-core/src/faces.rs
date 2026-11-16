@@ -113,7 +113,7 @@ use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
-use wz_session_core::wire_id::ExprId;
+use wz_session_core::wire_id::{next_u32_id, EntityId, ExprId};
 
 #[cfg(feature = "multicast-transport")]
 mod multicast;
@@ -1793,6 +1793,10 @@ struct Inner {
     /// the upstreams' rule, and a pico peer reads it off the wire: the id pico declares a
     /// subscriber with on a group is this one (MEASURED: `decl_subscriber(1, ..)` for the
     /// first entity of a session).
+    ///
+    /// The ids are `u32`, upstream's `EntityId`, and the space refuses once spent rather than
+    /// wrap as both upstream counters do ([`Inner::take_entity_id`]); the counter is a `u64` only
+    /// so that it can stand one past `u32::MAX`.
     next_entity_id: u64,
     qbls: Vec<QblEntry>,
     tokens: Vec<TokenEntry>,
@@ -1814,19 +1818,13 @@ struct Inner {
 }
 
 impl Inner {
-    /// The next session-scope entity id ([`Inner::next_entity_id`]).
-    fn take_entity_id(&mut self) -> u64 {
-        let id = self.next_entity_id;
-        self.next_entity_id = id.wrapping_add(1);
-        id
-    }
-
-    /// [`Self::take_entity_id`], or `None` once the space is spent, for a declaration whose
-    /// retraction names it by id alone and must not wrap onto a live one.
-    fn try_take_entity_id(&mut self) -> Option<u64> {
-        let id = self.next_entity_id;
-        self.next_entity_id = id.checked_add(1)?;
-        Some(id)
+    /// The next session-scope entity id ([`Inner::next_entity_id`]), or `None` once every `u32`
+    /// one has been handed out: a declaration is retracted by its id, and an id handed out twice
+    /// would retract a live one.
+    fn take_entity_id(&mut self) -> Option<EntityId> {
+        let held = self.next_entity_id;
+        self.next_entity_id = next_u32_id(held)?;
+        u32::try_from(held).ok()
     }
 
     /// Rebuild [`Self::face_set`] from `faces`. Call it right after `faces` changes, with the
@@ -2066,6 +2064,11 @@ pub struct SharedSession {
     /// starts one, so a build without it carries neither the table nor the task.
     #[cfg(feature = "advanced")]
     tickers: StdMutex<BTreeMap<u64, wz_runtime_tokio::periodic::PeriodicTask>>,
+    /// The id the next periodic job takes. A space of its own and not the entity ids': a job is
+    /// no declaration, so it neither spends an id a peer would read nor is refused when they are
+    /// spent.
+    #[cfg(feature = "advanced")]
+    next_ticker_id: std::sync::atomic::AtomicU64,
 }
 
 /// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
@@ -2437,6 +2440,8 @@ impl SharedSession {
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "advanced")]
             tickers: StdMutex::new(BTreeMap::new()),
+            #[cfg(feature = "advanced")]
+            next_ticker_id: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -4390,8 +4395,8 @@ impl SharedSession {
     /// future face announces it in [`Self::face_up`]. That is the ordinary case
     /// for upstream's `z_liveliness.c`, which declares and then sleeps.
     ///
-    /// `None` when the id space is exhausted, which cannot happen in practice
-    /// (u64) but is surfaced rather than wrapped, for the same reason
+    /// `None` when the session has handed out every `u32` entity id, which is
+    /// surfaced rather than wrapped, for the same reason
     /// [`Self::declare_keyexpr`] refuses: a reused id would retract a live
     /// token belonging to someone else.
     pub fn declare_liveliness_token(&self, keyexpr: String) -> Option<TokenId> {
@@ -4422,7 +4427,7 @@ impl SharedSession {
         links: LinkRestriction,
     ) -> Option<TokenId> {
         let mut guard = self.lock();
-        let id = guard.try_take_entity_id()?;
+        let id = TokenId::from(guard.take_entity_id()?);
 
         // R2580 — the local plane is in this walk. MEASURED against
         // `libzenohc.so` before the repair: a token declared here and a
@@ -4513,12 +4518,15 @@ impl SharedSession {
     /// gets back a `z_owned_subscriber_t` either way, so one id space is what
     /// lets [`Self::undeclare_subscriber`] serve both without the caller
     /// having to remember which kind it holds.
+    ///
+    /// `None` when the session has handed out every `u32` entity id: nothing
+    /// is declared, as [`Self::declare_subscriber`] refuses.
     pub fn declare_liveliness_subscriber(
         &self,
         keyexpr: String,
         options: LivelinessSubscriberOptions,
         sink: LivelinessSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         self.declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), options, sink)
     }
 
@@ -4530,7 +4538,7 @@ impl SharedSession {
         wire: WireKey,
         options: LivelinessSubscriberOptions,
         sink: LivelinessSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         self.declare_liveliness_subscriber_on_links(
             keyexpr,
             wire,
@@ -4553,9 +4561,9 @@ impl SharedSession {
         options: LivelinessSubscriberOptions,
         links: LinkRestriction,
         sink: LivelinessSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id();
+        let id = SubId::from(guard.take_entity_id()?);
 
         // R2580 — the plane included, which is the receiving half of the same
         // measurement: without it this subscriber cannot hear a token its own
@@ -4614,7 +4622,7 @@ impl SharedSession {
                 });
             }
         }
-        id
+        Some(id)
     }
 
     /// The legs of the liveliness subscriptions that the token on `keyexpr` is told to, one per
@@ -5269,18 +5277,6 @@ impl SharedSession {
         self.lock().faces.get(&id).map(|face| face.revised.clone())
     }
 
-    /// Record a C subscription in the SSOT and declare it on every live face.
-    ///
-    /// The SSOT entry is the LOCAL registration and is recorded
-    /// unconditionally, mirroring pico: `_z_register_subscriber` records the
-    /// subscription in the session tables first and its wire announce to peers
-    /// is best-effort after (`~/zenoh-pico/src/net/primitives.c:209-248`). So a
-    /// per-face wire declare that fails (a face mid-teardown) is ignored exactly
-    /// as [`Self::face_up`] ignores a failed replay, and the SSOT entry persists
-    /// so every FUTURE face still gets it. With no face yet (a listener before
-    /// its first peer) this declares nothing on the wire and still records the
-    /// entry — pico's declare-before-peer. Infallible today; keyexpr canonicity
-    /// validation is a separate follow-up.
     /// Allocate the next session-scope ENTITY id (R311y559).
     ///
     /// The `eid` half of the `(zid, eid)` global id `z_publisher_id` /
@@ -5288,7 +5284,10 @@ impl SharedSession {
     /// and held by the handle, never re-derived per call: upstream's id is
     /// stable for a handle's whole life, and a counter read per accessor would
     /// hand back a different answer each time it was asked.
-    pub fn next_entity_id(&self) -> u64 {
+    ///
+    /// `None` once the session has handed out every `u32` entity id, which
+    /// refuses the declaration that asked.
+    pub fn next_entity_id(&self) -> Option<EntityId> {
         self.lock().take_entity_id()
     }
 
@@ -5302,7 +5301,9 @@ impl SharedSession {
     /// it answers `false` or [`Self::stop_ticker`] is called with the id returned.
     #[cfg(feature = "advanced")]
     pub fn start_ticker(&self, period_ms: u64, tick: wz_capi_port::Tick) -> u64 {
-        let id = self.next_entity_id();
+        let id = self
+            .next_ticker_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let task = wz_runtime_tokio::periodic::spawn_periodic_ms(
             Arc::clone(self.local.clock()),
             period_ms,
@@ -5326,12 +5327,26 @@ impl SharedSession {
         drop(task);
     }
 
+    /// Record a C subscription in the SSOT and declare it on every live face.
+    ///
+    /// The SSOT entry is the LOCAL registration and is recorded
+    /// unconditionally, mirroring pico: `_z_register_subscriber` records the
+    /// subscription in the session tables first and its wire announce to peers
+    /// is best-effort after (`~/zenoh-pico/src/net/primitives.c:209-248`). So a
+    /// per-face wire declare that fails (a face mid-teardown) is ignored exactly
+    /// as [`Self::face_up`] ignores a failed replay, and the SSOT entry persists
+    /// so every FUTURE face still gets it. With no face yet (a listener before
+    /// its first peer) this declares nothing on the wire and still records the
+    /// entry — pico's declare-before-peer.
+    ///
+    /// `None` when the session has handed out every `u32` entity id
+    /// ([`Self::next_entity_id`]): nothing is recorded and nothing is sent.
     pub fn declare_subscriber(
         &self,
         keyexpr: String,
         allowed_origin: Locality,
         sink: SubscriberSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         self.declare_subscriber_on_wire(keyexpr, WireKey::literal(), allowed_origin, None, sink)
     }
 
@@ -5345,7 +5360,7 @@ impl SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         self.declare_subscriber_on_links(
             keyexpr,
             wire,
@@ -5370,9 +5385,9 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
+    ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id();
+        let id = SubId::from(guard.take_entity_id()?);
         wz_runtime_tokio::route_trace(format_args!(
             "peer {} declares subscriber key={keyexpr} to faces {:?}",
             zid_text(&self.zid),
@@ -5430,7 +5445,7 @@ impl SharedSession {
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
-        id
+        Some(id)
     }
 
     /// Record a C matching listener in the SSOT and install it on every live
@@ -5786,7 +5801,8 @@ impl SharedSession {
     /// every group a filter asks ([`crate::drive::GroupDeclarations::asks_for_filters`]) is
     /// asked by that id for its members' declarations on `wire`, the key as the peers were
     /// told it. A group that comes up later is not asked: zenoh-pico opens its one transport
-    /// before any entity, so it has no such moment.
+    /// before any entity, so it has no such moment. With no entity id left the filter is
+    /// refused (`None`) and nothing is asked.
     pub fn declare_write_filter(
         &self,
         plane: FilterPlane,
@@ -5794,13 +5810,21 @@ impl SharedSession {
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
-    ) -> FilterId {
+    ) -> Option<FilterId> {
         let mut guard = self.lock();
+        // Taken first, so a filter refused for want of an id leaves no filter id spent either.
+        let interest_id = guard.take_entity_id()?;
         guard.next_filter_id = guard.next_filter_id.wrapping_add(1);
         let id = guard.next_filter_id;
-        let interest_id = guard.take_entity_id();
         #[cfg(feature = "multicast-transport")]
-        Self::ask_filter_on_groups(&mut guard, id, interest_id, plane, &keyexpr, wire);
+        Self::ask_filter_on_groups(
+            &mut guard,
+            id,
+            u64::from(interest_id),
+            plane,
+            &keyexpr,
+            wire,
+        );
         #[cfg(not(feature = "multicast-transport"))]
         let _ = (interest_id, wire);
         if let Some(form) = &ask {
@@ -5825,7 +5849,7 @@ impl SharedSession {
             #[cfg(target_has_atomic = "64")]
             cache: None,
         });
-        id
+        Some(id)
     }
 
     /// Retract a write filter: drop the SSOT entry so no future face asks, and
@@ -6203,13 +6227,16 @@ impl SharedSession {
     /// allocates its own request ids (`alloc_next_request_id` is per
     /// `SessionLinkActions`), so two peers querying concurrently cannot
     /// correlate onto one another's reply chain.
+    ///
+    /// `None` when the session has handed out every `u32` entity id, as
+    /// [`Self::declare_subscriber`] refuses.
     pub fn declare_queryable(
         &self,
         keyexpr: String,
         complete: bool,
         allowed_origin: Locality,
         sink: QueryableSink,
-    ) -> QblId {
+    ) -> Option<QblId> {
         self.declare_queryable_on_wire(
             keyexpr,
             WireKey::literal(),
@@ -6231,7 +6258,7 @@ impl SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> QblId {
+    ) -> Option<QblId> {
         self.declare_queryable_on_links(
             keyexpr,
             wire,
@@ -6255,9 +6282,9 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> QblId {
+    ) -> Option<QblId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id();
+        let id = QblId::from(guard.take_entity_id()?);
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what an
         // in-process `z_get` reaches. The sink factory receives each target's
@@ -6306,7 +6333,7 @@ impl SharedSession {
                 &key,
             );
         }
-        id
+        Some(id)
     }
 
     /// Drop a C queryable: remove it from the SSOT so no future face replays
@@ -6561,22 +6588,26 @@ mod matching_aggregate_tests {
     #[test]
     fn a_write_filter_starts_active_and_a_retracted_one_does_not_suppress() {
         let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
-        let publisher = shared.declare_write_filter(
-            FilterPlane::Subscribers,
-            "wz/wf/pub".to_owned(),
-            &WireKey::literal(),
-            None,
-            false,
-        );
-        let querier = shared.declare_write_filter(
-            FilterPlane::Queryables {
-                complete_required: true,
-            },
-            "wz/wf/qry".to_owned(),
-            &WireKey::literal(),
-            None,
-            false,
-        );
+        let publisher = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "wz/wf/pub".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
+        let querier = shared
+            .declare_write_filter(
+                FilterPlane::Queryables {
+                    complete_required: true,
+                },
+                "wz/wf/qry".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
         assert_ne!(publisher, querier, "each filter is its own entry");
         assert!(shared.write_filter_active(publisher));
         assert!(shared.write_filter_active(querier));
@@ -6593,6 +6624,67 @@ mod matching_aggregate_tests {
         assert!(!shared.has_router_peer(), "no face, so no router peer");
     }
 
+    /// The session numbers every declaration from one `u32` space, upstream's `EntityId`: it
+    /// hands out `u32::MAX`, and from then on refuses every declaration that needs an id, with
+    /// nothing recorded, where upstream's counter would wrap onto an id a live one holds.
+    #[test]
+    fn a_session_hands_out_its_last_entity_id_and_then_refuses() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        shared.lock().next_entity_id = u64::from(u32::MAX);
+        let no_op: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+
+        let last = shared
+            .declare_subscriber("wz/ids/last".to_owned(), Locality::Any, no_op.clone())
+            .expect("the last id is free");
+        assert_eq!(last, SubId::from(u32::MAX));
+
+        assert_eq!(
+            shared.declare_subscriber("wz/ids/past".to_owned(), Locality::Any, no_op),
+            None
+        );
+        let answer: QueryableSink = Arc::new(|_: &TokioQueryHolder| {
+            Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}) as Box<_>
+        });
+        assert_eq!(
+            shared.declare_queryable("wz/ids/past".to_owned(), false, Locality::Any, answer),
+            None
+        );
+        assert_eq!(
+            shared.declare_liveliness_token("wz/ids/past".to_owned()),
+            None
+        );
+        let told: LivelinessSink = Arc::new(|| Box::new(|_: LivelinessSample<'_>| {}) as Box<_>);
+        assert_eq!(
+            shared.declare_liveliness_subscriber(
+                "wz/ids/past".to_owned(),
+                LivelinessSubscriberOptions::default(),
+                told,
+            ),
+            None
+        );
+        assert_eq!(
+            shared.declare_write_filter(
+                FilterPlane::Subscribers,
+                "wz/ids/past".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            ),
+            None
+        );
+        assert_eq!(shared.next_entity_id(), None);
+
+        let guard = shared.lock();
+        assert_eq!(guard.subs.len(), 1, "only the last id's subscriber is held");
+        assert!(guard.qbls.is_empty() && guard.tokens.is_empty());
+        assert!(guard.live_subs.is_empty() && guard.filters.is_empty());
+        assert_eq!(
+            guard.next_entity_id,
+            u64::from(u32::MAX) + 1,
+            "a spent space stays spent"
+        );
+    }
+
     /// zenoh-pico with its local subscriber switch on: a write filter and a matching
     /// listener that count the session's own entities see a subscriber whose locality
     /// admits session-local traffic, and stop seeing it when it is retracted; one whose
@@ -6602,20 +6694,24 @@ mod matching_aggregate_tests {
     #[test]
     fn the_sessions_own_subscriber_counts_where_the_filter_counts_local_entities() {
         let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
-        let counting = shared.declare_write_filter(
-            FilterPlane::Subscribers,
-            "wz/local/**".to_owned(),
-            &WireKey::literal(),
-            None,
-            true,
-        );
-        let remote_only = shared.declare_write_filter(
-            FilterPlane::Subscribers,
-            "wz/local/**".to_owned(),
-            &WireKey::literal(),
-            None,
-            false,
-        );
+        let counting = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "wz/local/**".to_owned(),
+                &WireKey::literal(),
+                None,
+                true,
+            )
+            .expect("a session with ids left declares");
+        let remote_only = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "wz/local/**".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
         let sink: MatchingSink = Arc::new(move |matching| log.lock().unwrap().push(matching));
@@ -6628,12 +6724,15 @@ mod matching_aggregate_tests {
         let no_op: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
 
         // A remote-only subscriber is no session-local match.
-        let remote_sub =
-            shared.declare_subscriber("wz/local/a".to_owned(), Locality::Remote, no_op.clone());
+        let remote_sub = shared
+            .declare_subscriber("wz/local/a".to_owned(), Locality::Remote, no_op.clone())
+            .expect("a session with ids left declares");
         assert!(shared.write_filter_active(counting));
         assert!(heard.lock().unwrap().is_empty());
 
-        let local_sub = shared.declare_subscriber("wz/local/a".to_owned(), Locality::Any, no_op);
+        let local_sub = shared
+            .declare_subscriber("wz/local/a".to_owned(), Locality::Any, no_op)
+            .expect("a session with ids left declares");
         assert!(
             !shared.write_filter_active(counting),
             "the session's own subscriber opens a filter that counts it"
@@ -7004,13 +7103,15 @@ mod matching_aggregate_tests {
             return;
         }
         let params = plain_params(&options).expect("a build with the lane sends plain puts");
-        let filter = shared.declare_write_filter(
-            FilterPlane::Subscribers,
-            "wz/plain/filtered".to_owned(),
-            &WireKey::literal(),
-            None,
-            false,
-        );
+        let filter = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "wz/plain/filtered".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
 
         // No face has said it matches: suppressed, and the same on every later put.
         for _ in 0..3 {
@@ -9173,8 +9274,12 @@ mod aggregation_tests {
 
         assert!(shared.face_up(1, &near.resp_actions, false));
         let before = near.resp_driver.snapshot().sends.len();
-        let first = shared.declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op());
-        let second = shared.declare_subscriber("wz/agg/b".to_owned(), Locality::Any, no_op());
+        let first = shared
+            .declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op())
+            .expect("a session with ids left declares");
+        let second = shared
+            .declare_subscriber("wz/agg/b".to_owned(), Locality::Any, no_op())
+            .expect("a session with ids left declares");
         let (declared, carried) = declarations_since(&near, before);
         assert_eq!(declared, 1, "one declaration for both subscribers");
         assert!(names(&carried, "wz/agg/**"), "it names the aggregate");

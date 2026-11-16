@@ -31,6 +31,7 @@ use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
+use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId};
 
 use super::RouterState;
 use crate::caller_span::CallerSpan;
@@ -94,7 +95,13 @@ enum Held {
 /// jobs it holds for the program.
 pub(super) struct EngineState {
     epoch: Instant,
-    next_id: AtomicU64,
+    /// The entity ids the program's declarations take, from 1: `u32`, upstream's `EntityId`, and
+    /// refused once spent rather than wrapped ([`Self::entity_id`]).
+    next_entity_id: AtomicU64,
+    /// The ids of what the node holds for the program and never names to a peer: its write
+    /// filters and its periodic jobs. A space of their own, so they are not refused when the
+    /// entity ids are spent.
+    next_local_id: AtomicU64,
     subscriptions: Mutex<HashMap<u64, Held>>,
     jobs: Mutex<HashMap<u64, PeriodicJob>>,
 }
@@ -103,14 +110,24 @@ impl EngineState {
     pub(super) fn new() -> Self {
         Self {
             epoch: Instant::now(),
-            next_id: AtomicU64::new(1),
+            next_entity_id: AtomicU64::new(1),
+            next_local_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
         }
     }
 
-    fn id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
+    /// The next entity id, or `None` once every `u32` one has been handed out.
+    fn entity_id(&self) -> Option<EntityId> {
+        u32_id_taken(self.next_entity_id.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            next_u32_id,
+        ))
+    }
+
+    fn local_id(&self) -> u64 {
+        self.next_local_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -151,8 +168,8 @@ impl SessionEngine for RouterState {
         u64::try_from(self.engine.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    fn next_entity_id(&self) -> u64 {
-        self.engine.id()
+    fn next_entity_id(&self) -> Option<EntityId> {
+        self.engine.entity_id()
     }
 
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
@@ -227,11 +244,12 @@ impl SessionEngine for RouterState {
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Option<SubId> {
+        // The id first, so a session with none left hosts nothing.
+        let id = SubId::from(self.engine.entity_id()?);
         // One callback for the node's one data plane, where a registry mints one for each face.
         let host = self
             .forwarder
             .host_subscriber_from(&keyexpr, allowed_origin, sink());
-        let id = self.engine.id();
         self.engine
             .subscriptions
             .lock()
@@ -327,9 +345,10 @@ impl SessionEngine for RouterState {
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
-    ) -> FilterId {
-        // A node holds no write back: the router forwards by what the faces declared.
-        self.engine.id()
+    ) -> Option<FilterId> {
+        // A node holds no write back: the router forwards by what the faces declared, and asks
+        // nothing, so the filter takes no entity id.
+        Some(self.engine.local_id())
     }
 
     fn write_filter_active(&self, _id: FilterId) -> bool {
@@ -407,8 +426,9 @@ impl SessionEngine for RouterState {
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
+        // The id first, so a session with none left subscribes nothing.
+        let id = SubId::from(self.engine.entity_id()?);
         let face = self.liveliness.subscribe(&keyexpr, history, sink());
-        let id = self.engine.id();
         self.engine
             .subscriptions
             .lock()
@@ -511,7 +531,7 @@ impl SessionEngine for RouterState {
     fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
         // At least a millisecond, so that a job cannot make the node spin.
         let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)?;
-        let id = self.engine.id();
+        let id = self.engine.local_id();
         self.engine
             .jobs
             .lock()
@@ -543,6 +563,26 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::AtomicUsize;
+
+    /// The node's entity ids are `u32`: it hands out `u32::MAX` and then refuses, and stays
+    /// refusing, while the ids of what it never names to a peer go on.
+    #[test]
+    fn the_node_hands_out_its_last_entity_id_and_then_refuses() {
+        let state = EngineState::new();
+        assert_eq!(state.entity_id(), Some(1), "the first entity id is 1");
+        state
+            .next_entity_id
+            .store(u64::from(u32::MAX), Ordering::Relaxed);
+        assert_eq!(state.entity_id(), Some(u32::MAX));
+        assert_eq!(state.entity_id(), None);
+        assert_eq!(state.entity_id(), None, "a spent space stays spent");
+        let local = state.local_id();
+        assert_eq!(
+            state.local_id(),
+            local + 1,
+            "a write filter or a job takes no entity id"
+        );
+    }
 
     /// A periodic job ticks on its period and stops when it is dropped: the count rises while the
     /// job lives and does not move once it is let go.

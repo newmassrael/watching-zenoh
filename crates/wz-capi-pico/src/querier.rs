@@ -59,7 +59,9 @@ use crate::matching::{
 };
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
+use crate::result::{
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
 
@@ -408,22 +410,29 @@ pub unsafe extern "C" fn z_declare_querier(
         };
         // Its entity id, taken before the filter's Interest takes the next, as pico's
         // `_z_declare_querier` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
-        // `querier->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before the filter is made.
-        let eid = engine.next_entity_id();
+        // `querier->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before the filter is made. A
+        // session that has handed out every id refuses the querier with the code a refused
+        // declaration gets here.
+        let Some(eid) = engine.next_entity_id().map(u64::from) else {
+            return Z_ERR_GENERIC;
+        };
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // R2962 — and its write filter, counting QUERYABLES; a target of
         // `ALL_COMPLETE` counts only the ones declared complete
         // (`vendor/zenoh-pico/src/api/api.c` @
         // `querier->_val._target == Z_QUERY_TARGET_ALL_COMPLETE`).
-        let filter = WriteFilter::declare(
+        let filter = match WriteFilter::declare(
             &PicoSession::of(handle),
             FilterPlane::Queryables {
                 complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },
             &key,
             qos.destination.allows_local(),
-        );
+        ) {
+            Ok(filter) => filter,
+            Err(rc) => return rc,
+        };
         let mut boxed = Box::new(QuerierState {
             #[cfg(feature = "unstable-api")]
             eid,
