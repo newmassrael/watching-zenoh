@@ -54,7 +54,7 @@
 //! - A block is batch-sized when it is at least the link's batch and at most `FRAMING` bytes
 //!   wider. Upstream allocates the batch exactly; wz keeps a stream frame's prefix in the batch's
 //!   own block, so a buffer it builds a frame in is the batch and two bytes, one it keeps spare
-//!   the batch and eight, and one it reads into the widest batch and four.
+//!   the batch and eight, and one it reads into the batch and four.
 //! - A size that is a power of two is not counted: it is the capacity a doubling buffer
 //!   reaches, and no batch buffer of either library is one at the sizes these documents give.
 //! - The allocation documents STATE the batch size (`STATED_BATCH`). Unstated, upstream's TCP
@@ -63,12 +63,14 @@
 //!   `let mss = socket.mss().unwrap_or(mtu as u32) / 2;`), a number of the host and not of the
 //!   document, and the window would have to be wide enough to admit unrelated blocks between the
 //!   phases this leg differences.
-//! - The receive documents leave the batch size at its default, where upstream's division by the
-//!   link's batch and wz's by the widest batch keep the same count (`rx_buffer_size` is a whole
-//!   number of widest batches, and the link's batch is above six sevenths of the widest on a
-//!   loopback of the usual MTU). Their window is every size from just over half the widest batch,
-//!   the least a TCP link of upstream's can settle on, to the widest batch and its framing. Past
-//!   the default the two divide differently, which this leg does not grade.
+//! - The receive documents come in two families, because the divisor of `rx_buffer_size` is the
+//!   link's negotiated batch and a leg that kept the batch at its default could not tell that
+//!   divisor from the widest batch. One family leaves the batch size at its default; its window
+//!   is every size from just over half the widest batch, the least a TCP link of upstream's can
+//!   settle on, to the widest batch and its framing, and its control asks only that the larger
+//!   size keep more, as the host's MSS decides the batch. The other states `STATED_BATCH`; its
+//!   window is that batch and its framing, and its control asks for upstream's own arithmetic,
+//!   `rx_buffer_size / batch` of each document.
 //! - The receive documents state `allocation/mode: "init"`. The transmit queue's batches, which
 //!   are inside the same window, are then all made at the open in a number the queue sizes fix,
 //!   so the difference between the two receive documents is the receive pool alone.
@@ -76,7 +78,7 @@
 //!   (each counts the batch-sized blocks both documents allocate alike, and the difference does
 //!   not), or between two phases of one run. Receive buffers are compared LIVE at a quiet point,
 //!   when every buffer a dry pool lent out has gone; how many of those a burst took depends on
-//!   scheduling, and wz's is as wide as the frame rather than the batch, so it is not compared.
+//!   scheduling, so it is not compared.
 //! - Each document runs `RUNS` times on each library. The reference must agree with itself
 //!   before it adjudicates wz's: a relation that moves between two runs of the real library is
 //!   one this machine cannot measure.
@@ -135,14 +137,14 @@ struct Window {
     high: usize,
 }
 
-/// A batch of the allocation documents' stated size.
-const ALLOCATION_WINDOW: Window = Window {
+/// A batch of the size the allocation documents and the stated receive documents give.
+const STATED_BATCH_WINDOW: Window = Window {
     low: STATED_BATCH,
     high: STATED_BATCH + FRAMING,
 };
 
 /// A batch of any size a default TCP link of either library settles on.
-const RECEIVE_WINDOW: Window = Window {
+const DEFAULT_BATCH_WINDOW: Window = Window {
     low: (WIDEST_BATCH - TCP_IPV4_HEADERS) / 2 + 1,
     high: WIDEST_BATCH + FRAMING,
 };
@@ -785,13 +787,13 @@ fn mode_pairs(arm: &Arm) -> Vec<ModePair> {
             init: observe(
                 arm,
                 Role::Puts,
-                ALLOCATION_WINDOW,
+                STATED_BATCH_WINDOW,
                 &allocation_document("init"),
             ),
             lazy: observe(
                 arm,
                 Role::Puts,
-                ALLOCATION_WINDOW,
+                STATED_BATCH_WINDOW,
                 &allocation_document("lazy"),
             ),
         })
@@ -869,19 +871,60 @@ fn an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_
     );
 }
 
-/// The receive documents: `rx/buffer_size` in widest batches, with the transmit queue's batches
-/// made at the open so they are the same in both.
-fn receive_document(batches: usize) -> Vec<(&'static str, String)> {
-    vec![
-        (
-            "transport/link/tx/queue/allocation/mode",
-            "\"init\"".to_owned(),
-        ),
-        (
-            "transport/link/rx/buffer_size",
-            (batches * WIDEST_BATCH).to_string(),
-        ),
-    ]
+/// One family of receive documents: the batch size they state, if any, and the window a buffer
+/// of that batch falls in.
+#[derive(Debug, Clone, Copy)]
+struct ReceiveFamily {
+    name: &'static str,
+    stated_batch: Option<usize>,
+    window: Window,
+}
+
+/// The default batch, which the host's MSS decides, and a batch the documents state, which
+/// grades the divisor of `rx_buffer_size`.
+const RECEIVE_FAMILIES: [ReceiveFamily; 2] = [
+    ReceiveFamily {
+        name: "at the default batch size",
+        stated_batch: None,
+        window: DEFAULT_BATCH_WINDOW,
+    },
+    ReceiveFamily {
+        name: "at a stated batch size",
+        stated_batch: Some(STATED_BATCH),
+        window: STATED_BATCH_WINDOW,
+    },
+];
+
+impl ReceiveFamily {
+    /// The document with `rx/buffer_size` of `batches` widest batches, the transmit queue's
+    /// batches made at the open so they are the same in both, and the family's batch size.
+    fn document(self, batches: usize) -> Vec<(&'static str, String)> {
+        let mut document = vec![
+            (
+                "transport/link/tx/queue/allocation/mode",
+                "\"init\"".to_owned(),
+            ),
+            (
+                "transport/link/rx/buffer_size",
+                (batches * WIDEST_BATCH).to_string(),
+            ),
+        ];
+        if let Some(batch) = self.stated_batch {
+            document.push(("transport/link/tx/batch_size", batch.to_string()));
+        }
+        document
+    }
+
+    /// Upstream's own count of the buffers the larger document keeps beyond the smaller one's,
+    /// where the document fixes the link's batch: `rx_buffer_size / batch` of each
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `let mut n = rx_buffer_size / mtu;`).
+    /// `None` at the default, where the host's MSS decides the batch.
+    fn upstream_count(self) -> Option<i64> {
+        self.stated_batch.map(|batch| {
+            let kept = |batches: usize| ((batches * WIDEST_BATCH) / batch).max(1);
+            (kept(MANY_BUFFERS) - kept(FEW_BUFFERS)) as i64
+        })
+    }
 }
 
 /// One run of each receive document.
@@ -903,27 +946,32 @@ impl BufferPair {
         self.many.after.live - self.few.after.live
     }
 
-    /// Whether the run shows upstream's rule: the larger size keeps more buffers, and keeps them
-    /// through the traffic.
-    fn shows_the_rule(&self) -> bool {
-        self.kept_at_open() > 0 && self.kept_after_the_burst() == self.kept_at_open()
+    /// Whether the run shows upstream's rule for `family`: the larger size keeps more buffers,
+    /// as many more as upstream's arithmetic gives where the document fixes the batch, and
+    /// keeps them through the traffic.
+    fn shows_the_rule(&self, family: ReceiveFamily) -> bool {
+        let counted = match family.upstream_count() {
+            Some(count) => self.kept_at_open() == count,
+            None => true,
+        };
+        counted && self.kept_at_open() > 0 && self.kept_after_the_burst() == self.kept_at_open()
     }
 }
 
-fn buffer_pairs(arm: &Arm) -> Vec<BufferPair> {
+fn buffer_pairs(arm: &Arm, family: ReceiveFamily) -> Vec<BufferPair> {
     (0..RUNS)
         .map(|_| BufferPair {
             few: observe(
                 arm,
                 Role::Receives,
-                RECEIVE_WINDOW,
-                &receive_document(FEW_BUFFERS),
+                family.window,
+                &family.document(FEW_BUFFERS),
             ),
             many: observe(
                 arm,
                 Role::Receives,
-                RECEIVE_WINDOW,
-                &receive_document(MANY_BUFFERS),
+                family.window,
+                &family.document(MANY_BUFFERS),
             ),
         })
         .collect()
@@ -931,7 +979,9 @@ fn buffer_pairs(arm: &Arm) -> Vec<BufferPair> {
 
 // wz-proves: none -- a config key's effect on the receive buffers a link keeps, claimed for no atom
 /// A session whose `transport/link/rx/buffer_size` is larger keeps more receive buffers on its
-/// link, from its open and through a burst it hears, by the same count on wz and libzenohc.
+/// link, from its open and through a burst it hears, by the same count on wz and libzenohc, at
+/// the default batch size and at a stated one, where the count is the size divided by the
+/// link's batch.
 #[test]
 #[ignore = "opens sessions and reads a zenoh-c oracle; run by run-ci Layer C1cc \
             (which builds the matching ABI arm this needs)"]
@@ -942,46 +992,51 @@ fn a_larger_rx_buffer_size_keeps_more_receive_buffers_on_wz_and_libzenohc() {
     assert_zenoh_c_arm_pairing(&include);
     let arms = build_both_arms(&include);
 
-    let reference = buffer_pairs(&arms.reference);
-    for (run, pair) in reference.iter().enumerate() {
-        eprintln!(
-            "libzenohc run {run}: kept at open {} kept after the burst {} ({pair:?})",
-            pair.kept_at_open(),
-            pair.kept_after_the_burst()
-        );
-        assert!(
-            pair.shows_the_rule(),
-            "run {run} of the REFERENCE does not keep more receive buffers for the larger size \
-             ({pair:?}), so this machine's libzenohc cannot adjudicate wz's"
-        );
-    }
-    let kept = reference[0].kept_at_open();
-    assert!(
-        reference.iter().all(|pair| pair.kept_at_open() == kept),
-        "the REFERENCE's buffers kept differ between its runs ({reference:?}), so the count is \
-         not one this machine can measure"
-    );
-
     let mut failures: Vec<String> = Vec::new();
-    for (run, pair) in buffer_pairs(&arms.wz).iter().enumerate() {
-        eprintln!(
-            "wz run {run}: kept at open {} kept after the burst {} ({pair:?})",
-            pair.kept_at_open(),
-            pair.kept_after_the_burst()
-        );
-        if pair.kept_at_open() != kept {
-            failures.push(format!(
-                "run {run}: {} buffers beyond the smaller size's kept at the open, where \
-                 libzenohc kept {kept}",
-                pair.kept_at_open()
-            ));
-        }
-        if pair.kept_after_the_burst() != kept {
-            failures.push(format!(
-                "run {run}: {} buffers beyond the smaller size's kept after the burst, where \
-                 libzenohc kept {kept}",
+    for family in RECEIVE_FAMILIES {
+        let name = family.name;
+        let reference = buffer_pairs(&arms.reference, family);
+        for (run, pair) in reference.iter().enumerate() {
+            eprintln!(
+                "{name}, libzenohc run {run}: kept at open {} kept after the burst {} ({pair:?})",
+                pair.kept_at_open(),
                 pair.kept_after_the_burst()
-            ));
+            );
+            assert!(
+                pair.shows_the_rule(family),
+                "{name}, run {run} of the REFERENCE does not keep the receive buffers upstream's \
+                 rule gives the larger size (expected {:?} more, {pair:?}), so this machine's \
+                 libzenohc cannot adjudicate wz's",
+                family.upstream_count()
+            );
+        }
+        let kept = reference[0].kept_at_open();
+        assert!(
+            reference.iter().all(|pair| pair.kept_at_open() == kept),
+            "{name}, the REFERENCE's buffers kept differ between its runs ({reference:?}), so \
+             the count is not one this machine can measure"
+        );
+
+        for (run, pair) in buffer_pairs(&arms.wz, family).iter().enumerate() {
+            eprintln!(
+                "{name}, wz run {run}: kept at open {} kept after the burst {} ({pair:?})",
+                pair.kept_at_open(),
+                pair.kept_after_the_burst()
+            );
+            if pair.kept_at_open() != kept {
+                failures.push(format!(
+                    "{name}, run {run}: {} buffers beyond the smaller size's kept at the open, \
+                     where libzenohc kept {kept}",
+                    pair.kept_at_open()
+                ));
+            }
+            if pair.kept_after_the_burst() != kept {
+                failures.push(format!(
+                    "{name}, run {run}: {} buffers beyond the smaller size's kept after the \
+                     burst, where libzenohc kept {kept}",
+                    pair.kept_after_the_burst()
+                ));
+            }
         }
     }
     assert!(
