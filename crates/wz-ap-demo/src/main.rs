@@ -90,6 +90,7 @@ use std::process::ExitCode;
 use wz::runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 
 mod args;
+mod flags;
 mod runner;
 mod sessions;
 mod sessions_access;
@@ -210,6 +211,15 @@ fn demo_main() -> ExitCode {
             return ExitCode::from(2);
         }
         Some(Ok(path)) => return device_requires_mode(&path),
+    }
+
+    // The whole command line against the flag table, before any other reader looks a flag up:
+    // a word no reader asks for would otherwise be taken and ignored, and a flag whose feature
+    // this build lacks would start a node without the effect it names. After the three
+    // document flags, which take no other word and refuse every other one themselves.
+    if let Err(message) = crate::flags::check_argv(rest) {
+        eprintln!("wz-ap-demo: {message}");
+        return ExitCode::from(2);
     }
 
     // R2072 (open-debt item 496) — `--check-topology <file>` once per node: the

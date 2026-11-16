@@ -87,16 +87,28 @@ const REACHED_THE_BIND: &str = "Cannot assign requested address";
 /// "the wire form depends on --max-links" a shape this test can see: an
 /// entrypoint that drops a capability again fails the `2` row of that flag and
 /// leaves its `1` row green.
-const ARMS: &[(&str, &[&str])] = &[
-    ("--lowlatency", &["1", "2"]),
-    ("--compression", &["1", "2"]),
-    ("--shm", &["1", "2"]),
+///
+/// The middle value is whether this build has the capability: one it was made
+/// without is refused by name at the command line (`src/flags.rs`), so it is not
+/// a capability an operator can put on this binary's peer, and its arm is not run.
+const ARMS: &[(&str, bool, &[&str])] = &[
+    (
+        "--lowlatency",
+        cfg!(feature = "transport-lowlatency"),
+        &["1", "2"],
+    ),
+    (
+        "--compression",
+        cfg!(feature = "session-extcompression"),
+        &["1", "2"],
+    ),
+    ("--shm", cfg!(feature = "session-extshm"), &["1", "2"]),
     // `--qos` was never in the refused set — it is the one capability the
     // aggregation path already carried, by its own `FaceSources.qos` route.
     // R2096 deleted that route and moved it into the offer with the other
     // three, so it is asked here on the same terms: a regression that broke it
     // would otherwise be invisible.
-    ("--qos", &["1", "2"]),
+    ("--qos", cfg!(feature = "transport-qos"), &["1", "2"]),
 ];
 
 #[test]
@@ -106,7 +118,7 @@ fn an_aggregating_peer_accepts_every_capability_a_single_link_peer_accepts() {
     // UNMEASURED, and unmeasured must not be reported as passed.
     let mut failures: Vec<String> = Vec::new();
 
-    for (flag, link_counts) in ARMS {
+    for (flag, _, link_counts) in ARMS.iter().filter(|(_, built, _)| *built) {
         for links in *link_counts {
             let out = run(&["--peer", UNBINDABLE, "--max-links", links, flag]);
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -132,7 +144,10 @@ fn an_aggregating_peer_accepts_every_capability_a_single_link_peer_accepts() {
         "{} of the {} argv arms this test runs did not reach the bind with the \
          flag accepted:\n  {}",
         failures.len(),
-        ARMS.iter().map(|(_, c)| c.len()).sum::<usize>(),
+        ARMS.iter()
+            .filter(|(_, built, _)| *built)
+            .map(|(_, _, c)| c.len())
+            .sum::<usize>(),
         failures.join("\n  ")
     );
 }

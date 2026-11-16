@@ -21,13 +21,13 @@
 // would be one that picks a winner behind the operator's back. The single-flag
 // arms are what separate those from the pair.
 //
-// ## Why it is feature-independent
+// ## Which build each arm runs in
 //
-// `--qos` on a build without `transport-qos` is INERT — the offer builder drops
-// the mode. The command line is contradictory either way, though, and answering
-// a contradiction with a running session is worse than refusing it, so the rule
-// is not compiled out. This file therefore carries no feature gate and runs in
-// the crate's default build, which is also the build `pre-push` runs.
+// A build without `transport-qos` or without `transport-lowlatency` refuses the
+// flag it lacks by name, before any rule about the pair is read (the flag table,
+// `src/flags.rs`), so the pair can only be met in a build that has both, and the
+// two arms below run there. The default build lacks both, and the arm at the end
+// of this file witnesses the refusal it gives instead.
 //
 // Deterministic by construction: no role flag is given, so no socket is opened,
 // nothing is dialled and no clock is read. That the pair is reported even
@@ -43,12 +43,14 @@ fn run(args: &[&str]) -> Output {
 }
 
 /// The diagnostic the pair must produce, and the two single flags must not.
+#[cfg(all(feature = "transport-qos", feature = "transport-lowlatency"))]
 const PAIR_REFUSED: &str = "--qos and --lowlatency are mutually exclusive";
 
 /// The pair is refused; each flag ALONE is not refused for that reason.
 ///
 /// Stated as one test so neither half can be read without the other, the same
 /// shape `check_topology_binary`'s verdict pair uses.
+#[cfg(all(feature = "transport-qos", feature = "transport-lowlatency"))]
 #[test]
 fn the_binary_refuses_qos_with_lowlatency_and_neither_flag_alone() {
     let pair = run(&["--qos", "--lowlatency"]);
@@ -91,6 +93,7 @@ fn the_binary_refuses_qos_with_lowlatency_and_neither_flag_alone() {
 /// the role parse does not somehow overtake it. `tcp/127.0.0.1:1` is never
 /// dialled — a demo that reached the dial would report a refused connection and
 /// exit 1, so the exit status here is load-bearing rather than incidental.
+#[cfg(all(feature = "transport-qos", feature = "transport-lowlatency"))]
 #[test]
 fn the_refusal_precedes_the_dial_a_role_would_have_started() {
     let out = run(&[
@@ -113,4 +116,39 @@ fn the_refusal_precedes_the_dial_a_role_would_have_started() {
         "the refusal lost its diagnostic once a role was on the command \
          line.\n--- stderr ---\n{stderr}"
     );
+}
+
+/// A build without one of the two features refuses the flag it lacks by name,
+/// as a usage error, before the role parse and before any dial.
+#[test]
+fn a_build_without_a_mode_refuses_its_flag_by_name() {
+    for (flag, feature, built) in [
+        ("--qos", "transport-qos", cfg!(feature = "transport-qos")),
+        (
+            "--lowlatency",
+            "transport-lowlatency",
+            cfg!(feature = "transport-lowlatency"),
+        ),
+    ] {
+        if built {
+            continue;
+        }
+        let out = run(&[
+            "--connect",
+            "tcp/127.0.0.1:1",
+            flag,
+            "--key",
+            "demo/exclusive",
+        ]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{flag}\n--- stderr ---\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("{flag} requires the `{feature}` feature")),
+            "the refusal must name the flag and the feature it lacks\n--- stderr ---\n{stderr}"
+        );
+    }
 }
