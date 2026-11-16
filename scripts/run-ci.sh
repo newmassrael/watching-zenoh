@@ -18289,12 +18289,12 @@ layer_ewirez_zenohd_wire_dissection() {
     # has no `Shm` ext compiled in at all; the variant that does installs
     # `zenohd` ALONE, so the dialer is a SECOND zenohd rather than an example.
     #
-    # The oracle is NOT provisioned in hosted CI (no `zenohd-shm` in ci.yml), so
-    # the test SKIPs where it is absent and this lane's guard would then see zero
-    # passed. `+` rather than `1` is wrong here for the same reason: a skip
-    # prints `1 passed` because the skip is a `return` inside the test. That is
-    # stated rather than hidden — this leg is a LOCAL witness until the variant
-    # is provisioned, which is open-debt item 484.
+    # The test returns early where the oracle is absent, and a `return` inside
+    # a test prints `1 passed`, so this lane's count guard cannot tell a skip
+    # from a run. The `interop` job closes that by provisioning the
+    # shared-memory zenohd and setting WZ_ZENOHD_SHM_REQUIRE on this step,
+    # which turns the absence into a panic inside `zenohd_shm_binary`; a
+    # machine that has not built the variant still skips, and says so.
     wz_test_args wz-integration-tests zenoh_shm_body_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh shm bodies" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
@@ -21698,7 +21698,16 @@ layer_z_zenohd_interop() {
     # step 7 moved the broker from the single-net peer forwarder to the region-hat
     # forwarder (`router_forward::brokered_interest`); no local run reaches this
     # leg, so it is the one to read in the first hosted run after that move.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
+    # `routing-routes` is on this line so that the one artifact path
+    # `crates/target/debug/wz-ap-demo` never holds a Layer Z build that Layers
+    # E5 and E5z would reject: their line is `routing-routes`, and the BUILD
+    # FEATURES banner their fixtures read names the demo's own keys. It changes
+    # no code here: no source gates on `routing-routes` since the route table was
+    # retired (Layer E3 records the same), and its two edges, `routing-router`
+    # and the runtime's `routing-peer`, are both on this line already. So the
+    # Layer Z binary is a superset of E5's in keys as well as in code. Both
+    # restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -21770,8 +21779,9 @@ layer_z_zenohd_interop() {
     # zenohd's default is `zenoh/default`, so the stock binary above has no
     # `init::ext::Shm` compiled in and can neither send the challenge nor react to
     # wz's offer. Built by `ZENOHD_SHM=1 scripts/build-zenohd.sh` into
-    # target/zenohd-shm/; ABSENT is a SKIP inside the test (the vsock precedent —
-    # hosted CI does not provision a source build for this).
+    # target/zenohd-shm/; ABSENT is a SKIP inside the test on a machine that has
+    # not built it, and a FAIL under WZ_ZENOHD_SHM_REQUIRE, which the hosted
+    # `interop` job sets because it provisions this oracle for this lane.
     #
     # The demo is rebuilt with `session-extshm` for these two legs alone, and the
     # test asserts the BUILD FEATURES line rather than trusting this invocation
@@ -21815,7 +21825,8 @@ layer_z_zenohd_interop() {
     # drives the wz node IN PROCESS through the library entry points and spawns
     # no demo, so it needs no feature restatement and cannot disturb the shared
     # `--bin` path. ABSENT oracle is a SKIP inside each leg, as for establishment
-    # (hosted CI provisions no source build), which is why this carries a COUNT:
+    # (a FAIL under the hosted job's WZ_ZENOHD_SHM_REQUIRE), and a skip still
+    # prints `ok`, which is why this carries a COUNT:
     # four legs must report, so a dropped `#[ignore]` or a rename cannot select
     # zero tests and pass. R3038: leg 3 was a PIN of the provider-lifecycle
     # defect of open-debt item 823 (6) until the provider held a chunk by
@@ -21922,8 +21933,8 @@ layer_z_zenohd_interop() {
     # R2203 adds `time-hlc` (open-debt item 220): the fourth proof shape reads a
     # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
     # false unconditionally so both documents answer `bare`. Both restatements
-    # carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
+    # carry it. `routing-routes` likewise, for the reason at the opening build.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
@@ -23550,7 +23561,8 @@ layer_e5_router_forward() {
 # The demo build here is `--features routing-routes`, matching E5's line rather
 # than Layer Z's wider one. Two lanes writing ONE binary path at different
 # feature sets is a documented misdiagnosis shape in this file; these two agree,
-# and Layer Z's build (which lacks routing-routes) runs in its own invocation.
+# and Layer Z's build carries `routing-routes` too, so whichever of the three
+# wrote the path last, the binary holds every key this lane's fixture reads.
 layer_e5z_router_query_target() {
     (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
     local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
@@ -23581,7 +23593,7 @@ layer_e5z_router_query_target() {
 # `wz_router_forward`. Self-contained wz<->wz (NO external zenohd / pico oracle),
 # so it lives in the primary `ci` job beside E5, NOT the zenohd Layer Z. The
 # `routing-routes,transport-link-unixpipe` build is NOT produced by any other lane
-# (E5 lacks unixpipe; Layer Z's demo build lacks routing-routes), so this lane
+# (E5 lacks unixpipe; Layer Z's carries both but in its own job), so this lane
 # builds its own binary. The test fn is `#![cfg(target_os = "linux")]` (unixpipe is
 # Linux-only) and starts `wz_router_`, so the default Layer E sweep's `--skip
 # wz_router` already excludes it from the oracle-less arbitrary-feature run. The

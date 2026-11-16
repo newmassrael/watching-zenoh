@@ -3960,6 +3960,56 @@ jobs:
           path: target/zenohd-vsock
           key: ${{ steps.zenohd-vsock-cache.outputs.cache-primary-key }}
 
+      - name: Cache the shared-memory zenohd oracle (pinned 1.10.2)
+        # A FOURTH oracle, and the one Layers Z and Ewirez had been skipping. The
+        # SHM legs of Layer Z (establishment, payload, query, router hop) and
+        # Ewirez's SHM establishment witness need zenoh's `shared-memory`
+        # feature, which the stock oracle above lacks, and their helper returns
+        # early on an absent binary, so every one of them printed `ok` here
+        # without running. `capi-c-arms` already builds this exact oracle under
+        # this exact key (same path, same script hashes), so a run normally
+        # restores the entry that job saved and the build below runs only on a
+        # miss in both. Restore/save split and the key's script binding are
+        # `zenohd-cache`'s.
+        id: zenohd-shm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target/zenohd-shm
+          key: zenohd-shm-1.10.2-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+
+      - name: Build the shared-memory zenohd and its four examples (cache miss only)
+        if: steps.zenohd-shm-cache.outputs.cache-hit != 'true'
+        # ZENOHD_ALLOW_CLONE=1 forces the SOURCE path: the examples exist only in a
+        # source tree, and `cargo install` yields no examples.
+        env:
+          ZENOHD_SHM: "1"
+          ZENOHD_ALLOW_CLONE: "1"
+        run: bash scripts/build-zenohd.sh
+
+      - name: Ensure the shared-memory zenohd ANSWERS at the pin and carries its examples
+        id: zenohd-shm-ensure
+        # The same reading as the unixpipe and vsock variants: a restore is
+        # trusted for what its key promised and only the binary knows what it is.
+        # The four examples are asserted because the payload, query and router
+        # legs drive them, and a restored entry missing one would turn those
+        # legs into a red with no provisioning cause named.
+        run: |
+          python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd-shm \
+            || { echo "::error::the shared-memory zenohd is not at the pin and could not be rebuilt"; exit 1; }
+          for ex in z_pub_shm z_sub_shm z_queryable_shm z_get_shm; do
+            test -x "target/zenohd-shm/$ex" \
+              || { echo "::error::$ex missing from target/zenohd-shm - the Layer Z SHM legs cannot run"; exit 1; }
+          done
+
+      - name: Save the shared-memory zenohd (cache miss only)
+        # Gated on the ensure step, which rebuilds a poisoned restore and so is the
+        # only step whose success says the binary is the one this key names.
+        if: always() && github.ref == 'refs/heads/main' && steps.zenohd-shm-cache.outputs.cache-hit != 'true' && steps.zenohd-shm-ensure.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: target/zenohd-shm
+          key: ${{ steps.zenohd-shm-cache.outputs.cache-primary-key }}
+
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this
         # step existed they ran on exactly one machine.
@@ -3970,8 +4020,14 @@ jobs:
         # plugin with it — so a SKIP would be a provisioning regression wearing a
         # green badge, and it would lie twice: Layer A4 reads "this lane is in
         # ci.yml" as evidence its proofs EXECUTED. Same rule as WZ_QZ_REQUIRE.
+        #
+        # WZ_ZENOHD_SHM_REQUIRE=1 for the same reason, about the shared-memory
+        # oracle the steps above now provision: `shm_oracle_or_refusal` in
+        # wz-integration-tests turns its absence into a panic at the one door
+        # every SHM leg goes through, instead of a `return` that prints `ok`.
         env:
           WZ_Z_REQUIRE: "1"
+          WZ_ZENOHD_SHM_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Z
 
       - name: Layer E5z — router QueryTarget e2e vs real zenoh queryables
@@ -4017,9 +4073,12 @@ jobs:
         #
         # Wired HERE because this job is what builds and guarantees zenohd; the
         # same `WZ_Z_REQUIRE` reasoning applies, and the lane's own prereq check
-        # turns an absent binary into a FAIL under it.
+        # turns an absent binary into a FAIL under it. WZ_ZENOHD_SHM_REQUIRE=1
+        # arms the SHM establishment witness the same way: this job provisions
+        # the shared-memory oracle it dials (the steps before Layer Z).
         env:
           WZ_Z_REQUIRE: "1"
+          WZ_ZENOHD_SHM_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Ewirez
 
       - name: Layer M — multicast loopback + wz<->pico multicast interop (R311y421)
