@@ -8503,6 +8503,16 @@ layer_c1ag_cargo_test_transport_compose() {
 #       It is not a substitute for this lane — E9 proves the composition
 #       interoperates, not that `time-hlc` WITH routing composes as a clippy-clean
 #       seam, which is what the combo below is for.
+#
+# The LAST clippy arm is the publish stamp's feature-OFF arm with a clock in
+# the build: `time-hlc` on, `pubsub-timestamp` off. Every other runtime clippy
+# above keeps the defaults, which carry `pubsub-timestamp`, so the
+# `not(feature = "pubsub-timestamp")` arms of `resolve_publish_timestamp` and
+# `stamps_publishes` were judged with `time-hlc` only where some unrelated lane
+# happened to drop the default. Named here, a future lane that adds
+# `pubsub-timestamp` to its own arms cannot take that judgement away. The
+# loopback pieces are the ones Layer C1bj's metadata-OFF arm uses, so the
+# stamp's two consumers are compiled with the field dropped.
 layer_c1ah_cargo_test_time_hlc() {
     # The two modules live in `wz-node-time` (the tokio crate re-exports them), so
     # their unit tests run THERE: the same filters under `wz-runtime-tokio` select
@@ -8542,7 +8552,9 @@ layer_c1ah_cargo_test_time_hlc() {
             --features time-hlc,ext-pubsub-advanced-cache --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features time-hlc,routing-router-hat,routing-peer,routing-accept --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features \
+            --features time-hlc,transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --quiet -- -D warnings)
 }
 
 # ─── Layer C1ai — liveliness-history: §5.10 CURRENT-state-replay request gate ─
@@ -11833,6 +11845,35 @@ layer_c1h_arbitrary_subset_matrix() {
     _runci_lane_did C1h "$ran" "arbitrary subset(s) of ${#subsets[@]}"
 }
 
+# ─── Layer C1sb — the switchboard crates, each selected by name ─────────
+#
+# `wz-switchboard-codegen` (the golden emission of the dispatch table),
+# `wz-switchboard-example` and `wz-ap-demo-app` (the committed generated
+# statechart, codec and dispatch, driven through the value path) were reached
+# only by Layer C1's unfiltered `cargo test --workspace`, where a target that
+# stops compiling its tests, or a `#[cfg]` that elides a module, shows up as a
+# smaller total among thousands and nothing else. Each run here is pinned to
+# the count its target holds, so losing one test is a red that names the
+# crate.
+#
+# The counts are the `#[test]` functions of each target, none of them gated
+# by anything but `#[cfg(test)]` and none `#[ignore]`d, and the included
+# `out/` artifacts carry no tests of their own: codegen 29 (one `tests`
+# module), example 15 (`tests` 9, `ap_dynamic_tests` 6), the demo app's lib 4
+# and its `fan_out_value_path` file 4. `--lib` keeps doctests out of the
+# count.
+layer_c1sb_switchboard_crates() {
+    _runci_guarded_test "C1sb wz-switchboard-codegen" 29 \
+        cargo test -p wz-switchboard-codegen --lib --quiet || return 1
+    _runci_guarded_test "C1sb wz-switchboard-example" 15 \
+        cargo test -p wz-switchboard-example --lib --quiet || return 1
+    _runci_guarded_test "C1sb wz-ap-demo-app lib" 4 \
+        cargo test -p wz-ap-demo-app --lib --quiet || return 1
+    wz_test_args wz-ap-demo-app fan_out_value_path
+    _runci_guarded_test "C1sb wz-ap-demo-app fan_out_value_path" 4 \
+        cargo test -p wz-ap-demo-app "${WZ_TEST_ARGS[@]}" --quiet || return 1
+}
+
 # ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─
 #
 # R311ep: scouting-active is off by default (scouting is opt-in per
@@ -14167,47 +14208,61 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # configuration. Every failing configuration is listed before the lane fails, so
 # one run names all of them, and each configuration's seconds are printed in the
 # cost table's row form.
+#
+# On the leg ledger: the two selftests are independent gates (the feature-set
+# reader and the shard planner), so a red in the first must not hide the
+# second. The plan leans on the planner's selftest, and the clippy sweep on the
+# plan and on the reader's selftest, because the configurations it clippies are
+# the sets that reader returns.
 layer_c1bf_cargo_clippy_all_features() {
     local shards="${WZ_ALLFEAT_SHARDS:-1}" shard="${WZ_ALLFEAT_SHARD:-0}"
-    local members plan crate label args_line started ran=0
-    local -a args failed=()
-    # The control group first: what decides the configurations and their shards is held
-    # in both directions before it is trusted.
-    python3 scripts/lib/doc_feature_sets.py --selftest || return 1
-    python3 scripts/lib/allfeat_clippy_plan.py --selftest || return 1
-    members="$(_c1bz_members)"
-    if [[ -z "$members" ]]; then
-        echo "  C1bf FAIL: cargo metadata listed no workspace member"
-        return 1
-    fi
-    plan="$(python3 scripts/lib/allfeat_clippy_plan.py plan --shard "$shard" --shards "$shards")" || {
-        echo "  C1bf FAIL: no plan for shard $shard of $shards (the line above says why)"
-        return 1
-    }
-    # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
-    while read -r crate label args_line; do
-        [[ -n "$crate" ]] || continue
-        read -r -a args <<<"$args_line"
-        started=$SECONDS
-        # The plan line carries the targets before the features: `--all-targets`, or the
-        # selectors the set declares (`clippy-targets`).
-        if ! (cd crates && cargo clippy -p "$crate" "${args[@]}" \
-            --quiet -- -D warnings); then
-            failed+=("$crate ($label)")
+    local plan=""
+    _c1bf_plan() {
+        local members
+        members="$(_c1bz_members)"
+        if [[ -z "$members" ]]; then
+            echo "  C1bf FAIL: cargo metadata listed no workspace member"
+            return 1
         fi
-        echo "  C1bf cost: $crate $label $((SECONDS - started))"
-        ran=$((ran + 1))
-    done <<<"$plan"
-    if [[ $ran -eq 0 ]]; then
-        echo "  C1bf FAIL: shard $shard of $shards ran no configuration"
-        return 1
-    fi
-    if [[ ${#failed[@]} -gt 0 ]]; then
-        echo "  C1bf FAIL: ${#failed[@]} of $ran configuration(s) do not pass clippy -D warnings:"
-        printf '    - %s\n' "${failed[@]}"
-        return 1
-    fi
-    _runci_lane_did C1bf "$ran" "configuration(s) of shard $shard of $shards clippied, at the targets each declares"
+        plan="$(python3 scripts/lib/allfeat_clippy_plan.py plan --shard "$shard" --shards "$shards")" || {
+            echo "  C1bf FAIL: no plan for shard $shard of $shards (the line above says why)"
+            return 1
+        }
+    }
+    _c1bf_clippy() {
+        local crate label args_line started ran=0
+        local -a args failed=()
+        # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
+        while read -r crate label args_line; do
+            [[ -n "$crate" ]] || continue
+            read -r -a args <<<"$args_line"
+            started=$SECONDS
+            # The plan line carries the targets before the features: `--all-targets`, or the
+            # selectors the set declares (`clippy-targets`).
+            if ! (cd crates && cargo clippy -p "$crate" "${args[@]}" \
+                --quiet -- -D warnings); then
+                failed+=("$crate ($label)")
+            fi
+            echo "  C1bf cost: $crate $label $((SECONDS - started))"
+            ran=$((ran + 1))
+        done <<<"$plan"
+        if [[ $ran -eq 0 ]]; then
+            echo "  C1bf FAIL: shard $shard of $shards ran no configuration"
+            return 1
+        fi
+        if [[ ${#failed[@]} -gt 0 ]]; then
+            echo "  C1bf FAIL: ${#failed[@]} of $ran configuration(s) do not pass clippy -D warnings:"
+            printf '    - %s\n' "${failed[@]}"
+            return 1
+        fi
+        echo "  C1bf: $ran configuration(s) of shard $shard of $shards clippied, at the targets each declares"
+    }
+    _runci_legs_open C1bf || return 1
+    _runci_leg doc-feature-sets-selftest -- python3 scripts/lib/doc_feature_sets.py --selftest
+    _runci_leg allfeat-plan-selftest -- python3 scripts/lib/allfeat_clippy_plan.py --selftest
+    _runci_leg plan --after allfeat-plan-selftest -- _c1bf_plan
+    _runci_leg clippy --after doc-feature-sets-selftest,plan -- _c1bf_clippy
+    _runci_legs_close
 }
 # ─── Layer C1bn — the PASSIVE-DISSECTION feature set, RUN ────────────
 #
@@ -27647,6 +27702,7 @@ run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1own layer_c1own_own_space_witnesses || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
+run_layer C1sb layer_c1sb_switchboard_crates || overall=1
 run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
 run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
 run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1

@@ -1633,6 +1633,17 @@ jobs:
         # subset-specific unused-import / dead-code into a hard error.
         run: bash scripts/run-ci.sh --layer C1h
 
+      - name: Layer C1sb — the switchboard crates, each selected by name
+        # The three crates that compile the committed switchboard artifacts
+        # (`wz-switchboard-codegen`, `wz-switchboard-example`, `wz-ap-demo-app`)
+        # were run only inside Layer C1's unfiltered workspace suite, where a
+        # target that stops compiling its tests changes nothing but a total. Here
+        # each is count-pinned. Placed in this job for its budget (it read 335s
+        # of 1200s): the crates are small and share `wz-session-core` and the
+        # SCE runtime crates, which the lanes above already build, so the cost
+        # is their own compile and a few seconds of tests.
+        run: bash scripts/run-ci.sh --layer C1sb
+
       - name: Budget margin — this job's own clock
         # The same guard as `ci`'s, with the floor of 20 its siblings use: a job
         # peeled down this far should be told to give its budget back, not to
