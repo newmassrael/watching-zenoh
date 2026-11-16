@@ -838,7 +838,10 @@ pub fn wire_tcp_stream_with_lowlatency(
         tx.set_inline_write(sink);
     }
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
-    let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency, subject, endpoints));
+    let outbound = Arc::new(
+        StreamWriteDriver::new(tx, lowlatency, subject, endpoints)
+            .settling_rx(inbound.rx_settler()),
+    );
     (inbound, outbound, writer_handle)
 }
 

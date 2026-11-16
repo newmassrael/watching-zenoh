@@ -76,7 +76,7 @@ use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
 };
 
-use crate::frame_arena::{link_arena, LinkArena};
+use crate::frame_arena::{link_arena, link_arena_settler, LinkArena};
 use crate::link_interfaces::ip_link_subject;
 use crate::link_socket::LinkSocket;
 use crate::quic_config::{alpn_offer, client_offering, server_offering};
@@ -1318,6 +1318,9 @@ pub(crate) fn wire_stream_over_quic(
     } = link;
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let arena = link_arena(rx_buffer_size);
+    // The streams of the link read into one pool, which the write half settles with the
+    // link's negotiated batch at Established.
+    let rx_settler = link_arena_settler(&arena);
     let has_priority_streams = priority_send.is_some();
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
     // u16 prefix (an always-false flag on the drivers).
@@ -1351,7 +1354,8 @@ pub(crate) fn wire_stream_over_quic(
         ))
     };
     let outbound = Arc::new(QuicWriteDriver {
-        streams: StreamWriteDriver::new(tx, Arc::new(AtomicBool::new(false)), subject, endpoints),
+        streams: StreamWriteDriver::new(tx, Arc::new(AtomicBool::new(false)), subject, endpoints)
+            .settling_rx(rx_settler),
         datagrams: mixed_reliability.then(|| DatagramCompanion::new(connection.clone())),
     });
     let inbound = QuicReadDriver {

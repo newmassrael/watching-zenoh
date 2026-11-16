@@ -33,7 +33,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use wz_codecs::stream_envelope::StreamEnvelope;
 
-use crate::frame_arena::{link_arena, LinkArena, LinkFrame};
+use crate::frame_arena::{link_arena, link_arena_settler, LinkArena, LinkArenaSettler, LinkFrame};
 use crate::link_ring_fd::RingReadable;
 use crate::writer_queue::{OutboundQueue, OutboundTx};
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
@@ -378,11 +378,19 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     }
 
     /// The buffers this link's RX pool holds while no frame is held: the count
-    /// its session's `transport/link/rx/buffer_size` sized it to. Only the
+    /// its session's `transport/link/rx/buffer_size` sized it to with the link's
+    /// negotiated batch, and none before the session has settled that batch. Only the
     /// recycling arena pools per link; the pooled arm shares the node's table.
     #[cfg(not(feature = "runtime-zero-copy"))]
     pub fn pooled_rx_buffers(&self) -> usize {
         self.arena.free_buffers()
+    }
+
+    /// What settles this link's RX pool with the batch its handshake negotiates: handed to
+    /// the link's write half ([`StreamWriteDriver::settling_rx`]), which the session gives
+    /// that batch at Established.
+    pub(crate) fn rx_settler(&self) -> LinkArenaSettler {
+        link_arena_settler(&self.arena)
     }
 
     /// R2750 — the same driver over a reactor the CALLER owns, for the reason
@@ -686,6 +694,10 @@ pub struct StreamWriteDriver {
     /// once at construction (a queue does not change kind).
     #[cfg(feature = "runtime-zero-copy")]
     pooled: bool,
+    /// The link's read half's pool, settled with the negotiated batch when the session
+    /// shapes this half at Established ([`Self::settling_rx`]). `None` for a write half
+    /// with no read half of its own to settle.
+    rx_settler: Option<LinkArenaSettler>,
 }
 
 /// The buffers lent for outbound frames, by slot number: an occupied entry is a
@@ -775,7 +787,17 @@ impl StreamWriteDriver {
             subject,
             endpoints,
             lent: Mutex::new(LentFrames::default()),
+            rx_settler: None,
         }
+    }
+
+    /// This write half with the settler of its link's read half
+    /// ([`StreamReadDriver::rx_settler`]): the session hands the write half the link's
+    /// negotiated batch at Established, and the read half's pool is built from it then, as
+    /// upstream builds a link's read pool when the link joins its transport.
+    pub(crate) fn settling_rx(mut self, settler: LinkArenaSettler) -> Self {
+        self.rx_settler = Some(settler);
+        self
     }
 
     /// Put a lent buffer in the table under a free number.
@@ -970,6 +992,11 @@ impl BoxedLinkDriver for StreamWriteDriver {
     }
 
     fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
+        // The shape carries the link's negotiated batch, which is what upstream's read task
+        // builds its pool from when the link joins the transport.
+        if let Some(settler) = &self.rx_settler {
+            settler.settle(shape.batch_bytes);
+        }
         self.tx.reshape(shape)
     }
 

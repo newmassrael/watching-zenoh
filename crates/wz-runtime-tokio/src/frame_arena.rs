@@ -178,27 +178,85 @@ impl FrameArena for HeapArena {
     }
 }
 
-/// The free list a [`RecycledBuf`] goes home to.
+/// The widest length prefix a stream frame carries in front of its batch: 4 under
+/// `transport-lowlatency`, 2 on the universal path. wz's reader keeps the prefix IN the
+/// frame for the codec, so a buffer that holds any frame of a batch is this much wider than
+/// the batch.
+pub const MAX_PREFIX: usize = 4;
+
+/// The pool a [`RecycledBuf`] goes home to: its free list, the width of its buffers once the
+/// link's batch is settled, and the `transport/link/rx/buffer_size` that sizes it then.
 ///
 /// `Mutex` rather than a lock-free queue: upstream's `RecyclingObjectPool` is
 /// backed by a `LifoQueue`, but the population here is ONE buffer at the
 /// pinned defaults and the only operations are a push and a pop on a link's
 /// own read path. A queue built for contention that never happens would be
 /// machinery with no subject.
-type FreeList = Mutex<Vec<Box<[u8]>>>;
+struct Population {
+    free: Vec<Box<[u8]>>,
+    /// The width of a pooled buffer, the settled batch and [`MAX_PREFIX`]; `None` while the
+    /// handshake has not settled the link's batch.
+    stride: Option<usize>,
+    rx_buffer_size: usize,
+}
 
-/// A fixed population of frame buffers that return to it when dropped.
+type FreeList = Mutex<Population>;
+
+impl Population {
+    /// Fill the free list for a link whose batch is `batch` bytes: upstream's
+    /// `n = rx_buffer_size / mtu`, at least one, each buffer a batch wide. The first
+    /// settlement stands, as upstream builds a link's pool once, when its read task starts.
+    fn settle(&mut self, batch: usize) {
+        if self.stride.is_some() {
+            return;
+        }
+        let batch = batch.max(1);
+        let stride = batch + MAX_PREFIX;
+        let count = (self.rx_buffer_size / batch).max(1);
+        self.free = (0..count)
+            .map(|_| vec![0u8; stride].into_boxed_slice())
+            .collect();
+        self.stride = Some(stride);
+    }
+}
+
+/// A population of frame buffers that return to it when dropped, sized for the link's
+/// negotiated batch.
 ///
 /// Upstream's production arm: `RecyclingObjectPool::new(n, move || vec![0_u8;
 /// mtu].into_boxed_slice())` in `rx_task_non_uring`, drawn from with
 /// `try_take().unwrap_or_else(|| alloc())`.
 ///
-/// THE POPULATION IS FIXED AT CONSTRUCTION and cannot grow, which is a property
+/// THE POPULATION IS FIXED WHEN IT IS SETTLED and cannot grow, which is a property
 /// rather than a limitation: only a buffer that CAME from the free list carries
 /// a live pointer back to it ([`RecyclingArena::take`] hands an overflow buffer
 /// a dead `Weak`, exactly as upstream's `alloc` hands one an empty `Weak`), so
 /// a burst that outruns the pool costs allocations for the burst and leaves the
 /// steady state untouched.
+///
+/// ## When the pool is made, and from which batch
+///
+/// Upstream reads a link's handshake into a fresh buffer of the link's MTU per message
+/// (`io/zenoh-transport/src/unicast/link.rs` @
+/// `.recv_batch(|| zenoh_buffers::vec::uninit(mtu).into_boxed_slice(), None)`). Once the
+/// handshake has settled the batch, the link is reconfigured to it
+/// (`io/zenoh-transport/src/unicast/establishment/open.rs` @ `mtu: state.transport.batch_size,`,
+/// clamped by `io/zenoh-transport/src/unicast/link.rs` @
+/// `config.batch.mtu = link.get_mtu().min(config.batch.mtu);`), and only then is its read task
+/// started (`io/zenoh-transport/src/unicast/universal/link.rs` @
+/// `pub(super) fn start_rx(&mut self, transport: TransportUnicastUniversal, lease: Duration) {`),
+/// which builds the pool from that batch and the manager's
+/// `transport.manager.config.link_rx_buffer_size,`
+/// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `let mut n = rx_buffer_size / mtu;`;
+/// the lowlatency task the same, `io/zenoh-transport/src/unicast/lowlatency/link.rs` @
+/// `let mtu = link_rx.config.batch.mtu as usize;`).
+///
+/// wz wires a link's read half before its handshake, so a link's arena starts unsettled
+/// ([`RecyclingArena::awaiting_batch`]) and reads the handshake as upstream does, into a
+/// fresh buffer per frame. The session settles it at Established, through the link's write
+/// half ([`RxPoolSettler::settle`], called from the shape the write half is given then), with
+/// the batch the handshake negotiated: the same point and the same number upstream's pool is
+/// built from.
 ///
 /// A clone draws from and returns to the SAME population: the streams of one
 /// multistream link read into one pool, as upstream's per-priority read loops
@@ -206,8 +264,7 @@ type FreeList = Mutex<Vec<Box<[u8]>>>;
 /// `let pool = pool.clone();`).
 #[derive(Clone)]
 pub struct RecyclingArena {
-    free: Arc<FreeList>,
-    buf_len: usize,
+    pool: Arc<FreeList>,
 }
 
 impl RecyclingArena {
@@ -217,47 +274,83 @@ impl RecyclingArena {
     /// fills the queue in its constructor loop. A pool that allocates lazily
     /// pays for its first frames exactly when a fresh link is at its busiest.
     pub fn new(count: usize, buf_len: usize) -> Self {
-        let mut free = Vec::with_capacity(count);
-        for _ in 0..count {
-            free.push(vec![0u8; buf_len].into_boxed_slice());
-        }
+        let free = (0..count)
+            .map(|_| vec![0u8; buf_len].into_boxed_slice())
+            .collect();
         Self {
-            free: Arc::new(Mutex::new(free)),
-            buf_len,
+            pool: Arc::new(Mutex::new(Population {
+                free,
+                stride: Some(buf_len),
+                rx_buffer_size: count.saturating_mul(buf_len),
+            })),
         }
     }
 
-    /// The arena ONE LINK's read half gets, sized upstream's way.
-    ///
-    /// `n = rx_buffer_size / mtu`, floored at 1 — `rx_task_non_uring` computes
-    /// exactly this and logs when the configured buffer is too small for one
-    /// mtu. wz's buffers are [`MAX_FRAME`] wide rather than `mtu` wide because
-    /// its reader keeps the length prefix IN the frame for the codec, so the
-    /// storage a frame needs is the prefix plus the payload the prefix names.
+    /// The arena of a link whose read half is wired before its handshake: no population
+    /// until [`RxPoolSettler::settle`] gives it the link's batch, then upstream's.
     ///
     /// `rx_buffer_size` is upstream's `transport/link/rx/buffer_size`, which a
     /// session's `LinkRxConf` carries from the config file to the link it
     /// wires (`link_arena`).
-    pub fn for_link(rx_buffer_size: usize, mtu: usize) -> Self {
-        let count = (rx_buffer_size / mtu.max(1)).max(1);
-        Self::new(count, MAX_FRAME)
+    pub fn awaiting_batch(rx_buffer_size: usize) -> Self {
+        Self {
+            pool: Arc::new(Mutex::new(Population {
+                free: Vec::new(),
+                stride: None,
+                rx_buffer_size,
+            })),
+        }
+    }
+
+    /// The arena of a link whose batch is already `batch` bytes: upstream's
+    /// `n = rx_buffer_size / mtu`, at least one, with `mtu` the link's batch, each buffer
+    /// the batch and the widest prefix wide.
+    pub fn for_link(rx_buffer_size: usize, batch: usize) -> Self {
+        let arena = Self::awaiting_batch(rx_buffer_size);
+        arena.settler().settle(batch);
+        arena
+    }
+
+    /// What settles this arena's pool when the link's batch is known; it holds the pool
+    /// weakly, so a write half that outlives its read half keeps no buffer alive.
+    pub fn settler(&self) -> RxPoolSettler {
+        RxPoolSettler {
+            pool: Arc::downgrade(&self.pool),
+        }
     }
 
     /// Buffers on the free list now: the pool's population while no frame
     /// holds one.
     pub fn free_buffers(&self) -> usize {
-        self.free.lock().map_or(0, |free| free.len())
+        self.pool.lock().map_or(0, |pool| pool.free.len())
+    }
+
+    /// The width of a pooled buffer, or `None` while the pool waits for its batch.
+    pub fn stride(&self) -> Option<usize> {
+        self.pool.lock().ok().and_then(|pool| pool.stride)
     }
 }
 
-/// The mtu a stream link's RX pool is divided by: the widest batch, because a
-/// link's arena is built when it is wired, before its handshake settles a
-/// batch size, and every buffer is [`MAX_FRAME`] wide whatever is settled.
-/// Upstream divides by the settled one
-/// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `let mtu = link_rx.config.batch.mtu as usize;`),
-/// which for a batch narrower than the widest pools more buffers of less
-/// storage each; wz pools the same bytes in buffers that each hold any frame.
-pub const LINK_RX_MTU: usize = u16::MAX as usize;
+/// The settling half of a [`RecyclingArena`], held by the link's write half, which is the
+/// half the session hands the negotiated batch at Established.
+#[derive(Clone)]
+pub struct RxPoolSettler {
+    pool: Weak<FreeList>,
+}
+
+impl RxPoolSettler {
+    /// Make the pool for a link whose negotiated batch is `batch` bytes. The first call
+    /// stands; a pool whose read half is gone has nothing to make.
+    pub fn settle(&self, batch: usize) {
+        let Some(pool) = self.pool.upgrade() else {
+            return;
+        };
+        let guard = pool.lock();
+        if let Ok(mut population) = guard {
+            population.settle(batch);
+        }
+    }
+}
 
 /// Whether a stream link pools its own RX buffers, sized by
 /// `transport/link/rx/buffer_size`: true but in a `runtime-zero-copy` build,
@@ -268,30 +361,35 @@ impl FrameArena for RecyclingArena {
     type Buf = RecycledBuf;
 
     fn take(&mut self, want: usize) -> RecycledBuf {
-        if want > self.buf_len {
+        // A poisoned lock reads as an unsettled pool: "no pooled buffer", which
+        // folds into an arm that already exists instead of adding one that defends
+        // against a panic no holder of this lock can raise.
+        let Ok(mut pool) = self.pool.lock() else {
+            return RecycledBuf::one_shot(want, MAX_FRAME);
+        };
+        let Some(stride) = pool.stride else {
+            // The handshake: a fresh buffer per frame, as wide as any frame the link can
+            // carry before a batch is settled, as upstream's `recv` takes one of the link's
+            // MTU per message.
+            return RecycledBuf::one_shot(want, MAX_FRAME);
+        };
+        if want > stride {
             // Wider than the population's stride, so it can never go home: a
             // free list holding two sizes would hand a short buffer to a long
             // frame later. Upstream reaches the same place from the other
             // direction -- its `alloc()` builds an mtu-sized object with an
             // empty `Weak`, so an overflow buffer is one-shot there too.
-            return RecycledBuf::one_shot(want);
+            return RecycledBuf::one_shot(want, want);
         }
-        // A poisoned lock and an empty free list are the SAME answer here --
-        // "no pooled buffer" -- and folding them says so instead of adding an
-        // arm that defends against a panic no holder of this lock can raise.
-        // The alternative, `unwrap()`, would turn an unreachable poisoning into
-        // a dead link.
-        match self.free.lock().ok().and_then(|mut free| free.pop()) {
+        match pool.free.pop() {
             Some(bytes) => RecycledBuf {
                 bytes: Some(bytes),
                 len: want,
-                home: Arc::downgrade(&self.free),
+                home: Arc::downgrade(&self.pool),
             },
-            // A dry pool: the frame gets storage of ITS width. The buffer is one-shot (it has no
-            // home to go back to), so a box of the stride would be 64 KiB zeroed for a frame of
-            // a kilobyte, and a read that overlapped the previous frame's last holder did it
-            // for one GET in three.
-            None => RecycledBuf::one_shot(want),
+            // A dry pool: a whole batch with no home, upstream's `alloc()`, which builds an
+            // object of the pool's own width and hands it an empty `Weak`.
+            None => RecycledBuf::one_shot(want, stride),
         }
     }
 }
@@ -321,9 +419,11 @@ pub struct RecycledBuf {
 }
 
 impl RecycledBuf {
-    fn one_shot(len: usize) -> Self {
+    /// A buffer of `width` bytes, at least `len`, holding a frame of `len` and with no pool
+    /// to go back to.
+    fn one_shot(len: usize, width: usize) -> Self {
         Self {
-            bytes: Some(vec![0u8; len].into_boxed_slice()),
+            bytes: Some(vec![0u8; width.max(len)].into_boxed_slice()),
             len,
             home: Weak::new(),
         }
@@ -375,8 +475,8 @@ impl Drop for RecycledBuf {
         // local declared after `home` drops before it, which is the order a
         // destructor needs.
         let guard = home.lock();
-        if let Ok(mut free) = guard {
-            free.push(bytes);
+        if let Ok(mut population) = guard {
+            population.free.push(bytes);
         }
     }
 }
@@ -417,7 +517,40 @@ pub(crate) type LinkFrame = <LinkArena as FrameArena>::Buf;
 /// handle on the NODE's table rather than building a table of its own.
 #[cfg(not(feature = "runtime-zero-copy"))]
 pub(crate) fn link_arena(rx_buffer_size: usize) -> LinkArena {
-    RecyclingArena::for_link(rx_buffer_size, LINK_RX_MTU)
+    RecyclingArena::awaiting_batch(rx_buffer_size)
+}
+
+/// What a link's write half holds to settle its read half's [`LinkArena`] with the batch the
+/// handshake negotiated: the recycling arm's [`RxPoolSettler`].
+#[cfg(not(feature = "runtime-zero-copy"))]
+pub(crate) type LinkArenaSettler = RxPoolSettler;
+
+/// The pooled arm's settler: the node's table is sized by its deploy declaration and not by
+/// any link's batch, so there is nothing to settle.
+#[cfg(feature = "runtime-zero-copy")]
+pub(crate) type LinkArenaSettler = NodeTableSettler;
+
+/// The settler of `arena`.
+#[cfg(not(feature = "runtime-zero-copy"))]
+pub(crate) fn link_arena_settler(arena: &LinkArena) -> LinkArenaSettler {
+    arena.settler()
+}
+
+/// The settler of `arena`.
+#[cfg(feature = "runtime-zero-copy")]
+pub(crate) fn link_arena_settler(_arena: &LinkArena) -> LinkArenaSettler {
+    NodeTableSettler
+}
+
+/// A settler with nothing to settle, for links that read into the node's table.
+#[cfg(feature = "runtime-zero-copy")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NodeTableSettler;
+
+#[cfg(feature = "runtime-zero-copy")]
+impl NodeTableSettler {
+    /// The node's table does not follow a link's batch.
+    pub(crate) fn settle(&self, _batch: usize) {}
 }
 
 /// The pooled arm. The node's table is the size its deploy declaration gives
@@ -460,12 +593,12 @@ mod tests {
     #[test]
     fn a_pooled_buffer_goes_home_when_the_frame_is_done() {
         let mut arena = RecyclingArena::new(1, MAX_FRAME);
-        assert_eq!(arena.free.lock().expect("uncontended").len(), 1);
+        assert_eq!(arena.free_buffers(), 1);
 
         let mut first = arena.take(16);
         first.as_mut()[0] = 0x5A;
         assert_eq!(
-            arena.free.lock().expect("uncontended").len(),
+            arena.free_buffers(),
             0,
             "a buffer being filled is gone from the population"
         );
@@ -519,13 +652,13 @@ mod tests {
             "the frame is a range of lent storage"
         );
         assert_eq!(
-            arena.free.lock().expect("uncontended").len(),
+            arena.free_buffers(),
             0,
             "the frame holds the pooled buffer it was read into"
         );
         drop(frame);
         assert_eq!(
-            arena.free.lock().expect("uncontended").len(),
+            arena.free_buffers(),
             1,
             "the buffer goes home when the frame drops"
         );
@@ -543,34 +676,77 @@ mod tests {
         }
         drop(held);
         assert_eq!(
-            arena.free.lock().expect("uncontended").len(),
+            arena.free_buffers(),
             1,
             "only the buffer that came from the free list goes back to it"
         );
     }
 
-    /// A frame read while the pool is dry gets storage of its own width, not of the stride:
-    /// the buffer is one-shot, so the rest of a stride-wide box would be zeroed for nothing.
+    /// A frame read while the pool is dry gets a whole batch of storage with no home, as
+    /// upstream's `alloc()` builds an object of the pool's own width: the frame is as long as
+    /// it is, and the box behind it is the stride.
     #[test]
-    fn an_overflow_buffer_is_the_width_of_its_frame_and_not_of_the_stride() {
-        let mut arena = RecyclingArena::new(1, MAX_FRAME);
+    fn a_dry_pool_hands_out_a_batch_wide_buffer() {
+        const BATCH: usize = 16_000;
+        let mut arena = RecyclingArena::for_link(BATCH, BATCH);
         let held = arena.take(16);
+        assert_eq!(arena.free_buffers(), 0, "the one pooled buffer is held");
         let overflow = arena.take(1100);
-        assert_eq!(overflow.as_ref().len(), 1100);
+        assert_eq!(overflow.as_ref().len(), 1100, "the frame is its own length");
         assert_eq!(
             overflow
                 .bytes
                 .as_ref()
                 .expect("bytes outlive every read")
                 .len(),
-            1100,
-            "the box behind a one-shot frame is as wide as the frame"
+            BATCH + MAX_PREFIX,
+            "the box behind a dry pool's frame is a batch and its prefix"
         );
         assert_eq!(
             held.bytes.as_ref().expect("bytes outlive every read").len(),
-            MAX_FRAME,
-            "CONTROL: the pooled buffer keeps its stride"
+            BATCH + MAX_PREFIX,
+            "CONTROL: the pooled buffer has the same stride"
         );
+        drop(overflow);
+        drop(held);
+        assert_eq!(arena.free_buffers(), 1, "and only the pooled one goes home");
+    }
+
+    /// An arena wired before its handshake pools nothing and reads each frame into a fresh
+    /// buffer, as upstream's `recv` reads a handshake; settling it with the link's batch makes
+    /// the population, and the first settlement stands.
+    #[test]
+    fn an_arena_waits_for_the_links_batch_and_the_first_settlement_stands() {
+        let mut arena = RecyclingArena::awaiting_batch(131_070);
+        assert_eq!(arena.stride(), None);
+        let handshake = arena.take(100);
+        assert_eq!(handshake.as_ref().len(), 100);
+        assert_eq!(
+            handshake
+                .bytes
+                .as_ref()
+                .expect("bytes outlive every read")
+                .len(),
+            MAX_FRAME,
+            "a handshake frame is read into a buffer any frame fits"
+        );
+        drop(handshake);
+        assert_eq!(arena.free_buffers(), 0, "a handshake buffer has no home");
+
+        let settler = arena.settler();
+        settler.settle(16_000);
+        assert_eq!(arena.stride(), Some(16_000 + MAX_PREFIX));
+        assert_eq!(arena.free_buffers(), 8);
+        settler.settle(u16::MAX as usize);
+        assert_eq!(
+            arena.free_buffers(),
+            8,
+            "a second settlement changes nothing"
+        );
+
+        // A settler whose arena is gone settles nothing and does not fail.
+        drop(arena);
+        settler.settle(16_000);
     }
 
     /// A frame wider than the population's stride is served rather than
@@ -590,30 +766,47 @@ mod tests {
     #[test]
     fn a_links_arena_is_one_buffer_at_the_pinned_defaults() {
         let arena = RecyclingArena::for_link(u16::MAX as usize, u16::MAX as usize);
-        assert_eq!(arena.free.lock().expect("uncontended").len(), 1);
+        assert_eq!(arena.free_buffers(), 1);
     }
 
-    /// `transport/link/rx/buffer_size` sizes a stream link's pool: four widest
-    /// batches of storage pool four buffers, a size below one batch still pools
+    /// `transport/link/rx/buffer_size` sizes a stream link's pool by the link's batch:
+    /// four widest batches of storage pool four buffers, a size below one batch still pools
     /// one, as upstream's RX task floors it, and the arena a link is wired with
-    /// is the one the value asks for.
+    /// pools what the value asks for once the session settles its batch.
     #[test]
     fn the_rx_buffer_size_sizes_a_links_pool() {
+        const WIDEST: usize = u16::MAX as usize;
         assert_eq!(
-            RecyclingArena::for_link(4 * LINK_RX_MTU, LINK_RX_MTU).free_buffers(),
+            RecyclingArena::for_link(4 * WIDEST, WIDEST).free_buffers(),
             4
         );
         assert_eq!(
-            RecyclingArena::for_link(4 * LINK_RX_MTU - 1, LINK_RX_MTU).free_buffers(),
+            RecyclingArena::for_link(4 * WIDEST - 1, WIDEST).free_buffers(),
             3
         );
-        assert_eq!(RecyclingArena::for_link(1, LINK_RX_MTU).free_buffers(), 1);
+        assert_eq!(RecyclingArena::for_link(1, WIDEST).free_buffers(), 1);
         #[cfg(not(feature = "runtime-zero-copy"))]
         {
             use wz_session_core::session_init_params::RX_BUFFER_SIZE;
-            assert_eq!(link_arena(RX_BUFFER_SIZE).free_buffers(), 1);
-            assert_eq!(link_arena(8 * RX_BUFFER_SIZE).free_buffers(), 8);
+            let wired = link_arena(8 * RX_BUFFER_SIZE);
+            assert_eq!(
+                wired.free_buffers(),
+                0,
+                "nothing is pooled before the batch"
+            );
+            link_arena_settler(&wired).settle(WIDEST);
+            assert_eq!(wired.free_buffers(), 8);
         }
+    }
+
+    /// The divisor is the link's batch and not the widest one: two widest batches of storage
+    /// on a link that settled a batch of 16000 pool eight buffers of that batch, as upstream's
+    /// `rx_buffer_size / mtu` does with the link's `batch.mtu`.
+    #[test]
+    fn a_narrower_batch_pools_more_buffers_of_its_own_width() {
+        let arena = RecyclingArena::for_link(131_070, 16_000);
+        assert_eq!(arena.free_buffers(), 8);
+        assert_eq!(arena.stride(), Some(16_000 + MAX_PREFIX));
     }
 
     /// A pooled buffer that a frame still holds is off the free list, and the
@@ -621,7 +814,8 @@ mod tests {
     /// size bounds what is reused, never what is read.
     #[test]
     fn a_pool_whose_buffers_are_held_still_serves_the_next_frame() {
-        let mut arena = RecyclingArena::for_link(2 * LINK_RX_MTU, LINK_RX_MTU);
+        const WIDEST: usize = u16::MAX as usize;
+        let mut arena = RecyclingArena::for_link(2 * WIDEST, WIDEST);
         let first = arena.take(100);
         let second = arena.take(100);
         assert_eq!(arena.free_buffers(), 0);
