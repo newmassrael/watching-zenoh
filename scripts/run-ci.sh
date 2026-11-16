@@ -23160,6 +23160,16 @@ layer_z_zenohd_interop() {
     _runci_guarded_test "Z quic acceptor iface" 1 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    # The QUIC link with the mixed-reliability datagram companion, zenohd->wz: both
+    # ends ask for `mixed_rel=1`, so a session opens only on a negotiated
+    # `zenoh-ms-mr` / `zenoh-mr`, and a pico Put sent after an idle window past the
+    # lease reaches wz only if wz kept the companion alive by its own keepalives
+    # (zenohd ends the pair when its companion's lease runs out). Same quic demo
+    # build and stock zenohd as the acceptor legs above; one test, so `1 passed`.
+    wz_test_args wz-integration-tests wz_quic_mixed_reliability_zenohd_interop
+    _runci_guarded_test "Z quic mixed reliability" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2590 — the `bind` and `dscp` link keys on the WIRE, tcp/tls/udp/quic, with
     # zenohd as the adjudicator of every row. Both implementations dial a libc
     # observer this test owns (`IP_RECVTOS`, `IP_PKTOPTIONS`), which reads the
