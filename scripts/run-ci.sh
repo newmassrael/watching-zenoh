@@ -18331,6 +18331,19 @@ layer_ewirez_zenohd_wire_dissection() {
         || return 1
     echo "  Ewirez: a stock zenohd and wz read each other's compressed group batches"
 
+    # Open-debt item 175 -- the CLOSE SCOPE of an established session. Layer Z's
+    # close scope witness reads the establishment reject; this reads the Close a
+    # stock zenoh client writes when it drops a session it established with
+    # zenohd. Needs zenohd and the core examples only.
+    wz_test_args wz-integration-tests zenoh_close_scope_foreign_witness
+    _runci_guarded_test "Ewirez stock-zenoh close scope" 1 \
+        timeout "$EWIREZ_WITNESS_BUDGET" \
+        env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: a stock zenoh session's Close of an established session was read"
+
     # R2051 (open-debt item 378) — the TIMESTAMP leg, and the only one in this
     # family with THREE processes and TWO implementations on the wire: pico
     # publishes, zenohd stamps while routing, pico subscribes. It therefore
