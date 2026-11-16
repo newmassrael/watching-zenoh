@@ -3046,14 +3046,14 @@ mod tests {
         );
 
         drop(owner);
-        std::fs::write(crate::posix_shm::segment_path(id), [0u8; 64])
-            .expect("make another segment of that id");
+        // A real segment rather than a file written by hand, so no sweep can take it.
+        let successor = OwnedSegment::create(64, || id).expect("make another segment of that id");
         let other = peer_data(id).expect("the new object maps");
         assert!(
             !Arc::ptr_eq(&first, &other),
             "the cache served the mapping of an object the name no longer names"
         );
-        std::fs::remove_file(crate::posix_shm::segment_path(id)).expect("clean up");
+        drop(successor);
     }
 
     /// A mapping whose segment is gone is let go by the sweep, so a pool that exited does not stay

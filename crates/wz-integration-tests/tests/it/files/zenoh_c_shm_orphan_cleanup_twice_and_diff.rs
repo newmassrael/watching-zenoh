@@ -25,6 +25,13 @@
 //! The observable is the filesystem, read by the harness, so the two arms are
 //! compared on the effect itself rather than on anything the program prints.
 //! Each arm gets its own ids, so neither can see the other's files.
+//!
+//! ## The first touch
+//!
+//! A program need not call the function: the first segment a process makes
+//! sweeps the same way (`commons/zenoh-shm/src/cleanup.rs` @ `// on first cleanup subsystem touch we perform zenoh segment cleanup`).
+//! A second probe makes one shared-memory provider and drops it, and nothing
+//! else, over a fresh plant of the same three files.
 
 #![cfg(target_os = "linux")]
 
@@ -59,6 +66,23 @@ const PROBE: &str = r#"#include <stdio.h>
 
 int main(void) {
     zc_cleanup_orphaned_shm_segments();
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// The first-touch probe: one provider, which makes the process's first
+/// segment, and no call to the cleanup.
+const FIRST_TOUCH_PROBE: &str = r#"#include <stdio.h>
+#include "zenoh.h"
+
+int main(void) {
+    z_owned_shm_provider_t provider;
+    if (z_shm_provider_default_new(&provider, 4096) != Z_OK) {
+        printf("provider failed\n");
+        return 1;
+    }
+    z_drop(z_move(provider));
     printf("done\n");
     return 0;
 }
@@ -118,14 +142,43 @@ impl Drop for Planted {
     }
 }
 
-/// Compile the probe against one library and run it over freshly planted
+/// One probe program: its source file's name and its text.
+struct Probe {
+    name: &'static str,
+    source: &'static str,
+}
+
+const CLEANUP: Probe = Probe {
+    name: "wz_shm_cleanup",
+    source: PROBE,
+};
+
+const FIRST_TOUCH: Probe = Probe {
+    name: "wz_shm_first_touch",
+    source: FIRST_TOUCH_PROBE,
+};
+
+/// Compile `probe` against one library and run it over freshly planted
 /// files, answering what survived.
-fn run_arm(include: &Path, dir: &Path, libdir: &Path, lib: &str, salt: u64) -> String {
+fn run_arm(
+    probe: &Probe,
+    include: &Path,
+    dir: &Path,
+    libdir: &Path,
+    lib: &str,
+    salt: u64,
+) -> String {
     let src_dir = dir.join("src");
     std::fs::create_dir_all(&src_dir).expect("probe source dir");
-    std::fs::write(src_dir.join("wz_shm_cleanup.c"), PROBE).expect("write the probe source");
-    let exe = compile_zenoh_c_example("wz_shm_cleanup", dir, include, &src_dir, libdir, lib)
-        .unwrap_or_else(|diag| panic!("the cleanup probe does not link against {lib}\n{diag}"));
+    std::fs::write(src_dir.join(format!("{}.c", probe.name)), probe.source)
+        .expect("write the probe source");
+    let exe = compile_zenoh_c_example(probe.name, dir, include, &src_dir, libdir, lib)
+        .unwrap_or_else(|diag| {
+            panic!(
+                "the {} probe does not link against {lib}\n{diag}",
+                probe.name
+            )
+        });
     let planted = Planted::new(salt);
     let out = Command::new(&exe)
         .env("LD_LIBRARY_PATH", libdir)
@@ -134,7 +187,8 @@ fn run_arm(include: &Path, dir: &Path, libdir: &Path, lib: &str, salt: u64) -> S
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
         out.status.success() && stdout.contains("done"),
-        "the cleanup probe did not complete against {lib}:\n{stdout}"
+        "the {} probe did not complete against {lib}:\n{stdout}",
+        probe.name
     );
     planted.survivors()
 }
@@ -171,13 +225,15 @@ fn orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc() {
     let libdir_ref = reference.parent().expect("libzenohc.so has a parent");
     let ref_dir = dir.path().join("reference");
     std::fs::create_dir_all(&ref_dir).expect("reference build dir");
-    let on_ref = run_arm(&include, &ref_dir, libdir_ref, "zenohc", 0);
+    let on_ref = run_arm(&CLEANUP, &include, &ref_dir, libdir_ref, "zenohc", 0);
+    let touched_ref = run_arm(&FIRST_TOUCH, &include, &ref_dir, libdir_ref, "zenohc", 2);
 
     let wz_lib = wz_capi_c_cdylib();
     let wz_libdir = wz_lib.parent().expect("cdylib has a parent");
     let wz_dir = dir.path().join("wz");
     std::fs::create_dir_all(&wz_dir).expect("wz build dir");
-    let on_wz = run_arm(&include, &wz_dir, wz_libdir, "wz_capi_c", 1);
+    let on_wz = run_arm(&CLEANUP, &include, &wz_dir, wz_libdir, "wz_capi_c", 1);
+    let touched_wz = run_arm(&FIRST_TOUCH, &include, &wz_dir, wz_libdir, "wz_capi_c", 3);
 
     // The ORACLE first: two identical failures diff clean.
     assert_eq!(
@@ -188,5 +244,14 @@ fn orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc() {
         on_wz, on_ref,
         "§5.27 api-compat-c: wz's C ABI and libzenohc disagree about which \
          /dev/shm segments are orphaned"
+    );
+    assert_eq!(
+        touched_ref, "orphan=false held=true other=true",
+        "the reference does not sweep at its first segment as this leg holds wz to"
+    );
+    assert_eq!(
+        touched_wz, touched_ref,
+        "§5.27 api-compat-c: wz's C ABI and libzenohc disagree about what a \
+         process's first shared-memory segment sweeps"
     );
 }
