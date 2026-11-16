@@ -383,3 +383,87 @@ fn a_link_that_chose_an_interface_opens_with_the_policy_on() {
         own
     );
 }
+
+/// A link's `#bind=` address chooses its egress as well as its source, as upstream's `ucast_sock`
+/// sets `IP_MULTICAST_IF` to the local address it binds
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.set_multicast_if_v4(addr)`); the link
+/// used to leave by the first interface address whatever `#bind=` named. Read back from the
+/// kernel. Linux only, whose `IP_MULTICAST_IF` takes the loopback address.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_link_bound_by_bind_leaves_by_the_address_it_binds() {
+    let cfg = SocketConfig {
+        bind: Some("127.0.0.1:0"),
+        ..Default::default()
+    };
+    let link = bind_sender(IpAddr::V4(GROUP), 0, &cfg, true).expect("bind the link's send half");
+    assert_eq!(
+        link.socket.multicast_if_v4().expect("read IP_MULTICAST_IF"),
+        Ipv4Addr::LOCALHOST
+    );
+    let bound = link
+        .socket
+        .local_addr()
+        .expect("the bound address")
+        .as_socket()
+        .expect("an inet address");
+    assert_eq!(bound.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+    // CONTROL: a sender that is not a link keeps `#iface=` or the kernel's choice, whatever it
+    // binds.
+    let plain = bind_sender(IpAddr::V4(GROUP), 0, &cfg, false).expect("bind a plain sender");
+    assert_eq!(
+        plain
+            .socket
+            .multicast_if_v4()
+            .expect("read IP_MULTICAST_IF"),
+        Ipv4Addr::UNSPECIFIED
+    );
+}
+
+/// A link's IPv6 egress is the interface of the address its sending socket binds, as upstream's
+/// `ucast_sock` takes it (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+/// `match zenoh_util::net::get_index_of_interface(local_addr.ip())`), told case by case over a
+/// lookup that stands in for the host's interface table.
+#[test]
+fn a_link_leaves_by_the_interface_its_ipv6_address_is_on() {
+    use crate::link_interfaces::IfaceResolveError;
+    use std::net::SocketAddrV6;
+
+    let global: Ipv6Addr = "2001:db8::7".parse().unwrap();
+    let at = |ip: Ipv6Addr, scope: u32| SocketAddrV6::new(ip, 0, 0, scope);
+    let unasked = |_: IpAddr| -> Result<Vec<u32>, IfaceResolveError> {
+        panic!("the address names its egress without a lookup")
+    };
+
+    // A link-local address carries its interface as its scope.
+    assert_eq!(
+        link_egress_index_v6(at("fe80::1".parse().unwrap(), 3), unasked).unwrap(),
+        Some(3)
+    );
+    // The wildcard names no interface, so the egress stays as it was.
+    assert_eq!(
+        link_egress_index_v6(at(Ipv6Addr::UNSPECIFIED, 0), unasked).unwrap(),
+        None
+    );
+    // The first carrier, as upstream answers with the first interface of its table.
+    assert_eq!(
+        link_egress_index_v6(at(global, 0), |ip| {
+            assert_eq!(ip, IpAddr::V6(global));
+            Ok(vec![5, 7])
+        })
+        .unwrap(),
+        Some(5)
+    );
+    // An address no interface carries refuses the link, as upstream's lookup does.
+    let err = link_egress_index_v6(at(global, 0), |_| Ok(Vec::new()))
+        .expect_err("an address no interface carries");
+    assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
+    // A table that cannot be read keeps the egress as it was rather than refusing the link.
+    assert_eq!(
+        link_egress_index_v6(at(global, 0), |_| Err(IfaceResolveError::Undetermined)).unwrap(),
+        None
+    );
+    // Any other failure of the lookup refuses it.
+    assert!(link_egress_index_v6(at(global, 0), |_| Err(IfaceResolveError::NotFound)).is_err());
+}
