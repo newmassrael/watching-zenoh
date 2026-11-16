@@ -27231,8 +27231,9 @@ layer_e18_zenoh_family_conformance() {
         cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
         --test zenoh_session_shm || return 1
     # Sessions of both crates in one process, linked over TCP and in a multicast group, hand each
-    # other shared memory.
-    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 5 \
+    # other shared memory. 6 = the file's tests (a member of another batch size heard by no member,
+    # as by no upstream member, is the sixth); the hosted run of 3148fdfc84 printed 6.
+    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 6 \
         cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
         --test zenoh_transport_shm || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \
