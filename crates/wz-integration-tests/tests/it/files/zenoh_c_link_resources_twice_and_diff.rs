@@ -3,7 +3,7 @@
 
 //! `transport/link/tx/queue/allocation/mode` and `transport/link/rx/buffer_size`, read off the
 //! heap of the program a session runs in: one C program, compiled once, linked against wz's
-//! cdylib and against the real `libzenohc.so`, run per document as a client that dials a peer of
+//! cdylib and against the real `libzenohc.so`, run per document as a peer that dials a peer of
 //! the same library in a process of its own.
 //!
 //! Neither key moves a byte on the wire. Each decides what a link holds of its host: WHEN the
@@ -307,19 +307,20 @@ static int insert(z_owned_config_t *config, const char *key, const char *value) 
     return rc == Z_OK ? 0 : -1;
 }
 
-/* A session of `mode` with `endpoint` under `role`, and the `pairs` key/value pairs of `stated`
-   laid over the default configuration. */
-static int open_node(z_owned_session_t *session, const char *mode, const char *role,
-                     const char *endpoint, int pairs, char **stated) {
+/* A peer with `endpoint` under `role`, and the `pairs` key/value pairs of `stated` laid over the
+   default configuration. A peer that dials states an empty listener list, so it binds nothing
+   and its one link is the one it dials. */
+static int open_node(z_owned_session_t *session, const char *role, const char *endpoint,
+                     int pairs, char **stated) {
     z_owned_config_t config;
     if (z_config_default(&config) != Z_OK) { return -100; }
-    char mode_value[32];
-    snprintf(mode_value, sizeof mode_value, "\"%s\"", mode);
     char endpoints[256];
     snprintf(endpoints, sizeof endpoints, "[\"%s\"]", endpoint);
-    if (insert(&config, "mode", mode_value) != 0
+    bool dials = strcmp(role, "connect/endpoints") == 0;
+    if (insert(&config, "mode", "\"peer\"") != 0
         || insert(&config, "scouting/multicast/enabled", "false") != 0
-        || insert(&config, role, endpoints) != 0) {
+        || insert(&config, role, endpoints) != 0
+        || (dials && insert(&config, "listen/endpoints", "[]") != 0)) {
         z_drop(z_move(config));
         return -101;
     }
@@ -374,7 +375,7 @@ static bool stdin_closed(int timeout_ms) {
 static int run_far(const char *role, const char *endpoint, int burst) {
     bool publishes = strcmp(role, "far-pub") == 0;
     z_owned_session_t session;
-    int rc = open_node(&session, "peer", "listen/endpoints", endpoint, 0, NULL);
+    int rc = open_node(&session, "listen/endpoints", endpoint, 0, NULL);
     if (rc != Z_OK) {
         printf("ready=%d\n", rc);
         return 1;
@@ -408,12 +409,12 @@ static int run_far(const char *role, const char *endpoint, int burst) {
     return 0;
 }
 
-/* The observed node: a client that dials the far node with the stated keys, and puts the burst
+/* The observed node: a peer that dials the far node with the stated keys, and puts the burst
    (`tx`) or receives it (`rx`), printing its batch-sized blocks at each phase. */
 static int run_observed(bool receives, const char *endpoint, int burst, int pairs,
                         char **stated) {
     z_owned_session_t session;
-    int rc = open_node(&session, "client", "connect/endpoints", endpoint, pairs, stated);
+    int rc = open_node(&session, "connect/endpoints", endpoint, pairs, stated);
     printf("open=%d\n", rc);
     if (rc != Z_OK) { return 1; }
     z_sleep_ms(SETTLE_MS);
