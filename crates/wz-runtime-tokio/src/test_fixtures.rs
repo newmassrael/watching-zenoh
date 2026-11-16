@@ -66,6 +66,12 @@ pub(crate) struct RecordingLinkDriver {
     /// the length's bytes of the batch on it. The recorder keeps the frames
     /// without the length either way.
     length_prefixed: bool,
+    /// The bound of the best-effort frames, carried bare, when the recorder stands
+    /// for a link that carries them apart from its reliable ones (a QUIC link with
+    /// a datagram companion): what [`BoxedLinkDriver::link_mtu_for`] answers for
+    /// them, with [`BoxedLinkDriver::batch_length_prefixed_for`] `false`. `None`
+    /// is a link that carries both classes the same way.
+    best_effort_mtu: Option<usize>,
 }
 
 impl RecordingLinkDriver {
@@ -155,6 +161,18 @@ impl BoxedLinkDriver for RecordingLinkDriver {
     fn batch_length_prefixed(&self) -> bool {
         self.length_prefixed
     }
+    fn link_mtu_for(&self, class: Reliability) -> usize {
+        match (class, self.best_effort_mtu) {
+            (Reliability::BestEffort, Some(mtu)) => mtu,
+            _ => self.link_mtu(),
+        }
+    }
+    fn batch_length_prefixed_for(&self, class: Reliability) -> bool {
+        match (class, self.best_effort_mtu) {
+            (Reliability::BestEffort, Some(_)) => false,
+            _ => self.length_prefixed,
+        }
+    }
 }
 
 /// R2943 — [`recording_actions`] over a recorder that stands for a link of
@@ -213,6 +231,7 @@ pub(crate) fn recording_driver_over(
             ..wz_session_core::link::LinkSubject::UNKNOWN
         }),
         length_prefixed: false,
+        best_effort_mtu: None,
     })
 }
 
@@ -248,6 +267,7 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
         fences: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: false,
+        best_effort_mtu: None,
     })
 }
 
@@ -263,6 +283,27 @@ pub(crate) fn recording_actions_length_prefixed(
         fences: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: true,
+        best_effort_mtu: None,
+    });
+    let actions = new_session_actions(driver.clone(), params, TokioTime::new());
+    (actions, driver)
+}
+
+/// [`recording_actions_length_prefixed`] over a recorder that also stands for a
+/// datagram companion: its best-effort frames are bounded by `best_effort_mtu`
+/// and carried with no length in front, for a test of what the session leaves
+/// of a batch for each class on such a link.
+#[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
+pub(crate) fn recording_actions_with_datagram_companion(
+    params: SessionInitParams,
+    best_effort_mtu: usize,
+) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
+    let driver = Arc::new(RecordingLinkDriver {
+        frames: Mutex::new(Vec::new()),
+        fences: Mutex::new(Vec::new()),
+        subject: None,
+        length_prefixed: true,
+        best_effort_mtu: Some(best_effort_mtu),
     });
     let actions = new_session_actions(driver.clone(), params, TokioTime::new());
     (actions, driver)

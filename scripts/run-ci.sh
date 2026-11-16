@@ -6759,11 +6759,11 @@ layer_c1ac_cargo_test_quic() {
     (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
         || return 1
     wz_test_args wz-runtime-tokio quic_e2e
-    # 5 -> 8, counted from the source: the file holds nine tests and one of them is gated
+    # 5 -> 10, counted from the source: the file holds eleven tests and one of them is gated
     # `all(locator-iface, target_os = "linux")`, which this feature set does not build. Two of
-    # the eight are the per-priority stream pair of 995be9f335, which landed without moving
-    # this guard; the third is the dial half of `enable_mtls`.
-    _runci_guarded_test C1ac 8 cargo test -p wz-runtime-tokio --features transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
+    # the ten are the per-priority stream pair of 995be9f335, which landed without moving
+    # this guard; one is the dial half of `enable_mtls`; two are the mixed-reliability pair.
+    _runci_guarded_test C1ac 10 cargo test -p wz-runtime-tokio --features transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
@@ -23217,6 +23217,16 @@ layer_z_zenohd_interop() {
     # gained `locator-iface`, which is also what puts the atom in the A4 closure.
     wz_test_args wz-integration-tests wz_quic_acceptor_iface_zenohd_interop
     _runci_guarded_test "Z quic acceptor iface" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    # The QUIC link with the mixed-reliability datagram companion, zenohd->wz: both
+    # ends ask for `mixed_rel=1`, so a session opens only on a negotiated
+    # `zenoh-ms-mr` / `zenoh-mr`, and a pico Put sent after an idle window past the
+    # lease reaches wz only if wz kept the companion alive by its own keepalives
+    # (zenohd ends the pair when its companion's lease runs out). Same quic demo
+    # build and stock zenohd as the acceptor legs above; one test, so `1 passed`.
+    wz_test_args wz-integration-tests wz_quic_mixed_reliability_zenohd_interop
+    _runci_guarded_test "Z quic mixed reliability" 1 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2590 — the `bind` and `dscp` link keys on the WIRE, tcp/tls/udp/quic, with

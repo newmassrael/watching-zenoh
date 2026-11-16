@@ -18,6 +18,24 @@
 //! return both) — so unlike TCP (`into_split`) / TLS (`tokio::io::split`) this
 //! module needs no split call at all.
 //!
+//! ## The datagram companion of a mixed-reliability link
+//!
+//! A connection that negotiated `zenoh-mr` or `zenoh-ms-mr` carries its
+//! best-effort batches on the connection's datagrams, one batch to a datagram
+//! with no length in front, and its reliable batches on its streams, as
+//! upstream's QUIC link pairs itself with a datagram link over the same
+//! connection (`io/zenoh-link-commons/src/quic/unicast.rs` @
+//! `PROTOCOL_MIXED_REL | PROTOCOL_MULTI_STREAM_MIXED_REL => true,`). The session
+//! already keeps a frame to one reliability class and hands it over with that
+//! class, so the class is what routes it: [`QuicWriteDriver`] puts a
+//! best-effort frame on a datagram and every other on the streams' queue, and
+//! the read driver reads the datagrams beside the streams. No second queue
+//! orders the datagrams: quinn takes one without waiting, and the session's
+//! conduits already hand frames over in priority order. A best-effort frame is
+//! never held back by the streams' room, and the session keeps the companion
+//! alive by its own last write and keepalive, since the peer leases it on its
+//! own (`BoxedLinkDriver::carries_apart`).
+//!
 //! ## QUIC endpoint lifecycle (the wz keep-alive wrinkle)
 //!
 //! Unlike a TCP/unixsock/vsock socket (where the stream owns the OS fd), a QUIC
@@ -41,15 +59,17 @@
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
+use bytes::Bytes;
 use futures_util::stream::{SelectAll, Stream};
 use futures_util::{FutureExt, StreamExt};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
-    ClientConfig as QuinnClientConfig, Connection, Endpoint, Incoming, RecvStream, SendStream,
-    ServerConfig as QuinnServerConfig, TransportConfig,
+    ClientConfig as QuinnClientConfig, Connection, Endpoint, Incoming, RecvStream,
+    SendDatagramError, SendStream, ServerConfig as QuinnServerConfig, TransportConfig,
 };
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::rustls::{
@@ -62,8 +82,11 @@ use crate::link_socket::LinkSocket;
 use crate::quic_config::{alpn_offer, client_offering, server_offering};
 use crate::stream_link::{write_wire, writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::{OutboundQueue, WriterHandle};
-use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
-use wz_session_core::link::LinkKind;
+use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, RxStorage, TxFrame};
+use wz_session_core::link::{
+    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkKind, LinkRoom, LinkSendOutcome,
+    LinkSubject, RoomAnswer, RoomPermit, RoomWait, TxQueueShape, TxSlot, TxSlotGrant,
+};
 use wz_session_core::locator::{QuicAlpn, QuicStreamChoice, QuicStreams};
 use wz_session_core::qos::Priority;
 
@@ -229,6 +252,36 @@ pub struct QuicLink {
     /// link. The peer's own come in as it writes on them, so they are the read
     /// driver's to accept.
     pub priority_send: Option<PrioritySendStreams>,
+    /// Whether the connection negotiated a mixed-reliability protocol, so its
+    /// best-effort batches ride its datagrams (see the module doc).
+    pub mixed_reliability: bool,
+}
+
+/// The largest best-effort batch a mixed-reliability link puts in a datagram.
+/// Fixed rather than read off the path: both ends must size the batches the
+/// same way whatever their own path MTU discovery has found, and upstream's
+/// companion takes this many bytes, its datagram link's
+/// `const MIXED_RELIABILITY_MTU: BatchSize = 1_150;` (QUIC's 1200-byte UDP
+/// payload floor less the packet's header, tag and datagram frame).
+pub const MIXED_RELIABILITY_MTU: usize = 1_150;
+
+/// A received datagram as frame storage: quinn hands it over as a refcounted
+/// `Bytes`, so the frame can be that buffer instead of a copy.
+struct Datagram(Bytes);
+
+impl RxStorage for Datagram {
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// A received datagram as a frame: the refcounted buffer quinn already gave
+/// it, handed up whole rather than copied out. The datagram link and the
+/// datagram companion of a mixed-reliability link read through this one.
+pub(crate) fn frame_of_datagram(bytes: Bytes) -> RxFrame {
+    let len = bytes.len();
+    let storage: Arc<dyn RxStorage> = Arc::new(Datagram(bytes));
+    RxFrame::new(RxBytes::shared(storage, 0..len).expect("a datagram is a range of itself"))
 }
 
 /// The unidirectional streams of a multistream link that carry the priorities
@@ -299,8 +352,11 @@ pub(crate) fn negotiated_protocol(connection: &Connection) -> io::Result<QuicAlp
 /// Each is opened without waiting, as upstream opens them: the peer allowed one
 /// per priority when it offered the protocol (`StreamAllowance`), so a stream
 /// that is not there at once never will be.
-fn open_priority_streams(connection: &Connection) -> io::Result<Option<PrioritySendStreams>> {
-    if !negotiated_protocol(connection)?.is_multistream() {
+fn open_priority_streams(
+    connection: &Connection,
+    protocol: QuicAlpn,
+) -> io::Result<Option<PrioritySendStreams>> {
+    if !protocol.is_multistream() {
         return Ok(None);
     }
     let mut streams = Vec::with_capacity(PRIORITY_STREAMS);
@@ -356,10 +412,11 @@ pub struct QuicReadDriver {
     _connection: Connection,
 }
 
-/// What a QUIC link reads: its one stream, or every stream of a multistream link.
+/// What a QUIC link reads: its one stream, or every source of a link that has
+/// more than one (a stream per priority, the datagram companion, or both).
 enum QuicReader {
     Single(StreamReadDriver<RecvStream>),
-    Priority(PriorityStreamsReader),
+    Sources(ConnectionReader),
 }
 
 impl LinkDriver for QuicReadDriver {
@@ -367,16 +424,16 @@ impl LinkDriver for QuicReadDriver {
         match &mut self.inner {
             QuicReader::Single(reader) => reader.open().await,
             // The connection is live, as a single stream's is.
-            QuicReader::Priority(_) => Ok(()),
+            QuicReader::Sources(_) => Ok(()),
         }
     }
 
     async fn send(&mut self, frame: &TxFrame<'_>, reliability: Reliability) -> io::Result<()> {
         match &mut self.inner {
             QuicReader::Single(reader) => reader.send(frame, reliability).await,
-            QuicReader::Priority(_) => Err(io::Error::new(
+            QuicReader::Sources(_) => Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                "QuicReadDriver does not send; outbound goes via StreamWriteDriver",
+                "QuicReadDriver does not send; outbound goes via QuicWriteDriver",
             )),
         }
     }
@@ -384,20 +441,20 @@ impl LinkDriver for QuicReadDriver {
     async fn close(&mut self) -> io::Result<()> {
         match &mut self.inner {
             QuicReader::Single(reader) => reader.close().await,
-            QuicReader::Priority(_) => Ok(()),
+            QuicReader::Sources(_) => Ok(()),
         }
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
         match &mut self.inner {
             QuicReader::Single(reader) => reader.poll_event().await,
-            QuicReader::Priority(reader) => reader.poll_event().await,
+            QuicReader::Sources(reader) => reader.poll_event().await,
         }
     }
 }
 
-/// What one of a multistream link's streams yields: a frame or a loss read off
-/// a stream, or a stream the peer opened.
+/// What one source of a link's frames yields: a frame or a loss read off a
+/// stream or a datagram, or a stream the peer opened.
 enum Arrival {
     Event(LinkEvent),
     Opened(RecvStream),
@@ -406,30 +463,47 @@ enum Arrival {
 /// One source of [`Arrival`]s, boxed once when it joins the reader.
 type Arrivals = Pin<Box<dyn Stream<Item = Arrival> + Send>>;
 
-/// The read side of a multistream link: the bidirectional stream, and each
-/// stream the peer opens for a priority, read as one driver. Upstream reads
-/// each priority's stream in a task of its own and ends the link when any of
-/// them ends (`io/zenoh-transport/src/unicast/universal/link.rs` @
-/// `let (res, _, _) = select_all((Priority::MAX as u8..=Priority::MIN as u8).map(|prio| {`);
-/// here they are polled together by the one driver the session already polls,
-/// so a frame is handed up on the thread that reads it and nothing is spawned.
+/// The read side of a link with more than one source: the bidirectional
+/// stream, each stream the peer opens for a priority on a multistream link, and
+/// the connection's datagrams on a mixed-reliability one, read as one driver.
+/// Upstream reads each priority's stream in a task of its own and ends the link
+/// when any of them ends (`io/zenoh-transport/src/unicast/universal/link.rs` @
+/// `let (res, _, _) = select_all((Priority::MAX as u8..=Priority::MIN as u8).map(|prio| {`),
+/// and reads its datagram companion in the RX task of a link of its own, whose
+/// end ends the pair; here they are polled together by the one driver the
+/// session already polls, so a frame is handed up on the thread that reads it
+/// and nothing is spawned.
 ///
-/// A frame carries its own priority, so which stream it came on is not handed
-/// up: the streams separate the priorities on the wire, where a lost packet of
-/// one no longer holds up the others.
-struct PriorityStreamsReader {
+/// A frame carries its own priority and reliability, so which source it came
+/// from is not handed up: the sources separate them on the wire, where a lost
+/// packet of one no longer holds up the others.
+struct ConnectionReader {
     arrivals: SelectAll<Arrivals>,
     /// The link's one receive pool, which every stream reads into.
     arena: LinkArena,
-    /// The loss of the first stream that ended, which is the link's.
+    /// The loss of the first source that ended, which is the link's.
     lost: Option<LostCause>,
 }
 
-impl PriorityStreamsReader {
-    fn new(control: RecvStream, connection: Connection, arena: LinkArena) -> Self {
+impl ConnectionReader {
+    /// A reader of the bidirectional stream `control`, and, on `connection`,
+    /// the peer's priority streams when `priority_streams` and its datagrams
+    /// when `datagrams`.
+    fn new(
+        control: RecvStream,
+        connection: &Connection,
+        arena: LinkArena,
+        priority_streams: bool,
+        datagrams: bool,
+    ) -> Self {
         let mut arrivals = SelectAll::new();
         arrivals.push(read_stream(control, arena.clone()));
-        arrivals.push(accept_priority_streams(connection));
+        if priority_streams {
+            arrivals.push(accept_priority_streams(connection.clone()));
+        }
+        if datagrams {
+            arrivals.push(read_datagrams(connection.clone()));
+        }
         Self {
             arrivals,
             arena,
@@ -444,7 +518,7 @@ impl PriorityStreamsReader {
             }
             match self.arrivals.next().await {
                 Some(Arrival::Event(LinkEvent::Lost { cause })) => {
-                    // The link is lost with any of its streams; the rest are
+                    // The link is lost with any of its sources; the rest are
                     // dropped, and their connection with them once the driver goes.
                     self.lost = Some(cause);
                     self.arrivals.clear();
@@ -493,6 +567,28 @@ fn accept_priority_streams(connection: Connection) -> Arrivals {
     ))
 }
 
+/// The best-effort batches the peer puts on the connection's datagrams, one
+/// batch to a datagram, as upstream's companion link reads them
+/// (`read_datagram`, no length in front). A connection that ends ends this
+/// source with the link's loss, as the end of the companion ends upstream's
+/// pair, and the reader stops at the first loss of any source.
+fn read_datagrams(connection: Connection) -> Arrivals {
+    Box::pin(futures_util::stream::unfold(
+        connection,
+        |connection| async move {
+            let event = match connection.read_datagram().await {
+                Ok(bytes) => LinkEvent::Rx(frame_of_datagram(bytes)),
+                // The connection ended: the cause a stream reader gives the
+                // same end, quinn's `NotConnected`.
+                Err(_) => LinkEvent::Lost {
+                    cause: LostCause::OsError,
+                },
+            };
+            Some((Arrival::Event(event), connection))
+        },
+    ))
+}
+
 /// The writer of a multistream link: the one queue's takes, each written on the
 /// stream of its lane ([`OutboundQueue::next_wire_by_lane`]), so the existing
 /// priority lanes feed the streams and no second scheduler decides the order.
@@ -509,6 +605,308 @@ async fn priority_writer_task(mut streams: Vec<SendStream>, mut queue: OutboundQ
     }
     for stream in &mut streams {
         let _ = stream.shutdown().await;
+    }
+}
+
+/// The datagram half of a mixed-reliability link: the connection's datagrams,
+/// one best-effort batch to each, written from the sending thread as upstream's
+/// companion link writes them (a copy of the batch handed to `send_datagram`).
+/// quinn queues a datagram without waiting and drops the oldest it holds when
+/// its buffer is full, which is all a best-effort batch is promised, so there
+/// is no room to wait for and no writer task.
+struct DatagramCompanion {
+    connection: Connection,
+    /// The instant `last_send_ns` counts from.
+    epoch: Instant,
+    /// Nanoseconds from `epoch` to the last datagram quinn took, `NEVER_SENT`
+    /// before the first: when this half last spoke.
+    last_send_ns: AtomicU64,
+}
+
+/// `DatagramCompanion::last_send_ns` before the first datagram.
+const NEVER_SENT: u64 = u64::MAX;
+
+impl DatagramCompanion {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            epoch: Instant::now(),
+            last_send_ns: AtomicU64::new(NEVER_SENT),
+        }
+    }
+
+    fn now_ns(&self) -> u64 {
+        self.epoch.elapsed().as_nanos() as u64
+    }
+
+    /// Put `batch` on one datagram.
+    fn send(&self, batch: &[u8]) -> LinkSendOutcome {
+        if batch.len() > MIXED_RELIABILITY_MTU {
+            // The session sizes a best-effort batch to this half
+            // (`QuicWriteDriver::link_mtu_for`), so a longer one bypassed it.
+            log::warn!(
+                "wz-runtime-tokio: best-effort batch {} bytes > the datagram companion's {}; \
+                 dropping",
+                batch.len(),
+                MIXED_RELIABILITY_MTU
+            );
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+        }
+        match self.connection.send_datagram(Bytes::copy_from_slice(batch)) {
+            Ok(()) => {
+                self.last_send_ns.store(self.now_ns(), Ordering::Relaxed);
+                LinkSendOutcome::Sent
+            }
+            // The path takes less than the fixed size at the moment: this batch
+            // is lost, and the half goes on.
+            Err(SendDatagramError::TooLarge) => LinkSendOutcome::Dropped(LinkDropCause::Oversize),
+            // The connection is gone, or a peer that negotiated the companion
+            // takes no datagrams: no later batch can leave by this half either,
+            // and upstream ends the pair on its companion's write error alike.
+            Err(e) => {
+                log::warn!("wz-runtime-tokio: quic datagram companion send failed: {e}");
+                LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+            }
+        }
+    }
+
+    /// Milliseconds since quinn last took a datagram of this half, `None` before
+    /// the first.
+    fn ms_since_send(&self) -> Option<u64> {
+        let last = self.last_send_ns.load(Ordering::Relaxed);
+        (last != NEVER_SENT).then(|| self.now_ns().saturating_sub(last) / 1_000_000)
+    }
+}
+
+/// The write half of a QUIC stream link: the stream link's write half over the
+/// link's queue, and, on a link that negotiated a mixed-reliability protocol,
+/// the datagram companion its best-effort frames leave by. Every frame of
+/// another class, every transport message and every frame of a link without
+/// the companion goes to the streams exactly as the stream link sends it.
+pub struct QuicWriteDriver {
+    streams: StreamWriteDriver,
+    datagrams: Option<DatagramCompanion>,
+}
+
+impl QuicWriteDriver {
+    /// The companion a frame of `class` leaves by: `None` for the streams.
+    fn companion_for(&self, class: Reliability) -> Option<&DatagramCompanion> {
+        match class {
+            Reliability::BestEffort => self.datagrams.as_ref(),
+            Reliability::Reliable => None,
+        }
+    }
+}
+
+impl BoxedLinkDriver for QuicWriteDriver {
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        self.streams.link_subject()
+    }
+
+    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+        self.streams.link_endpoints()
+    }
+
+    fn link_mtu(&self) -> usize {
+        self.streams.link_mtu()
+    }
+
+    fn link_mtu_for(&self, class: Reliability) -> usize {
+        match self.companion_for(class) {
+            Some(_) => MIXED_RELIABILITY_MTU,
+            None => self.streams.link_mtu_for(class),
+        }
+    }
+
+    fn link_rx_capacity(&self) -> usize {
+        self.streams.link_rx_capacity()
+    }
+
+    fn batch_length_prefixed(&self) -> bool {
+        self.streams.batch_length_prefixed()
+    }
+
+    // A datagram is its own boundary: a best-effort batch on the companion has
+    // no length in front.
+    fn batch_length_prefixed_for(&self, class: Reliability) -> bool {
+        match self.companion_for(class) {
+            Some(_) => false,
+            None => self.streams.batch_length_prefixed_for(class),
+        }
+    }
+
+    fn reports_wire_writes(&self) -> bool {
+        self.streams.reports_wire_writes()
+    }
+
+    fn ms_since_wire_write(&self) -> Option<u64> {
+        self.streams.ms_since_wire_write()
+    }
+
+    // The companion is a line the peer leases on its own, so the session keeps it
+    // alive by its own last write.
+    fn carries_apart(&self, class: Reliability) -> bool {
+        self.companion_for(class).is_some()
+    }
+
+    fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
+        match self.companion_for(class) {
+            Some(companion) => companion.ms_since_send(),
+            None => self.streams.ms_since_wire_write(),
+        }
+    }
+
+    // The class names the line: the companion's keepalive is sent with the
+    // best-effort class and goes on a datagram alone, every other urgent message
+    // on the streams.
+    fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        match self.companion_for(reliability) {
+            Some(companion) => companion.send(bytes),
+            None => self.streams.send_urgent(bytes, reliability),
+        }
+    }
+
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, Priority::DEFAULT)
+    }
+
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        reliability: Reliability,
+        priority: Priority,
+    ) -> LinkSendOutcome {
+        match self.companion_for(reliability) {
+            Some(companion) => companion.send(bytes),
+            None => self.streams.send_prioritized(bytes, reliability, priority),
+        }
+    }
+
+    fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> RoomAnswer {
+        self.streams.wait_for_room(priority, wait)
+    }
+
+    fn try_reserve_room(&self, priority: Priority) -> Option<RoomPermit> {
+        self.streams.try_reserve_room(priority)
+    }
+
+    fn block_first_acquire(&self, priority: Priority, wait_us: u64) -> bool {
+        self.streams.block_first_acquire(priority, wait_us)
+    }
+
+    fn block_first_release(&self, priority: Priority) {
+        self.streams.block_first_release(priority)
+    }
+
+    // A best-effort frame on the companion never waits for the streams' room:
+    // quinn takes a datagram without waiting, so the companion's queue, which
+    // upstream keeps as a pipeline of its own beside its main link's, is never
+    // full.
+    fn wait_for_room_for(
+        &self,
+        class: Reliability,
+        priority: Priority,
+        wait: RoomWait,
+    ) -> RoomAnswer {
+        match self.companion_for(class) {
+            Some(_) => RoomAnswer::at_once(LinkRoom::Free),
+            None => self.streams.wait_for_room(priority, wait),
+        }
+    }
+
+    fn try_reserve_room_for(&self, class: Reliability, priority: Priority) -> Option<RoomPermit> {
+        match self.companion_for(class) {
+            Some(_) => Some(RoomPermit::trivial()),
+            None => self.streams.try_reserve_room(priority),
+        }
+    }
+
+    // Upstream's block-first waiters are per link, and the companion's push never
+    // waits, so its slot is always free.
+    fn block_first_acquire_for(
+        &self,
+        class: Reliability,
+        priority: Priority,
+        wait_us: u64,
+    ) -> bool {
+        match self.companion_for(class) {
+            Some(_) => true,
+            None => self.streams.block_first_acquire(priority, wait_us),
+        }
+    }
+
+    fn block_first_release_for(&self, class: Reliability, priority: Priority) {
+        if self.companion_for(class).is_none() {
+            self.streams.block_first_release(priority)
+        }
+    }
+
+    fn shape_tx_queue(&self, shape: TxQueueShape) {
+        self.streams.shape_tx_queue(shape)
+    }
+
+    fn set_idle_flush(&self, hook: Arc<dyn Fn() + Send + Sync>) -> bool {
+        self.streams.set_idle_flush(hook)
+    }
+
+    fn watch_room(&self, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.streams.watch_room(waker)
+    }
+
+    fn tx_staged(&self) {
+        self.streams.tx_staged()
+    }
+
+    fn tx_fence(&self) {
+        self.streams.tx_fence()
+    }
+
+    fn tx_slot_acquire(&self, want: usize, priority: Priority) -> Option<TxSlotGrant> {
+        self.streams.tx_slot_acquire(want, priority)
+    }
+
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        self.streams.tx_slot_storage(slot)
+    }
+
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        priority: Priority,
+    ) -> LinkSendOutcome {
+        let Some(companion) = self.companion_for(reliability) else {
+            return self
+                .streams
+                .tx_slot_send(slot, start, len, reliability, priority);
+        };
+        // A best-effort frame the session encoded into a buffer the streams
+        // lent leaves on a datagram: quinn takes a copy, as it does of every
+        // batch of this half, and the buffer goes back to the streams unsent.
+        let (base, capacity) = self.streams.tx_slot_storage(slot);
+        debug_assert!(start + len <= capacity);
+        // SAFETY: the session wrote `[start, start + len)` of the slot it was
+        // lent and hands it over here (`TxLease::send`), within the capacity
+        // `tx_slot_storage` reported; the slot is no one else's until the abort
+        // below returns it.
+        let frame = unsafe { std::slice::from_raw_parts(base.add(start), len) };
+        let outcome = companion.send(frame);
+        self.streams.tx_slot_abort(slot);
+        outcome
+    }
+
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        self.streams.tx_slot_abort(slot)
+    }
+
+    fn open_blocking(&self) {
+        self.streams.open_blocking()
+    }
+
+    fn close_blocking(&self) {
+        self.streams.close_blocking()
     }
 }
 
@@ -752,13 +1150,15 @@ pub(crate) async fn open_quic_stream(
     // The initiator opens the bidirectional stream; the responder
     // `accept_bi`s it (zenoh: open_bi on dial, accept_bi on listen).
     let (send, recv) = connection.open_bi().await.map_err(io_other)?;
-    let priority_send = open_priority_streams(&connection)?;
+    let protocol = negotiated_protocol(&connection)?;
+    let priority_send = open_priority_streams(&connection, protocol)?;
     Ok(QuicLink {
         endpoint,
         connection,
         send,
         recv,
         priority_send,
+        mixed_reliability: protocol.is_mixed_rel(),
     })
 }
 
@@ -831,13 +1231,15 @@ pub async fn complete_quic_accept(incoming: Incoming, endpoint: Endpoint) -> io:
     let connection = incoming.await.map_err(io_other)?;
     let (send, recv) = connection.accept_bi().await.map_err(io_other)?;
     // Each end opens its own priority streams, as upstream's acceptor does.
-    let priority_send = open_priority_streams(&connection)?;
+    let protocol = negotiated_protocol(&connection)?;
+    let priority_send = open_priority_streams(&connection, protocol)?;
     Ok(QuicLink {
         endpoint,
         connection,
         send,
         recv,
         priority_send,
+        mixed_reliability: protocol.is_mixed_rel(),
     })
 }
 
@@ -859,8 +1261,9 @@ pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
 
 /// Wire a [`QuicLink`] into the cooperating drivers the session FSM consumes: an
 /// inbound [`QuicReadDriver`] (`&mut LinkDriver` for the poll loop), an outbound
-/// `Arc<`[`StreamWriteDriver`]`>` (`BoxedLinkDriver` for `send_blocking`), and
-/// the [`writer_task`] join handle. The
+/// `Arc<`[`QuicWriteDriver`]`>` (`BoxedLinkDriver` for `send_blocking`; the
+/// [`StreamWriteDriver`] of the streams, and the datagram companion of a
+/// mixed-reliability link), and the [`writer_task`] join handle. The
 /// `SendStream`/`RecvStream` are already a split pair (no `into_split` /
 /// `tokio::io::split`); the endpoint + connection ride into the read driver as
 /// the link keep-alive (module doc). StreamEnvelope framing + write driver are
@@ -870,7 +1273,7 @@ pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
 pub fn wire_quic_stream(
     link: QuicLink,
     rx_buffer_size: usize,
-) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+) -> (QuicReadDriver, Arc<QuicWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject: quinn reports the endpoint's bound address.
     // R2698 — with the peer's certificate common name, the ACL's fifth subject
     // axis. Unlike the TLS twin there is no split to race here: `connection`
@@ -890,8 +1293,9 @@ pub fn wire_quic_stream(
 }
 
 /// R2810 — the part of [`wire_quic_stream`] that does not depend on WHICH link
-/// the QUIC stream is: the StreamEnvelope drivers over the one bidirectional
-/// stream, with the endpoint and connection riding along as the keep-alive.
+/// the QUIC stream is: the StreamEnvelope drivers over the link's streams, the
+/// datagram companion when the connection negotiated a mixed-reliability
+/// protocol, and the endpoint and connection riding along as the keep-alive.
 ///
 /// Split out because upstream's reliable UDP link IS this link under another
 /// name, and the name is exactly what the caller must supply: its subject
@@ -903,27 +1307,22 @@ pub(crate) fn wire_stream_over_quic(
     subject: wz_session_core::link::LinkSubject,
     endpoints: Option<wz_session_core::link::LinkEndpoints>,
     rx_buffer_size: usize,
-) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+) -> (QuicReadDriver, Arc<QuicWriteDriver>, WriterHandle) {
     let QuicLink {
         endpoint,
         connection,
         send,
         recv,
         priority_send,
+        mixed_reliability,
     } = link;
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let arena = link_arena(rx_buffer_size);
+    let has_priority_streams = priority_send.is_some();
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
     // u16 prefix (an always-false flag on the drivers).
-    let (writer_handle, reader) = match priority_send {
-        None => (
-            WriterHandle::spawn(rx, |queue| writer_task(send, queue)),
-            QuicReader::Single(StreamReadDriver::with_arena(
-                recv,
-                Arc::new(AtomicBool::new(false)),
-                arena,
-            )),
-        ),
+    let writer_handle = match priority_send {
+        None => WriterHandle::spawn(rx, |queue| writer_task(send, queue)),
         // A lane per stream: the queue's lanes become the link's streams, and
         // the handshake, queued before the session's shape, stays on the
         // bidirectional stream where the peer reads it.
@@ -931,24 +1330,59 @@ pub(crate) fn wire_stream_over_quic(
             let mut streams = Vec::with_capacity(Priority::NUM);
             streams.push(send);
             streams.extend(priority_streams);
-            (
-                WriterHandle::spawn(rx.with_stream_lanes(), |queue| {
-                    priority_writer_task(streams, queue)
-                }),
-                QuicReader::Priority(PriorityStreamsReader::new(recv, connection.clone(), arena)),
-            )
+            WriterHandle::spawn(rx.with_stream_lanes(), |queue| {
+                priority_writer_task(streams, queue)
+            })
         }
     };
-    let outbound = Arc::new(StreamWriteDriver::new(
-        tx,
-        Arc::new(AtomicBool::new(false)),
-        subject,
-        endpoints,
-    ));
+    let reader = if has_priority_streams || mixed_reliability {
+        QuicReader::Sources(ConnectionReader::new(
+            recv,
+            &connection,
+            arena,
+            has_priority_streams,
+            mixed_reliability,
+        ))
+    } else {
+        QuicReader::Single(StreamReadDriver::with_arena(
+            recv,
+            Arc::new(AtomicBool::new(false)),
+            arena,
+        ))
+    };
+    let outbound = Arc::new(QuicWriteDriver {
+        streams: StreamWriteDriver::new(tx, Arc::new(AtomicBool::new(false)), subject, endpoints),
+        datagrams: mixed_reliability.then(|| DatagramCompanion::new(connection.clone())),
+    });
     let inbound = QuicReadDriver {
         inner: reader,
         _endpoint: endpoint,
         _connection: connection,
     };
     (inbound, outbound, writer_handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2971 — A RECEIVED DATAGRAM IS QUINN'S BUFFER, not a copy of it.
+    ///
+    /// An address is a sound witness here where it is not for a freed buffer:
+    /// the `Bytes` is alive inside the frame for the whole assertion, so no
+    /// allocation can have reused its storage. Under a `to_vec` the frame's
+    /// bytes would be a second allocation and the addresses would differ.
+    #[test]
+    fn a_received_datagram_is_the_buffer_quinn_gave_it() {
+        let datagram = Bytes::from(b"one datagram, one frame".to_vec());
+        let at = datagram.as_ptr();
+        let frame = frame_of_datagram(datagram);
+        assert_eq!(frame.bytes, b"one datagram, one frame");
+        assert!(frame.bytes.is_shared());
+        assert_eq!(
+            frame.bytes.as_ptr(),
+            at,
+            "the frame IS the datagram's storage"
+        );
+    }
 }

@@ -170,6 +170,7 @@ mod wz_queryable_round_trip;
 mod wz_quic_acceptor_iface_zenohd_interop;
 mod wz_quic_acceptor_zenohd_interop;
 mod wz_quic_datagram_acceptor_zenohd_interop;
+mod wz_quic_mixed_reliability_zenohd_interop;
 mod wz_reads_a_stock_zenohd_config;
 mod wz_reassembles_pico_fragment_tx;
 mod wz_reconnect_zenohd_pico_interop;

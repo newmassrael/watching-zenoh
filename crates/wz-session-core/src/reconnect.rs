@@ -673,6 +673,26 @@ where
         R::link_driver(&sink).try_reserve_room(priority)
     }
 
+    // The class's room, on a clone as the room wait above is.
+    fn wait_for_room_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+        wait: crate::link::RoomWait,
+    ) -> crate::link::RoomAnswer {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).wait_for_room_for(class, priority, wait)
+    }
+
+    fn try_reserve_room_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+    ) -> Option<crate::link::RoomPermit> {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).try_reserve_room_for(class, priority)
+    }
+
     // The notice of room, forwarded to the live link as the room wait is. A swap replaces the
     // link and with it the waker: the sender that holds messages is told nothing by the new
     // link until it asks again, and its own recheck covers the interval.
@@ -694,6 +714,21 @@ where
     fn block_first_release(&self, priority: crate::qos::Priority) {
         let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
         R::link_driver(&sink).block_first_release(priority)
+    }
+
+    fn block_first_acquire_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+        wait_us: u64,
+    ) -> bool {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).block_first_acquire_for(class, priority, wait_us)
+    }
+
+    fn block_first_release_for(&self, class: Reliability, priority: crate::qos::Priority) {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).block_first_release_for(class, priority)
     }
 
     // ARCHITECTURE section 9.1 — the lend is forwarded, and a slot stays with the
@@ -747,6 +782,18 @@ where
         })
     }
 
+    fn carries_apart(&self, class: Reliability) -> bool {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).carries_apart(class)
+        })
+    }
+
+    fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).ms_since_wire_write_for(class)
+        })
+    }
+
     fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).send_urgent(bytes, reliability)
@@ -757,6 +804,10 @@ where
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu())
     }
 
+    fn link_mtu_for(&self, class: Reliability) -> usize {
+        R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu_for(class))
+    }
+
     fn link_rx_capacity(&self) -> usize {
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_rx_capacity())
     }
@@ -764,6 +815,12 @@ where
     fn batch_length_prefixed(&self) -> bool {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).batch_length_prefixed()
+        })
+    }
+
+    fn batch_length_prefixed_for(&self, class: Reliability) -> bool {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).batch_length_prefixed_for(class)
         })
     }
 
@@ -883,6 +940,26 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         R::link_driver(&sink).try_reserve_room(priority)
     }
 
+    // The class's room, forwarded as in the twin.
+    fn wait_for_room_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+        wait: crate::link::RoomWait,
+    ) -> crate::link::RoomAnswer {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).wait_for_room_for(class, priority, wait)
+    }
+
+    fn try_reserve_room_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+    ) -> Option<crate::link::RoomPermit> {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).try_reserve_room_for(class, priority)
+    }
+
     // The notice of room, forwarded as in the twin.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     fn watch_room(&self, waker: Option<alloc::sync::Arc<dyn Fn() + Send + Sync>>) {
@@ -899,6 +976,21 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     fn block_first_release(&self, priority: crate::qos::Priority) {
         let sink = self.inner.borrow().clone();
         R::link_driver(&sink).block_first_release(priority)
+    }
+
+    fn block_first_acquire_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+        wait_us: u64,
+    ) -> bool {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).block_first_acquire_for(class, priority, wait_us)
+    }
+
+    fn block_first_release_for(&self, class: Reliability, priority: crate::qos::Priority) {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).block_first_release_for(class, priority)
     }
 
     // ARCHITECTURE section 9.1 — the lend, forwarded as in the twin, with a slot
@@ -943,6 +1035,14 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         R::link_driver(&self.inner.borrow()).ms_since_wire_write()
     }
 
+    fn carries_apart(&self, class: Reliability) -> bool {
+        R::link_driver(&self.inner.borrow()).carries_apart(class)
+    }
+
+    fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
+        R::link_driver(&self.inner.borrow()).ms_since_wire_write_for(class)
+    }
+
     fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         R::link_driver(&self.inner.borrow()).send_urgent(bytes, reliability)
     }
@@ -951,12 +1051,20 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         R::link_driver(&self.inner.borrow()).link_mtu()
     }
 
+    fn link_mtu_for(&self, class: Reliability) -> usize {
+        R::link_driver(&self.inner.borrow()).link_mtu_for(class)
+    }
+
     fn link_rx_capacity(&self) -> usize {
         R::link_driver(&self.inner.borrow()).link_rx_capacity()
     }
 
     fn batch_length_prefixed(&self) -> bool {
         R::link_driver(&self.inner.borrow()).batch_length_prefixed()
+    }
+
+    fn batch_length_prefixed_for(&self, class: Reliability) -> bool {
+        R::link_driver(&self.inner.borrow()).batch_length_prefixed_for(class)
     }
 
     fn shape_tx_queue(&self, shape: crate::link::TxQueueShape) {

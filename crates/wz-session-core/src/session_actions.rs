@@ -1886,8 +1886,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// (R60, layer3_init_body) continue to work.
     pub inbound_peer_init_caps: R::Mutex<Option<PeerInitCaps>>,
     /// What the slot above makes of the negotiated send limits, kept so a send reads them
-    /// without its mutex ([`TxLimitsCache`]). Every write of the slot moves it.
+    /// without its mutex ([`TxLimitsCache`]). Every write of the slot moves it. The limits of
+    /// the reliable frames; the best-effort ones are kept beside them.
     pub tx_limits_cache: TxLimitsCache,
+    /// [`Self::tx_limits_cache`] for the best-effort frames, whose budget is their own on a
+    /// link that carries them apart ([`BoxedLinkDriver::link_mtu_for`]). Every write of the
+    /// slot moves it too.
+    pub best_effort_tx_limits_cache: TxLimitsCache,
     /// R121e — outbound Frame sequence-number generator. The
     /// session-FSM Established-side path emits one `Frame`
     /// transport-message per outbound application-layer batch
@@ -3795,6 +3800,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 shm_auth: R::new_mutex(crate::extshm::ShmAuthDispatch::empty()),
                 inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
                 tx_limits_cache: TxLimitsCache::new(),
+                best_effort_tx_limits_cache: TxLimitsCache::new(),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
@@ -4991,7 +4997,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let wait_us = self.params.tx_queue.wait_before_drop_us;
         let granted = self.with_conduit_link(wire_reliability, route, |link| {
             link.link_driver()
-                .block_first_acquire(qos.priority(), wait_us)
+                .block_first_acquire_for(wire_reliability, qos.priority(), wait_us)
         });
         if !granted {
             #[cfg(feature = "transport-stats")]
@@ -5065,8 +5071,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
             }),
         );
-        self.with_conduit_link(Reliability::from_reliable_bool(reliable), route, |link| {
-            link.link_driver().block_first_release(qos.priority())
+        let class = Reliability::from_reliable_bool(reliable);
+        self.with_conduit_link(class, route, |link| {
+            link.link_driver()
+                .block_first_release_for(class, qos.priority())
         });
     }
 
@@ -5251,7 +5259,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // only a control frame stamps here, which is what keeps the emitter to one keepalive
         // per interval while the writer is behind, and a data frame waiting in the queue is
         // not activity the peer can hear.
-        if priority == Priority::Control || !link.link_driver().reports_wire_writes() {
+        //
+        // A frame of a class the link carries apart ([`BoxedLinkDriver::carries_apart`]) is
+        // not the link's line speaking: the peer leases that carriage on its own, the driver
+        // reports its writes per class, and a stamp here would hold the link's own keepalive
+        // back while its streams are silent.
+        let driver = link.link_driver();
+        if !driver.carries_apart(reliability)
+            && (priority == Priority::Control || !driver.reports_wire_writes())
+        {
             R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
         }
 
@@ -5810,8 +5826,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The frame budget and SN ring mask together: [`Self::negotiated_batch_mtu`] less
     /// [`Self::batch_envelope_bytes`], and [`Self::negotiated_sn_mask`], with the peer's caps
-    /// read under one hold of their mutex instead of two. What every send resolves before it
-    /// takes its conduit's lock.
+    /// read under one hold of their mutex instead of two, for the reliable frames;
+    /// [`Self::negotiated_tx_limits_for`] answers for either class, and is what every send
+    /// resolves, for its own class, before it takes its conduit's lock.
     ///
     /// The budget is what one frame may carry, not the batch size: the batch size counts the
     /// envelope the link and the compression wrap put around the frame, and a frame that
@@ -5835,27 +5852,52 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "liveliness-token",
     ))]
     pub fn negotiated_tx_limits(&self) -> (usize, u64) {
+        self.negotiated_tx_limits_for(Reliability::Reliable)
+    }
+
+    /// [`Self::negotiated_tx_limits`] for the frames of one reliability class: the budget
+    /// is the class's (the batch bound of [`Self::negotiated_batch_mtu`] taken with the
+    /// class's link bound, less [`Self::batch_envelope_bytes_for`] of it), the ring the
+    /// session's. The two budgets differ only on a link that carries
+    /// best-effort frames apart from reliable ones ([`BoxedLinkDriver::link_mtu_for`]).
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> (usize, u64) {
+        let cache = match class {
+            Reliability::Reliable => &self.tx_limits_cache,
+            Reliability::BestEffort => &self.best_effort_tx_limits_cache,
+        };
         // The common case, a session whose handshake is long done: the kept answer, read
         // without the capabilities' mutex ([`TxLimitsCache`]).
-        if let Some((mtu, ring)) = self.tx_limits_cache.get() {
+        if let Some((mtu, ring)) = cache.get() {
             return (mtu, crate::sn::mask_from_res(ring));
         }
         // The capabilities and the tag they are the capabilities OF, read in one hold: a
         // writer moves the tag in the hold that writes them.
         let (peer, tag) = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
-            (*slot, self.tx_limits_cache.current_tag())
+            (*slot, cache.current_tag())
         });
         let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
         // Read BEFORE the envelope: a session seen established had settled the outcomes the
         // envelope reads before it became established, so they are final here.
         let established = self.is_established();
         let budget = self
-            .batch_mtu_for(peer)
-            .saturating_sub(self.batch_envelope_bytes());
+            .batch_mtu_for(peer, class)
+            .saturating_sub(self.batch_envelope_bytes_for(class));
         // Before the peer's capabilities arrive the own advertisement applies, and before
         // establishment the envelope can still change: neither answer is kept.
         if peer.is_some() && established {
-            self.tx_limits_cache.keep(tag, budget, ring);
+            cache.keep(tag, budget, ring);
         }
         (budget, crate::sn::mask_from_res(ring))
     }
@@ -5872,12 +5914,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `let b = buffer.get_mut(0..n)`),
     /// and it does not compress ([`Self::compresses_batches`]). Before establishment the
     /// same link still frames with the batch length, as [`crate::drive`] reads it.
+    ///
+    /// The envelope of the reliable frames; [`Self::batch_envelope_bytes_for`] answers for
+    /// either class.
     pub fn batch_envelope_bytes(&self) -> usize {
+        self.batch_envelope_bytes_for(crate::reliability::Reliability::Reliable)
+    }
+
+    /// [`Self::batch_envelope_bytes`] for the frames of one reliability class: on a link that
+    /// writes its best-effort batches bare, one to a datagram, beside its length-prefixed
+    /// streams ([`BoxedLinkDriver::batch_length_prefixed_for`]), a best-effort frame spends
+    /// no bytes on the length.
+    pub fn batch_envelope_bytes_for(&self, class: crate::reliability::Reliability) -> usize {
         #[cfg(feature = "transport-lowlatency")]
         if self.is_lowlatency() && self.is_established() {
             return 0;
         }
-        let length = if self.link_driver().batch_length_prefixed() {
+        let length = if self.link_driver().batch_length_prefixed_for(class) {
             crate::link::STREAM_BATCH_LENGTH_BYTES
         } else {
             0
@@ -5901,6 +5954,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
             *slot = caps;
             self.tx_limits_cache.peer_caps_changed();
+            self.best_effort_tx_limits_cache.peer_caps_changed();
         });
     }
 
@@ -5978,6 +6032,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// advertisement in every build (the former R311cb
     /// `transport-batching` clamp made batching-off builds ignore the
     /// peer RX budget even for fragment sizing).
+    ///
+    /// The budget of the reliable frames: a link that carries best-effort frames apart
+    /// bounds them by its own ([`BoxedLinkDriver::link_mtu_for`]).
     pub fn negotiated_batch_mtu(&self) -> usize {
         // R311kj — both sides are 0-normalized at their SSOT
         // (own: own_batch_advertisement, the same value the Init wire
@@ -5998,13 +6055,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // inert against the `u16` batch advertisements, so TCP is
         // unchanged.
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
-        self.batch_mtu_for(peer)
+        self.batch_mtu_for(peer, crate::reliability::Reliability::Reliable)
     }
 
-    /// [`Self::negotiated_batch_mtu`] over a peer's caps already read: the one formula.
-    fn batch_mtu_for(&self, peer: Option<PeerInitCaps>) -> usize {
+    /// [`Self::negotiated_batch_mtu`] over a peer's caps already read, for the frames of one
+    /// reliability class (the link's bound is the class's,
+    /// [`BoxedLinkDriver::link_mtu_for`]): the one formula.
+    fn batch_mtu_for(
+        &self,
+        peer: Option<PeerInitCaps>,
+        class: crate::reliability::Reliability,
+    ) -> usize {
         let own = self.own_batch_advertisement() as usize;
-        let link = self.link_driver().link_mtu();
+        let link = self.link_driver().link_mtu_for(class);
         match peer {
             Some(p) => own.min(p.batch_size as usize).min(link),
             None => own.min(link),
@@ -10153,9 +10216,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R311kb — and the negotiated SN ring every mint below walks
         // ([`Self::negotiated_sn_mask`]). Resolved here, before the batch
         // lock, in the same hold of the `inbound_peer_init_caps` mutex
-        // ([`Self::negotiated_tx_limits`]): session mutex scopes stay disjoint
-        // by discipline.
-        let (mtu, sn_mask) = self.negotiated_tx_limits();
+        // ([`Self::negotiated_tx_limits_for`]): session mutex scopes stay disjoint
+        // by discipline. The budget is the message's class's: a best-effort
+        // message batches and fragments to what the link's best-effort carriage
+        // takes, which a datagram companion bounds below its streams.
+        let (mtu, sn_mask) = self.negotiated_tx_limits_for(wire_reliability);
 
         // This profile's own reassembly budget, resolved HERE for the same
         // reason as `mtu` and `sn_mask` above: the accessor takes a mutex,
@@ -10225,8 +10290,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 return false;
             }
             let mut left = deadline.get();
+            // The room of the queue this message's class leaves by: a best-effort message on a
+            // link that carries it apart never waits for its streams' room.
             let answer = self.with_conduit_link(wire_reliability, priority, |link| {
-                link.link_driver().wait_for_room(priority, left.ask())
+                link.link_driver()
+                    .wait_for_room_for(wire_reliability, priority, left.ask())
             });
             left.spend(answer.waited_us);
             deadline.set(left);
@@ -10961,7 +11029,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // congestion drop.
             if emitted > 0 {
                 let answer = self.with_conduit_link(reliability, priority, |link| {
-                    link.link_driver().wait_for_room(priority, deadline.ask())
+                    link.link_driver()
+                        .wait_for_room_for(reliability, priority, deadline.ask())
                 });
                 deadline.spend(answer.waited_us);
                 if answer.room == crate::link::LinkRoom::Congested {
@@ -11828,7 +11897,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let priority = self.conduit_priority(priority);
         let reliability = Reliability::from_reliable_bool(reliable);
         Ok(self.with_conduit_link(reliability, priority, |link| {
-            link.link_driver().try_reserve_room(priority)
+            link.link_driver()
+                .try_reserve_room_for(reliability, priority)
         }))
     }
 
@@ -15070,6 +15140,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // path ([`BoxedLinkDriver::send_urgent`]).
             self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
+    }
+
+    /// [`Self::send_keep_alive`] for the carriage that frames of `class` leave by, on a link
+    /// that carries that class apart ([`BoxedLinkDriver::carries_apart`]): upstream's companion
+    /// link writes its own KeepAlive when its own tracker runs out
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `let message: TransportMessage = KeepAlive.into();`), whatever its main link carries.
+    /// The open batches are not drained first: the keepalive carries no sequence number, and
+    /// the frames it may pass are the other carriage's or the companion's own best-effort ones.
+    #[cfg(feature = "transport-keepalive")]
+    pub(crate) fn send_keep_alive_apart(&self, class: Reliability) {
+        R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
+        let bytes = crate::handshake_encode::encode_keep_alive();
+        self.send_wire_urgent_this_link(&bytes, class);
     }
 
     /// A4 — record one declaration for replay and send it, as ONE step: `entry` goes at the end of

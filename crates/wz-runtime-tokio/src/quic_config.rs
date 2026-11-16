@@ -46,10 +46,9 @@ use wz_session_core::locator::{QuicAlpn, QuicStreams};
 
 /// The ALPN list a streamed QUIC link offers for its stream keys: the tokens of
 /// [`QuicStreams::offer`], in its order of preference, which is upstream's
-/// `compute_alpn_protocols` less the protocols this build does not serve. The
-/// builders below put the default keys' offer in the config they build; a dial
-/// or a listener replaces it with its own locator's ([`client_offering`],
-/// [`server_offering`]).
+/// `compute_alpn_protocols`. The builders below put the default keys' offer in
+/// the config they build; a dial or a listener replaces it with its own
+/// locator's ([`client_offering`], [`server_offering`]).
 pub fn alpn_offer(streams: QuicStreams) -> Vec<Vec<u8>> {
     streams
         .offer()

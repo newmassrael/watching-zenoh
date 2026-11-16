@@ -394,6 +394,98 @@ mod keepalive_emitter {
         );
     }
 
+    /// A link that carries its best-effort frames on a companion the peer leases
+    /// on its own (a QUIC datagram companion): the companion has not written, and
+    /// every urgent message is recorded with the class it was sent for.
+    struct CompanionDriver {
+        urgent: std::sync::Mutex<Vec<(Vec<u8>, wz_runtime_tokio::Reliability)>>,
+    }
+
+    impl BoxedLinkDriver for CompanionDriver {
+        fn send_blocking(
+            &self,
+            _bytes: &[u8],
+            _reliability: wz_runtime_tokio::Reliability,
+        ) -> wz_runtime_tokio::session_glue::LinkSendOutcome {
+            wz_runtime_tokio::session_glue::LinkSendOutcome::Sent
+        }
+        fn send_urgent(
+            &self,
+            bytes: &[u8],
+            reliability: wz_runtime_tokio::Reliability,
+        ) -> wz_runtime_tokio::session_glue::LinkSendOutcome {
+            self.urgent
+                .lock()
+                .unwrap()
+                .push((bytes.to_vec(), reliability));
+            wz_runtime_tokio::session_glue::LinkSendOutcome::Sent
+        }
+        fn reports_wire_writes(&self) -> bool {
+            true
+        }
+        fn carries_apart(&self, class: wz_runtime_tokio::Reliability) -> bool {
+            class == wz_runtime_tokio::Reliability::BestEffort
+        }
+        fn ms_since_wire_write_for(&self, _class: wz_runtime_tokio::Reliability) -> Option<u64> {
+            None
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    /// The companion is kept alive by its own clock, as upstream's companion link
+    /// writes its own KeepAlive: a control frame that just left on the link's
+    /// streams defers the link's keepalive and not the companion's, whose
+    /// keepalive goes with its own class and leaves the link's line stamp as it
+    /// was. Once the link is idle too, each gets one.
+    #[test]
+    fn a_companion_is_kept_alive_by_its_own_clock() {
+        use wz_runtime_tokio::Reliability;
+        let driver = Arc::new(CompanionDriver {
+            urgent: std::sync::Mutex::new(Vec::new()),
+        });
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
+        let actions =
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        drive_to_established(&mut engine);
+
+        // Past the 10_000/3 interval from establishment, with a control frame on
+        // the streams at that very instant.
+        let idle_check = actions.clock.now_monotonic_ms() + 4_000;
+        *actions.link.last_outbound_at.lock().unwrap() = Some(idle_check);
+        assert_eq!(
+            check_keepalive_deadline(&actions, idle_check),
+            KeepAliveCheckOutcome::Emitted
+        );
+        assert_eq!(
+            *driver.urgent.lock().unwrap(),
+            vec![(vec![0x04], Reliability::BestEffort)],
+            "the companion's keepalive alone, on the companion"
+        );
+        assert_eq!(
+            *actions.link.last_outbound_at.lock().unwrap(),
+            Some(idle_check),
+            "the companion's keepalive is not the link's line speaking"
+        );
+        assert_eq!(actions.trace_snapshot().send_keep_alive, 1);
+
+        // An interval past the control frame both lines are idle: one each.
+        assert_eq!(
+            check_keepalive_deadline(&actions, idle_check + 4_000),
+            KeepAliveCheckOutcome::Emitted
+        );
+        assert_eq!(
+            driver.urgent.lock().unwrap()[1..],
+            [
+                (vec![0x04], Reliability::Reliable),
+                (vec![0x04], Reliability::BestEffort)
+            ],
+            "the link's keepalive on the streams, the companion's on the companion"
+        );
+    }
+
     /// Wire self-parity: the emitted frame parses back as a KeepAlive on
     /// the inbound side and resets the receiver's lease stamp — the
     /// full liveness round trip the emitter exists for.

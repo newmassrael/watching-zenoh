@@ -30,10 +30,9 @@ use crate::link_socket::LinkSocket;
 use crate::quic_config::alpn_offer;
 use crate::quic_pipeline::{
     open_quic_stream, quic_server_endpoint, wire_stream_over_quic, QuicLink, QuicReadDriver,
-    StreamAllowance,
+    QuicWriteDriver, StreamAllowance,
 };
 use crate::quic_plaintext::{plaintext_client_crypto, plaintext_server_crypto};
-use crate::stream_link::StreamWriteDriver;
 use crate::writer_queue::WriterHandle;
 use wz_session_core::locator::QuicStreams;
 
@@ -119,7 +118,7 @@ pub async fn bind_udp_reliable_with_streams(
 pub fn wire_udp_reliable(
     link: QuicLink,
     rx_buffer_size: usize,
-) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+) -> (QuicReadDriver, Arc<QuicWriteDriver>, WriterHandle) {
     let local = link.endpoint.local_addr().ok();
     let subject = ip_link_subject(LinkKind::UdpReliable, local);
     let endpoints = ip_link_endpoints(LinkKind::Udp, local, Some(link.connection.remote_address()));

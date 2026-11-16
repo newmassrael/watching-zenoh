@@ -1181,7 +1181,17 @@ async fn a_default_quic_link_carries_each_priority_on_its_own_stream() {
         client.priority_send.is_some(),
         "the dialer opened its priority streams"
     );
+    assert!(
+        !client.mixed_reliability,
+        "no datagram companion by default"
+    );
     let (_client_in, client_out, _client_writer) = wire_quic_stream(client, 64 * 1024);
+    // Without the companion the best-effort frames are the streams' as well.
+    assert_eq!(
+        client_out.link_mtu_for(Reliability::BestEffort),
+        client_out.link_mtu()
+    );
+    assert!(client_out.batch_length_prefixed_for(Reliability::BestEffort));
 
     assert!(matches!(
         client_out.send_prioritized(b"before-shape", Reliability::Reliable, Priority::Background),
@@ -1196,6 +1206,19 @@ async fn a_default_quic_link_carries_each_priority_on_its_own_stream() {
         read_frame(&mut server.recv).await,
         b"before-shape",
         "on the bidirectional stream"
+    );
+    assert!(matches!(
+        client_out.send_prioritized(
+            b"best-effort",
+            Reliability::BestEffort,
+            Priority::Background
+        ),
+        LinkSendOutcome::Sent
+    ));
+    assert_eq!(
+        read_frame(&mut server.recv).await,
+        b"best-effort",
+        "a best-effort frame stays on the streams of a link without the companion"
     );
 
     client_out.shape_tx_queue(TxQueueShape {
@@ -1258,6 +1281,7 @@ async fn a_listener_without_multistream_keeps_the_link_on_one_stream() {
         .expect("dial quic");
     assert_eq!(negotiated(&client.connection), b"zenoh");
     assert!(client.priority_send.is_none(), "no priority stream to open");
+    assert!(!client.mixed_reliability, "nor a datagram companion");
     client
         .send
         .write_all(b"x")
@@ -1265,4 +1289,223 @@ async fn a_listener_without_multistream_keeps_the_link_on_one_stream() {
         .expect("a byte on the bidirectional stream");
     let (_endpoint, server) = accept.await.expect("the accept task");
     assert!(server.priority_send.is_none(), "nor on the accepting end");
+}
+
+/// A loopback listener and a dial to it whose stream keys are both `streams`:
+/// the dialed link, and the task that accepts it with the listener it keeps.
+/// The accept completes once the dialer writes on the bidirectional stream.
+async fn loopback_link_pair(
+    streams: wz_session_core::locator::QuicStreams,
+) -> (
+    wz_runtime_tokio::quic_pipeline::QuicLink,
+    tokio::task::JoinHandle<(quinn::Endpoint, wz_runtime_tokio::quic_pipeline::QuicLink)>,
+) {
+    use wz_runtime_tokio::quic_pipeline::{bind_quic_with_streams, dial_quic_with_streams};
+
+    let (server_config, client_config) = loopback_quic_configs();
+    let endpoint = bind_quic_with_streams(
+        "127.0.0.1:0".parse().expect("loopback addr"),
+        server_config,
+        &LinkSocket::NONE,
+        streams,
+    )
+    .await
+    .expect("bind quic server endpoint");
+    let addr = endpoint.local_addr().expect("endpoint local addr");
+    let accept = tokio::spawn(async move {
+        let link = accept_quic_on(&endpoint).await.expect("accept quic peer");
+        (endpoint, link)
+    });
+    let client =
+        dial_quic_with_streams(addr, client_config, "localhost", &LinkSocket::NONE, streams)
+            .await
+            .expect("dial quic");
+    (client, accept)
+}
+
+/// The next frame `reader` hands up, within a bound.
+async fn next_frame(reader: &mut wz_runtime_tokio::quic_pipeline::QuicReadDriver) -> Vec<u8> {
+    use wz_runtime_tokio::{LinkDriver, LinkEvent};
+    match tokio::time::timeout(Duration::from_secs(5), reader.poll_event())
+        .await
+        .expect("a frame arrives")
+    {
+        LinkEvent::Rx(frame) => frame.bytes.as_slice().to_vec(),
+        _ => panic!("the link handed up something other than a frame"),
+    }
+}
+
+/// Two ends whose keys keep the default `multistream` and ask for `mixed_rel=1`
+/// negotiate `zenoh-ms-mr`, the protocol with both: a stream per priority and
+/// the datagram companion. A reliable frame leaves on its stream behind its
+/// length, a best-effort one as one datagram with no length in front, a
+/// best-effort batch past the companion's bound is refused, each line's
+/// keepalive goes on that line alone and the companion's last write is its own,
+/// and a full streams lane never holds back the companion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mixed_reliability_pair_puts_best_effort_frames_on_datagrams() {
+    use wz_runtime_tokio::quic_pipeline::{wire_quic_stream, MIXED_RELIABILITY_MTU};
+    use wz_runtime_tokio::Reliability;
+    use wz_session_core::link::{
+        BoxedLinkDriver, LinkDropCause, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait,
+    };
+    use wz_session_core::locator::{QuicStreamChoice, QuicStreams};
+    use wz_session_core::qos::Priority;
+
+    let (client, accept) = loopback_link_pair(QuicStreams {
+        multistream: QuicStreamChoice::Auto,
+        mixed_rel: QuicStreamChoice::Enabled,
+    })
+    .await;
+    assert_eq!(negotiated(&client.connection), b"zenoh-ms-mr");
+    assert!(client.mixed_reliability, "the dialer has the companion");
+    assert!(
+        client.priority_send.is_some(),
+        "and its stream per priority"
+    );
+    let (_client_in, client_out, _client_writer) = wire_quic_stream(client, 64 * 1024);
+    assert_eq!(
+        client_out.link_mtu_for(Reliability::BestEffort),
+        MIXED_RELIABILITY_MTU
+    );
+    assert!(!client_out.batch_length_prefixed_for(Reliability::BestEffort));
+    assert_eq!(
+        client_out.link_mtu_for(Reliability::Reliable),
+        client_out.link_mtu()
+    );
+    assert!(client_out.batch_length_prefixed_for(Reliability::Reliable));
+
+    assert!(matches!(
+        client_out.send_prioritized(b"reliable", Reliability::Reliable, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    ));
+    let (_endpoint, mut server) = accept.await.expect("the accept task");
+    assert!(
+        server.mixed_reliability,
+        "the acceptor has the companion too"
+    );
+    assert_eq!(
+        read_frame(&mut server.recv).await,
+        b"reliable",
+        "a reliable frame on the bidirectional stream"
+    );
+    assert!(client_out.carries_apart(Reliability::BestEffort));
+    assert!(!client_out.carries_apart(Reliability::Reliable));
+    assert_eq!(
+        client_out.ms_since_wire_write_for(Reliability::BestEffort),
+        None,
+        "the companion has not spoken, whatever the streams wrote"
+    );
+
+    assert!(matches!(
+        client_out.send_prioritized(b"best-effort", Reliability::BestEffort, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    ));
+    let datagram = tokio::time::timeout(Duration::from_secs(5), server.connection.read_datagram())
+        .await
+        .expect("the datagram arrives")
+        .expect("a datagram");
+    assert_eq!(
+        &datagram[..],
+        b"best-effort",
+        "a best-effort frame is one datagram, with no length in front"
+    );
+    assert_eq!(
+        client_out.send_prioritized(
+            &vec![0x5A; MIXED_RELIABILITY_MTU + 1],
+            Reliability::BestEffort,
+            Priority::DEFAULT,
+        ),
+        LinkSendOutcome::Dropped(LinkDropCause::Oversize),
+        "a best-effort batch past the companion's bound is refused, not split"
+    );
+
+    assert!(
+        client_out
+            .ms_since_wire_write_for(Reliability::BestEffort)
+            .is_some(),
+        "the companion's write is its own"
+    );
+
+    // Each line's keepalive goes on that line alone.
+    assert!(matches!(
+        client_out.send_urgent(b"stream-keepalive", Reliability::Reliable),
+        LinkSendOutcome::Sent
+    ));
+    assert!(matches!(
+        client_out.send_urgent(b"companion-keepalive", Reliability::BestEffort),
+        LinkSendOutcome::Sent
+    ));
+    assert_eq!(read_frame(&mut server.recv).await, b"stream-keepalive");
+    let datagram = tokio::time::timeout(Duration::from_secs(5), server.connection.read_datagram())
+        .await
+        .expect("the companion's keepalive arrives")
+        .expect("a datagram");
+    assert_eq!(&datagram[..], b"companion-keepalive");
+
+    // A full streams lane holds back the streams' frames and never the
+    // companion's.
+    let mut held = Vec::new();
+    while let Some(permit) =
+        client_out.try_reserve_room_for(Reliability::Reliable, Priority::DEFAULT)
+    {
+        assert!(held.len() < 4096, "the streams' lane is bounded");
+        held.push(permit);
+    }
+    let permit = client_out
+        .try_reserve_room_for(Reliability::BestEffort, Priority::DEFAULT)
+        .expect("the companion has room while the streams' lane is full");
+    assert!(!permit.is_held(), "and holds nothing for it");
+    assert_eq!(
+        client_out.wait_for_room_for(
+            Reliability::BestEffort,
+            Priority::DEFAULT,
+            RoomWait::Drop { wait_us: 0 },
+        ),
+        RoomAnswer::at_once(LinkRoom::Free)
+    );
+    assert!(client_out.block_first_acquire_for(Reliability::BestEffort, Priority::DEFAULT, 0));
+    drop(held);
+}
+
+/// Two ends with `multistream=0` and `mixed_rel=1` negotiate `zenoh-mr`: one
+/// stream and the datagram companion. The accepting end's read driver hands up
+/// what arrives on either, the reliable frame off the stream and the
+/// best-effort one off a datagram.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mixed_reliability_link_without_multistream_reads_both_halves() {
+    use wz_runtime_tokio::quic_pipeline::wire_quic_stream;
+    use wz_runtime_tokio::Reliability;
+    use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
+    use wz_session_core::locator::{QuicStreamChoice, QuicStreams};
+    use wz_session_core::qos::Priority;
+
+    let (client, accept) = loopback_link_pair(QuicStreams {
+        multistream: QuicStreamChoice::Disabled,
+        mixed_rel: QuicStreamChoice::Enabled,
+    })
+    .await;
+    assert_eq!(negotiated(&client.connection), b"zenoh-mr");
+    assert!(client.mixed_reliability, "the dialer has the companion");
+    assert!(client.priority_send.is_none(), "and no priority stream");
+    let (_client_in, client_out, _client_writer) = wire_quic_stream(client, 64 * 1024);
+
+    assert!(matches!(
+        client_out.send_prioritized(b"reliable", Reliability::Reliable, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    ));
+    let (_endpoint, server) = accept.await.expect("the accept task");
+    assert!(
+        server.mixed_reliability,
+        "the acceptor has the companion too"
+    );
+    assert!(server.priority_send.is_none(), "and no priority stream");
+    let (mut server_in, _server_out, _server_writer) = wire_quic_stream(server, 64 * 1024);
+    assert_eq!(next_frame(&mut server_in).await, b"reliable");
+
+    assert!(matches!(
+        client_out.send_prioritized(b"best-effort", Reliability::BestEffort, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    ));
+    assert_eq!(next_frame(&mut server_in).await, b"best-effort");
 }
