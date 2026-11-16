@@ -1410,11 +1410,10 @@ pub unsafe extern "C" fn ze_sample_miss_listener_drop(
 /// Subscribe to the liveliness tokens of matching advanced PUBLISHERS (pico
 /// `ze_advanced_subscriber_detect_publishers`).
 ///
-/// The derived keyexpr is `<ke>/@adv/pub/**` — pico builds exactly that
-/// (`_Z_KEYEXPR_ADV_PREFIX` / `_Z_KEYEXPR_PUB` / `_Z_KEYEXPR_STARSTAR`,
-/// `advanced_subscriber.c:1929-1932`) and so does wz's own advanced subscriber
-/// (`advanced_ke::ke_pub_liveliness`), so the two agree on the namespace by
-/// construction rather than by coincidence.
+/// The derived keyexpr is `<ke>/@adv/pub/**`, pico's
+/// (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @ `_Z_KEYEXPR_APPEND_STR_ARRAY(&keyexpr, _Z_KEYEXPR_ADV_PREFIX, _Z_KEYEXPR_PUB, _Z_KEYEXPR_STARSTAR),`),
+/// spelled by `wz_ext_pubsub::advanced_ke::publisher_detection_ke`, the one
+/// place every advanced subscriber of wz derives it.
 ///
 /// The handle handed back is an ordinary `z_owned_subscriber_t`, as pico's is:
 /// a C program drops it with the same `z_drop`.
@@ -1441,7 +1440,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         else {
             return Z_ERR_NULL;
         };
-        let ke = format!("{}/@adv/pub/**", state.subscriber.keyexpr());
+        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(state.subscriber.keyexpr());
         let history = if options.is_null() {
             false
         } else {
@@ -1795,7 +1794,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
             }
             return Z_ERR_NULL;
         };
-        let detection = format!("{}/@adv/pub/**", state.keyexpr);
+        let detection = wz_ext_pubsub::advanced_ke::publisher_detection_ke(&state.keyexpr);
         crate::liveliness::declare_background_liveliness_subscriber(
             &state.engine,
             &detection,
@@ -1814,6 +1813,23 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The publisher-detection keyexpr is derived where every advanced subscriber derives it, and
+    /// not spelled again in this file, by either detection door: a second spelling is a second
+    /// place the namespace can move. The needle is assembled, so this test's own text is not a
+    /// spelling of it.
+    #[test]
+    fn the_publisher_detection_keyexpr_is_not_spelled_here() {
+        let spelling = concat!("@adv/pub/", "**\"");
+        assert!(
+            !include_str!("advanced.rs").contains(spelling),
+            "the pico ABI spells the publisher-detection keyexpr instead of deriving it"
+        );
+        assert_eq!(
+            wz_ext_pubsub::advanced_ke::publisher_detection_ke("demo/x"),
+            concat!("demo/x/@adv/pub/", "**")
+        );
+    }
 
     /// A sample refused for want of a time answers pico's code for a timestamp it could not
     /// make (-68), whichever of the two reasons; a sample that went out, or that the write filter

@@ -1981,10 +1981,10 @@ pub unsafe extern "C" fn ze_sample_miss_listener_drop(this_: *mut ze_moved_sampl
 /// Subscribe to the liveliness tokens of matching advanced PUBLISHERS (zenoh-c
 /// `ze_advanced_subscriber_detect_publishers`).
 ///
-/// The derived keyexpr is `<ke>/@adv/pub/**`, which is what wz's own advanced
-/// subscriber builds (`advanced_ke::ke_pub_liveliness`) and what the pico ABI
-/// builds — so the three agree on the namespace by construction rather than by
-/// coincidence.
+/// The derived keyexpr is `<ke>/@adv/pub/**`, upstream's
+/// (`zenoh-ext/src/advanced_subscriber.rs` @ `.declare_subscriber(self.subscriber.key_expr() / KE_ADV_PREFIX / KE_PUB / KE_STARSTAR)`),
+/// spelled by `wz_ext_pubsub::advanced_ke::publisher_detection_ke`, the one
+/// place every advanced subscriber of wz and the pico ABI derive it.
 ///
 /// The handle handed back is an ordinary `z_owned_subscriber_t`, as upstream's
 /// is: a C program drops it with the same `z_drop`.
@@ -2020,7 +2020,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         let Some(state) = (unsafe { adv_sub_state(subscriber) }) else {
             return Z_ENULL;
         };
-        let ke = format!("{}/@adv/pub/**", state.subscriber.keyexpr());
+        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(state.subscriber.keyexpr());
         let history = if options.is_null() {
             false
         } else {
@@ -2086,6 +2086,22 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The publisher-detection keyexpr is derived where every advanced subscriber derives it, and
+    /// not spelled again in this file: a second spelling is a second place the namespace can move.
+    /// The needle is assembled, so this test's own text is not a spelling of it.
+    #[test]
+    fn the_publisher_detection_keyexpr_is_not_spelled_here() {
+        let spelling = concat!("@adv/pub/", "**\"");
+        assert!(
+            !include_str!("advanced.rs").contains(spelling),
+            "the C ABI spells the publisher-detection keyexpr instead of deriving it"
+        );
+        assert_eq!(
+            wz_ext_pubsub::advanced_ke::publisher_detection_ke("demo/x"),
+            concat!("demo/x/@adv/pub/", "**")
+        );
+    }
 
     /// A sample refused for want of a time is an error to the C caller; every other outcome of an
     /// advanced put stays best-effort, as it was.
