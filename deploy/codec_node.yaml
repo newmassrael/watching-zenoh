@@ -126,8 +126,9 @@ codecs:
   undecl_token:
     capacity:
       extensions: 8
-  # The transport messages: the eight entries `parse_error::MAX_EXT_CHAIN_DEPTH`
-  # reads of a transport chain.
+  # The transport messages: what a storing form of them holds. The receive path
+  # reads a transport chain through the message's view to its end and keeps it
+  # in a form of its own, so this is not a bound on what a node reads.
   transport_init:
     capacity:
       extensions: 8

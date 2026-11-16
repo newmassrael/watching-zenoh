@@ -605,12 +605,13 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 /// needs of it, kept in fixed storage, so reading it allocates nothing.
 ///
 /// The chain is read by the header's document (`transport_frame_header.scxml`,
-/// `transport_fragment_header.scxml`) and walked here under the depth bound the
-/// owned chain is kept under ([`KeptChain`]). What is kept is what a participant acts on:
-/// each entry's header (for the mandatory-extension rule,
-/// [`crate::ext_admit::judge_ext_chain`]), the priority the QoS extension
-/// carries, and the two chain-boundary markers of a Fragment. Each is projected
-/// by the rule the owned chain is projected by ([`ext_qos_priority`],
+/// `transport_fragment_header.scxml`) to the entry whose `Z` flag is clear,
+/// whatever its length, and walked here once ([`KeptChain`]). What is kept is
+/// what a participant acts on, folded as the walk goes so that the storage does
+/// not grow with the chain: the mandatory-extension rule's verdict for the
+/// message ([`crate::ext_admit::judge_ext_chain`]), the priority the QoS
+/// extension carries, and the two chain-boundary markers of a Fragment. Each is
+/// projected by the rule the owned chain is projected by ([`ext_qos_priority`],
 /// [`crate::extfragment::FragmentMarkers::from_headers`]).
 ///
 /// One difference from the owned decode, by construction: an entry is read and
@@ -627,8 +628,14 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 ))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InPlaceExtChain {
-    headers: [u8; crate::parse_error::MAX_EXT_CHAIN_DEPTH],
-    len: u8,
+    /// Whether the message carried a chain at all.
+    #[cfg(feature = "alloc")]
+    chained: bool,
+    /// The admission verdict, which only the unicast receive path asks for.
+    #[cfg(feature = "session-unicast")]
+    admission: crate::ext_admit::ExtAdmission,
+    #[cfg(feature = "reassembly")]
+    markers: crate::extfragment::FragmentMarkers,
     priority: crate::qos::Priority,
 }
 
@@ -641,13 +648,6 @@ pub(crate) struct InPlaceExtChain {
     )
 ))]
 impl InPlaceExtChain {
-    /// No chain: what a message whose Z flag is clear carries.
-    const EMPTY: Self = Self {
-        headers: [0; crate::parse_error::MAX_EXT_CHAIN_DEPTH],
-        len: 0,
-        priority: crate::qos::Priority::DEFAULT,
-    };
-
     /// The chain of the Frame at the front of `unit`, OWNED: its header read
     /// again by its document and the entries kept as the owned decode keeps
     /// them. Empty when there is no chain.
@@ -657,15 +657,10 @@ impl InPlaceExtChain {
     /// every record is lent never pays for it.
     #[cfg(feature = "alloc")]
     pub(crate) fn owned(&self, unit: &[u8]) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
-        if self.len == 0 {
+        if !self.chained {
             return Ok(Vec::new());
         }
         decode_frame_head::<Vec<ExtEntryOwned>>(unit).map(|(head, _)| head.chain)
-    }
-
-    /// Each entry's header byte, in wire order.
-    pub(crate) fn headers(&self) -> impl Iterator<Item = u8> + '_ {
-        self.headers[..usize::from(self.len)].iter().copied()
     }
 
     /// The priority the chain's QoS extension carries,
@@ -674,14 +669,17 @@ impl InPlaceExtChain {
         self.priority
     }
 
-    /// Whether a participant may act on a message of `mid` carrying this chain:
+    /// The chain-boundary markers the chain carries.
+    #[cfg(feature = "reassembly")]
+    pub(crate) fn markers(&self) -> crate::extfragment::FragmentMarkers {
+        self.markers
+    }
+
+    /// Whether a participant may act on the message this chain was kept for:
     /// the rule [`InboundFrame::ext_admission`] applies to the decoded message.
     #[cfg(feature = "session-unicast")]
-    pub(crate) fn admission(&self, mid: u8) -> crate::ext_admit::ExtAdmission {
-        crate::ext_admit::judge_ext_chain(
-            crate::ext_admit::ExtCarrier::Transport(mid),
-            self.headers(),
-        )
+    pub(crate) fn admission(&self) -> crate::ext_admit::ExtAdmission {
+        self.admission
     }
 }
 
@@ -795,10 +793,10 @@ pub fn parse_inbound_consuming_in_into(
 /// The form a Frame's or a Fragment's own extension chain is kept in, taken
 /// from the entries its header's document read ([`decode_frame_head`],
 /// [`decode_fragment_head`]): the owned entries of a decoded message, or the
-/// [`InPlaceExtChain`] of one read where it lies. The document's view holds no
-/// list and reads a chain of any length, so each form keeps the bound a node
-/// reads of a transport chain (`MAX_EXT_CHAIN_DEPTH`) and refuses the entry past
-/// it as `ExtChainOverflow`.
+/// [`InPlaceExtChain`] of one read where it lies. The document's view reads the
+/// chain to the entry whose `Z` flag is clear, whatever its length, and neither
+/// form refuses a chain for its length: the owned one grows, and the in-place one
+/// keeps a fixed summary of it.
 // Gated as the head decoders that name it.
 #[cfg(all(
     feature = "codec-frame",
@@ -814,15 +812,19 @@ pub fn parse_inbound_consuming_in_into(
     )
 ))]
 pub(crate) trait KeptChain: Sized {
-    /// The chain whose entries `walked` yields, in wire order.
+    /// The chain whose entries `walked` yields, in wire order, of a message of
+    /// the transport id `mid`.
     fn keep<'a>(
+        mid: u8,
         walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     ) -> Result<Self, InboundParseError>;
 }
 
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 impl KeptChain for Vec<ExtEntryOwned> {
+    /// Every entry is kept, so the message's id is not needed to judge it.
     fn keep<'a>(
+        _mid: u8,
         walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     ) -> Result<Self, InboundParseError> {
         crate::ext_chain::collect_ext_chain(walked)
@@ -839,23 +841,50 @@ impl KeptChain for Vec<ExtEntryOwned> {
 ))]
 impl KeptChain for InPlaceExtChain {
     fn keep<'a>(
+        mid: u8,
         walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     ) -> Result<Self, InboundParseError> {
-        use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
-        let mut chain = Self::EMPTY;
+        #[cfg(feature = "session-unicast")]
+        let carrier = crate::ext_admit::ExtCarrier::Transport(mid);
+        #[cfg(not(feature = "session-unicast"))]
+        let _ = mid;
+        // The rule answers with the first entry it refuses, so that entry's header
+        // is all of the chain its verdict needs.
+        #[cfg(feature = "session-unicast")]
+        let mut refused: Option<u8> = None;
+        #[cfg(feature = "alloc")]
+        let mut chained = false;
+        #[cfg(feature = "reassembly")]
+        let mut markers = crate::extfragment::FragmentMarkers::NONE;
         let mut priority = None;
-        for (slot, entry) in walked.enumerate() {
-            if slot == MAX_EXT_CHAIN_DEPTH {
-                return Err(InboundParseError::ExtChainOverflow);
+        for entry in walked {
+            #[cfg(feature = "alloc")]
+            {
+                chained = true;
             }
-            chain.headers[slot] = entry.header;
-            chain.len = (slot + 1) as u8;
+            #[cfg(feature = "session-unicast")]
+            if refused.is_none()
+                && crate::ext_admit::judge_ext_chain(carrier, [entry.header]).is_refusal()
+            {
+                refused = Some(entry.header);
+            }
+            #[cfg(feature = "reassembly")]
+            {
+                markers = markers.with_header(entry.header);
+            }
             if priority.is_none() {
                 priority = qos_priority_of_entry(&entry);
             }
         }
-        chain.priority = priority.unwrap_or(crate::qos::Priority::DEFAULT);
-        Ok(chain)
+        Ok(Self {
+            #[cfg(feature = "alloc")]
+            chained,
+            #[cfg(feature = "session-unicast")]
+            admission: crate::ext_admit::judge_ext_chain(carrier, refused),
+            #[cfg(feature = "reassembly")]
+            markers,
+            priority: priority.unwrap_or(crate::qos::Priority::DEFAULT),
+        })
     }
 }
 
@@ -903,7 +932,7 @@ impl FrameHead<InPlaceExtChain> {
     /// receive path's rule, as for a fragment.
     #[cfg(feature = "session-unicast")]
     pub(crate) fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
-        self.chain.admission(wire_const::T_MID_FRAME)
+        self.chain.admission()
     }
 
     /// The priority the frame's QoS extension carries.
@@ -941,7 +970,10 @@ fn decode_frame_head<C: KeptChain>(
 ) -> Result<(FrameHead<C>, usize), InboundParseError> {
     let mut cursor = SceCursor::new(unit);
     let view = wz_codecs::transport_frame_header::TransportFrameHeaderView::decode(&mut cursor)?;
-    let chain = C::keep(crate::ext_view::walked(view.extensions.as_ref()))?;
+    let chain = C::keep(
+        wire_const::T_MID_FRAME,
+        crate::ext_view::walked(view.extensions.as_ref()),
+    )?;
     let head = FrameHead {
         reliable: (view.header & wire_const::FLAG_T_FRAME_R) != 0,
         sn: view.sn,
@@ -1021,7 +1053,10 @@ fn decode_fragment_head<C: KeptChain>(
     let mut cursor = SceCursor::new(unit);
     let view =
         wz_codecs::transport_fragment_header::TransportFragmentHeaderView::decode(&mut cursor)?;
-    let chain = C::keep(crate::ext_view::walked(view.extensions.as_ref()))?;
+    let chain = C::keep(
+        wire_const::T_MID_FRAGMENT,
+        crate::ext_view::walked(view.extensions.as_ref()),
+    )?;
     let head = FragmentHead {
         reliable: (view.header & wire_const::FLAG_T_FRAGMENT_R) != 0,
         sn: view.sn,
@@ -1048,7 +1083,7 @@ impl FragmentHead<InPlaceExtChain> {
 
     /// The chain-boundary markers the fragment carries.
     pub(crate) fn markers(&self) -> crate::extfragment::FragmentMarkers {
-        crate::extfragment::FragmentMarkers::from_headers(self.chain.headers())
+        self.chain.markers()
     }
 
     /// Whether a participant may act on the fragment's own extension chain.
@@ -1056,7 +1091,7 @@ impl FragmentHead<InPlaceExtChain> {
     /// owned decode reads it, which leaves its own chain to the records.
     #[cfg(feature = "session-unicast")]
     pub(crate) fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
-        self.chain.admission(wire_const::T_MID_FRAGMENT)
+        self.chain.admission()
     }
 }
 
@@ -1295,6 +1330,7 @@ fn parse_init(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPars
     };
     if let InboundFrame::Init { extensions, .. } = out {
         collect_handshake_ext_chain(
+            wire_const::T_MID_INIT,
             crate::ext_view::walked(view.extensions.as_ref()),
             extensions,
         )?;
@@ -1326,6 +1362,7 @@ fn parse_open(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPars
     };
     if let InboundFrame::Open { extensions, .. } = out {
         collect_handshake_ext_chain(
+            wire_const::T_MID_OPEN,
             crate::ext_view::walked(view.extensions.as_ref()),
             extensions,
         )?;
@@ -1350,6 +1387,7 @@ fn parse_close(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPar
     };
     if let InboundFrame::Close { extensions, .. } = out {
         collect_handshake_ext_chain(
+            wire_const::T_MID_CLOSE,
             crate::ext_view::walked(view.extensions.as_ref()),
             extensions,
         )?;
@@ -1485,6 +1523,7 @@ fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, Inbo
     };
     if let InboundFrame::KeepAlive { extensions, .. } = out {
         collect_handshake_ext_chain(
+            wire_const::T_MID_KEEP_ALIVE,
             crate::ext_view::walked(view.extensions.as_ref()),
             extensions,
         )?;

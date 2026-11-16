@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Inbound-parse error surface and the ext-chain depth ceiling.
+//! Inbound-parse error surface.
 //!
-//! Both are precursor types for the session_glue dispatch cluster
+//! A precursor type for the session_glue dispatch cluster
 //! (NetworkMessage / DriverLoopOutcome / IterationEvent), which will
 //! land in subsequent rounds. Extracted first because InboundParseError
 //! is the smallest type with the most external coupling
@@ -26,11 +26,17 @@ pub enum InboundParseError {
     /// The body codec rejected the wire (truncated, VLE overflow,
     /// etc.).
     Codec(CodecError),
-    /// R68c — the transport header set the Z flag but the trailing
-    /// ext chain exceeded `MAX_EXT_CHAIN_DEPTH` without surfacing a
-    /// chain-terminator entry (Z bit clear). Mirrors
-    /// `ext_envelope.scxml::on-overflow="reject"` so a malformed
-    /// peer cannot pin the decoder into an unbounded loop.
+    /// A received handshake chain repeats an extension a `session-slot`
+    /// build reads, past the one entry per extension such a build holds.
+    ///
+    /// The length of a chain is not refused: a chain is read to the entry
+    /// whose `Z` flag is clear, as zenoh's reader
+    /// (`commons/zenoh-codec/src/transport/init.rs` @ `while has_ext {`) and
+    /// zenoh-pico's (`vendor/zenoh-pico/src/protocol/codec/ext.c` @
+    /// `while (has_next && ret == _Z_RES_OK) {`) both read it, and an entry no
+    /// build reads is judged by its header and not kept. A chain that never
+    /// terminates runs into the end of its frame and is refused as a
+    /// truncated wire ([`Self::Codec`]).
     ExtChainOverflow,
     /// The header selected a body encoding the wire spec RESERVES, so the
     /// message has no shape to read and no length to skip.
@@ -108,8 +114,7 @@ impl fmt::Display for InboundParseError {
             Self::Codec(e) => write!(f, "inbound body codec rejected wire: {:?}", e),
             Self::ExtChainOverflow => write!(
                 f,
-                "inbound ext chain exceeded MAX_EXT_CHAIN_DEPTH={} without terminator",
-                MAX_EXT_CHAIN_DEPTH
+                "inbound handshake ext chain repeats an extension past the one entry held for it"
             ),
             Self::ReservedEncoding => {
                 write!(f, "inbound header selected a reserved body encoding")
@@ -134,15 +139,6 @@ impl fmt::Display for InboundParseError {
         }
     }
 }
-
-/// R68c — how many ext-chain entries the wz inbound decoder stores of one
-/// transport message, refusing a chain past it as `ExtChainOverflow`. The
-/// protocol bounds a chain by nothing; this is the participant's capacity,
-/// the same eight the `Node` deployment gives every chain
-/// (`deploy/codec_node.yaml`), and the dissector, which judges the wire,
-/// does not apply it. A deployment with a higher ceiling bumps this and the
-/// deploy file together.
-pub const MAX_EXT_CHAIN_DEPTH: usize = 8;
 
 impl core::error::Error for InboundParseError {}
 

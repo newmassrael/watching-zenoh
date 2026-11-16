@@ -104,8 +104,10 @@ pub type ExtChainOwned = Vec<ExtEntryOwned>;
 #[cfg(feature = "session-slot")]
 pub type ExtChainOwned = ReceivedExtChain;
 
-/// The header byte of every entry of a chain, in the chain's order: what the admission rule
-/// judges a message's extensions by ([`crate::ext_admit::judge_ext_chain`]).
+/// The header bytes the admission rule judges a message's extensions by
+/// ([`crate::ext_admit::judge_ext_chain`]), in the chain's order: every entry's, where the chain
+/// is kept whole, and the first entry the rule refuses, where it is not. The rule answers with
+/// the first entry it refuses, so both judge alike.
 // Named by `InboundFrame::ext_admission`'s `judge`, which the arms of the messages that carry a
 // chain call: the handshake's four, and the heap profile's three more.
 #[cfg(any(
@@ -212,14 +214,13 @@ const fn reads_received_ext(id: u8) -> bool {
             && id == known::COMPRESSION)
 }
 
-/// The extension chain of a received handshake message on `session-slot`: the header byte of
-/// every entry, for the admission rule, and the entries of the extensions this build reads
-/// ([`reads_received_ext`]), for the readers, which look an extension up by its id.
+/// The extension chain of a received handshake message on `session-slot`: the entries of the
+/// extensions this build reads ([`reads_received_ext`]), for the readers, which look an
+/// extension up by its id, and the header of the first entry the admission rule refuses for the
+/// message, which is all the rule's verdict depends on.
 ///
-/// An array of the decoder's own bound (`MAX_EXT_CHAIN_DEPTH`) entries of 65 bytes was 520 bytes
-/// in the message the decoder is lent, in each of the four messages that carry a chain, under
-/// every call the receive makes; a chain keeps one entry for each extension a build reads (three
-/// in the smallest) and eight bytes of headers.
+/// Its size does not depend on the chain's length, which the protocol does not bound: a chain
+/// keeps one entry for each extension a build reads (three in the smallest) and one header.
 #[cfg(feature = "session-slot")]
 #[derive(Debug, Default)]
 pub struct ReceivedExtChain {
@@ -231,7 +232,7 @@ pub struct ReceivedExtChain {
         feature = "codec-close",
         feature = "codec-keep-alive"
     ))]
-    headers: heapless::Vec<u8, { crate::parse_error::MAX_EXT_CHAIN_DEPTH }>,
+    refused_header: Option<u8>,
 }
 
 #[cfg(feature = "session-slot")]
@@ -246,7 +247,7 @@ impl ReceivedExtChain {
                 feature = "codec-close",
                 feature = "codec-keep-alive"
             ))]
-            headers: heapless::Vec::new(),
+            refused_header: None,
         }
     }
 }
@@ -261,7 +262,7 @@ impl core::ops::Deref for ReceivedExtChain {
 }
 
 // Only a handshake message holds its chain in this form (the heap profile's three keep a `Vec`),
-// so the headers are kept, and read, where a handshake decoder is built.
+// so the refused header is kept, and read, where a handshake decoder is built.
 #[cfg(all(
     feature = "session-slot",
     any(
@@ -273,7 +274,7 @@ impl core::ops::Deref for ReceivedExtChain {
 ))]
 impl ChainHeaders for ReceivedExtChain {
     fn chain_headers(&self) -> impl Iterator<Item = u8> + '_ {
-        self.headers.iter().copied()
+        self.refused_header.into_iter()
     }
 }
 
@@ -281,14 +282,16 @@ impl ChainHeaders for ReceivedExtChain {
 /// (`sources/codecs/transport_{init,open,close,keep_alive}.scxml`), into the form the
 /// message holds it in ([`ExtChainOwned`]), and into a chain the caller already holds (empty,
 /// as [`ExtChainOwned::new`] makes it): the caller builds the message the chain belongs to
-/// first, so that the chain (520 bytes on `session-slot`) is filled where it will stay and is
-/// not a value of its own on the way there. On an error the chain holds the entries taken so
-/// far, which the caller discards with the message.
+/// first, so that the chain is filled where it will stay and is not a value of its own on the
+/// way there. On an error the chain holds the entries taken so far, which the caller discards
+/// with the message.
 ///
-/// `walked` yields the entries of the document's view, in order. The view holds no list and
-/// reads a chain of any length, so the bound a node reads of a transport chain
-/// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)) is kept here: the entry
-/// past it refuses the message as `ExtChainOverflow`.
+/// `walked` yields the entries of the document's view, in order, to the entry whose `Z` flag is
+/// clear, and every one of them is taken: the protocol bounds a chain by nothing, and zenoh
+/// reads a handshake chain to its end (`commons/zenoh-codec/src/transport/init.rs` @
+/// `while has_ext {`). On `session-slot` an entry of an extension the build does not read is
+/// judged by its header for the message `mid` names and not kept, so the chain's storage does
+/// not grow with its length.
 ///
 /// An entry's own body is a separate matter: an owned entry carries its bytes
 /// in the SCE default storage, so an extension whose body is a byte string (the
@@ -302,31 +305,35 @@ impl ChainHeaders for ReceivedExtChain {
     feature = "codec-keep-alive"
 ))]
 pub(crate) fn collect_handshake_ext_chain<'a>(
+    mid: u8,
     walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     entries: &mut ExtChainOwned,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
-
-    for (at, entry) in walked.enumerate() {
-        if at == MAX_EXT_CHAIN_DEPTH {
-            return Err(InboundParseError::ExtChainOverflow);
+    #[cfg(not(feature = "session-slot"))]
+    {
+        // The whole chain is kept, so the rule judges it entry by entry later.
+        let _ = mid;
+        for entry in walked {
+            entries.push(received_entry(&entry)?);
         }
-        #[cfg(not(feature = "session-slot"))]
-        entries.push(received_entry(&entry)?);
-        #[cfg(feature = "session-slot")]
+    }
+    #[cfg(feature = "session-slot")]
+    for entry in walked {
+        if entries.refused_header.is_none()
+            && crate::ext_admit::judge_ext_chain(
+                crate::ext_admit::ExtCarrier::Transport(mid),
+                [entry.header],
+            )
+            .is_refusal()
         {
-            // Cannot overflow: the walk's bound above is the array's.
-            if entries.headers.push(entry.header).is_err() {
-                return Err(InboundParseError::ExtChainOverflow);
-            }
-            // An extension this build does not read is judged by its header and not kept.
-            // One entry for each extension a build reads: a peer that repeats one fills
-            // the chain and is refused, as a chain past the bound is.
-            if reads_received_ext(entry.ext_id())
-                && entries.entries.push(received_entry(&entry)?).is_err()
-            {
-                return Err(InboundParseError::ExtChainOverflow);
-            }
+            entries.refused_header = Some(entry.header);
+        }
+        // One entry for each extension a build reads: a peer that repeats one fills
+        // the chain and is refused.
+        if reads_received_ext(entry.ext_id())
+            && entries.entries.push(received_entry(&entry)?).is_err()
+        {
+            return Err(crate::parse_error::InboundParseError::ExtChainOverflow);
         }
     }
     Ok(())
@@ -334,9 +341,8 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
 
 /// The chain of a received Frame, Fragment, Join, transport OAM, Scout or Hello as its document
 /// read it, owned: the heap profile's form of the chain those messages report. The document's
-/// view reads a chain of any length, so the bound a node reads of a transport chain
-/// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)) is kept here, as
-/// `collect_handshake_ext_chain` keeps it.
+/// view reads a chain to the entry whose `Z` flag is clear, whatever its length, and every entry
+/// is kept, as `collect_handshake_ext_chain` keeps a handshake's.
 ///
 /// Gated on `alloc` alone: the transport OAM is read by every build with an allocator, under no
 /// `codec-*` feature, so every such build has a reader of this.
@@ -344,16 +350,7 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
 pub(crate) fn collect_ext_chain<'a>(
     walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
-    use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
-
-    let mut entries = Vec::new();
-    for (at, entry) in walked.enumerate() {
-        if at == MAX_EXT_CHAIN_DEPTH {
-            return Err(InboundParseError::ExtChainOverflow);
-        }
-        entries.push(received_entry(&entry)?);
-    }
-    Ok(entries)
+    walked.map(|entry| received_entry(&entry)).collect()
 }
 
 /// One entry of a received transport chain, from the view the document read it as to the
@@ -534,9 +531,10 @@ pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
         .sum()
 }
 
-/// Decode the Z-flag-gated ext chain into the lifetime-free owned mirror,
-/// bounded by [`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)
-/// so a malformed peer cannot pin the decoder into an unbounded loop.
+/// Decode the Z-flag-gated ext chain into the lifetime-free owned mirror, to
+/// the entry whose `Z` flag is clear. Each entry consumes at least its header
+/// byte, so a chain that never terminates ends at the cursor's end as a
+/// truncated wire rather than in a loop.
 ///
 /// The chain no message's document holds: the authentication extension's inner
 /// list of method entries, which travels inside a ZBuf body (`auth_dispatch`'s
@@ -546,11 +544,11 @@ pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
-    use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
+    use crate::parse_error::InboundParseError;
     use wz_codecs::lent::ExtEntry;
 
     let mut entries = Vec::new();
-    for _ in 0..MAX_EXT_CHAIN_DEPTH {
+    loop {
         let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
         let z = entry.z();
         // Deep-copy the borrowed decode view into the lifetime-free owned mirror
@@ -564,7 +562,6 @@ pub(crate) fn decode_ext_chain(
             return Ok(entries);
         }
     }
-    Err(InboundParseError::ExtChainOverflow)
 }
 
 // Compiled only under the lend-only profile, whose handshake is the one that

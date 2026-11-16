@@ -84,7 +84,6 @@ use wz_codecs::wire_const;
 use crate::codec_owned::owned_bytes;
 use crate::frame_encode::{build_fragment_wire, build_frame_wire};
 use crate::lease::lease_to_wire;
-use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
 use crate::qos::Priority;
 
 /// Why a message could not be composed.
@@ -112,14 +111,6 @@ pub enum ComposeError {
         index: usize,
         /// The id it was given.
         id: u8,
-    },
-    /// More extensions than the reader's bound
-    /// ([`MAX_EXT_CHAIN_DEPTH`]). The chain is encodable; it is refused
-    /// because a reader that stops at the bound could not read it back, and the
-    /// layout of the bytes is derived by reading them.
-    ExtensionChain {
-        /// How many entries were given.
-        entries: usize,
     },
     /// A lease that does not divide into seconds, asked for in seconds: the
     /// wire value would be a rounded one, and nothing here rounds.
@@ -450,11 +441,6 @@ fn cbyte(whatami: u8, zid_len: usize) -> u8 {
 /// document is handed them: the document sets each entry's continuation bit and
 /// the header's Z flag.
 fn chain_of(extensions: &[ExtSpec<'_>]) -> Result<Vec<ExtEntryOwned>, ComposeError> {
-    if extensions.len() > MAX_EXT_CHAIN_DEPTH {
-        return Err(ComposeError::ExtensionChain {
-            entries: extensions.len(),
-        });
-    }
     let mut entries: Vec<ExtEntryOwned> = Vec::with_capacity(extensions.len());
     for (index, ext) in extensions.iter().enumerate() {
         if ext.id > 0x0F {

@@ -1657,11 +1657,8 @@ pub fn readable_ext_bodies_line(enc: u8) -> String {
 /// # The chain is read as the wire says
 ///
 /// The protocol bounds the chain by nothing, so it is read until an entry's `Z`
-/// flag is clear, as every chain here is ([`walk_ext_chain_z`]). The
-/// participant's `decode_ext_chain` stops at
-/// [`crate::parse_error::MAX_EXT_CHAIN_DEPTH`], which is how many entries it
-/// stores, not a rule of the frame: a handshake past it is one the peer did
-/// send, and the dissector reports it as sent.
+/// flag is clear, as every chain here is ([`walk_ext_chain_z`]), and as the
+/// participant's `decode_ext_chain` reads it.
 ///
 /// # The sub-ext bodies, and the sentence that used to stop here
 ///

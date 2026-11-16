@@ -427,6 +427,40 @@ impl Plan {
         }
     }
 
+    /// The egress interface of a multicast LINK's sending socket: the interface of the address it
+    /// binds, `local` ([`Self::egress_local_addr`]), which is upstream's rule for its `ucast_sock`
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.set_multicast_if_v4(addr)` on the
+    /// local IPv4 address, and @ `match zenoh_util::net::get_index_of_interface(local_addr.ip())`
+    /// for IPv6). So a `#bind=` address chooses the egress as well as the source, and an IPv6 link
+    /// leaves by the interface its address is on rather than by the kernel's choice.
+    ///
+    /// An IPv6 address no interface carries refuses the link, as upstream's `bail!` does. A
+    /// link-local address carries its interface as its scope. Two cases keep the egress
+    /// [`Self::pin_egress`] sets, because there is no address to derive one from: a host whose
+    /// interface table cannot be read, and the IPv6 wildcard a host with no IPv6 address to fill
+    /// it with is left on.
+    ///
+    /// The second is a deliberate divergence. Upstream refuses that link: no interface carries
+    /// `::` (`commons/zenoh-util/src/net/mod.rs` @
+    /// `.ok_or_else(|| zerror!("No interface found with address {addr}").into())`), and its link
+    /// bails on the lookup (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+    /// `Err(e) => bail!("{}: {}", mcast_addr, e),`). wz opens it on the kernel's interface, as it
+    /// does for the IPv4 wildcard: a link upstream cannot open at all is one no upstream peer
+    /// depends on being refused, and `multicast-link-requires-iface` is the policy that refuses an
+    /// unchosen interface where a deployment wants that.
+    fn pin_link_egress(&self, raw: &Socket, local: SocketAddr) -> io::Result<()> {
+        match local {
+            SocketAddr::V4(local) => raw.set_multicast_if_v4(local.ip()),
+            SocketAddr::V6(local) => match link_egress_index_v6(
+                local,
+                crate::link_interfaces::interface_indices_of_address,
+            )? {
+                Some(index) => raw.set_multicast_if_v6(index),
+                None => self.pin_egress(raw),
+            },
+        }
+    }
+
     /// The egress interface, when `#iface=` pinned one.
     fn pin_egress(&self, raw: &Socket) -> io::Result<()> {
         match self {
@@ -523,6 +557,44 @@ impl Plan {
     }
 }
 
+/// The interface index an IPv6 multicast link's sending socket bound to `local` leaves by
+/// (`Plan::pin_link_egress`), with `carriers` answering which interfaces carry an address: the
+/// scope of a link-local address, else the first carrier of the address. `None` where there is no
+/// address to derive one from (the wildcard) or the carriers cannot be named, and the caller keeps
+/// the egress it would otherwise have. Kept apart from the interface table so that each case can
+/// be tested without a host of that shape.
+fn link_egress_index_v6(
+    local: std::net::SocketAddrV6,
+    carriers: impl FnOnce(IpAddr) -> Result<Vec<u32>, crate::link_interfaces::IfaceResolveError>,
+) -> io::Result<Option<u32>> {
+    use crate::link_interfaces::IfaceResolveError;
+
+    if local.scope_id() != 0 {
+        return Ok(Some(local.scope_id()));
+    }
+    if local.ip().is_unspecified() {
+        return Ok(None);
+    }
+    match carriers(IpAddr::V6(*local.ip())) {
+        Ok(found) => match found.first() {
+            Some(index) => Ok(Some(*index)),
+            None => Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!(
+                    "No interface found with address {}: a multicast link sends from an \
+                     address of the interface it leaves by",
+                    local.ip()
+                ),
+            )),
+        },
+        Err(IfaceResolveError::Undetermined) => Ok(None),
+        Err(e) => Err(io::Error::other(format!(
+            "the interface of {} could not be resolved: {e}",
+            local.ip()
+        ))),
+    }
+}
+
 /// A multicast socket built here: bound, non-blocking, with the memberships and options set, and
 /// the group address its datagrams are written to.
 #[derive(Debug)]
@@ -611,10 +683,11 @@ pub fn bind_joined(
 /// applied. No membership: a sender needs no group, so a `#join=` it would never use does not
 /// refuse it either.
 ///
-/// `link` says the socket is the send half of a multicast LINK. R3335 -- only a link pins its
-/// unpinned egress to upstream's chosen interface (the `ucast_sock` of upstream's link calls
-/// `set_multicast_if_v4` on its filled local address); the scouting senders that share this
-/// constructor are not links and keep the kernel's choice.
+/// `link` says the socket is the send half of a multicast LINK. Only a link leaves by the
+/// interface of the address it binds, as the `ucast_sock` of upstream's link does, in both
+/// families and whether that address was filled or named by `#bind=` (`Plan::pin_link_egress`);
+/// the scouting senders that share this constructor are not links and keep `#iface=` or the
+/// kernel's choice.
 ///
 /// `IP_MULTICAST_LOOP` is a property of the SENDING socket, so the policy belongs here as much as
 /// on the joined socket; `OsDefault` sets nothing on either.
@@ -635,14 +708,18 @@ pub fn bind_sender(
     } else {
         plan
     };
-    // Without an iface this is exactly the `bind((UNSPECIFIED, 0))` the senders did before, so the
-    // un-narrowed path is unchanged.
+    // R2791 — `#bind=`. This is the socket upstream binds to it, and the fallback is the wildcard
+    // this line used to pass unconditionally. Resolved before the socket exists, so a bad value
+    // leaves nothing behind.
+    let local = plan.egress_local_addr(cfg.bind, cfg.iface, port)?;
     let raw = Socket::new(plan.domain(), Type::DGRAM, Some(Protocol::UDP))?;
     raw.set_nonblocking(true)?;
-    plan.pin_egress(&raw)?;
-    // R2791 — `#bind=`. This is the socket upstream binds to it, and the fallback is the wildcard
-    // this line used to pass unconditionally.
-    raw.bind(&plan.egress_local_addr(cfg.bind, cfg.iface, port)?.into())?;
+    if link {
+        plan.pin_link_egress(&raw, local)?;
+    } else {
+        plan.pin_egress(&raw)?;
+    }
+    raw.bind(&local.into())?;
     plan.loop_back(&raw, cfg.loopback)?;
     // R311y832 — this is the SEND-only half, so the hop limit belongs here most directly; it is
     // zenoh's `ucast_sock`, the socket `multicast.rs:363` sets the TTL on.

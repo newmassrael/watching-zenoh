@@ -942,21 +942,22 @@ mod tests {
     }
 
     /// Every reader of a received JOIN reads the chain its document reads, so a
-    /// JOIN whose `Z` announces a chain that is not there, or whose chain runs
-    /// past the bound a node holds of one, is no JOIN to any of them, its body
-    /// included; a chain at the bound is read.
+    /// JOIN whose `Z` announces a chain that is not there, or whose last entry
+    /// announces one more, is no JOIN to any of them, its body included; a
+    /// terminated chain is read whatever its length, as upstream reads it to
+    /// its end (`commons/zenoh-codec/src/transport/join.rs` @ `while has_ext {`).
     #[test]
     fn every_reader_refuses_a_join_whose_chain_does_not_read() {
         use crate::ext_header::EXT_FLAG_Z;
         use crate::join_decode::join_message_len;
-        use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
         let silent = join_without_chain(&join0(&protocol_default_params(&[0x01, 0x02])));
-        // The body, then `entries` unit extensions of id 0xf, chained.
-        let with_units = |entries: usize| {
+        // The body, then `entries` unit extensions of id 0xf, chained, the last
+        // one clearing `Z` when `terminated`.
+        let with_units = |entries: usize, terminated: bool| {
             let mut bytes = silent.clone();
             bytes[0] |= wire_const::FLAG_T_Z;
             for i in 0..entries {
-                bytes.push(if i + 1 < entries {
+                bytes.push(if i + 1 < entries || !terminated {
                     0x0f | EXT_FLAG_Z
                 } else {
                     0x0f
@@ -964,12 +965,22 @@ mod tests {
             }
             bytes
         };
-        let at_bound = with_units(MAX_EXT_CHAIN_DEPTH);
-        assert_eq!(join_message_len(&at_bound), Some(at_bound.len()));
-        assert_eq!(decode_join_zid(&at_bound), Some(&[0x01u8, 0x02][..]));
-        let past_bound = with_units(MAX_EXT_CHAIN_DEPTH + 1);
-        let not_there = with_units(0);
-        for (refused, what) in [(&past_bound, "past the bound"), (&not_there, "not there")] {
+        for entries in [1, 8, 9, 40] {
+            let read = with_units(entries, true);
+            assert_eq!(
+                join_message_len(&read),
+                Some(read.len()),
+                "{entries} entries"
+            );
+            assert_eq!(
+                decode_join_zid(&read),
+                Some(&[0x01u8, 0x02][..]),
+                "{entries} entries"
+            );
+        }
+        let unterminated = with_units(9, false);
+        let not_there = with_units(0, true);
+        for (refused, what) in [(&unterminated, "unterminated"), (&not_there, "not there")] {
             assert_eq!(join_message_len(refused), None, "{what}");
             assert!(decode_join(refused).is_none(), "{what}");
             #[cfg(feature = "transport-qos")]

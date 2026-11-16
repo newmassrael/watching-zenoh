@@ -17,9 +17,7 @@
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::ExtEntryOwnedVariant;
 use wz_codecs::wire_const::PROTOCOL_VERSION;
-use wz_runtime_tokio::session_glue::{
-    parse_inbound, InboundFrame, InboundParseError, MAX_EXT_CHAIN_DEPTH,
-};
+use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame, InboundParseError};
 use zenoh_pico_sys::{
     _z_delete_context_t, _z_id_t, _z_init_encode, _z_msg_ext_encode, _z_msg_ext_make_unit,
     _z_msg_ext_make_zbuf, _z_msg_ext_make_zint, _z_slice_t, _z_t_msg_init_t, _z_wbuf_clear,
@@ -198,31 +196,25 @@ fn initack_with_unit_chain(entries: usize, terminated: bool) -> Vec<u8> {
 
 // wz-proves: none -- hand-synthesized wire; no foreign code invoked
 #[test]
-fn ext_chain_overflow_rejects_unbounded_continuation() {
-    // A whole chain one entry past the bound: the wire is read, and the
-    // participant's capacity refuses the entry past it.
-    let past_the_bound = initack_with_unit_chain(MAX_EXT_CHAIN_DEPTH + 1, true);
-    assert_eq!(
-        parse_inbound(&past_the_bound).err(),
-        Some(InboundParseError::ExtChainOverflow),
-        "a chain past the bound must surface ExtChainOverflow"
-    );
-
-    // CONTROL: the same chain at the bound is read whole.
-    let at_the_bound = initack_with_unit_chain(MAX_EXT_CHAIN_DEPTH, true);
-    assert!(
-        matches!(
-            parse_inbound(&at_the_bound),
-            Ok(InboundFrame::Init { has_ext: true, .. })
-        ),
-        "a chain at the bound must be read"
-    );
+fn a_terminated_chain_of_any_length_is_read_and_an_unterminated_one_is_not() {
+    // zenoh and zenoh-pico read a chain until an entry's flag clears, with no
+    // count: a terminated chain of nine or forty entries is read whole.
+    for entries in [8, 9, 40] {
+        let terminated = initack_with_unit_chain(entries, true);
+        assert!(
+            matches!(
+                parse_inbound(&terminated),
+                Ok(InboundFrame::Init { has_ext: true, .. })
+            ),
+            "a terminated chain of {entries} entries must be read"
+        );
+    }
 
     // A chain whose last entry still announces a next, cut by the end of the
     // unit, is a wire that cannot be read, whatever its length: zenoh's
     // reader and zenoh-pico's walk the chain until the flag clears and fail
-    // on the missing header, and the bound judges only a chain that was read.
-    for entries in [MAX_EXT_CHAIN_DEPTH, MAX_EXT_CHAIN_DEPTH + 1] {
+    // on the missing header.
+    for entries in [8, 9, 40] {
         let cut = initack_with_unit_chain(entries, false);
         assert_eq!(
             parse_inbound(&cut).err(),

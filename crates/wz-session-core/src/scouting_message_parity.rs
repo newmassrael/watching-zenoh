@@ -24,7 +24,6 @@ use wz_codecs::scouting_scout::ScoutingScoutView;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
-use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
 use crate::scout_responder::{hello_datagram, ResponderIdentity};
 use crate::scouting_message::{parse_scouting, ScoutingFrame};
 
@@ -224,22 +223,26 @@ fn a_scouting_frame_cut_short_is_refused_by_both_readers() {
     }
 }
 
-/// A chain one entry past what the readers here read is refused by them and
-/// read by the view, which holds no list; at the bound both read it.
+/// A terminated chain is read to its end by the readers here and by the view,
+/// whatever its length, as upstream reads it
+/// (`commons/zenoh-codec/src/scouting/scout.rs` @ `while has_extensions {`); a chain
+/// whose last entry still announces a next is refused by both.
 #[test]
-fn a_scouting_chain_past_the_bound_is_refused_here_and_read_by_the_view() {
+fn a_scouting_chain_of_any_length_is_read_alike_and_an_unterminated_one_is_refused() {
     let scout_with = |entries: usize| {
         let mut wire = vec![wire_const::S_MID_SCOUT | 0x80, 0x09, 0x03];
         wire.resize(3 + entries - 1, 0x8C);
         wire.push(0x0C);
         wire
     };
-    assert_scout_read_alike(&scout_with(MAX_EXT_CHAIN_DEPTH));
-    let past = scout_with(MAX_EXT_CHAIN_DEPTH + 1);
-    let view = read_whole!(ScoutingScoutView::decode, &past);
-    assert_eq!(view_chain_headers!(view).len(), MAX_EXT_CHAIN_DEPTH + 1);
-    assert!(matches!(
-        parse_scouting(&past),
-        Err(InboundParseError::ExtChainOverflow)
-    ));
+    for entries in [1, 8, 9, 40] {
+        let wire = scout_with(entries);
+        assert_scout_read_alike(&wire);
+        let view = read_whole!(ScoutingScoutView::decode, &wire);
+        assert_eq!(view_chain_headers!(view).len(), entries);
+    }
+    let mut unterminated = scout_with(9);
+    *unterminated.last_mut().expect("a chain") = 0x8C;
+    assert!(ScoutingScoutView::decode(&mut SceCursor::new(&unterminated)).is_err());
+    assert!(parse_scouting(&unterminated).is_err());
 }

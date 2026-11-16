@@ -126,15 +126,20 @@ impl FragmentMarkers {
     /// [`crate::unit_ext::chain_has_ext_eid`] does, so a z64-bodied entry that
     /// merely shares the 4-bit id field is not read as the unit marker.
     pub fn from_headers(headers: impl IntoIterator<Item = u8>) -> Self {
-        let first = crate::ext_header::ext_eid(FRAGMENT_FIRST_EXT_ID);
-        let dropped = crate::ext_header::ext_eid(FRAGMENT_DROP_EXT_ID);
         headers
             .into_iter()
-            .map(crate::ext_header::ext_eid)
-            .fold(Self::NONE, |markers, eid| Self {
-                first: markers.first || eid == first,
-                dropped: markers.dropped || eid == dropped,
-            })
+            .fold(Self::NONE, |markers, header| markers.with_header(header))
+    }
+
+    /// These markers and the one the entry whose header is `header` carries:
+    /// one step of [`Self::from_headers`], for a reader that walks a chain once
+    /// and keeps no list of its headers.
+    pub fn with_header(self, header: u8) -> Self {
+        let eid = crate::ext_header::ext_eid(header);
+        Self {
+            first: self.first || eid == crate::ext_header::ext_eid(FRAGMENT_FIRST_EXT_ID),
+            dropped: self.dropped || eid == crate::ext_header::ext_eid(FRAGMENT_DROP_EXT_ID),
+        }
     }
 }
 
