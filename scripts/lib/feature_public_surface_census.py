@@ -417,6 +417,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`tls_coop_roundtrip`)",
         frozenset({"scout", "scout-datagram", "listen", "tls-mbedtls"}),
     ),
+    "wz-tls-mbedtls": (
+        "the secure channel over Mbed TLS that the cooperative engine's `tls/` link runs (its "
+        "consumers are `wz-capi-coop`, whose `tls-mbedtls` turns both features on, and the deploy "
+        "images); it is not a surface the analyzer's diagnostic axis probes. The one public item "
+        "the two gate together is `channel::HOST_KEY_SLOTS`, the number of keys the host build's "
+        "key store holds (`host-lock` selects the host configuration, `vendored` builds it), "
+        "which this crate's own tests hold to the library's store (`tests.rs` and "
+        "`tests/key_store_exhaustion.rs`)",
+        frozenset({"host-lock", "vendored"}),
+    ),
     "wz-capi-port": (
         "the port between a wz C ABI and its engine: a workspace-internal rlib with no path a C "
         "program names. Its four features gate `observation`, the one behaviour of the node's "
@@ -1428,6 +1438,9 @@ FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.to
 #
 # `wz-node-time` too, for the same reason: who consumes the crate (the tokio runtime's re-exports,
 # the cooperative engine) is a claim no predicate above holds a row to.
+#
+# `wz-tls-mbedtls` as well: who consumes the crate (the cooperative engine and the deploy images)
+# is a claim no predicate above holds a row to.
 PROSE_ONLY: frozenset[str] = frozenset(
     {
         "wz-capi-core",
@@ -1436,6 +1449,7 @@ PROSE_ONLY: frozenset[str] = frozenset(
         "wz-host-net",
         "wz-ext-pubsub",
         "wz-node-time",
+        "wz-tls-mbedtls",
     }
 )
 
