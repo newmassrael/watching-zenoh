@@ -7443,8 +7443,11 @@ pub mod common {
     /// before it runs the test. Inside the test a skip would report green over a
     /// witness that never ran.
     pub struct NetnsPair {
+        tag: String,
         ns: String,
         ifname: String,
+        host_cidr: String,
+        peer_cidr: String,
     }
 
     /// Whether this process runs inside the sandbox of `scripts/lib/netns-topology.sh`
@@ -7474,32 +7477,65 @@ pub mod common {
         /// `peer_cidr`. Tear-down runs on drop, and also first, so a previous
         /// run that died mid-test does not leave this one unable to build.
         pub fn up(tag: &str, host_cidr: &str, peer_cidr: &str) -> Self {
-            let script = project_root().join("scripts/lib/netns-topology.sh");
-            let out = Command::new("bash")
-                .arg("-c")
-                .arg(
-                    r#"source "$1" || exit 4
-                       netns_topology_up "$2" "$3" "$4"; rc=$?
-                       printf '%s' "$NETNS_TOPOLOGY_WHY" >&2
-                       [ "$rc" -eq 0 ] && printf '%s' "$(_netns_ifname "$2")"
-                       exit "$rc""#,
-                )
-                .arg("netns-topology")
-                .arg(&script)
-                .args([tag, host_cidr, peer_cidr])
+            let ifname = topology_call("netns_topology_up", tag, host_cidr, peer_cidr);
+            Self {
+                tag: tag.to_owned(),
+                ns: format!("wzns{tag}"),
+                ifname,
+                host_cidr: host_cidr.to_owned(),
+                peer_cidr: peer_cidr.to_owned(),
+            }
+        }
+
+        /// Delete the host end of the pair, as a hot-unplugged or reconfigured interface is
+        /// deleted. The peer end goes with it; the namespace and what runs in it stay.
+        pub fn detach(&self) {
+            let out = netns_privileged("ip")
+                .args(["link", "del", "dev", &self.host_iface()])
                 .output_bounded()
-                .expect("run bash for netns-topology.sh");
-            let why = String::from_utf8_lossy(&out.stderr).into_owned();
-            match out.status.code() {
-                Some(0) => Self {
-                    ns: format!("wzns{tag}"),
-                    ifname: String::from_utf8_lossy(&out.stdout).into_owned(),
-                },
-                Some(2) => panic!(
-                    "netns-topology: this host cannot build a namespace ({why}); the \
-                     lane that runs this test probes for that and decides whether to skip"
-                ),
-                code => panic!("netns-topology: the build FAILED with {code:?}: {why}"),
+                .expect("run ip link del");
+            assert!(
+                out.status.success(),
+                "ip link del {} failed: {}",
+                self.host_iface(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        /// Put the pair back after [`Self::detach`]: the same names and the addresses
+        /// [`Self::up`] gave, on new devices, into the namespace that outlived the old ones.
+        /// Panics as [`Self::up`] does, and also when the link was never detached.
+        pub fn reattach(&self) {
+            let ifname = topology_call(
+                "netns_topology_reattach",
+                &self.tag,
+                &self.host_cidr,
+                &self.peer_cidr,
+            );
+            assert_eq!(
+                ifname, self.ifname,
+                "a re-attached link must carry the names the first one did"
+            );
+        }
+
+        /// Kill every process inside the namespace, by pid and with the namespace's privilege:
+        /// a process spawned through `sudo` is not reachable by killing the sudo child, because
+        /// SIGKILL is not relayed. A caller that holds the `sudo` children then reaps them.
+        pub fn kill_inside(&self) {
+            if let Ok(out) = netns_privileged("ip")
+                .args(["netns", "pids", &self.ns])
+                .output_bounded()
+            {
+                let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                if !pids.is_empty() {
+                    let _ = netns_privileged("kill")
+                        .args(["-KILL"])
+                        .args(&pids)
+                        .status_bounded();
+                }
             }
         }
 
@@ -8157,34 +8193,49 @@ pub mod common {
         devices
     }
 
+    /// Run `function` of `scripts/lib/netns-topology.sh` (`netns_topology_up` or
+    /// `netns_topology_reattach`) on `tag` and the two addresses, and return the pair's
+    /// interface stem. Panics on both of the script's non-zero codes, with its reason; the
+    /// policy is [`NetnsPair`]'s.
+    fn topology_call(function: &str, tag: &str, host_cidr: &str, peer_cidr: &str) -> String {
+        let script = project_root().join("scripts/lib/netns-topology.sh");
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"source "$1" || exit 4
+                   "$2" "$3" "$4" "$5"; rc=$?
+                   printf '%s' "$NETNS_TOPOLOGY_WHY" >&2
+                   [ "$rc" -eq 0 ] && printf '%s' "$(_netns_ifname "$3")"
+                   exit "$rc""#,
+            )
+            .arg("netns-topology")
+            .arg(&script)
+            .args([function, tag, host_cidr, peer_cidr])
+            .output_bounded()
+            .expect("run bash for netns-topology.sh");
+        let why = String::from_utf8_lossy(&out.stderr).into_owned();
+        match out.status.code() {
+            Some(0) => String::from_utf8_lossy(&out.stdout).into_owned(),
+            Some(2) => panic!(
+                "netns-topology: this host cannot build a namespace ({why}); the \
+                 lane that runs this test probes for that and decides whether to skip"
+            ),
+            code => panic!("netns-topology: {function} FAILED with {code:?}: {why}"),
+        }
+    }
+
     impl Drop for NetnsPair {
         fn drop(&mut self) {
-            // A process spawned through `sudo` is not reachable by killing the
-            // sudo child: SIGKILL is not relayed. So every process still in the
-            // namespace is killed by pid here, BEFORE the namespace is deleted —
-            // deleting the name would leave such a process running, unreachable.
-            if let Ok(out) = netns_privileged("ip")
-                .args(["netns", "pids", &self.ns])
-                .output_bounded()
-            {
-                let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect();
-                if !pids.is_empty() {
-                    let _ = netns_privileged("kill")
-                        .args(["-KILL"])
-                        .args(&pids)
-                        .status_bounded();
-                }
-            }
-            let tag = self.ns.trim_start_matches("wzns").to_string();
+            // Every process still in the namespace is killed BEFORE the namespace
+            // is deleted: deleting the name would leave such a process running,
+            // unreachable.
+            self.kill_inside();
             let _ = Command::new("bash")
                 .arg("-c")
                 .arg(r#"source "$1" && netns_topology_down "$2""#)
                 .arg("netns-topology")
                 .arg(project_root().join("scripts/lib/netns-topology.sh"))
-                .arg(tag)
+                .arg(&self.tag)
                 .status_bounded();
         }
     }

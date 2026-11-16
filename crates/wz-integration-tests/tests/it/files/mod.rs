@@ -59,6 +59,7 @@ mod usrpwd_zenohd_interop;
 mod wz_adminspace_query_zenohd_interop;
 mod wz_advanced_pubsub_zenoh_ext_interop;
 mod wz_advertised_locator_zenohd_dial;
+mod wz_ap_demo_group_rejoin_netns;
 mod wz_ap_demo_inert_flags;
 mod wz_ap_demo_query_timeout;
 mod wz_ap_demo_query_timeout_from_a_config_file;

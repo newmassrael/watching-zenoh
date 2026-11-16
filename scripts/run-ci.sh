@@ -21184,6 +21184,19 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     fi
+    # Open-debt item 902 — a group session of a demo PROCESS over a device that is removed and
+    # re-attached: link lost, a re-join refused while the device is absent, rejoined once it is
+    # back, a member admitted over the re-joined link. Needs the demo built above with
+    # `locator-iface` (its `#iface=` tail) and a namespace, behind the probe of the `#join=` leg.
+    # Count-guarded at 1: the leg is `#[ignore]`, so a rename would select zero and pass.
+    if (( netns_rc != 0 )); then
+        echo "Layer M SKIP group session re-joins a re-attached device (no network namespace on this host)"
+    else
+        wz_test_args wz-integration-tests wz_ap_demo_group_rejoin_netns
+        _runci_guarded_test "M group session re-joins a re-attached device" 1 \
+            "${netns_wrap[@]}" cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
+    fi
 
     # R2854 (`adminspace-metrics`, `transport-stats`) — a router PROCESS serves
     # its multicast group on its admin metrics leg: the group face records into
