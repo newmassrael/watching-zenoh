@@ -6862,7 +6862,11 @@ layer_c1bb_cargo_test_qos() {
     # feature set (the six pre-existing cases plus the three), measured with `--list`;
     # the fragmentation-interplay case is NOT among them (it needs
     # transport-fragmentation and is pinned by Layer C1l instead).
-    _runci_guarded_test C1bb 9 cargo test -p wz-runtime-tokio --features transport-qos,transport-batching,codec-push,codec-close,transport-unicast --lib batch_tx_tests:: --quiet \
+    # 9 -> 11, counted from the file and not yet printed: under these features
+    # the module held ten cases before the open frame's per-conduit message
+    # count was added (`a_session_without_batching_sends_each_message_as_a_frame_of_its_own`
+    # came without a guard move), and that witness is the eleventh.
+    _runci_guarded_test C1bb 11 cargo test -p wz-runtime-tokio --features transport-qos,transport-batching,codec-push,codec-close,transport-unicast --lib batch_tx_tests:: --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings) \

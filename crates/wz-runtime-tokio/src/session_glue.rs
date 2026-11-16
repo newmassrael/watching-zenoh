@@ -4579,6 +4579,34 @@ mod batch_tx_tests {
         );
     }
 
+    /// The open frame's message count is readable per conduit: two pushes
+    /// staged on the data conduit read 2 there, and the drain that sends the
+    /// frame brings it back to 0. CONTROL: return a constant from
+    /// `batch_staged_messages` and one of the three readings is wrong.
+    #[test]
+    fn the_open_frames_message_count_is_read_per_conduit() {
+        use wz_session_core::qos::Priority;
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.batch_start().expect("batch_start");
+        assert_eq!(actions.batch_staged_messages(Priority::DEFAULT), 0);
+        actions
+            .send_push_literal("home/batch", b"a", true)
+            .expect("batched push");
+        actions
+            .send_push_literal("home/batch", b"b", true)
+            .expect("batched push");
+        assert_eq!(driver.frame_count(), 0, "both wait in the open frame");
+        assert_eq!(actions.batch_staged_messages(Priority::DEFAULT), 2);
+        actions.batch_stop().expect("batch_stop");
+        assert_eq!(driver.frame_count(), 1);
+        assert_eq!(
+            actions.batch_staged_messages(Priority::DEFAULT),
+            0,
+            "the frame left, so nothing waits in it"
+        );
+    }
+
     /// Express parity (`_z_transport_tx_get_express_status` arm): an
     /// express-flagged publish is absorbed into the open frame and the
     /// whole frame flushes immediately.
