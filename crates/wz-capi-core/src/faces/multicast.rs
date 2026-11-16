@@ -573,11 +573,15 @@ impl SharedSession {
         // session's next entity id, as zenoh-pico asks when it opens its multicast transport
         // (`vendor/zenoh-pico/src/session/interest.c` @
         // `z_result_t _z_interest_pull_resource_from_peers(_z_session_t *zn) {`). Best effort:
-        // a member's own declarations reach the group later all the same.
-        if declarations.declares_keyexprs() {
-            let interest_id = guard.take_entity_id();
+        // a member's own declarations reach the group later all the same, so a session with no
+        // entity id left does not ask.
+        if let Some(interest_id) = declarations
+            .declares_keyexprs()
+            .then(|| guard.take_entity_id())
+            .flatten()
+        {
             let _ = session.ask(
-                interest_id,
+                u64::from(interest_id),
                 InterestKinds::KEYEXPRS,
                 /*current=*/ true,
                 /*future=*/ false,

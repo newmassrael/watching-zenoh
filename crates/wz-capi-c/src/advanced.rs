@@ -87,7 +87,7 @@ use crate::entity::z_entity_global_id_t;
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{z_publisher_options_t, z_publisher_put_options_t};
-use crate::result::{ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
 use crate::session::{not_a_registry, session_handle, SessionHandle};
 use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
@@ -1584,6 +1584,8 @@ unsafe fn declare_subscriber_state(
     .map_err(|refused| match refused {
         // A bound that asks for nothing is the caller's, as upstream's own builder refuses it.
         HostError::HistoryBoundZero { .. } => Z_EINVAL,
+        // The code this ABI gives every declaration whose id space is spent.
+        HostError::IdsExhausted => Z_EUNAVAILABLE,
         _ => Z_EGENERIC,
     })?;
     let mut boxed = Box::new(AdvSubState {
@@ -2034,13 +2036,15 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         let declared = ke.clone();
         let handle = match &state.host {
             AdvSubHost::Registry(shared) => {
-                let id = shared.declare_liveliness_subscriber(ke, opts, {
+                let Some(id) = shared.declare_liveliness_subscriber(ke, opts, {
                     let closure = Arc::new(cclosure);
                     Arc::new(move || {
                         Box::new(crate::liveliness::make_liveliness_callback(closure.clone()))
                             as Box<_>
                     })
-                });
+                }) else {
+                    return Z_EUNAVAILABLE;
+                };
                 subscriber_state_handle(shared, id, declared)
             }
             // A node's own face is told the tokens of the other faces; the subscription is hosted

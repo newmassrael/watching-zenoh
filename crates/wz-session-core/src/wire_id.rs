@@ -56,6 +56,33 @@ pub const fn declared_peer_key(wire: u64) -> u64 {
 /// (`commons/zenoh-protocol/src/network/request.rs` @ `pub type RequestId = u32;`).
 pub type RequestId = u32;
 
+/// The id a session declares an entity under: a subscriber, a queryable, a
+/// token (`commons/zenoh-protocol/src/core/mod.rs` @ `pub type EntityId = u32;`).
+pub type EntityId = u32;
+
+/// The value a `u32` id space's counter moves to when the id it holds, `held`,
+/// is taken, or `None` when `held` is past `u32::MAX` and the space is spent.
+///
+/// The counter is 64 bits wide so that it can stand one past `u32::MAX` and stay
+/// there: a space that wrapped would hand out an id a live declaration may still
+/// hold, where upstream's counter wraps (`zenoh/src/net/runtime/mod.rs` @
+/// `self.next_id.fetch_add(1, Ordering::SeqCst)`). It is a plain step so that a
+/// counter of any atomic type can take it as a `fetch_update`, and a counter
+/// under a lock can apply it directly; [`u32_id_taken`] reads the result.
+pub const fn next_u32_id(held: u64) -> Option<u64> {
+    if held <= u32::MAX as u64 {
+        Some(held + 1)
+    } else {
+        None
+    }
+}
+
+/// The id a `fetch_update` of a `u32` id space's counter by [`next_u32_id`]
+/// took, or `None` when the space was spent and the counter did not move.
+pub fn u32_id_taken(update: Result<u64, u64>) -> Option<u32> {
+    update.ok().and_then(|held| u32::try_from(held).ok())
+}
+
 /// An interest's id (`commons/zenoh-protocol/src/network/interest.rs` @
 /// `pub type InterestId = u32;`), which also correlates a liveliness get's
 /// replies, as a request id correlates a get's.
@@ -88,6 +115,23 @@ mod tests {
         assert_eq!(peer_key(ExprId::MAX), 0xFFFF);
         assert_eq!(declared_peer_key(0x1_0005), 5);
         assert_eq!(declared_peer_key(42), 42);
+    }
+
+    #[test]
+    fn a_u32_id_space_steps_to_one_past_its_last_id_and_no_further() {
+        assert_eq!(next_u32_id(1), Some(2));
+        assert_eq!(
+            next_u32_id(u64::from(u32::MAX)),
+            Some(u64::from(u32::MAX) + 1)
+        );
+        assert_eq!(next_u32_id(u64::from(u32::MAX) + 1), None);
+    }
+
+    #[test]
+    fn a_taken_u32_id_is_the_counter_before_the_step() {
+        assert_eq!(u32_id_taken(Ok(7)), Some(7));
+        assert_eq!(u32_id_taken(Ok(u64::from(u32::MAX))), Some(u32::MAX));
+        assert_eq!(u32_id_taken(Err(u64::from(u32::MAX) + 1)), None);
     }
 
     #[test]

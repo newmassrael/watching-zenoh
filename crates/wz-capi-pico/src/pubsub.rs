@@ -1223,8 +1223,10 @@ impl PlainPublisher {
         // Interest takes the next, whether or not this build reports the id: pico's
         // `_z_declare_publisher` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
         // `publisher->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before `z_declare_publisher`
-        // creates the filter, and a group the Interest goes to reads the id.
-        let eid = session.engine.next_entity_id();
+        // creates the filter, and a group the Interest goes to reads the id. A session that
+        // has handed out every id refuses the publisher with the code a refused declaration
+        // gets here.
+        let eid = u64::from(session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?);
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // R2962 — the filter is created AFTER the key, because its Interest names
@@ -1235,7 +1237,7 @@ impl PlainPublisher {
             FilterPlane::Subscribers,
             &key,
             declared.counts_local(),
-        );
+        )?;
         let plain = declared
             .apply(&put_options())
             .plain_put_params()
@@ -2453,11 +2455,17 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // not the caller's key the announce went out on.
         let retraction = key.retraction_naming(&PicoSession::of(state));
         let released = cclosure.release_latch();
-        let id =
+        // A session that has handed out every declaration id refuses the subscriber with the
+        // code this ABI gives a refused queryable or token declaration; the engine dropped the
+        // sink, so the closure's drop has run.
+        let Some(id) =
             engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-            });
+            })
+        else {
+            return Z_ERR_GENERIC;
+        };
         let mut boxed = Box::new(SubscriberState {
             shared: engine,
             id,
@@ -2540,12 +2548,14 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         drop(key);
         // No handle will undeclare this one, so the session's close waits for it.
         state.keep_background(cclosure.release_latch());
-        let _ =
-            engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
-                let closure = Arc::new(cclosure);
-                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-            });
-        Z_OK
+        match engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
+            let closure = Arc::new(cclosure);
+            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+        }) {
+            Some(_) => Z_OK,
+            // As the owned form above refuses it.
+            None => Z_ERR_GENERIC,
+        }
     })
 }
 

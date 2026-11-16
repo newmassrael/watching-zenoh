@@ -438,13 +438,15 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
         Some(false)
     );
 
-    let subscriber = other.declare_subscriber_on_wire(
-        "wz/port/match/**".to_owned(),
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(|| Box::new(|_| {})),
-    );
+    let subscriber = other
+        .declare_subscriber_on_wire(
+            "wz/port/match/**".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(|| Box::new(|_| {})),
+        )
+        .expect("a node with ids left declares");
     assert!(
         eventually(|| told.lock().unwrap().last() == Some(&true)),
         "the listener was not told a subscriber matched"
@@ -484,13 +486,15 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
     // A listener that is undeclared is told of nothing more.
     engine.undeclare_matching_listener(listener);
     let count = told.lock().unwrap().len();
-    let again = other.declare_subscriber_on_wire(
-        "wz/port/match/**".to_owned(),
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(|| Box::new(|_| {})),
-    );
+    let again = other
+        .declare_subscriber_on_wire(
+            "wz/port/match/**".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(|| Box::new(|_| {})),
+        )
+        .expect("a node with ids left declares");
     assert!(eventually(|| {
         engine.matching_status(
             FilterPlane::Subscribers,
@@ -691,7 +695,7 @@ mod shared_memory {
                 })
             }),
         );
-        (got, id)
+        (got, id.expect("a node with ids left declares"))
     }
 
     /// A chunk published through the port goes to a client that negotiated shared memory as the

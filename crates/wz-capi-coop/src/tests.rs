@@ -624,17 +624,19 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
 fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let filter = engine.declare_write_filter(
-        FilterPlane::Subscribers,
-        "demo/x".to_owned(),
-        &WireKey::literal(),
-        Some(InterestForm {
-            mapping_id: 0,
-            suffix: Some("demo/x".to_owned()),
-            aggregate: false,
-        }),
-        false,
-    );
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/x".to_owned(),
+            &WireKey::literal(),
+            Some(InterestForm {
+                mapping_id: 0,
+                suffix: Some("demo/x".to_owned()),
+                aggregate: false,
+            }),
+            false,
+        )
+        .expect("a session with ids left declares");
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) > 0
     });
@@ -707,20 +709,24 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let any_id = engine.declare_matching_listener(any_plane, "demo/q".to_owned(), sink, false);
     let (sink, complete) = heard();
     engine.declare_matching_listener(complete_plane, "demo/q".to_owned(), sink, false);
-    let complete_filter = engine.declare_write_filter(
-        complete_plane,
-        "demo/q".to_owned(),
-        &WireKey::literal(),
-        ask(),
-        false,
-    );
-    let subscriber_filter = engine.declare_write_filter(
-        FilterPlane::Subscribers,
-        "demo/q".to_owned(),
-        &WireKey::literal(),
-        ask(),
-        false,
-    );
+    let complete_filter = engine
+        .declare_write_filter(
+            complete_plane,
+            "demo/q".to_owned(),
+            &WireKey::literal(),
+            ask(),
+            false,
+        )
+        .expect("a session with ids left declares");
+    let subscriber_filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/q".to_owned(),
+            &WireKey::literal(),
+            ask(),
+            false,
+        )
+        .expect("a session with ids left declares");
     until(&engine, "the router to see the Interests", || {
         router.seen(|s| s.interests) >= 2
     });
@@ -806,17 +812,19 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
             })
         }),
     );
-    let filter = engine.declare_write_filter(
-        FilterPlane::Subscribers,
-        "demo/x".to_owned(),
-        &WireKey::literal(),
-        Some(InterestForm {
-            mapping_id: 0,
-            suffix: Some("demo/x".to_owned()),
-            aggregate: false,
-        }),
-        false,
-    );
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/x".to_owned(),
+            &WireKey::literal(),
+            Some(InterestForm {
+                mapping_id: 0,
+                suffix: Some("demo/x".to_owned()),
+                aggregate: false,
+            }),
+            false,
+        )
+        .expect("a session with ids left declares");
     until(
         &engine,
         "the router to see the subscriber and the Interest",

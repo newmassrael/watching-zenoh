@@ -80,6 +80,9 @@ pub enum HostError {
         /// The id that did not fit.
         id: u64,
     },
+    /// The session has handed out every declaration id it can put on the wire, so the
+    /// subscription was not declared.
+    IdsExhausted,
     /// A history bound was zero, which upstream refuses at construction.
     HistoryBoundZero {
         /// Which knob: `"max_samples"` or `"max_age"`.
@@ -99,6 +102,9 @@ impl std::fmt::Display for HostError {
                     f,
                     "the subscription id {id} does not fit a 32-bit entity id"
                 )
+            }
+            Self::IdsExhausted => {
+                f.write_str("the session has handed out every 32-bit declaration id")
             }
             Self::HistoryBoundZero { knob } => write!(f, "history {knob} must not be zero"),
         }
@@ -367,7 +373,7 @@ impl EngineSubscriber {
             &subscriber_form,
             options.allowed_origin,
             live_sink,
-        );
+        )?;
         let id = identity_of(&zid, subscriber.entity.id, forms.as_ref())?;
 
         // The retention sweep and the periodic re-ask: jobs the engine runs.
@@ -495,7 +501,7 @@ impl EngineSubscriber {
                     &form,
                     options.allowed_origin,
                     sink,
-                ))
+                )?)
             } else {
                 log::warn!(
                     "advanced subscriber on '{base_keyexpr}': heartbeat recovery was REQUESTED \
@@ -628,22 +634,24 @@ fn declare_subscription(
     form: &EntityForm,
     origin: Locality,
     sink: SubscriberSink,
-) -> Held<Subscription> {
-    let id = engine.declare_subscriber_on_wire(
-        keyexpr.to_owned(),
-        wire_of(form),
-        origin,
-        form.retraction().cloned(),
-        sink,
-    );
-    Held {
+) -> Result<Held<Subscription>, HostError> {
+    let id = engine
+        .declare_subscriber_on_wire(
+            keyexpr.to_owned(),
+            wire_of(form),
+            origin,
+            form.retraction().cloned(),
+            sink,
+        )
+        .ok_or(HostError::IdsExhausted)?;
+    Ok(Held {
         entity: Subscription {
             engine: Arc::clone(engine),
             id,
             retract: true,
         },
         keeps: form.kept().cloned(),
-    }
+    })
 }
 
 /// Declare a liveliness subscription on `keyexpr` in `form`.

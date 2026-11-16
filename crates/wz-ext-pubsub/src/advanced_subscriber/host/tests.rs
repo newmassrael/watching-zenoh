@@ -59,6 +59,8 @@ struct Script {
     closed: AtomicBool,
     /// Whether the engine runs periodic jobs.
     no_tickers: AtomicBool,
+    /// Whether the session has handed out every declaration id, so a subscription is refused.
+    ids_spent: AtomicBool,
     /// How many legs a get is issued as.
     legs: Mutex<usize>,
     /// What was declared and retracted, in order.
@@ -75,6 +77,11 @@ impl Script {
         *script.legs.lock().unwrap() = legs;
         script.next.store(100, Ordering::SeqCst);
         Arc::new(script)
+    }
+
+    /// The next id the script hands out, for every kind it records.
+    fn take_id(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::SeqCst)
     }
 
     fn event(&self, what: impl Into<String>) {
@@ -124,8 +131,8 @@ impl SessionEngine for Script {
     fn now_ms(&self) -> u64 {
         self.now.load(Ordering::SeqCst)
     }
-    fn next_entity_id(&self) -> u64 {
-        self.next.fetch_add(1, Ordering::SeqCst)
+    fn next_entity_id(&self) -> Option<u32> {
+        u32::try_from(self.take_id()).ok()
     }
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         Vec::new()
@@ -149,14 +156,17 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
-        let id = self.next_entity_id();
+    ) -> Option<SubId> {
+        if self.ids_spent.load(Ordering::SeqCst) {
+            return None;
+        }
+        let id = self.take_id();
         self.event(format!("declare subscriber {keyexpr}"));
         self.subscriptions
             .lock()
             .unwrap()
             .push((id, keyexpr, wire, sink));
-        id
+        Some(id)
     }
     fn undeclare_subscriber(&self, id: SubId) {
         let known = self
@@ -200,8 +210,8 @@ impl SessionEngine for Script {
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
-    ) -> FilterId {
-        0
+    ) -> Option<FilterId> {
+        Some(0)
     }
     fn write_filter_active(&self, _id: FilterId) -> bool {
         false
@@ -235,7 +245,7 @@ impl SessionEngine for Script {
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
-        let id = self.next_entity_id();
+        let id = self.take_id();
         self.event(format!("declare token {keyexpr}"));
         Some(id)
     }
@@ -249,7 +259,7 @@ impl SessionEngine for Script {
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
-        let id = self.next_entity_id();
+        let id = self.take_id();
         self.event(format!("declare liveliness {keyexpr}"));
         self.liveliness
             .lock()
@@ -293,7 +303,7 @@ impl SessionEngine for Script {
         if self.no_tickers.load(Ordering::SeqCst) {
             return None;
         }
-        let id = self.next_entity_id();
+        let id = self.take_id();
         self.event(format!("start ticker {period_ms}"));
         self.tickers.lock().unwrap().push((id, period_ms, tick));
         Some(id)
@@ -800,4 +810,22 @@ fn what_is_refused_declares_nothing() {
         Err(HostError::Refused(_))
     ));
     assert!(script.events().is_empty());
+}
+
+/// A session with no declaration id left refuses the subscription, and the subscriber is
+/// refused with it rather than left without its live subscription.
+#[test]
+fn a_session_with_no_id_left_refuses_the_subscriber() {
+    let script = Script::new(1);
+    script.ids_spent.store(true, Ordering::SeqCst);
+    let refused = EngineSubscriber::declare(
+        &engine(&script),
+        "demo/data",
+        AdvancedSubscriberOptions::new(),
+        |_| {},
+    )
+    .map(|_| ());
+    assert_eq!(refused, Err(HostError::IdsExhausted));
+    assert!(script.events().is_empty(), "nothing was declared");
+    assert!(script.subscriptions.lock().unwrap().is_empty());
 }

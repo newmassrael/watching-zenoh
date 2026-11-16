@@ -21,18 +21,20 @@ use super::{open, until, CatchAll, Engine, Router};
 fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<AtomicUsize>) {
     let count = Arc::new(AtomicUsize::new(0));
     let into = count.clone();
-    let id = engine.declare_subscriber_on_wire(
-        key.to_owned(),
-        WireKey::literal(),
-        origin,
-        None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |_: &dyn SampleView| {
-                into.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    let id = engine
+        .declare_subscriber_on_wire(
+            key.to_owned(),
+            WireKey::literal(),
+            origin,
+            None,
+            Arc::new(move || {
+                let into = into.clone();
+                Box::new(move |_: &dyn SampleView| {
+                    into.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("a session with ids left declares");
     (id, count)
 }
 
@@ -124,17 +126,19 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     let (_, counting) = listen(true);
     let (_, blind) = listen(false);
     let filter = |count_local: bool| {
-        engine.declare_write_filter(
-            FilterPlane::Subscribers,
-            "demo/l/x".to_owned(),
-            &WireKey::literal(),
-            Some(InterestForm {
-                mapping_id: 0,
-                suffix: Some("demo/l/x".to_owned()),
-                aggregate: false,
-            }),
-            count_local,
-        )
+        engine
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "demo/l/x".to_owned(),
+                &WireKey::literal(),
+                Some(InterestForm {
+                    mapping_id: 0,
+                    suffix: Some("demo/l/x".to_owned()),
+                    aggregate: false,
+                }),
+                count_local,
+            )
+            .expect("a session with ids left declares")
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);

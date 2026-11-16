@@ -185,13 +185,15 @@ impl NodeGroup {
                 }
             })
         });
-        let subscriber = engine.declare_subscriber_on_wire(
-            event_key.clone(),
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            sink,
-        );
+        let subscriber = engine
+            .declare_subscriber_on_wire(
+                event_key.clone(),
+                WireKey::literal(),
+                Locality::Any,
+                None,
+                sink,
+            )
+            .ok_or(NodeGroupError::Refused("the event subscriber was refused"))?;
 
         // The member's own record, served from its own key to whoever asks.
         let record = encode_member(&member);

@@ -493,7 +493,9 @@ pub(crate) unsafe fn declare_subscriber_on(
         let declared = ke.clone();
         // `declare_liveliness_subscriber` is this call with no restriction and the literal wire
         // key, so a subscriber that states no links is declared as it always was.
-        let id: SubId = state.shared.declare_liveliness_subscriber_on_links(
+        // A session that has handed out every entity id refuses the subscriber, as it refuses a
+        // token above.
+        let Some(id): Option<SubId> = state.shared.declare_liveliness_subscriber_on_links(
             ke,
             WireKey::literal(),
             opts,
@@ -502,7 +504,9 @@ pub(crate) unsafe fn declare_subscriber_on(
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_liveliness_callback(closure.clone())) as Box<_>)
             },
-        );
+        ) else {
+            return Z_EUNAVAILABLE;
+        };
         unsafe {
             *subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
                 &state.shared,

@@ -47,12 +47,11 @@ use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 /// been taken. The counter is a `u64` so that it can stand one past `u32::MAX` and stay there:
 /// an id space that wrapped would hand out an id a live declaration may still hold.
 fn take_u32_id(counter: &AtomicU64) -> Option<u32> {
-    counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-            (id <= u64::from(u32::MAX)).then_some(id + 1)
-        })
-        .ok()
-        .and_then(|id| u32::try_from(id).ok())
+    crate::wire_id::u32_id_taken(counter.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        crate::wire_id::next_u32_id,
+    ))
 }
 
 #[cfg(test)]

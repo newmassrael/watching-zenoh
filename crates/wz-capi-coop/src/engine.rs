@@ -84,7 +84,7 @@ use wz_session_core::session_init_params::{
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
-use wz_session_core::wire_id::ExprId;
+use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 #[cfg(feature = "listen")]
 use wz_session_core::zid_hex::same_zid;
@@ -293,7 +293,15 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     live_samples: LivelinessQueue,
     zid: [u8; 16],
     closed: AtomicBool,
+    /// The entity ids the session's declarations and Interests take, from 1: `u32`, upstream's
+    /// `EntityId`, and refused once spent rather than wrapped (`SessionEngine::next_entity_id`).
     next_entity: AtomicU64,
+    /// The ids of what the session holds for the program and never names to a peer: the legs
+    /// of its gets and its periodic jobs. They start past `u32::MAX`, so a leg shares the table
+    /// of callbacks with the subscribers without meeting one's id, and they are not refused when
+    /// the entity ids are spent.
+    #[cfg(any(feature = "query", feature = "ticker"))]
+    next_local: AtomicU64,
     reader: Mutex<Option<ReadTask>>,
     /// The threads handing deliveries out for this engine now ([`Delivering`]): a callback that
     /// steps its session again from one of them queues what it delivers for the outer delivery.
@@ -1540,6 +1548,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             zid,
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
+            #[cfg(any(feature = "query", feature = "ticker"))]
+            next_local: AtomicU64::new(u64::from(u32::MAX) + 1),
             reader: Mutex::new(None),
             delivering: Lock::new(Vec::new()),
             this: this.clone(),
@@ -1993,33 +2003,45 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         true
     }
 
-    /// Hold the Interest for `keyexpr` on `plane`, sending it in `form` for its first holder.
+    /// Hold the Interest for `keyexpr` on `plane`, sending it in `form` for its first holder:
+    /// `false`, with nothing held or sent, when a first holder finds the session with no entity
+    /// id left for it.
     fn acquire_interest(
         &self,
         core: &mut Core<L, C>,
         plane: FilterPlane,
         keyexpr: &str,
         form: &InterestForm,
-    ) {
+    ) -> bool {
         if let Some(hold) = core
             .interests
             .iter_mut()
             .find(|h| h.plane.same_kind(plane) && h.keyexpr == keyexpr)
         {
             hold.holds += 1;
-            return;
+            return true;
         }
         // zenoh-pico's Interest takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/primitives.c` @ `intr._id = _z_get_entity_id(zn);`).
+        let Some(interest_id) = self.next_entity_id() else {
+            return false;
+        };
         let hold = InterestHold {
             plane,
             keyexpr: keyexpr.to_owned(),
-            interest_id: self.next_entity_id(),
+            interest_id: u64::from(interest_id),
             form: form.clone(),
             holds: 1,
         };
         core.announce(Kind::Interest, |actions| hold.send(actions));
         core.interests.push(hold);
+        true
+    }
+
+    /// The id of something the session holds and never names to a peer (`next_local`).
+    #[cfg(any(feature = "query", feature = "ticker"))]
+    fn next_local_id(&self) -> u64 {
+        self.next_local.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Let go of one hold on the Interest for `keyexpr` on `plane`; the last one ends it.
@@ -2186,14 +2208,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         lock(&self.core).0.clock.now_us() / 1000
     }
 
-    fn next_entity_id(&self) -> u64 {
-        self.next_entity.fetch_add(1, Ordering::Relaxed)
+    fn next_entity_id(&self) -> Option<EntityId> {
+        u32_id_taken(self.next_entity.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            next_u32_id,
+        ))
     }
 
     #[cfg(feature = "ticker")]
     fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
         let mut core = self.live()?;
-        let id = self.next_entity_id();
+        let id = self.next_local_id();
         let now_ms = core.0.clock.now_us() / 1000;
         core.0.tickers.start(id, period_ms, tick, now_ms);
         Some(id)
@@ -2268,10 +2294,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId {
-        let id = self.next_entity_id();
+    ) -> Option<SubId> {
+        let id = SubId::from(self.next_entity_id()?);
         let Some(mut guard) = self.live() else {
-            return id;
+            return Some(id);
         };
         let core = &mut guard.0;
         let queue = self.samples.clone();
@@ -2283,7 +2309,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }),
         );
         let Ok(registration) = registration else {
-            return id;
+            return Some(id);
         };
         lock(&self.targets).push((id, Target::Subscriber(Arc::new(Mutex::new(sink())))));
         let entry = SubEntry {
@@ -2303,7 +2329,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             self.deliver();
         }
-        id
+        Some(id)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
@@ -2438,9 +2464,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return 0;
         };
         let core = &mut guard.0;
-        let id = core.next_match;
-        core.next_match += 1;
-        self.acquire_interest(
+        // A listener whose Interest the session has no id left for is not declared, as a closed
+        // session declares none: it would never hear a peer.
+        if !self.acquire_interest(
             core,
             plane,
             &keyexpr,
@@ -2449,7 +2475,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 suffix: Some(keyexpr.clone()),
                 aggregate: false,
             },
-        );
+        ) {
+            return 0;
+        }
+        let id = core.next_match;
+        core.next_match += 1;
         let local = count_local && Self::local_matches(core, plane, &keyexpr);
         let now = Self::peer_matches(core, plane, &keyexpr) || local;
         let queue = self.matching.clone();
@@ -2523,20 +2553,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // See `declare_matching_listener`: the session's own subscribers count with
         // `local-subscriber`.
         count_local: bool,
-    ) -> FilterId {
+    ) -> Option<FilterId> {
         let Some(mut core) = self.live() else {
-            return 0;
+            return Some(0);
         };
         let core = &mut core.0;
-        let id = core.next_filter;
-        core.next_filter += 1;
-        if let Some(form) = &ask {
-            self.acquire_interest(core, plane, &keyexpr, form);
-        } else {
+        let held = match &ask {
+            Some(form) => self.acquire_interest(core, plane, &keyexpr, form),
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
             // `_z_add_interest` takes it before it decides.
-            let _ = self.next_entity_id();
+            None => self.next_entity_id().is_some(),
+        };
+        // A session with no id left refuses the filter, and spends no filter id on it.
+        if !held {
+            return None;
         }
+        let id = core.next_filter;
+        core.next_filter += 1;
         core.filters.push(FilterEntry {
             id,
             plane,
@@ -2544,7 +2577,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             asked: ask.is_some(),
             count_local,
         });
-        id
+        Some(id)
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {
@@ -2682,7 +2715,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> Option<QblId> {
-        let id = self.next_entity_id();
+        let id = QblId::from(self.next_entity_id()?);
         let mut guard = self.live()?;
         let core = &mut guard.0;
         // The registry's queryable only copies a query out and holds its Final; the callback
@@ -2752,7 +2785,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         let mut issued = 0;
         for face in faces {
-            let leg_id = self.next_entity_id();
+            let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
                 return Some(issued);
             };
@@ -2822,7 +2855,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         #[cfg(feature = "local-queryable")]
         if opts.allowed_destination.allows_local() {
-            let leg_id = self.next_entity_id();
+            let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
                 return Some(issued);
             };
@@ -2895,7 +2928,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         let mut issued = 0;
         for face in faces {
-            let leg_id = self.next_entity_id();
+            let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
                 return Some(issued);
             };
@@ -2990,7 +3023,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Option<TokenId> {
         // zenoh-pico's token takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
-        let id = self.next_entity_id();
+        let id = TokenId::from(self.next_entity_id()?);
         let mut core = self.live()?;
         let core = &mut core.0;
         core.registry
@@ -3035,7 +3068,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
-        let id = self.next_entity_id();
+        let id = SubId::from(self.next_entity_id()?);
         let Some(mut guard) = self.live() else {
             return Some(id);
         };

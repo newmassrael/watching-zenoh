@@ -16,13 +16,15 @@ use crate::CoopConfig;
 
 /// Declare a subscriber on `key` that hears nothing, for the declaration it makes.
 fn subscribe(engine: &Engine, key: &str) -> SubId {
-    engine.declare_subscriber_on_wire(
-        key.to_owned(),
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(|| Box::new(|_: &dyn SampleView| {})),
-    )
+    engine
+        .declare_subscriber_on_wire(
+            key.to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+        )
+        .expect("a session with ids left declares")
 }
 
 /// How many declarations the router has been told.

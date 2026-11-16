@@ -185,17 +185,19 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
         Arc::new(move |matching| into.lock().unwrap().push(matching)),
         false,
     );
-    let filter = engine.declare_write_filter(
-        plane,
-        "demo/m/x".to_owned(),
-        &WireKey::literal(),
-        Some(InterestForm {
-            mapping_id: 0,
-            suffix: Some("demo/m/x".to_owned()),
-            aggregate: false,
-        }),
-        false,
-    );
+    let filter = engine
+        .declare_write_filter(
+            plane,
+            "demo/m/x".to_owned(),
+            &WireKey::literal(),
+            Some(InterestForm {
+                mapping_id: 0,
+                suffix: Some("demo/m/x".to_owned()),
+                aggregate: false,
+            }),
+            false,
+        )
+        .expect("a session with ids left declares");
     until(&engine, "both routers to see the Interest", || {
         first.seen(|s| s.interests) >= 1 && second.seen(|s| s.interests) >= 1
     });

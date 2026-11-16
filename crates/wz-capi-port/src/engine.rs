@@ -27,7 +27,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::sample::TimestampHint;
-use wz_session_core::wire_id::ExprId;
+use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::{
@@ -55,8 +55,11 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// here and compares two readings of this one engine, never with another clock.
     fn now_ms(&self) -> u64;
 
-    /// A fresh entity id, for the source info and the global id of what the C program declares.
-    fn next_entity_id(&self) -> u64;
+    /// A fresh entity id, for the source info and the global id of what the C program declares,
+    /// from the one space every declaration of the session is numbered from; `None` once the
+    /// session has handed out every `u32` id, rather than an id a live entity may still hold
+    /// (`wz_session_core::wire_id::next_u32_id`).
+    fn next_entity_id(&self) -> Option<EntityId>;
 
     /// The zid and the announced role of every established peer, the role in its 2-bit wire form
     /// (0 router, 1 peer, 2 client), so the split between zenoh-pico's `z_info_routers_zid` and
@@ -158,6 +161,11 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Declare a subscriber on `keyexpr`, announced as `wire`, receiving what `allowed_origin`
     /// admits through callbacks `sink` mints. `retraction` is the key its undeclaration names
     /// beside its id, when the declaring ABI's reference library names one.
+    ///
+    /// `None` when the session has handed out every declaration id it can put on the wire, as
+    /// [`Self::declare_queryable_on_wire`] and [`Self::declare_liveliness_token_on_wire`] answer:
+    /// nothing is declared and nothing is sent, rather than an id a live declaration may still
+    /// hold being handed out again.
     fn declare_subscriber_on_wire(
         &self,
         keyexpr: String,
@@ -165,7 +173,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> SubId;
+    ) -> Option<SubId>;
 
     /// Retract subscriber `id`. Retracting one already retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
@@ -231,6 +239,11 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Declare a write filter on `keyexpr` (named on the wire as `wire`) that counts the
     /// declarations `plane` names, asking the peers as `ask` says or not at all; with
     /// `count_local`, the session's own entities count too.
+    ///
+    /// The filter's Interest takes the session's next entity id whether it is sent or not, as
+    /// zenoh-pico's does (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `intr._id = _z_get_entity_id(zn);`), so `None` once the session has handed out every id
+    /// ([`Self::next_entity_id`]): a filter that could not ask would hold every write back.
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
@@ -238,7 +251,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
-    ) -> FilterId;
+    ) -> Option<FilterId>;
 
     /// Whether filter `id` says nothing matches, so a write is not sent (zenoh-pico's
     /// `_z_write_filter_active`).
