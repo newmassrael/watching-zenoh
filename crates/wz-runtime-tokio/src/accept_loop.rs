@@ -3111,6 +3111,14 @@ struct FaceDriving<'a> {
 /// Shutdown drops the in-flight open/drive futures: each face's socket closes
 /// and its (detached, `Send`) writer task drains. Per-face graceful Close is a
 /// NON-goal of this atom (see the module doc).
+///
+/// Generic only at this edge. The loop itself is [`face_drive_loop_core`], which takes the
+/// shutdown signal and the event observer as trait objects, so its body is compiled once per
+/// build rather than once per caller's closure pair. The body is the largest function in the
+/// runtime, and each caller's pair used to cost a full copy of it in the C libraries: four
+/// copies of about 25 KB in the pico library and five of about 41 KB in the zenoh-c one,
+/// measured by `nm --size-sort` on the Layer C1cs builds. An event is reported a few times per
+/// face lifetime, so the indirect call is never on a per-message path.
 async fn face_drive_loop<S, F>(
     sources: FaceSources,
     params: SessionInitParams,
@@ -3124,6 +3132,29 @@ where
     S: Future<Output = ()>,
     F: FnMut(&AcceptEvent),
 {
+    let shutdown = std::pin::pin!(shutdown);
+    face_drive_loop_core(
+        sources,
+        params,
+        clock,
+        tick_interval_ms,
+        shutdown,
+        &mut on_event,
+        driving,
+    )
+    .await
+}
+
+/// The body of [`face_drive_loop`], free of its callers' types.
+async fn face_drive_loop_core(
+    sources: FaceSources,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    mut shutdown: Pin<&mut dyn Future<Output = ()>>,
+    on_event: &mut dyn FnMut(&AcceptEvent),
+    driving: FaceDriving<'_>,
+) -> AcceptLoopSummary {
     let FaceDriving { forwarder, spawned } = driving;
     let FaceSources {
         listeners,
@@ -3150,7 +3181,6 @@ where
         feature = "session-close-ingress"
     )))]
     let _ = peer_board;
-    tokio::pin!(shutdown);
     // The loop serves every face of the node; one that stops here stops the node without a line,
     // so it turns a heartbeat that a thread outside this runtime reads ([`crate::liveness`]).
     let heartbeat = crate::liveness::Heartbeat::register(
