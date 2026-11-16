@@ -2232,6 +2232,11 @@ layer_c0_test_discipline() {
     # arm's history; its populations must all be non-zero or it exits 2.
     _runci_leg test_discipline_gate.selftest -- python3 scripts/lib/test_discipline_gate.py --selftest
     _runci_leg test_discipline_gate --after test_discipline_gate.selftest -- python3 scripts/lib/test_discipline_gate.py --check
+    # A multi-process test asserts only on a process it has waited on: one
+    # process's line stopped every process and another's log was graded, which
+    # redded a hosted mesh leg. A text scan of the test corpus, no build.
+    _runci_leg one_sided_wait_lint.selftest -- python3 scripts/lib/one_sided_wait_lint.py --selftest
+    _runci_leg one_sided_wait_lint --after one_sided_wait_lint.selftest -- python3 scripts/lib/one_sided_wait_lint.py --check
     # R2222 (open-debt items 568 + 569) — the MIRROR of the obligation above.
     # That one keeps Layer E from running a fixture another lane owns; this one
     # asks whether ANY lane runs it. Nothing had, four times: R311y528's drop-in

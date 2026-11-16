@@ -1196,6 +1196,10 @@ round_fed_gates=(
     # dbc20e6f redded C0 and Layer E on two untokened legs. 3.51-3.98s over
     # three runs at load 1.2-1.6, which is why it sits among the dearer members.
     "test_discipline_gate.py --check"
+    # A multi-process test asserts only on a process it has waited on. Round-fed
+    # by the test corpus it reads; a text scan, no build.
+    "one_sided_wait_lint.py --selftest"
+    "one_sided_wait_lint.py --check"
     "accessor_reach_census.py"
     "binary_freshness_lint.py"
     "genuine_axis_witness_gate.py --check"
