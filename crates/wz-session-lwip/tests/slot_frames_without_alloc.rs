@@ -204,16 +204,22 @@ fn create(
     (actions, pump_link, sender)
 }
 
-/// A reliable or best-effort Frame at `sn` carrying `payload`: the header, the SN as a
-/// one-byte VLE, the payload.
+/// A reliable or best-effort Frame at `sn` carrying `payload`: the header, the SN as a VLE
+/// (seven bits a byte, low first, the top bit saying another follows), the payload. The
+/// session's initial SN is derived from its zid, so it may take more than one byte.
 fn frame_wire(reliable: bool, sn: u64, payload: &[u8]) -> Vec<u8> {
-    assert!(sn < 0x80, "a one-byte SN");
     let r = if reliable {
         wire_const::FLAG_T_FRAME_R
     } else {
         0
     };
-    let mut wire = vec![wire_const::T_MID_FRAME | r, sn as u8];
+    let mut wire = vec![wire_const::T_MID_FRAME | r];
+    let mut rest = sn;
+    while rest >= 0x80 {
+        wire.push((rest as u8 & 0x7f) | 0x80);
+        rest >>= 7;
+    }
+    wire.push(rest as u8);
     wire.extend_from_slice(payload);
     wire
 }
@@ -321,6 +327,8 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
     let priority = wz_session_core::qos::Priority::DEFAULT;
     let reliable = i_actions.next_outbound_frame_sn(priority, true, mask);
     let best_effort = i_actions.next_outbound_frame_sn(priority, false, mask);
+    // Taken from the session rather than added to: an SN wraps at the negotiated resolution.
+    let best_effort_next = i_actions.next_outbound_frame_sn(priority, false, mask);
     let before = DECLARED.load(Ordering::SeqCst);
     let declared = || {
         (
@@ -363,7 +371,7 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
         let mut wire = frame_wire(true, reliable, &declare_subscriber(63, "two/c"));
         wire.extend_from_slice(&frame_wire(
             false,
-            i_actions.next_outbound_frame_sn(priority, false, mask),
+            best_effort_next,
             &declare_subscriber(64, "two/d"),
         ));
         read("a best-effort Frame behind a refused one", &wire);
@@ -381,7 +389,7 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
         &[
             (true, reliable),
             (false, best_effort),
-            (false, best_effort + 1)
+            (false, best_effort_next)
         ],
         "the records the receive handed over, by Frame, in wire order"
     );

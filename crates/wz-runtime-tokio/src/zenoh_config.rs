@@ -2120,10 +2120,19 @@ impl ZenohNodeConfig {
         );
         // Item 751 — `gateway.south`, in `DEFAULT_CONFIG.json5`'s order (after
         // `timestamping`, before `transport`), so a partition survives a round
-        // trip through this emitter.
-        out.push_str(" },\n  \"gateway\": { \"south\": ");
-        out.push_str(&gateway_south_json(&self.gateway_south));
-        out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
+        // trip through this emitter. A build without the region hats reads the `auto` preset
+        // without naming it, so there the preset is left unstated, as nothing wz emits may be a
+        // key it cannot read back; a partition is written in every build, for that build's
+        // reader to refuse rather than this emitter to drop.
+        out.push_str(" }");
+        if cfg!(feature = "routing-router-hat")
+            || !matches!(self.gateway_south, SouthPartition::Auto)
+        {
+            out.push_str(",\n  \"gateway\": { \"south\": ");
+            out.push_str(&gateway_south_json(&self.gateway_south));
+            out.push_str(" }");
+        }
+        out.push_str(",\n  \"transport\": {\n    \"unicast\": {\n");
         let _ = writeln!(out, "      \"open_timeout\": {},", self.open_timeout_ms);
         let _ = writeln!(out, "      \"accept_timeout\": {},", self.accept_timeout_ms);
         let _ = writeln!(out, "      \"accept_pending\": {},", self.accept_pending);
@@ -4671,6 +4680,23 @@ pub(crate) fn wz_accepts(path: &str) -> bool {
         .any(|known| path == known)
         || HONOURED_SUBTREE_LEAVES.contains(&path)
         || DEEPENABLE_UPSTREAM_KEYS.iter().any(under)
+}
+
+/// Whether the leaf `value` at `path` is an empty object at a section of the keys [`wz_accepts`]
+/// takes, `path` not being such a key itself. Upstream reads every section into a struct whose
+/// fields default, so `transport_optimization: {}` is the section with nothing changed; an empty
+/// object at a path that is no section is a key stock zenoh does not know, and is judged as one.
+fn states_nothing_as_an_empty_section(path: &str, value: &Json5Value) -> bool {
+    if !matches!(value, Json5Value::Object(members) if members.is_empty()) || wz_accepts(path) {
+        return false;
+    }
+    let prefix = format!("{path}/");
+    upstream_surface()
+        .chain(WZ_EXTENSION_CONFIG_KEYS.iter().copied())
+        .chain(UPSTREAM_INERT_CONFIG_KEYS.iter().copied())
+        .chain(HONOURED_SUBTREE_LEAVES.iter().copied())
+        .chain(DEEPENABLE_UPSTREAM_KEYS.iter().copied())
+        .any(|known| known.starts_with(&prefix))
 }
 
 /// The result of reading a stock zenoh config: what wz took from it, and —
@@ -7703,8 +7729,15 @@ impl ZenohNodeConfig {
 
         // The ACCEPTANCE BOUNDARY, matched to zenoh's before anything is read.
         // Checked first so a typo is reported as a typo rather than as a
-        // missing value somewhere downstream.
-        let leaves = doc.leaf_paths();
+        // missing value somewhere downstream. An empty section states nothing and is not a key
+        // (`states_nothing_as_an_empty_section`), so it is neither judged nor reported ignored.
+        let mut leaves: Vec<String> = doc
+            .leaf_entries()
+            .into_iter()
+            .filter(|(path, value)| !states_nothing_as_an_empty_section(path, value))
+            .map(|(path, _)| path)
+            .collect();
+        leaves.sort();
         if let Some(unknown) = leaves.iter().find(|p| !wz_accepts(p)) {
             return Err(ConfigIngestError::UnknownKey {
                 path: unknown.clone(),
@@ -8811,6 +8844,49 @@ mod tests {
         assert_eq!(again.config.gateway_south, read.config.gateway_south);
         // A document the reader refuses is refused whole, not read as the preset.
         assert!(ZenohNodeConfig::from_json5(r#"{ gateway: { south: 7 } }"#).is_err());
+    }
+
+    /// The emitter states `gateway/south` where the build reads it back: the preset only under
+    /// the region hats, and a partition in every build, which a build without them refuses by
+    /// the key's name rather than reading it as the preset.
+    #[test]
+    fn the_south_partition_is_emitted_where_the_build_reads_it() {
+        let preset = ZenohNodeConfig::default().to_json5();
+        let document = wz_session_core::json5::parse(&preset).expect("the emitter writes JSON5");
+        assert_eq!(
+            document.get("gateway").is_some(),
+            cfg!(feature = "routing-router-hat"),
+            "{preset}"
+        );
+        let read = ZenohNodeConfig::from_json5(&preset).expect("the preset reads back");
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+
+        let partitioned = ZenohNodeConfig {
+            gateway_south: south(r#"[{ filters: [{ modes: ["peer"] }] }]"#).expect("a partition"),
+            ..ZenohNodeConfig::default()
+        };
+        let written = partitioned.to_json5();
+        assert!(written.contains("\"gateway\""), "{written}");
+        let again = ZenohNodeConfig::from_json5(&written);
+        #[cfg(feature = "routing-router-hat")]
+        assert_eq!(
+            again
+                .expect("the partition reads back")
+                .config
+                .gateway_south,
+            partitioned.gateway_south
+        );
+        #[cfg(not(feature = "routing-router-hat"))]
+        assert!(
+            matches!(
+                again,
+                Err(ConfigIngestError::NotInBuild {
+                    path: "gateway/south",
+                    ..
+                })
+            ),
+            "{again:?}"
+        );
     }
 
     /// `transport/multicast/compression/enabled` reaches the config's field, is named and not
@@ -10991,6 +11067,31 @@ mod tests {
             0.5,
             "the refusal belongs to the flag parser, which every route goes \
              through -- deciding it twice is how the two answers drift"
+        );
+    }
+
+    /// An empty section states nothing: upstream reads `transport_optimization: {}` into the
+    /// section's defaults, so the document reads as a silent one, with nothing named or ignored.
+    /// An empty object at a path that is no section is a key stock zenoh does not know, and is
+    /// refused as one.
+    #[test]
+    fn an_empty_section_states_nothing_and_an_empty_unknown_key_is_refused() {
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        for doc in [
+            r#"{ transport: { shared_memory: { transport_optimization: {} } } }"#,
+            r#"{ transport: {} }"#,
+            r#"{ scouting: { multicast: {} } }"#,
+        ] {
+            let read = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{doc}: {e}"));
+            assert_eq!(read.config, silent.config, "{doc}");
+            assert_eq!(read.named, silent.named, "{doc}");
+            assert_eq!(read.ignored, silent.ignored, "{doc}");
+        }
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ transport: { not_a_section: {} } }"#).unwrap_err(),
+            ConfigIngestError::UnknownKey {
+                path: String::from("transport/not_a_section")
+            }
         );
     }
 

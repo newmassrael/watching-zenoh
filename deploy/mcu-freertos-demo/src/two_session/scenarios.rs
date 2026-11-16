@@ -48,7 +48,7 @@ use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverLoopOutcome, DriverOutcome, IterationEvent};
 use wz_session_core::multicast_dispatch::MulticastConfig;
 use wz_session_core::multicast_join::encode_join;
-use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
+use wz_session_core::multicast_params::{GroupJoinRule, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::session_actions::SessionLinkActions;
@@ -112,6 +112,10 @@ fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
         compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        // An MCU session judges a Join by zenoh-pico's rule, and its table's rows bound its
+        // members.
+        join_rule: GroupJoinRule::Pico,
+        max_sessions: None,
     }
 }
 

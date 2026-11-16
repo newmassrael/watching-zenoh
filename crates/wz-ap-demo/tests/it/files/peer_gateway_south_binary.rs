@@ -33,8 +33,10 @@ fn run(args: &[&str]) -> Output {
     cmd.output().expect("the demo binary runs")
 }
 
-/// The mode rule's diagnostic: the flag is held by the router hat, the peer and the client node.
-const MODE_REFUSED: &str = "--gateway-south requires --router-hat, --peer or --client-node";
+/// The mode rule's diagnostic: the flag is held by the router hat, the peer, the client node and
+/// a one-shot client's session.
+const MODE_REFUSED: &str =
+    "--gateway-south requires --router-hat, --peer, --client-node or --connect";
 
 /// A run mode that holds no partition refuses the flag, and says why.
 #[test]

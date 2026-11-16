@@ -160,21 +160,66 @@ fn blocks_entered(entered_recursive: bool, left: Held) -> bool {
 
 /// The orders of the process and the pairs of one class's instances seen nested, under one lock
 /// that is not itself checked.
+#[derive(Default)]
 struct Process {
     graph: Graph,
     /// `(class, outer instance, inner instance)` for every nesting of two locks of one class.
     nested: HashMap<(Class, u64, u64), Witness>,
 }
 
+static PROCESS: OnceLock<parking_lot::Mutex<Process>> = OnceLock::new();
+
 fn process() -> &'static parking_lot::Mutex<Process> {
-    static PROCESS: OnceLock<parking_lot::Mutex<Process>> = OnceLock::new();
     PROCESS.get_or_init(|| {
-        parking_lot::Mutex::new(Process {
-            graph: Graph::default(),
-            nested: HashMap::new(),
-        })
+        arm_release_at_exit();
+        parking_lot::Mutex::new(Process::default())
     })
 }
+
+/// Free what `process` holds, the orders and the stack captured for each, unless a thread holds
+/// it now. Returns whether it was freed.
+///
+/// The orders are kept for the life of the process, which is what lets a cycle be found between
+/// two orders taken far apart. A static is never dropped, and a leak checker run over a program
+/// linking a debug build would count each stack as lost; freed at exit, they are what the
+/// process returned.
+#[cfg(any(unix, test))]
+fn release(process: &parking_lot::Mutex<Process>) -> bool {
+    match process.try_lock() {
+        Some(mut held) => {
+            *held = Process::default();
+            true
+        }
+        // A thread that is still taking locks while the process exits holds it: what it is
+        // recording is left in place rather than the exit waiting for that thread.
+        None => false,
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn release_at_exit() {
+    if let Some(process) = PROCESS.get() {
+        release(process);
+    }
+}
+
+/// Ask the C library to run `release_at_exit` when the process exits, which runs before a leak
+/// checker reads what is left.
+#[cfg(unix)]
+fn arm_release_at_exit() {
+    extern "C" {
+        fn atexit(callback: extern "C" fn()) -> core::ffi::c_int;
+    }
+    // SAFETY: `atexit` is the C library's, with this signature on every unix; `release_at_exit`
+    // takes nothing, returns nothing and does not unwind. A refusal (the table of exit handlers
+    // is full) leaves the orders allocated until the process is gone, as before.
+    let _ = unsafe { atexit(release_at_exit) };
+}
+
+/// Off unix the orders stay until the process is gone: the leak programs that read them at exit
+/// run under valgrind, on unix.
+#[cfg(not(unix))]
+fn arm_release_at_exit() {}
 
 /// What the checker does with a cycle.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -780,5 +825,42 @@ mod tests {
         assert_ne!(Class::of(one), Class::of(other));
         let twice: Vec<_> = (0..2).map(|_| Class::of(made())).collect();
         assert_eq!(twice[0], twice[1]);
+    }
+
+    /// The release at exit frees every order, nesting and stack the process holds, and leaves
+    /// them to a thread that holds the process's lock. A process of its own: the one the
+    /// other tests record into is not emptied under them.
+    #[test]
+    fn the_release_at_exit_frees_what_the_process_holds_unless_a_thread_holds_it() {
+        let stack = std::sync::Arc::new(std::backtrace::Backtrace::disabled());
+        let kept = std::sync::Arc::downgrade(&stack);
+        let held = || Witness {
+            stack: Some(stack.clone()),
+            ..witness()
+        };
+        let process = parking_lot::Mutex::new(Process::default());
+        {
+            let mut filling = process.lock();
+            filling
+                .graph
+                .record(order(1, Held::Exclusive, 2, Wait::Exclusive), held());
+            filling.nested.insert((class(3), 1, 2), held());
+        }
+        drop(stack);
+
+        let holder = process.lock();
+        assert!(!release(&process), "a held process is left to its holder");
+        assert!(kept.upgrade().is_some());
+        drop(holder);
+
+        assert!(release(&process));
+        let left = process.lock();
+        assert!(left.graph.known.is_empty());
+        assert!(left.graph.from.is_empty());
+        assert!(left.nested.is_empty());
+        assert!(
+            kept.upgrade().is_none(),
+            "the stack is freed with its orders"
+        );
     }
 }

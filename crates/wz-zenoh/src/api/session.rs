@@ -2085,6 +2085,10 @@ mod tokio_engine {
 
     /// The document the plan reads: the whole configuration as JSON, with the mode and the id the
     /// session stands on stated, so that what the engine reads is what the session reports.
+    ///
+    /// The sections `INERT_SECTIONS` names are left out: upstream built so never reads them, and
+    /// the engine's reader, which refuses an instruction to a part it was built without, would
+    /// refuse an open upstream's would make.
     pub(super) fn document_of(
         config: &ExpandedConfig,
         role: EngineWhatAmI,
@@ -2094,6 +2098,7 @@ mod tokio_engine {
         let object = document
             .as_object_mut()
             .ok_or_else(|| zerror!("the configuration is not an object"))?;
+        object.retain(|section, _| !INERT_SECTIONS.contains(&section.as_str()));
         object.insert("mode".to_owned(), role.to_str().into());
         object.insert("id".to_owned(), zid.to_string().into());
         Ok(document)
@@ -2336,9 +2341,16 @@ mod tokio_engine {
     /// are read into the configuration and no plugin is loaded or configured. A build with the
     /// feature is another matter, and a plugin it was asked for is not silently left unloaded.
     fn inert_in_this_build(key: &str) -> bool {
-        !cfg!(feature = "plugins")
-            && (key.starts_with("plugins/") || key.starts_with("plugins_loading/"))
+        key.split('/')
+            .next()
+            .is_some_and(|section| INERT_SECTIONS.contains(&section))
     }
+
+    /// The top-level sections that do nothing in this build, as `inert_in_this_build` says.
+    #[cfg(not(feature = "plugins"))]
+    const INERT_SECTIONS: &[&str] = &["plugins", "plugins_loading"];
+    #[cfg(feature = "plugins")]
+    const INERT_SECTIONS: &[&str] = &[];
 
     /// An open the plan refuses, in the words upstream refuses it in where it does, and by the key
     /// the refusal is about where it does not.
@@ -7008,6 +7020,57 @@ mod tests {
         let session = open(peer("a1b2c3")).wait().expect("a peer opens alone");
         assert_eq!(session.zid(), ZenohId::from_str("a1b2c3").expect("an id"));
         assert!(!session.is_closed());
+    }
+
+    /// Upstream built without `plugins` never reads `plugins_loading` or `plugins`
+    /// (`zenoh/src/net/runtime/mod.rs` @ `.unwrap_or_else(|| load_plugins(&config));`, under
+    /// `#[cfg(feature = "plugins")]`), so its adminspace test opens a configuration that turns
+    /// the lookup on and names a required plugin. This build opens the same configuration.
+    #[cfg(not(feature = "plugins"))]
+    #[test]
+    fn a_build_without_plugins_opens_a_configuration_that_asks_for_them() {
+        let mut config = peer("a1b2d7");
+        config
+            .insert_json5("plugins_loading/enabled", "true")
+            .expect("a key");
+        config
+            .insert_json5("plugins/rest/__required__", "true")
+            .expect("a key");
+        let session = open(config)
+            .wait()
+            .expect("the plugin sections do nothing in this build");
+        assert!(!session.is_closed());
+    }
+
+    /// The document the engine reads carries the plugin sections exactly where the build loads
+    /// plugins, and every other section whatever the build.
+    #[test]
+    fn the_document_carries_the_plugin_sections_only_where_plugins_are_built() {
+        let mut config = Config::default();
+        config
+            .insert_json5("plugins_loading/enabled", "true")
+            .expect("a key");
+        config
+            .insert_json5("plugins/rest/http_port", "\"8080\"")
+            .expect("a key");
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .expect("a key");
+        let expanded = config.0.clone().expanded();
+        let zid = expanded.id();
+        let role = tokio_engine::role_of(expanded.mode());
+        let document = tokio_engine::document_of(&expanded, role, &zid).expect("a document");
+        let built = cfg!(feature = "plugins");
+        assert_eq!(
+            document.pointer("/plugins_loading/enabled").is_some(),
+            built
+        );
+        assert_eq!(document.pointer("/plugins/rest/http_port").is_some(), built);
+        // CONTROL: a section every build reads is carried.
+        assert_eq!(
+            document.pointer("/scouting/multicast/enabled"),
+            Some(&serde_json::Value::Bool(false))
+        );
     }
 
     #[test]
