@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y736 (N28) — READ THE ARTEFACT PATHS CARGO ITSELF DECLARES.
+"""R311y736 (N28, N31) — READ THE ARTEFACT PATHS CARGO ITSELF DECLARES.
 
 Reads `cargo --message-format=json` on stdin and writes one absolute artefact
 path per line. That is the whole job: cargo names every file it considers an
@@ -20,18 +20,27 @@ IT REFUSES AN EMPTY READ. A run that produced no artefact message means the
 command did not build anything this tool understands, and a collector that
 silently contributes nothing to the keep-set is how a reaper deletes a live
 lane's output.
+
+A BUILD SCRIPT'S RUN IS A UNIT TOO. Its output directory
+(`<profile>/build/<pkg>-<hash>/out`) is named by no `compiler-artifact`
+message, only by the `build-script-executed` one, and without it the reaper
+(`artifact_reap.py`) would condemn every build script's output and the
+fingerprint that says it is current. So that directory is declared as well.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Iterable
 
 
-def main() -> int:
+def collect(lines: Iterable[str]) -> tuple[set[str], int]:
+    """The paths the messages declare, and how many `compiler-artifact`
+    messages were read."""
     seen: set[str] = set()
     messages = 0
-    for line in sys.stdin:
+    for line in lines:
         line = line.strip()
         if not line or not line.startswith("{"):
             continue
@@ -39,7 +48,13 @@ def main() -> int:
             msg = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if msg.get("reason") != "compiler-artifact":
+        reason = msg.get("reason")
+        if reason == "build-script-executed":
+            out_dir = msg.get("out_dir")
+            if out_dir:
+                seen.add(out_dir)
+            continue
+        if reason != "compiler-artifact":
             continue
         messages += 1
         for path in msg.get("filenames") or []:
@@ -50,7 +65,67 @@ def main() -> int:
         binary = msg.get("executable")
         if binary:
             seen.add(binary)
+    return seen, messages
 
+
+def selftest() -> int:
+    stream = [
+        "   Compiling foo v0.1.0",
+        json.dumps(
+            {
+                "reason": "compiler-artifact",
+                "filenames": ["/t/debug/deps/libfoo-0123456789abcdef.rlib"],
+                "executable": None,
+                "fresh": True,
+            }
+        ),
+        json.dumps(
+            {
+                "reason": "compiler-artifact",
+                "filenames": [],
+                "executable": "/t/debug/deps/it-fedcba9876543210",
+                "fresh": False,
+            }
+        ),
+        json.dumps(
+            {
+                "reason": "build-script-executed",
+                "out_dir": "/t/debug/build/foo-1111111111111111/out",
+            }
+        ),
+        json.dumps({"reason": "compiler-message", "message": {}}),
+        "{not json",
+    ]
+    failures = 0
+    seen, messages = collect(stream)
+    want = {
+        "/t/debug/deps/libfoo-0123456789abcdef.rlib",
+        "/t/debug/deps/it-fedcba9876543210",
+        "/t/debug/build/foo-1111111111111111/out",
+    }
+    if seen != want:
+        failures += 1
+        print(f"artifact-filenames selftest FAIL: declared {sorted(seen)}, want {sorted(want)}")
+    if messages != 2:
+        failures += 1
+        print(f"artifact-filenames selftest FAIL: {messages} artifact message(s), want 2")
+    _, none = collect(stream[3:])
+    if none != 0:
+        failures += 1
+        print("artifact-filenames selftest FAIL: a stream without an artifact message counted one")
+    if failures:
+        return 1
+    print("artifact-filenames selftest: ok")
+    return 0
+
+
+def main() -> int:
+    if sys.argv[1:] == ["--selftest"]:
+        return selftest()
+    if sys.argv[1:]:
+        print("usage: artifact_filenames.py [--selftest] < cargo-json", file=sys.stderr)
+        return 2
+    seen, messages = collect(sys.stdin)
     if not messages:
         print(
             "artifact-filenames: no compiler-artifact message on stdin",
