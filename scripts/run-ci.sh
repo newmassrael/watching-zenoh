@@ -10479,12 +10479,17 @@ layer_c1bm_cargo_test_pico_failfast() {
 # changed-inputs witness). PRINTED by each command on pc2.
 layer_c1x_cargo_test_routing_routes() {
     # The c2 integration (route memo index): 12 -> 18. MEASURED on pc2.
-    _runci_guarded_test "C1X route cache peer 18" 18 \
+    # 18 -> 20: the two retirement tests (the reach is asked with the kept keyexpr's chunks, a move
+    # of no key keeps every route) arrived on a branch the 18 was not measured on; `route_cache.rs`
+    # holds 20 ungated tests, and the hosted run of 3148fdfc84 printed 20.
+    _runci_guarded_test "C1X route cache peer 20" 20 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
     # The c2 integration (route memo index): 16 -> 22. MEASURED on pc2.
-    _runci_guarded_test "C1X route cache router 22" 22 \
+    # 22 -> 24, counted from the source: the same two, beside the four `router_forward` tests the
+    # name filters select under `routing-router-hat` (20 + 4).
+    _runci_guarded_test "C1X route cache router 24" 24 \
         cargo test -p wz-runtime-tokio --features routing-routes,routing-router-hat --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
