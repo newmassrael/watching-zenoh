@@ -39,6 +39,26 @@ moved. That deliberately includes a symbol REMOVAL and a version change with no
 symbol change: the second is legitimate (the memory rule may change on its own)
 and must still be a deliberate edit here, because a revision that moves for
 reasons nobody wrote down is a revision nobody can reason about.
+
+## Each symbol carries the revision that brought it
+
+`EXPECTED_SYMBOLS` maps a symbol to the revision that first exported it. A
+consumer reading this file to learn what its pinned revision can call answers
+it here (`--history` prints the table by revision), and a finding names the
+revision of the symbol it is about: a pinned symbol the build lost says which
+revision promised it, and an exported symbol nobody pinned says which revision
+it has to be pinned at.
+
+The numbers were DERIVED, not remembered. For each symbol: the commit that
+first wrote it into this file (`git log --reverse -S'"<symbol>"' --
+scripts/lib/capi_abi_pin.py`), and `EXPECTED_VERSION` in this file as that
+commit left it (`git show <commit>:scripts/lib/capi_abi_pin.py`). This gate made
+the two move in one commit from its first day, so that pair is the revision. The
+file's first commit pinned five symbols at revision 2; the crate's
+`wz_dissect_abi_version` at that commit's parent returns 1 and already exports
+four of them, so those four are 1 and `wz_dissect_pcap_summary_bounded`, the
+symbol that commit added, is 2. A new symbol is pinned at the revision its own
+commit moves `EXPECTED_VERSION` to, which `pin_findings` holds.
 """
 
 from __future__ import annotations
@@ -77,8 +97,8 @@ EXPECTED_VERSION = 58
 # only way that matters -- it sits three lines from EXPECTED_VERSION, so the
 # layout and the revision are edited in one place or the gate reds.
 EXPECTED_LAYOUT = (56, 8, 0, 8, 16, 24, 32, 40, 44, 48, 49, 50, 51, 52)
-EXPECTED_SYMBOLS = {
-    "wz_dissect_abi_version",
+EXPECTED_SYMBOLS: dict[str, int] = {
+    "wz_dissect_abi_version": 1,
     # R2102 (open-debt item 524) — THE LIVE DOOR. Five symbols, and the first
     # entry here whose revision bump is not only about symbols: the memory rule
     # itself moved, because a live tap is a dissection kept alive between
@@ -91,11 +111,11 @@ EXPECTED_SYMBOLS = {
     # previous one has been. The callback half of the rule did NOT move: the
     # drain writes into a buffer the caller owns, which is what let this be a
     # widening rather than the callback registration that was refused before.
-    "wz_dissect_live_open",
-    "wz_dissect_live_push",
-    "wz_dissect_live_drain",
-    "wz_dissect_live_lost",
-    "wz_dissect_live_close",
+    "wz_dissect_live_open": 11,
+    "wz_dissect_live_push": 11,
+    "wz_dissect_live_drain": 11,
+    "wz_dissect_live_lost": 11,
+    "wz_dissect_live_close": 11,
     # R2373 (open-debt item 661) — a GROWING capture container fed into a handle
     # that already exists. The memory rule does not move with it: the handle is
     # the one `wz_dissect_live_open` made and `wz_dissect_live_close` releases,
@@ -108,7 +128,7 @@ EXPECTED_SYMBOLS = {
     # appends. A caller polling a growing container through the replay door gets
     # a fresh handle each window, which restarts the packet coordinate and the
     # discard count — a floor reported as a total, permanently.
-    "wz_dissect_live_follow",
+    "wz_dissect_live_follow": 15,
     # R2205 (open-debt item 560) — the BYTES a drained record was decoded from.
     # The memory rule did NOT move with it, and that is the fact worth pinning
     # here rather than assuming: this is the first door handing back something
@@ -116,13 +136,13 @@ EXPECTED_SYMBOLS = {
     # reader of this file would expect to have moved it. Bytes into a buffer the
     # CALLER sized add nothing to release and run no callback, so the revision
     # moves for the symbol alone.
-    "wz_dissect_live_message_bytes",
+    "wz_dissect_live_message_bytes": 14,
     # (ABI 19) — the JOINED buffer of a record that completed a fragment
     # chain, the bytes `above_transport.fields` indexes. Copied into a buffer
     # the CALLER sized, exactly like the door above, so the memory rule does not
     # move; it is its own symbol because it answers a different buffer of the
     # same message, and folding the two would make one record mean two ranges.
-    "wz_dissect_live_reassembled_bytes",
+    "wz_dissect_live_reassembled_bytes": 19,
     # (ABI 21) — the CAPTURED FRAME of a packet, by the number a field
     # row's `first_byte.packet` names. Copied into a buffer the CALLER sized,
     # exactly like the two doors above, so the memory rule does not move. It
@@ -131,7 +151,7 @@ EXPECTED_SYMBOLS = {
     # meant a retention policy for every packet or a `RETIRED` answer for most
     # of them. It runs the walk `wz_dissect_live_follow` runs, so the number is
     # the same number by construction.
-    "wz_dissect_pcap_frame_bytes",
+    "wz_dissect_pcap_frame_bytes": 21,
     # R2453 (open-debt item 700) — the ANALYSIS PLANES over a live handle, and
     # the call that declares its feed over. Two symbols and ONE revision,
     # because they are one capability: measured, the census of a capture that
@@ -152,14 +172,14 @@ EXPECTED_SYMBOLS = {
     # at `wz_dissect_live_open` and taking it again here would be the same fact
     # in two places -- which is why one live symbol reaches all four
     # combinations the container family needs four names for.
-    "wz_dissect_live_census",
-    "wz_dissect_live_end",
+    "wz_dissect_live_census": 16,
+    "wz_dissect_live_end": 16,
     # (ABI 18) — the FIELD DOCUMENT over a live handle, each row
     # carrying the handle's record coordinates, so rows and drained records
     # describe one dissection. The memory rule does not move: the document is
     # a `char*` released by `wz_dissect_string_free`, and the container bytes
     # are read from a buffer the CALLER holds.
-    "wz_dissect_live_fields_where",
+    "wz_dissect_live_fields_where": 18,
     # (ABI 22) — the same document's rows AFTER A CURSOR: the rows whose `seq`
     # is above the number the caller passes, so a list that refreshes once per
     # feed step is handed what is new and not every row again. The memory rule
@@ -167,7 +187,7 @@ EXPECTED_SYMBOLS = {
     # handle `wz_dissect_live_open` made, over a container the CALLER holds. It
     # is its own symbol and not an argument of the one above, which would have
     # given one name two shapes and one of them a document with a `window`.
-    "wz_dissect_live_fields_since",
+    "wz_dissect_live_fields_since": 22,
     # (ABI 20) — the selector's VERDICT over that document's rows, and
     # nothing beside it: four coordinates and a word per row, where the field
     # document renders every row's whole tree (a consumer measured 58 MB and
@@ -177,7 +197,7 @@ EXPECTED_SYMBOLS = {
     # capture container -- the field document re-reads datagrams from one to walk
     # their trees and this document walks none -- so it is its own symbol and
     # not a flag on the one above, which would have given one name two shapes.
-    "wz_dissect_live_selection",
+    "wz_dissect_live_selection": 20,
     # (ABI 23) — what an open handle still HOLDS beside the ceilings that bound
     # it: counts per list family, the fullest scope each ceiling bounds, and the
     # oldest retained capture instant. The memory rule does not move: a `char*`
@@ -186,7 +206,7 @@ EXPECTED_SYMBOLS = {
     # is its own symbol and not a key of another document, because the field and
     # census documents describe the messages and this describes the reader's
     # memory of them.
-    "wz_dissect_live_retention",
+    "wz_dissect_live_retention": 23,
     # (ABI 24) — what an open handle has LOST OR DOUBTED: the summary's `health`
     # object over a live handle, beside the count of flows its stream counters
     # are over. The memory rule does not move: a `char*` released by
@@ -195,17 +215,17 @@ EXPECTED_SYMBOLS = {
     # symbol because the summary needs the whole capture in one buffer, which a
     # running tap never has, and not a key of the retention document because that
     # one describes what is held and this one what the wire and the ceilings cost.
-    "wz_dissect_live_health",
+    "wz_dissect_live_health": 24,
     # R2171 (open-debt item 547) — the door BETWEEN the two families above and
     # the nine document doors below. It hands back the same opaque handle
     # `wz_dissect_live_open` does, so the memory rule does not move with it:
     # what moves is the symbol set, which is this pin's own subject.
-    "wz_dissect_pcap_replay",
+    "wz_dissect_pcap_replay": 13,
     # R2108 (open-debt item 525) — the layout door. Exported so THIS gate can
     # read the record's shape out of the artifact; it is not a door a consumer
     # has any use for, since a program that includes the header already has the
     # layout from its own compiler.
-    "wz_dissect_record_layout",
+    "wz_dissect_record_layout": 12,
     # R311y913 (unregistered item 435) — what this build can READ, with no
     # capture. The command line had answered it in `--help` for a while and the
     # linked surface could not answer it at all; R311y912 gave
@@ -213,23 +233,23 @@ EXPECTED_SYMBOLS = {
     # this symbol is what that axis had counted as missing. The strings are
     # DERIVED from the link-type match and the two body dispatches, so this
     # door, the help text and the dispatch are one fact.
-    "wz_dissect_readable_surfaces",
+    "wz_dissect_readable_surfaces": 9,
     # R311y855 — the FIELD layer, which is the walk this header had described
     # since R311y586 and could not perform.
-    "wz_dissect_pcap_fields",
+    "wz_dissect_pcap_fields": 5,
     # R311y856 — the payload seam. The decoders lived in the command line, so
     # the surface a product LINKS could not decode a payload at all; the
     # diagnostic beside it answers "is this declaration text valid, and if not
     # which line" with no capture, which is the question a UI asks while it is
     # being typed.
-    "wz_dissect_pcap_fields_with_payloads",
+    "wz_dissect_pcap_fields_with_payloads": 6,
     # R311y917 (unregistered item 366) — the field layer under a CEILING. The
     # one read plane with no bounded form, and the one that walks every message
     # in the capture; `max_messages_shown_per_flow` trims the output after the whole
     # dissection is already built, so it was never the bound it looks like. One
     # symbol on R311y887's pattern rather than a `_bounded` twin for each of the
     # two existing field doors, which would have made four.
-    "wz_dissect_pcap_fields_limited",
+    "wz_dissect_pcap_fields_limited": 10,
     # R2766 (open debt 788, ABI 17) — the field document a selector narrows.
     # ⚠ R2770 CORRECTS THE SENTENCE THAT STOOD HERE. It said this gate did not
     # catch the absence and that no lane did. THE LANE DID: hosted run
@@ -254,8 +274,8 @@ EXPECTED_SYMBOLS = {
     # ⚠ The standing hole is still real and still unpaid: presence is checked
     # (`CDYLIB.is_file()` below FAILs, correctly), provenance is not. A gate
     # that fails closed on ABSENCE can still be fooled by PRESENCE.
-    "wz_dissect_pcap_fields_where_limited",
-    "wz_dissect_declarations_diagnose",
+    "wz_dissect_pcap_fields_where_limited": 17,
+    "wz_dissect_declarations_diagnose": 6,
     # (ABI 25) -- `.proto` schema text turned into DECLARATION text, so a
     # consumer that links this library never parses `.proto` itself: a second
     # reader of a language inside the program that links this one is a second
@@ -265,7 +285,7 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_proto_file`, three fields, 24 bytes on a 64-bit target), and no
     # callback runs. It is its own symbol and not a mode of the diagnostic door
     # above, which says whether lines install and hands nothing back.
-    "wz_dissect_declarations_from_proto",
+    "wz_dissect_declarations_from_proto": 25,
     # (ABI 26) -- a protected frame BUILT and OPENED under a profile the caller
     # passes as JSON on every call, so a consumer that produces such frames and
     # also analyses them never holds a second copy of the CRC arithmetic, the
@@ -273,8 +293,8 @@ EXPECTED_SYMBOLS = {
     # memory rule does not move: each verdict is a `char*` released by
     # `wz_dissect_string_free`, the body and the frame cross as bytes the CALLER
     # holds, nothing is retained between calls, and no callback runs.
-    "wz_dissect_e2e_wrap",
-    "wz_dissect_e2e_open",
+    "wz_dissect_e2e_wrap": 26,
+    "wz_dissect_e2e_open": 26,
     # (ABI 31) -- a protected frame OPENED with its body READ by the types of a
     # `.proto` schema, so a consumer that holds the schema never holds a second
     # READER of the wire format beside the one writer. The schema crosses as
@@ -282,7 +302,7 @@ EXPECTED_SYMBOLS = {
     # struct. The memory rule does not move: the verdict is a `char*` released by
     # `wz_dissect_string_free`, the frame crosses as bytes the CALLER holds,
     # nothing is retained between calls, and no callback runs.
-    "wz_dissect_e2e_open_body",
+    "wz_dissect_e2e_open_body": 31,
     # (ABI 32) -- the STRUCTURAL REPORT of a transport message that ALREADY
     # EXISTS (a captured frame), in the rows `wz_dissect_transport_build` gives
     # the bytes it built, so a consumer that mutates a captured frame knows what
@@ -291,7 +311,7 @@ EXPECTED_SYMBOLS = {
     # (or null), so no struct. The memory rule does not move: the document is a
     # `char*` released by `wz_dissect_string_free`, nothing is retained between
     # calls, and no callback runs.
-    "wz_dissect_transport_layout",
+    "wz_dissect_transport_layout": 32,
     # (ABI 28) -- ONE key expression, judged. A consumer asking about a single
     # pattern had to build a declaration line (`pattern=format`) to reach the
     # diagnostic door above, which reads a `:` in the pattern as a field-name
@@ -300,7 +320,7 @@ EXPECTED_SYMBOLS = {
     # `char*` released by `wz_dissect_string_free`, and no callback runs. It is
     # its own symbol and not a mode of the door above, which judges a TEXT of
     # lines.
-    "wz_dissect_keyexpr_diagnose",
+    "wz_dissect_keyexpr_diagnose": 28,
     # (ABI 29) -- FIELD VALUES, as JSON, turned into protobuf wire bytes by the
     # types a `.proto` schema gives them, so a consumer that lets a person fill
     # in a message never holds a second WRITER of the wire format beside the one
@@ -308,7 +328,7 @@ EXPECTED_SYMBOLS = {
     # (no new struct). The memory rule does not move: the verdict is a `char*`
     # released by `wz_dissect_string_free`, the files cross as bytes the CALLER
     # already read, and no callback runs.
-    "wz_dissect_proto_encode",
+    "wz_dissect_proto_encode": 29,
     # (ABI 30) -- a TRANSPORT MESSAGE BUILT from the fields the caller sets, in
     # the framing the link wants (datagram, a 16-bit or a 32-bit length prefix),
     # with a report of where each field sits in the bytes. The writing half of
@@ -316,7 +336,7 @@ EXPECTED_SYMBOLS = {
     # memory rule does not move: the document is a `char*` released by
     # `wz_dissect_string_free`, the unit and the body cross as hex inside it,
     # nothing is retained between calls, and no callback runs.
-    "wz_dissect_transport_build",
+    "wz_dissect_transport_build": 30,
     # (ABI 33) -- the CAPTURE READ AS SESSIONS, one row per zid pair, from a
     # container (`wz_dissect_pcap_session_table`, which takes the limit preset
     # as an argument as `wz_dissect_pcap_census_where_limited` does) and from a
@@ -326,8 +346,8 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, the handle is the one `wz_dissect_live_open`
     # made and is `const` here, nothing is retained between calls, and no
     # callback runs.
-    "wz_dissect_pcap_session_table",
-    "wz_dissect_live_session_table",
+    "wz_dissect_pcap_session_table": 33,
+    "wz_dissect_live_session_table": 33,
     # (ABI 34) -- THREE DOORS for a consumer that builds and checks a write
     # without reading a `.proto` or judging a key expression itself: two key
     # expressions RELATED (includes, intersects) by the engines the C drop-in's
@@ -339,21 +359,21 @@ EXPECTED_SYMBOLS = {
     # by `wz_dissect_string_free`, the schema files cross as bytes the CALLER
     # already read (the struct `wz_dissect_declarations_from_proto` takes), nothing
     # is retained between calls, and no callback runs.
-    "wz_dissect_keyexpr_relate",
-    "wz_dissect_declarations_match",
-    "wz_dissect_proto_describe",
+    "wz_dissect_keyexpr_relate": 34,
+    "wz_dissect_declarations_match": 34,
+    "wz_dissect_proto_describe": 34,
     # (ABI 54) -- a node's lifecycle answer (a verb's reply, a control-pipe line)
     # read into the fixed struct the participant's library fills, for a process
     # that links no session library. One symbol. The memory rule moves, by the
     # header's ABI 54 paragraph: the struct goes into memory the CALLER owns and
     # its words point at static strings of this library, never freed.
-    "wz_dissect_lifecycle_read",
+    "wz_dissect_lifecycle_read": 54,
     # (ABI 55) -- the rows after a cursor without their field trees, as the
     # `row_facts` document in CBOR. Bytes go into a buffer the CALLER owns and
     # sized; what does not fit stays in the handle until the take copies it out.
     # Two symbols; nothing crosses allocated, so the memory rule does not move.
-    "wz_dissect_live_row_facts_since",
-    "wz_dissect_live_row_facts_take",
+    "wz_dissect_live_row_facts_since": 55,
+    "wz_dissect_live_row_facts_take": 55,
     # (ABI 56) -- the structural report of a unit with the rows of the protected
     # frame each message of a Frame carries under a profile: its CRC, length,
     # counter and other header fields inside the `payload` row, so a consumer
@@ -362,16 +382,16 @@ EXPECTED_SYMBOLS = {
     # does not move: the document is a `char*` released by
     # `wz_dissect_string_free`, nothing is retained between calls, and no
     # callback runs.
-    "wz_dissect_transport_layout_e2e",
+    "wz_dissect_transport_layout_e2e": 56,
     # (ABI 57) -- the decryption pass behind the doors. Two document doors take
     # an NSS key log's bytes beside what their older doors take, and an open
     # handle takes one. Three symbols. The memory rule does not move: the
     # documents are `char*` released by `wz_dissect_string_free`, the key bytes
     # are read in the call and not retained, and the secrets a handle keeps are
     # released with it by `wz_dissect_live_close`.
-    "wz_dissect_pcap_summary_keyed",
-    "wz_dissect_pcap_session_table_keyed",
-    "wz_dissect_live_add_keylog",
+    "wz_dissect_pcap_summary_keyed": 57,
+    "wz_dissect_pcap_session_table_keyed": 57,
+    "wz_dissect_live_add_keylog": 57,
     # (ABI 58) -- the two selection documents with the samples read by a
     # declaration text, so a selector's `e2e` terms are decided under a profile
     # rule. Two symbols; the text crosses as the C string the field doors take.
@@ -379,8 +399,8 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, and the selection memory a handle keeps (now per
     # selector and declaration text) is released with it by
     # `wz_dissect_live_close`.
-    "wz_dissect_live_selection_declaring",
-    "wz_dissect_live_selection_since_declaring",
+    "wz_dissect_live_selection_declaring": 58,
+    "wz_dissect_live_selection_since_declaring": 58,
     # (ABI 35) -- the NODE NAMES of a selector resolved to the zids a caller's
     # table gives them. A `node` term names a node the way the application's own
     # list does, and a record carries only the zid its sender announced; this is
@@ -389,7 +409,7 @@ EXPECTED_SYMBOLS = {
     # rule does not move: the verdict is a `char*` released by
     # `wz_dissect_string_free`, the selector and the table cross as C strings the
     # CALLER holds, nothing is retained between calls, and no callback runs.
-    "wz_dissect_selector_bind",
+    "wz_dissect_selector_bind": 35,
     # (ABI 36) -- EVERY MESSAGE a set of `.proto` files declares, with no root:
     # the list a person picks a message from before `wz_dissect_proto_describe`
     # describes it. One symbol and one document. The memory rule does not move:
@@ -398,7 +418,7 @@ EXPECTED_SYMBOLS = {
     # retained between calls, and no callback runs. The describe document moved
     # to revision 4 on the same step (an option's `origin`), which moves no
     # symbol.
-    "wz_dissect_proto_messages",
+    "wz_dissect_proto_messages": 36,
     # (ABI 37) -- a protected frame OPENED AND ITS HEADER COMPARED with the values
     # a caller expects (a Data ID it declared): the open document and an
     # `expectation`. One symbol and one document, the `e2e_open` one at revision
@@ -406,7 +426,7 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, the profile and the expected values cross as C
     # strings the CALLER holds, the frame as the bytes the open door takes,
     # nothing is retained between calls, and no callback runs.
-    "wz_dissect_e2e_open_expecting",
+    "wz_dissect_e2e_open_expecting": 37,
     # (ABI 38) -- the selector's verdict over the rows AFTER A CURSOR, and the
     # earlier rows whose word has moved since the handle last said one. One symbol
     # and one new document, `selection_since` at revision 1. The memory rule does
@@ -414,51 +434,51 @@ EXPECTED_SYMBOLS = {
     # selector crosses as a C string the CALLER holds and the cursor as an integer,
     # no callback runs. The handle gains state of its own (the words it said, for
     # one selector), which it frees with itself in `wz_dissect_live_close`.
-    "wz_dissect_live_selection_since",
+    "wz_dissect_live_selection_since": 38,
     # (ABI 39) -- how many bytes of the container `wz_dissect_live_follow` has
     # consumed. One symbol and no document: a `size_t` the CALLER owns, written
     # through a pointer, so no string is returned and nothing is allocated or
     # retained. It tells a capture that was cut from one still growing, which the
     # follow door's return code cannot.
-    "wz_dissect_live_followed",
+    "wz_dissect_live_followed": 39,
     # (ABI 40) -- how many selectors the census and `selection_since` keep a
     # memory for at once. One symbol and no document: a `size_t` in, the number in
     # effect written through a pointer the CALLER owns. Default one, which is the
     # behaviour before the door; no document changes at any count.
-    "wz_dissect_live_set_selector_memories",
+    "wz_dissect_live_set_selector_memories": 40,
     # (ABI 41) -- the since document for at most `max_rows` sequence numbers. The
     # same document and the same cursor as `wz_dissect_live_fields_since` with one
     # more integer in; the window's last number is `window.through_seq`, the cursor
     # for the next window. `0` is no limit.
-    "wz_dissect_live_fields_since_window",
+    "wz_dissect_live_fields_since_window": 41,
     # (ABI 53) -- the typed values of a few payload field paths for the records
     # after a cursor a selector picks: the `field_values` document. Three strings
     # and a cursor in, one string out, released by `wz_dissect_string_free`; the
     # memory rule does not move.
-    "wz_dissect_live_field_values_since",
+    "wz_dissect_live_field_values_since": 53,
     # (ABI 42) -- the callback a long call asks how it is going and that can stop it.
     # One symbol: a function pointer and a `void *` the CALLER owns go in, nothing
     # comes out, and a null pointer clears the hook. A stopped call answers
     # `WZ_DISSECT_ERR_CANCELLED` (-11) from the doors it covers.
-    "wz_dissect_live_set_progress",
+    "wz_dissect_live_set_progress": 42,
     # (ABI 44) -- EVERY FIELD a selector can name, the paths into a record's
     # dissection among them, with operators and closed words: the list a UI
     # completes against. One symbol and one document; it takes no input. The
     # memory rule does not move: the list is a `char*` released by
     # `wz_dissect_string_free`, nothing is retained, and no callback runs.
-    "wz_dissect_selector_fields",
+    "wz_dissect_selector_fields": 44,
     # (ABI 45) -- the capture packets that carried the rows a selector picks,
     # with the context a reader needs as a flag. One symbol: the numbers go into
     # a `uint64_t` buffer the CALLER sized (nothing written when it is short,
     # the count always in `*needed`) and ten counts into an 80-byte struct the
     # caller owns. Nothing is allocated for the caller and nothing is retained.
-    "wz_dissect_live_selected_packets",
+    "wz_dissect_live_selected_packets": 45,
     # (ABI 46) -- every packet of one link type in a container, for a writer
     # reading back records of a link type it defined. One symbol: 48-byte records
     # into a buffer the CALLER sized, each naming where its bytes are in the
     # caller's own container (nothing is copied), the count always in `*needed`
     # and whether the container was cut off in `*partial`. Nothing is retained.
-    "wz_dissect_pcap_packets_of_link_type",
+    "wz_dissect_pcap_packets_of_link_type": 46,
     # (ABI 47) -- the Custom Options of the packets of one link type, for a writer
     # reading back what it attached to a packet's block. One symbol: 32-byte
     # records into a buffer the CALLER sized, each joined to its packet by number
@@ -466,7 +486,7 @@ EXPECTED_SYMBOLS = {
     # copied), the count always in `*needed`, the options that could not be read
     # in `*malformed` and whether the container was cut off in `*partial`.
     # Nothing is retained.
-    "wz_dissect_pcap_custom_options_of_link_type",
+    "wz_dissect_pcap_custom_options_of_link_type": 47,
     # (ABI 49) -- the options of those packets whose code is reserved for local
     # use (top bit set), for a writer with no registered organization number
     # reading back what it attached to a packet's block. One symbol: 32-byte
@@ -475,19 +495,19 @@ EXPECTED_SYMBOLS = {
     # copied), the count always in `*needed`, the lists that ended inside an
     # option in `*malformed` and whether the container was cut off in `*partial`.
     # Nothing is retained.
-    "wz_dissect_pcap_local_options_of_link_type",
+    "wz_dissect_pcap_local_options_of_link_type": 49,
     # (ABI 50, open-debt item 924) -- the replay and follow doors over a capture
     # the caller LENDS the handle. Two symbols, and the memory rule moves with
     # them: the handle RETAINS the caller's pointer and reads through it during
     # any later call, so the container's bytes must outlive the handle (or the
     # next lending call that names where the container then is). In return the
     # handle keeps no copy of the TCP payloads that sit in it.
-    "wz_dissect_pcap_replay_lent",
-    "wz_dissect_live_follow_lent",
+    "wz_dissect_pcap_replay_lent": 50,
+    "wz_dissect_live_follow_lent": 50,
     # (ABI 51, open-debt item 924, D7) -- what a live handle holds in memory, by
     # structure, as the `memory` document. One symbol, a read of a handle (const),
     # a string released by `wz_dissect_string_free`. No memory rule moves.
-    "wz_dissect_live_memory",
+    "wz_dissect_live_memory": 51,
     # (ABI 52) -- the SELECTOR A FIELD DOCUMENT'S NODE OFFERS: the sentence that
     # filters by, adds or excludes the field the node shows, written by the
     # grammar that reads it, so a consumer keeps no copy of the quoting, the
@@ -496,34 +516,34 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, the node object and the selector typed cross as
     # C strings the CALLER holds, the verb as an `int`, nothing is retained
     # between calls, and no callback runs.
-    "wz_dissect_selector_term",
+    "wz_dissect_selector_term": 52,
     # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
     # sets: how many one flow keeps, and how many the handle keeps in all. One
     # symbol: two integers in and the handle through a pointer the CALLER owns,
     # released by `wz_dissect_live_close` as every live handle is; `0` for either
     # leaves the live-tap preset's figure. The `caps` group of every document that
     # carries `dropped_by_limits` gained `frames_total` on the same step.
-    "wz_dissect_live_open_bounded",
+    "wz_dissect_live_open_bounded": 43,
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
-    "wz_dissect_pcap_census",
+    "wz_dissect_pcap_census": 3,
     # R311y885 — the census under the live-tap ceilings. The bounded SUMMARY
     # had existed since R311y748 while the analysis planes stayed unbounded,
     # so the document a live tap needs was the one that could not be capped.
-    "wz_dissect_pcap_census_bounded",
+    "wz_dissect_pcap_census_bounded": 7,
     # R311y854 — the selector: one door that narrows the census, one that
     # diagnoses the expression without a capture.
-    "wz_dissect_pcap_census_where",
+    "wz_dissect_pcap_census_where": 4,
     # R311y887 — the census with the selector AND the limit preset as
     # arguments, which is the shape that stops a `_bounded` twin per document.
     # The three census doors above are kept, not replaced: a published symbol is
     # one a consumer links.
-    "wz_dissect_pcap_census_where_limited",
-    "wz_dissect_pcap_summary",
-    "wz_dissect_pcap_summary_bounded",
-    "wz_dissect_selector_diagnose",
-    "wz_dissect_string_free",
-    "wz_dissect_transport_message",
+    "wz_dissect_pcap_census_where_limited": 8,
+    "wz_dissect_pcap_summary": 1,
+    "wz_dissect_pcap_summary_bounded": 2,
+    "wz_dissect_selector_diagnose": 4,
+    "wz_dissect_string_free": 1,
+    "wz_dissect_transport_message": 1,
     # (ABI 27) -- ONE message read in the light of its session's `context`
     # object: on a LowLatency session the data after the handshake is bare
     # network messages, which the context-free door above reads as `Unknown`.
@@ -531,7 +551,7 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, and the context crosses as NUL-terminated text
     # the CALLER holds. It is its own symbol and not an argument of the door
     # above, whose published signature a consumer already links.
-    "wz_dissect_transport_message_in",
+    "wz_dissect_transport_message_in": 27,
 }
 
 # A product, so it is where the artifact root rule puts it; the header below is
@@ -558,8 +578,64 @@ def header_revision(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def pin_findings(pinned: dict[str, int], pinned_version: int) -> list[str]:
+    """What is wrong with the table itself, with no artifact to read.
+
+    A symbol pinned at a revision the pin has not reached, or below the first
+    revision, is a history that cannot be true. A revision that brought no symbol
+    is not a finding: a memory-rule change moves the revision alone.
+    """
+    findings = []
+    for name, since in sorted(pinned.items()):
+        if since > pinned_version:
+            findings.append(
+                f"{name} is pinned since ABI {since}, after the pinned revision "
+                f"{pinned_version}"
+            )
+        elif since < 1:
+            findings.append(f"{name} is pinned since ABI {since}; revisions start at 1")
+    return findings
+
+
+def drift_findings(
+    symbols: set[str], version: int, pinned: dict[str, int], pinned_version: int
+) -> list[str]:
+    """Each symbol the artifact and the pin disagree about, with its revision.
+
+    A pinned symbol the build lost names the revision that promised it, so the
+    reader knows which consumers it breaks. An exported symbol nobody pinned is
+    named with the revision it has to be pinned at: the one the build answers when
+    the revision has moved, the next one when it has not, because then the move is
+    what is missing.
+    """
+    lines = []
+    new_at = version if version > pinned_version else pinned_version + 1
+    for name in sorted(symbols - set(pinned)):
+        lines.append(
+            f"exported but not pinned: {name} -- pin it as \"{name}\": {new_at}"
+        )
+    for name in sorted(set(pinned) - symbols):
+        lines.append(f"pinned but not exported: {name} (since ABI {pinned[name]})")
+    return lines
+
+
+def history(pinned: dict[str, int]) -> str:
+    """The table a consumer reads: each revision and the symbols it brought."""
+    by_revision: dict[int, list[str]] = {}
+    for name, since in pinned.items():
+        by_revision.setdefault(since, []).append(name)
+    return "\n".join(
+        f"ABI {since}: {', '.join(sorted(by_revision[since]))}"
+        for since in sorted(by_revision)
+    )
+
+
 def selftest() -> int:
-    """The define is read; a prose mention with a number after it is NOT."""
+    """The define is read; a prose mention with a number after it is NOT.
+
+    And the revision arms: a finding names the revision of the symbol it is
+    about, an impossible table is refused, and the table this file pins is not.
+    """
     cases = [
         ("#define WZ_DISSECT_ABI_REVISION 7\n", 7),
         (" * compare it against WZ_DISSECT_ABI_REVISION 3 before reading\n", None),
@@ -575,6 +651,62 @@ def selftest() -> int:
                 file=sys.stderr,
             )
             return 1
+
+    pinned = {"wz_a": 1, "wz_b": 3}
+    drift_cases = [
+        # Agreement: nothing to say.
+        ({"wz_a", "wz_b"}, 3, []),
+        # A new symbol in a build whose revision moved is pinned at that revision.
+        (
+            {"wz_a", "wz_b", "wz_c"},
+            4,
+            ['exported but not pinned: wz_c -- pin it as "wz_c": 4'],
+        ),
+        # A new symbol in a build whose revision did not move is pinned at the next.
+        (
+            {"wz_a", "wz_b", "wz_c"},
+            3,
+            ['exported but not pinned: wz_c -- pin it as "wz_c": 4'],
+        ),
+        # A lost symbol names the revision that promised it.
+        ({"wz_a"}, 3, ["pinned but not exported: wz_b (since ABI 3)"]),
+    ]
+    for symbols, version, want in drift_cases:
+        got = drift_findings(symbols, version, pinned, 3)
+        if got != want:
+            print(
+                f"capi-abi-pin: selftest FAIL -- symbols {sorted(symbols)} at "
+                f"ABI {version} gave {got}, expected {want}",
+                file=sys.stderr,
+            )
+            return 1
+
+    table_cases = [
+        ({"wz_a": 1, "wz_b": 3}, 3, 0),
+        ({"wz_a": 1, "wz_b": 4}, 3, 1),
+        ({"wz_a": 0}, 3, 1),
+    ]
+    for table, version, want in table_cases:
+        got = len(pin_findings(table, version))
+        if got != want:
+            print(
+                f"capi-abi-pin: selftest FAIL -- table {table} at ABI {version} "
+                f"gave {got} finding(s), expected {want}",
+                file=sys.stderr,
+            )
+            return 1
+    if history({"wz_b": 3, "wz_a": 1, "wz_c": 3}) != "ABI 1: wz_a\nABI 3: wz_b, wz_c":
+        print("capi-abi-pin: selftest FAIL -- the history table", file=sys.stderr)
+        return 1
+
+    own = pin_findings(EXPECTED_SYMBOLS, EXPECTED_VERSION)
+    if own:
+        print(
+            "capi-abi-pin: selftest FAIL -- this file's own table:\n  "
+            + "\n  ".join(own),
+            file=sys.stderr,
+        )
+        return 1
     print("capi-abi-pin: selftest OK")
     return 0
 
@@ -681,8 +813,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    added = sorted(symbols - EXPECTED_SYMBOLS)
-    removed = sorted(EXPECTED_SYMBOLS - symbols)
+    table = pin_findings(EXPECTED_SYMBOLS, EXPECTED_VERSION)
+    if table:
+        print(
+            "capi-abi-pin: FAIL -- the pinned table is not a history that can be "
+            "true:\n  " + "\n  ".join(table),
+            file=sys.stderr,
+        )
+        return 1
+    added = sorted(symbols - set(EXPECTED_SYMBOLS))
+    removed = sorted(set(EXPECTED_SYMBOLS) - symbols)
     moved = version != EXPECTED_VERSION
     reshaped = shape != EXPECTED_LAYOUT
 
@@ -706,10 +846,8 @@ def main() -> int:
                     "moves them too.",
                     file=sys.stderr,
                 )
-        for s in added:
-            print(f"  - exported but not pinned: {s}", file=sys.stderr)
-        for s in removed:
-            print(f"  - pinned but not exported: {s}", file=sys.stderr)
+        for line in drift_findings(symbols, version, EXPECTED_SYMBOLS, EXPECTED_VERSION):
+            print(f"  - {line}", file=sys.stderr)
         if moved:
             print(
                 f"  - revision is {version}, pinned at {EXPECTED_VERSION}",
@@ -750,9 +888,12 @@ def main() -> int:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--selftest"]:
         sys.exit(selftest())
+    if sys.argv[1:] == ["--history"]:
+        print(history(EXPECTED_SYMBOLS))
+        sys.exit(0)
     if sys.argv[1:]:
         print(
-            f"usage: {pathlib.Path(__file__).name} [--selftest]",
+            f"usage: {pathlib.Path(__file__).name} [--selftest | --history]",
             file=sys.stderr,
         )
         sys.exit(2)
