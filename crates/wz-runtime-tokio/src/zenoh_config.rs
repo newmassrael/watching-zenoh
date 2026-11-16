@@ -4717,6 +4717,17 @@ pub struct ZenohConfigIngest {
     /// [`named`]: ZenohConfigIngest::named
     /// [`ignored`]: ZenohConfigIngest::ignored
     pub stated_for_other_modes: Vec<&'static str>,
+    /// The admin space's permissions as the document states them, whatever it
+    /// says about `adminspace/enabled`; a permission it leaves unstated takes
+    /// zenoh's `PermissionsConf` default (read on, write off).
+    ///
+    /// [`ZenohNodeConfig::adminspace`] is a library session's reading, in which
+    /// `enabled: false` leaves no admin space and so no permissions to keep. A
+    /// zenoh daemon turns the admin space on after it loads the file
+    /// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`)
+    /// and serves it under the permissions the file states, so a host that
+    /// reads the file as the daemon does needs them apart from `enabled`.
+    pub adminspace_permissions: AdminspaceConfig,
 }
 
 impl ZenohConfigIngest {
@@ -8652,8 +8663,9 @@ impl ZenohNodeConfig {
         refuse_unbuilt_instruction(&doc, "stats/filters", is_empty_list)?;
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
-        // why `enabled: false` here has to erase the block rather than record
-        // two permissions nobody can use.
+        // why `enabled: false` here erases the block: a library session has no
+        // admin space to apply its permissions to. The ingest keeps them apart
+        // for a host that turns the admin space on over the file.
         let admin_enabled = want_bool(&doc, "adminspace/enabled")?;
         let admin_read = want_bool(&doc, "adminspace/permissions/read")?;
         let admin_write = want_bool(&doc, "adminspace/permissions/write")?;
@@ -8672,11 +8684,12 @@ impl ZenohNodeConfig {
         }
         let admin_described =
             admin_enabled.is_some() || admin_read.is_some() || admin_write.is_some();
+        let adminspace_permissions = AdminspaceConfig {
+            read: admin_read.unwrap_or(true),
+            write: admin_write.unwrap_or(false),
+        };
         if admin_described && admin_enabled != Some(false) {
-            out.adminspace = Some(AdminspaceConfig {
-                read: admin_read.unwrap_or(true),
-                write: admin_write.unwrap_or(false),
-            });
+            out.adminspace = Some(adminspace_permissions);
         }
 
         // A capability's key this build was made without reached here only as upstream's default,
@@ -8691,6 +8704,7 @@ impl ZenohNodeConfig {
             named,
             ignored,
             stated_for_other_modes: other_modes,
+            adminspace_permissions,
         })
     }
 }
@@ -12355,6 +12369,35 @@ mod tests {
                 read: true,
                 write: false
             })
+        );
+    }
+
+    /// The permissions a document states outlive its `enabled: false` on the
+    /// ingest, where a host that turns the admin space on over the file reads
+    /// them, while the library reading still holds no admin space.
+    #[test]
+    fn the_stated_permissions_outlive_a_disabled_block_on_the_ingest() {
+        let off = ZenohNodeConfig::from_json5(
+            r#"{ "adminspace": { "enabled": false,
+                                 "permissions": { "read": false, "write": true } } }"#,
+        )
+        .unwrap();
+        assert_eq!(off.config.adminspace, None);
+        assert_eq!(
+            off.adminspace_permissions,
+            AdminspaceConfig {
+                read: false,
+                write: true
+            }
+        );
+        // A silent document carries zenoh's `PermissionsConf` defaults.
+        let silent = ZenohNodeConfig::from_json5("{}").unwrap();
+        assert_eq!(
+            silent.adminspace_permissions,
+            AdminspaceConfig {
+                read: true,
+                write: false
+            }
         );
     }
 
