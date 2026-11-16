@@ -102,7 +102,12 @@ impl AdvancedPublisherPlane for CPlane {
     ) -> Result<DeclaredPublisher<()>, AdvancedPublisherError> {
         // The entity id of the `SourceInfo.eid` id space, one for the publisher and not one for
         // each face: the token and every sample name this publisher with it.
-        let eid = self.shared.local_session().actions().alloc_next_entity_id();
+        let eid = self
+            .shared
+            .local_session()
+            .actions()
+            .alloc_next_entity_id()
+            .ok_or(AdvancedPublisherError::EntityIdsExhausted)?;
         Ok(DeclaredPublisher { handle: (), eid })
     }
 

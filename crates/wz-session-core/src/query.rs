@@ -541,16 +541,26 @@ fn extract_query_value_shared(
 /// the keyexpr pattern (duplicate-pattern queryables are explicitly
 /// allowed: e.g. a metrics responder and a domain responder on the
 /// same keyexpr).
+///
+/// The id is also the `DeclQueryable.id` the session announces the
+/// queryable under, so it is a `u32`, the width of upstream's `EntityId`
+/// (`commons/zenoh-protocol/src/network/declare.rs` @
+/// `pub type QueryableId = EntityId;`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct QueryableId(u64);
+pub struct QueryableId(u32);
 
 impl QueryableId {
-    /// The numeric id behind the handle. Exposed for diagnostic
-    /// surfaces; callers should not depend on the exact value across
-    /// runs since the registry assigns ids monotonically from the
-    /// session-local counter.
-    pub fn as_u64(self) -> u64 {
+    /// The declaration id the queryable is announced under on the wire.
+    /// The registry assigns ids in order from one session-local counter, so
+    /// the value is not stable across runs.
+    pub fn entity_id(self) -> u32 {
         self.0
+    }
+
+    /// [`entity_id`](Self::entity_id), widened for the callers that carry a
+    /// declaration id as the wire's z64.
+    pub fn as_u64(self) -> u64 {
+        u64::from(self.0)
     }
 }
 
@@ -2130,6 +2140,9 @@ pub enum QueryableInterestReply {
 /// separate `all(codec-request, alloc)` impl block below.
 pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
     queryables: BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P>,
+    /// The declaration id the next queryable takes, from 1. A `u64` only so
+    /// that it can stand one past `u32::MAX`, which is how the registry knows
+    /// every id has been handed out.
     next_id: u64,
     /// The zid the key of the link this registry's session is on proved, when it proved one
     /// (decision D12): handed to every matched queryable as [`QueryView::requester`]. Set by the
@@ -2290,6 +2303,12 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// [`RegisterError::TableFull`] (fail-fast, no silent
     /// truncation). On the `alloc` backing neither branch is ever taken,
     /// so the convenience wrappers `.expect()` the result.
+    ///
+    /// Once the registry has handed out every `u32` declaration id it refuses
+    /// with [`RegisterError::IdsExhausted`] on every backing, rather than wrap
+    /// onto an id a live queryable may still hold, where upstream's counter
+    /// wraps (`zenoh/src/net/runtime/mod.rs` @
+    /// `self.next_id.fetch_add(1, Ordering::SeqCst)`).
     pub fn register_sink(
         &mut self,
         keyexpr_pattern: &str,
@@ -2323,7 +2342,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     raw
                 }
             };
-        let id = QueryableId(self.next_id);
+        let id = QueryableId(u32::try_from(self.next_id).map_err(|_| RegisterError::IdsExhausted)?);
         let pattern_facts = crate::keyexpr_match::KeyFacts::of(&pattern);
         // Push first; only consume the id counter on success so a
         // rejected (table-full) registration leaves no id gap.
@@ -2337,7 +2356,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                 sink,
             })
             .map_err(|_| RegisterError::TableFull)?;
-        self.next_id = self.next_id.saturating_add(1);
+        // Taken only after the id above fitted, so the counter stops one past `u32::MAX`.
+        self.next_id += 1;
         Ok(id)
     }
 
@@ -7966,4 +7986,42 @@ mod storage_policy_tests {
         canonizer_answers_in_the_policy,
         dispatch_fires_matching_in_registration_order,
     );
+}
+
+/// A queryable's id is the `DeclQueryable.id` it is announced under, a `u32`
+/// upstream's decoder refuses to read wider, so the registry hands out ids up
+/// to `u32::MAX` and refuses past it.
+#[cfg(all(test, feature = "alloc"))]
+mod entity_id_space_tests {
+    use super::*;
+    use crate::locality::Locality;
+
+    fn sink() -> BoxedQuerySink {
+        BoxedQuerySink::new(|_query, _reply| {})
+    }
+
+    #[test]
+    fn the_last_u32_id_is_handed_out_and_the_next_queryable_is_refused() {
+        let mut reg = QueryableRegistry::new();
+        reg.next_id = u64::from(u32::MAX);
+
+        let last = reg
+            .register_sink("home/a", Locality::Any, false, sink())
+            .expect("the last id is free");
+        assert_eq!(last.entity_id(), u32::MAX);
+        assert_eq!(last.as_u64(), u64::from(u32::MAX));
+
+        assert_eq!(
+            reg.register_sink("home/b", Locality::Any, false, sink()),
+            Err(RegisterError::IdsExhausted)
+        );
+        assert_eq!(reg.len(), 1, "the refused queryable is not stored");
+
+        // Retiring a queryable frees its row, not its id.
+        assert!(reg.unregister(last));
+        assert_eq!(
+            reg.register_sink("home/c", Locality::Any, false, sink()),
+            Err(RegisterError::IdsExhausted)
+        );
+    }
 }

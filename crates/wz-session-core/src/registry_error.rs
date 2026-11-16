@@ -51,7 +51,8 @@ pub enum RegisterError {
     /// (`commons/zenoh-protocol/src/core/mod.rs` @ `pub type EntityId = u32;`),
     /// and upstream's decoder refuses a wider one, so the registry refuses the
     /// registration rather than reuse an id a live declaration may still hold.
-    /// Produced only by the subscriber table.
+    /// Produced by the subscriber table and the queryable registry, whose
+    /// ids are the declaration ids on the wire.
     IdsExhausted,
 }
 

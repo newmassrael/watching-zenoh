@@ -545,6 +545,11 @@ pub enum LivelinessAliasError {
     /// by a `0x3 Drop` stop fragment); nothing was cached, so re-declaring
     /// once the budget is refilled is the repair.
     FragmentChainAbandoned,
+    /// The session has handed out every `u32` token id
+    /// (`commons/zenoh-protocol/src/network/declare.rs` @
+    /// `pub type TokenId = u32;`), so the DECLARE was not emitted rather than
+    /// carry an id a live token may still hold.
+    IdsExhausted,
 }
 
 impl std::fmt::Display for LivelinessAliasError {
@@ -589,6 +594,11 @@ impl std::fmt::Display for LivelinessAliasError {
                  Drop stop fragment followed any fragments already sent); nothing \
                  was cached — re-declare once the budget is refilled"
             ),
+            LivelinessAliasError::IdsExhausted => write!(
+                f,
+                "LivelinessAliasError: the session has handed out every 32-bit \
+                 token id; the DECLARE was not emitted"
+            ),
         }
     }
 }
@@ -602,7 +612,8 @@ impl std::error::Error for LivelinessAliasError {
             | LivelinessAliasError::ExceedsCapacity
             | LivelinessAliasError::TransportUnavailable
             | LivelinessAliasError::RequiresUnicast
-            | LivelinessAliasError::FragmentChainAbandoned => None,
+            | LivelinessAliasError::FragmentChainAbandoned
+            | LivelinessAliasError::IdsExhausted => None,
         }
     }
 }

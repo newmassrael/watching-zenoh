@@ -114,7 +114,11 @@ where
         // id counters, so the publisher eid has its own (R311y72: it was
         // minted from the token-id counter — a conflated namespace + a
         // truncating `as u32`; now a real u32 entity counter).
-        let eid = self.session.actions().alloc_next_entity_id();
+        let eid = self
+            .session
+            .actions()
+            .alloc_next_entity_id()
+            .ok_or(AdvancedPublisherError::EntityIdsExhausted)?;
         Ok(DeclaredPublisher {
             handle: self.session.declare_publisher(keyexpr.to_owned(), options),
             eid,
