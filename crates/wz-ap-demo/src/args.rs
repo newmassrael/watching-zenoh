@@ -2677,6 +2677,11 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // `plugins` site's precondition: only that run-mode hosts plugins. A named `false` is the
     // library's default, which the absent flag already means; this host reads the file as a
     // library session does, and not as zenohd, which turns the lookup on over its file.
+    //
+    // The `--config` form reads the file two ways at once: the admin space below as zenohd's
+    // daemon does (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`),
+    // this key and the default mode (`DAEMON_DEFAULT_MODE`) as the library reading R2109
+    // chose. Which reading the whole form follows is an open decision for the owner.
     if named("plugins_loading/enabled") {
         let run_flag = typed_role
             .map(|(flag, _)| flag)

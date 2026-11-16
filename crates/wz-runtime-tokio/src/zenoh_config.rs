@@ -5119,6 +5119,17 @@ pub const LIBRARY_DEFAULT_MODE: WhatAmI = WhatAmI::Peer;
 /// tree ships no daemon, and a flag that changes a node's role would owe its own
 /// witness on the wire to be worth anything. The harm the register records is
 /// the word "silently", and a line in the report is what removes it.
+///
+/// ## The `--config` form reads the file two ways at once
+///
+/// `wz-ap-demo --config` reads the admin space as zenohd's daemon does: it is
+/// hosted in every mode whatever `adminspace/enabled` says
+/// (`zenohd/src/main.rs` @ `config.adminspace.set_enabled(true).unwrap();`).
+/// The default mode stated here and `plugins_loading/enabled` keep the library
+/// reading R2109 chose. Which reading the whole `--config` form follows is an
+/// open decision for the owner; until it is taken the mix is deliberate, and
+/// this paragraph and the `plugins_loading/enabled` site in `wz-ap-demo`'s
+/// `args.rs` are where it is stated.
 pub const DAEMON_DEFAULT_MODE: WhatAmI = WhatAmI::Router;
 
 /// What a document's silence about `mode` means — in BOTH readings at once.
