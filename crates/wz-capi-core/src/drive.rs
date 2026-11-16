@@ -6217,11 +6217,13 @@ mod multicast_face_tests {
                 let a = session(0xa1);
                 let b = session(0xb2);
                 let heard = Arc::new(AtomicUsize::new(0));
-                let sub = b.declare_subscriber(
-                    "demo/mc/**".into(),
-                    Locality::Any,
-                    counting_subscriber(&heard),
-                );
+                let sub = b
+                    .declare_subscriber(
+                        "demo/mc/**".into(),
+                        Locality::Any,
+                        counting_subscriber(&heard),
+                    )
+                    .expect("a session with ids left declares");
                 let a_task = join(
                     &bus,
                     1,
