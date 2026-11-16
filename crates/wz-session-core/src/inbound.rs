@@ -1013,7 +1013,17 @@ pub(crate) fn parse_frame_in_place(
 /// What a `Fragment` says about itself before its payload, with its own
 /// extension chain as `C`: the owned entries [`InboundFrame::Fragment`]
 /// reports, or the [`InPlaceExtChain`] a fragment read where it lies keeps.
-#[cfg(feature = "reassembly")]
+// Built only by `decode_fragment_head`, so it exists exactly where that decode
+// does: a build that reassembles but neither owns a heap nor runs a session has
+// no receive path that reads a fragment.
+#[cfg(all(
+    feature = "reassembly",
+    any(
+        feature = "alloc",
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
 #[derive(Debug)]
 pub(crate) struct FragmentHead<C> {
     pub(crate) reliable: bool,
