@@ -531,8 +531,8 @@ impl PeerSegment {
     /// still does. The question a holder that keeps the mapping for reuse asks
     /// before it trusts one. The twin of [`PeerSegmentRw::provider_is_live`].
     pub fn provider_is_live(&self) -> bool {
-        self.is_current()
-            && !(self.signalled && provider_holds_liveness(&self._file) == Some(false))
+        let lapsed = self.signalled && provider_holds_liveness(&self._file) == Some(false);
+        self.is_current() && !lapsed
     }
 
     /// The object this maps.
@@ -646,8 +646,8 @@ impl PeerSegmentRw {
     /// for reuse asks this before it trusts one: a mapping of a dead provider's
     /// metadata would read its headers as if they were live.
     pub fn provider_is_live(&self) -> bool {
-        self.is_current()
-            && !(self.signalled && provider_holds_liveness(&self._file) == Some(false))
+        let lapsed = self.signalled && provider_holds_liveness(&self._file) == Some(false);
+        self.is_current() && !lapsed
     }
 
     /// The object this maps.
