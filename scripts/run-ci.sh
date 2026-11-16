@@ -4567,6 +4567,65 @@ layer_c0i_impact_ref_gate() {
         return 1
     fi
 
+    # THE TWO PROSE PRECONDITIONS WERE CALLED (open-debt item 797). Both can
+    # skip by design on a runner (`$HOME` is a shared CI home; no pinned
+    # upstream checkout), so their REFUSAL cannot be the witness there. What
+    # each always prints is: the home-path check `home-paths: N prose file(s)
+    # scanned` or `home-paths: skipped`, the citation check `ledger-citation: N
+    # prose file(s)` or `ledger-citation: SKIP`. A clean prose file must pass
+    # and draw one line of each, so a precondition that stopped being reached
+    # fails here on every host. Where the home-path check can refuse (a
+    # developer's `$HOME`), its refusal is driven too; where it cannot, that
+    # arm says it is not armed rather than passing.
+    local c0i_prose c0i_out
+    c0i_prose="$(mktemp)"
+    c0i_out="$(mktemp)"
+    printf 'A Layer C0i control: plain prose, no path and no citation.\n' >"$c0i_prose"
+    if ! bash scripts/append-round.sh --check-only --impact "$real" \
+        --decision-file "$c0i_prose" >"$c0i_out" 2>&1; then
+        echo "  Layer C0i FAIL: a clean prose file was refused under --check-only:" >&2
+        sed 's/^/    /' "$c0i_out" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    if ! grep -Eq 'home-paths: (1 prose file\(s\) scanned|skipped)' "$c0i_out"; then
+        echo "  Layer C0i FAIL: the home-path precondition printed neither its scan" \
+            "nor its skip for a run that handed it prose, so it was not called" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    if ! grep -Eq 'ledger-citation: (1 prose file\(s\)|SKIP)' "$c0i_out"; then
+        echo "  Layer C0i FAIL: the citation precondition printed neither its scan" \
+            "nor its skip for a run that handed it prose, so it was not called" >&2
+        rm -f "$c0i_prose" "$c0i_out"
+        return 1
+    fi
+    grep -E 'home-paths: |ledger-citation: ' "$c0i_out" | sed 's/^ */  C0i prose precondition: /'
+    # shellcheck disable=SC1091  # constant path, resolved at run time
+    source scripts/lib/home-path-scan.sh || {
+        rm -f "$c0i_prose" "$c0i_out"
+        echo "  Layer C0i FAIL: scripts/lib/home-path-scan.sh is unreadable" >&2
+        return 1
+    }
+    local c0i_home_state=0
+    wz_home_path_term_state || c0i_home_state=$?
+    if [[ "$c0i_home_state" -eq 0 ]]; then
+        printf 'A Layer C0i fixture naming %s/somewhere.\n' "$HOME" >"$c0i_prose"
+        if bash scripts/append-round.sh --check-only --impact "$real" \
+            --decision-file "$c0i_prose" >/dev/null 2>&1; then
+            echo "  Layer C0i FAIL: prose naming this machine's home directory was" \
+                "accepted, and a frozen entry naming it costs a push that can" \
+                "never pass (pre-push gate 0b)" >&2
+            rm -f "$c0i_prose" "$c0i_out"
+            return 1
+        fi
+        echo "  C0i prose precondition: a home path in the prose is refused"
+    else
+        echo "  C0i prose precondition: home-path refusal NOT ARMED here" \
+            "(\$HOME is $HOME, which the check skips by design)"
+    fi
+    rm -f "$c0i_prose" "$c0i_out"
+
     # A ROUND CARRIED AS A DESCRIPTOR (`scripts/file-round.sh`, the script the queue
     # integrator's `file-round` action runs). The descriptor's reader refuses every
     # malformed form (its own selftest), and the script refuses a file that is not
