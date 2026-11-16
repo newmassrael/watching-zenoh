@@ -750,17 +750,47 @@ fn allocation_document(mode: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The `data` queue's size the wider `init` document states, against upstream's default of 2
+/// (`DEFAULT_CONFIG.json5` @ `data: 2`).
+const WIDE_DATA_QUEUE: i64 = 6;
+/// The batches the wider queue holds beyond the default one.
+const DATA_QUEUE_STEP: i64 = WIDE_DATA_QUEUE - 2;
+
+/// The `init` document with a wider `data` queue: an `init` queue fills its refill ring with
+/// one batch per slot of its size when the link is made
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `for _ in 0..*num {`), so the two `init`
+/// documents differ at the open by the step and by nothing else.
+fn wide_init_document() -> Vec<(&'static str, String)> {
+    let mut document = allocation_document("init");
+    document.push((
+        "transport/link/tx/queue/size/data",
+        WIDE_DATA_QUEUE.to_string(),
+    ));
+    document
+}
+
 /// One run of each allocation document.
 #[derive(Debug, Clone, Copy)]
 struct ModePair {
     init: Reading,
+    wide_init: Reading,
     lazy: Reading,
 }
 
 impl ModePair {
-    /// The batches the `init` program has made at the open beyond the `lazy` one's.
+    /// The batches the `init` program has made at the open beyond the `lazy` one's. How many
+    /// the `lazy` one has made by then depends on scheduling (a lane that wants a batch while
+    /// fewer than its queue's size exist makes one: `pipeline.rs` @
+    /// `None if self.batch_allocs < self.batch_config.0`), on libzenohc as on wz, so only its
+    /// sign is part of the rule.
     fn ahead(&self) -> i64 {
         self.init.open.made - self.lazy.open.made
+    }
+
+    /// The batches the wider `init` document has made at the open beyond the default one's: the
+    /// queue's arithmetic, the same on every run of either library.
+    fn queue_step(&self) -> i64 {
+        self.wide_init.open.made - self.init.open.made
     }
 
     /// The batches the `init` program makes after its open, through the declaration and the
@@ -790,6 +820,7 @@ fn mode_pairs(arm: &Arm) -> Vec<ModePair> {
                 STATED_BATCH_WINDOW,
                 &allocation_document("init"),
             ),
+            wide_init: observe(arm, Role::Puts, STATED_BATCH_WINDOW, &wide_init_document()),
             lazy: observe(
                 arm,
                 Role::Puts,
@@ -802,8 +833,11 @@ fn mode_pairs(arm: &Arm) -> Vec<ModePair> {
 
 // wz-proves: none -- a config key's effect on when a link allocates batches, claimed for no atom
 /// A session whose `transport/link/tx/queue/allocation/mode` is `init` allocates its queue's
-/// batches when its link is made and none after, and one whose mode is `lazy` allocates fewer
-/// then and some when traffic wants them, by the same counts on wz and libzenohc.
+/// batches when its link is made, one per slot of the queue's size, and none after, and one
+/// whose mode is `lazy` allocates fewer then and some when traffic wants them, on wz as on
+/// libzenohc. The count compared exactly is the init queue's arithmetic (a wider `data` queue
+/// makes its extra slots at the open); how many a lazy queue has made by the open depends on
+/// scheduling on both libraries, so of that only the rule is compared.
 #[test]
 #[ignore = "opens sessions and reads a zenoh-c oracle; run by run-ci Layer C1cc \
             (which builds the matching ABI arm this needs)"]
@@ -817,7 +851,9 @@ fn an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_
     let reference = mode_pairs(&arms.reference);
     for (run, pair) in reference.iter().enumerate() {
         eprintln!(
-            "libzenohc run {run}: ahead {} init after open {} lazy on traffic {} ({pair:?})",
+            "libzenohc run {run}: queue step {} ahead {} init after open {} lazy on traffic {} \
+             ({pair:?})",
+            pair.queue_step(),
             pair.ahead(),
             pair.init_after_open(),
             pair.lazy_on_traffic()
@@ -827,26 +863,36 @@ fn an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_
             "run {run} of the REFERENCE does not show upstream's allocation rule ({pair:?}), so \
              this machine's libzenohc cannot adjudicate wz's"
         );
+        assert_eq!(
+            pair.queue_step(),
+            DATA_QUEUE_STEP,
+            "run {run} of the REFERENCE: a data queue {DATA_QUEUE_STEP} slots wider made a \
+             different number of batches at the open ({pair:?}), so this machine's libzenohc \
+             does not show the init arithmetic it is asked to adjudicate"
+        );
     }
-    let ahead = reference[0].ahead();
-    assert!(
-        reference.iter().all(|pair| pair.ahead() == ahead),
-        "the REFERENCE's batches made ahead of traffic differ between its runs ({reference:?}), \
-         so the count is not one this machine can measure"
-    );
 
     let mut failures: Vec<String> = Vec::new();
     for (run, pair) in mode_pairs(&arms.wz).iter().enumerate() {
         eprintln!(
-            "wz run {run}: ahead {} init after open {} lazy on traffic {} ({pair:?})",
+            "wz run {run}: queue step {} ahead {} init after open {} lazy on traffic {} \
+             ({pair:?})",
+            pair.queue_step(),
             pair.ahead(),
             pair.init_after_open(),
             pair.lazy_on_traffic()
         );
-        if pair.ahead() != ahead {
+        if pair.queue_step() != DATA_QUEUE_STEP {
+            failures.push(format!(
+                "run {run}: a data queue {DATA_QUEUE_STEP} slots wider made {} more batches at \
+                 the open, where libzenohc's made {DATA_QUEUE_STEP}",
+                pair.queue_step()
+            ));
+        }
+        if pair.ahead() <= 0 {
             failures.push(format!(
                 "run {run}: an init queue made {} batches at the open beyond a lazy one's, where \
-                 libzenohc's made {ahead}",
+                 libzenohc's made more",
                 pair.ahead()
             ));
         }
