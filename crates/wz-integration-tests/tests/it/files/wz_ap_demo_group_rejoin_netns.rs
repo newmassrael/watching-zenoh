@@ -139,8 +139,8 @@ impl Witness {
 }
 
 // The subject and both members are wz: the claim is the re-join sequence of wz's own group
-// session over a real device, which no foreign program can be asked to perform.
-// wz-proves: none -- wz group session re-join over a removed and re-attached device, wz members only
+// session over a real device, which no foreign program can be asked to perform, so it carries
+// no cross-implementation marker (a wz-only file may not claim one, Layer A4-3).
 #[test]
 #[ignore = "needs a network namespace and wz-ap-demo with transport-multicast + locator-iface; Layer M runs via --ignored after probing for one"]
 fn in_a_netns_a_group_session_rejoins_a_reattached_interface_and_admits_a_new_member() {
