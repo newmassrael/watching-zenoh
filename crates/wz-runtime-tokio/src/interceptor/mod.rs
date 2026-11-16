@@ -28,17 +28,11 @@
 //! crate — exactly as zenoh keeps `access_control.rs` (which matches on
 //! `NetworkBodyMut`) separate from the message-type-free `authorization.rs`.
 //!
-//! # Scope of the first atom
+//! # Where the chain is consulted
 //!
-//! The chain is consulted at the linkstate forwarder's INBOUND boundary — the
-//! mesh-RELAY admission point. A denied inbound message is not relayed onward.
-//! Local delivery to THIS node's own subscriber is driven by the session layer
-//! (a separate consumer of the inbound frame), so gating it is the full
-//! Primitives/`DeMux` seam a later atom builds; this atom enforces ingress on
-//! the relay path. Egress (the `Mux` twin) and the per-transport factory that
-//! resolves cert/username subjects are likewise later atoms. The enforcer
-//! checks the `Put` action by the auth-free zid subject — the smallest real
-//! rule, on the structure that the rest of §5.16 extends rather than replaces.
+//! The ingress chain is consulted at the forwarder's INBOUND boundary — the
+//! mesh-RELAY admission point — and the egress chain (the `Mux` twin) before
+//! each outbound send. A denied inbound message is not relayed onward.
 
 // Each concrete interceptor is an independent §5.16 composition knob: the
 // module, its config field, and its build_chain push gate on the matching

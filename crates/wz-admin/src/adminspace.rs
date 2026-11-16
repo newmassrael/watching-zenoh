@@ -3524,8 +3524,8 @@ pub enum AdminConfigWrite {
     /// `wz_storage_host_adminspace_read_permit_flips_over_the_wire`.
     AdminReadPermit(bool),
     /// R2393 (`router-connect-reconcile`) — `.../config/connect-add <endpoint>[,…]`
-    /// — dial these endpoints now, the wz analogue of upstream re-entering
-    /// `update_peers` when a live node's connect list changes.
+    /// — dial these endpoints now. Upstream has no such trigger: it re-reads its
+    /// connect list only when a session closes, so this is wz's own.
     ///
     /// # Why this key is admissible, on the test [`AdminReadPermit`](Self::AdminReadPermit) used
     ///
@@ -4998,8 +4998,7 @@ mod tests {
 
     #[test]
     fn parse_config_write_connect_add_decodes_each_endpoint() {
-        // The intent upstream reaches by re-entering `update_peers` on a config
-        // change. Whitespace around each element is trimmed, as every other arm here
+        // Whitespace around each element is trimmed, as every other arm here
         // trims, so an operator's spaced list dials what a tight one does.
         let out = parse_admin_config_write(
             &write_space(),
