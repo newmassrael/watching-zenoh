@@ -165,7 +165,15 @@ IMAGES = (
         # longer on it. The chain moved with the pins since ed2f5d7453 (main's own code did not
         # change it), and the share of each pin, and whether the two functions were inlined or
         # shrank, are not separated.
-        peak=2360,
+        #
+        # 2,512 bytes over 8 frames on hosted run 43914611055 (`65ec9acd16`) and on pc2 at that
+        # head, the same chain: `wz_task` 704 (632), `TwoSessions::spawn` 792 (744), the session's
+        # send 824 (792) and the small frames beneath it. The group session's parameters gained
+        # the preset's Join rule and `max_sessions` (2026-11-14), and the image did not build
+        # again until it named them (`681bf449a1`): at `4ef678910d` it stops at `MulticastParams`,
+        # so the window has no reading of its own between the two figures, and the 152 bytes are
+        # those three frames, which build and spawn the group session and send on it.
+        peak=2512,
     ),
     # The Zephyr node on the fixed-memory profile: its main thread's stack is the overlay's
     # `CONFIG_MAIN_STACK_SIZE`, and the image is built by west into a directory Layer Qzb
@@ -194,6 +202,13 @@ IMAGES = (
     # the kit's own reading is 13,736 bytes (scripts/kit-lane.sh run zephyr-fixed, the stack line of
     # HW.7 in 3 of 3 runs), 112 over the chain, which the 16 calls through a register not followed
     # account for, so the resource budget's row carries `chain_misses`.
+    #
+    # 13,376 bytes over 12 frames on hosted run 43914611055 (`65ec9acd16`) and on pc2 at that
+    # head, the same chain: `start` 6,160, the connect manager's 544, 272 and 176, the dialer's
+    # `open` path 4,840. pc2 reads 13,408 at `4ef678910d` (`start` 6,176, the dialer 4,848), so the
+    # 216 bytes the chain fell since ff6a235d9d are the commits of 2026-11-05 to 2026-11-16 (they
+    # were not bisected: no hosted run reached Qzb between them) and 32 the handshake held to
+    # `open_timeout` alone, which the dial path is. The kit's reading was not taken again.
     Image(
         key="zephyr-fixed",
         elf=None,
@@ -201,7 +216,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=13624,
+        peak=13376,
     ),
     # The same node over `tcp/` (`overlays/t2g_tcp.conf` after `overlays/t2g_fixed.conf`, the node of
     # `fixed_tcp.rs`): the stack is the fixed-memory overlay's, which the TCP overlay does not state
@@ -215,6 +230,14 @@ IMAGES = (
     # bytes (scripts/kit-lane.sh run zephyr-fixed-tcp, the stack line of HW.7 in 3 of 3 runs), 56
     # over the chain, which the 5 calls through a register not followed account for, so the resource
     # budget's row carries `chain_misses`.
+    #
+    # 13,416 bytes over the same 6 frames on hosted run 43914611055 (`65ec9acd16`) and on pc2 at
+    # that head: `wz_app_main` 3,896 (3,664), `fixed_tcp::start` 6,416 (6,408), `install_observer`
+    # 1,896, `canonize_keyexpr_as` 1,112 and the two copies. pc2 reads 13,456 at `4ef678910d`
+    # (`start` 6,456), so the 232 bytes of the thread's entry are the commits of 2026-11-05 to
+    # 2026-11-16 (not bisected: no hosted run reached Qzb between them) and the 40 `start` gave
+    # back are this window's. The chain is now over the kit's reading of 2026-11-05 (13,240),
+    # which was not taken again, so the resource budget's row no longer carries `chain_misses`.
     Image(
         key="zephyr-fixed-tcp",
         elf=None,
@@ -222,7 +245,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=13184,
+        peak=13416,
     ),
     # The Zephyr CLIENT on the fixed-memory profile: the same rule, over the overlay of its own.
     # Its `run` is inlined into the board's `wz_app_main`, which is the thread's entry symbol.
@@ -429,7 +452,17 @@ IMAGES = (
         # the writer of a response in the parts form: the chain of direct calls is now the receive
         # path into the engine's turn and the session's send, the same for the heap and the batching
         # clients.
-        peak=2376,
+        #
+        # 2,680 bytes over 14 frames on hosted run 43914611055 (`65ec9acd16`) and on pc2 at that
+        # head, and the worst chain is the dial again: `wz_app_main` 176, the running node 400, the
+        # connect manager's 328, 264 and 112, the dialer's `dial_expecting` 200, the slot's claim
+        # 624, the link noting its endpoints 280 and the locator written as text (104, then the
+        # digits' 40, 64 and the division's 88). At `4ef678910d` the image did not build (its run
+        # arena was smaller than the host, factory and node) until the dialled handshake was held to
+        # `open_timeout` alone and its two per-phase limits retired, so which commit since
+        # 2026-11-05 made the dial the longest path was not bisected. The heap and batching rows are
+        # read by the kit lane only and keep the figure of their last reading.
+        peak=2680,
     ),
     # The fixed client with its storage block taken from the kernel heap at start
     # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
@@ -842,8 +875,12 @@ def judge_chain(
         + (f", committed {committed}" if committed is not None else "")
         + f"; {chain.indirect} call(s) through a register on the path are not followed"
     )
-    for frame, name in chain.path[:6]:
-        lines.append(f"stack-chain:   +{frame:5d} {name[:100]}")
+    # A finding asks for the reason the chain moved, which only the whole chain gives: a failing
+    # image prints every frame with its whole name, since a generic prefix of a hundred
+    # characters names one type and hides which of its functions the frame is.
+    shown = chain.path if not ok else chain.path[:6]
+    for frame, name in shown:
+        lines.append(f"stack-chain:   +{frame:5d} {name if not ok else name[:100]}")
     return ok, lines
 
 
