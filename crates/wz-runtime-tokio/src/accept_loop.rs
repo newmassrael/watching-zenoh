@@ -5986,6 +5986,50 @@ mod tests {
         opened.drain_to_close().await;
     }
 
+    /// When a QUIC mesh test may shut its acceptor down: once every initiator is
+    /// Established AND the acceptor has reported every face up, each counted by
+    /// [`Self::arrive`]. Each half alone lets the test end early.
+    ///
+    /// The initiators, because every QUIC connection shares the acceptor's one
+    /// endpoint UDP socket, so a shutdown on the acceptor's FaceUps alone (the
+    /// lossless-IPC siblings' rule) closes that socket under a peer still waiting
+    /// for its OpenAck (`LinkLost(OsError)`).
+    ///
+    /// The FaceUps, because the loop learns that an accepted session is
+    /// Established only when the intake hands its handshake over (`Step::Intake`,
+    /// then `Step::Opened`, each a turn of an unbiased `select!`), while the
+    /// OpenAck the acceptor queued on reaching Established is already on its way:
+    /// the peer can read it and report Established first, and a shutdown on the
+    /// initiators alone then ends the loop before it holds the last face.
+    #[cfg(feature = "transport-link-quic")]
+    struct QuicMeshGate {
+        arrived: AtomicUsize,
+        needed: usize,
+        go: watch::Sender<bool>,
+    }
+
+    #[cfg(feature = "transport-link-quic")]
+    impl QuicMeshGate {
+        /// A gate for `peers` sessions: one arrival per initiator and one per FaceUp.
+        fn new(peers: usize, go: watch::Sender<bool>) -> Arc<Self> {
+            Arc::new(Self {
+                arrived: AtomicUsize::new(0),
+                needed: 2 * peers,
+                go,
+            })
+        }
+
+        /// One end of one session is up: an initiator Established, or the
+        /// acceptor's FaceUp. An initiator arrives once and the acceptor holds at
+        /// most one face per peer, so the count reaches `needed` only when both
+        /// ends of every session have arrived.
+        fn arrive(&self) {
+            if self.arrived.fetch_add(1, SeqCst) + 1 == self.needed {
+                let _ = self.go.send(true);
+            }
+        }
+    }
+
     /// The quic twin of [`unixsock_idle_initiator`] (R311y404): dials a
     /// `quic/<addr>` listener through the cert-threaded [`connect_and_open_session`]
     /// SSOT (`DialConfig.quic`, exactly the `quic_e2e` dial path), reaches
@@ -5995,27 +6039,16 @@ mod tests {
     /// asserts. Builds its own client config trusting the acceptor's self-signed
     /// `localhost` cert (SNI `localhost`, the self-trust-anchor pattern).
     ///
-    /// SHUTDOWN IS GATED ON INITIATOR COMPLETION, not the acceptor's FaceUp (unlike
-    /// the lossless-IPC siblings, which flip `go` from the acceptor's Nth FaceUp).
-    /// The LAST initiator to reach Established flips `go`, which both ends the
-    /// acceptor and releases every initiator. This is load-bearing for QUIC: all
-    /// connections share the ONE server-endpoint UDP socket, so tearing the acceptor
-    /// down on its own FaceUp — while a peer initiator is still awaiting its final
-    /// handshake datagram (OpenAck) — would close that shared socket under the
-    /// in-flight initiator (retransmit to a closed port -> `LinkLost(OsError)`, a
-    /// teardown race the independent-fd siblings never hit). Since the acceptor's
-    /// per-face Established (it SENT OpenAck) precedes the initiator's (it RECEIVED
-    /// it), "all N initiators Established" already implies the acceptor recorded N
-    /// FaceUps -> `peak_concurrent == N` holds before shutdown.
+    /// Shutdown waits for this initiator through `gate` ([`QuicMeshGate`]), which
+    /// opens only once every initiator is Established and the acceptor has
+    /// reported every face up; `go` then both ends the acceptor and releases every
+    /// initiator.
     #[cfg(feature = "transport-link-quic")]
-    #[allow(clippy::too_many_arguments)]
     async fn quic_idle_initiator(
         addr: SocketAddr,
         cert_pem: String,
         zid: u8,
-        up: Arc<AtomicUsize>,
-        n: usize,
-        go_tx: watch::Sender<bool>,
+        gate: Arc<QuicMeshGate>,
         mut go: watch::Receiver<bool>,
     ) {
         use crate::quic_config::quic_client_config_from_pem;
@@ -6040,14 +6073,7 @@ mod tests {
         )
         .await
         .expect("quic initiator reaches Established");
-
-        // This initiator is now Established. Only once ALL N are (the acceptor holds
-        // N faces by then) do we flip `go` to shut the acceptor down — never before,
-        // or the shared-endpoint teardown would kill an in-flight peer (see the fn
-        // doc). Flipping `go` also releases this + every other initiator's idle wait.
-        if up.fetch_add(1, SeqCst) + 1 == n {
-            let _ = go_tx.send(true);
-        }
+        gate.arrive();
 
         let timeouts = SessionTimeouts::from_build();
         tokio::select! {
@@ -6068,19 +6094,15 @@ mod tests {
     /// stream), and idles until `go`. Each initiator is a distinct client on the
     /// SAME server-endpoint UDP socket, so the DEFERRED-handshake datagram acceptor
     /// holds each as a DISTINCT ZID-keyed mesh face — the property
-    /// [`mesh_accept_loop_holds_two_quic_datagram_peers`] asserts. The shutdown
-    /// discipline is IDENTICAL to the reliable-quic initiator (gated on ALL
-    /// initiators reaching Established, never the acceptor's FaceUp), for the same
-    /// shared-UDP-socket teardown-race reason spelled out on [`quic_idle_initiator`].
+    /// [`mesh_accept_loop_holds_two_quic_datagram_peers`] asserts. Shutdown waits
+    /// for this initiator through the same [`QuicMeshGate`] the reliable-quic
+    /// initiator arrives at, for the same two reasons.
     #[cfg(feature = "transport-link-quic-datagram")]
-    #[allow(clippy::too_many_arguments)]
     async fn quic_datagram_idle_initiator(
         addr: SocketAddr,
         cert_pem: String,
         zid: u8,
-        up: Arc<AtomicUsize>,
-        n: usize,
-        go_tx: watch::Sender<bool>,
+        gate: Arc<QuicMeshGate>,
         mut go: watch::Receiver<bool>,
     ) {
         use crate::quic_config::quic_client_config_from_pem;
@@ -6106,13 +6128,7 @@ mod tests {
         )
         .await
         .expect("quic-datagram initiator reaches Established");
-
-        // See `quic_idle_initiator`: flip `go` only once ALL N are Established (the
-        // acceptor holds N faces by then), never on a per-initiator FaceUp, so the
-        // shared server-endpoint UDP socket is never torn down under an in-flight peer.
-        if up.fetch_add(1, SeqCst) + 1 == n {
-            let _ = go_tx.send(true);
-        }
+        gate.arrive();
 
         let timeouts = SessionTimeouts::from_build();
         tokio::select! {
@@ -7318,11 +7334,10 @@ mod tests {
     /// accept_loop mod is `routing-accept`-gated, so this test compiles only when the
     /// harness names `routing-accept` alongside `transport-link-quic` (a bare
     /// `transport-link-quic` build compiles the whole loop — and this test — OUT).
-    /// NON-FLAKY: shutdown is gated on ALL initiators reaching Established
-    /// ([`quic_idle_initiator`] flips `go`), NOT the acceptor's FaceUp — QUIC's
-    /// connections share one endpoint UDP socket, so an acceptor-FaceUp shutdown
-    /// could close it under a peer still awaiting its OpenAck (`LinkLost`); gating on
-    /// initiator completion closes that teardown race. [[feedback-no-flaky-ever]]
+    /// NON-FLAKY: shutdown waits for both ends of every session ([`QuicMeshGate`]):
+    /// every initiator Established, so the shared endpoint socket is not closed
+    /// under a peer awaiting its OpenAck, and every FaceUp, so the loop holds each
+    /// face before it ends. [[feedback-no-flaky-ever]]
     /// [[feedback-flaky-rootcause-never-revert]]
     #[cfg(feature = "transport-link-quic")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7349,21 +7364,19 @@ mod tests {
             .expect("bind a quic listener");
         let addr = listener.local_addr().expect("quic listener local addr");
 
-        // `go` flips when all N INITIATORS reach Established (each initiator counts
-        // itself up; the last one sends), NOT on the acceptor's Nth FaceUp: the
-        // acceptor must outlive every initiator's handshake because they share one
-        // endpoint UDP socket (see `quic_idle_initiator`). By then the acceptor holds
-        // all N faces (its per-face Established precedes the initiator's), so
-        // `peak_concurrent == N` is already recorded when shutdown fires.
+        // `go` flips when both ends of all N sessions are up ([`QuicMeshGate`]).
         let (go_tx, go_rx) = watch::channel(false);
-        let up = Arc::new(AtomicUsize::new(0));
+        let gate = QuicMeshGate::new(N, go_tx);
         let rejects = Arc::new(AtomicUsize::new(0));
         let on_event = {
             let rejects = rejects.clone();
-            move |event: &AcceptEvent| {
-                if let AcceptEvent::AcceptError(_) = event {
+            let gate = gate.clone();
+            move |event: &AcceptEvent| match event {
+                AcceptEvent::AcceptError(_) => {
                     rejects.fetch_add(1, SeqCst);
                 }
+                AcceptEvent::FaceUp(_) => gate.arrive(),
+                _ => {}
             }
         };
         let acceptor = accept_loop(
@@ -7380,9 +7393,7 @@ mod tests {
                 addr,
                 cert_pem.clone(),
                 (i as u8) + 1,
-                up.clone(),
-                N,
-                go_tx.clone(),
+                gate.clone(),
                 go_rx.clone(),
             )
         });
@@ -7429,11 +7440,10 @@ mod tests {
     /// is `routing-accept`-gated, so this test compiles only when the harness names
     /// `routing-accept` alongside `transport-link-quic-datagram` (a bare
     /// `transport-link-quic-datagram` build compiles the whole loop — and this test —
-    /// OUT). NON-FLAKY: shutdown is gated on ALL initiators reaching Established
-    /// ([`quic_datagram_idle_initiator`] flips `go`), NOT the acceptor's FaceUp —
-    /// datagram connections share one endpoint UDP socket, and loopback UDP is
-    /// lossless, so two clean handshakes are deterministic (the same assumption
-    /// `mesh_accept_loop_holds_two_udp_peers` / `quic_datagram_e2e` rely on).
+    /// OUT). NON-FLAKY: shutdown waits for both ends of every session
+    /// ([`QuicMeshGate`]), and loopback UDP is lossless, so two clean handshakes
+    /// are deterministic (the same assumption `mesh_accept_loop_holds_two_udp_peers`
+    /// / `quic_datagram_e2e` rely on).
     /// [[feedback-no-flaky-ever]] [[feedback-flaky-rootcause-never-revert]]
     #[cfg(feature = "transport-link-quic-datagram")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7464,20 +7474,19 @@ mod tests {
             .local_addr()
             .expect("quic-datagram listener local addr");
 
-        // `go` flips when all N INITIATORS reach Established (each counts itself up;
-        // the last one sends), NOT on the acceptor's Nth FaceUp — the shared-endpoint
-        // teardown-race guard (see `quic_datagram_idle_initiator`). By then the
-        // acceptor holds all N faces (its per-face Established precedes the
-        // initiator's), so `peak_concurrent == N` is already recorded at shutdown.
+        // `go` flips when both ends of all N sessions are up ([`QuicMeshGate`]).
         let (go_tx, go_rx) = watch::channel(false);
-        let up = Arc::new(AtomicUsize::new(0));
+        let gate = QuicMeshGate::new(N, go_tx);
         let rejects = Arc::new(AtomicUsize::new(0));
         let on_event = {
             let rejects = rejects.clone();
-            move |event: &AcceptEvent| {
-                if let AcceptEvent::AcceptError(_) = event {
+            let gate = gate.clone();
+            move |event: &AcceptEvent| match event {
+                AcceptEvent::AcceptError(_) => {
                     rejects.fetch_add(1, SeqCst);
                 }
+                AcceptEvent::FaceUp(_) => gate.arrive(),
+                _ => {}
             }
         };
         let acceptor = accept_loop(
@@ -7494,9 +7503,7 @@ mod tests {
                 addr,
                 cert_pem.clone(),
                 (i as u8) + 1,
-                up.clone(),
-                N,
-                go_tx.clone(),
+                gate.clone(),
                 go_rx.clone(),
             )
         });
