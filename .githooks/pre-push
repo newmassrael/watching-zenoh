@@ -757,6 +757,16 @@ if ! python3 scripts/lib/build_evidence_lint.py; then
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     _prepush_refuse
 fi
+# Items 76 and 386 -- a filtered cargo test in run-ci.sh that asserts no count
+# passes having selected nothing; read off run-ci.sh, no build.
+if ! python3 scripts/lib/unguarded_test_filter_lint.py --selftest \
+    || ! python3 scripts/lib/unguarded_test_filter_lint.py --check; then
+    echo "" >&2
+    echo "pre-push: [gate 2c2x] run-ci.sh runs a filtered cargo test that asserts no count." >&2
+    echo "          Wrap it in _runci_guarded_test <label> <N|+>; the line above names it." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    _prepush_refuse
+fi
 
 # ─── gate 2d — the config key set vs the fixtures that owe it ───────
 # grades: worktree
