@@ -795,7 +795,7 @@ if ! python3 scripts/lib/apfull_membership.py >/dev/null; then
     exit 1
 fi
 
-# ─── gate 2e — every attachment carrier witnesses its own capacity ──
+# ─── gate 2e2 — every attachment carrier witnesses its own capacity ──
 # grades: worktree
 #
 # R2546, closing the last clause of the `attachment-bytes` atom. The ext-zbuf
@@ -819,7 +819,7 @@ fi
 # is gate 2y's rule one file over.
 if ! python3 scripts/lib/attachment_capacity_witness_gate.py; then
     echo "" >&2
-    echo "pre-push: [gate 2e] attachment capacity witness gate FAILED — a" >&2
+    echo "pre-push: [gate 2e2] attachment capacity witness gate FAILED — a" >&2
     echo "          carrier's over-capacity behaviour is unproven, or the Rust" >&2
     echo "          mirror of the codegen capacity has drifted from it. The" >&2
     echo "          lines above name WHICH; a carrier without a witness is not" >&2
@@ -1490,7 +1490,7 @@ if ! python3 scripts/lib/test_double_knob_gate.py; then
     exit 1
 fi
 
-# ─── gate 2k — how many places read `_anyke` (R2306, item 156) ────────
+# ─── gate 2k2 — how many places read `_anyke` (R2306, item 156) ───────
 # grades: worktree
 #
 # `_anyke` had THREE readers and only two were ever compared, so the third
@@ -1505,14 +1505,14 @@ fi
 # because a gate that cannot fail is worth nothing.
 if ! python3 scripts/lib/anyke_reader_gate.py --selftest >/dev/null; then
     echo "" >&2
-    echo "pre-push: [gate 2k] anyke-reader gate SELFTEST failed — it can no" >&2
+    echo "pre-push: [gate 2k2] anyke-reader gate SELFTEST failed — it can no" >&2
     echo "          longer tell a reader from a test fixture, so its verdict" >&2
     echo "          on this push means nothing." >&2
     exit 1
 fi
 if ! python3 scripts/lib/anyke_reader_gate.py; then
     echo "" >&2
-    echo "pre-push: [gate 2k] anyke-reader gate FAILED — a place outside the" >&2
+    echo "pre-push: [gate 2k2] anyke-reader gate FAILED — a place outside the" >&2
     echo "          two declared readers holds an \`_anyke\` literal in code, or" >&2
     echo "          a declared reader stopped holding one. A fourth copy is how" >&2
     echo "          this drifted before; call the SSOT for the implementation" >&2
@@ -1766,7 +1766,7 @@ if ! python3 scripts/lib/deny_diagnostic_gate.py; then
     exit 1
 fi
 
-# ─── gate 2r — a shipped multicast loop must be stoppable (R2333, item 15) ──
+# ─── gate 2r2 — a shipped multicast loop must be stoppable (R2333, item 15) ──
 # grades: worktree
 #
 # The `transport-multicast` atom's residual: the library grew a graceful
@@ -1786,7 +1786,7 @@ fi
 # so a refactor that moves the hosts cannot make this read green by emptying it.
 if ! python3 scripts/lib/multicast_stop_wiring_gate.py; then
     echo "" >&2
-    echo "pre-push: [gate 2r] multicast-stop-wiring FAILED — a shipped host" >&2
+    echo "pre-push: [gate 2r2] multicast-stop-wiring FAILED — a shipped host" >&2
     echo "          drives a multicast group loop that runs for the node's" >&2
     echo "          life and cannot be asked to stop, so it can only leave" >&2
     echo "          its group by dying: no departure Close, and every member" >&2
@@ -1870,7 +1870,7 @@ if ! python3 scripts/lib/subsystem_spawn_gate.py; then
     exit 1
 fi
 
-# ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
+# ─── gate 2e3 — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #
 # Which axes of the scouting socket config can move, and which are witnessed
@@ -1884,7 +1884,7 @@ fi
 # the same reason too: a scope predicate that is wrong reads exactly like a pass.
 if ! python3 scripts/lib/scouting_socket_axis_census.py > /dev/null; then
     echo "" >&2
-    echo "pre-push: [gate 2e] scouting-socket axis census FAILED — a movable axis is" >&2
+    echo "pre-push: [gate 2e3] scouting-socket axis census FAILED — a movable axis is" >&2
     echo "          unjudged, a witness it names no longer exists, or the" >&2
     echo "          derivation read an EMPTY population." >&2
     echo "          Run \`python3 scripts/lib/scouting_socket_axis_census.py\`" >&2
@@ -1893,7 +1893,7 @@ if ! python3 scripts/lib/scouting_socket_axis_census.py > /dev/null; then
     exit 1
 fi
 
-# ─── gate 2f — a flag's precondition SET, derived (R2144, item 218) ──
+# ─── gate 2f2 — a flag's precondition SET, derived (R2144, item 218) ──
 # grades: worktree
 #
 # R311y844 found this class by TRIPPING OVER IT: the expansion emitted
@@ -1914,7 +1914,7 @@ fi
 # added to `args.rs` reaches origin with no local signal otherwise.
 if ! python3 scripts/lib/flag_precondition_gate.py > /dev/null; then
     echo "" >&2
-    echo "pre-push: [gate 2f] flag-precondition gate FAILED — the expansion emits a flag" >&2
+    echo "pre-push: [gate 2f2] flag-precondition gate FAILED — the expansion emits a flag" >&2
     echo "          the binary refuses without a partner, and the emission site" >&2
     echo "          carries no guard; or an anchor this reader needs is gone." >&2
     echo "          Run \`python3 scripts/lib/flag_precondition_gate.py\` for the" >&2
@@ -1932,7 +1932,7 @@ fi
 # asks whether a row is in the RIGHT list. Measured on this gate's first run:
 # THREE of seventy-five `BEYOND` rows were already reader gaps.
 #
-# Here for gate 2d's reasons, and for gate 2f's specifically: both sides are on
+# Here for gate 2d's reasons, and for gate 2f2's specifically: both sides are on
 # disk and it reads them in seconds, and the thing it catches cannot be caught
 # by the changed-crates tests. `zenoh_config` is
 # `#[cfg(feature = "zenoh-config")]`, which is NOT default, so gate 3's

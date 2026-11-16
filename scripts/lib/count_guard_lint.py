@@ -123,40 +123,70 @@ VALUE_FLAGS = frozenset(
 SHELL_EXPANSION_RE = re.compile(r"[$`\"']")
 
 
-def logical_lines(text: str) -> list[tuple[int, str]]:
-    """Join backslash continuations, keeping each logical line's FIRST line no.
+def mapped_logical_lines(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
+    """Join backslash continuations, keeping where each physical line begins.
 
     `run-ci.sh` writes its lanes as one `(cd crates && a && b && c)` subshell
     spread over many physical lines, so a physical-line scan sees a guard with
-    no `cargo test` beside it and a `cargo test` with no guard.
+    no `cargo test` beside it and a `cargo test` with no guard. Each logical line
+    comes with `(offset, physical line no)` for every physical line joined into
+    it, so a match inside it can name the line it actually sits on.
     """
-    out: list[tuple[int, str]] = []
+    out: list[tuple[str, list[tuple[int, int]]]] = []
     buf: str | None = None
-    start = 0
+    starts: list[tuple[int, int]] = []
     for i, line in enumerate(text.split("\n"), 1):
         if buf is None:
-            buf, start = line, i
+            buf, starts = line, [(0, i)]
         else:
-            buf += " " + line.strip()
+            buf += " "
+            starts.append((len(buf), i))
+            buf += line.strip()
         if buf.rstrip().endswith("\\"):
             buf = buf.rstrip()[:-1]
         else:
-            out.append((start, buf))
+            out.append((buf, starts))
             buf = None
     if buf is not None:
-        out.append((start, buf))
+        out.append((buf, starts))
     return out
 
 
+def line_at(starts: list[tuple[int, int]], offset: int) -> int:
+    """The physical line holding character `offset` of a mapped logical line."""
+    line = starts[0][1]
+    for begin, lineno in starts:
+        if begin > offset:
+            break
+        line = lineno
+    return line
+
+
+def logical_lines(text: str) -> list[tuple[int, str]]:
+    """`mapped_logical_lines` with each logical line's FIRST physical line no."""
+    return [(starts[0][1], logical) for logical, starts in mapped_logical_lines(text)]
+
+
 def guard_segments(text: str) -> list[tuple[int, str]]:
-    """Every `&&`-separated segment that both runs cargo test and guards a count."""
+    """Every `&&`-separated segment that both runs cargo test and guards a count,
+    with the physical line its guard sits on.
+
+    Open-debt item 536: this used to report the logical line's FIRST physical
+    line, which for a guard inside a multi-line `(cd crates && ...)` subshell is
+    the subshell's opening line -- one to four lines off, and the same line for
+    every guard of the subshell. The segment offsets are kept through the split
+    so the guard's own line is named.
+    """
     found = []
-    for lineno, logical in logical_lines(text):
+    for logical, starts in mapped_logical_lines(text):
         if logical.lstrip().startswith("#"):
             continue
+        pos = 0
         for seg in logical.split("&&"):
-            if CARGO_TEST_RE.search(seg) and GUARD_RE.search(seg):
-                found.append((lineno, seg.strip()))
+            guard = GUARD_RE.search(seg)
+            if CARGO_TEST_RE.search(seg) and guard:
+                found.append((line_at(starts, pos + guard.start()), seg.strip()))
+            pos += len(seg) + len("&&")
     return found
 
 
@@ -179,13 +209,15 @@ def helper_segments(text: str) -> list[tuple[int, str, int]]:
     race, which this spelling structurally cannot have.
     """
     found = []
-    for lineno, logical in logical_lines(text):
+    for logical, starts in mapped_logical_lines(text):
         if logical.lstrip().startswith("#"):
             continue
         m = HELPER_RE.search(logical)
         if not m:
             continue
-        found.append((lineno, logical[m.start() :].strip(), int(m.group(1))))
+        found.append(
+            (line_at(starts, m.start()), logical[m.start() :].strip(), int(m.group(1)))
+        )
     return found
 
 
@@ -332,6 +364,20 @@ _BARE_FIXTURE = (
 )
 
 
+_BARE_PAIR_FIXTURE = (
+    "    (cd crates \\\n"
+    "        && cargo test -p p --test t --quiet 2>&1 \\\n"
+    "        | grep -qE '^test result: ok\\. 3 passed' \\\n"
+    "        && cargo test -p p --test u --quiet 2>&1 \\\n"
+    "        | grep -qE '^test result: ok\\. 4 passed') || return 1\n"
+)
+
+_HELPER_FIXTURE = (
+    "    echo start && \\\n"
+    "        _runci_guarded_test C1 5 cargo test -p p --test t\n"
+)
+
+
 def _bare_parser_selftest() -> None:
     """The bare spelling's parser must still find a bare guard in a fixture.
 
@@ -343,6 +389,22 @@ def _bare_parser_selftest() -> None:
     assert len(found) == 1 and GUARD_RE.search(found[0][1]).group(1) == "3", (
         "count-guard lint: the bare-spelling parser no longer recognises a bare "
         f"`| grep -qE '^test result: ok. N passed'` guard in its own fixture: {found}"
+    )
+    # Open-debt item 536: the guard sits on the fixture's SECOND physical line,
+    # and two guards of one subshell must not share a line number.
+    assert found[0][0] == 2, (
+        "count-guard lint: the bare guard in the fixture sits on line 2, but the "
+        f"parser reports line {found[0][0]}"
+    )
+    pair = guard_segments(_BARE_PAIR_FIXTURE)
+    assert [ln for ln, _ in pair] == [3, 5], (
+        "count-guard lint: two guards of one subshell must each report their own "
+        f"line (3 and 5), got {[ln for ln, _ in pair]}"
+    )
+    helper = helper_segments(_HELPER_FIXTURE)
+    assert [ln for ln, _, _ in helper] == [2], (
+        "count-guard lint: a helper guard continued from an earlier line must "
+        f"report its own line (2), got {[ln for ln, _, _ in helper]}"
     )
 
 

@@ -1382,48 +1382,54 @@ run_qemu_case() {
 # its own header. Same class y415 spent a round retracting.
 layer_0_preflight_lints() {
     # 0.1 cargo fmt --check across every workspace (mandatory). crates/ is
-    # the primary workspace; each deploy/*/ that carries its OWN
+    # the primary workspace; every other tracked manifest that carries its OWN
     # `[workspace]` table is a standalone workspace the crates/ fmt --check
-    # does not visit (R311be `mcu-qemu-demo`, R311hl `mcu-noheap-probe`,
-    # R311iv `mcu-session-acceptor`). R311iw — these were enumerated one
-    # `if`-block per crate, and the enumeration was forgotten for
-    # mcu-session-acceptor (it shipped un-gated until R311iv caught a fmt
-    # FAIL on a full run). Auto-discovery replaces the manual list for the
-    # layouts the globs below reach. R311y415 — it does NOT make the
-    # stronger guarantee this comment used to claim ("a NEW standalone
-    # deploy workspace is fmt-gated the moment it exists"): a workspace
-    # nested one level deeper than `deploy/*/*/` is silently not gated,
-    # reproduced at R311y415. The floor below is what converts that class
-    # from a silent green into a red; the globs still need widening by hand
-    # when a deeper layout lands.
-    # R311y31 — also scan one level deeper (`deploy/*/*/`): the Zephyr deploy is
-    # west/cmake-driven at deploy/zephyr-app/, with its Rust staticlib workspace
-    # nested at deploy/zephyr-app/rust/. The extra glob keeps the auto-discovery
-    # invariant ("any standalone deploy workspace is fmt-gated") for nested
-    # layouts; it still only matches a dir that carries its OWN `[workspace]`.
-    local fmt_dirs=(crates)
-    local dpath
-    for dpath in deploy/*/ deploy/*/*/; do
-        [[ -f "${dpath}Cargo.toml" ]] || continue
-        grep -qE '^[[:space:]]*\[[[:space:]]*workspace[[:space:]]*\]' \
-            "${dpath}Cargo.toml" || continue
-        fmt_dirs+=("${dpath%/}")
-    done
-    # R311y415 — DISCOVERY FLOOR. The loop above had no lower bound, so a
-    # deploy workspace the globs miss (one nested a third level deep, which
-    # R311y31 already had to widen the glob for once) was not reported as
-    # ungated: the lane simply printed `fmt --check OK` over the shorter
-    # list and returned 0. That was moot while Layer 0 ran nowhere; hosting
-    # it (R311y415) makes the hole load-bearing, and it is the same
-    # "success by silence" class y414's _runci_guarded_test closes by
-    # rejecting an expect of 0. The floor turns every future discovery miss
-    # into a red. Bump it in the same commit that adds a workspace.
-    local -r fmt_dirs_min=7   # crates + 6 deploy workspaces @ R311y415
-    if (( ${#fmt_dirs[@]} < fmt_dirs_min )); then
-        echo "  Layer0 FAIL: fmt discovery found ${#fmt_dirs[@]} workspace(s), expected >= ${fmt_dirs_min}" >&2
-        echo "  found: ${fmt_dirs[*]}" >&2
+    # does not visit. R311iw — these were enumerated one `if`-block per crate
+    # and one was forgotten (mcu-session-acceptor shipped un-gated); globs
+    # replaced the list and then missed every layout they did not reach.
+    #
+    # Open-debt item 495 -- BOTH DISCOVERIES READ THE WHOLE INDEX, AND NEITHER
+    # HAS A HAND-KEPT FLOOR. The deploy globs (`deploy/*/ deploy/*/*/`) and the
+    # shellcheck pathspec below each carried a minimum count that had to be
+    # bumped by hand; it drifted three times, and the globs had left seven
+    # workspaces ungated (four under conformance/, crates/wz-fuzz, oracles,
+    # xtask) while the floor stayed satisfied. A workspace is now any tracked
+    # Cargo.toml with its own `[workspace]` table, wherever it sits, and a
+    # shell script is any tracked `*.sh` plus the shell hooks: there is no
+    # pathspec left to stop matching, so there is no number to keep. What can
+    # still fail is the listing itself, and that is checked by its status.
+    local index_list index_rc=0 tracked
+    local -a index_files=()
+    index_list="$(mktemp)"
+    git ls-files -z >"$index_list" || index_rc=$?
+    while IFS= read -r -d '' tracked; do
+        index_files+=("$tracked")
+    done <"$index_list"
+    rm -f "$index_list"
+    if (( index_rc != 0 || ${#index_files[@]} == 0 )); then
+        echo "  Layer0 FAIL: git ls-files could not list the index (rc ${index_rc}, ${#index_files[@]} path(s)); fmt and shellcheck discovery cannot run" >&2
         return 1
     fi
+    local fmt_dirs=() manifest
+    for manifest in "${index_files[@]}"; do
+        case "$manifest" in
+            Cargo.toml | */Cargo.toml) ;;
+            *) continue ;;
+        esac
+        grep -qE '^[[:space:]]*\[[[:space:]]*workspace[[:space:]]*\]' "$manifest" 2>/dev/null \
+            || continue
+        fmt_dirs+=("$(dirname "$manifest")")
+    done
+    if (( ${#fmt_dirs[@]} == 0 )); then
+        echo "  Layer0 FAIL: the index holds no Cargo workspace, so fmt would grade nothing" >&2
+        return 1
+    fi
+    # OWED: workspaces the index discovery reached for the first time and that
+    # were not rustfmt-clean then (measured file by file: 2 of 6, 13 of 51 and
+    # 2 of 3). Each is still checked, its failure printed and not counted, and
+    # one that PASSES fails the lane until it is taken off this list, so the
+    # list can only shrink. A name here that is no longer a workspace fails too.
+    local -a fmt_owed=(conformance/differential conformance/differential-shm oracles)
     # R311y415 — accumulate rather than fail-fast. A `return 1` on the first
     # dirty workspace costs one full hosted round-trip PER dirty workspace;
     # reporting all of them is one push instead of N.
@@ -1436,8 +1442,31 @@ layer_0_preflight_lints() {
     # on the first. The `Diff in <path>` lines cargo prints above each FAIL
     # are the actual defect list. The unique reach of the six deploy lanes
     # is their OWN sources, which nothing else in the repo fmt-checks.
-    local fdir fmt_rc=0
+    local fdir fmt_rc=0 owed owed_here
+    for owed in "${fmt_owed[@]}"; do
+        owed_here=0
+        for fdir in "${fmt_dirs[@]}"; do
+            [[ "$fdir" == "$owed" ]] && owed_here=1
+        done
+        if (( owed_here == 0 )); then
+            echo "  Layer0 FAIL: fmt_owed names ${owed}, which is not a tracked workspace; remove it" >&2
+            fmt_rc=1
+        fi
+    done
     for fdir in "${fmt_dirs[@]}"; do
+        owed_here=0
+        for owed in "${fmt_owed[@]}"; do
+            [[ "$fdir" == "$owed" ]] && owed_here=1
+        done
+        if (( owed_here == 1 )); then
+            if (cd "$fdir" && cargo fmt --all -- --check --color=never >/dev/null 2>&1); then
+                echo "  Layer0 FAIL: ${fdir} is fmt-clean now; remove it from fmt_owed so it stays graded" >&2
+                fmt_rc=1
+            else
+                echo "  Layer0 note: ${fdir} is owed formatting (fmt_owed) and is not graded" >&2
+            fi
+            continue
+        fi
         if ! (cd "$fdir" && cargo fmt --all -- --check --color=never); then
             # R311y415 — ` FAIL: ` exactly, not the older ` FAIL `: that is
             # the token y414's GitHub `::error` extractor lifts. With the
@@ -1559,9 +1588,12 @@ layer_0_preflight_lints() {
         # .githooks/* entries are extensionless, so they are admitted by SHEBANG
         # rather than by name — a future non-shell file dropped in that
         # directory then neither breaks the lane nor silently widens it.
+        #
+        # The files come from the whole index read once above (open-debt item
+        # 495): there is no pathspec to stop matching and no floor to keep.
         local -a sc_files=()
         local scf
-        while IFS= read -r scf; do
+        for scf in "${index_files[@]}"; do
             case "$scf" in
                 *.sh) sc_files+=("$scf") ;;
                 .githooks/*)
@@ -1569,39 +1601,9 @@ layer_0_preflight_lints() {
                         && head -n1 "$scf" | grep -qE '^#!.*\b(ba)?sh\b' \
                         && sc_files+=("$scf") ;;
             esac
-        done < <(git ls-files -- '*.sh' '.githooks/*')
-        # DISCOVERY FLOOR, same contract as fmt_dirs_min above: without it a
-        # pathspec that stops matching degrades to "linted fewer files" and
-        # still prints OK. Bump it in the same commit that adds a script.
-        # R311y782 — raised 18 -> 33, the MEASURED count. It had stood at the
-        # R311y419 count while the tree grew to 33 files, so a pathspec that
-        # stopped matching could have dropped fifteen scripts and still cleared
-        # the floor. A floor is only a floor against the number it is set to.
-        #
-        # Raised 33 -> 38 on 2026-08-22, and the interesting part is that only
-        # ONE of those five is this commit's: adding
-        # scripts/lib/sce-codegen-oracle.sh made the count 38, and it had
-        # already drifted to 37 without anyone moving the floor. So the gate had
-        # four scripts of slack — a pathspec that stopped matching could have
-        # dropped four and still cleared 33. That is the SAME drift R311y782
-        # measured and wrote the instruction against, recurring within the file
-        # that carries the instruction, which says the instruction is not
-        # enough on its own. Recomputing it is one command, and the recipe is
-        # the loop directly above this line.
-        # Raised 38 -> 39 at R2068, and this is the THIRD time the paragraph
-        # above has had to be written: 33 had drifted to 38, 38 had drifted to
-        # 39 (R2064 added scripts/lib/home-path-scan.sh and left the floor),
-        # and each time the slack was found by someone recomputing it for an
-        # unrelated reason rather than by the gate. The instruction to bump it
-        # in the same commit is now demonstrably not enough on its own -- see
-        # open debt 495 for the shape that would not need one: compare this
-        # pathspec's result against the SAME suffix filter applied to the whole
-        # index, which catches a pathspec that stops matching without anyone
-        # maintaining a number, and is not circular the way auto-deriving the
-        # floor from the pathspec itself would be.
-        local -r sc_files_min=39   # 36 *.sh (25 scripts/ + 11 scripts/lib/) + 3 .githooks
-        if (( ${#sc_files[@]} < sc_files_min )); then
-            echo "  Layer0 FAIL: shellcheck discovery found ${#sc_files[@]} file(s), expected >= ${sc_files_min}" >&2
+        done
+        if (( ${#sc_files[@]} == 0 )); then
+            echo "  Layer0 FAIL: the index holds no shell script, so shellcheck would grade nothing" >&2
             return 1
         fi
         if ! shellcheck "${sc_files[@]}"; then

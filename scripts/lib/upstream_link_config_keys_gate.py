@@ -165,10 +165,12 @@ CONFIG_MOD = re.compile(r"^pub mod config \{\n(.*?)^\}", re.M | re.S)
 CONFIG_KEY = re.compile(r'pub const [A-Z0-9_]+: &str = "([^"]+)"\s*;')
 
 #: wz's own spelling for "this locator config key has a reader": a `const`
-#: declaration binding it to a name. A doc comment mentioning the key does NOT
-#: match, deliberately -- the unixpipe residual this gate was born from was a
-#: doc comment naming `file_mask` and no reader at all.
-WZ_KEY_DECL = re.compile(r'const [A-Z0-9_]+: &str = "([^"]+)"\s*;')
+#: declaration binding it to a name, and that name USED by some code beyond the
+#: declaration (open-debt 726; see `referenced_beyond_declaration`). A doc
+#: comment mentioning the key does NOT match, deliberately -- the unixpipe
+#: residual this gate was born from was a doc comment naming `file_mask` and no
+#: reader at all -- and neither does a declaration nobody uses.
+WZ_KEY_DECL = re.compile(r'const ([A-Z0-9_]+): &str = "([^"]+)"\s*;')
 
 #: The impl-axis tag lives at the HEAD of an inventory reason.
 IMPL_TAG = re.compile(r"^\s*([A-Z-]+)")
@@ -483,15 +485,52 @@ def pico_spellings(
     return out
 
 
-def wz_pico_macro_reads(root: pathlib.Path | None = None) -> set[str]:
-    """Every pico config macro some wz crate's CODE references (comments removed)."""
+#: A Rust constant's declaration site: `const NAME:`, with or without `pub`.
+CONST_DECL_SITE = re.compile(r"\bconst\s+([A-Z][A-Z0-9_]*)\s*:")
+
+
+def referenced_beyond_declaration(code: str, names: set[str]) -> set[str]:
+    """The names in `names` that occur in `code` more often than they are
+    declared there: a constant some code USES, not one that is only written.
+
+    Open-debt 726. The READ predicates asked whether a key's name APPEARS, and a
+    declaration is an appearance, so declaring a constant credited the key with
+    a reader nobody had written (R2599 moved two schemes' unread count 6 -> 1 by
+    declaring fifteen constants whose parsed values nothing consumed yet). One
+    use outside the declaration is still not proof that the value reaches the
+    scheme's consumer -- that needs the value followed, which no text read does --
+    but it refuses the declaration alone.
+    """
+    if not names:
+        return set()
+    uses: dict[str, int] = {}
+    for ident in re.findall(r"\b[A-Z][A-Z0-9_]*\b", code):
+        if ident in names:
+            uses[ident] = uses.get(ident, 0) + 1
+    decls: dict[str, int] = {}
+    for ident in CONST_DECL_SITE.findall(code):
+        if ident in names:
+            decls[ident] = decls.get(ident, 0) + 1
+    return {n for n in names if uses.get(n, 0) > decls.get(n, 0)}
+
+
+def _crate_code(root: pathlib.Path | None) -> str:
+    """Every `crates/**/*.rs` file's code, comments removed, as one text."""
     base = (root or ROOT) / "crates"
-    found: set[str] = set()
-    for path in base.rglob("*.rs"):
+    parts = []
+    for path in sorted(base.rglob("*.rs")):
         if "/target/" in str(path):
             continue
-        found.update(re.findall(r"\b(Z_CONFIG_[A-Z0-9_]+_KEY)\b", _code(path)))
-    return found
+        parts.append(_code(path))
+    return "\n".join(parts)
+
+
+def wz_pico_macro_reads(root: pathlib.Path | None = None) -> set[str]:
+    """Every pico config macro some wz crate's CODE uses beyond declaring it
+    (comments removed)."""
+    code = _crate_code(root)
+    named = set(re.findall(r"\b(Z_CONFIG_[A-Z0-9_]+_KEY)\b", code))
+    return referenced_beyond_declaration(code, named)
 
 
 def wz_honoured_config_keys(root: pathlib.Path | None = None) -> set[str]:
@@ -505,15 +544,19 @@ def wz_honoured_config_keys(root: pathlib.Path | None = None) -> set[str]:
 
 
 def wz_declared_keys(root: pathlib.Path | None = None) -> set[str]:
-    """Every locator config key wz BINDS TO A NAME, across `crates/**/src`."""
+    """Every locator config key wz binds to a name that some code then USES,
+    across `crates/**/*.rs` (open-debt 726: the declaration alone no longer
+    credits the key)."""
     base = (root or ROOT) / "crates"
-    found: set[str] = set()
+    by_name: dict[str, set[str]] = {}
     for path in base.rglob("*.rs"):
         if "/target/" in str(path):
             continue
         body = path.read_text(encoding="utf-8", errors="replace")
-        found.update(WZ_KEY_DECL.findall(body))
-    return found
+        for name, key in WZ_KEY_DECL.findall(body):
+            by_name.setdefault(name, set()).add(key)
+    used = referenced_beyond_declaration(_crate_code(root), set(by_name))
+    return {key for name in used for key in by_name[name]}
 
 
 def store_reasons(root: pathlib.Path | None = None) -> dict[str, str]:
@@ -1524,13 +1567,44 @@ def selftest() -> int:
             src.mkdir(parents=True)
             src.joinpath("l.rs").write_text(
                 '/// wz does NOT model zenoh\'s `file_mask` locator parameter.\n'
-                'const LOCATOR_IFACE_KEY: &str = "iface";\n',
+                'const LOCATOR_IFACE_KEY: &str = "iface";\n'
+                "fn iface(p: &Params) -> Option<&str> { p.get(LOCATOR_IFACE_KEY) }\n",
                 encoding="utf-8",
             )
             if wz_declared_keys(pathlib.Path(wz)) != {"iface"}:
                 print(
                     "upstream-link-config-keys: SELFTEST FAIL -- a key mentioned "
                     "only in a doc comment must NOT count as read"
+                )
+                return 1
+
+        # Open-debt 726 -- a constant that is only DECLARED is not a reader:
+        # the same key with no use of its name, and a use only in a comment.
+        with tempfile.TemporaryDirectory() as wz:
+            src = pathlib.Path(wz) / "crates" / "c" / "src"
+            src.mkdir(parents=True)
+            src.joinpath("l.rs").write_text(
+                'pub const LOCATOR_IFACE_KEY: &str = "iface";\n'
+                'const LOCATOR_DSCP_KEY: &str = "dscp";\n'
+                "// p.get(LOCATOR_DSCP_KEY) is what a reader would write\n",
+                encoding="utf-8",
+            )
+            if wz_declared_keys(pathlib.Path(wz)) != set():
+                print(
+                    "upstream-link-config-keys: SELFTEST FAIL -- a key whose "
+                    "constant is declared and never used must NOT count as read"
+                )
+                return 1
+            src.joinpath("m.rs").write_text(
+                "pub const Z_CONFIG_SCOUTING_TIMEOUT_KEY: u8 = 0x05;\n"
+                "pub const Z_CONFIG_SESSION_ZID_KEY: u8 = 0x06;\n"
+                "fn t(c: &Config) { c.get(Z_CONFIG_SESSION_ZID_KEY); }\n",
+                encoding="utf-8",
+            )
+            if wz_pico_macro_reads(pathlib.Path(wz)) != {"Z_CONFIG_SESSION_ZID_KEY"}:
+                print(
+                    "upstream-link-config-keys: SELFTEST FAIL -- a pico macro "
+                    "that is only declared must NOT count as read"
                 )
                 return 1
 

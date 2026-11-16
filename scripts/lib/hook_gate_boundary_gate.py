@@ -147,11 +147,35 @@ SECTION_RE = re.compile(r"^# ─── (?P<h>[^\n]*)$", re.M)
 # three times and `2k` and `2r` twice each, which is what a namespace overflows
 # into when its grammar admits no second level. Those duplicates are a real
 # defect — two gates sharing a name are indistinguishable in the `[gate 2e]`
-# attribution mark this file also reads — and they are not repaired here; what
-# this widening does is stop the grammar from FORCING another one.
+# attribution mark this file also reads. Open-debt item 689 repaired them
+# (the second holder of each name took a two-level name) and `check` now refuses
+# two sections with one name, so the attribution a refusal prints is unambiguous.
 GATE_RE = re.compile(r"^gate (?P<n>\d+[a-z0-9]*)\b")
 EXIT1_RE = re.compile(r"\bexit\s+1\b")
 COMMENT_RE = re.compile(r"^\s*#")
+
+# Open-debt item 742 -- a refusal is `exit 1` OR the RECORDING primitive. The
+# hook is fail-fast, so one push shows at most one refusal; the cheap static
+# gates can instead RECORD theirs and let one settle point refuse once with all
+# of them. This file used to define a refusal as the literal `exit 1`, so a gate
+# that recorded instead of exiting read as a gate that cannot refuse, and the
+# accumulator could not be built without this gate going red. Both readers --
+# the count and the message walk -- take the same predicate, so a recorded
+# refusal is held to the same attribution as an exiting one.
+#
+# The primitive is called as a command; its definition (`name() {`) is not a
+# call. A recorded refusal refuses nothing until the settle point runs, so a
+# hook that records and never settles is refused below.
+REFUSE_FN = "_prepush_refuse"
+SETTLE_FN = "_prepush_settle"
+_CMD_START = r"(?:^\s*|[;&|]\s*|\bthen\s+|\belse\s+|\bdo\s+)"
+RECORD_RE = re.compile(_CMD_START + re.escape(REFUSE_FN) + r"(?=\s|;|$)")
+SETTLE_RE = re.compile(_CMD_START + re.escape(SETTLE_FN) + r"(?=\s|;|$)")
+
+
+def is_refusal(line: str) -> bool:
+    """A code line that refuses: it exits 1 or records a refusal."""
+    return bool(EXIT1_RE.search(line) or RECORD_RE.search(line))
 
 # A refusal's MESSAGE: the run of stderr-writing lines directly above `exit 1`.
 # Bounded by anything else -- the `if !` that opens the block ends the walk, so
@@ -207,12 +231,25 @@ def code_of(body: str) -> str:
 
 
 def refusals(body: str) -> int:
-    """`exit 1` occurrences on CODE lines -- a comment quoting one is not one."""
-    return sum(1 for ln in code_of(body).splitlines() if EXIT1_RE.search(ln))
+    """Refusals (`exit 1` or a recorded one) on CODE lines -- a comment quoting
+    one is not one."""
+    return sum(1 for ln in code_of(body).splitlines() if is_refusal(ln))
+
+
+def recordings(text: str) -> list[int]:
+    """Line numbers (1-based) of every recorded refusal on a code line."""
+    return [i for i, ln in enumerate(text.splitlines(), 1)
+            if not COMMENT_RE.match(ln) and RECORD_RE.search(ln)]
+
+
+def settles(text: str) -> list[int]:
+    """Line numbers (1-based) of every call of the settle point on a code line."""
+    return [i for i, ln in enumerate(text.splitlines(), 1)
+            if not COMMENT_RE.match(ln) and SETTLE_RE.search(ln)]
 
 
 def refusal_messages(body: str) -> list[str]:
-    """One entry per `exit 1`: the stderr lines printed directly above it.
+    """One entry per refusal: the stderr lines printed directly above it.
 
     `code_of` cannot be used here -- it strips the very `echo` payloads this
     reads. The walk goes UP from the refusal and stops at the first line that
@@ -222,7 +259,7 @@ def refusal_messages(body: str) -> list[str]:
     lines = body.splitlines()
     out: list[str] = []
     for i, ln in enumerate(lines):
-        if COMMENT_RE.match(ln) or not ln.strip() or not EXIT1_RE.search(ln):
+        if COMMENT_RE.match(ln) or not ln.strip() or not is_refusal(ln):
             continue
         j = i - 1
         while j >= 0 and STDERR_ECHO_RE.match(lines[j]):
@@ -254,6 +291,34 @@ def check(hook_text: str) -> tuple[bool, list[str]]:
                        "found. That is the header scan having stopped scanning, "
                        "not the hook having no gates -- a population of zero is "
                        "not a pass."]
+
+    # Open-debt item 689 -- a gate's name is what its refusal prints, so two
+    # sections answering to one name make every such refusal ambiguous. Derived
+    # over HEADERS: a count of mentions cannot tell one gate named five times
+    # from two gates sharing a label.
+    seen: dict[str, int] = {}
+    for h, _ in gates:
+        gid = GATE_RE.match(h).group("n")
+        seen[gid] = seen.get(gid, 0) + 1
+    for gid, n in sorted(seen.items()):
+        if n > 1:
+            ok = False
+            lines.append(
+                f"hook-gate-boundary FAIL: {n} sections are named `gate {gid}`. "
+                f"A refusal marked [gate {gid}] then names either of them; give "
+                f"each its own name (a second level, `{gid}2`, is free grammar).")
+
+    # Item 742 -- a recorded refusal refuses only when a settle point runs after
+    # it. Without one, every recorded refusal is a pass with a message.
+    recorded = recordings(hook_text)
+    if recorded:
+        settled = settles(hook_text)
+        if not settled or max(settled) < max(recorded):
+            ok = False
+            lines.append(
+                f"hook-gate-boundary FAIL: line {max(recorded)} records a refusal "
+                f"({REFUSE_FN}) and no {SETTLE_FN} call follows it. A refusal "
+                f"that is recorded and never settled lets the push through.")
 
     counts: dict[str, int] = {s: 0 for s in SURFACES}
     for h, body in secs:
@@ -398,6 +463,17 @@ def _verdict(gid: str) -> str:
             '    exit 1\nfi\n')
 
 
+def _recorded(gid: str, mark: bool = True) -> str:
+    """A refusal that RECORDS instead of exiting (item 742)."""
+    tag = f"[gate {gid}] " if mark else ""
+    return ('if ! cargo test; then\n'
+            f'    echo "pre-push: {tag}changed-crate tests failed." >&2\n'
+            f'    {REFUSE_FN}\nfi\n')
+
+
+_PRIMITIVES = (f'{REFUSE_FN}() {{\n    refused=$((refused + 1))\n}}\n'
+               f'{SETTLE_FN}() {{\n    (( refused == 0 )) || exit "$refused"\n}}\n')
+_SETTLE = _sec("the static block settles what it recorded", f"{SETTLE_FN}\n")
 _GUARD = 'if [[ -z "$diff_base" ]]; then\n    exit 0\nfi\n'
 _VERDICT = _verdict("5")
 _SILENT = 'if ! cargo test; then\n    exit 1\nfi\n'
@@ -501,6 +577,40 @@ _CASES = [
           '    echo "pre-push: [gate 7] a changed crate is not CLEAN." >&2\n'
           '    echo "          (gate 3 is default features, no clippy)" >&2\n'
           '    exit 1\nfi\n', "worktree"), None),
+    # --- the recorded refusal (item 742) ---
+    ("a gate whose refusal is RECORDED, then settled, owns its refusal", True,
+     _PRIMITIVES
+     + _sec("gate 2d — the config key set", _recorded("2d"), "worktree")
+     + _sec("gate 2g — the kind of unhonoured", _recorded("2g"), "worktree")
+     + _SETTLE, None),
+    ("a recorded refusal that nothing settles", False,
+     _PRIMITIVES
+     + _sec("gate 2d — the config key set", _recorded("2d"), "worktree"),
+     f"no {SETTLE_FN} call follows it"),
+    ("a settle point that runs BEFORE the refusal it should settle", False,
+     _PRIMITIVES + _SETTLE
+     + _sec("gate 2d — the config key set", _recorded("2d"), "worktree"),
+     f"no {SETTLE_FN} call follows it"),
+    ("a recorded refusal is held to the attribution arm too", False,
+     _PRIMITIVES
+     + _sec("gate 2d — the config key set", _recorded("2d", mark=False), "worktree")
+     + _SETTLE,
+     "names no gate in the message it prints"),
+    ("a recorded refusal moved into a neighbour still carries its mark", False,
+     _PRIMITIVES
+     + _sec("gate 2d — the config key set", _recorded("2d") + _recorded("2g"),
+            "worktree")
+     + _sec("gate 2g — the kind of unhonoured", _recorded("2g"), "worktree")
+     + _SETTLE,
+     "is marked ['[gate 2g]']"),
+    # --- unique names (item 689) ---
+    ("two sections answering to one gate name", False,
+     _sec("gate 2e — the grading-pin ratchet", _verdict("2e"), "worktree")
+     + _sec("gate 2e — the scouting socket", _verdict("2e"), "worktree"),
+     "2 sections are named gate 2e"),
+    ("a second-level name keeps two neighbours apart", True,
+     _sec("gate 2e — the grading-pin ratchet", _verdict("2e"), "worktree")
+     + _sec("gate 2e3 — the scouting socket", _verdict("2e3"), "worktree"), None),
 ]
 
 

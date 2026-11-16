@@ -1588,12 +1588,29 @@ def changed_from_git(rng):
     return files, lines
 
 
-def _read_worktree(d, rel):
-    p = CRATES / d / rel
+#: Open-debt item 778 -- every worktree file the selection could not READ, as
+#: opposed to one that is not there. Both used to answer "", so a file that
+#: failed to read narrowed the population with nothing printed (measured: one
+#: changed reader took a range from 33 reached guards to 10, silently). `main`
+#: prints these and refuses to judge while any exists.
+READ_FAILURES: list[str] = []
+
+
+def _read_file(p):
+    """`p`'s text; "" when it is absent, which is a legitimate empty answer (a
+    file the range deleted), and "" with the failure recorded when it exists
+    and cannot be read."""
     try:
         return p.read_text()
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
         return ""
+    except (OSError, UnicodeDecodeError) as exc:
+        READ_FAILURES.append(f"{p}: {type(exc).__name__}: {exc}")
+        return ""
+
+
+def _read_worktree(d, rel):
+    return _read_file(CRATES / d / rel)
 
 
 def range_base(rng):
@@ -2049,6 +2066,20 @@ def main():
         shape_changed=changes.shape_changed,
         run_ci_lines=changes.run_ci_lines,
     )
+    if READ_FAILURES:
+        # Item 778: the selection above read these as empty, so the guards whose
+        # filter only their text could match were dropped, and the count below
+        # would be a lower bound printed as a result.
+        print(
+            f"guarded-count gate: CANNOT JUDGE -- {len(READ_FAILURES)} file(s) this "
+            "push reaches could not be read, so the guards they would select are "
+            "missing from the count:",
+            file=sys.stderr,
+        )
+        for failure in READ_FAILURES:
+            print(f"  {failure}", file=sys.stderr)
+        if not args.count_only:
+            return EXIT_CANNOT_JUDGE
 
     # Which of the reached guards the cache already answers. A digest per
     # package, computed once.
@@ -2662,6 +2693,7 @@ def selftest():
 
     selftest_787(arm)
     selftest_exit_codes(arm)
+    selftest_778(arm)
 
     bad =[(n, w) for n, ok, w in arms if not ok]
     print(f"guarded-count gate selftest: {len(arms) - len(bad)}/{len(arms)} arm(s) OK")
@@ -2707,6 +2739,45 @@ lane_loop() {
         cargo test -p demo-crate --features "x,zenoh-config" --lib --quiet || return 1
 }
 """
+
+
+def selftest_778(arm):
+    """An unreadable file is recorded; an absent one and a readable one are not."""
+    import tempfile
+
+    saved = list(READ_FAILURES)
+    READ_FAILURES.clear()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            good = base / "good.rs"
+            good.write_text("fn f() {}\n")
+            bad = base / "bad.rs"
+            bad.write_bytes(b"fn f() { \xff\xfe }\n")
+            arm(
+                "778: a readable file is read and records nothing",
+                _read_file(good) == "fn f() {}\n" and not READ_FAILURES,
+                "the reader must not report a file it read",
+            )
+            arm(
+                "778: an absent file is empty and records nothing",
+                _read_file(base / "gone.rs") == "" and not READ_FAILURES,
+                "a file the range deleted is a legitimate empty answer",
+            )
+            got = _read_file(bad)
+            arm(
+                "778: a file that exists and cannot be read is recorded",
+                got == "" and len(READ_FAILURES) == 1 and "bad.rs" in READ_FAILURES[0],
+                "an unreadable file read as empty narrows the selection silently",
+            )
+            arm(
+                "778: a directory where a file is expected is recorded",
+                _read_file(base) == "" and len(READ_FAILURES) == 2,
+                "an OSError other than absence is a failure to read",
+            )
+    finally:
+        READ_FAILURES.clear()
+        READ_FAILURES.extend(saved)
 
 
 def selftest_exit_codes(arm):
