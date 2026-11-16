@@ -3461,6 +3461,10 @@ layer_c0_test_discipline() {
     # knew. Three sites were in that state and R311y756 had repaired a fourth,
     # which is what makes this a rule rather than a habit.
     _runci_leg build_evidence_lint -- python3 scripts/lib/build_evidence_lint.py
+    # Item 427 -- a footprint attribution by SIZE as well as delta, which tags
+    # growth that vanished callees explain as absorbed. An instrument run by
+    # hand on two ELFs; its matcher is held here by the selftest.
+    _runci_leg footprint_attribution.selftest -- python3 scripts/lib/footprint_attribution.py --selftest
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks

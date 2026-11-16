@@ -514,7 +514,9 @@ declare -A BASELINE_MC_TEXT=(
     # `check_eventless_transitions` also has two callers (`engine.rs:2030` and
     # `:2418`), so a sum over the loop symbol alone undercounts in the other
     # direction. This gate is unaffected: it weighs whole-section `text`, not
-    # symbols.
+    # symbols. `scripts/lib/footprint_attribution.py --old A --new B --nm
+    # arm-none-eabi-nm --scope 'Engine<'` prints sizes, instance counts and the
+    # scope total, and tags a growth that vanished callees explain as absorbed.
     #
     # Round 1955 — SHRANK, and this is the 7% of the paragraph above being
     # claimed. `wz-session-core`'s new `no_macrostep_diagnostics` profile
