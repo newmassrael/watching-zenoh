@@ -2428,6 +2428,10 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // R2944 — the QoS metadata is the ESTABLISHMENT's input, not the
             // link's: the dial caller stages it into the link's offer.
             qos: _,
+            // The stream keys choose a QUIC link's offer; this build's QUIC
+            // dial serves the single-stream protocols alone
+            // (`QuicAlpn::is_served`), which every accepted value includes.
+            quic_streams: _,
         } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(
@@ -3070,6 +3074,7 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
             retry,
             tls,
             qos,
+            quic_streams,
         } => {
             let addrs = crate::link_pipeline::resolve_locator_addrs(&host, port)
                 .await
@@ -3097,6 +3102,9 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
                 // R2944 — and its QoS metadata, so a named peer's link
                 // declares what the endpoint says, as a numeric one's does.
                 qos,
+                // And its stream keys, so a named QUIC peer is offered what a
+                // numeric one is.
+                quic_streams,
             })
         }
         other => other,
@@ -3500,6 +3508,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // links it accepts: upstream seeds an accepted link from that
             // link's own src endpoint, not from the listen endpoint.
             qos: _,
+            // As on the dial side: this build's QUIC listener serves the
+            // single-stream protocols alone, which every accepted value includes.
+            quic_streams: _,
         } => match proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
                 bind_tcp_host(
@@ -6599,6 +6610,7 @@ mod tests {
                 retry: None,
                 tls: None,
                 qos: None,
+                quic_streams: wz_session_core::locator::QuicStreams::DEFAULT,
             })
         );
     }
@@ -6627,6 +6639,7 @@ mod tests {
                 retry: None,
                 tls: None,
                 qos: None,
+                quic_streams: wz_session_core::locator::QuicStreams::DEFAULT,
             })
         );
         assert_eq!(

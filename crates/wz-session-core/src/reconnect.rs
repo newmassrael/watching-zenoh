@@ -99,6 +99,9 @@ pub enum ReconnectLocator {
         /// for the reason the TLS material is: a reconnect that dropped it
         /// would re-establish the link with a band and class nobody declared.
         qos: Option<alloc::boxed::Box<crate::locator::LocatorQosMetadata>>,
+        /// The endpoint's QUIC stream keys, preserved across the narrowing so a
+        /// re-dial offers the protocols the first dial did.
+        quic_streams: crate::locator::QuicStreams,
     },
 }
 
@@ -148,6 +151,7 @@ impl From<ReconnectLocator> for AnyLocator {
                 retry,
                 tls,
                 qos,
+                quic_streams,
             } => AnyLocator::Named {
                 proto,
                 host,
@@ -156,6 +160,7 @@ impl From<ReconnectLocator> for AnyLocator {
                 retry,
                 tls,
                 qos,
+                quic_streams,
             },
         }
     }
@@ -178,6 +183,7 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 retry,
                 tls,
                 qos,
+                quic_streams,
             } => Ok(ReconnectLocator::Named {
                 proto,
                 host,
@@ -186,6 +192,7 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 retry,
                 tls,
                 qos,
+                quic_streams,
             }),
             AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
             // R311xi — unix-domain socket: non-IP, not in the reconnect set
@@ -993,6 +1000,15 @@ mod reconnect_locator_tests {
             retry: None,
             tls: None,
             qos: None,
+            quic_streams: crate::locator::QuicStreams::DEFAULT,
+        }
+    }
+
+    /// Stream keys a round trip must carry: neither of them the default.
+    fn declared_streams() -> crate::locator::QuicStreams {
+        crate::locator::QuicStreams {
+            multistream: crate::locator::QuicStreamChoice::Disabled,
+            mixed_rel: crate::locator::QuicStreamChoice::Auto,
         }
     }
 
@@ -1030,6 +1046,7 @@ mod reconnect_locator_tests {
             retry: None,
             tls: None,
             qos: declared_qos(),
+            quic_streams: declared_streams(),
         };
         let reconnectable =
             ReconnectLocator::try_from(any.clone()).expect("named is reconnectable");
@@ -1043,6 +1060,7 @@ mod reconnect_locator_tests {
                 retry: None,
                 tls: None,
                 qos: declared_qos(),
+                quic_streams: declared_streams(),
             }
         );
         assert_eq!(AnyLocator::from(reconnectable), any);
