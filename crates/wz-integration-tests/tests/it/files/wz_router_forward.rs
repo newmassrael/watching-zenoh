@@ -36,8 +36,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, run_query_until_answered, wait_for_substring,
-    wz_ap_demo_binary, ChildGuard, PortReservation, QueryAttempts,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    run_query_until_answered, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
+    QueryAttempts,
 };
 
 /// The keyexpr both peers agree on — distinct from the other router e2e's
@@ -252,6 +253,7 @@ const QUERY_ATTEMPTS: usize = 6;
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E5 runs via --ignored"]
 fn wz_router_routes_a_wz_query_to_a_wz_queryable_on_another_face() {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let (mut router_guard, mut router_reader, addr) = spawn_router(&demo);
 
     let qabl_stderr = tempfile::tempfile().expect("tempfile for queryable stderr");
