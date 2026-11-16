@@ -6346,8 +6346,13 @@ layer_c1u_cargo_test_tls() {
     # matcher in `wz-access-control`) and neither said the wiring carried the
     # value between them. Its anti-vacuity arm is a plain TCP link through the
     # same accessor, answering `None`. The number is what the command PRINTED.
+    # 8 -> 10, counted from the file and not yet printed: the file held nine
+    # tests before this change (`an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it`
+    # came without a guard move), and a dial with no trust material now
+    # verifies against the public roots (it replaces the test that expected a
+    # refusal) beside its control dial, which trusts the acceptor's root.
     wz_test_args wz-runtime-tokio tls_e2e
-    _runci_guarded_test C1u 8 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1u 10 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     #
     # R311y801 — 6 -> 7, the THIRD instance of the same missed update, and this
