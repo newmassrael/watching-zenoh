@@ -428,6 +428,13 @@ transport-link-unixpipe,transport-link-ws|"
     # which no leg named, so the census reported it as claimed by nothing. The filter is the module
     # path, so a test added there is covered.
     "wz-capi-core|hook|router-node,scout|open_plan::"
+    # The span of the code that opens a session, carried onto the engine's tasks and threads
+    # (`caller_span`, built with `tracing-instrument`), and the copy a session promotes a large
+    # payload into (`session_defaults`, whose copy test is built with `transport-shm`). No leg
+    # named either feature, so the census named one test of each unclaimed. The two rows share
+    # one feature set so they share one build; each filter is its module path.
+    "wz-capi-core|hook|tracing-instrument,transport-shm|caller_span::"
+    "wz-capi-core|hook|tracing-instrument,transport-shm|session_defaults::"
     # The cooperative engine's two ends of a query, against a router stand-in on its own thread:
     # the queryable answers outside the session's lock and a kept query holds its Final; a get's
     # leg ends with its Final, its deadline, its cancelled token or its lost link. Their tests
@@ -1426,6 +1433,13 @@ wz-session-core/query-reply-err|"
     # honest reading of this row is that the combination axis now has a
     # population of one where it had none.
     "wz-runtime-tokio|hook|transport-multicast,reassembly|multicast_glue"
+    # The router's routing events (`router_forward::routing_spans`, built with `routing-router-hat`
+    # and `tracing-spans`) and the span a spawned task runs in (`runtime_pool::span_tests`, whose
+    # claim is the `tracing-instrument` arm). The wide leg names neither tracing feature, so the
+    # census named one test of each unclaimed. The two rows share one feature set so they share
+    # one build; each filter is its module path.
+    "wz-runtime-tokio|hook|routing-router-hat,tracing-instrument,tracing-spans|router_forward::routing_spans::"
+    "wz-runtime-tokio|hook|routing-router-hat,tracing-instrument,tracing-spans|runtime_pool::span_tests::"
     # ── R2967 — wz-capi-c's no-unstable arm ──
     #
     # `zenoh-c-no-unstable-api` is the axis that makes the C ABI match a zenoh-c
