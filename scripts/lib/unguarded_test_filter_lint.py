@@ -445,20 +445,22 @@ def counted_by_hand(lines: list[str], run: TestRun) -> bool:
 
 _PREDATES = (
     "predates this lint and nothing counts what it selects; move it under "
-    "`_runci_guarded_test` with the number the lane prints, then delete this row"
+    "the guarded-count helper of `scripts/run-ci.sh` with the number the lane "
+    "prints, then delete this row"
 )
 _LIST_PINNED = (
-    "the same package, features and filter are listed with `-- --list` just "
-    "above it and the names compared with a pinned set, so a filter that "
+    "the same package, features and filter are listed by libtest's list mode "
+    "just above it and the names compared with a pinned set, so a filter that "
     "selects nothing already fails there; this run only proves those tests pass"
 )
 _ONE_ARM_PINNED = (
-    "a `-- --list` count between the two runs pins the filter in the arm with "
-    "neither feature; the two runs themselves are not counted -- " + _PREDATES
+    "a count from libtest's list mode between the two runs pins the filter in "
+    "the arm with neither feature; the two runs themselves are not counted -- "
+    + _PREDATES
 )
 _EXECUTED_SET = (
-    "both runs write one log that `own_space_witness_lint.py --executed` "
-    "reads, and it fails unless every witness derived from the source is in "
+    "both runs write one log that `scripts/lib/own_space_witness_lint.py` "
+    "reads in its executed mode, and it fails unless every witness derived from the source is in "
     "cargo's executed list -- a set held by name, stronger than a count"
 )
 _LOOPED_EXACT = (

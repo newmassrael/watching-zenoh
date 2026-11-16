@@ -152,6 +152,11 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
     ("scripts/lib/lane_build_restore_gate.py", "q"): (
         "the same fixture, a build of `demo` stating another feature"
     ),
+    ("scripts/lib/unguarded_test_filter_lint.py", "a"): (
+        "a FIXTURE lane script in that lint's `--selftest`, naming an invented package (`p`) "
+        "and feature; it asserts how a bare filtered run is told from a guarded one, so a "
+        "real package would couple the fixture to the workspace for nothing"
+    ),
     ("scripts/lib/sce_codegen_spawn_lint.py", "cli"): (
         "a FIXTURE shell file in that lint's `--selftest`: the build of SCE's own `sce-codegen` "
         "it must not mistake for a spawn, the command `scripts/build-sce.sh` runs inside the "

@@ -32,7 +32,7 @@
 
 # The markers of the toolchains the tree's builds run: rustc and cargo
 # (`error[E0425]:`, `error: could not compile`), gcc/clang/ld
-# (`file.c:3:1: error:`, `fatal error:`, `undefined reference`), cmake
+# (`<source>:<line>:<col>: error:`, `fatal error:`, `undefined reference`), cmake
 # (`CMake Error`), ninja (`FAILED:`), make (`make[2]: ***`), libtest
 # (`panicked at`, `test x ... FAILED`) and west's own `FATAL ERROR`.
 WZ_BUILD_ERROR_MARKERS='^error(\[E[0-9]+\])?:|^[[:space:]]*error:|: (fatal )?error:|^FAILED:|CMake Error|^make(\[[0-9]+\])?: \*\*\*|undefined reference to|panicked at|^test .* \.\.\. FAILED|FATAL ERROR|^ERROR:'

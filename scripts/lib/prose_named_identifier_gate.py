@@ -219,6 +219,19 @@ ABSENT: dict[str, tuple[str, str | None, tuple[str, ...]]] = {
             "scripts/lib/prose_named_identifier_gate.py",
         ),
     ),
+    # git's own environment variables, which a hook exports and git reads; the
+    # oracle pin check asks git for the list (`rev-parse --local-env-vars`) and
+    # drops them, so this tree never spells either name outside prose.
+    "GIT_DIR": (
+        "foreign",
+        "git",
+        ("scripts/lib/ensure_zenohd_at_pin.py",),
+    ),
+    "GIT_INDEX_FILE": (
+        "foreign",
+        "git",
+        ("scripts/lib/ensure_zenohd_at_pin.py",),
+    ),
     # sce-codegen's own environment variable, read by a program this tree runs
     # and never by this tree.
     "SCE_WORKSPACE_ROOT": (

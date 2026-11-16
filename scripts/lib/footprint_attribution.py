@@ -263,7 +263,7 @@ _OLD = """\
          U undefined_thing
 """
 _NEW = """\
-00000100 00000410 T engine::Engine<P>::run_main_event_loop::haaaaaaaaaaaaaaa
+00000100 00000410 T engine::Engine<P>::run_main_event_loop::haaaaaaaaaaaaaaaa
 00000500 00000020 T other[9f8e7d6c]::f
 00000600 00000040 D data_thing
 00000700 00000020 T engine::Engine<Q>::step::h4444444444444444

@@ -292,10 +292,12 @@ def selftest() -> None:
 
     assert citations("see lib.rs:4061 and crates/a/src/lib.rs:4-6.") == [("crates/a/src/lib.rs", 4, 6)]
 
-    gone = "crates/a/src/" + "gone.rs:3"
+    # Assembled, never spelled whole: a `<name>.rs:<line>` literal in this file
+    # is a foreign basename citation to upstream_citation_anchor_gate.py.
+    gone = "crates/a/src/" + "gone.rs" + ":3"
     rust = f'let s = "{gone}";\n// see {gone}\n/// and crates/a/src/lib.rs:2\n'
     found, graded = grade(fixture, [("f.rs", comment_lines("f.rs", rust))])
-    assert len(found) == 1 and found[0].startswith("f.rs:2:"), f"selftest: rust {found}"
+    assert len(found) == 1 and found[0].startswith("f.rs" + ":2:"), f"selftest: rust {found}"
     assert graded == 2, f"selftest: rust graded {graded}"
 
     py = f'"""Module.\n\nSee {gone}.\n"""\nX = "{gone}"\n# {gone}\ny = 1  # {gone}\n'

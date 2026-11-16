@@ -582,6 +582,11 @@ def selftest_closure(tree: ast.Module) -> set[str]:
     Seeded from the branch and not from a name: a function called `selftest`
     that nothing dispatches to is not a selftest, and one called `_probe` that
     the branch calls is.
+
+    The branch is a statement (`if args.selftest: selftest()`) or an
+    expression (`return selftest() if args.selftest else check()`); both
+    dispatch the same way, so both seed. Only the TRUE arm seeds: the other
+    arm of the expression is the production path.
     """
     funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     seeds: set[str] = set()
@@ -589,6 +594,8 @@ def selftest_closure(tree: ast.Module) -> set[str]:
         if isinstance(node, ast.If) and "selftest" in ast.dump(node.test):
             for stmt in node.body:
                 seeds |= _loads(stmt, set(funcs))
+        elif isinstance(node, ast.IfExp) and "selftest" in ast.dump(node.test):
+            seeds |= _loads(node.body, set(funcs))
     closure = set(seeds)
     stack = list(seeds)
     while stack:
@@ -960,6 +967,25 @@ def selftest() -> int:
     got = _classes(chained)
     if got.get("SRC") != "FIXTURE":
         return fail(f"a fixture composed into another was classed {got.get('SRC')!r}")
+
+    # The same fixture dispatched by a conditional EXPRESSION, the shape
+    # `unguarded_test_filter_lint.py` has: its true arm is the selftest branch,
+    # and its other arm is production and seeds nothing.
+    as_expression = (
+        "SRC = 'a `first` token'\n"
+        "def _selftest():\n"
+        "    return SRC\n"
+        "def check():\n"
+        "    return 0\n"
+        "def main():\n"
+        "    return _selftest() if args.selftest else check()\n"
+    )
+    got = _classes(as_expression)
+    if got.get("SRC") != "FIXTURE":
+        return fail(f"a fixture behind a conditional-expression dispatch was {got.get('SRC')!r}")
+    got = _classes(as_expression.replace("return 0", "return SRC"))
+    if got.get("SRC") != "REASON":
+        return fail(f"a table the expression's production arm reads was {got.get('SRC')!r}")
 
     # The same table, read by production code as well: it stops being a fixture
     # the moment anything outside the closure reads it.
