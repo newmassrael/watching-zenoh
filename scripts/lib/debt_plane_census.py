@@ -724,6 +724,10 @@ class Roster(typing.NamedTuple):
     reaim_cap: int
     reaim_ttl: int
     unstamped_baseline: int
+    # Open-debt item 477: `(item, times)` for every number a class names more
+    # than once. `target` and `owner` are sets, so the repeat is gone by the
+    # time a caller sees them; this is the one place it can still be told.
+    repeated: list[tuple[int, int]]
 
 
 #: The roster keys that carry a single integer. Named in ONE place because a
@@ -750,8 +754,11 @@ def roster(text: str) -> Roster:
             f"The roster IS the denominator; without it this script would "
             f"report zero remaining, which reads exactly like done."
         )
-    target: set[int] = set()
-    owner: set[int] = set()
+    # Lists while reading, sets once read: a number on two lines of one class
+    # used to be absorbed by the union, so closing it on one line left it on
+    # the other and the plane did not shrink (item 477, measured at R2030).
+    target_named: list[int] = []
+    owner_named: list[int] = []
     # A LIST, not a set: the head is the claim, so order is the whole content
     # of this line. Reading it into a set would leave the queue looking right
     # and pointing at whichever number happened to sort first.
@@ -760,9 +767,9 @@ def roster(text: str) -> Roster:
     for line in block.splitlines():
         line = line.strip()
         if line.startswith("plane:analyzer-owner-decision"):
-            owner |= {int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])}
+            owner_named += [int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])]
         elif line.startswith("plane:analyzer"):
-            target |= {int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])}
+            target_named += [int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])]
         elif line.startswith("priority"):
             priority += [int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])]
         else:
@@ -780,9 +787,17 @@ def roster(text: str) -> Roster:
             f"{', '.join('`' + k + '`' for k in missing)}"
         )
     swept = scalars["swept_through"]
+    repeated = sorted(
+        {
+            (n, named.count(n))
+            for named in (target_named, owner_named)
+            for n in named
+            if named.count(n) > 1
+        }
+    )
     return Roster(
-        target,
-        owner,
+        set(target_named),
+        set(owner_named),
         swept,
         priority,
         scalars["ranked_from"],
@@ -790,6 +805,7 @@ def roster(text: str) -> Roster:
         scalars["reaim_cap"],
         scalars["reaim_ttl"],
         scalars["unstamped_baseline"],
+        repeated,
     )
 
 
@@ -874,6 +890,7 @@ SELFTEST_ROSTER = """\
 {begin}
 plane:analyzer = 10 11
 plane:analyzer-owner-decision = 13
+{roster_extra}
 priority = {priority}
 swept_through = {swept}
 ranked_from = {ranked_from}
@@ -909,6 +926,27 @@ def selftest() -> int:
         ("a CLOSED item on the queue fails", {"priority": "12"}, 1, "is CLOSED and still"),
         ("an ABSENT item on the queue fails", {"priority": "99"}, 1, "no such item"),
         ("a DUPLICATE on the queue fails", {"priority": "10 10"}, 1, "appears twice"),
+        # Item 477 -- the roster lines, which a set union used to dedupe in
+        # silence. The control is the same second line naming a NEW item: it
+        # must be read (the open count moves from 2 to 3) and must pass.
+        (
+            "an item on two roster lines of one class fails",
+            {"priority": "", "roster_extra": "plane:analyzer = 10"},
+            1,
+            "item 10 appears 2 times on the roster's lines of one class",
+        ),
+        (
+            "an item twice on one owner-decision line fails",
+            {"priority": "", "roster_extra": "plane:analyzer-owner-decision = 13"},
+            1,
+            "item 13 appears 2 times on the roster's lines of one class",
+        ),
+        (
+            "a second roster line naming a NEW item is read and passes",
+            {"priority": "", "roster_extra": "plane:analyzer = 19"},
+            0,
+            "analyzer open = 3 ",
+        ),
         ("an UNJUDGED item on the queue fails", {"priority": "10", "swept": "9"}, 1, "past `swept_through"),
         ("an OWNER-DECISION item on the queue fails", {"priority": "13"}, 1, "held for an OWNER DECISION"),
         # R2250b (item 603). A folded original must not reopen its item: 10, 11,
@@ -1366,6 +1404,7 @@ def selftest() -> int:
                 r19=fields.get("r19", ""),
             ),
             priority=fields.get("priority", ""),
+            roster_extra=fields.get("roster_extra", ""),
             swept=fields.get("swept", "30"),
             extra=fields.get("extra", ""),
             ranked_from=fields.get("ranked_from", "18"),
@@ -1965,6 +2004,13 @@ def main() -> int:
                 f"here inflates the remaining count, which is the direction that "
                 f"makes a repayment loop never finish"
             )
+    for n, times in rst.repeated:
+        findings.append(
+            f"item {n} appears {times} times on the roster's lines of one class; "
+            f"a close that removes it from one line leaves it counted from the "
+            f"other, so the plane does not shrink when the item is paid. Keep "
+            f"one mention"
+        )
     both = target & owner
     if both:
         findings.append(
