@@ -215,6 +215,12 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp_reliable() {
 
     let received_substr = ">> [Subscriber] Received";
     let received = wait_for_substring(&mut z_sub_reader, received_substr, Duration::from_secs(10));
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _demo_transport = wait_for_substring(
+        &mut demo_stderr_reader,
+        "over udp-reliable transport",
+        Duration::from_secs(10),
+    );
 
     let _ = demo_child.child_mut().kill();
     let _ = demo_child.child_mut().wait();

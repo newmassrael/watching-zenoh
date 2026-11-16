@@ -1533,7 +1533,9 @@ fn pico_zpub_source_on_wz_capi_is_told_about_a_real_pico_zsub_arriving_and_leavi
     // Independent cross-check: the foreign subscriber actually RECEIVED data,
     // so the window the two edges bracket is the window in which delivery
     // happened. A verdict unrelated to the real subscriber set could satisfy
-    // both edges and would not line up with this.
+    // both edges and would not line up with this. Waited on for its own line:
+    // the departing edge is the publisher's reading, not the subscriber's.
+    let _sub_heard = wait_for_substring(&mut sub_out, key, EXCHANGE_TIMEOUT);
     let foreign = read_captured(&mut sub_out);
     assert!(
         foreign.contains(key),

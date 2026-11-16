@@ -1167,6 +1167,12 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_ws() {
         received_substr,
         Duration::from_secs(10),
     );
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _demo_transport = wait_for_substring(
+        &mut demo_stderr_reader,
+        "over ws transport",
+        Duration::from_secs(10),
+    );
 
     let _ = demo_child.child_mut().kill();
     let _ = demo_child.child_mut().wait();
@@ -1364,6 +1370,12 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_unixsock() {
     let received = wait_for_substring(
         &mut z_sub_stdout_reader,
         received_substr,
+        Duration::from_secs(10),
+    );
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _demo_transport = wait_for_substring(
+        &mut demo_stderr_reader,
+        "over unixsock transport",
         Duration::from_secs(10),
     );
 
@@ -1773,6 +1785,12 @@ fn wz_peer_publish_routes_through_zenohd_to_pico_zsub() {
         received_substr,
         Duration::from_secs(10),
     );
+    // The peer is asserted on below, so it is waited on for its own line.
+    let _demo_whatami = wait_for_substring(
+        &mut demo_stderr_reader,
+        "whatami Some(Router)",
+        Duration::from_secs(10),
+    );
 
     let _ = demo_child.child_mut().kill();
     let _ = demo_child.child_mut().wait();
@@ -1980,6 +1998,12 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_tls() {
     let received = wait_for_substring(
         &mut z_sub_stdout_reader,
         received_substr,
+        Duration::from_secs(10),
+    );
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _demo_transport = wait_for_substring(
+        &mut demo_stderr_reader,
+        "over tls transport",
         Duration::from_secs(10),
     );
 
@@ -2215,6 +2239,12 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_quic() {
         received_substr,
         Duration::from_secs(10),
     );
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _demo_transport = wait_for_substring(
+        &mut demo_stderr_reader,
+        "over quic transport",
+        Duration::from_secs(10),
+    );
 
     let _ = demo_child.child_mut().kill();
     let _ = demo_child.child_mut().wait();
@@ -2409,6 +2439,12 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp() {
     let received = wait_for_substring(
         &mut z_sub_stdout_reader,
         received_substr,
+        Duration::from_secs(10),
+    );
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _demo_transport = wait_for_substring(
+        &mut demo_stderr_reader,
+        "over udp transport",
         Duration::from_secs(10),
     );
 

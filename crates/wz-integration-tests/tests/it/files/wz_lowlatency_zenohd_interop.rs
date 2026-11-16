@@ -171,6 +171,12 @@ fn wz_lowlatency_negotiates_and_publishes_through_zenohd_to_pico_zsub() {
         received_substr,
         Duration::from_secs(10),
     );
+    // The publisher is asserted on below, so it is waited on for its own line.
+    let _demo_negotiated = wait_for_substring(
+        &mut demo_stderr_reader,
+        "lowlatency negotiated = true",
+        Duration::from_secs(10),
+    );
 
     let _ = demo_child.child_mut().kill();
     let _ = demo_child.child_mut().wait();
