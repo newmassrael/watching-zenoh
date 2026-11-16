@@ -43,8 +43,9 @@ path = "src/lib.rs"
 [features]
 default = ["std"]
 # `internal` carries the doc-hidden items zenoh's own crates and its plugins use: `chunks`,
-# `is_wild`, `get_nonwild_prefix`, `strip_prefix` and `strip_nonwild_prefix`. Upstream's `zenoh`
-# depends on this crate with it on, so every user of `zenoh` builds them.
+# `is_wild`, `get_nonwild_prefix`, `strip_prefix` and `strip_nonwild_prefix`. `zenoh` depends on
+# `zenoh-keyexpr` with it on, upstream's and this workspace's alike, so every user of `zenoh`
+# builds them.
 internal = []
 std = ["dep:schemars", "zenoh-result/std"]
 unstable = []
