@@ -20,7 +20,8 @@ use alloc::vec::Vec;
 
 // The three imports below serve the frame writers, which a build has when it has a heap or a
 // link kind to send over for a message kind (the gate of [`frame_flags`], [`begin_frame`] and
-// [`encode_frame_envelope_into`]).
+// [`encode_frame_envelope_into`]), and the fragment writers, which a build has when it can
+// reassemble fragments (the gate of [`write_fragment_head`]).
 #[cfg(any(
     feature = "alloc",
     all(
@@ -32,7 +33,8 @@ use alloc::vec::Vec;
             feature = "codec-declare",
         ),
         any(feature = "session-unicast", feature = "session-multicast")
-    )
+    ),
+    all(feature = "codec-fragment", feature = "reassembly")
 ))]
 use sce_forge_runtime::codec::CodecError;
 // The chain of a Frame header with its QoS extension, and of a Fragment header.
@@ -52,7 +54,8 @@ use sce_forge_runtime::codec::Bounded;
             feature = "codec-declare",
         ),
         any(feature = "session-unicast", feature = "session-multicast")
-    )
+    ),
+    all(feature = "codec-fragment", feature = "reassembly")
 ))]
 use wz_codecs::wire_const;
 
@@ -67,7 +70,8 @@ use wz_codecs::wire_const;
             feature = "codec-declare",
         ),
         any(feature = "session-unicast", feature = "session-multicast")
-    )
+    ),
+    all(feature = "codec-fragment", feature = "reassembly")
 ))]
 use crate::qos::Priority;
 // `TxBuf` is needed for the method calls only when `EncodeBuf` is a concrete
