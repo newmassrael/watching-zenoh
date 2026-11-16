@@ -4502,11 +4502,13 @@ pub enum OpenError {
     /// rather than folding into [`Self::Terminal`].
     #[cfg(feature = "session-extqos")]
     QosLinkRejected(wz_session_core::extqos::QosLinkError),
-    /// session-extshm (R311y507) — the peer's `init::ext::Shm` challenge body
-    /// did not decode. zenoh `bail!`s on this in `recv_init_syn`, aborting
-    /// establishment; the dispatcher took the `establishment.ext_rejected` arm
-    /// (Closing with `CloseReason::Generic`, R311y823) and the typed reason
-    /// surfaces here. Acceptor-only, per that method's asymmetry.
+    /// session-extshm — the peer's `open::ext::Shm` committed the link to
+    /// shared memory this node cannot honour (an OpenSyn the acceptor cannot
+    /// read or verify, an OpenAck after an offer the initiator could not use),
+    /// which zenoh 1.10.2 refuses rather than run with shared memory on one
+    /// side; the dispatcher took the `establishment.ext_rejected` arm (Closing
+    /// with `CloseReason::Generic`) and the typed reason surfaces here, for
+    /// either role.
     #[cfg(feature = "session-extshm")]
     ShmChallengeRejected,
     /// session-extshm (R311y507) — the SHM offer was accepted but this node
@@ -4762,24 +4764,25 @@ pub(crate) async fn drive_open_loop_within(
                     DriverLoopOutcome::LinkRefused => {
                         return Err(OpenError::LinkRefused);
                     }
-                    // R3b — a usrpwd method rejected the peer; the FSM is already
-                    // Closing(Invalid). Surface the typed reason (mirrors the
-                    // InitAckCapsRejected path) for both the initiator and the
-                    // acceptor (both drive through this shared loop).
+                    // R3b — an auth method (or the multilink key exchange) rejected
+                    // the peer; the FSM is already Closing(Generic). Surface the typed
+                    // reason (mirrors the InitAckCapsRejected path) for both the
+                    // initiator and the acceptor (both drive through this shared loop).
                     #[cfg(feature = "session-extauth")]
                     DriverLoopOutcome::AuthRejected(e) => {
                         return Err(OpenError::AuthRejected(e));
                     }
                     // session-extqos — the QoSLink containment refused the peer;
-                    // the FSM is already Closing(Invalid). Same shape as the two
+                    // the FSM is already Closing(Generic). Same shape as the two
                     // arms above, for both roles (they share this loop).
                     #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
                     DriverLoopOutcome::QosLinkRejected(e) => {
                         return Err(OpenError::QosLinkRejected(e));
                     }
-                    // session-extshm — a malformed SHM challenge from an
-                    // initiator; the FSM is already Closing(Invalid).
-                    #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+                    // session-extshm — an Open-phase shared-memory commitment
+                    // this node cannot honour, for either role; the FSM is
+                    // already Closing(Generic).
+                    #[cfg(all(feature = "session-extshm", feature = "codec-open-body"))]
                     DriverLoopOutcome::ShmChallengeRejected => {
                         return Err(OpenError::ShmChallengeRejected);
                     }

@@ -297,19 +297,22 @@ pub enum DriverLoopOutcome {
     /// typed open error rather than folding it into `Terminal`.
     #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
     QosLinkRejected(crate::extqos::QosLinkError),
-    /// session-extshm (R311y507) — an initiator's `init::ext::Shm` challenge
-    /// body did not decode. zenoh `recv_init_syn` `bail!`s on exactly this
-    /// (`ext/shm.rs`), aborting establishment, so the dispatcher injects
+    /// session-extshm — the peer's `open::ext::Shm` commits this link to shared
+    /// memory in a way this node cannot honour, and both roles refuse it: the
+    /// acceptor an OpenSyn whose body does not decode, whose challenge is not
+    /// ours, or whose counters cannot be opened; the initiator an OpenAck after
+    /// an offer it could not use, or one whose body or counters it cannot read
+    /// ([`crate::extshm::ShmAuthError`]). zenoh 1.10.2 errors out of the
+    /// establishment on each, so the dispatcher injects
     /// `EstablishmentExtRejected` and the FSM tears the session down with
-    /// `CloseReason::Generic` (R311y823; the accept side's ext `map_err` at
-    /// `establishment/accept.rs:242`). Its own variant (the
-    /// `InitAckCapsRejected` pattern) so the open loop can map it to a typed
-    /// error.
+    /// `CloseReason::Generic`, the reason zenoh's extension `map_err` carries.
+    /// Its own variant (the `InitAckCapsRejected` pattern) so the open loop can
+    /// map it to a typed error.
     ///
-    /// ONLY the acceptor reaches this: the initiator's mirror of the same
-    /// failure degrades to "no shared memory" instead, which is upstream's
-    /// asymmetry and not a wz simplification.
-    #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+    /// The Init phase never reaches this: a challenge that does not decode or
+    /// does not match there degrades to "no shared memory", as upstream's does.
+    /// Gated on the OPEN codec, the one whose frames raise it.
+    #[cfg(all(feature = "session-extshm", feature = "codec-open-body"))]
     ShmChallengeRejected,
     /// R3b — a Z_EXT_AUTH method rejected the peer on a handshake recv stage
     /// (a bad usrpwd credential / unknown user / missing required sub-ext, or a

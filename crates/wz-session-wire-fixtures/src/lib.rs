@@ -301,6 +301,72 @@ pub fn craft_initsyn_wire_with_qos_link(value: u8) -> Vec<u8> {
     wire
 }
 
+/// `init::ext::MultiLink = zextzbuf!(0x4, false)` as a header byte: id `0x4`,
+/// ZBUF encoding (`0x40`), mandatory bit and chain-continuation bit CLEAR.
+/// The identity `wz_session_core::extmultilink::MULTILINK_EXT_EID` reads.
+pub const EXT_HDR_INIT_MULTILINK_ZBUF: u8 = 0x44;
+
+/// `init::ext::Shm` and `open::ext::Shm`, both `zextzbuf!(0x2, false)`, as a
+/// header byte: id `0x2`, ZBUF encoding (`0x40`), M and Z clear. One byte for
+/// both carriers, as `wz_session_core::extshm::SHM_ZBUF_EXT_HEADER` is.
+pub const EXT_HDR_SHM_ZBUF: u8 = 0x42;
+
+/// A ZBuf extension as a lone terminal chain entry: `header`, the VLE length
+/// of `body`, then `body` verbatim. The length is written as a full VLE, so a
+/// body past 127 bytes (an RSA public key) is framed as a peer frames it.
+#[cfg(feature = "alloc")]
+fn zbuf_ext_chain(header: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + body.len());
+    out.push(header);
+    let mut len = body.len();
+    loop {
+        let byte = (len & 0x7f) as u8;
+        len >>= 7;
+        if len == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+/// [`craft_initsyn_wire`] carrying a `0x4` MultiLink extension whose ZBuf body
+/// is `body`, verbatim, so an acceptor-side test can present an initiator key
+/// the responder cannot read as well as one it can.
+///
+/// Caps are the all-zero conforming advertisement, so a rejection this
+/// fixture produces cannot be the size-parameter rule firing.
+#[cfg(feature = "alloc")]
+pub fn craft_initsyn_wire_with_multilink(body: &[u8]) -> Vec<u8> {
+    let mut wire = craft_initsyn_wire();
+    wire[0] |= FLAG_T_Z;
+    wire.extend_from_slice(&zbuf_ext_chain(EXT_HDR_INIT_MULTILINK_ZBUF, body));
+    wire
+}
+
+/// [`craft_initack_wire`] carrying a `0x2` Shm extension whose ZBuf body is
+/// `body`, verbatim: the acceptor's shared-memory offer, so an initiator-side
+/// test can present one whose challenge and segment the initiator cannot use.
+#[cfg(feature = "alloc")]
+pub fn craft_initack_wire_with_shm(cookie: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut wire = craft_initack_wire(cookie);
+    wire[0] |= FLAG_T_Z;
+    wire.extend_from_slice(&zbuf_ext_chain(EXT_HDR_SHM_ZBUF, body));
+    wire
+}
+
+/// [`craft_openack_wire`] carrying a `0x2` Shm extension whose ZBuf body is
+/// `body`, verbatim: the acceptor's commitment to shared memory.
+#[cfg(feature = "alloc")]
+pub fn craft_openack_wire_with_shm(initial_sn: u64, body: &[u8]) -> Vec<u8> {
+    let mut wire = craft_openack_wire(initial_sn);
+    wire[0] |= FLAG_T_Z;
+    wire.extend_from_slice(&zbuf_ext_chain(EXT_HDR_SHM_ZBUF, body));
+    wire
+}
+
 /// `OpenSyn` echoing `cookie` (parent flags 0x00 so the cookie carrier is
 /// present and the lease is in ms): lease VLE=0, initial_sn VLE=0,
 /// cookie_len VLE, cookie bytes.

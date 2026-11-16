@@ -6859,6 +6859,13 @@ layer_c1bb_cargo_test_qos() {
     wz_test_args wz-runtime-tokio init_qos_link_reject
     _runci_guarded_test C1bb 2 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
+    # The multilink arm of the same rejects, on the same build: the Close reason an
+    # acceptor sends for an initiator key it cannot read, and the control that the
+    # key a wz initiator offers is answered. Gated on `transport-multilink`, which no
+    # default run builds. 2 = the file's two cases, counted from the source.
+    wz_test_args wz-runtime-tokio init_multilink_reject
+    _runci_guarded_test C1bb 2 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast "${WZ_TEST_ARGS[@]}" --quiet \
+        || return 1
     # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
     # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
     # default feature of wz-runtime-tokio: the three cases this round adds are
@@ -8383,6 +8390,13 @@ layer_c1af_cargo_test_shm() {
     # (io/zenoh-transport/src/unicast/universal/rx.rs:50-51).
     wz_test_args wz-runtime-tokio shm_e2e
     _runci_guarded_test C1af 6 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
+        || return 1
+    # The shared-memory arm of the establishment-extension rejects, on the same build:
+    # the Close reason an initiator sends for an OpenAck commitment it cannot honour,
+    # and the control that the same OpenAck with no offer behind it is ignored.
+    # 2 = the file's two cases, counted from the source.
+    wz_test_args wz-runtime-tokio open_shm_reject
+    _runci_guarded_test C1af 2 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3122 -- the last two clippy runs are builds the lines before them do not reach: the runtime
     # with multilink, where the three tests of the leg above compile, and the core with the
