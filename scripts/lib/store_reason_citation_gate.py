@@ -128,7 +128,9 @@ MIN_REASONS = 40
 #: move down here; the direction is the gate's own instruction.
 #: 24 -> 23 (R3569). The one bare line-form pair of `attachment-bytes` that named upstream's reply
 #: and delete messages left with the repair that rooted both (see FINDINGS_BUDGET).
-LINE_BUDGET = 23
+#: 23 -> 22 (R4502). The 1.5.0 example-path citation of
+#: `ext-pubsub-sample-miss-detection` left with the repair of FINDINGS_BUDGET's last five.
+LINE_BUDGET = 22
 #: 9 -> 7 (R2371). The `transport-stats` re-tag rewrote that atom's whole reason
 #: against the pin. Its two bare citations both named the 1.5.0-era
 #: transport-side stats module, which does not exist at 1.10.0 at all, so they
@@ -199,7 +201,15 @@ BARE_BUDGET = 6
 #: tracked meaning in this tree, and the one citation of `attachment-bytes` they made ambiguous
 #: was rooted at upstream's `commons/zenoh-protocol/src/zenoh/` with a line of its text, which
 #: also resolves an unresolved claim the pair carried.
-FINDINGS_BUDGET = 5
+#: 5 -> 0 (R4502, register item 736). The five were 1.5.0 paths: three into the
+#: linkstate and p2p peer HATs the pin no longer has, and one example path the pin
+#: moved. Each HAT path is now written rooted with the absence marker, or described
+#: by the module it named, and the example path is described, its rooted citation
+#: being already in the same reason. That repairs the CITATIONS only. The atoms
+#: named in the paragraph above are still graded against 1.5.0, and re-grading them
+#: against the pin remains owed as a round each; this number no longer counts that
+#: debt, so the open-debt register holds it.
+FINDINGS_BUDGET = 0
 
 #: ROOT-LESS AXIS (open debt 754). The classifier this gate borrows sorts every
 #: citation into EIGHT buckets; until debt 754 was paid this gate held three and
@@ -220,8 +230,10 @@ FINDINGS_BUDGET = 5
 #: tracked tree's directory names (the reasons are flat files, so the tree's
 #: names are passed in rather than derived), which keeps this number a property
 #: of the store alone: moving the source tree cannot move it.
-ROOTLESS_LINE_BUDGET = 72
-ROOTLESS_BARE_BUDGET = 10
+#: 72 -> 69 and 10 -> 9 (R4502): the root-less HAT and example tokens of the item 736
+#: repair (see FINDINGS_BUDGET).
+ROOTLESS_LINE_BUDGET = 69
+ROOTLESS_BARE_BUDGET = 9
 ROOTLESS_STALE_LINE_BUDGET = 17
 #: THE RESIDUE IS A TABLE, ONE ROW PER SEGMENT (open debt 799, the source gate's
 #: item, which this store axis shares). A single sum cannot say whether a
@@ -260,7 +272,9 @@ def rootless_undeclared_budget() -> int:
 #: The conservation check, as in the source gate: line + bare + residue. A
 #: declaration moves an occurrence between the three and leaves this alone; a
 #: new citation raises it whatever the others were set to.
-ROOTLESS_TOTAL_BUDGET = 174
+#: 174 -> 170 (R4502): the same four tokens, one of them the routing-peer token
+#: that rooting the HAT directory would otherwise have exposed into the residue.
+ROOTLESS_TOTAL_BUDGET = 170
 
 
 def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:
@@ -335,8 +349,19 @@ def grade(reasons: dict[str, str], ref: pathlib.Path, own_dirs: set[str]):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _verdict(reasons, ref, counts, findings, residue: Residue = NO_RESIDUE) -> int:
-    """The verdict layer, separated so the selftest can drive it directly."""
+def _verdict(
+    reasons,
+    ref,
+    counts,
+    findings,
+    residue: Residue = NO_RESIDUE,
+    findings_budget: int = FINDINGS_BUDGET,
+) -> int:
+    """The verdict layer, separated so the selftest can drive it directly.
+
+    `findings_budget` is the module's number except where the selftest states
+    one: at a budget of zero no finding can be removed, so the ratchet-down row
+    drives a budget of its own."""
     if len(reasons) < MIN_REASONS:
         print(
             "FAIL: only %d live atom reason(s) found, expected at least %d. A "
@@ -367,7 +392,7 @@ def _verdict(reasons, ref, counts, findings, residue: Residue = NO_RESIDUE) -> i
             counts.get("gone", 0),
             counts.get("absent", 0),
             len(findings),
-            FINDINGS_BUDGET,
+            findings_budget,
         )
     )
     rl_line = counts.get("rootless_line", 0)
@@ -476,12 +501,12 @@ def _verdict(reasons, ref, counts, findings, residue: Residue = NO_RESIDUE) -> i
                 % (rl_total, ROOTLESS_TOTAL_BUDGET, rl_total)
             )
 
-    if len(findings) != FINDINGS_BUDGET:
+    if len(findings) != findings_budget:
         rc = 1
-        moved = "ADDED" if len(findings) > FINDINGS_BUDGET else "REMOVED"
+        moved = "ADDED" if len(findings) > findings_budget else "REMOVED"
         print(
             "FAIL: %d claim(s) do not resolve at the pin, budget %d. This commit "
-            "%s one." % (len(findings), FINDINGS_BUDGET, moved)
+            "%s one." % (len(findings), findings_budget, moved)
         )
         for f in findings:
             print("    - %s" % (f,))
@@ -673,9 +698,15 @@ def selftest() -> int:
          dict(clean, line=LINE_BUDGET - 1), findings7, clean_res, 1),
         ("an ADDED unresolved claim FAILs", big, x, clean,
          findings7 + ["extra"], clean_res, 1),
-        ("a REMOVED unresolved claim FAILs (ratchet down)", big, x,
-         clean, findings7[:-1], clean_res, 1),
     ]
+    # The ratchet down: one finding fewer than the budget. Driven at a budget of
+    # its own, so it still has a finding to remove when the module's is zero.
+    rc = _verdict(big, x, clean, findings7, clean_res, findings_budget=len(findings7) + 1)
+    if rc != 1:
+        print("  selftest FAIL  a REMOVED unresolved claim FAILs (ratchet down): rc=%d" % rc)
+        failures += 1
+    else:
+        print("  selftest ok    a REMOVED unresolved claim FAILs (ratchet down)")
     # Open debt 754: each root-less measurement is checked in BOTH directions.
     # Every row moves exactly one measurement, so a verdict that still ignored
     # that measurement returns 0 and fails the row.
