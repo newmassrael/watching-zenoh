@@ -150,6 +150,7 @@ pub fn outbound_channel_with_capacity(
             capacity: queue_size.map(|n| n * batch_bytes),
             batch_bytes,
             single_lane: false,
+            rule: LaneRule::Pipeline,
             occupied: [0; Priority::NUM],
             reserved: [0; Priority::NUM],
             congested: [false; Priority::NUM],
@@ -746,9 +747,13 @@ struct LaneState {
     capacity: [usize; Priority::NUM],
     /// The bytes one batch holds, the unit a queue size counts in.
     batch_bytes: usize,
-    /// R2924 — every frame goes to the `Priority::DEFAULT` lane: the session
-    /// negotiated no QoS, and zenoh gives such a transport one queue.
+    /// R2924 — every frame goes to one lane: the session negotiated no QoS, and
+    /// zenoh gives such a transport one queue. Which lane that is, and whether
+    /// the queue starts that way, is [`Self::rule`]'s to say.
     single_lane: bool,
+    /// What a lane stands for: a priority of the transmission pipeline, or a
+    /// stream of the link ([`LaneRule`]).
+    rule: LaneRule,
     /// Each lane's bytes queued or in flight.
     occupied: [usize; Priority::NUM],
     /// Each lane's bytes PROMISED to a sender that holds a [`Permit`] and has not yet sent its
@@ -891,6 +896,32 @@ struct Batch {
     lent: bool,
 }
 
+/// What a lane of a queue stands for, which decides the lane a frame takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaneRule {
+    /// A priority of the transmission pipeline: a lane per priority from the
+    /// start, and a session that negotiated no QoS folds every priority onto the
+    /// `Priority::DEFAULT` lane. Every link has one byte stream, or datagrams,
+    /// so what a lane is decides only the order frames leave in.
+    Pipeline,
+    /// A STREAM of the link, for a link with one stream per priority: the
+    /// Control lane is the stream the link opened with, and each other lane is
+    /// its priority's own. Every frame takes the Control lane until a shape says
+    /// the session negotiated QoS, and the whole session's when it did not.
+    ///
+    /// This is upstream's multistream QUIC link: its handshake reads and writes
+    /// the bidirectional stream alone, and once established its pipeline writes
+    /// each priority's queue on that priority's stream, where a non-QoS
+    /// pipeline's one queue is index 0, `Priority::Control`, and so the
+    /// bidirectional stream (`io/zenoh-transport/src/unicast/universal/link.rs`
+    /// @ `Some(pipeline.priority()),` and `io/zenoh-transport/src/common/pipeline.rs`
+    /// @ `priority: Priority::try_from(prio as u8).unwrap(),`). A frame keeps the
+    /// lane it was queued on through a reshape, so the stream it leaves on is
+    /// decided when it is queued, and a handshake frame the writer drains after
+    /// the session's shape still leaves on the stream the peer reads it from.
+    Streams,
+}
+
 /// What [`LaneState::take_next`] found.
 enum Taken {
     /// A frame (or a batch of frames) for the writer, with its priority.
@@ -900,6 +931,19 @@ enum Taken {
     Blocked,
     /// Nothing is queued.
     Empty,
+}
+
+impl Taken {
+    /// The take, answered with the priority of `lane` in place of its first
+    /// frame's: under [`LaneRule::Streams`] the lane is the stream the take is
+    /// written on, which is not the frames' own priority for a frame queued
+    /// before the session's shape or by a session without QoS.
+    fn on_lane(self, lane: usize) -> Taken {
+        match self {
+            Taken::Frame(_, out) => Taken::Frame(Priority::from_wire(lane as u8), out),
+            other => other,
+        }
+    }
 }
 
 /// The parts of a taken item; [`OutboundRx`] makes the [`WireFrame`].
@@ -958,9 +1002,20 @@ impl LaneState {
     /// a non-QoS session has.
     fn lane_of(&self, priority: Priority) -> usize {
         if self.single_lane {
-            Priority::DEFAULT.wire_byte() as usize
+            self.single_lane_index()
         } else {
             priority.wire_byte() as usize
+        }
+    }
+
+    /// The lane every frame takes while the queue has one: `Priority::DEFAULT`'s
+    /// for the pipeline, whose one queue is sized as that priority's, and the
+    /// Control lane when a lane is a stream, because the one stream such a link
+    /// writes a non-QoS session on is the one it opened with.
+    fn single_lane_index(&self) -> usize {
+        match self.rule {
+            LaneRule::Pipeline => Priority::DEFAULT.wire_byte() as usize,
+            LaneRule::Streams => Priority::Control.wire_byte() as usize,
         }
     }
 
@@ -1059,9 +1114,9 @@ impl LaneState {
             return;
         };
         let single_lane = self.single_lane;
-        let default = Priority::DEFAULT.wire_byte() as usize;
+        let single = self.single_lane_index();
         for (i, lane) in self.lanes.iter_mut().enumerate() {
-            let reachable = !single_lane || i == default;
+            let reachable = !single_lane || i == single;
             let room = if reachable { budget } else { 0 };
             let want = room.max(lane.len());
             if lane.capacity() < want {
@@ -1345,8 +1400,63 @@ impl LaneState {
         if let Some(urgent) = self.take_urgent() {
             return (urgent, freed);
         }
+        // Asked once, before any frame is taken: the control lane is held if a lane behind it
+        // has a frame the fence is owed (see `take_next`), and the take then packs the others.
+        let held = self.control_held_by_fence();
+        let control = self.control_lane();
+        let lanes = (0..Priority::NUM).filter(move |&lane| !held || lane != control);
+        (self.pack_heap(lanes, budget), freed)
+    }
+
+    /// [`Self::take_next_packed`] for a writer that writes each lane on a stream
+    /// of its own ([`LaneRule::Streams`]): the frames of ONE lane, packed as that
+    /// method packs them, never joined to another lane's, because the two would
+    /// be bytes of two streams. The lanes are visited in the same priority
+    /// order, the keepalive still leaves first, and the fence still holds the
+    /// control lane, so the order frames are taken in is `take_next`'s.
+    ///
+    /// The take is answered with its LANE's priority ([`Taken::on_lane`]), which
+    /// is the stream it is written on. A keepalive is answered with
+    /// `Priority::Control`, the stream upstream writes it on
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `let n = link.send(&message, Some(Priority::Control)).await?;`).
+    ///
+    /// A pooled queue's batches each hold one lane's frames already, so its lane
+    /// is taken as `take_next` takes it.
+    fn take_lane_packed(&mut self, budget: usize) -> (Taken, bool) {
+        let freed = self.release_in_flight();
+        if let Some(urgent) = self.take_urgent() {
+            return (urgent, freed);
+        }
+        let held = self.control_held_by_fence();
+        for lane in 0..Priority::NUM {
+            if held && lane == self.control_lane() {
+                continue;
+            }
+            #[cfg(feature = "runtime-zero-copy")]
+            let taken = if self.pool.is_some() {
+                self.take_from(lane)
+            } else {
+                self.pack_heap(std::iter::once(lane), budget)
+            };
+            #[cfg(not(feature = "runtime-zero-copy"))]
+            let taken = self.pack_heap(std::iter::once(lane), budget);
+            match taken {
+                Taken::Empty => continue,
+                taken => return (taken.on_lane(lane), freed),
+            }
+        }
+        (Taken::Empty, freed)
+    }
+
+    /// The heap frames at the front of `lanes`, in that order, as one buffer of
+    /// at most `budget` bytes (`write_bound` for the first frame's size): the
+    /// packing [`Self::take_next_packed`] and [`Self::take_lane_packed`] share.
+    /// A frame that does not fit stays queued whole for the next take, and so
+    /// does every frame of a later lane, so the lanes keep their order.
+    fn pack_heap(&mut self, lanes: impl Iterator<Item = usize>, budget: usize) -> Taken {
         // What is queued now: the occupancy minus nothing, the previous take
-        // having just been released above.
+        // having just been released by the caller.
         let queued: usize = self.occupied.iter().sum();
         let mut first: Option<(Priority, Vec<u8>)> = None;
         let mut joined: Option<Vec<u8>> = None;
@@ -1354,13 +1464,7 @@ impl LaneState {
         // `write_bound` for its size (kept here, because the first frame's buffer is
         // emptied when the second is joined to it).
         let mut bound = budget;
-        // Asked once, before any frame is taken: the control lane is held if a lane behind it
-        // has a frame the fence is owed (see `take_next`), and the take then packs the others.
-        let held = self.control_held_by_fence();
-        'lanes: for lane in 0..Priority::NUM {
-            if held && lane == self.control_lane() {
-                continue;
-            }
+        'lanes: for lane in lanes {
             while let Some(Entry::Heap(_, frame, _)) = self.lanes[lane].front() {
                 if let Some((_, head)) = first.as_ref() {
                     let so_far = joined.as_ref().map_or(head.len(), Vec::len);
@@ -1396,11 +1500,9 @@ impl LaneState {
             }
         }
         match (first, joined) {
-            (None, _) => (Taken::Empty, freed),
-            (Some((priority, _)), Some(buffer)) => {
-                (Taken::Frame(priority, Out::Heap(buffer)), freed)
-            }
-            (Some((priority, frame)), None) => (Taken::Frame(priority, Out::Heap(frame)), freed),
+            (None, _) => Taken::Empty,
+            (Some((priority, _)), Some(buffer)) => Taken::Frame(priority, Out::Heap(buffer)),
+            (Some((priority, frame)), None) => Taken::Frame(priority, Out::Heap(frame)),
         }
     }
 }
@@ -2729,6 +2831,17 @@ impl Drop for OutboundTx {
     }
 }
 
+/// How a writer takes the queue: what one take may hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TakeMode {
+    /// One frame (a batch, on a pooled queue): a datagram writer's take.
+    One,
+    /// Everything queued up to a batch, across lanes: a byte-stream writer's.
+    Packed,
+    /// One lane's frames up to a batch: the take of a writer with a stream per lane.
+    ByLane,
+}
+
 /// The receiving half of [`outbound_channel`].
 pub struct OutboundRx {
     shared: Arc<Lanes>,
@@ -2798,7 +2911,7 @@ impl OutboundRx {
     /// R3239 — [`Self::recv_wire`], with the priority the frame was sent at (a
     /// batch's: the priority of the first frame in it).
     pub async fn recv_wire_tagged(&mut self) -> Option<(Priority, WireFrame)> {
-        self.recv_wire_tagged_with(false).await
+        self.recv_wire_tagged_with(TakeMode::One).await
     }
 
     /// R3366 — [`Self::recv_wire`] for a BYTE-STREAM writer: all that is queued, up
@@ -2806,15 +2919,43 @@ impl OutboundRx {
     /// have been taken one by one. See `LaneState::take_next_packed` for why
     /// that is the same wire, and why a datagram writer must not use it.
     pub async fn recv_wire_packed(&mut self) -> Option<WireFrame> {
-        self.recv_wire_mode(true).await
-    }
-
-    /// [`Self::recv_wire`] or [`Self::recv_wire_packed`], by `packed`: the one
-    /// call the seal-aware queue wrapper makes either way.
-    pub(crate) async fn recv_wire_mode(&mut self, packed: bool) -> Option<WireFrame> {
-        self.recv_wire_tagged_with(packed)
+        self.recv_wire_tagged_with(TakeMode::Packed)
             .await
             .map(|(_, wire)| wire)
+    }
+
+    /// [`Self::recv_wire_packed`] for a writer that writes each lane on a byte
+    /// stream of its own, on a queue made with [`Self::with_stream_lanes`]: one
+    /// lane's frames as one buffer, with the priority of the LANE, which names
+    /// the stream to write them on. See `LaneState::take_lane_packed`.
+    pub async fn recv_wire_by_lane(&mut self) -> Option<(Priority, WireFrame)> {
+        self.recv_wire_tagged_with(TakeMode::ByLane).await
+    }
+
+    /// This fresh queue, with each lane a STREAM of its link rather than a
+    /// priority of one stream: for a link that writes each priority on a stream
+    /// of its own and takes the queue with [`Self::recv_wire_by_lane`]. Every
+    /// frame takes the Control lane until the session's shape says it
+    /// negotiated QoS, which is where the link's handshake must be read; see
+    /// `LaneRule::Streams` for the rule and for why a frame keeps its lane.
+    ///
+    /// Made when the queue is, before any frame is on it: a frame already on a
+    /// priority's lane would leave on that priority's stream before the peer
+    /// reads any but the first.
+    pub fn with_stream_lanes(self) -> Self {
+        {
+            let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+            debug_assert!(
+                st.lanes.iter().all(VecDeque::is_empty),
+                "a queue takes its lane rule before its first frame"
+            );
+            st.rule = LaneRule::Streams;
+            st.single_lane = true;
+            // The pool's per-link budgets follow the lanes a frame can reach.
+            #[cfg(feature = "runtime-zero-copy")]
+            st.size_budgets();
+        }
+        self
     }
 
     /// Before the idle hook flushes, let producers that are still staging finish: while the
@@ -2890,7 +3031,7 @@ impl OutboundRx {
         }
     }
 
-    async fn recv_wire_tagged_with(&mut self, packed: bool) -> Option<(Priority, WireFrame)> {
+    async fn recv_wire_tagged_with(&mut self, mode: TakeMode) -> Option<(Priority, WireFrame)> {
         // The idle hook runs once per call: if it flushed something the next take finds it,
         // and if it did not there is nothing more to ask before waiting.
         let mut idle_hook_ran = false;
@@ -2914,16 +3055,19 @@ impl OutboundRx {
                 // `Send`).
                 let (carried, taken, freed, finished) = {
                     let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+                    // A carry is left only by an inline write, which a link with
+                    // a stream per lane does not have, so it is never on the
+                    // by-lane path.
                     if let Some(carried) = st.carry.take() {
                         // What a sender left half written goes first: the bytes of the
                         // stream stay in order.
                         (Some(carried), Taken::Empty, false, false)
                     } else {
-                        let (taken, freed) = if packed {
-                            let budget = st.batch_bytes.max(1);
-                            st.take_next_packed(budget)
-                        } else {
-                            st.take_next()
+                        let budget = st.batch_bytes.max(1);
+                        let (taken, freed) = match mode {
+                            TakeMode::One => st.take_next(),
+                            TakeMode::Packed => st.take_next_packed(budget),
+                            TakeMode::ByLane => st.take_lane_packed(budget),
                         };
                         let finished =
                             matches!(taken, Taken::Empty) && (st.closed || st.senders == 0);
@@ -3407,26 +3551,38 @@ impl OutboundQueue {
     /// ([`WireFrame::begin_write`]), writes it, and hands it back
     /// ([`Self::recycle_wire`]) or drops it.
     pub async fn next_wire(&mut self) -> Option<WireFrame> {
-        self.next_wire_with(false).await
+        self.next_wire_with(TakeMode::One)
+            .await
+            .map(|(_, wire)| wire)
     }
 
     /// R3366 — [`Self::next_wire`] for a BYTE-STREAM writer: what is queued, up
     /// to a batch, as one buffer ([`OutboundRx::recv_wire_packed`]). The seal
     /// behaves exactly as it does there.
     pub async fn next_wire_packed(&mut self) -> Option<WireFrame> {
-        self.next_wire_with(true).await
+        self.next_wire_with(TakeMode::Packed)
+            .await
+            .map(|(_, wire)| wire)
     }
 
-    async fn next_wire_with(&mut self, packed: bool) -> Option<WireFrame> {
+    /// [`Self::next_wire_packed`] for a writer with a byte stream per lane: one
+    /// lane's frames, with the priority of the lane, which names the stream
+    /// ([`OutboundRx::recv_wire_by_lane`]). The seal behaves exactly as it does
+    /// there.
+    pub async fn next_wire_by_lane(&mut self) -> Option<(Priority, WireFrame)> {
+        self.next_wire_with(TakeMode::ByLane).await
+    }
+
+    async fn next_wire_with(&mut self, mode: TakeMode) -> Option<(Priority, WireFrame)> {
         loop {
             if self.sealed || self.seal.is_none() {
-                return self.rx.recv_wire_mode(packed).await;
+                return self.rx.recv_wire_tagged_with(mode).await;
             }
             let seal = self.seal.as_mut().expect("checked directly above");
             let mut sealed_now = false;
             let frame = tokio::select! {
                 biased;
-                frame = self.rx.recv_wire_mode(packed) => Some(frame),
+                frame = self.rx.recv_wire_tagged_with(mode) => Some(frame),
                 changed = seal.changed() => {
                     sealed_now = match changed {
                         Ok(()) => *seal.borrow_and_update(),
@@ -5819,6 +5975,153 @@ mod tests {
         assert!(
             waiter.join().expect("the waiter ends"),
             "it was lent a slot"
+        );
+    }
+
+    /// The shape an established session gives its link, with or without QoS.
+    fn session_shape(qos: bool) -> wz_session_core::link::TxQueueShape {
+        use wz_session_core::link::{TxPipeline, TxQueueShape};
+        TxQueueShape {
+            sizes: [DEFAULT_QUEUE_SIZE; Priority::NUM],
+            qos,
+            batch_bytes: BATCH_BYTES,
+            queue_unit_bytes: BATCH_BYTES,
+            pipeline: TxPipeline::DEFAULT,
+        }
+    }
+
+    /// Every take of a finished queue a writer with a stream per lane makes, as
+    /// the stream's priority and the bytes written on it.
+    async fn takes_by_lane(rx: &mut OutboundRx) -> Vec<(Priority, Vec<u8>)> {
+        let mut takes = Vec::new();
+        while let Some((stream, wire)) = rx.recv_wire_by_lane().await {
+            takes.push((stream, wire.into_vec()));
+        }
+        takes
+    }
+
+    /// Before the session's shape a queue whose lanes are streams has ONE lane,
+    /// the Control lane, so the handshake leaves on the stream the peer reads it
+    /// from whatever priority it was sent at.
+    #[tokio::test]
+    async fn a_stream_lane_queue_writes_everything_on_the_control_stream_before_its_shape() {
+        let (tx, rx) = outbound_channel();
+        let mut rx = rx.with_stream_lanes();
+        tx.send(Priority::Data, b"init".to_vec()).expect("enqueue");
+        tx.send(Priority::RealTime, b"open".to_vec())
+            .expect("enqueue");
+        drop(tx);
+
+        assert_eq!(
+            takes_by_lane(&mut rx).await,
+            vec![(Priority::Control, b"initopen".to_vec())],
+            "one lane, in the order sent, on the Control stream"
+        );
+    }
+
+    /// Once the shape says QoS, each priority has its stream: a take holds one
+    /// lane's frames and is answered with that lane's priority. A frame queued
+    /// before the shape keeps the Control lane, so it is not moved onto the
+    /// stream of the priority it was sent at when the writer reaches it later.
+    #[tokio::test]
+    async fn a_qos_shape_gives_each_priority_its_stream_and_a_queued_frame_keeps_its_own() {
+        let (tx, rx) = outbound_channel();
+        let mut rx = rx.with_stream_lanes();
+        tx.send(Priority::Data, b"ack".to_vec()).expect("enqueue");
+        tx.reshape(session_shape(true));
+        tx.send(Priority::Data, b"d1".to_vec()).expect("enqueue");
+        tx.send(Priority::RealTime, b"rt".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Data, b"d2".to_vec()).expect("enqueue");
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        drop(tx);
+
+        assert_eq!(
+            takes_by_lane(&mut rx).await,
+            vec![
+                (Priority::Control, b"ackctl".to_vec()),
+                (Priority::RealTime, b"rt".to_vec()),
+                (Priority::Data, b"d1d2".to_vec()),
+            ],
+            "per lane, highest first, never joined across lanes"
+        );
+    }
+
+    /// A session without QoS writes every priority on the Control stream, as
+    /// upstream's single queue is written on the bidirectional stream.
+    #[tokio::test]
+    async fn a_session_without_qos_writes_every_priority_on_the_control_stream() {
+        let (tx, rx) = outbound_channel();
+        let mut rx = rx.with_stream_lanes();
+        tx.reshape(session_shape(false));
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.send(Priority::Background, b"bg".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::RealTime, b"rt".to_vec())
+            .expect("enqueue");
+        drop(tx);
+
+        assert_eq!(
+            takes_by_lane(&mut rx).await,
+            vec![(Priority::Control, b"databgrt".to_vec())],
+            "one lane, FIFO, on the Control stream"
+        );
+    }
+
+    /// The keepalive passes every lane and leaves on the Control stream, alone.
+    #[tokio::test]
+    async fn a_keepalive_leaves_first_and_on_the_control_stream() {
+        let (tx, rx) = outbound_channel();
+        let mut rx = rx.with_stream_lanes();
+        tx.reshape(session_shape(true));
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.send_urgent(b"ka".to_vec()).expect("enqueue");
+        drop(tx);
+
+        assert_eq!(
+            takes_by_lane(&mut rx).await,
+            vec![
+                (Priority::Control, b"ka".to_vec()),
+                (Priority::Data, b"data".to_vec()),
+            ]
+        );
+    }
+
+    /// A queue that is not made with stream lanes keeps the pipeline's rule: a
+    /// session without QoS folds onto the `Priority::DEFAULT` lane.
+    #[test]
+    fn a_pipeline_queue_without_qos_keeps_the_default_lane() {
+        let (tx, rx) = outbound_channel();
+        tx.reshape(session_shape(false));
+        let st = rx.shared.state.lock().expect("lanes");
+        assert_eq!(
+            st.lane_of(Priority::RealTime),
+            Priority::DEFAULT.wire_byte() as usize
+        );
+    }
+
+    /// A pooled queue with stream lanes: its batches pack one lane each, and a
+    /// Control frame queued after the shape joins the handshake's batch, which
+    /// is on the same stream.
+    #[cfg(feature = "runtime-zero-copy")]
+    #[tokio::test]
+    async fn a_pooled_stream_lane_queue_takes_one_lane_per_batch() {
+        let (tx, rx) = outbound_channel_pooled();
+        let mut rx = rx.with_stream_lanes();
+        tx.send_framed(Priority::Data, b"", b"hs").expect("a slot");
+        tx.reshape(session_shape(true));
+        tx.send_framed(Priority::Data, b"", b"d1").expect("a slot");
+        tx.send_framed(Priority::Control, b"", b"c")
+            .expect("a slot");
+        drop(tx);
+
+        assert_eq!(
+            takes_by_lane(&mut rx).await,
+            vec![
+                (Priority::Control, b"hsc".to_vec()),
+                (Priority::Data, b"d1".to_vec()),
+            ]
         );
     }
 }
