@@ -26,14 +26,13 @@
 //!
 //! Model B sink shape, the matching sibling of [`crate::decl_sink`]: the
 //! [`MatchingSink`] trait is the DIP seam, [`BoxedMatchingSink`] the AP
-//! heap-closure adapter. The whole module is `alloc`-gated — a watch owns
-//! its keyexpr `String`, and the membership table it re-evaluates against
-//! is itself the `alloc`-gated half of the registries — and rides the
+//! heap-closure adapter. The whole module is `alloc`-gated — the watch list
+//! and the boxed sink are heap-held, and the membership table it re-evaluates
+//! against is itself the `alloc`-gated half of the registries — and rides the
 //! `session-matching` feature (the wz atom mirroring pico's
 //! `Z_FEATURE_MATCHING`, default-on in pico's CMake cache).
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Matching-status sink: the DIP seam a [`MatchingWatchList`] fires on a
@@ -105,17 +104,17 @@ struct MatchingWatch<C: MatchingSink, K> {
 /// registry's listener-handle currency, not a wire id).
 ///
 /// R311y797 — `K` is the WATCHED CRITERION, i.e. everything the verdict
-/// predicate needs from the watcher. It defaults to `String` (the bare
-/// keyexpr) because that is the whole of a publisher's criterion, and the
-/// subscriber-side registry keeps that instantiation unchanged. A querier
-/// needs more — its `AllComplete` target changes which peer queryables can
-/// answer it at all — so the queryable-side registry instantiates
-/// `K = `[`QuerierCriterion`](crate::declare::queryable::QuerierCriterion).
+/// predicate needs from the watcher, and each registry names its own: the
+/// subscriber-side one a publisher's keyexpr and allowed destination, the
+/// queryable-side one also a querier's `AllComplete` target, which changes
+/// which peer queryables can answer it at all. There is no default: no
+/// registry watches a bare keyexpr, so one would only let a new registry
+/// leave out the half of its criterion the verdict reads.
 /// This is pico's own shape: the write-filter ctx stores `key` AND
 /// `is_complete` side by side and both are read on every re-evaluation
 /// (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h:56-66`), so the
 /// watch key is a criterion rather than a keyexpr in upstream too.
-pub struct MatchingWatchList<C: MatchingSink, K = String> {
+pub struct MatchingWatchList<C: MatchingSink, K> {
     watches: Vec<MatchingWatch<C, K>>,
     next_id: u64,
 }
@@ -227,6 +226,7 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
     use alloc::vec;
     use std::sync::{Arc, Mutex};
 
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn watch_fires_on_flip_only() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink, String> = MatchingWatchList::new();
         let id = list.register("home/temp".into(), false, recording_sink(&log));
         assert_eq!(list.len(), 1);
 
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn registering_an_already_matching_watch_fires_true_once() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink, String> = MatchingWatchList::new();
         list.register("home/temp".into(), true, recording_sink(&log));
         assert_eq!(
             *log.lock().unwrap(),
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn registering_a_non_matching_watch_stays_silent() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink, String> = MatchingWatchList::new();
         list.register("home/temp".into(), false, recording_sink(&log));
         assert!(log.lock().unwrap().is_empty());
     }
@@ -309,7 +309,7 @@ mod tests {
     fn watches_evaluate_independently() {
         let log_a = Arc::new(Mutex::new(Vec::new()));
         let log_b = Arc::new(Mutex::new(Vec::new()));
-        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink, String> = MatchingWatchList::new();
         list.register("home/a".into(), false, recording_sink(&log_a));
         list.register("home/b".into(), false, recording_sink(&log_b));
 
