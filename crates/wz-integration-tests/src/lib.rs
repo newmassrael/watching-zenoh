@@ -3571,6 +3571,26 @@ pub mod common {
             .map(str::to_string)
     }
 
+    /// The request id `wz-ap-demo --query` sent its Query under, read off its
+    /// `QUERY EMITTED … rid=<n> …` line.
+    ///
+    /// The demo asks through `Session::query`, which takes the id from the
+    /// session's request counter, so a fixture that names a value is pinning
+    /// the counter's state rather than the echo it means to check. The reply
+    /// and final lines are held to this one instead. `None` until the line is
+    /// whole: a digit run that reaches the end of the capture may be torn.
+    pub fn emitted_query_rid(captured: &str) -> Option<u32> {
+        let line = captured
+            .split_inclusive('\n')
+            .find(|line| line.contains("QUERY EMITTED"))?;
+        let rest = line.split_once(" rid=")?.1;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() || digits.len() == rest.len() {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
     /// One unicast session as ZENOH reports it in its `@/<zid>/router` adminspace
     /// answer: the peer's zid, its whatami, and how many PHYSICAL links zenoh has
     /// bound to that ONE transport.
@@ -8977,6 +8997,34 @@ mod tests {
     /// `33763`), and the caller would then probe a port nobody is listening on and
     /// blame the child. The parser therefore demands a terminating non-digit; this
     /// pins that, since a torn read is exactly the case a live run does not produce.
+    /// The id is read off the `QUERY EMITTED` line only, whole: another line's
+    /// `rid=` is not it, and a line torn inside its digits is not yet readable.
+    #[test]
+    fn the_emitted_query_rid_is_read_off_the_emit_line_alone() {
+        use super::common::emitted_query_rid;
+        let emitted = "INFO wz-ap-demo: QUERY EMITTED keyexpr='demo/test' rid=7 params=None \
+                       attachment_pairs=0\n";
+        assert_eq!(emitted_query_rid(emitted), Some(7));
+        let after_a_reply = format!(
+            "INFO wz-ap-demo: REPLY RECEIVED rid=3 keyexpr='demo/test' body=Del\n{emitted}"
+        );
+        assert_eq!(
+            emitted_query_rid(&after_a_reply),
+            Some(7),
+            "a reply line's rid is not the emitted one"
+        );
+        assert_eq!(
+            emitted_query_rid("INFO wz-ap-demo: QUERY EMITTED keyexpr='demo/test' rid=1"),
+            None,
+            "a digit run at the end of the capture may be torn"
+        );
+        assert_eq!(
+            emitted_query_rid("INFO wz-ap-demo: FINAL RECEIVED rid=7\n"),
+            None,
+            "no emit line, no id"
+        );
+    }
+
     #[test]
     fn parse_announced_tcp_port_refuses_an_unterminated_digit_run() {
         // R2230 (open-debt item 579) — the fixture drives the needle the helpers

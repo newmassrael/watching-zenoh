@@ -49,7 +49,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
+    emitted_query_rid, line_with, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -166,7 +167,7 @@ fn wz_queryable_round_trip_against_wz_initiator() {
     };
 
     // The acceptor's queryable callback logs:
-    //   "QUERYABLE FIRED pattern='demo/**' rid=1 keyexpr='demo/test' reply='hello-from-queryable'"
+    //   "QUERYABLE FIRED pattern='demo/**' rid=<n> keyexpr='demo/test' reply='hello-from-queryable'"
     // Three substring assertions on the captured stderr so a
     // regression on any of (pattern resolution, rid echo, resolved
     // keyexpr literal, configured reply payload) localises here.
@@ -175,11 +176,19 @@ fn wz_queryable_round_trip_against_wz_initiator() {
         "QUERYABLE FIRED line lacks pattern='{queryable_pattern}'.\n\
          --- acceptor stderr ---\n{fired_text}"
     );
+    // The id is the one the initiator's `Session::query` took from its
+    // session's counter, which its `QUERY EMITTED` line names.
+    let rid = emitted_query_rid(&initiator_captured).unwrap_or_else(|| {
+        panic!(
+            "the initiator logged no whole 'QUERY EMITTED … rid=<n>' line\n\
+             --- initiator stderr ---\n{initiator_captured}"
+        )
+    });
+    let fired_line = line_with(&fired_text, "QUERYABLE FIRED").unwrap_or_default();
     assert!(
-        fired_text.contains("rid=1"),
-        "QUERYABLE FIRED line lacks 'rid=1' — initiator's query_task hard-codes \
-         QUERY_RID=1 and the acceptor's responder must echo the inbound \
-         Request.rid verbatim.\n\
+        fired_line.contains(&format!(" rid={rid} ")),
+        "QUERYABLE FIRED line lacks 'rid={rid}' — the acceptor's responder must \
+         see the Request.rid the initiator sent.\n\
          --- acceptor stderr ---\n{fired_text}"
     );
     assert!(

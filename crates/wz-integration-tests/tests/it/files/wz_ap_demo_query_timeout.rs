@@ -5,10 +5,11 @@
 //
 // Closes the verification debt from R263. R263 wired the
 // --query-timeout-ms CLI flag through ReplyConsumerSpec to the
-// QUERY_RID register call's `deadline_ms` and made the wz-ap-demo
-// sweep_task load-bearing for that register site (a peer that never
-// replies should surface `FINAL RECEIVED rid=1` within (timeout_ms +
-// sweep-tick) of register time). R263 verification was in-process at
+// outbound Query's pending-entry deadline (since `--query` asks through
+// `Session::query`, its `QueryOptions` timeout) and made the wz-ap-demo
+// sweep_task load-bearing for it (a peer that never replies should
+// surface `FINAL RECEIVED rid=<the emitted rid>` within (timeout_ms +
+// sweep-tick) of the Query's send). R263 verification was in-process at
 // the unit level only; this round adds the cross-process integration
 // fixture so the full register-deadline -> sweep_task -> on_final
 // fire chain is exercised at the actual process boundary.
@@ -58,10 +59,11 @@
 //   - Initiator `wz-ap-demo --connect <port> --query demo/timeout
 //     --query-timeout-ms 500 --on-query-final-log` sends one
 //     outbound Query once the session reaches Established. The
-//     register call computes deadline_ms = session_clock.now + 500.
+//     query computes deadline_ms = session_clock.now + 500.
 //     The wz-ap-demo sweep_task fires every 100 ms; the first sweep
 //     after clock.now > deadline_ms invokes the on_final callback
-//     which logs `FINAL RECEIVED rid=1` to stderr.
+//     which logs `FINAL RECEIVED rid=<n>` to stderr, <n> being the
+//     id its `QUERY EMITTED` line names.
 //
 // Wall-time bounds (chosen R264 kickoff):
 //   - Lower 400 ms — catches a regression where `deadline_ms` is
@@ -81,8 +83,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, wz_e2e_silent_peer_binary,
-    PortReservation,
+    emitted_query_rid, read_captured, wait_for_substring, wz_ap_demo_binary,
+    wz_e2e_silent_peer_binary, PortReservation,
 };
 
 #[test]
@@ -164,7 +166,7 @@ fn wz_ap_demo_query_timeout_fires_final_callback() {
     // driver-loop-tick ~50-200 ms + 50 ms poll quantisation.
     let final_result = wait_for_substring(
         &mut initiator_stderr_reader,
-        "FINAL RECEIVED rid=1",
+        "FINAL RECEIVED rid=",
         Duration::from_secs(2),
     );
     let final_elapsed = initiator_start.elapsed();
@@ -184,12 +186,24 @@ fn wz_ap_demo_query_timeout_fires_final_callback() {
 
     if let Err(c) = final_result {
         panic!(
-            "initiator wz-ap-demo did not log 'FINAL RECEIVED rid=1' within 2s; \
+            "initiator wz-ap-demo did not log 'FINAL RECEIVED' within 2s; \
              --query-timeout-ms=500 should have fired the ReplyRegistry on_final \
              callback via the R264 sweep_task.\n\
              --- captured initiator stderr at deadline ---\n{c}"
         );
     }
+    // The final is the emitted Query's, not some other id's.
+    let rid = emitted_query_rid(&initiator_captured).unwrap_or_else(|| {
+        panic!(
+            "the initiator logged no whole 'QUERY EMITTED … rid=<n>' line\n\
+             --- initiator stderr ---\n{initiator_captured}"
+        )
+    });
+    assert!(
+        initiator_captured.contains(&format!("FINAL RECEIVED rid={rid}\n")),
+        "the FINAL line is not the emitted Query's rid={rid}\n\
+         --- initiator stderr ---\n{initiator_captured}"
+    );
 
     // Wall-time bounds — see file header for the rationale behind
     // the 400 ms / 2000 ms boundaries.

@@ -15,9 +15,9 @@
 // expansion withholds the flag from a run that has no query to bind it to.
 //
 // The control. The same topology and the same silent peer with a file that does
-// not name the key. Without a deadline the pending entry never expires on its
-// own, so the peer's silence must leave the FINAL line absent over the same 2 s
-// the positive leg uses to observe it. The control first waits for the session
+// not name the key. The query then has the library's default timeout (10 s on a
+// build with `query-timeout`, none without), so the peer's silence must leave
+// the FINAL line absent over the same 2 s the positive leg uses to observe it. The control first waits for the session
 // to be Established, so an absence is about the deadline and not about an
 // initiator that never connected.
 //
@@ -29,8 +29,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
-    wz_e2e_silent_peer_binary, PortReservation,
+    assert_demo_binary_newer_than_sources, emitted_query_rid, read_captured, wait_for_substring,
+    wz_ap_demo_binary, wz_e2e_silent_peer_binary, PortReservation,
 };
 
 /// The document: a 500 ms default query timeout.
@@ -137,7 +137,7 @@ fn query_a_silent_peer_given(document: &str, require_established: bool) -> Obser
 
     let final_result = wait_for_substring(
         &mut initiator_stderr_reader,
-        "FINAL RECEIVED rid=1",
+        "FINAL RECEIVED rid=",
         Duration::from_secs(2),
     );
     let final_elapsed = initiator_start.elapsed();
@@ -174,9 +174,24 @@ fn wz_ap_demo_query_timeout_from_a_config_file_fires_final_callback() {
     );
     assert!(
         seen.final_seen,
-        "initiator wz-ap-demo did not log 'FINAL RECEIVED rid=1' within 2s; the file's \
+        "initiator wz-ap-demo did not log 'FINAL RECEIVED' within 2s; the file's \
          `queries_default_timeout: 500` should have fired the ReplyRegistry on_final \
          callback via the sweep task\n--- initiator stderr ---\n{}",
+        seen.initiator_stderr
+    );
+    // The final is the emitted Query's: its id is the one the `QUERY EMITTED`
+    // line names, which the session's request counter chose.
+    let rid = emitted_query_rid(&seen.initiator_stderr).unwrap_or_else(|| {
+        panic!(
+            "the initiator logged no whole 'QUERY EMITTED … rid=<n>' line\n\
+             --- initiator stderr ---\n{}",
+            seen.initiator_stderr
+        )
+    });
+    assert!(
+        seen.initiator_stderr
+            .contains(&format!("FINAL RECEIVED rid={rid}\n")),
+        "the FINAL line is not the emitted Query's rid={rid}\n--- initiator stderr ---\n{}",
         seen.initiator_stderr
     );
     assert!(
@@ -192,8 +207,9 @@ fn wz_ap_demo_query_timeout_from_a_config_file_fires_final_callback() {
     );
 }
 
-/// CONTROL, key absent: no deadline reaches the register call, so the silent
-/// peer leaves the pending entry open and no FINAL line appears.
+/// CONTROL, key absent: no 500 ms deadline reaches the query, so the silent
+/// peer leaves the pending entry open past the window and no FINAL line
+/// appears in it.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features zenoh-config + wz-e2e-silent-peer); Layer Z runs via --ignored"]
 fn wz_ap_demo_query_without_the_timeout_key_from_a_config_file_never_fires_final() {

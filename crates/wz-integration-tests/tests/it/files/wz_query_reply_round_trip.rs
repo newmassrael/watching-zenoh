@@ -53,7 +53,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
+    emitted_query_rid, line_with, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -186,15 +187,25 @@ fn wz_initiator_consumes_reply_chain_from_wz_queryable() {
     };
 
     // The initiator's on_reply callback logs:
-    //   "REPLY RECEIVED rid=1 keyexpr='demo/test' body=Put payload=\"value-from-queryable\""
+    //   "REPLY RECEIVED rid=<n> keyexpr='demo/test' body=Put payload=\"value-from-queryable\""
     // Three substring assertions so a regression on any of (rid echo,
     // resolved keyexpr literal, configured reply payload, body arm)
     // localises here.
+    //
+    // <n> is the id the Query went out under, which `Session::query` takes
+    // from the session's counter: read off the initiator's own
+    // `QUERY EMITTED` line rather than assumed.
+    let rid = emitted_query_rid(&initiator_captured).unwrap_or_else(|| {
+        panic!(
+            "the initiator logged no whole 'QUERY EMITTED … rid=<n>' line\n\
+             --- initiator stderr ---\n{initiator_captured}"
+        )
+    });
+    let reply_line = line_with(&initiator_captured, "REPLY RECEIVED").unwrap_or_default();
     assert!(
-        reply_text_captured.contains("rid=1"),
-        "REPLY RECEIVED line lacks 'rid=1' — initiator's query_task hard-codes \
-         QUERY_RID=1 and the inbound Response.request_id must echo the outbound \
-         Request.rid verbatim.\n\
+        reply_line.contains(&format!("rid={rid} ")),
+        "the REPLY RECEIVED line lacks 'rid={rid}' — the inbound \
+         Response.request_id must echo the outbound Request.rid verbatim.\n\
          --- initiator stderr ---\n{reply_text_captured}"
     );
     assert!(
@@ -220,8 +231,8 @@ fn wz_initiator_consumes_reply_chain_from_wz_queryable() {
     );
 
     assert!(
-        final_text_captured.contains("FINAL RECEIVED rid=1"),
-        "FINAL RECEIVED line lacks 'rid=1' — the on_final callback should \
+        final_text_captured.contains(&format!("FINAL RECEIVED rid={rid}\n")),
+        "FINAL RECEIVED line lacks 'rid={rid}' — the on_final callback should \
          receive the same rid the registry was bound to.\n\
          --- initiator stderr ---\n{final_text_captured}"
     );

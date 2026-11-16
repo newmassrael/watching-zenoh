@@ -89,8 +89,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
-    wz_ap_demo_binary, ChildGuard,
+    emitted_query_rid, graceful_terminate, read_captured, spawn_on_ephemeral_port,
+    wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
 
 /// The topology mode every node of this file runs in. These tests assert that a router's peer
@@ -677,14 +677,18 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
     });
     // Isolate the actual `REPLY RECEIVED` line so the rid/payload asserts pin the
     // REPLY, not the whole issuer capture (which also holds the issuer's own
-    // `QUERY EMITTED rid=1` line — a whole-buffer `contains("rid=1")` would match it).
+    // `QUERY EMITTED rid=<n>` line — a whole-buffer `contains` would match it).
+    // <n> is read off that emit line: the session's request counter chose it.
+    let rid = emitted_query_rid(&iss_captured).unwrap_or_else(|| {
+        panic!("the issuer logged no whole 'QUERY EMITTED … rid=<n>' line:\n{iss_captured}")
+    });
     let reply_line = iss_capture
         .lines()
         .find(|l| l.contains("REPLY RECEIVED"))
         .unwrap_or_else(|| panic!("no 'REPLY RECEIVED' line in issuer capture:\n{iss_capture}"));
     assert!(
-        reply_line.contains("rid=1"),
-        "the routed reply must echo the query's rid=1\n--- issuer ---\n{reply_line}"
+        reply_line.contains(&format!("rid={rid} ")),
+        "the routed reply must echo the query's rid={rid}\n--- issuer ---\n{reply_line}"
     );
     assert!(
         reply_line.contains("payload=\"value-from-router-mesh\""),
@@ -861,14 +865,18 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
     });
     // Isolate the actual `REPLY RECEIVED` line so the rid/payload asserts pin the
     // REPLY, not the whole issuer capture (which also holds the issuer's own
-    // `QUERY EMITTED rid=1` line — a whole-buffer `contains("rid=1")` would match it).
+    // `QUERY EMITTED rid=<n>` line — a whole-buffer `contains` would match it).
+    // <n> is read off that emit line: the session's request counter chose it.
+    let rid = emitted_query_rid(&iss_captured).unwrap_or_else(|| {
+        panic!("the issuer logged no whole 'QUERY EMITTED … rid=<n>' line:\n{iss_captured}")
+    });
     let reply_line = iss_capture
         .lines()
         .find(|l| l.contains("REPLY RECEIVED"))
         .unwrap_or_else(|| panic!("no 'REPLY RECEIVED' line in issuer capture:\n{iss_capture}"));
     assert!(
-        reply_line.contains("rid=1"),
-        "the routed reply must echo the query's rid=1\n--- issuer ---\n{reply_line}"
+        reply_line.contains(&format!("rid={rid} ")),
+        "the routed reply must echo the query's rid={rid}\n--- issuer ---\n{reply_line}"
     );
     assert!(
         reply_line.contains("payload=\"value-across-two-routers\""),
