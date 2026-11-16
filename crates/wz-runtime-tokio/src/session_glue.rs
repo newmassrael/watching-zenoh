@@ -1530,7 +1530,7 @@ where
                     }
                     // R2922 — a request staged from outside the loop. Fall
                     // through: the loop head raises it.
-                    _ = actions.core.out_of_band.signalled() => {}
+                    _ = actions.out_of_band_signalled() => {}
                     outcome = next_outcome(&mut held, driver, actions, engine) => {
                         // §5.21 routing-namespace — strip the DIRECT decoded
                         // FramePayload before dispatch. Covers BOTH the
@@ -1664,7 +1664,7 @@ where
             None => {
                 // R2922 — the same out-of-band wake as the select arm above.
                 let outcome = tokio::select! {
-                    _ = actions.core.out_of_band.signalled() => None,
+                    _ = actions.out_of_band_signalled() => None,
                     outcome = poll_and_dispatch_one(driver, actions, engine) => Some(outcome),
                 };
                 let Some(outcome) = outcome else {

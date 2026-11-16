@@ -1382,4 +1382,140 @@ mod tests {
             "the UDP link took nothing more"
         );
     }
+
+    /// An aggregate of `extra + 1` recording links on the primary's core: the
+    /// primary and one joined handle per extra link.
+    fn aggregate_of(extra: usize) -> (Arc<SessionLinkActions>, Vec<Arc<SessionLinkActions>>) {
+        use crate::runtime_impl::TokioRuntime;
+        use wz_runtime_core::Runtime;
+
+        let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
+        let (primary, _) = crate::test_fixtures::recording_actions();
+        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
+        let joined = (0..extra)
+            .map(|_| {
+                let (secondary, _) = crate::test_fixtures::recording_actions();
+                TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| {
+                    *s = Some(key.clone())
+                });
+                match join_link(&primary, &secondary, extra + 1) {
+                    JoinOutcome::Joined(handle) => handle,
+                    _ => panic!("every link joins the aggregate"),
+                }
+            })
+            .collect();
+        (primary, joined)
+    }
+
+    /// A session-scope Close on one link deletes the transport: the deletion is
+    /// owed once to every OTHER link of the aggregate, and never to the link the
+    /// Close arrived on, which ends by that Close.
+    #[test]
+    fn a_deleted_transport_is_owed_once_to_every_other_link() {
+        let (primary, joined) = aggregate_of(1);
+        let other = &joined[0];
+        assert!(!other.transport_deleted(), "nothing is deleted yet");
+        assert!(!other.take_transport_deleted());
+
+        primary.peer_deleted_transport();
+        assert!(primary.transport_deleted() && other.transport_deleted());
+        assert!(
+            !primary.take_transport_deleted(),
+            "the link the Close arrived on is not told again"
+        );
+        assert!(other.take_transport_deleted(), "the other link is told");
+        assert!(!other.take_transport_deleted(), "once");
+    }
+
+    /// The other link's loop takes the deletion as a peer Close: an established
+    /// link goes to `Closed` and writes no Close frame of its own, as upstream's
+    /// delete closes its remaining links without one.
+    #[test]
+    fn the_other_link_ends_as_on_a_peer_close() {
+        use crate::session_fsm_unicast::{
+            SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
+        };
+
+        let (primary, joined) = aggregate_of(1);
+        let other = &joined[0];
+        let mut engine = crate::session_glue::new_session_engine(other);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        for event in [
+            E::OutboundStart,
+            E::LinkOpened,
+            E::InitAckReceived,
+            E::OpenAckReceived,
+        ] {
+            engine.process_event(event);
+        }
+        assert_eq!(engine.get_current_state(), S::Established);
+        assert!(
+            !wz_session_core::drive::check_out_of_band(other, &mut engine),
+            "nothing asked of the session yet"
+        );
+
+        primary.peer_deleted_transport();
+        assert!(wz_session_core::drive::check_out_of_band(
+            other,
+            &mut engine
+        ));
+        assert_eq!(engine.get_current_state(), S::Closed);
+        assert_eq!(other.trace_snapshot().send_close_frame_with_reason, 0);
+        assert!(
+            !wz_session_core::drive::check_out_of_band(other, &mut engine),
+            "the deletion is raised once"
+        );
+    }
+
+    /// Every link's loop parked on the shared core is woken by the deletion, not
+    /// only the one that parked last; the loop of the link the Close arrived on
+    /// is not left owing it.
+    #[test]
+    fn a_deleted_transport_wakes_every_parked_loop() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Wake, Waker};
+
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let (primary, joined) = aggregate_of(2);
+        let counts: Vec<Arc<Count>> = (0..2)
+            .map(|_| Arc::new(Count(AtomicUsize::new(0))))
+            .collect();
+        for (link, count) in joined.iter().zip(&counts) {
+            let waker = Waker::from(count.clone());
+            let mut cx = Context::from_waker(&waker);
+            let mut parked = std::pin::pin!(link.out_of_band_signalled());
+            assert!(parked.as_mut().poll(&mut cx).is_pending());
+        }
+
+        primary.peer_deleted_transport();
+        for count in &counts {
+            assert_eq!(
+                count.0.load(Ordering::SeqCst),
+                1,
+                "each parked loop is woken"
+            );
+        }
+        let mut cx = Context::from_waker(Waker::noop());
+        for link in &joined {
+            let mut owed = std::pin::pin!(link.out_of_band_signalled());
+            assert!(
+                owed.as_mut().poll(&mut cx).is_ready(),
+                "the deletion is owed"
+            );
+        }
+        let mut receiver = std::pin::pin!(primary.out_of_band_signalled());
+        assert!(receiver.as_mut().poll(&mut cx).is_pending());
+        let mut session_only = std::pin::pin!(primary.core.out_of_band.signalled());
+        assert!(
+            session_only.as_mut().poll(&mut cx).is_pending(),
+            "the session's own requests do not count the deletion"
+        );
+    }
 }

@@ -1245,6 +1245,15 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     *to_engine = Some(event);
                     return DriverLoopOutcome::LinkRefused;
                 }
+                // A Close at session scope on an established session deletes the whole transport:
+                // this link takes it as a peer Close, and the links beside it are told through the
+                // session (see `SessionLinkActions::peer_deleted_transport`).
+                #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
+                if matches!(&frame, InboundFrame::Close { session: true, .. })
+                    && actions.is_established()
+                {
+                    actions.peer_deleted_transport();
+                }
                 *to_engine = Some(event);
                 DriverLoopOutcome::AdvancedFsm
             }
@@ -2783,6 +2792,14 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
     if actions.take_congestion_close() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
         engine.process_event(E::TxCongestionExhaust);
+        return true;
+    }
+    // The peer deleted the transport on another link of this session: this link
+    // ends as on a peer Close, without a Close frame of its own.
+    #[cfg(feature = "transport-multilink")]
+    if actions.take_transport_deleted() {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        engine.process_event(E::PeerClose);
         return true;
     }
     false
