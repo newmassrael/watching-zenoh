@@ -146,8 +146,8 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, SubId,
-    SubscriberSink, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
+    SubId, SubscriberSink, TokenId, WireKey,
 };
 
 /// Mints one queryable callback per face.
@@ -897,11 +897,6 @@ fn declare_liveliness_subscriber_on(
     }
 }
 
-/// A C-level queryable id — what a `z_owned_queryable_t` handle carries. The
-/// responder-side mirror of [`SubId`], keying the per-face wz [`Queryable`]s
-/// one C queryable declaration spawned.
-pub type QblId = u64;
-
 /// The first face id of the dial (`connect`) role: a client's one face is this
 /// id, and a peer's faces are this id plus the index of their endpoint.
 ///
@@ -1205,10 +1200,11 @@ fn tell_liveliness(
     token_id: TokenId,
 ) {
     for mut leg in legs {
+        // A sample holds a token id as it reads a peer's, 64 bits wide.
         leg(LivelinessSample {
             kind,
             keyexpr,
-            token_id,
+            token_id: u64::from(token_id),
         });
     }
 }
@@ -4427,7 +4423,7 @@ impl SharedSession {
         links: LinkRestriction,
     ) -> Option<TokenId> {
         let mut guard = self.lock();
-        let id = TokenId::from(guard.take_entity_id()?);
+        let id = guard.take_entity_id()?;
 
         // R2580 — the local plane is in this walk. MEASURED against
         // `libzenohc.so` before the repair: a token declared here and a
@@ -4563,7 +4559,7 @@ impl SharedSession {
         sink: LivelinessSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = SubId::from(guard.take_entity_id()?);
+        let id = guard.take_entity_id()?;
 
         // R2580 — the plane included, which is the receiving half of the same
         // measurement: without it this subscriber cannot hear a token its own
@@ -4618,7 +4614,7 @@ impl SharedSession {
                 leg(LivelinessSample {
                     kind: LivelinessSampleKind::Put,
                     keyexpr: key,
-                    token_id: *token_id,
+                    token_id: u64::from(*token_id),
                 });
             }
         }
@@ -5387,7 +5383,7 @@ impl SharedSession {
         sink: SubscriberSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = SubId::from(guard.take_entity_id()?);
+        let id = guard.take_entity_id()?;
         wz_runtime_tokio::route_trace(format_args!(
             "peer {} declares subscriber key={keyexpr} to faces {:?}",
             zid_text(&self.zid),
@@ -6284,7 +6280,7 @@ impl SharedSession {
         sink: QueryableSink,
     ) -> Option<QblId> {
         let mut guard = self.lock();
-        let id = QblId::from(guard.take_entity_id()?);
+        let id = guard.take_entity_id()?;
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what an
         // in-process `z_get` reaches. The sink factory receives each target's
@@ -6636,7 +6632,7 @@ mod matching_aggregate_tests {
         let last = shared
             .declare_subscriber("wz/ids/last".to_owned(), Locality::Any, no_op.clone())
             .expect("the last id is free");
-        assert_eq!(last, SubId::from(u32::MAX));
+        assert_eq!(last, u32::MAX);
 
         assert_eq!(
             shared.declare_subscriber("wz/ids/past".to_owned(), Locality::Any, no_op),

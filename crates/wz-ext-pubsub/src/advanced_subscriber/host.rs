@@ -75,11 +75,6 @@ pub enum HostError {
         /// The zid's length.
         len: usize,
     },
-    /// The subscription's id does not fit the 32-bit entity id an identity carries.
-    EntityIdOutOfRange {
-        /// The id that did not fit.
-        id: u64,
-    },
     /// The session has handed out every declaration id it can put on the wire, so the
     /// subscription was not declared.
     IdsExhausted,
@@ -96,12 +91,6 @@ impl std::fmt::Display for HostError {
             Self::Refused(what) => write!(f, "the engine refused an advanced subscriber: {what}"),
             Self::SessionZid { len } => {
                 write!(f, "the session's zid is {len} bytes, not 1 to 16")
-            }
-            Self::EntityIdOutOfRange { id } => {
-                write!(
-                    f,
-                    "the subscription id {id} does not fit a 32-bit entity id"
-                )
             }
             Self::IdsExhausted => {
                 f.write_str("the session has handed out every 32-bit declaration id")
@@ -613,17 +602,15 @@ impl EngineSubscriber {
 }
 
 /// The identity a subscriber reports: its host's, when the host has one, else its subscription's
-/// own id.
+/// own id, which is the entity id its declaration carries.
 fn identity_of(
     zid: &[u8],
     subscription: SubId,
     forms: Option<&FormsHandle>,
 ) -> Result<EntityGlobalId, HostError> {
-    let eid = match forms.and_then(|f| f.forms().entity_id()) {
-        Some(eid) => eid,
-        None => u32::try_from(subscription)
-            .map_err(|_| HostError::EntityIdOutOfRange { id: subscription })?,
-    };
+    let eid = forms
+        .and_then(|f| f.forms().entity_id())
+        .unwrap_or(subscription);
     EntityGlobalId::new(zid, eid).ok_or(HostError::SessionZid { len: zid.len() })
 }
 

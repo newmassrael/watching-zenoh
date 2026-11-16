@@ -1639,15 +1639,11 @@ pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult
 #[cfg(feature = "unstable-api")]
 pub(crate) unsafe fn entity_global_id(
     zs: &PicoSessionHandle,
-    eid: u64,
+    eid: wz_session_core::wire_id::EntityId,
 ) -> crate::entity::z_entity_global_id_t {
     crate::entity::z_entity_global_id_t {
         zid: crate::zid::z_id_t { id: zs.drive.zid() },
-        // TRUNCATING, and that is upstream's width rather than a loss: zenoh's
-        // `_z_entity_global_id_t.eid` is a `uint32_t`, so the wire cannot carry
-        // more. A session declaring 2^32 entities would wrap, which is the same
-        // thing upstream does.
-        eid: eid as u32,
+        eid,
     }
 }
 
@@ -1881,11 +1877,13 @@ pub unsafe extern "C" fn ze_advanced_subscriber_keyexpr(
 /// report" answer cannot differ between them — the class of asymmetry this
 /// crate has already paid for.
 #[cfg(feature = "unstable-api")]
-fn entity_id_of(identity: Option<([u8; 16], u64)>) -> crate::entity::z_entity_global_id_t {
+fn entity_id_of(
+    identity: Option<([u8; 16], wz_session_core::wire_id::EntityId)>,
+) -> crate::entity::z_entity_global_id_t {
     match identity {
         Some((zid, eid)) => crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t { id: zid },
-            eid: eid as u32,
+            eid,
         },
         None => crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t::empty(),

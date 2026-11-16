@@ -298,7 +298,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// answering the queries `allowed_origin` admits through callbacks `sink` mints. `retraction`
     /// is the key its undeclaration names beside its id, when the declaring ABI's reference
     /// library names one. `None` from an engine with no queryable in this build, which is the
-    /// provided answer.
+    /// provided answer, and from a session that has handed out every entity id.
     fn declare_queryable_on_wire(
         &self,
         keyexpr: String,
@@ -341,7 +341,8 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Declare a liveliness token on `keyexpr`, announced as `wire`, to every peer the session
     /// reaches now and later. `retraction` is the key its undeclaration names beside its id,
     /// when the declaring ABI's reference library names one. `None` from an engine with no
-    /// liveliness in this build, which is the provided answer.
+    /// liveliness in this build, which is the provided answer, and from a session that has
+    /// handed out every entity id.
     fn declare_liveliness_token_on_wire(
         &self,
         keyexpr: String,

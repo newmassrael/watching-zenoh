@@ -160,7 +160,7 @@ impl SessionEngine for Script {
         if self.ids_spent.load(Ordering::SeqCst) {
             return None;
         }
-        let id = self.take_id();
+        let id = self.next_entity_id()?;
         self.event(format!("declare subscriber {keyexpr}"));
         self.subscriptions
             .lock()
@@ -245,7 +245,7 @@ impl SessionEngine for Script {
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
-        let id = self.take_id();
+        let id = self.next_entity_id()?;
         self.event(format!("declare token {keyexpr}"));
         Some(id)
     }
@@ -259,7 +259,7 @@ impl SessionEngine for Script {
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
-        let id = self.take_id();
+        let id = self.next_entity_id()?;
         self.event(format!("declare liveliness {keyexpr}"));
         self.liveliness
             .lock()
@@ -828,4 +828,18 @@ fn a_session_with_no_id_left_refuses_the_subscriber() {
     assert_eq!(refused, Err(HostError::IdsExhausted));
     assert!(script.events().is_empty(), "nothing was declared");
     assert!(script.subscriptions.lock().unwrap().is_empty());
+}
+
+/// With no host identity, a subscriber reports its subscription's id as its entity id, the last
+/// one an engine hands out included: the id is the one its declaration carries, of the width an
+/// identity holds.
+#[test]
+fn a_subscriber_without_a_host_identity_reports_its_subscription_id() {
+    let id = super::identity_of(&ZID, u32::MAX, None).expect("the zid is 1 to 16 bytes");
+    assert_eq!((id.zid(), id.eid()), (&ZID[..], u32::MAX));
+    assert_eq!(
+        super::identity_of(&[], 7, None),
+        Err(HostError::SessionZid { len: 0 }),
+        "an empty zid has no identity"
+    );
 }

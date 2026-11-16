@@ -54,19 +54,21 @@ pub(super) struct TokenEntry {
 impl TokenEntry {
     /// Announce this token over `actions`: whether the link took it.
     pub(super) fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        let id = u64::from(self.id);
         if self.wire.is_literal() {
-            actions.send_declare_token(self.id, 0, Some(&self.keyexpr))
+            actions.send_declare_token(id, 0, Some(&self.keyexpr))
         } else {
-            actions.send_declare_token(self.id, self.wire.mapping_id, self.wire.suffix.as_deref())
+            actions.send_declare_token(id, self.wire.mapping_id, self.wire.suffix.as_deref())
         }
         .is_ok()
     }
 
     /// Retract this token over `actions`, naming its key when its declaration asked to.
     pub(super) fn retract<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
+        let id = u64::from(self.id);
         match &self.retraction {
-            Some(key) => actions.send_undeclare_token_naming(self.id, key.mapping_id, &key.suffix),
-            None => actions.send_undeclare_token(self.id),
+            Some(key) => actions.send_undeclare_token_naming(id, key.mapping_id, &key.suffix),
+            None => actions.send_undeclare_token(id),
         }
     }
 }
@@ -85,16 +87,12 @@ impl LiveSubEntry {
     /// Send this subscriber's Interest over `actions`: the tokens to come, and with `history` the
     /// ones alive now: whether the link took it.
     pub(super) fn ask<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        let id = u64::from(self.id);
         if self.wire.is_literal() {
-            actions.send_interest_liveliness_subscriber(
-                self.id,
-                self.history,
-                0,
-                Some(&self.keyexpr),
-            )
+            actions.send_interest_liveliness_subscriber(id, self.history, 0, Some(&self.keyexpr))
         } else {
             actions.send_interest_liveliness_subscriber(
-                self.id,
+                id,
                 self.history,
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),

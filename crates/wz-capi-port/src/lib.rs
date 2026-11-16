@@ -81,7 +81,11 @@ pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, Rep
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine
 /// with faces).
-pub type SubId = u64;
+///
+/// It is the entity id the declaration carries on the wire, so it has upstream's width
+/// (`EntityId`, `u32`), and an engine that has handed out every one refuses the declaration
+/// ([`SessionEngine::next_entity_id`]).
+pub type SubId = wz_session_core::wire_id::EntityId;
 
 /// A C-level matching-listener id, keying what an engine holds for one C declaration.
 pub type MatchId = u64;
@@ -94,8 +98,9 @@ pub type FilterId = u64;
 pub type SubscriberSink =
     Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
 
-/// A C-level liveliness token id — what a `z_owned_liveliness_token_t` handle carries.
-pub type TokenId = u64;
+/// A C-level liveliness token id — what a `z_owned_liveliness_token_t` handle carries: the
+/// entity id the token is declared under, of the width [`SubId`] has for the same reason.
+pub type TokenId = wz_session_core::wire_id::EntityId;
 
 /// The id of one periodic job an engine runs ([`SessionEngine::start_ticker`]).
 pub type TickerId = u64;

@@ -103,6 +103,39 @@ fn a_put_reaches_the_sessions_own_subscribers_by_destination_and_origin() {
     );
 }
 
+/// A matching listener and a subscriber are numbered in spaces of their own, so the two may hold
+/// the same number: retracting the listener that holds the subscriber's number leaves the
+/// subscriber's callback where it was.
+#[test]
+fn retracting_a_matching_listener_leaves_the_subscriber_of_its_number() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (subscriber, count) = subscribe(&engine, "demo/l/same", Locality::SessionLocal);
+    let same = loop {
+        let listener = engine.declare_matching_listener(
+            FilterPlane::Subscribers,
+            "demo/l/other".to_owned(),
+            Arc::new(|_: bool| {}),
+            false,
+        );
+        assert!(
+            listener <= u64::from(subscriber),
+            "the listeners count up from 1"
+        );
+        if listener == u64::from(subscriber) {
+            break listener;
+        }
+    };
+    engine.undeclare_matching_listener(same);
+
+    put(&engine, "demo/l/same", Locality::SessionLocal);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "the subscriber's callback is still held"
+    );
+}
+
 /// A write filter and a matching listener that count the session's own subscribers match
 /// once one is declared and no more once it is retracted, with no peer subscribing at all; the
 /// ones that do not count them match nothing, and a plain put that a subscriber of the session

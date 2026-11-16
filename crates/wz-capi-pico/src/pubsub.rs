@@ -1095,7 +1095,7 @@ pub(crate) struct PlainPublisher {
     /// `SharedSession::next_entity_id` for why it is allocated rather than
     /// derived. Only the unstable API reports it, so only `unstable-api` keeps it.
     #[cfg(feature = "unstable-api")]
-    eid: u64,
+    eid: wz_session_core::wire_id::EntityId,
     /// What it was declared with, applied to every put and delete it makes
     /// ([`PublisherQos`]).
     declared: PublisherQos,
@@ -1226,7 +1226,7 @@ impl PlainPublisher {
         // creates the filter, and a group the Interest goes to reads the id. A session that
         // has handed out every id refuses the publisher with the code a refused declaration
         // gets here.
-        let eid = u64::from(session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?);
+        let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // R2962 — the filter is created AFTER the key, because its Interest names
@@ -1315,7 +1315,7 @@ impl PlainPublisher {
 
     /// The `eid` half of the global id `z_publisher_id` reports.
     #[cfg(feature = "advanced")]
-    pub(crate) fn entity_id(&self) -> u64 {
+    pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
         self.eid
     }
 
@@ -1371,7 +1371,7 @@ impl PublisherState {
 
     /// The `eid` half of the global id `z_publisher_id` reports.
     #[cfg(feature = "unstable-api")]
-    pub(crate) fn entity_id(&self) -> u64 {
+    pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
         self.core.eid
     }
 

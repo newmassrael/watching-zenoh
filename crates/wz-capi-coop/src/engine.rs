@@ -278,7 +278,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The callbacks deliveries go to, by the id of the entity that owns them. Kept outside
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
     /// entity finds its target gone rather than the lock held.
-    targets: Mutex<Vec<(u64, Target)>>,
+    targets: Mutex<Vec<(TargetKey, Target)>>,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -297,9 +297,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// `EntityId`, and refused once spent rather than wrapped (`SessionEngine::next_entity_id`).
     next_entity: AtomicU64,
     /// The ids of what the session holds for the program and never names to a peer: the legs
-    /// of its gets and its periodic jobs. They start past `u32::MAX`, so a leg shares the table
-    /// of callbacks with the subscribers without meeting one's id, and they are not refused when
-    /// the entity ids are spent.
+    /// of its gets and its periodic jobs. A space of their own, so they are not refused when the
+    /// entity ids are spent; the table of callbacks tells a leg from an entity by its kind
+    /// ([`TargetKey`]).
     #[cfg(any(feature = "query", feature = "ticker"))]
     next_local: AtomicU64,
     reader: Mutex<Option<ReadTask>>,
@@ -388,6 +388,21 @@ enum Target {
     Reply(Arc<Mutex<ReplyCallback>>),
     #[cfg(feature = "liveliness")]
     Liveliness(LivelinessCallback),
+}
+
+/// Whose callback a [`Target`] is: the kind of what owns it, and that owner's id. The kinds are
+/// numbered from spaces of their own (the entity ids, the matching listeners', the legs of the
+/// gets), so an id alone would find a callback of another kind that holds the same number.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetKey {
+    Subscriber(SubId),
+    Matching(MatchId),
+    #[cfg(feature = "queryable")]
+    Queryable(QblId),
+    #[cfg(feature = "query")]
+    Reply(u64),
+    #[cfg(feature = "liveliness")]
+    Liveliness(SubId),
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
@@ -550,10 +565,10 @@ impl SubEntry {
     /// Declare this subscriber over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
         if self.wire.is_literal() {
-            actions.send_declare_subscriber(self.id, 0, Some(&self.keyexpr))
+            actions.send_declare_subscriber(u64::from(self.id), 0, Some(&self.keyexpr))
         } else {
             actions.send_declare_subscriber(
-                self.id,
+                u64::from(self.id),
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
             )
@@ -578,10 +593,15 @@ impl QblEntry {
     /// Declare this queryable over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
         if self.wire.is_literal() {
-            actions.send_declare_queryable(self.id, 0, Some(&self.keyexpr), self.complete)
+            actions.send_declare_queryable(
+                u64::from(self.id),
+                0,
+                Some(&self.keyexpr),
+                self.complete,
+            )
         } else {
             actions.send_declare_queryable(
-                self.id,
+                u64::from(self.id),
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
                 self.complete,
@@ -593,10 +613,12 @@ impl QblEntry {
     /// Retract this queryable over `actions`, naming its key when its declaration asked to.
     fn retract<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
         match &self.retraction {
-            Some(key) => {
-                actions.send_undeclare_queryable_naming(self.id, key.mapping_id, &key.suffix)
-            }
-            None => actions.send_undeclare_queryable(self.id),
+            Some(key) => actions.send_undeclare_queryable_naming(
+                u64::from(self.id),
+                key.mapping_id,
+                &key.suffix,
+            ),
+            None => actions.send_undeclare_queryable(u64::from(self.id)),
         }
     }
 }
@@ -1549,7 +1571,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
             #[cfg(any(feature = "query", feature = "ticker"))]
-            next_local: AtomicU64::new(u64::from(u32::MAX) + 1),
+            next_local: AtomicU64::new(1),
             reader: Mutex::new(None),
             delivering: Lock::new(Vec::new()),
             this: this.clone(),
@@ -1688,7 +1710,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let callback = lock(&self.targets)
                 .iter()
                 .find_map(|(t, target)| match target {
-                    Target::Subscriber(cb) if *t == id => Some(cb.clone()),
+                    Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => Some(cb.clone()),
                     _ => None,
                 });
             if let Some(callback) = callback {
@@ -1704,7 +1726,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let callback = lock(&self.targets)
                 .iter()
                 .find_map(|(t, target)| match target {
-                    Target::Liveliness(cb) if *t == id => Some(cb.clone()),
+                    Target::Liveliness(cb) if *t == TargetKey::Liveliness(id) => Some(cb.clone()),
                     _ => None,
                 });
             if let Some(callback) = callback {
@@ -1727,7 +1749,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let sink = lock(&self.targets)
                 .iter()
                 .find_map(|(t, target)| match target {
-                    Target::Matching(sink) if *t == id => Some(sink.clone()),
+                    Target::Matching(sink) if *t == TargetKey::Matching(id) => Some(sink.clone()),
                     _ => None,
                 });
             if let Some(sink) = sink {
@@ -1743,7 +1765,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let callback = lock(&self.targets)
                 .iter()
                 .find_map(|(t, target)| match target {
-                    Target::Queryable(cb) if *t == id => Some(cb.clone()),
+                    Target::Queryable(cb) if *t == TargetKey::Queryable(id) => Some(cb.clone()),
                     _ => None,
                 });
             let mut replies = ReplyStage::new();
@@ -1767,7 +1789,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         lock(&self.targets)
                             .iter()
                             .find_map(|(t, target)| match target {
-                                Target::Reply(cb) if *t == leg => Some(cb.clone()),
+                                Target::Reply(cb) if *t == TargetKey::Reply(leg) => {
+                                    Some(cb.clone())
+                                }
                                 _ => None,
                             });
                     if let Some(callback) = callback {
@@ -1780,7 +1804,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     if let Some(mut core) = self.live() {
                         core.0.pending_gets.retain(|pending| pending.leg != leg);
                     }
-                    drop(self.take_target(leg));
+                    drop(self.take_target(TargetKey::Reply(leg)));
                 }
             }
         }
@@ -1916,7 +1940,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 pending.unregister(&mut core.registry.borrow_mut());
             }
         }
-        drop(self.take_target(leg));
+        drop(self.take_target(TargetKey::Reply(leg)));
+    }
+
+    /// Hold `callback` as what the replies of leg `leg` are handed to, until the leg ends.
+    #[cfg(feature = "query")]
+    fn hold_leg(&self, leg: u64, callback: ReplyCallback) {
+        lock(&self.targets).push((
+            TargetKey::Reply(leg),
+            Target::Reply(Arc::new(Mutex::new(callback))),
+        ));
     }
 
     /// Send `replies` to the query `rid` on the link of `generation` and, with `release`, let go
@@ -1965,11 +1998,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Take the callback of entity `id` out of the targets; the caller drops it with no lock
-    /// held.
-    fn take_target(&self, id: u64) -> Option<Target> {
+    /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
+    fn take_target(&self, key: TargetKey) -> Option<Target> {
         let mut targets = lock(&self.targets);
-        let at = targets.iter().position(|(t, _)| *t == id)?;
+        let at = targets.iter().position(|(t, _)| *t == key)?;
         Some(targets.remove(at).1)
     }
 
@@ -2295,7 +2327,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Option<SubId> {
-        let id = SubId::from(self.next_entity_id()?);
+        let id = self.next_entity_id()?;
         let Some(mut guard) = self.live() else {
             return Some(id);
         };
@@ -2311,7 +2343,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Ok(registration) = registration else {
             return Some(id);
         };
-        lock(&self.targets).push((id, Target::Subscriber(Arc::new(Mutex::new(sink())))));
+        lock(&self.targets).push((
+            TargetKey::Subscriber(id),
+            Target::Subscriber(Arc::new(Mutex::new(sink()))),
+        ));
         let entry = SubEntry {
             id,
             registration,
@@ -2345,15 +2380,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .borrow_mut()
                 .app
                 .liveliness_subscribers
-                .unregister(id);
+                .unregister(u64::from(id));
             for actions in links {
-                actions.send_interest_final(id);
+                actions.send_interest_final(u64::from(id));
             }
             Some(entry)
         });
         #[cfg(feature = "liveliness")]
         if live.is_some() {
-            let callback = self.take_target(id);
+            let callback = self.take_target(TargetKey::Liveliness(id));
             drop((live, callback));
             return;
         }
@@ -2369,10 +2404,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .unregister(entry.registration);
             for actions in links {
                 match &entry.retraction {
-                    Some(key) => {
-                        actions.send_undeclare_subscriber_naming(id, key.mapping_id, &key.suffix)
-                    }
-                    None => actions.send_undeclare_subscriber(id),
+                    Some(key) => actions.send_undeclare_subscriber_naming(
+                        u64::from(id),
+                        key.mapping_id,
+                        &key.suffix,
+                    ),
+                    None => actions.send_undeclare_subscriber(u64::from(id)),
                 }
             }
             // One that counted it may now match no more.
@@ -2380,7 +2417,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Self::reevaluate_subscriber_matching(core);
             Some(entry)
         });
-        let callback = self.take_target(id);
+        let callback = self.take_target(TargetKey::Subscriber(id));
         drop((entry, callback));
         #[cfg(feature = "local-subscriber")]
         self.deliver();
@@ -2503,7 +2540,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 ),
             }
         };
-        lock(&self.targets).push((id, Target::Matching(sink)));
+        lock(&self.targets).push((TargetKey::Matching(id), Target::Matching(sink)));
         // An already-matching registration is told so at once, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
         if now {
@@ -2541,7 +2578,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 Self::release_interest(core, entry.plane, &entry.keyexpr);
             }
         }
-        drop(self.take_target(id));
+        drop(self.take_target(TargetKey::Matching(id)));
     }
 
     fn declare_write_filter(
@@ -2715,7 +2752,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> Option<QblId> {
-        let id = QblId::from(self.next_entity_id()?);
+        let id = self.next_entity_id()?;
         let mut guard = self.live()?;
         let core = &mut guard.0;
         // The registry's queryable only copies a query out and holds its Final; the callback
@@ -2736,7 +2773,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let holder = Arc::new(CoopHolder {
             engine: self.this.clone(),
         });
-        lock(&self.targets).push((id, Target::Queryable(Arc::new(Mutex::new(sink(holder))))));
+        lock(&self.targets).push((
+            TargetKey::Queryable(id),
+            Target::Queryable(Arc::new(Mutex::new(sink(holder)))),
+        ));
         let entry = QblEntry {
             id,
             registration,
@@ -2823,7 +2863,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             if !registered {
                 continue;
             }
-            lock(&self.targets).push((leg_id, Target::Reply(Arc::new(Mutex::new(leg())))));
+            self.hold_leg(leg_id, leg());
             let (mapping_id, suffix) = if wire.is_literal() {
                 (0, Some(keyexpr))
             } else {
@@ -2838,7 +2878,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.replies.unregister(rid);
                 }
                 drop(guard);
-                drop(self.take_target(leg_id));
+                drop(self.take_target(TargetKey::Reply(leg_id)));
                 continue;
             }
             core.pending_gets.push(PendingGet {
@@ -2881,7 +2921,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 sink,
             );
             if registered.is_ok() {
-                lock(&self.targets).push((leg_id, Target::Reply(Arc::new(Mutex::new(leg())))));
+                self.hold_leg(leg_id, leg());
                 core.pending_gets.push(PendingGet {
                     face: LOCAL_FACE,
                     leg: leg_id,
@@ -2955,7 +2995,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             if !registered {
                 continue;
             }
-            lock(&self.targets).push((leg_id, Target::Reply(Arc::new(Mutex::new(leg())))));
+            self.hold_leg(leg_id, leg());
             let (mapping_id, suffix) = if wire.is_literal() {
                 (0, Some(keyexpr))
             } else {
@@ -2970,7 +3010,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.liveliness_gets.unregister(interest_id);
                 }
                 drop(guard);
-                drop(self.take_target(leg_id));
+                drop(self.take_target(TargetKey::Reply(leg_id)));
                 continue;
             }
             core.pending_gets.push(PendingGet {
@@ -3008,7 +3048,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Self::reevaluate_queryable_matching(core);
             Some(entry)
         });
-        let callback = self.take_target(id);
+        let callback = self.take_target(TargetKey::Queryable(id));
         drop((entry, callback));
         #[cfg(feature = "local-queryable")]
         self.deliver();
@@ -3023,14 +3063,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Option<TokenId> {
         // zenoh-pico's token takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
-        let id = TokenId::from(self.next_entity_id()?);
+        let id = self.next_entity_id()?;
         let mut core = self.live()?;
         let core = &mut core.0;
         core.registry
             .borrow_mut()
             .app
             .local_tokens
-            .register(id, &keyexpr)
+            .register(u64::from(id), &keyexpr)
             .ok()?;
         let entry = TokenEntry {
             id,
@@ -3050,7 +3090,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.tokens.iter().position(|t| t.id == id)?;
             let links = core.retract(Kind::Token, at);
             let entry = core.tokens.remove(at);
-            core.registry.borrow_mut().app.local_tokens.unregister(id);
+            core.registry
+                .borrow_mut()
+                .app
+                .local_tokens
+                .unregister(u64::from(id));
             for actions in links {
                 entry.retract(&actions);
             }
@@ -3068,24 +3112,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
-        let id = SubId::from(self.next_entity_id()?);
+        let id = self.next_entity_id()?;
         let Some(mut guard) = self.live() else {
             return Some(id);
         };
         let core = &mut guard.0;
-        lock(&self.targets).push((id, Target::Liveliness(Arc::new(Mutex::new(sink())))));
+        lock(&self.targets).push((
+            TargetKey::Liveliness(id),
+            Target::Liveliness(Arc::new(Mutex::new(sink()))),
+        ));
         // With `history`, the registration hands the sink the tokens the session already knows,
         // before the peer answers with the rest, as zenoh-pico's does
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`).
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
-            id,
+            u64::from(id),
             &keyexpr,
             history,
             liveliness::sample_sink(id, &self.live_samples),
         );
         if registered.is_err() {
             drop(guard);
-            drop(self.take_target(id));
+            drop(self.take_target(TargetKey::Liveliness(id)));
             return Some(id);
         }
         let entry = LiveSubEntry {
@@ -3130,34 +3177,49 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         }
         let core = &mut guard.0;
         core.end_links();
-        let subscribers: Vec<SubId> = core.subscribers.drain(..).map(|s| s.id).collect();
-        let matches: Vec<MatchId> = core.matches.drain(..).map(|m| m.id).collect();
+        let subscribers: Vec<TargetKey> = core
+            .subscribers
+            .drain(..)
+            .map(|s| TargetKey::Subscriber(s.id))
+            .collect();
+        let matches: Vec<TargetKey> = core
+            .matches
+            .drain(..)
+            .map(|m| TargetKey::Matching(m.id))
+            .collect();
         #[cfg(feature = "queryable")]
-        let queryables: Vec<QblId> = core.queryables.drain(..).map(|q| q.id).collect();
+        let queryables: Vec<TargetKey> = core
+            .queryables
+            .drain(..)
+            .map(|q| TargetKey::Queryable(q.id))
+            .collect();
         #[cfg(not(feature = "queryable"))]
-        let queryables: Vec<u64> = Vec::new();
+        let queryables: Vec<TargetKey> = Vec::new();
         // A get still pending ends with its session: its entry and its leg's callback go.
         #[cfg(feature = "query")]
-        let gets: Vec<u64> = {
+        let gets: Vec<TargetKey> = {
             let mut registry = core.registry.borrow_mut();
             core.pending_gets
                 .drain(..)
                 .map(|pending| {
                     pending.unregister(&mut registry);
-                    pending.leg
+                    TargetKey::Reply(pending.leg)
                 })
                 .collect()
         };
         #[cfg(not(feature = "query"))]
-        let gets: Vec<u64> = Vec::new();
+        let gets: Vec<TargetKey> = Vec::new();
         // The session's tokens end with its link; its liveliness subscribers' callbacks go.
         #[cfg(feature = "liveliness")]
-        let live_subs: Vec<SubId> = {
+        let live_subs: Vec<TargetKey> = {
             core.tokens.clear();
-            core.live_subs.drain(..).map(|s| s.id).collect()
+            core.live_subs
+                .drain(..)
+                .map(|s| TargetKey::Liveliness(s.id))
+                .collect()
         };
         #[cfg(not(feature = "liveliness"))]
-        let live_subs: Vec<SubId> = Vec::new();
+        let live_subs: Vec<TargetKey> = Vec::new();
         drop(guard);
         #[cfg(feature = "liveliness")]
         drop(core::mem::take(&mut *lock(&self.live_samples)));

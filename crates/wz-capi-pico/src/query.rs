@@ -1684,7 +1684,7 @@ pub unsafe extern "C" fn z_query_encoding(
 #[cfg(feature = "unstable-api")]
 pub(crate) unsafe fn queryable_identity(
     queryable: *const z_loaned_queryable_t,
-) -> Option<([u8; 16], u64)> {
+) -> Option<([u8; 16], QblId)> {
     handle_ref::<z_loaned_queryable_t, QueryableState>(queryable)
         .map(|state| (state.engine.zid(), state.id))
 }

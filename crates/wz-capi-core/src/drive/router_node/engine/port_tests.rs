@@ -254,6 +254,72 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
     assert!(replies.lock().unwrap().is_empty());
 }
 
+/// A node's queryables and tokens take the entity ids its subscribers take: the last one is
+/// handed out, and then both are refused and nothing is hosted for them, while what holds the
+/// last id is retracted by it.
+#[test]
+fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
+    let router = open_node();
+    let engine = router.as_engine();
+    router
+        .engine
+        .next_entity_id
+        .store(u64::from(u32::MAX), Ordering::Relaxed);
+    let answer = || -> QueryableSink {
+        Arc::new(|_holder| Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}))
+    };
+    let queryables = |key: &str| {
+        engine.matching_status(
+            FilterPlane::Queryables {
+                complete_required: false,
+            },
+            key,
+            Locality::Any,
+        )
+    };
+
+    let token = engine.declare_liveliness_token_on_wire(
+        "wz/port/spent/t/last".to_owned(),
+        WireKey::literal(),
+        None,
+    );
+    assert_eq!(token, Some(u32::MAX), "the last entity id is handed out");
+    let refused = engine.declare_queryable_on_wire(
+        "wz/port/spent/q".to_owned(),
+        WireKey::literal(),
+        false,
+        Locality::Any,
+        None,
+        answer(),
+    );
+    assert_eq!(refused, None, "a queryable past the last id is refused");
+    assert_eq!(
+        queryables("wz/port/spent/q"),
+        Some(false),
+        "a refused queryable is not hosted"
+    );
+    assert_eq!(
+        engine.declare_liveliness_token_on_wire(
+            "wz/port/spent/t/refused".to_owned(),
+            WireKey::literal(),
+            None,
+        ),
+        None,
+        "a token past the last id is refused"
+    );
+    assert_eq!(
+        router.liveliness.alive("wz/port/spent/**"),
+        vec!["wz/port/spent/t/last".to_owned()],
+        "only the token that took the last id is alive"
+    );
+
+    engine.undeclare_liveliness_token(u32::MAX);
+    assert!(
+        router.liveliness.alive("wz/port/spent/**").is_empty(),
+        "the last id retracts the token that holds it"
+    );
+}
+
 /// A token declared through the port is told to a liveliness subscription made through the port
 /// on the other node and on the node itself, and its retraction is told as a delete.
 #[test]
