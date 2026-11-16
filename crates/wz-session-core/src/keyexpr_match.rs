@@ -72,8 +72,7 @@ use crate::bounded::BoundedVec;
 /// keyexprs are deploy-bounded), so a peer's 33-chunk keyexpr is
 /// delivered to no subscriber there. On the AP profile the growable
 /// backing grows past it, so AP behaviour is unbounded and identical to
-/// the prior `Vec` form. Mirrors the `parse_error::MAX_EXT_CHAIN_DEPTH`
-/// declared-bound precedent.
+/// the prior `Vec` form.
 pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 
 /// How many chunks of a keyexpr [`KeyChunks`] holds on the stack on the FIXED backing (`alloc` off,

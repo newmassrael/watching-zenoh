@@ -765,15 +765,22 @@ fn a_value_that_does_not_fit_its_field_is_refused_at_its_key() {
         "/extensions/0/unit",
         "no body",
     );
-    let nine = r#"{"id":1,"unit":true},"#.repeat(9);
-    at(
-        &init(&format!(
-            r#","extensions":[{}]"#,
-            nine.trim_end_matches(',')
-        )),
-        "/extensions",
-        "9 extensions",
-    );
+    // The protocol bounds a chain by nothing and the receive path reads one to
+    // its end, so a chain of any length is written.
+    for entries in [9, 40] {
+        let chain = r#"{"id":1,"unit":true},"#.repeat(entries);
+        assert!(
+            build(
+                &init(&format!(
+                    r#","extensions":[{}]"#,
+                    chain.trim_end_matches(',')
+                )),
+                Framing::Datagram
+            )
+            .is_ok(),
+            "{entries} extensions"
+        );
+    }
     at(
         &init(r#","extensions":[{"id":3,"zbuf":"abc"}]"#),
         "/extensions/0/zbuf",

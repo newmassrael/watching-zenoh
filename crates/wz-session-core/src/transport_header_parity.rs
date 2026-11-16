@@ -13,6 +13,7 @@
 //! `impl<W> WCodec<&FrameHeader, &mut W> for Zenoh080`, and `fragment.rs`
 //! beside it) is what the writers here write for the same values.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::SceCursor;
@@ -215,4 +216,84 @@ fn the_fragment_header_written_here_for_upstreams_values_is_upstreams() {
     let mut unit = header;
     unit.extend_from_slice(&PAYLOAD);
     assert_fragment_read_alike(&unit);
+}
+
+/// Nine entries no reader acts on (id 0xC, not mandatory), each announcing a
+/// next: the run a chain carries before the entries that matter, past the eight
+/// a reader here once stopped at.
+const NINE_UNREAD: [u8; 9] = [0x8C; 9];
+
+/// A Frame with nine unread entries before its QoS extension, and a Fragment
+/// with them before its QoS, First and Drop, are read whole by every reader
+/// here, the one that keeps no list included: upstream reads the chain to its
+/// end (`commons/zenoh-codec/src/transport/frame.rs` @ `while has_ext {`).
+#[test]
+fn the_entries_after_a_long_chain_prefix_are_read_in_place() {
+    let mut frame = vec![0x85, 0xAC, 0x02];
+    frame.extend_from_slice(&NINE_UNREAD);
+    frame.extend_from_slice(&[0x31, 0x02]);
+    frame.extend_from_slice(&PAYLOAD);
+    assert_frame_read_alike(&frame);
+    let (head, _) = parse_frame_in_place(&frame)
+        .expect("a Frame")
+        .expect("the in-place reader reads it");
+    assert_eq!(head.priority(), Priority::from_wire(2));
+    #[cfg(feature = "session-unicast")]
+    assert_eq!(
+        head.ext_admission(),
+        crate::ext_admit::ExtAdmission::Admissible
+    );
+
+    let mut fragment = vec![0xE6, 0xAC, 0x02];
+    fragment.extend_from_slice(&NINE_UNREAD);
+    fragment.extend_from_slice(&[0xB1, 0x02, 0x82, 0x03]);
+    fragment.extend_from_slice(&PAYLOAD);
+    assert_fragment_read_alike(&fragment);
+    let (head, _) = parse_fragment_in_place(&fragment)
+        .expect("a Fragment")
+        .expect("the in-place reader reads it");
+    assert_eq!(head.priority(), Priority::from_wire(2));
+    assert_eq!(
+        head.markers(),
+        crate::extfragment::FragmentMarkers {
+            first: true,
+            dropped: true
+        }
+    );
+    #[cfg(feature = "session-unicast")]
+    assert_eq!(
+        head.ext_admission(),
+        crate::ext_admit::ExtAdmission::Admissible
+    );
+}
+
+/// The in-place reader keeps no list of a chain's headers, so the entry the
+/// admission rule refuses is found wherever it lies: a mandatory entry of an id
+/// a Frame does not declare, tenth in the chain, refuses the Frame as the owned
+/// decode's verdict does.
+#[cfg(feature = "session-unicast")]
+#[test]
+fn a_refused_entry_after_a_long_chain_prefix_refuses_the_frame_in_place() {
+    use crate::ext_admit::ExtAdmission;
+    let mut frame = vec![0x85, 0xAC, 0x02];
+    frame.extend_from_slice(&NINE_UNREAD);
+    frame.push(0x1C);
+    frame.extend_from_slice(&PAYLOAD);
+    let (head, _) = parse_frame_in_place(&frame)
+        .expect("a Frame")
+        .expect("the in-place reader reads it");
+    assert_eq!(
+        head.ext_admission(),
+        ExtAdmission::UnknownMandatory { eid: 0x1C }
+    );
+    let owned = parse_inbound(&frame).expect("the owned decode reads it");
+    assert_eq!(owned.ext_admission(), head.ext_admission());
+
+    // CONTROL: the same entry without the mandatory bit is admissible.
+    let last_entry = frame.len() - PAYLOAD.len() - 1;
+    frame[last_entry] = 0x0C;
+    let (head, _) = parse_frame_in_place(&frame)
+        .expect("a Frame")
+        .expect("the in-place reader reads it");
+    assert_eq!(head.ext_admission(), ExtAdmission::Admissible);
 }

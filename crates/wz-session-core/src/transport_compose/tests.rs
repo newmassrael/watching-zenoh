@@ -317,23 +317,20 @@ fn every_value_that_does_not_fit_its_field_is_refused() {
         init(&[1], 1, size(0, 9)),
         Err(ComposeError::ResolutionCode(9))
     );
-    let too_many = [ExtSpec {
-        id: 1,
+    // The protocol bounds a chain by nothing, so no length of one is refused.
+    let long = [ExtSpec {
+        id: 0xC,
         mandatory: false,
         body: ExtBody::Unit,
-    }; MAX_EXT_CHAIN_DEPTH + 1];
-    assert_eq!(
-        compose_open(&OpenSpec {
-            role: OpenRole::Ack,
-            lease_ms: 0,
-            lease_unit: None,
-            initial_sn: 0,
-            extensions: &too_many
-        }),
-        Err(ComposeError::ExtensionChain {
-            entries: MAX_EXT_CHAIN_DEPTH + 1
-        })
-    );
+    }; 40];
+    assert!(compose_open(&OpenSpec {
+        role: OpenRole::Ack,
+        lease_ms: 0,
+        lease_unit: None,
+        initial_sn: 0,
+        extensions: &long
+    })
+    .is_ok());
     let bad_id = [ExtSpec {
         id: 16,
         mandatory: false,

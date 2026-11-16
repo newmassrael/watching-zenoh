@@ -50,7 +50,6 @@ use alloc::vec::Vec;
 
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::json5::Json5Value;
-use wz_session_core::parse_error::MAX_EXT_CHAIN_DEPTH;
 use wz_session_core::transport_compose::{
     compose_close, compose_fragment, compose_frame, compose_init, compose_keep_alive, compose_open,
     frame_unit, sn_ring_max, ComposeError, ExtBody, ExtSpec, FragmentSpec, FrameSpec, Framing,
@@ -146,13 +145,6 @@ fn refuse(e: ComposeError) -> DocError {
         ComposeError::ExtensionId { index, id } => invalid(
             format!("/extensions/{index}/id"),
             format!("extension id {id} does not fit the four bits of the entry header (0 to 15)"),
-        ),
-        ComposeError::ExtensionChain { entries } => invalid(
-            "/extensions",
-            format!(
-                "{entries} extensions; the chain reader follows at most {MAX_EXT_CHAIN_DEPTH}, \
-                 so a longer chain could not be read back and its layout could not be derived"
-            ),
         ),
         ComposeError::LeaseNotWholeSeconds { lease_ms } => invalid(
             "/lease_unit",

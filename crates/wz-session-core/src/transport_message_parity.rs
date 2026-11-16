@@ -15,10 +15,8 @@
 //!   `close.rs` and `keepalive.rs` beside it) is what an encoder here writes
 //!   for the same values, and the decoder here and the view read it alike.
 //!
-//! The one difference between the two readers is the bound on a chain: the
-//! decoder here refuses a chain of more than `MAX_EXT_CHAIN_DEPTH` entries,
-//! and the view, which holds no list, reads it. A decoder built on the view
-//! keeps the bound by counting what it walks; the last test holds that.
+//! Both readers read a chain to the entry whose `Z` flag is clear, whatever its
+//! length; the last test holds that.
 //!
 //! The transport OAM, which no node here writes, is held in the second
 //! direction alone (`transport_oam.scxml`, `commons/zenoh-codec/src/transport/oam.rs`
@@ -40,7 +38,7 @@ use wz_codecs::wire_const;
 use crate::ext_chain::ChainHeaders;
 use crate::handshake_encode::{encode_close, encode_init, encode_keep_alive, encode_open};
 use crate::inbound::{parse_inbound, InboundFrame};
-use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
+use crate::parse_error::InboundParseError;
 use crate::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
 
@@ -136,6 +134,21 @@ macro_rules! read_whole {
     }};
 }
 
+/// The decoder here read the chain of a message of `mid` as the view did: every
+/// entry's header where the decoder keeps the whole chain, and the admission
+/// rule's verdict in every build, which on `session-slot` is all the decoder
+/// keeps of an entry it does not read.
+fn assert_chain_read_alike<C: ChainHeaders + ?Sized>(mid: u8, chain: &C, view_headers: &[u8]) {
+    use crate::ext_admit::{judge_ext_chain, ExtCarrier};
+    assert_eq!(
+        judge_ext_chain(ExtCarrier::Transport(mid), chain.chain_headers()),
+        judge_ext_chain(ExtCarrier::Transport(mid), view_headers.iter().copied()),
+        "the two readers judge the chain alike"
+    );
+    #[cfg(not(feature = "session-slot"))]
+    assert_eq!(chain.chain_headers().collect::<Vec<u8>>(), view_headers);
+}
+
 /// The decoder here and the view of `transport_init` read `wire` alike, and
 /// the view writes it back unchanged.
 fn assert_init_read_alike(wire: &[u8]) {
@@ -151,9 +164,10 @@ fn assert_init_read_alike(wire: &[u8]) {
             assert_eq!(is_ack, view.header & wire_const::FLAG_T_INIT_A != 0);
             assert_eq!(has_ext, view.extensions.is_some());
             assert_eq!(body.encode_to_vec(), view.body.encode_to_vec());
-            assert_eq!(
-                extensions.chain_headers().collect::<Vec<u8>>(),
-                view_chain_headers!(view)
+            assert_chain_read_alike(
+                wire_const::T_MID_INIT,
+                &extensions,
+                &view_chain_headers!(view),
             );
         }
         Ok(_) => panic!("the decoder here read another message"),
@@ -188,9 +202,10 @@ fn assert_open_read_alike(wire: &[u8]) {
                 body.cookie.as_ref().map(|c| c.as_bytes().into_inner()),
                 view.body.cookie.as_ref().map(|c| c.as_bytes().into_inner())
             );
-            assert_eq!(
-                extensions.chain_headers().collect::<Vec<u8>>(),
-                view_chain_headers!(view)
+            assert_chain_read_alike(
+                wire_const::T_MID_OPEN,
+                &extensions,
+                &view_chain_headers!(view),
             );
         }
         Ok(_) => panic!("the decoder here read another message"),
@@ -212,9 +227,10 @@ fn assert_close_read_alike(wire: &[u8]) {
             assert_eq!(reason, view.body.reason);
             assert_eq!(session, view.header & wire_const::FLAG_T_CLOSE_S != 0);
             assert_eq!(has_ext, view.extensions.is_some());
-            assert_eq!(
-                extensions.chain_headers().collect::<Vec<u8>>(),
-                view_chain_headers!(view)
+            assert_chain_read_alike(
+                wire_const::T_MID_CLOSE,
+                &extensions,
+                &view_chain_headers!(view),
             );
         }
         Ok(_) => panic!("the decoder here read another message"),
@@ -232,9 +248,10 @@ fn assert_keep_alive_read_alike(wire: &[u8]) {
             extensions,
         }) => {
             assert_eq!(has_ext, view.extensions.is_some());
-            assert_eq!(
-                extensions.chain_headers().collect::<Vec<u8>>(),
-                view_chain_headers!(view)
+            assert_chain_read_alike(
+                wire_const::T_MID_KEEP_ALIVE,
+                &extensions,
+                &view_chain_headers!(view),
             );
         }
         Ok(_) => panic!("the decoder here read another message"),
@@ -445,28 +462,73 @@ fn a_frame_cut_short_is_refused_by_both_readers() {
     }
 }
 
-/// A chain one entry past what the decoder here reads is refused by it and read
-/// by the view; a decoder built on the view keeps the bound by counting what it
-/// walks, and at the bound both read the chain.
+/// A terminated chain is read to its end by the decoder here and by the view,
+/// whatever its length, as zenoh reads it
+/// (`commons/zenoh-codec/src/transport/keepalive.rs` @
+/// `extension::skip_all(reader, "Unknown KeepAlive ext")?;`, a loop with no
+/// count in `commons/zenoh-codec/src/common/extension.rs` @ `while has_ext {`);
+/// an unterminated one is refused by both.
 #[test]
-fn a_chain_past_the_bound_is_refused_here_and_read_by_the_view() {
+fn a_chain_of_any_length_is_read_here_as_the_view_reads_it() {
     // Entries of id 0xC, which no build reads, so a build that keeps only the
-    // entries it reads holds none of them and is judged by the count alone.
-    let keep_alive_with = |entries: usize| {
+    // entries it reads holds none of them; `last` is the final entry's header.
+    let keep_alive_with = |entries: usize, last: u8| {
         let mut wire = vec![wire_const::T_MID_KEEP_ALIVE | 0x80];
         wire.resize(entries, 0x8C);
-        wire.push(0x0C);
+        wire.push(last);
         wire
     };
 
-    let at_bound = keep_alive_with(MAX_EXT_CHAIN_DEPTH);
-    assert_keep_alive_read_alike(&at_bound);
+    for entries in [1, 8, 9, 40] {
+        let wire = keep_alive_with(entries, 0x0C);
+        assert_keep_alive_read_alike(&wire);
+        let view = read_whole!(TransportKeepAliveView::decode, &wire);
+        assert_eq!(view_chain_headers!(view).len(), entries);
+    }
 
-    let past = keep_alive_with(MAX_EXT_CHAIN_DEPTH + 1);
-    let view = read_whole!(TransportKeepAliveView::decode, &past);
-    assert_eq!(view_chain_headers!(view).len(), MAX_EXT_CHAIN_DEPTH + 1);
-    assert!(matches!(
-        parse_inbound(&past),
-        Err(InboundParseError::ExtChainOverflow)
-    ));
+    let unterminated = keep_alive_with(9, 0x8C);
+    assert!(TransportKeepAliveView::decode(&mut SceCursor::new(&unterminated)).is_err());
+    assert!(parse_inbound(&unterminated).is_err());
+}
+
+/// An entry the admission rule refuses is found wherever it lies in a chain,
+/// however many entries no build reads come before it: a KeepAlive declares no
+/// mandatory extension, so a mandatory entry ninth in its chain refuses it on
+/// every build, the one that keeps only what it reads included.
+#[test]
+fn a_refused_entry_past_eight_others_is_judged() {
+    use crate::ext_admit::ExtAdmission;
+    // Eight entries of id 0xC, then the same id with the mandatory bit set.
+    let mut wire = vec![wire_const::T_MID_KEEP_ALIVE | 0x80];
+    wire.resize(9, 0x8C);
+    wire.push(0x1C);
+    assert_keep_alive_read_alike(&wire);
+    let frame = parse_inbound(&wire).expect("the chain is read");
+    assert_eq!(
+        frame.ext_admission(),
+        ExtAdmission::UnknownMandatory { eid: 0x1C }
+    );
+
+    // CONTROL: without the mandatory bit the same chain is admissible.
+    *wire.last_mut().expect("a chain") = 0x0C;
+    let frame = parse_inbound(&wire).expect("the chain is read");
+    assert_eq!(frame.ext_admission(), ExtAdmission::Admissible);
+}
+
+/// A build that keeps one entry for each extension it reads refuses a chain
+/// that repeats one past the entries it holds: the one refusal of a chain that
+/// is not about its wire.
+#[cfg(feature = "session-slot")]
+#[test]
+fn a_slot_build_refuses_a_chain_repeating_an_extension_it_reads() {
+    let patch = crate::extpatch::encode_patch_ext_at(1).header & !0x80;
+    let mut wire = vec![wire_const::T_MID_KEEP_ALIVE | 0x80];
+    for _ in 0..crate::ext_chain::RECEIVED_EXT_KINDS {
+        wire.extend_from_slice(&[patch | 0x80, 0x01]);
+    }
+    wire.extend_from_slice(&[patch, 0x01]);
+    assert_eq!(
+        parse_inbound(&wire).err(),
+        Some(InboundParseError::ExtChainOverflow)
+    );
 }

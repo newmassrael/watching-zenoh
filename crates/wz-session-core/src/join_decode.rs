@@ -33,23 +33,16 @@ use wz_codecs::wire_const;
 /// body (with the lease as the wire carries it) and the extension chain, and how
 /// many of `bytes` they occupy.
 ///
-/// `None` for another message id, a JOIN that does not decode, or a chain longer
-/// than the bound a node reads of a transport chain
-/// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)): the
-/// document reads a chain of any length, and a node holds that many entries of
-/// one, as the Join arm of [`crate::inbound::parse_inbound`] does.
+/// `None` for another message id or a JOIN that does not decode. The document
+/// reads the chain to the entry whose `Z` flag is clear, whatever its length,
+/// as the Join arm of [`crate::inbound::parse_inbound`] does.
 pub fn read_join(bytes: &[u8]) -> Option<(TransportJoinView<'_>, usize)> {
     if bytes.first()? & 0x1f != wire_const::T_MID_JOIN {
         return None;
     }
     let mut cursor = SceCursor::new(bytes);
     let view = TransportJoinView::decode(&mut cursor).ok()?;
-    let entries = view
-        .extensions
-        .as_ref()
-        .map_or(0, |chain| chain.inner().len());
-    (entries <= crate::parse_error::MAX_EXT_CHAIN_DEPTH)
-        .then(|| (view, bytes.len() - cursor.remaining()))
+    Some((view, bytes.len() - cursor.remaining()))
 }
 
 /// How many bytes the JOIN at the front of `bytes` occupies: its header, its base
@@ -64,7 +57,7 @@ pub fn join_message_len(bytes: &[u8]) -> Option<usize> {
 
 /// If `bytes` is a multicast JOIN datagram, its body (a borrowed view into
 /// `bytes`), read by [`read_join`], so a JOIN whose extension chain does not
-/// decode, or runs past the bound, is no JOIN here either. The returned `lease`
+/// decode is no JOIN here either. The returned `lease`
 /// is ALWAYS milliseconds — the `T` header flag's seconds form is projected back
 /// here (R311kr, pico decode parity, codec/transport.c:161-164:
 /// `_lease = _lease * 1000`; the projection itself is [`crate::lease`], shared

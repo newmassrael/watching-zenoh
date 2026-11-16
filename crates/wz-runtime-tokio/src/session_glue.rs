@@ -708,11 +708,10 @@ pub use wz_session_core::frame_encode::encode_frame_with_response_final;
 pub use wz_session_core::inbound::inbound_to_fsm_event;
 pub use wz_session_core::inbound::{parse_inbound, InboundFrame};
 
-// R311di-6 — InboundParseError + MAX_EXT_CHAIN_DEPTH moved to
-// wz-session-core::parse_error. Re-exports keep every callsite
-// (session_glue.rs internal + wz-runtime-tokio external) working
-// verbatim across the migration.
-pub use wz_session_core::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
+// R311di-6 — InboundParseError moved to wz-session-core::parse_error. The
+// re-export keeps every callsite (session_glue.rs internal +
+// wz-runtime-tokio external) working verbatim across the migration.
+pub use wz_session_core::parse_error::InboundParseError;
 
 // R74 / R311di-11 — NetworkMessage + parse_frame_payload extracted to
 // wz-session-core::network_message. Re-exported here so all callsite
