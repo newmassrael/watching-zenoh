@@ -1308,4 +1308,39 @@ mod fragments {
         assert_eq!(delivered, expected);
         all_slots_home(&pair);
     }
+
+    /// A message the sender restarts is reported as ONE dropped chain beside
+    /// the restarted message, which is delivered whole: the restart's first
+    /// fragment carries `0x2 First`, ends the chain open on its key and begins
+    /// its own, and the in-place path reports the ended chain as well as the
+    /// fragment's own admission.
+    #[test]
+    fn a_restarted_message_is_reported_dropped_once_and_delivered_whole() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let mut pair = Pair::establish(&link, 7511);
+        assert!(
+            pair.initiator.fragmentation_markers_negotiated(),
+            "two wz peers negotiate the chain-boundary markers, or no restart is read"
+        );
+        let (_, body) = frame_of(0, 2);
+        let expected = decoded_puts(&body);
+
+        // The stranded message: its first fragment only. The restart's SNs
+        // follow the whole stranded chain's, a forward step the gate passes.
+        let stranded = chain_of(&pair, &body, 7);
+        assert!(stranded.len() >= 2);
+        let restart = chain_of(&pair, &body, 7);
+        let (_, tally, delivered, _) = send(&mut pair, &stranded[..1]);
+        assert_eq!((delivered.len(), tally.dropped), (0, 0));
+
+        let (_, tally, delivered, _) = send(&mut pair, &restart);
+        assert_eq!(delivered, expected, "the restarted message is whole");
+        assert_eq!(
+            (tally.dropped, tally.sn_rejected, tally.parse_error),
+            (1, 0, 0),
+            "(chains dropped, SN rejections, parse errors)"
+        );
+        all_slots_home(&pair);
+    }
 }
