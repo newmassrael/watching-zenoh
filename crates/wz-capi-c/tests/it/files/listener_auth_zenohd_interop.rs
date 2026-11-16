@@ -31,7 +31,6 @@
 use std::ffi::{c_void, CString};
 use std::io::Write as _;
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -44,6 +43,9 @@ use wz_capi_c::zid::{
     z_closure_zid, z_id_t, z_info_routers_zid, z_moved_closure_zid_t, z_owned_closure_zid_t,
 };
 use wz_runtime_tokio_test_support::free_port;
+
+// The reference router, held to the pinned version (open-debt item 635).
+use wz_codegen_build::zenohd_binary;
 
 const USER: &str = "alice";
 const PASSWORD: &str = "interop-secret";
@@ -60,17 +62,6 @@ const ADMIT_BUDGET: Duration = Duration::from_secs(30);
 /// How long a refused zenohd is watched: several times what the control has measured to need on
 /// this machine, so a refusal is not a peer that was merely slow.
 const REFUSE_WINDOW: Duration = Duration::from_secs(8);
-
-fn zenohd_binary() -> PathBuf {
-    if let Ok(p) = std::env::var("WZ_ZENOHD_BIN") {
-        return PathBuf::from(p);
-    }
-    let path = wz_codegen_build::artifact("target/zenohd/zenohd")
-        .canonicalize()
-        .expect("target/zenohd/zenohd is missing; run scripts/build-zenohd.sh");
-    assert!(path.is_file(), "{} is not a file", path.display());
-    path
-}
 
 struct ChildGuard(Child);
 

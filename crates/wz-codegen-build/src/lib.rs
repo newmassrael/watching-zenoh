@@ -31,6 +31,13 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod zenohd_oracle;
+
+pub use zenohd_oracle::{
+    assert_zenohd_at_pin, zenohd_binary, zenohd_pin_in, zenohd_pin_verdict, zenohd_version_in,
+    ZenohdPinVerdict, ZENOHD_BIN_ENV, ZENOHD_BUILD_SCRIPT,
+};
+
 /// The variable that moves every product of this checkout out of it -- the
 /// Rust reading of the rule `scripts/lib/artifact-root.sh` states (and
 /// `scripts/lib/artifact_root.py` reads for Python). Unset or empty: a product

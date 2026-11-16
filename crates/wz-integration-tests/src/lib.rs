@@ -2209,20 +2209,14 @@ pub mod common {
     /// (zenoh is not a wz dependency), so it is built on demand; this panics
     /// with the build hint if absent — the same prereq discipline as
     /// [`zenoh_pico_cli_binary`].
+    ///
+    /// Open-debt item 635 — and refuses a router that is not the version
+    /// `scripts/build-zenohd.sh` pins, whichever path it came from: the
+    /// override names any binary, and an older router still answers the
+    /// handshake. The resolver is `wz_codegen_build::zenohd_binary`, the one the
+    /// C ABI crate's zenohd tests use too.
     pub fn zenohd_binary() -> PathBuf {
-        if let Ok(p) = std::env::var("WZ_ZENOHD_BIN") {
-            return PathBuf::from(p);
-        }
-        // `zenohd.exe` on Windows, where `build-zenohd.sh` does not yet install; a
-        // host that built the router another way names it with `WZ_ZENOHD_BIN`.
-        let path =
-            artifact("target/zenohd").join(format!("zenohd{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            path.is_file(),
-            "zenohd binary missing at {}; set WZ_ZENOHD_BIN or run scripts/build-zenohd.sh first",
-            path.display()
-        );
-        path
+        wz_codegen_build::zenohd_binary()
     }
 
     /// R311y442 — locate a `zenoh-ext-examples` example binary (`z_advanced_pub`
@@ -2306,16 +2300,19 @@ pub mod common {
     /// out of the default oracle to preserve its "one identity". Panics with the
     /// build hint if absent, the same prereq discipline as [`zenohd_binary`].
     pub fn zenohd_unixpipe_binary() -> PathBuf {
-        if let Ok(p) = std::env::var("WZ_ZENOHD_UNIXPIPE_BIN") {
-            return PathBuf::from(p);
-        }
-        let path = artifact("target/zenohd-unixpipe/zenohd");
+        let path = match std::env::var("WZ_ZENOHD_UNIXPIPE_BIN") {
+            Ok(p) => PathBuf::from(p),
+            Err(_) => artifact("target/zenohd-unixpipe/zenohd"),
+        };
         assert!(
             path.is_file(),
             "unixpipe-enabled zenohd missing at {}; set WZ_ZENOHD_UNIXPIPE_BIN or run \
              `ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh` first",
             path.display()
         );
+        // Built by the same script from the same pinned checkout as the stock
+        // router, so held to the same pin (open-debt item 635).
+        wz_codegen_build::assert_zenohd_at_pin(&path);
         path
     }
 
@@ -2339,10 +2336,15 @@ pub mod common {
     /// `WZ_ZENOHD_SHM_REQUIRE`, and there an absent oracle PANICS: see the
     /// private helper `shm_oracle_or_refusal` just below.
     pub fn zenohd_shm_binary() -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("WZ_ZENOHD_SHM_BIN") {
-            return shm_oracle_or_refusal(PathBuf::from(p));
-        }
-        shm_oracle_or_refusal(artifact("target/zenohd-shm/zenohd"))
+        let path = match std::env::var("WZ_ZENOHD_SHM_BIN") {
+            Ok(p) => PathBuf::from(p),
+            Err(_) => artifact("target/zenohd-shm/zenohd"),
+        };
+        let path = shm_oracle_or_refusal(path)?;
+        // A router present but off the pin is refused, not skipped: its
+        // absence is the only state a leg may skip on (open-debt item 635).
+        wz_codegen_build::assert_zenohd_at_pin(&path);
+        Some(path)
     }
 
     /// Open-debt item 901 -- what an ABSENT shared-memory oracle means.
@@ -2408,16 +2410,19 @@ pub mod common {
     /// Z leg SKIPs rather than FAILs when this binary is absent. Panics with the
     /// build hint if absent, the same prereq discipline as [`zenohd_binary`].
     pub fn zenohd_vsock_binary() -> PathBuf {
-        if let Ok(p) = std::env::var("WZ_ZENOHD_VSOCK_BIN") {
-            return PathBuf::from(p);
-        }
-        let path = artifact("target/zenohd-vsock/zenohd");
+        let path = match std::env::var("WZ_ZENOHD_VSOCK_BIN") {
+            Ok(p) => PathBuf::from(p),
+            Err(_) => artifact("target/zenohd-vsock/zenohd"),
+        };
         assert!(
             path.is_file(),
             "vsock-enabled zenohd missing at {}; set WZ_ZENOHD_VSOCK_BIN or run \
              `ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh` first",
             path.display()
         );
+        // Built by the same script from the same pinned checkout as the stock
+        // router, so held to the same pin (open-debt item 635).
+        wz_codegen_build::assert_zenohd_at_pin(&path);
         path
     }
 

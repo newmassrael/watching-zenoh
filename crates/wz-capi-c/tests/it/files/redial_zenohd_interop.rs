@@ -39,7 +39,6 @@
 
 use std::ffi::{c_void, CString};
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -59,6 +58,9 @@ use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_sess
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 use wz_runtime_tokio_test_support::free_port;
 
+// The reference router, held to the pinned version (open-debt item 635).
+use wz_codegen_build::zenohd_binary;
+
 const KEYEXPR: &str = "wz/redial/zenohd";
 
 /// How long zenohd gets to accept TCP after it is spawned.
@@ -66,18 +68,6 @@ const ZENOHD_UP_BUDGET: Duration = Duration::from_secs(30);
 
 /// How long a put gets to reach the subscriber, through the router.
 const DELIVERY_BUDGET: Duration = Duration::from_secs(20);
-
-/// Locate the reference `zenohd`, as `config_verdict_zenohd_interop` does.
-fn zenohd_binary() -> PathBuf {
-    if let Ok(p) = std::env::var("WZ_ZENOHD_BIN") {
-        return PathBuf::from(p);
-    }
-    let path = wz_codegen_build::artifact("target/zenohd/zenohd")
-        .canonicalize()
-        .expect("target/zenohd/zenohd is missing; run scripts/build-zenohd.sh");
-    assert!(path.is_file(), "{} is not a file", path.display());
-    path
-}
 
 /// Kills the child on drop, so a panicking test does not leave a zenohd
 /// holding the port.
