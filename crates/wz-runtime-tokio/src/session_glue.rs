@@ -297,7 +297,7 @@ pub use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkKind, LinkSu
 /// implementation.
 ///
 /// Each blocking call crosses into the runtime through
-/// [`block_in_place_on`](crate::runtime_pool::block_in_place_on), the bridge
+/// [`block_in_place_on`], the bridge
 /// [`WzRuntime::block_in_place`](crate::runtime_pool::WzRuntime::block_in_place)
 /// is, so a script action fired on a runtime worker releases that worker
 /// rather than nesting a runtime inside it, and the bridge's guards are the

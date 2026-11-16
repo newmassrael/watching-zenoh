@@ -152,7 +152,7 @@ pub struct PlainGuard<'a, T> {
 /// takes the guard and answers it), so that a caller of `std`'s reads the same: `parking_lot`'s,
 /// which pairs with the mutex, and whose wait makes no system call when nobody is to be woken.
 ///
-/// In a debug build a wait is checked like a lock ([`lock_order`]): the guard's lock leaves the
+/// In a debug build a wait is checked like a lock (`lock_order`): the guard's lock leaves the
 /// thread's held locks for as long as the wait lasts, and a thread that waits while it holds
 /// any OTHER lock is reported. A condition variable waits for an event another thread makes,
 /// and that thread may need the lock the waiter holds; no order of locks shows it, which is why

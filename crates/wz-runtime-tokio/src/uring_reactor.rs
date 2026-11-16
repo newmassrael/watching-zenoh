@@ -359,7 +359,7 @@ impl UringReactor {
     ///
     /// The width is read when a frame starts, and a frame starts when the
     /// session asks for it: the worker hands the link a completion uncut and
-    /// [`UringRx::poll_event`] cuts one frame per call ([`StreamCut`]). That is
+    /// [`UringRx::poll_event`] cuts one frame per call (`StreamCut`). That is
     /// `poll_framed`'s rule exactly, and it holds when one completion carries
     /// the handshake's last frame and the first lean one: the flag flips while
     /// the session handles the first, before the second is cut. A worker that
