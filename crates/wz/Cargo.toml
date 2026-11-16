@@ -1013,7 +1013,7 @@ transport-unicast = ["wz-runtime-tokio?/transport-unicast"]
 
 # ----- §5.21 router (16 atomic; router-hat-router active, rest reserved) -----
 # R311y202 — router-connect-reconcile active flip: the runtime dynamic connect-list
-# reconcile (`update_peers`) + peer auto-reconnect, gated on the router-hat run mode.
+# reconcile (wz's own trigger) + peer auto-reconnect, gated on the router-hat run mode.
 router-connect-reconcile = ["routing-router-hat", "wz-runtime-tokio?/router-connect-reconcile"]
 router-face-management = []
 router-hat-multihat = []
@@ -1030,9 +1030,9 @@ routing-data-route-compute = []
 routing-interceptor-framework = []
 routing-interceptor-hotreload = ["wz-runtime-tokio?/routing-interceptor-hotreload"]
 routing-interest-broker = []
-# R311y512 — was a no-op `= []` facade; now forwards the REAL gate. Pulls
-# `routing-peer` (the LinkstateForwarder owns the pending table) and the
-# runtime-crate feature that carries the cfg sites.
+# Forwards the REAL gate. Pulls `routing-router-hat` (the RouterForwarder
+# owns the pending table) and the runtime-crate feature that carries the cfg
+# sites.
 routing-interest-pending-gc = [
     "routing-router-hat",
     "wz-runtime-tokio?/routing-interest-pending-gc",

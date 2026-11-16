@@ -485,10 +485,10 @@ pub type DialIntentReceiver = tokio::sync::mpsc::UnboundedReceiver<DialIntent>;
 /// carried addresses); the loop dials each address it is not already dialing
 /// (address dedup — a config endpoint has no zid pre-handshake, so the gossip zid
 /// dedup `holds_zid` cannot apply).
-/// ADD-ONLY, faithful to the router branch (`orchestrator.rs:449-467`): a removed
-/// endpoint is NOT torn down (the Client close-removed branch `427-448` is
-/// deliberately router-inapplicable — closing a live federation face on a
-/// static-list edit would blackhole the mesh).
+/// ADD-ONLY, as upstream's close-time re-read is: an endpoint removed from the
+/// list is NOT torn down — upstream only stops re-dialing it once its session
+/// closes — because closing a live federation face on a list edit would
+/// blackhole the mesh.
 ///
 /// The sending end lives in the run-mode host (`run_router_hat`), written when the
 /// operator affordance fires; the channel is UNBOUNDED (the producer is a sync
@@ -2243,8 +2243,7 @@ enum Step {
     /// A runtime connect-list reconcile arrived (`router-connect-reconcile`) — the
     /// A desired-outbound-connect-set reconcile, carrying its own verb
     /// ([`ConnectReconcile`]): dial each newly-listed address not already being
-    /// dialed (ADD-ONLY teardown-wise, the wz analogue of zenoh's `update_peers`
-    /// Peer/Router branch). Only ever produced when [`FaceSources::reconcile`] is
+    /// dialed (ADD-ONLY teardown-wise; see [`ReconcileSender`]). Only ever produced when [`FaceSources::reconcile`] is
     /// `Some`; the variant is always present so the `select!` arm carries no
     /// attribute (tokio's `select!` rejects branch attributes), and its handler body
     /// is `#[cfg]`-gated — inert without the feature.
@@ -2977,8 +2976,8 @@ pub struct FaceSources {
     /// The runtime connect-list reconcile stream (`router-connect-reconcile`): the
     /// run-mode host (`run_router_hat`) sends the NEW full desired outbound
     /// connect-set here when the operator changes the connect endpoints at runtime,
-    /// and the loop dials each newly-listed address it is not already dialing (the
-    /// wz analogue of zenoh's `update_peers`, `orchestrator.rs:413`). `None` when
+    /// and the loop dials each newly-listed address it is not already dialing (see
+    /// [`ReconcileSender`] for what upstream does instead). `None` when
     /// `router-connect-reconcile` is not wired (every non-router loop, and a router
     /// built without the feature) — then the arm parks forever and the loop is
     /// byte-for-byte the prior behaviour. Always-present (no `#[cfg]` on the field)
@@ -4481,12 +4480,11 @@ where
 
             // A runtime connect-list reconcile arrived (`router-connect-reconcile`):
             // the loop's endpoints change, and each newly-listed one is dialled by
-            // its connection machine (decision D5). This is the wz analogue of
-            // zenoh's `update_peers` Peer/Router branch (`orchestrator.rs:449-467`)
-            // — ADD-ONLY. A removed endpoint is forgotten, NOT torn down (the
-            // Client close-removed branch `427-448` is router-inapplicable: closing
-            // a live federation face on a static-list edit would blackhole the
-            // mesh). An endpoint is named by its ADDRESS (a config endpoint carries
+            // its connection machine (decision D5). ADD-ONLY, as upstream's
+            // close-time re-read of the connect list is: a removed endpoint is
+            // forgotten, NOT torn down, because closing a live federation face on
+            // a list edit would blackhole the mesh (see [`ReconcileSender`]).
+            // An endpoint is named by its ADDRESS (a config endpoint carries
             // no zid until the handshake, so the gossip `holds_zid` zid dedup
             // cannot apply), and one already held or being reached is unchanged.
             // The arm parks when `reconcile` is `None`, so a non-router /
@@ -4936,11 +4934,11 @@ fn accept_only_sources(
 }
 
 /// Bind-once, dial-configured-peers, accept-inbound, hold-all: the peer-mesh
-/// node (the `routing-peer` foundation, R311qg).
+/// node (the `routing-peer` foundation).
 ///
 /// The dial + accept generalisation of [`accept_loop`]: a peer both DIALS each
 /// [`FaceSources::dial_targets`] locator (its outbound mesh links — every
-/// IP-family scheme since R2233, dispatched by [`dial_locator`] and carrying the
+/// IP-family scheme, dispatched by [`dial_locator`] and carrying the
 /// loop's [`FaceSources::dial_config`] trust material) AND accepts inbound peers
 /// on [`FaceSources::listeners`], holding every resulting face in one set. The
 /// only difference from `accept_loop` is the seeded outbound dials;
@@ -4949,24 +4947,12 @@ fn accept_only_sources(
 /// isolated as `FaceFailed`) covers a dialed face too — an unreachable dial
 /// target surfaces as `FaceFailed` and the mesh keeps forming.
 ///
-/// R2438 — THE TWO SENTENCES THAT WERE HERE WERE FALSE, and they had been
-/// asserting a missing capability for long enough that the atom's own registry
-/// entry flagged them (`routing-peer`: "the registry is right and the CODE is
-/// the thing that went stale, and nothing measures that direction either").
-/// They read: "a held mesh face routes nothing yet", and that mesh forwarding
-/// "needs zid-keyed loop suppression ... the next `routing-peer` atom".
-///
-/// Both are refuted by this crate: `linkstate_forward` is a shipped module
-/// (`crate::linkstate_forward`), it forwards Push, propagates Declare interest
-/// and routes Query / Response / ResponseFinal, and its tier tables are keyed by
-/// graph zid with a per-face psid-to-zid mapping — which IS the zid-keyed
-/// suppression the deleted sentence said was still owed. A held face routes
-/// whatever forwarder it was given.
-///
-/// The seam itself is unchanged and is why the comment could rot unnoticed:
-/// `peer_loop` takes the same `forwarder` parameter as `accept_loop`, so a node
-/// that genuinely wants no forwarding still passes [`NoOpForwarder`]. "Can be
-/// hold-only" is a caller's choice here; it was never this function's ceiling.
+/// What a held face routes is the `forwarder`'s, not this loop's: a mesh node
+/// passes the region-hat forwarder (`RouterForwarder` at node mode Peer), which
+/// forwards Push, propagates Declare interest, routes Query / Response /
+/// ResponseFinal over a net keyed by graph zid; a node that wants no
+/// forwarding passes [`NoOpForwarder`]. Hold-only is the caller's choice, never
+/// this function's ceiling.
 #[cfg(feature = "routing-peer")]
 pub async fn peer_loop<S, F>(
     sources: FaceSources,

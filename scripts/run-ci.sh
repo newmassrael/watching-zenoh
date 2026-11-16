@@ -2,19 +2,19 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# R311y420 — FILE-SCOPED, and only this file. Every lane runs through
+# FILE-SCOPED, and only this file. Every lane runs through
 # `run_layer <name> <fn>`, which invokes its argument as `"$@"`, so no layer
 # function is reachable by static analysis and neither is any helper only they
-# call. shellcheck 0.11 (the pin this round introduced; the check did not exist
-# in the 0.8.0 that floated on the runner image before it) therefore reports
-# SC2329 on 124 functions here (R311y449 — it read 119, drifted since R311y420
-# and widened by y448; it is a MOVING count, so recompute with
-# `grep -cE '^[A-Za-z_][A-Za-z0-9_]*\(\) \{' scripts/run-ci.sh` rather than
-# trusting this number) — including `_runci_guarded_test`, which has 15
-# call sites in this file. The dispatch is the point of the design, so the
-# finding is structural rather than a defect to fix. Scoped to this file
-# deliberately: SC2329 stays live for the other 17 shell files, none of which
-# dispatch indirectly.
+# call. shellcheck 0.11 (the pinned version; the check does not exist in
+# 0.8.0) therefore reports SC2329 on the functions defined here, counted by
+# `grep -cE '^[A-Za-z_][A-Za-z0-9_]*\(\) \{' scripts/run-ci.sh` -- including
+# `_runci_guarded_test`, whose call sites are counted by
+# `grep -c '_runci_guarded_test ' scripts/run-ci.sh`. Both counts move with
+# every lane, which is why neither is written here. The dispatch is the point
+# of the design, so the finding is structural rather than a defect to fix.
+# Scoped to this file deliberately: SC2329 stays live for every other shell
+# file, none of which dispatch indirectly.
+#
 # R311y710 — the SC2317 half of this directive is RETIRED. R311y707 added it
 # because shellcheck 0.9.0 (a developer's apt) emits SC2317 across this file's
 # dispatch while 0.11.0 (the pin ci.yml installs) does not, and a permanently
@@ -7249,7 +7249,7 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      re-gating C3a local delivery + C3b's router leg). The query route (Request/
 #      Response) + source-dimensioned route cache are the later C5 slice.
 #   4. §5.16 access-control (R311y131, the y113 obligation): the router now carries
-#      the ingress/egress interceptor plane (parity with LinkstateForwarder). The
+#      the ingress/egress interceptor plane. The
 #      `routing-router-hat,access-acl` arm RUNS the router ACL tests (an_ingress /
 #      an_egress_acl_* — fan_out_tier + admit_inbound gates); the full access combo
 #      (acl+downsampling+quota) clippy-gates --all-targets so the shared
@@ -13900,9 +13900,9 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings)
 }
 
-# ─── Layer C1n — wz-mcu-session-acceptor isolated host e2e + clippy ──
-#
-# Stage 5. wz-mcu-session-acceptor owns the MCU acceptor session e2e SSOT
+# ─── Layer C1n — MCU session profile: acceptor e2e + its library + clippy ──
+# (with the slim link lib suite, the fixed wire fixtures, the coop cookie-nonce
+# seam, the entropy port and the signing key.) The acceptor owns the e2e SSOT
 # (run_acceptor_e2e<C>, shared verbatim by this host test and the
 # deploy/mcu-session-acceptor QEMU bin). It composes wz-session-lwip + the
 # facade session-lwip funnel, so it inherits wz-session-lwip's no_std
@@ -23115,7 +23115,7 @@ layer_z_zenohd_interop() {
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # wz-PEER <-> zenohd-PEER linkstate FEDERATION interop, the peer-tier twin of
     # the router-hat leg above (the last cross-impl router gap): a wz `--peer`
-    # LinkstateForwarder meshes with a real zenohd in mode=peer +
+    # node (the region-hat forwarder at node mode Peer) meshes with a real zenohd in mode=peer +
     # routing/peer/mode=linkstate and DECODES its linkstatepeers_net LinkStateList
     # flood. Leg 1 (positive) converges a MUTUAL edge (the full-linkstate
     # discriminator: zenohd's self-entry advertises a reciprocal link back to wz);
@@ -24042,7 +24042,7 @@ layer_e6c_peer_multilink() {
 # R311y220 — the demo-binary prioritized-publish proof. A `--peer` node built `--features
 # transport-qos,transport-multilink` and driven `--max-links 2 --qos --express-high`
 # ORIGINATES its `--publish` data at a non-DEFAULT QoS band (RealTime, the HIGH band)
-# through the new `LinkstateForwarder::publish_qos` app path, and the `--subscribe` peer
+# through the `RouterForwarder::publish_qos` app path, and the `--subscribe` peer
 # RECEIVES it over the aggregated qos session — making the y217 `select_link` band routing
 # + y219a per-face band assignment reachable from a real binary (pre-y220 the forwarder
 # publish API hard-clamped `Priority::DEFAULT`, so an application could never originate a

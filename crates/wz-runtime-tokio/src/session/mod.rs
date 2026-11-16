@@ -7475,8 +7475,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // weight is a ROUTER-tier graph value, and a Session holds no such graph.
             let sessions: Vec<_> = actions.admin_session_of_peer().into_iter().collect();
             // The match+reply SSOT (root local_data / metrics / config + the read
-            // gate) — the SAME answerer the §5.23 routing-peer forwarder host calls
-            // (R311y45), so both emit byte-identical admin replies.
+            // gate) — the SAME answerer a forwarder host calls, so a session and a
+            // node emit byte-identical admin replies.
             // R311y810 — the cfg is on the VALUE, not on the struct field: gating
             // the field would force a matching `#[cfg]` on every construction
             // site, including crates that carry no such feature of their own.

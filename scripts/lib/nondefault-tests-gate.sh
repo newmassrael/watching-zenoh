@@ -1491,15 +1491,6 @@ wz-session-core/query-reply-err|"
 # census treats the name as claimed. Both readings come from this one table, so
 # "what we do not run" and "what we do not count" cannot drift apart.
 SKIPS=(
-    # Its premise is `ws`/`tls` name-dialling being UNWIRED, so it asserts a
-    # typed `Unsupported` arrives before any I/O. Turn `transport-link-ws` on and
-    # the dial IS wired, the premise is void, and the assertion fails on what the
-    # NETWORK said -- MEASURED `left: NetworkUnreachable` after resolving
-    # `example.org`, and it is what made the all-features run take 270s. A test
-    # that reaches the network is the one thing item 543 says must never enter a
-    # local hook, which is why the wide leg above still needs this row.
-    "wz-runtime-tokio|session_open::tests::ws_and_tls_named_dial_is_unsupported_without_io|\
-a wired ws/tls dial reaches the real network (measured: NetworkUnreachable on example.org:7447)"
     # A pinned OpenMetrics body. `transport-stats` adds four counters (tx_bytes,
     # rx_bytes, wz_tx_batches, wz_rx_batches) that the pinned text does not
     # carry, so the equality fails on a body that is CORRECT for the wider build.
@@ -1507,21 +1498,6 @@ a wired ws/tls dial reaches the real network (measured: NetworkUnreachable on ex
     # build than this leg makes.
     "wz-runtime-tokio|session::tests::declare_adminspace_metrics_get_returns_openmetrics_text|\
 the pinned OpenMetrics text describes a build without transport-stats' four counters"
-    # ⚠ NOT a premise problem like the two above -- this one is a genuine RACE,
-    # and it is the first defect this widened table found rather than caused.
-    # `transport-link-unixpipe` is non-default, so gate 3 never compiled this
-    # module and NO leg ran it: the test had never executed in a gate at all.
-    # MEASURED, alone, same tree, same feature set: run 1 hung and was killed at
-    # the 180s timeout; runs 2 and 3 passed in ~1s. In a whole-crate run it hung
-    # 719s before it was killed, while an earlier whole-crate run passed it. So
-    # it is intermittent, roughly 1-in-3 here, and a hang -- not a failure -- so
-    # a lane that ran it would not go red, it would STOP.
-    # Skipped rather than fixed on purpose: the fix is a change to the two-dialer
-    # FIFO rendezvous, which is a different seam from this table's, and pinning
-    # it here keeps the leg's verdict meaningful in the meantime. It is filed as
-    # open-debt item 544, and this row is what must be deleted when 544 closes.
-    "wz-runtime-tokio|unixpipe_pipeline::tests::two_dialers_get_distinct_dedicated_pairs|\
-an intermittent HANG in the two-dialer FIFO rendezvous (measured 1-in-3 alone, 719s in-suite); open-debt item 544"
     # The `tls/` link of the COOPERATIVE engine through the pico ABI
     # (`tests/it/files/tls_coop_roundtrip.rs`, `tls-mbedtls`; a module of the merged target `it`,
     # so a row names its test by the path `-- --list` reports there). They are about the engine the build selects, and a build that has the tokio

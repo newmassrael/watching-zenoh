@@ -2033,11 +2033,11 @@ fn install_session_handles(
         }
     });
 
-    // R311y347 — `--matching-log`. Installed PRE-DRIVE, which is load-bearing
-    // rather than tidy: `declare_matching_listener` is TRANSITION-only (pico
-    // parity — registration never fires), so a listener installed after the
-    // remote's `DeclSubscriber` has already been dispatched would miss the very
-    // edge it exists to observe and report nothing, silently.
+    // `--matching-log`. Installed PRE-DRIVE so the `true` it reports is the
+    // edge the remote's `DeclSubscriber` drives: a listener installed after
+    // that declare has been dispatched reports `true` at registration instead
+    // (pico's fire-before-insert), which says the publisher matches but not
+    // that the transition was observed.
     let (publisher, matching_listener) = match matching_publisher_keyexpr {
         // R2578 — the publisher is declared for EITHER knob, but the listener
         // only for `--matching-log`. MEASURED, and it is why this arm is split:
@@ -4083,7 +4083,7 @@ pub(crate) enum PublishBand {
 
 #[cfg(feature = "transport-qos")]
 impl PublishBand {
-    /// The `(priority, express)` pair [`publish_qos`](wz::runtime_tokio::linkstate_forward)
+    /// The `(priority, express)` pair `RouterForwarder::publish_qos`
     /// consumes. RealTime(1) sits in the even-FaceId HIGH band and Background(7) in the
     /// odd-FaceId LOW band (`accept_loop::multilink_priority_range`), so the two select
     /// DISTINCT aggregated links; DEFAULT (Data=5) also lands in the LOW band, so only
@@ -6551,9 +6551,9 @@ async fn run_router_hat_until(
 
     // The runtime connect-list reconcile affordance (`router-connect-reconcile`):
     // `--connect-after <ms>:<addr>[,<addr>...]` schedules a runtime ADD of the
-    // listed connect endpoints `<ms>` after the mesh comes up — the operator-driven
-    // trigger that mirrors zenoh re-reading `connect/endpoints` on a config change
-    // and `update_peers`-dialing the newly-listed members.
+    // listed connect endpoints `<ms>` after the mesh comes up — an operator-driven
+    // trigger of wz's own (upstream re-reads `connect/endpoints` only when a
+    // session closes).
     //
     // R2233 (open-debt item 585) — resolved through `resolve_dial_targets`, the
     // SAME seam the static `--connect` list uses, so a runtime add reads the same

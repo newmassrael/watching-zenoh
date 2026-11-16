@@ -277,8 +277,8 @@ adminspace-metrics = [
 # adminspace-introspection-handlers (§5.23) — the per-entity subscriber/queryable
 # admin introspection. Composes adminspace-core (the reply machinery) + the
 # wz-admin reply legs, and the caller-side live materialization: the
-# LinkstateForwarder `subscriptions()`/`queryables()` whole-table accessors (this
-# crate) that the demo host snapshots per app-tick.
+# RouterForwarder `admin_subscribers()`/`admin_queryables()` whole-table
+# accessors (this crate) a host reads the declared entities from.
 adminspace-introspection-handlers = [
     "adminspace-core",
     "wz-admin/adminspace-introspection-handlers",
@@ -1202,8 +1202,8 @@ routing-peer = [
 ]
 # R311y108 — §5.21 router-hat slice 1a: the DUAL-mesh router forwarder
 # (the 4th `impl FaceForwarder`, `router_forward` module). Ports zenoh
-# `hat/router`'s two link-state graphs (routers_net + linkstatepeers_net)
-# DISTINCT from the single-net `routing-peer` `LinkstateForwarder`. Slice 1a
+# `hat/router`'s two link-state graphs (routers_net + linkstatepeers_net);
+# a peer node runs the same forwarder at node mode Peer. Slice 1a
 # is the TOPOLOGY STATE half: dual-net register/deregister/OAM-ingest with a
 # TIER-SCOPED flood (a routers_net change reaches only router faces, a
 # linkstatepeers_net change only peer faces — the two graphs never cross-inject).
@@ -1239,19 +1239,19 @@ routing-token-tables = ["routing-router-hat"]
 # named for is the timeout sweep on that table (CurrentInterestCleanup), which
 # finalizes the client when an upstream goes silent; zenoh-pico's CURRENT
 # interest carries NO timeout of its own (net/liveliness.c:348), so without the
-# sweep a foreign client waits forever. Composes ONLY routing-peer -- the
+# sweep a foreign client waits forever. Composes ONLY routing-router-hat -- the
 # forwarder that owns the table. The propagated Interest is built with
 # wz-session-core's interest_build, which (like the declare_build reply builders
 # the forwarder already uses) carries no feature gate, so the broker pulls no
 # app-surface declare-interest / liveliness-* dep.
 routing-interest-pending-gc = ["routing-router-hat"]
 # §5.21 router-connect-reconcile — the runtime dynamic connect-list reconcile
-# (zenoh `net/runtime/orchestrator.rs:413` `update_peers`) + peer auto-reconnect
-# (the `closed_session` 1194 Peer/Router re-dial). The shared `face_drive_loop`
+# (upstream re-reads the live connect list only when a session closes) + peer
+# auto-reconnect (upstream's `closed_session` re-dial). The shared `face_drive_loop`
 # gains (1) a reconcile channel that dials each newly-listed connect endpoint not
 # already being dialed (ADD-ONLY, address dedup — a config endpoint has no zid
-# until the handshake; the Client close-removed branch is NOT ported, it would
-# blackhole a router mesh) and (2) the re-dial of a dropped/failed configured
+# until the handshake; tearing down a removed endpoint would blackhole a router
+# mesh) and (2) the re-dial of a dropped/failed configured
 # peer with a growing backoff (retry-until-success), by the peer's connection
 # machine since decision D5 (`loop_peers`). Composes only the RouterForwarder foundation (both live on
 # the shared accept/peer loop under the router-hat run mode).

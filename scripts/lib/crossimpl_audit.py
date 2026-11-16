@@ -304,9 +304,10 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #     subscriber declared BEFORE the session is driven, which zenohd serves off
 #     its answer to that subscriber's own CURRENT interest. This one declares a
 #     SECOND history subscriber after the first has seen the token, where zenohd
-#     answers with the id it already used for the resource (`make_token_id`
-#     reuses `local_tokens[res]`, hat/router/token.rs:978-990) and wz's
-#     first-declaration-wins guard drops the reply -- so only the R311y790
+#     answers with the id it already used for the resource (the broker hat
+#     reuses the face's `local_tokens` entry,
+#     `zenoh/src/net/routing/hat/broker/interests.rs` @ `.entry(token.clone())`)
+#     and wz's first-declaration-wins guard drops the reply -- so only the R311y790
 #     declare-time local replay can serve it. Same atom, same router, a plane
 #     the first witness cannot reach.
 # R311y798 takes it to 828. `session-matching` gains THREE adjudicating tests,

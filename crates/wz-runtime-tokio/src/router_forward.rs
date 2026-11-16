@@ -19,10 +19,9 @@
 //! number, the code and the cited pin source are authoritative.
 //!
 //! [`RouterForwarder`] is the 4th [`FaceForwarder`],
-//! the wz port of zenoh's `hat/router` routing strategy. Where the
-//! retired single-net peer forwarder (`LinkstateForwarder`, item 751 step 7c-2) ported
-//! `hat/linkstate_peer` (ONE [`LinkstateNetwork`] graph), the router maintains
-//! TWO graphs — `routers_net` (the Router-tier mesh) and `linkstatepeers_net`
+//! the wz port of zenoh's `hat/router` routing strategy, and the forwarder of a
+//! peer node too (at node mode Peer). Where a linkstate peer hat keeps ONE
+//! [`LinkstateNetwork`] graph, the router maintains TWO graphs — `routers_net` (the Router-tier mesh) and `linkstatepeers_net`
 //! (the Peer-tier mesh) — exactly as zenoh's `HatTables` keeps `routers_net`
 //! and `linkstatepeers_net` side by side (`hat/router/mod.rs:174-175`). The
 //! local node is a `WhatAmI::Router` present in BOTH graphs (zenoh's local
@@ -37,8 +36,8 @@
 //! [`FaceForwarder`] trait is the same
 //! multi-hat seam expressed without type erasure: each forwarder owns TYPED
 //! self-state, and the run-mode selects the concrete forwarder. The router is
-//! the routing type beside `NoOpForwarder` (R2912 retired the single-hop `RoutingForwarder`,
-//! item 751 step 7c-2 the single-net `LinkstateForwarder`).
+//! the one routing type beside `NoOpForwarder`: a peer node is this forwarder
+//! at node mode Peer rather than a forwarder of its own.
 //!
 //! ## Slice 1a (topology STATE)
 //!
@@ -338,15 +337,11 @@
 //! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
 //!   retired single-net forwarder carried; added as the router gains the corresponding
 //!   plane. (The pending-query GC — the timeout sweep — landed with C5c above.)
-//!   NOTE (impl-panel R311y113): NEITHER the tier-scoped
-//!   `fan_out_tier` NOR the single-target
-//!   `send_to_face` applies the egress-ACL
-//!   `admit_outbound` gate or the `interceptor_dropped` witness the single-net
-//!   `fan_out` applies, so a within-tier Push forward, the tick re-advertise, and
-//!   the query Request/Response sends reach a face a §5.16 egress-deny would
-//!   drop. Silent in any config with no ACL wired (the router has no interceptor
-//!   plane yet); these two egress helpers are the router↔single-net data-path
-//!   parity obligation for the interceptor slice.
+//!   Both egress helpers, the tier-scoped `fan_out_tier` and the single-target
+//!   `send_to_face`, apply the egress-ACL `admit_outbound` gate and raise the
+//!   `interceptor_dropped` witness, so a within-tier Push forward, the tick
+//!   re-advertise and the query Request/Response sends all pass the §5.16
+//!   egress chain.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -2356,7 +2351,7 @@ impl RouterDeclarationsView {
     /// `UndeclareToken` carries no keyexpr on the wire, so only an id map can
     /// resolve a retraction.
     ///
-    /// ⚠ NO self-exclusion predicate, unlike the peer forwarder's token fold.
+    /// ⚠ NO self-exclusion predicate in the token fold.
     /// This host never writes a self row for a client's token: a client-held
     /// token is DERIVE-NOT-STORE here (`repropagate`
     /// advertises it without storing it in a mesh table), so a self row in these
@@ -2855,8 +2850,8 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
 
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
 /// (Router-tier) and `linkstatepeers_net` (Peer-tier) — from the face lifecycle
-/// and inbound `OAM_LINKSTATE` topology. It replaced the single-net
-/// `LinkstateForwarder` as the peer node's forwarder too (item 751 step 7c-2). Slice 1a owns
+/// and inbound `OAM_LINKSTATE` topology. It is the peer node's forwarder too, built
+/// by [`peer_with_timestamping`](Self::peer_with_timestamping). Slice 1a owns
 /// the topology STATE; see the module docs for the deferred slices.
 pub struct RouterForwarder {
     /// The routing tables: the hats, the faces and the stores a declaration writes, in one
@@ -2990,10 +2985,10 @@ pub struct RouterForwarder {
     /// forwarded Query's pending return entry lives before the C5c tick sweep
     /// abandons it. [`route_request`](Self::route_request) stamps each allocated
     /// entry with [`now`](Self::now)` + this`. `Cell` (it is `Copy`, set through a
-    /// `&self` config seam), the same knob the single-net forwarder carries.
+    /// `&self` config seam).
     query_timeout: PlainCell<Duration>,
     /// Count of pending queries reaped by the timeout sweep (C5c) — the GC
-    /// witness, the router twin of the single-net forwarder's `timed_out`. Rises
+    /// witness. Rises
     /// once per abandoned BRANCH (a queryable that never sent its `ResponseFinal`
     /// on a still-up face; a 2-branch fan expiring counts 2); `0` on a healthy
     /// mesh where every branch finalizes.
@@ -3125,20 +3120,17 @@ pub struct RouterForwarder {
     #[cfg(feature = "session-extauth")]
     session_auth: PlainRwLock<Option<crate::accept_loop::SessionAuth>>,
     /// §5.16 access-control EGRESS interceptor chain — consulted per outbound
-    /// message in [`fan_out_tier`](Self::fan_out_tier) + [`send_to_face`](Self::send_to_face),
-    /// the router twin of the single-net `egress_interceptors`. This closes the
-    /// y113 obligation: the router's egress helpers now carry the same
-    /// `admit_outbound` gate the single-net `fan_out` has (the one router↔single-net
-    /// data-path parity gap).
+    /// message in [`fan_out_tier`](Self::fan_out_tier) + [`send_to_face`](Self::send_to_face)
+    /// through the `admit_outbound` gate, so every egress path of the router
+    /// passes the same chain.
     egress_interceptors: PlainRwLock<InterceptorChain>,
-    /// R2348 (`routing-interceptor-hotreload`) — the monotonic version every
-    /// [`set_interceptors`](Self::set_interceptors) stamps, so a table computed
-    /// against a previous chain compares unequal and is recomputed. The router
-    /// twin of the single-net `interceptor_version`, and until R2348 the router
-    /// had NEITHER this nor a cache: it re-ran the whole chain per message, on
-    /// both flows, which is the residual the atom named.
+    /// The monotonic version every
+    /// [`set_interceptors`](Self::set_interceptors) stamps, read by the
+    /// `routing-interceptor-hotreload` verdict cache, so a table computed
+    /// against a previous chain compares unequal and is recomputed rather than
+    /// re-running the whole chain per message on both flows.
     ///
-    /// Ungated for the same reason the single-net one is: a counter nothing
+    /// Ungated: a counter nothing
     /// reads costs one `Cell` bump per reconfigure, whereas cfg-ing it would
     /// fork `set_interceptors` into two bodies for no behavioural difference.
     interceptor_version: PlainCell<u64>,
@@ -3186,22 +3178,20 @@ pub struct RouterForwarder {
     /// cache yields the same verdict.
     #[cfg(feature = "routing-interceptor-hotreload")]
     interceptor_cache_recomputes: Counter,
-    /// R2348 — the EGRESS recompute witness, a SEPARATE counter for the reason
-    /// the single-net pair records: one relayed message computes an ingress table
+    /// The EGRESS recompute witness, a SEPARATE counter because
+    /// one relayed message computes an ingress table
     /// AND an egress table per destination, so a summed counter could not tell
     /// "the egress table was built" from "the ingress table was built twice".
     #[cfg(feature = "routing-interceptor-hotreload")]
     egress_interceptor_cache_recomputes: Counter,
-    /// Count of messages ANY interceptor dropped on either flow — the router twin
-    /// of the single-net `interceptor_dropped` witness (a coarse per-node count, not
-    /// per-interceptor). `0` in any config with no ACL wired.
+    /// Count of messages ANY interceptor dropped on either flow (a coarse
+    /// per-node count, not per-interceptor). `0` in any config with no ACL wired.
     interceptor_dropped: Counter,
     /// Total spanning-tree recomputes flushed across both nets — the D2c
     /// coalescing witness (rises once per flushed net per tick window).
     recomputes: Counter,
     /// The coalescing window the [`tick_period`](FaceForwarder::tick_period)
-    /// reports — zenoh's `TREES_COMPUTATION_DELAY_MS`, shared with the
-    /// linkstate forwarder's default.
+    /// reports — zenoh's `TREES_COMPUTATION_DELAY_MS`.
     trees_delay: Duration,
     /// The monotonic clock the pending-query deadlines are stamped from (C5b) and
     /// reaped against (C5c) — [`Box`]ed so a deterministic test injects a
@@ -3215,10 +3205,10 @@ pub struct RouterForwarder {
     ///
     /// This is the role that STAMPS. zenoh ships `timestamping.enabled:
     /// { router: true, peer: false, client: false }`
-    /// (`DEFAULT_CONFIG.json5:206`) and this forwarder is a `WhatAmI::Router` in
-    /// both meshes by construction, so — unlike the linkstate-peer forwarder,
-    /// whose clock is `None` under the same default — a `time-hlc` build of this
-    /// forwarder really does add timestamps to un-timestamped Puts it relays.
+    /// (`DEFAULT_CONFIG.json5:206`) and the clock is built over the forwarder's
+    /// node mode, so — unlike the same forwarder at node mode Peer, whose clock
+    /// is `None` under the same default — a `time-hlc` build of a router
+    /// really does add timestamps to un-timestamped Puts it relays.
     /// That makes the forward stamp FOREIGN-OBSERVABLE here: a pico subscriber
     /// prints `with timestamp:` for a Put that entered this router bare.
     node_hlc: crate::node_clock::NodeHlc,
@@ -3249,7 +3239,7 @@ struct LocalNamespace {
 
 /// The handler of a queryable a host registered on the router: the shape the session's own
 /// `declare_queryable` takes (`Send`, so that a router shared between threads can run it from any
-/// of them), where the peer forwarder's is not, a single task never leaving its thread.
+/// of them).
 pub(crate) type HostedQueryHandler = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send>;
 
 /// The handler of a subscriber a host registered on the router (see [`HostedQueryHandler`]).
@@ -4890,10 +4880,9 @@ impl RouterForwarder {
     /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`),
     /// with its faces placed by [`region_of`] at node mode Peer.
     ///
-    /// Public since step 7 of `docs/peer-region-hats.md`: the publish and subscribe,
-    /// query, token and interest planes and the node's own surfaces were held to
-    /// the single-net `LinkstateForwarder` and to the pin by the differential and the network
-    /// gates (steps 3 to 6; the former is retired and the gates are frozen scenes now).
+    /// Public because a peer node has no other forwarder: its publish and subscribe,
+    /// query, token and interest planes and its own surfaces are held to the pin by
+    /// the network gates (`docs/peer-region-hats.md`).
     /// `timestamping` is the `timestamping.enabled` map a
     /// host read out of its config document, resolved against Peer here, as
     /// [`with_timestamping`](Self::with_timestamping) does against Router.
@@ -5116,8 +5105,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// [`enable_autoconnect`](Self::enable_autoconnect) against a channel the
     /// CALLER already owns — for a deploy running the multicast-scouting plane
     /// too, since the accept loop drains ONE receiver and the two producers must
-    /// share its ends. The same split the peer forwarder offers, and for the
-    /// same reason.
+    /// share its ends.
     pub fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender) {
         self.autoconnect.set(policy);
         *self.dial_tx.guard() = Some(tx);
@@ -5266,8 +5254,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// Override the per-query timeout (zenoh's `queries_default_timeout`) — the
-    /// same `&self` config seam the single-net forwarder exposes. Takes effect on
+    /// Override the per-query timeout (zenoh's `queries_default_timeout`) through
+    /// a `&self` config seam. Takes effect on
     /// the NEXT [`route_request`](Self::route_request); already-recorded deadlines
     /// are not retroactively changed.
     pub fn set_query_timeout(&self, timeout: Duration) {
@@ -5915,7 +5903,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// The number of messages ANY interceptor has dropped so far (ACL denial on
-    /// either flow) — the router twin of the single-net drop witness.
+    /// either flow).
     pub fn interceptor_dropped(&self) -> usize {
         self.interceptor_dropped.get()
     }
@@ -5935,12 +5923,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return InterceptorVerdict::Admit;
         };
         let ctx = RouterFaceContext { face, known: None };
-        // R2348 (`routing-interceptor-hotreload`) — serve this (face, keyexpr)'s
+        // `routing-interceptor-hotreload`: serve this (face, keyexpr)'s
         // precomputed verdict table while the chain that produced it is still
-        // installed, recomputing when the version says otherwise. The same rule
-        // the single-net forwarder has applied since R311y508; the router had no
-        // cache at all until this round, which is half the residual the atom
-        // named. A message with no governed keyexpr has nothing to key on and
+        // installed, recomputing when the version says otherwise, so the chain
+        // does not run per message. A message with no governed keyexpr has nothing to key on and
         // takes the direct path, which is also the whole path with the feature
         // off.
         #[cfg(feature = "routing-interceptor-hotreload")]
@@ -5963,7 +5949,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// Whether the EGRESS chain admits sending `msg` to the face whose `state` the
-    /// caller already holds — the router twin of the single-net `admit_outbound`.
+    /// caller already holds.
     /// Takes the already-borrowed `state` (not a `FaceId`) because the egress seams
     /// ([`fan_out_tier`](Self::fan_out_tier)) hold the `faces` borrow across the
     /// per-face loop. Empty chain admits without building a context.
@@ -6511,8 +6497,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let verdict = self.admit_outbound(id, state, &msg, known);
         if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped.bump();
-            // R2371 — the router twin of the linkstate forwarder's
-            // attribution: charge the drop to the DESTINATION face's own
+            // Charge the drop to the DESTINATION face's own
             // session on upstream's per-reason counter.
             crate::linkstate_forward::charge_interceptor_drop(
                 &state.runtime.actions,
@@ -6697,10 +6682,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(net) = self.topology_plane(tier) else {
             return Ok(0);
         };
-        // R2893 — the shape and the per-face exclusions are the graph's
-        // (`build_reflood_for`), shared with the peer forwarder. This used to
-        // withhold the whole list from the source face, the defect R311y431
-        // found and repaired on the peer side only: psid space is per sender,
+        // The shape and the per-face exclusions are the graph's
+        // (`build_reflood_for`). The source face is not withheld the whole
+        // list: psid space is per sender,
         // so the source must get the `new` half back to learn self's psids.
         self.fan_out_tier(tier, true, |id, zid| {
             match net.build_reflood_for(changes, zid, id == source)? {
@@ -6853,7 +6837,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
     /// `UndeclKexpr` on `face` (1b) — a thin `&self.tables.faces`-borrow around the
-    /// shared [`absorb_keyexpr_into`] SSOT (R311y111), which both forwarders use.
+    /// shared [`absorb_keyexpr_into`] SSOT.
     /// Link-local: each link negotiates its own aliases (not re-flooded).
     fn absorb_keyexpr_declaration(&mut self, face: FaceId, declare: &DeclareOwned)
     where
@@ -8453,8 +8437,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // R2626 — the DROP arm, at the same single stamp point the paragraph
         // above defends. zenoh's spelling is a bare `return` out of
         // `route_data`, so no destination is reached; here that means none of
-        // the four blocks below runs, which is the same statement. R2892 — the
-        // stamp itself is `NodeHlc`'s, shared with the peer forwarder.
+        // the four blocks below runs, which is the same statement. The
+        // stamp itself is `NodeHlc`'s.
         let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
             return;
         };
@@ -9018,8 +9002,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// [`route_push`](Self::route_push) legs, now landed. A leaf-region Push
     /// has no mesh to route within,
     /// so it is only counted (the reception witness in [`forward`]). A drop
-    /// (unresolvable source / no interested subscriber / hop-exhausted) is silent,
-    /// as in the single-net path.
+    /// (unresolvable source / no interested subscriber / hop-exhausted) is silent.
     fn forward_push_tier(
         &self,
         inbound: FaceId,
@@ -14597,23 +14580,21 @@ impl InterceptorContext for RouterFaceContext<'_> {
         self.face.peer_zid
     }
 
-    // R311y453 — the §5.16 link-derived subject, off the driver this face already
-    // holds. Same one-liner as the single-net twin: both forwarders read the
-    // subject from the same place, so the two cannot drift.
+    // The §5.16 link-derived subject, off the driver this face already
+    // holds, so the subject is read from the one place the link records it.
     fn link_subject(&self) -> Option<&LinkSubject> {
         self.face.runtime.actions.link_subject()
     }
 
-    // R2631 — the authenticated name, through the reader the single-net twin
-    // uses, so both forwarders answer the username axis identically.
+    // The authenticated name, through the one shared reader of the session's
+    // auth state.
     fn username(&self) -> Option<String> {
         peer_acl_username(&self.face.runtime.actions)
     }
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
-        // Delegates to the shared SSOT (the single-net FaceContext delegates to the
-        // same free fn), alias-resolved against THIS face's table — one
-        // governed-kind match for both forwarders.
+        // Delegates to the shared SSOT, alias-resolved against THIS face's
+        // table — one governed-kind match for every interceptor context.
         resolve_governed_keyexpr(msg, &self.face.keyexpr_table)
             .or_else(|| self.known.map(str::to_owned))
     }
@@ -15263,8 +15244,8 @@ mod tests {
     const WIRE_PEER: u8 = 0b01;
     const WIRE_CLIENT: u8 = 0b10;
 
-    /// One LinkState entry (psid-space, with the psids it links to). Unlike the
-    /// linkstate forwarder's direct-ingest `entry` (which can leave `options`
+    /// One LinkState entry (psid-space, with the psids it links to). Unlike an
+    /// entry ingested directly (which can leave `options`
     /// 0), this one is encoded into an OAM ZBuf and decoded back, so `options`
     /// MUST flag the present optional fields: `OPT_P` (zid) | `OPT_W` (whatami).
     /// Otherwise the encoder writes the zid bytes the decoder then skips, and
@@ -15374,7 +15355,7 @@ mod tests {
 
     /// Ingest (through `forward`) on `face` a 3-entry flood that DISCOVERS a
     /// distant `node` reachable self <-> `neighbour` <-> `node` — the proven
-    /// discovery shape (mirrors the linkstate forwarder's `discover_distant`).
+    /// discovery shape.
     fn discover_via(
         fwd: &RouterForwarder,
         face: FaceId,
@@ -17077,7 +17058,7 @@ mod tests {
     fn push_to_an_unsubscribed_keyexpr_is_counted_but_not_routed() {
         // A Push on a keyexpr no in-tier peer subscribes to raises the reception
         // witness but forwards NOWHERE — `compute_push_forward` drops on the empty
-        // interested set (the same drop the single-net path takes).
+        // interested set.
         let fwd = RouterForwarder::new(zid(0x01));
         let (a_r, sink_r) = face(zid(0xAA), WIRE_ROUTER);
         let (a_p, sink_p) = face(zid(0xBB), WIRE_PEER);
@@ -17468,9 +17449,8 @@ mod tests {
         );
     }
 
-    /// An `AclPolicy` that DENIES `Put` on `keyexpr` for `flow`, allow-default —
-    /// the router twin of the single-net `deny_put_policy`, parameterised on the
-    /// flow so a test can gate ingress vs egress.
+    /// An `AclPolicy` that DENIES `Put` on `keyexpr` for `flow`, allow-default,
+    /// parameterised on the flow so a test can gate ingress vs egress.
     #[cfg(feature = "access-acl")]
     fn deny_put_policy(keyexpr: &str, flow: AclFlow) -> AclPolicy {
         AclPolicy::new(AclConfig {
@@ -17516,11 +17496,9 @@ mod tests {
         (fwd, sink_a, sink_c)
     }
 
-    /// R2631 — the router twin of the single-net
-    /// `a_face_authenticated_as_a_denied_user_is_dropped_and_another_user_is_not`.
-    /// Both forwarders implement the interceptor context separately, so a join
-    /// witnessed on one says nothing about the other; that is why the reader is a
-    /// shared function and why each forwarder carries its own witness of it.
+    /// A face authenticated as a denied user is dropped and a face authenticated
+    /// as another user is not: the join of the session's auth state with the
+    /// interceptor context's username axis, witnessed through the forwarder.
     #[cfg(all(feature = "access-acl", feature = "session-extauth"))]
     #[test]
     fn a_router_face_authenticated_as_a_denied_user_is_dropped_and_another_user_is_not() {
@@ -17580,8 +17558,7 @@ mod tests {
     fn an_ingress_acl_deny_drops_a_push_before_route() {
         // With self configured to DENY demo/** on INGRESS, a Put from A is dropped
         // at the top of forward(): not counted as received data, not routed to the
-        // interested child C, and witnessed. The router twin of the single-net
-        // an_acl_deny_drops_an_inbound_put_before_relay.
+        // interested child C, and witnessed.
         let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
         fwd.set_interceptors(InterceptorConfig {
             acl: Some(deny_put_policy("demo/**", AclFlow::Ingress)),
@@ -17606,10 +17583,10 @@ mod tests {
     #[cfg(feature = "access-acl")]
     #[test]
     fn an_egress_acl_deny_drops_the_within_tier_relay() {
-        // The y113 obligation: with self configured to DENY demo/** on EGRESS, a Put
+        // With self configured to DENY demo/** on EGRESS, a Put
         // from A is ADMITTED on ingress (counted, routed) but its within-tier relay
         // to the subscriber C is dropped at fan_out_tier's admit_outbound gate and
-        // witnessed — the router↔single-net egress parity the fan_out gate closes.
+        // witnessed.
         let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
         fwd.set_interceptors(InterceptorConfig {
             acl: Some(deny_put_policy("demo/**", AclFlow::Egress)),
@@ -17823,11 +17800,8 @@ mod tests {
         ))
     }
 
-    /// R2348 (`routing-interceptor-hotreload`) — the router's INGRESS verdict
-    /// cache. Until this round the router had no cache and no version at all: it
-    /// re-ran the whole chain for every message on every face, which is half the
-    /// residual the atom named (the single-net forwarder has been cached since
-    /// R311y508).
+    /// `routing-interceptor-hotreload`: the router's INGRESS verdict cache, which
+    /// keeps the whole chain from re-running for every message on every face.
     ///
     /// The pre-swap policy denies an UNRELATED keyexpr so the chain is non-empty
     /// (an empty chain short-circuits before the cache is ever consulted) and
@@ -24099,11 +24073,10 @@ mod tests {
         );
     }
 
-    /// R2893 — the source face of a topology flood gets the NEW node back:
+    /// The source face of a topology flood gets the NEW node back:
     /// psid space is per sender, so it learns self's psid for that node only
-    /// from the echo (the peer forwarder's R311y431 finding, measured against
-    /// zenohd). The router's re-flood withheld the whole list from the source
-    /// until it asked the graph's shared `build_reflood_for`.
+    /// from the echo (measured against zenohd); the re-flood is the graph's
+    /// shared `build_reflood_for`.
     #[test]
     fn a_topology_reflood_returns_the_new_node_to_its_source() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -28980,8 +28953,7 @@ mod tests {
         assert_eq!(sink_a.frame_count(), 2, "a post-final Response drops");
     }
 
-    /// R2906 — the router twin of the linkstate forwarder's
-    /// `a_relayed_reply_and_final_carry_the_querys_qos_not_the_answerers`: the
+    /// A relayed reply and final carry the query's QoS, not the answerer's: the
     /// querier gets its OWN QoS back on the reply and on the final, as upstream's
     /// `route_send_response` and `finalize_pending_query` stamp
     /// `query.src_qos`. The router's relay is separate code, so it is witnessed

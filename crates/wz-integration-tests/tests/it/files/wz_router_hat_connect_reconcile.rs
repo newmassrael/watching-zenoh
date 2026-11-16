@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! P4 §5.21 `router-connect-reconcile` (R311y202, slice 1) — the runtime dynamic
-//! connect-list reconcile driven END TO END over real transport, the wz port of
-//! zenoh's `update_peers` (`net/runtime/orchestrator.rs:413`): a router-hat that
+//! P4 §5.21 `router-connect-reconcile` — the runtime dynamic
+//! connect-list reconcile driven END TO END over real transport (upstream
+//! re-reads its connect list only when a session closes): a router-hat that
 //! learns a NEW connect endpoint at runtime dials it and federates, without the
 //! endpoint ever appearing on the startup `--connect` list.
 //!
@@ -340,10 +340,8 @@ fn wz_router_hat_reconcile_requires_feature() {
 
 // ── R2393 — the connect list told over the WIRE, not from the CLI ──────────────
 //
-// The atom's last live residual was that the runtime connect-list reconcile had
-// exactly ONE producer, the one-shot `--connect-after` timer, where upstream
-// re-enters `update_peers` whenever a live node's config changes. R2393 added the
-// second producer: a `RouterForwarder`-hosted config-WRITE subscriber that decodes
+// The runtime connect-list reconcile has a second producer beside the one-shot
+// `--connect-after` timer: a `RouterForwarder`-hosted config-WRITE subscriber that decodes
 // `.../config/connect-add <endpoint>` and feeds the same `ReconcileSender`.
 //
 // THESE TESTS EXIST BECAUSE THAT FEATURE SHIPPED BROKEN AND NOTHING NOTICED.
