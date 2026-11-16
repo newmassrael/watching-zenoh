@@ -26405,6 +26405,17 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc" \
         || return 1
+    # `transport/link/tx/queue/batching/enabled`, read off the link a C session writes through
+    # a tap: with the key off no batch carries two puts, with it on a burst shares batches. The
+    # real library must show both first. Needs only the oracle, not the unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_tx_batching_twice_and_diff
+    _runci_guarded_test \
+        "C1cc a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+        --test-threads=1 \
+        --exact "${WZ_TEST_PREFIX}a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc" \
+        || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was
