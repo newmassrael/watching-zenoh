@@ -309,8 +309,9 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # carries `pub struct BatchLendCounts` and the method
             # `batch_lend_counts` on the session, both behind
             # `all(feature = "transport-batching", feature = "transport-tx-lend")`.
-            # Both sites are compound, so it is DEFERRED below as
-            # `compound-cfg` beside `transport-tx-lend`, not probed.
+            # Both sites are compound, so it was DEFERRED below as
+            # `compound-cfg` beside `transport-tx-lend`, not probed; a method
+            # under the bare feature since makes it `impl-method` (its own row).
         )
     } | {
         # Decision D2 of docs/session-lifecycle-intent.md. A marker the secure-channel
@@ -464,7 +465,11 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "adminspace-core",
             "adminspace-introspection-handlers",
             "adminspace-plugins-handlers",
-            "adminspace-router-linkstate",
+            # `adminspace-router-linkstate` LEAVES this list by the route the runtime's row
+            # records for it (R2684): the text of a region's graph became
+            # `adminspace::single_hop_graph_text`, a `pub fn` under a simple cfg that the
+            # runtime crate calls, so the feature gates a public path here and the probe
+            # derived off the module tree is its decision.
             # The core's fixed backing, forwarded as the shells forward it: a selector that
             # gates nothing in this package.
             "session-slot",
@@ -733,11 +738,7 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "query-queryable",
                 "query-timeout",
                 "session-matching",
-                # R3243 — moved here from `NO_PUBLIC_PATH` (see the note
-                # there). Its two public sites, the per-reason staging count
-                # `BatchLendCounts` and the session's `batch_lend_counts`, are
-                # both behind `all(transport-batching, transport-tx-lend)`.
-                "transport-batching",
+                # `transport-batching` LEFT this list: see its own row below.
                 # Round 3171's `transport-tx-lend` gates the buffer seam of
                 # `tx_buf.rs`: both public items it gates are behind an
                 # `all(feature, ..)` attribute, so rustc's note names no
@@ -792,6 +793,20 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "switchboard",
             )
         },
+        # R3243 moved it to `compound-cfg` from `NO_PUBLIC_PATH`: its two public sites then, the
+        # per-reason staging count `BatchLendCounts` and the session's `batch_lend_counts`, are
+        # both behind `all(transport-batching, transport-tx-lend)`. The count of a conduit's
+        # staged messages (`SessionLinkActions::batch_staged_messages`) came since under the bare
+        # feature, so "every public item it gates is compound" stopped being true. What is under
+        # a simple cfg is that METHOD alone, and the compound two name no feature to rustc
+        # either, so there is still no path an import could probe: the word the sites show is
+        # this one.
+        "transport-batching": (
+            "@defer impl-method -- the one public item it gates under a simple cfg is a METHOD "
+            "(`batch_staged_messages`), with no `module::name` path to import, and the struct "
+            "and method it gates beside `transport-tx-lend` are behind an `all(..)`, for which "
+            "rustc's note names no feature"
+        ),
         # `initial_sn::derive_initial_sn` is declared twice, once under the feature (a compact pure
         # function of the two zids) and once under `not` (zenoh's SHAKE128), so turning the feature
         # off swaps the body and leaves the path in place: nothing disappears for rustc to annotate.

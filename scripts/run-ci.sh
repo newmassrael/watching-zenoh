@@ -1434,6 +1434,18 @@ layer_0_preflight_lints() {
     # one that PASSES fails the lane until it is taken off this list, so the
     # list can only shrink. A name here that is no longer a workspace fails too.
     local -a fmt_owed=(conformance/differential conformance/differential-shm oracles)
+    # ONE FORMATTER for every workspace: the rustfmt of the product's pinned toolchain
+    # (`rust-toolchain.toml` at the root, whose components carry it), named with `+` so a
+    # workspace's own toolchain file does not choose it. Formatting is a property of the
+    # source, not of the compiler that builds it: `crates/wz-fuzz` pins a minimal nightly for
+    # libFuzzer's instrumentation and for nothing else, which has no rustfmt, and a second
+    # rustfmt would let two workspaces be held to two styles.
+    local fmt_channel
+    fmt_channel="$(sed -n 's/^ *channel *= *"\([^"]*\)".*/\1/p' "${repo_root}/rust-toolchain.toml" | head -1)"
+    if [[ -z "$fmt_channel" ]]; then
+        echo "  Layer0 FAIL: ${repo_root}/rust-toolchain.toml names no channel, so fmt has no pinned rustfmt to run" >&2
+        return 1
+    fi
     # R311y415 — accumulate rather than fail-fast. A `return 1` on the first
     # dirty workspace costs one full hosted round-trip PER dirty workspace;
     # reporting all of them is one push instead of N.
@@ -1463,7 +1475,7 @@ layer_0_preflight_lints() {
             [[ "$fdir" == "$owed" ]] && owed_here=1
         done
         if (( owed_here == 1 )); then
-            if (cd "$fdir" && cargo fmt --all -- --check --color=never >/dev/null 2>&1); then
+            if (cd "$fdir" && cargo "+${fmt_channel}" fmt --all -- --check --color=never >/dev/null 2>&1); then
                 echo "  Layer0 FAIL: ${fdir} is fmt-clean now; remove it from fmt_owed so it stays graded" >&2
                 fmt_rc=1
             else
@@ -1471,12 +1483,12 @@ layer_0_preflight_lints() {
             fi
             continue
         fi
-        if ! (cd "$fdir" && cargo fmt --all -- --check --color=never); then
+        if ! (cd "$fdir" && cargo "+${fmt_channel}" fmt --all -- --check --color=never); then
             # R311y415 — ` FAIL: ` exactly, not the older ` FAIL `: that is
             # the token y414's GitHub `::error` extractor lifts. With the
             # old spelling every Layer 0 red produced an EMPTY annotation
             # body, the same defect y414 fixed for the count guards.
-            echo "  Layer0 FAIL: fmt --check ${fdir} — run \`(cd ${fdir} && cargo fmt --all)\`" >&2
+            echo "  Layer0 FAIL: fmt --check ${fdir} — run \`(cd ${fdir} && cargo +${fmt_channel} fmt --all)\`" >&2
             fmt_rc=1
         fi
     done
@@ -7216,8 +7228,11 @@ layer_c1bd_locator_iface() {
 # with the MEASURED counts (6 unit / 2 e2e). The e2e count is 3 since the
 # Init-chain order test joined `compression_e2e.rs`: three ungated tests in a
 # file the leg's features compile whole.
+# 6 -> 7 unit: a batch written by `compress_batch` is the batch the compressed-batch document reads
+# (`every_batch_written_here_is_the_batch_the_document_reads`); the hosted run of 3148fdfc84
+# printed 7.
 layer_c1ae_cargo_test_compression() {
-    _runci_guarded_test C1ae 6 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
+    _runci_guarded_test C1ae 7 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
         || return 1
     wz_test_args wz-runtime-tokio compression_e2e
     _runci_guarded_test C1ae 3 cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
@@ -8732,7 +8747,10 @@ layer_c1ah_cargo_test_time_hlc() {
     # 23 -> 25: two tests that landed without moving this guard (hosted run 41411911409 expected
     # 23; the build host printed `25 passed`). 25 -> 28: a112baa068 added the three reply-stamp
     # tests (`node_clock/tests.rs`) and left the guard; the hosted run of d7dc86a826 printed 28.
-    _runci_guarded_test "C1ah node_clock" 28 \
+    # 28 -> 31: three tests gated on `time-hlc` alone (a node that holds no clock gives no reading,
+    # the data stamp names why there is none, trusted-only holds back data stamps and not the
+    # clock); the hosted run of 3148fdfc84 printed 31.
+    _runci_guarded_test "C1ah node_clock" 31 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
@@ -9297,7 +9315,11 @@ layer_c1am_cargo_test_adminspace() {
     # 53 -> 54: the snapshot answerer's test (`f04bb6ec`, serve a hosted node's snapshot), which
     # the filter selects; the hosted run of 017e3c71 printed 54.
     # 54 -> 57: the null-meaning list's three tests (see C1ak).
-    _runci_guarded_test "C1AM adminspace 57" 57 \
+    # 57 -> 59: one answerer for every role and a client's manifest, two tests no feature of this
+    # crate gates, so every `--lib adminspace` leg below moves by two (by three under
+    # `adminspace-router-linkstate`, whose region tests replaced two and added one). The hosted
+    # run of 3148fdfc84 printed 59 here; the others are counted from the source.
+    _runci_guarded_test "C1AM adminspace 59" 59 \
         cargo test -p wz-admin --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
@@ -9317,7 +9339,10 @@ layer_c1am_cargo_test_adminspace() {
     # crate's since the server-layer split (step 4).
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
         cargo test -p wz-storage --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 4" 4 \
+    # 4 -> 6, and the two legs below by two, counted from the source: a client is answered under
+    # its own role, and its queryable is announced on the wire (`session/tests.rs`, both under
+    # `adminspace-core` with the queryable features the default build carries).
+    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
     # R2827 — the `adminspace-core`-only `admin_write_permit` leg is GONE, not
     # renumbered. It pinned the compiled-out arm (the resolver returning `true`
@@ -9325,7 +9350,7 @@ layer_c1am_cargo_test_adminspace() {
     # test module now exist only under `adminspace-write`, so this build selects
     # no test, which is how hosted run 35951692857 redded here. The gated arm
     # is still pinned by the `adminspace-write,query-get` leg below.
-    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
+    _runci_guarded_test "C1AM declare_adminspace 8" 8 \
         cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     # 6 -> 7: the LIVE-permit witness
     # (declare_adminspace_live_permit_source_flips_the_gate_at_runtime). It drives
@@ -9335,7 +9360,7 @@ layer_c1am_cargo_test_adminspace() {
     # atom recorded (zenoh re-reads the live config inside its admin handler,
     # net/runtime/adminspace.rs:456-457). Falsified by hoisting the permit read out
     # of the closure: that arm alone reds, the other six stay green.
-    _runci_guarded_test "C1AM declare_adminspace 8" 8 \
+    _runci_guarded_test "C1AM declare_adminspace 10" 10 \
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM admin_write_permit 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet || return 1
@@ -9379,9 +9404,12 @@ layer_c1am_cargo_test_adminspace() {
     # `51 passed`); re-derived on the build host.
     # 51 -> 54 here and on the next four commands: the null-meaning list's three tests (see C1ak),
     # each count PRINTED on the build machine.
-    _runci_guarded_test "C1AM adminspace introspection 54" 54 \
+    # 54 -> 56 and 54 -> 57, counted from the source: the two role tests of the first guard of
+    # this layer, and under `adminspace-router-linkstate` its peer's region answer, with the two
+    # region tests that replaced the both-dots and routers-leg ones.
+    _runci_guarded_test "C1AM adminspace introspection 56" 56 \
         cargo test -p wz-admin --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 54" 54 \
+    _runci_guarded_test "C1AM adminspace 57" 57 \
         cargo test -p wz-admin --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
@@ -9389,9 +9417,10 @@ layer_c1am_cargo_test_adminspace() {
     # guard below because `wz-admin`'s own `adminspace-config-hotreload`
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
-    _runci_guarded_test "C1AM adminspace 62" 62 \
+    # 62 -> 64 and 4 -> 6, counted from the source: the role tests here and in the runtime crate.
+    _runci_guarded_test "C1AM adminspace 64" 64 \
         cargo test -p wz-admin --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 4" 4 \
+    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM compiled_plugins 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib compiled_plugins --quiet || return 1
@@ -9416,7 +9445,8 @@ layer_c1am_cargo_test_adminspace() {
     # by `guarded_count_gate.py --range 69a8d5da..715e936a`.
     # 66 -> 67: the one more `adminspace` test the lib gained (the other four commands of this
     # layer moved with it); re-derived on the build host, which printed 67.
-    _runci_guarded_test "C1AM adminspace 70" 70 \
+    # 70 -> 72, counted from the source: the two role tests of the first guard of this layer.
+    _runci_guarded_test "C1AM adminspace 72" 72 \
         cargo test -p wz-admin --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -9511,7 +9541,10 @@ layer_c1am_cargo_test_adminspace() {
     # for the same reason as the peer leg above.
     # Item 751 step 7c -- 16 -> 11: the single-net peer forwarder's `admin_` tests (five) left
     # with it. Read off this command: `11 passed`.
-    _runci_guarded_test "C1AM router introspection admin_ 11" 11 \
+    # 11 -> 13, counted from the source: `admin_session_of_peer_files_the_row_under_the_named_peer`
+    # and `the_admin_queryable_is_declared_incomplete` (`session/tests.rs`), whose names carry the
+    # filter and whose features this build has.
+    _runci_guarded_test "C1AM router introspection admin_ 13" 13 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     # Server-layer split, step 7: the admin space is the wz-admin crate's, so its every leg is
     # linted there, with every admin feature on (the MCU write surface among them).
@@ -9559,20 +9592,24 @@ layer_c1am_cargo_test_adminspace() {
 layer_c1an_cargo_test_adminspace_nodefault() {
     # R2859 — both +2, as the C1AM guards (see there).
     # 46 -> 49 and 51 -> 54: the null-meaning list's three tests (see C1ak), PRINTED on the build machine.
-    _runci_guarded_test "C1AN adminspace 49" 49 \
+    # 49 -> 51 and 54 -> 57, counted from the source: the same role and region tests as C1AM's.
+    _runci_guarded_test "C1AN adminspace 51" 51 \
         cargo test -p wz-admin --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
     # The one more `adminspace` test the lib gained is in each of these four commands (C1AM 51
     # and 59 above, C1AN 46 and 51), re-derived on the build host.
-    _runci_guarded_test "C1AN adminspace 54" 54 \
+    _runci_guarded_test "C1AN adminspace 57" 57 \
         cargo test -p wz-admin --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AN declare_adminspace 4" 4 \
+    # +1 on each of the three, counted from the source: a client answered under its own role. The
+    # other of C1AM's two (its queryable announced on the wire) needs `declare-queryable`, which
+    # none of these builds selects.
+    _runci_guarded_test "C1AN declare_adminspace 5" 5 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
-    _runci_guarded_test "C1AN declare_adminspace 6" 6 \
+    _runci_guarded_test "C1AN declare_adminspace 7" 7 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     # 6 -> 7, the same live-permit witness C1AM pins — here on the slim build, so
     # the source-taking declare and its per-GET resolve compose without the default
     # feature set too.
-    _runci_guarded_test "C1AN declare_adminspace 8" 8 \
+    _runci_guarded_test "C1AN declare_adminspace 9" 9 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-admin --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
@@ -10508,12 +10545,17 @@ layer_c1bm_cargo_test_pico_failfast() {
 # changed-inputs witness). PRINTED by each command on pc2.
 layer_c1x_cargo_test_routing_routes() {
     # The c2 integration (route memo index): 12 -> 18. MEASURED on pc2.
-    _runci_guarded_test "C1X route cache peer 18" 18 \
+    # 18 -> 20: the two retirement tests (the reach is asked with the kept keyexpr's chunks, a move
+    # of no key keeps every route) arrived on a branch the 18 was not measured on; `route_cache.rs`
+    # holds 20 ungated tests, and the hosted run of 3148fdfc84 printed 20.
+    _runci_guarded_test "C1X route cache peer 20" 20 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
     # The c2 integration (route memo index): 16 -> 22. MEASURED on pc2.
-    _runci_guarded_test "C1X route cache router 22" 22 \
+    # 22 -> 24, counted from the source: the same two, beside the four `router_forward` tests the
+    # name filters select under `routing-router-hat` (20 + 4).
+    _runci_guarded_test "C1X route cache router 24" 24 \
         cargo test -p wz-runtime-tokio --features routing-routes,routing-router-hat --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
@@ -13382,9 +13424,12 @@ layer_c1m_session_lwip() {
     # 19 -> 20: the mode a request carries reaches the node's opener (decision D10).
     # +1 in every leg that runs the crate's lib tests (20 -> 21, 21 -> 22, 52 -> 53, 24 -> 25,
     # 62 -> 63): the control port reads each command line the node vocabulary states.
-    _runci_guarded_test "C1m mcu default" 21 \
+    # +1 in every leg that runs the lib without `session-slot` (21 -> 22, 22 -> 23, 25 -> 26): the
+    # in-memory network carries an IPv6 host's datagrams (`memory::tests`). The hosted run of
+    # 3148fdfc84 printed 22 here; the other numbers are counted from the source.
+    _runci_guarded_test "C1m mcu default" 22 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 22 \
+    _runci_guarded_test "C1m mcu unicast app layer" 23 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -13397,7 +13442,9 @@ layer_c1m_session_lwip() {
     # +2 here and in the next leg (53 -> 55, 25 -> 27), counted from the source and not yet
     # printed by a run: the session a passive node opened is ended through the shell by a close,
     # and its end is a lost session to a machine a dialling open moved on (decision D10).
-    _runci_guarded_test "C1m mcu adminspace-write" 55 \
+    # 55 -> 57, counted from the source: the in-memory network's IPv6 test (as in the default leg)
+    # and the dial reader's bracketed IPv6 address (`dial::parse_tests`, which `dial` compiles).
+    _runci_guarded_test "C1m mcu adminspace-write" 57 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 27 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
@@ -13413,14 +13460,15 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
         connect_manager --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 25 \
+    _runci_guarded_test "C1m mcu adminspace-core" 26 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
     # the build host.
     # 58 -> 59: the same test D15 added (a close removes the row of a node with no locator).
     # 59 -> 62: the same three as the adminspace-write leg (decision D10).
     # 63 -> 65, counted from the source: the same two as the adminspace-write leg.
-    _runci_guarded_test "C1m mcu adminspace read+write" 65 \
+    # 65 -> 67, counted from the source: the same two IPv6 tests as the adminspace-write leg.
+    _runci_guarded_test "C1m mcu adminspace read+write" 67 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -13488,9 +13536,12 @@ layer_c1m_session_lwip() {
     # the cap) carry no feature gate and so run in every leg, and the join test (a
     # push through the real session into the lent pbuf) needs `codec-push`. Each
     # number below is the one its own run PRINTED, from the guarded-count oracle.
-    _runci_guarded_test "C1m default" 9 \
+    # +1 in every leg below that runs the lib without `session-slot`, counted from the source: the
+    # lwIP links refuse an IPv6 locator and bind nothing for it (`links::tests`, no feature gate).
+    # The guard of each such leg is its lib count (the other targets print 0).
+    _runci_guarded_test "C1m default" 10 \
         cargo test -p wz-session-lwip --quiet || return 1
-    _runci_guarded_test "C1m reassembly" 9 \
+    _runci_guarded_test "C1m reassembly" 10 \
         cargo test -p wz-session-lwip --features reassembly --quiet || return 1
     # R2827 — the UNICAST application layer: `app_layer::dispatch_to` wires the
     # session drive's events into the observer and drains replies through the
@@ -13501,7 +13552,7 @@ layer_c1m_session_lwip() {
     # the number this command PRINTED.
     # R3080 4 -> 4: the application-layer test moved to the shell crate and the
     # lwIP links' bind test arrived, beside the three session_drive tests.
-    _runci_guarded_test "C1m unicast app layer" 9 \
+    _runci_guarded_test "C1m unicast app layer" 10 \
         cargo test -p wz-session-lwip \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -13517,7 +13568,7 @@ layer_c1m_session_lwip() {
     # R3080 11 -> 5: the admin host, connection manager and dialer tests moved
     # to the shell crate; the three session_drive tests stay and the lwIP links'
     # two tests (the bind, and the handshake) arrived.
-    _runci_guarded_test "C1m adminspace-write" 10 \
+    _runci_guarded_test "C1m adminspace-write" 11 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -13527,7 +13578,7 @@ layer_c1m_session_lwip() {
     # R2846 3 -> 4: the `status/connect` document test.
     # R3080 5 -> 4: the admin status and host tests moved to the shell crate,
     # leaving the three session_drive tests and the lwIP links' bind test.
-    _runci_guarded_test "C1m adminspace-core" 9 \
+    _runci_guarded_test "C1m adminspace-core" 10 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
@@ -13537,7 +13588,7 @@ layer_c1m_session_lwip() {
     # verdict test.
     # R3080 17 -> 5: everything but the three session_drive tests and the lwIP
     # links' two moved to the shell crate.
-    _runci_guarded_test "C1m adminspace read+write" 10 \
+    _runci_guarded_test "C1m adminspace read+write" 11 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
@@ -13576,23 +13627,26 @@ layer_c1m_session_lwip() {
     # leg below, by ONE: `a_group_transport_that_cannot_open_sends_nothing_and_ends_lost`
     # carries no `#[cfg]` of its own inside the module `transport-multicast`
     # gates. DERIVED, not printed: the agent that wrote it builds nothing.
-    _runci_guarded_test "C1m multicast" 19 \
+    #
+    # The lwIP links' IPv6 refusal moved the same seven, and the two-session leg below, by ONE,
+    # as it moved the legs above. Counted from the source.
+    _runci_guarded_test "C1m multicast" 20 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 22 \
+    _runci_guarded_test "C1m multicast+push" 23 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 21 \
+    _runci_guarded_test "C1m multicast+liveliness" 22 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 20 \
+    _runci_guarded_test "C1m multicast+queryable" 21 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 25 \
+    _runci_guarded_test "C1m multicast maximal" 26 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 19 \
+    _runci_guarded_test "C1m multicast+reassembly" 20 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 23 \
+    _runci_guarded_test "C1m multicast+fragmentation" 24 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     # Open-debt item 900 — ONE program, TWO sessions: a client session to a
@@ -13603,7 +13657,8 @@ layer_c1m_session_lwip() {
     # number this command PRINTED. 26 since the session duties were made causal
     # (the +1 above), derived. 27 since the group session was also run from a seed
     # (`a_seeded_group_session_runs_beside_the_client_session`), the number this PRINTED.
-    _runci_guarded_test "C1m two sessions" 27 \
+    # 28 with the lwIP links' IPv6 refusal (the +1 above), counted from the source.
+    _runci_guarded_test "C1m two sessions" 28 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
         --quiet || return 1
@@ -13649,13 +13704,15 @@ layer_c1m_session_lwip() {
     # (`mod fragments`, gated on `rx-in-place` + `transport-fragmentation`).
     # The copying-path fragment test gives way to the three fragment tests, on
     # both backings. 6 = what each PRINTED.
+    # 7 -> 8 on both, counted from the source: a restarted message is one dropped chain and is
+    # delivered whole (`fragments::a_restarted_message_is_reported_dropped_once_and_delivered_whole`).
     wz_test_args wz-session-lwip rx_frame_allocations
-    _runci_guarded_test "C1m rx fragment in place" 7 \
+    _runci_guarded_test "C1m rx fragment in place" 8 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
     wz_test_args wz-session-lwip rx_frame_allocations
-    _runci_guarded_test "C1m rx fragment in place fixed" 7 \
+    _runci_guarded_test "C1m rx fragment in place fixed" 8 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation,wz-session-core/bounded-heapless \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
@@ -13682,7 +13739,8 @@ layer_c1m_session_lwip() {
     # which hold a lent frame in the session socket: one of them reads the
     # datagram the dispatch is handed in the MAC's own buffer, and no leg above
     # builds the library with this feature. 10 = what the command PRINTED.
-    _runci_guarded_test "C1m lib in place" 10 \
+    # 11 with the lwIP links' IPv6 refusal, counted from the source.
+    _runci_guarded_test "C1m lib in place" 11 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
         --lib --quiet || return 1
@@ -13755,8 +13813,9 @@ layer_c1m_session_lwip() {
     # halves, the combination an MCU node that keeps a session up is built with,
     # and the only one here that compiles `tx_pool_session_tests`: two sessions
     # over the lwIP loopback, every frame counted against a transmit pool. 10 =
-    # the default leg's 9 + that one, the number this command PRINTED.
-    _runci_guarded_test "C1m keep-alive tx pool" 10 \
+    # the default leg's 9 + that one, the number this command PRINTED. 11 with the lwIP links'
+    # IPv6 refusal (the default leg's 10 + that one), counted from the source.
+    _runci_guarded_test "C1m keep-alive tx pool" 11 \
         cargo test -p wz-session-lwip \
         --features transport-keepalive,session-unicast-open,session-unicast-accept \
         --quiet || return 1
@@ -13948,22 +14007,29 @@ layer_c1m_session_lwip() {
     # connections a listener hands the stack are the same stream link (one that finds no buffer is
     # closed and counted, a poll that finds none claims none, a broken listener is said as it is), and
     # the connections a secure listener completes are the stack's `tls/` link, not its `tcp/` one:
-    # 9 = what that command PRINTED, five of them the accepting side.
-    _runci_guarded_test "C1m coop ip stack links" 9 \
+    # 9 = what that command PRINTED, five of them the accepting side. 10, counted from the source:
+    # a dial to an IPv6 locator opens a socket of that family (the heap form of the same test is
+    # `alloc` without `session-slot`, so not here).
+    _runci_guarded_test "C1m coop ip stack links" 10 \
         cargo test -p wz-runtime-coop --features session-slot \
         --lib ip_stack:: --quiet || return 1
     # The host's TCP seam (`wz_runtime_posix::stream`): the connection a dial makes and the port a
     # listener takes them on, over loopback sockets: 15 = what that command PRINTED, eight of them
     # the listener (both ends named, nagle off, a read that does not block, order of arrival, a
     # connection closed before it was taken, a port already listened on, a port freed for the next).
-    _runci_guarded_test "C1m posix tcp seam" 15 \
+    # 17, counted from the source: an IPv6 connection and listener name their ends in their family,
+    # and only a family the kernel lacks is `Unsupported`.
+    _runci_guarded_test "C1m posix tcp seam" 17 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop
     # limit it was given, and a released transport is silent: 4 = what that command PRINTED. The fifth
     # test of the module, the datagram one member sends reaching another, needs a multicast route on
     # the host and is `--ignored`, which Layer M runs.
-    _runci_guarded_test "C1m posix group seam" 4 \
+    # 7, counted from the source: an IPv6 group's sockets are of its family with the hop limit asked
+    # for, a group that states no hop limit leaves the kernel's, and an interface of the other family
+    # is refused before any socket.
+    _runci_guarded_test "C1m posix group seam" 7 \
         cargo test -p wz-runtime-posix --lib group:: --quiet || return 1
     # The host's control channel (`wz_runtime_posix::control`, decision D7 step 7d): the lines a test
     # agent writes to a node's standard input, taken without blocking: an idle channel gives none,
@@ -14374,13 +14440,19 @@ layer_c1r_mcu_multicast_e2e() {
 # (`refactor(zephyr)`, 503b3eb5f) brought two tests of its own in the crate root and
 # the guard was not moved with them (hosted C1ns: `expected exactly 29 passed`, the
 # run printed `31 passed`).
+#
+# 31 -> 37, counted from the source (the job stopped at C1m before reaching this layer): `net::tests`
+# (four: an address through Zephyr's form on either family, an IPv6 interface's index, a missing
+# family refused for good, what the form cannot carry), `fd::tests` (a descriptor held open while a
+# wait on it is held) and `links::tests` (Zephyr's sockets as the heap shell's links), all compiled
+# in a host build at the default `alloc`.
 layer_c1ns_nostd_members_isolated() {
     local nostd
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 31 \
+    _runci_guarded_test "C1ns zephyr lib" 37 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
@@ -27226,8 +27298,9 @@ layer_e18_zenoh_family_conformance() {
         cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
         --test zenoh_session_shm || return 1
     # Sessions of both crates in one process, linked over TCP and in a multicast group, hand each
-    # other shared memory.
-    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 5 \
+    # other shared memory. 6 = the file's tests (a member of another batch size heard by no member,
+    # as by no upstream member, is the sixth); the hosted run of 3148fdfc84 printed 6.
+    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 6 \
         cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
         --test zenoh_transport_shm || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \

@@ -2485,10 +2485,13 @@ mod duty_tests {
     }
 
     /// An arena that admits bytes with `fits` and refuses them in `append`:
-    /// the heap arena with its `append` switched off by `refuse`.
+    /// the heap arena with its `append` switched off by `refuse`. `refused`
+    /// counts the appends it turned away, so a test tells the dispatcher's
+    /// ending of the chain from a chain this arena never saw.
     struct RefusingStaging<const SLOTS: usize, const CAP: usize> {
         inner: HeapStaging<SLOTS, CAP>,
         refuse: bool,
+        refused: usize,
     }
 
     impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
@@ -2498,6 +2501,7 @@ mod duty_tests {
             Self {
                 inner: <HeapStaging<SLOTS, CAP> as BuildsOwnStorage<SLOTS, CAP>>::new(),
                 refuse: false,
+                refused: 0,
             }
         }
     }
@@ -2521,6 +2525,7 @@ mod duty_tests {
             payload: &[u8],
         ) -> Result<(), crate::chain_staging::StagingError> {
             if self.refuse {
+                self.refused += 1;
                 return Err(crate::chain_staging::StagingError::ChainCapExceeded);
             }
             self.inner.append(chain, payload)
@@ -2564,6 +2569,7 @@ mod duty_tests {
             d.ingest(frag(1, 1, b"aa"), MASK, 0, |_| {}),
             IngestOutcome::Aborted(AbortReason::CapacityOverflow)
         );
+        assert_eq!(d.staging.refused, 1, "the arena was asked for the bytes");
         assert_drained(&d);
         assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
         assert_eq!(d.active_chains(), 0);
@@ -2594,6 +2600,10 @@ mod duty_tests {
                 )),
                 IngestOutcome::Aborted(AbortReason::CapacityOverflow),
                 "more = {more}"
+            );
+            assert_eq!(
+                d.staging.refused, 1,
+                "the arena was asked for the second fragment's bytes, more = {more}"
             );
             assert_drained(&d);
             assert_eq!(

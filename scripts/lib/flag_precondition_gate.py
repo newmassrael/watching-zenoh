@@ -66,8 +66,9 @@ directly, through one binding, or not textually at all.
 A precondition the binary does not enforce BY REFUSING is not in the derived
 rule set. `--tls-ca` is the standing example: emitting it into a run with no
 `tls/` link opens a file for nothing, and `main` refuses nothing, so its guard
-(`NO_TLS_LINK`) lands in the "guarded for a reason the binary does not refuse"
-class rather than against a rule. Deriving THAT class needs an oracle for what
+(`names_scheme` in `args.rs`, which withholds the key from a run whose endpoints
+name no link of the flag's scheme) lands in the "guarded for a reason the binary
+does not refuse" class rather than against a rule. Deriving THAT class needs an oracle for what
 the binary DOES with a flag, not for what it refuses -- a different seam.
 
 Every anchor is a HARD FAIL when it does not resolve, and an empty population is

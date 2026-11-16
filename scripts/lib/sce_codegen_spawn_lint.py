@@ -351,9 +351,11 @@ def selftest() -> int:
             'if [[ ! -x "$WZ_SCE_CODEGEN_BIN" ]]; then :; fi\n'
         ),
         "c.yml": "      - name: Build sce-codegen (vendor/sce)\n",
+        # The row's name is invented: a real variable of the generator spelled in this string
+        # would read, to the prose-name gate, as this tree carrying it.
         "d.py": (
             '"""Runs `sce-codegen generate` with SCE_SCHEMAS_DIR named."""\n'
-            'OWNERS = {"SCE_WORKSPACE_ROOT": ("foreign", "sce-codegen", ("x.py",))}\n'
+            'OWNERS = {"SCE_FIXTURE_ROOT": ("foreign", "sce-codegen", ("x.py",))}\n'
             'EDGE = "wz-ap-demo-app:sce-codegen"\n'
         ),
     }

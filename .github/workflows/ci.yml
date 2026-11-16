@@ -6556,12 +6556,17 @@ jobs:
   # reader of the `ci` job's entry, as `reduced-docs` is, and restores the RocksDB engine for
   # wz-runtime-tokio's `rocksdb` and the crates above it. wz-capi-coop's `tls-mbedtls` builds
   # Mbed TLS from the pinned submodules with cmake, which the job installs.
+  #
+  # THE BUDGET is the six shards' clock, measured in run 43807729116: 247, 272, 305, 322, 417
+  # and 437 s. The floor (a fifth) holds the fastest to the budget and the alarm (nine tenths)
+  # the slowest, so 18 minutes: 247 s is 22% of 1080 s, and the alarm at 972 s is 2.2 times the
+  # slowest shard, room for a run whose cache missed. The two numbers below are one fact.
   allfeat-clippy:
     name: every member at its largest feature sets, clippy (Layer C1bf, shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-22.04
     outputs:
       cache_spec: ${{ steps.cache-series.outputs.spec }}
-    timeout-minutes: 30
+    timeout-minutes: 18
     strategy:
       fail-fast: false
       matrix:
@@ -6662,7 +6667,7 @@ jobs:
         # The floor is 20, as `reduced-docs`': a job holding one lane that falls under a fifth
         # of its budget should hand the budget back (fewer shards).
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1080 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R4245 -- the ANALYZER crates' lanes, out of `isolated-crates`. That job reached its

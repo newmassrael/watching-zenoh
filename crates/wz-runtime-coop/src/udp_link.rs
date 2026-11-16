@@ -147,7 +147,7 @@ pub trait DatagramSocket: Sized {
     const CARRIED: bool = true;
 
     /// Whether `error`, from a [`Self::bind`], says the stack can never open a socket for the
-    /// address (its family is not built in, as an IPv6 address on a stack without IPv6, or the
+    /// address (the stack has no such family, as an IPv6 address on a stack without IPv6, or the
     /// stack cannot name it): a dial that meets it is `LinkOpenError::Unsupported` and not
     /// retried, where any other failed bind is a socket the stack had none of now. The provided
     /// answer is that it never says so, for a platform whose error does not tell.
