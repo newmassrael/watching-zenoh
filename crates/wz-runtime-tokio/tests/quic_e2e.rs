@@ -1008,6 +1008,103 @@ async fn an_expiring_client_chain_closes_the_listener_that_asked_for_it() {
     .await;
 }
 
+/// The dial half of `enable_mtls`: a dialer presents the certificate its locator names only
+/// when the same locator enables mTLS.
+///
+/// Both dials name the same CA, client certificate and key, and reach the same listener, which
+/// demands a client certificate. They differ in `enable_mtls` alone. The enabled dial is
+/// accepted, so the dialer read and presented the certificate; the other is refused, so it
+/// presented none, and `root_ca` was only its trust in the server. A dialer that ignored the key
+/// fails one arm or the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dialer_presents_its_certificate_only_when_its_locator_enables_mtls() {
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
+
+    let ca_key = KeyPair::generate().expect("ca key");
+    let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let ca = ca_params.self_signed(&ca_key).expect("self-signed ca");
+    let ca_pem = ca.pem();
+
+    let server_key = KeyPair::generate().expect("server key");
+    let mut server_params =
+        CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let server = server_params
+        .signed_by(&server_key, &ca, &ca_key)
+        .expect("ca-signed server cert");
+
+    let client_key = KeyPair::generate().expect("client key");
+    let mut client_params =
+        CertificateParams::new(vec!["wz-client".to_string()]).expect("client params");
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client = client_params
+        .signed_by(&client_key, &ca, &ca_key)
+        .expect("ca-signed client cert");
+
+    for mtls in [true, false] {
+        let mut listener = bind_locator(
+            parse_any_locator(&format!(
+                "quic/127.0.0.1:0#listen_certificate_raw={};listen_private_key_raw={};\
+                 root_ca_certificate_raw={ca_pem};enable_mtls=true",
+                server.pem(),
+                server_key.serialize_pem(),
+            ))
+            .expect("listen locator parses"),
+            &AcceptConfig::default(),
+        )
+        .await
+        .expect("mTLS listen material binds a quic acceptor");
+        let addr: std::net::SocketAddr = listener
+            .local_addr_display()
+            .expect("bound address")
+            .parse()
+            .expect("numeric listener address");
+        let dial = parse_any_locator(&format!(
+            "quic/localhost:{}#root_ca_certificate_raw={ca_pem};enable_mtls={mtls};\
+             connect_certificate_raw={};connect_private_key_raw={}",
+            addr.port(),
+            client.pem(),
+            client_key.serialize_pem(),
+        ))
+        .expect("dial locator parses");
+
+        let dial_cfg = DialConfig::default();
+        // The dialer writes, so the listener's handshake has a stream to complete on.
+        let (accepted, _dialed) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(accept_bound_on(&mut listener), async {
+                let mut d = dial_locator(dial, &dial_cfg).await?;
+                if let DialedLink::Quic(ref mut link) = d {
+                    use tokio::io::AsyncWriteExt;
+                    link.send.write_all(b"wz").await?;
+                    link.send.flush().await?;
+                }
+                Ok::<_, std::io::Error>(d)
+            })
+        })
+        .await
+        .expect("the listener decides within 20 s");
+
+        if mtls {
+            assert!(
+                accepted.is_ok(),
+                "the mTLS dial presents the named certificate and is accepted: {:?}",
+                accepted.err()
+            );
+        } else {
+            assert!(
+                accepted.is_err(),
+                "a dial without enable_mtls presents no certificate, so the listener that \
+                 demands one refuses it"
+            );
+        }
+    }
+}
+
 /// A self-signed `localhost` server config and a client config that trusts it,
 /// through the production builders.
 fn loopback_quic_configs() -> (

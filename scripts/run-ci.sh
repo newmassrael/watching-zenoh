@@ -6759,7 +6759,11 @@ layer_c1ac_cargo_test_quic() {
     (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
         || return 1
     wz_test_args wz-runtime-tokio quic_e2e
-    _runci_guarded_test C1ac 5 cargo test -p wz-runtime-tokio --features transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
+    # 5 -> 8, counted from the source: the file holds nine tests and one of them is gated
+    # `all(locator-iface, target_os = "linux")`, which this feature set does not build. Two of
+    # the eight are the per-priority stream pair of 995be9f335, which landed without moving
+    # this guard; the third is the dial half of `enable_mtls`.
+    _runci_guarded_test C1ac 8 cargo test -p wz-runtime-tokio --features transport-link-quic "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
