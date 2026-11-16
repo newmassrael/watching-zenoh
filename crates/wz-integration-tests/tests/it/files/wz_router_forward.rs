@@ -22,17 +22,22 @@
 //!    an id-only Put, which the router RE-LITERALIZES for the literal subscriber
 //!    (the destination never saw the producer's expr-id mapping).
 //!
+//! A third leg runs the QUERY plane through the same router with wz on every
+//! side (`wz_router_routes_a_wz_query_to_a_wz_queryable_on_another_face`).
+//!
 //! Requires the binary built with `--features routing-routes` (the forwarding
 //! router; `--features routing-router` alone holds faces but routes nothing, so
 //! the consumer would never fire). run-ci's Layer E5 builds it with the feature
 //! and runs these on the `--ignored` lane.
 
+use std::fs::File;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
-    PortReservation,
+    graceful_terminate, read_captured, run_query_until_answered, wait_for_substring,
+    wz_ap_demo_binary, ChildGuard, PortReservation, QueryAttempts,
 };
 
 /// The keyexpr both peers agree on — distinct from the other router e2e's
@@ -47,40 +52,7 @@ const KEYEXPR: &str = "demo/route-fwd";
 /// for any scenario-specific assertion the caller adds.
 fn run_router_forward_e2e(producer_extra: &[&str]) -> (String, String, String) {
     let demo = wz_ap_demo_binary();
-    let port_res = PortReservation::pick();
-    let addr = format!("127.0.0.1:{}", port_res.port());
-
-    // ── router: bind once, hold faces, FORWARD Puts (routing-routes) ──
-    let router_stderr = tempfile::tempfile().expect("tempfile for router stderr");
-    let router_writer = router_stderr.try_clone().expect("dup router stderr handle");
-    let mut router_reader = router_stderr;
-    let mut router_guard = ChildGuard::wrap(
-        "wz-ap-demo router (--router, routing-routes)",
-        Command::new(&demo)
-            .arg("--router")
-            .arg(&addr)
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(router_writer))
-            .spawn()
-            .expect("spawn wz-ap-demo --router"),
-    );
-
-    let bound = wait_for_substring(
-        &mut router_reader,
-        "router-hat: listening on",
-        Duration::from_secs(5),
-    );
-    if let Err(captured) = &bound {
-        let _ = router_guard.child_mut().kill();
-        let _ = router_guard.child_mut().wait();
-        panic!(
-            "wz-ap-demo --router did not log 'listening on' within 5s (is the binary \
-             built with --features routing-routes?)\n--- router stderr ---\n{captured}"
-        );
-    }
-    // Router bound — release the port-alloc mutex for parallel Layer E tests.
-    drop(port_res);
+    let (mut router_guard, mut router_reader, addr) = spawn_router(&demo);
 
     // ── consumer: declare a routed subscriber and idle. The router records the
     //    subscription only when its own poll of this face yields the Declare
@@ -215,6 +187,180 @@ fn run_router_forward_e2e(producer_extra: &[&str]) -> (String, String, String) {
     );
 
     (router_captured, consumer_captured, producer_captured)
+}
+
+/// Spawn `wz-ap-demo --router` (bind once, hold faces, forward with
+/// `routing-routes`) on a reserved loopback port, and return once it listens:
+/// its guard, its stderr capture and the address the peers dial.
+fn spawn_router(demo: &Path) -> (ChildGuard, File, String) {
+    let port_res = PortReservation::pick();
+    let addr = format!("127.0.0.1:{}", port_res.port());
+
+    let router_stderr = tempfile::tempfile().expect("tempfile for router stderr");
+    let router_writer = router_stderr.try_clone().expect("dup router stderr handle");
+    let mut router_reader = router_stderr;
+    let mut router_guard = ChildGuard::wrap(
+        "wz-ap-demo router (--router, routing-routes)",
+        Command::new(demo)
+            .arg("--router")
+            .arg(&addr)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(router_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --router"),
+    );
+
+    let bound = wait_for_substring(
+        &mut router_reader,
+        "router-hat: listening on",
+        Duration::from_secs(5),
+    );
+    if let Err(captured) = &bound {
+        let _ = router_guard.child_mut().kill();
+        let _ = router_guard.child_mut().wait();
+        panic!(
+            "wz-ap-demo --router did not log 'listening on' within 5s (is the binary \
+             built with --features routing-routes?)\n--- router stderr ---\n{captured}"
+        );
+    }
+    // Router bound — release the port-alloc mutex for parallel Layer E tests.
+    drop(port_res);
+    (router_guard, router_reader, addr)
+}
+
+/// The keyexpr a querier asks and the pattern the queryable answers, distinct
+/// from `KEYEXPR` so the query leg cannot be answered by the Push legs'
+/// processes.
+const QUERY_KEYEXPR: &str = "demo/route-q/x";
+const QUERYABLE_PATTERN: &str = "demo/route-q/**";
+/// The queryable's reply, checked byte for byte at the querier.
+const QUERY_REPLY: &str = "answered-across-the-router";
+/// How many one-shot queries the declaration-propagation window may eat: the
+/// router records the queryable's declaration on its own poll of that face, so
+/// a query can still find an empty route after the queryable logged its
+/// declaration. A query that misses is finalized at once and retried.
+const QUERY_ATTEMPTS: usize = 6;
+
+/// The QUERY plane through the same router, with wz on every side: a wz querier
+/// and a wz queryable that each hold one link to the router, so the reply can
+/// only reach the querier if the router carried the query to the queryable's
+/// face and the reply back. The foreign-pair legs (pico, zenoh) are stronger
+/// witnesses, and they SKIP where their oracle is not installed; this one needs
+/// nothing but the demo, so a build without either oracle still runs the query
+/// plane end to end.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E5 runs via --ignored"]
+fn wz_router_routes_a_wz_query_to_a_wz_queryable_on_another_face() {
+    let demo = wz_ap_demo_binary();
+    let (mut router_guard, mut router_reader, addr) = spawn_router(&demo);
+
+    let qabl_stderr = tempfile::tempfile().expect("tempfile for queryable stderr");
+    let qabl_writer = qabl_stderr
+        .try_clone()
+        .expect("dup queryable stderr handle");
+    let mut qabl_reader = qabl_stderr;
+    let mut qabl_guard = ChildGuard::wrap(
+        "wz-ap-demo queryable (--queryable)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(&addr)
+            .arg("--queryable")
+            .arg(QUERYABLE_PATTERN)
+            .arg("--reply")
+            .arg(QUERY_REPLY)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(qabl_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect --queryable"),
+    );
+    let declared = wait_for_substring(
+        &mut qabl_reader,
+        "DECLARED ROUTED QUERYABLE",
+        Duration::from_secs(10),
+    );
+    let face0 = wait_for_substring(&mut router_reader, "face 0 UP", Duration::from_secs(10));
+
+    let spawn_querier = || {
+        let out = tempfile::tempfile().expect("tempfile for querier stderr");
+        let writer = out.try_clone().expect("dup querier stderr handle");
+        let guard = ChildGuard::wrap(
+            "wz-ap-demo querier (--query)",
+            Command::new(&demo)
+                .arg("--connect")
+                .arg(&addr)
+                .arg("--query")
+                .arg(QUERY_KEYEXPR)
+                .arg("--on-query-reply-log")
+                .arg("--on-query-final-log")
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(writer))
+                .spawn()
+                .expect("spawn wz-ap-demo --connect --query"),
+        );
+        (guard, out)
+    };
+    let answered = run_query_until_answered(
+        "wz querier through the wz router",
+        QueryAttempts::UpTo(QUERY_ATTEMPTS),
+        "REPLY RECEIVED",
+        Duration::from_secs(15),
+        spawn_querier,
+    );
+    let (mut querier, finalized) = match answered {
+        Ok((guard, mut reader, _)) => {
+            let finalized =
+                wait_for_substring(&mut reader, "FINAL RECEIVED", Duration::from_secs(5));
+            (Some(guard), finalized)
+        }
+        Err(captured) => (None, Err(captured)),
+    };
+
+    if let Some(guard) = querier.as_mut() {
+        let _ = guard.child_mut().kill();
+        let _ = guard.child_mut().wait();
+    }
+    let _ = qabl_guard.child_mut().kill();
+    let _ = qabl_guard.child_mut().wait();
+    graceful_terminate(router_guard.child_mut(), Duration::from_secs(5));
+    let router_captured = read_captured(&mut router_reader);
+    let qabl_captured = read_captured(&mut qabl_reader);
+    eprintln!("--- router stderr ---\n{router_captured}");
+    eprintln!("--- queryable stderr ---\n{qabl_captured}");
+
+    declared.unwrap_or_else(|c| {
+        panic!("the queryable did not log 'DECLARED ROUTED QUERYABLE' within 10s\n--- queryable ---\n{c}")
+    });
+    face0.unwrap_or_else(|c| {
+        panic!("router did not log 'face 0 UP' within 10s\n--- router ---\n{c}")
+    });
+    assert!(
+        qabl_captured.contains(&format!("QUERYABLE FIRED pattern='{QUERYABLE_PATTERN}'"))
+            && qabl_captured.contains(&format!("keyexpr='{QUERY_KEYEXPR}'")),
+        "the queryable never fired for {QUERY_KEYEXPR} — the router did not carry the \
+         query to the queryable's face\n--- queryable ---\n{qabl_captured}\n--- router \
+         ---\n{router_captured}"
+    );
+    let final_log = finalized.unwrap_or_else(|c| {
+        panic!(
+            "the querier saw no reply in {QUERY_ATTEMPTS} attempts, or no final within 5s of \
+             it — the reply did not come back across the router, or the query was not \
+             closed\n--- querier ---\n{c}\n--- queryable ---\n{qabl_captured}\n--- router \
+             ---\n{router_captured}"
+        )
+    });
+    let reply_line = final_log
+        .lines()
+        .find(|line| line.contains("REPLY RECEIVED"))
+        .unwrap_or_default();
+    assert!(
+        reply_line.contains(&format!("keyexpr='{QUERY_KEYEXPR}'"))
+            && reply_line.contains(&format!("payload=\"{QUERY_REPLY}\"")),
+        "the querier's reply must carry the asked key and the queryable's value\n\
+         --- querier ---\n{final_log}"
+    );
 }
 
 /// Literal-keyexpr forwarding: the producer publishes a literal Put, the router

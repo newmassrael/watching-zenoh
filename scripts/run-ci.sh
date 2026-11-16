@@ -23489,9 +23489,12 @@ layer_e4i_demo_inert_flags() {
 # it here does not invalidate E3's assertions.
 layer_e5_router_forward() {
     (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
+    # Count-guarded: the file's three ignored legs, the two Push forwards and the
+    # wz querier reaching a wz queryable across the router (the query plane's leg
+    # that needs no foreign oracle). Counted from the source.
     wz_test_args wz-integration-tests wz_router_forward
-    (cd crates && cargo test -p wz-integration-tests \
-        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
+    _runci_guarded_test E5 3 cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R311y373 — the CROSS-IMPL half of routing-routes forwarding: real pico
     # z_pub / z_put -> wz --router (the router hat) -> real pico z_sub, the
     # §5.15 forwarding atom's foreign<->foreign witness (incl the pico publisher's
