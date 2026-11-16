@@ -6852,6 +6852,13 @@ layer_c1bb_cargo_test_qos() {
     # the other link, and when its lender leaves the set. MEASURED: 16 passed.
     _runci_guarded_test C1bb 16 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
+    # The `QoSLink` arm of the establishment-extension rejects: the Close reason
+    # an acceptor sends for a body it cannot read, and the control that a readable
+    # one is answered. The file is gated on `session-extqos`, which no default run
+    # builds. 2 = the file's two cases, counted from the source.
+    wz_test_args wz-runtime-tokio init_qos_link_reject
+    _runci_guarded_test C1bb 2 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast "${WZ_TEST_ARGS[@]}" --quiet \
+        || return 1
     # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
     # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
     # default feature of wz-runtime-tokio: the three cases this round adds are

@@ -12,6 +12,7 @@ mod echo_demo;
 mod echo_demo_del_and_udp;
 mod fragment_markers_e2e;
 mod init_ack_patch_level;
+mod init_qos_link_reject;
 mod init_region_name;
 mod init_syn_version;
 mod layer3_reassembly_rx;

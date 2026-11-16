@@ -272,6 +272,35 @@ pub fn craft_initsyn_wire_with_patch(patch_level: u8) -> Vec<u8> {
     wire
 }
 
+/// `init::ext::QoSLink = zextz64!(0x1, false)` as a header byte: id `0x1`,
+/// z64 encoding (`0x20`), mandatory bit and chain-continuation bit CLEAR.
+/// The same id as the unit `QoS` form, told apart by the encoding.
+pub const EXT_HDR_INIT_QOS_LINK_Z64: u8 = 0x21;
+
+/// [`craft_initsyn_wire`] carrying a `0x1` `QoSLink` extension whose z64 body
+/// is `value`, so an acceptor-side test can present a body upstream's
+/// `State::try_from_u64` refuses (a reserved tag, `0b1000`) as well as one it
+/// reads.
+///
+/// Caps are the all-zero conforming advertisement, so a rejection this
+/// fixture produces cannot be the size-parameter rule firing.
+#[cfg(feature = "alloc")]
+pub fn craft_initsyn_wire_with_qos_link(value: u8) -> Vec<u8> {
+    assert!(value < 0x80, "fixture: single-byte VLE QoSLink body only");
+    let mut wire = vec![
+        FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT,
+        PROTOCOL_VERSION,
+        0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
+    ];
+    wire.extend_from_slice(&FIXTURE_PEER_ZID);
+    wire.extend_from_slice(&[
+        0x00, // sn_res (seq=0, req=0)
+        0x00, 0x00, // batch_size LE u16 = 0
+    ]);
+    wire.extend_from_slice(&[EXT_HDR_INIT_QOS_LINK_Z64, value]);
+    wire
+}
+
 /// `OpenSyn` echoing `cookie` (parent flags 0x00 so the cookie carrier is
 /// present and the lease is in ms): lease VLE=0, initial_sn VLE=0,
 /// cookie_len VLE, cookie bytes.
