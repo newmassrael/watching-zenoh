@@ -415,6 +415,7 @@ fn diff_rows(rows: &[Row]) {
 /// `aggregation/subscribers`: two subscribers under one listed aggregate leave the router holding
 /// the aggregate alone, where the same node with no list leaves it holding both keys, on wz as on
 /// the real library.
+// wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
 #[ignore = "compiles a C program against libzenohc and wz-capi-c and spawns a real zenohd; \
             needs the machine-local zenoh-c oracle; run-ci Layer C1cd drives it"]
@@ -444,6 +445,7 @@ fn subscribers_under_a_listed_aggregate_are_declared_as_it_identically_on_wz_and
 /// `aggregation/publishers`: two publishers under one listed aggregate leave the router holding
 /// one subscribers interest on the aggregate, where the same node with no list leaves it holding
 /// one per key, on wz as on the real library.
+// wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
 #[ignore = "compiles a C program against libzenohc and wz-capi-c and spawns a real zenohd; \
             needs the machine-local zenoh-c oracle; run-ci Layer C1cd drives it"]

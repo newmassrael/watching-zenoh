@@ -334,6 +334,7 @@ fn diff_rows(rows: &[Row]) {
 /// `plugins_loading/enabled`: off, a plugin named without a path is not looked for although a
 /// listed directory holds it; on, the same directory is searched and the plugin found there, on the
 /// wz storage host as on zenohd.
+// wz-proves: plugin-dynamic-loading zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features preset-ap-full,zenoh-config); \
             Layer C1bp runs via --ignored"]
@@ -357,6 +358,7 @@ fn wz_storage_host_looks_a_plugin_up_by_name_only_when_enabled_as_zenohd_does() 
 /// `plugins_loading/search_dirs`: a list whose directories hold no file of the plugin finds
 /// nothing, and a list that names the directory holding it after one that does not finds it there,
 /// on the wz storage host as on zenohd.
+// wz-proves: plugin-dynamic-loading zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features preset-ap-full,zenoh-config); \
             Layer C1bp runs via --ignored"]

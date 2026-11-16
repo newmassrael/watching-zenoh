@@ -352,6 +352,7 @@ fn observed(subscriber: &Built, putter: &Built, rule: bool) -> (String, String, 
 /// `qos/publication`: a rule's priority, congestion control and express flag reach the far
 /// subscriber on every put and publisher under its keys, and nothing else changes, on wz as on the
 /// real library.
+// wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
 #[ignore = "compiles a C program against libzenohc and wz-capi-c and runs it on loopback; \
             needs the machine-local zenoh-c oracle; run-ci Layer C1cd drives it"]

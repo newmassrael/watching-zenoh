@@ -1192,7 +1192,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # partial`; `wz_tls_close_on_expiry_zenohd_interop.rs` (`transport-link-tls zenohd->wz partial`)
 # and `wz_unixpipe_file_mask_zenohd_interop.rs` (`transport-link-unixpipe zenohd->wz partial`):
 # 6 tests x 1 atom = 6. Counted from the diff, not yet measured.
-FOREIGN_ADJUDICATOR_LINKS = 1101
+# 1101 -> 1106, RISING by five: the remaining config-key witnesses of the same programme, tagged
+# once the landing queue's audit read them as declaring nothing.
+# `zenoh_c_declaration_aggregation_twice_and_diff.rs` (two: the subscriber and the publisher
+# aggregates) and `zenoh_c_publication_qos_twice_and_diff.rs` (one), each `api-compat-c
+# zenoh-c->wz partial`; `wz_storage_host_plugins_loading_matches_zenohd.rs` (two: by-name loading
+# and the search dirs), `plugin-dynamic-loading zenohd->wz partial`. Measured by
+# `audit-crossimpl-proof.sh` (`measured 1106, declared 1101`).
+FOREIGN_ADJUDICATOR_LINKS = 1106
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
