@@ -246,6 +246,7 @@ const PRIORITY_STREAMS: usize = Priority::NUM - 1;
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StreamAllowance {
     /// The datagram link: no stream of either kind.
+    #[cfg(feature = "transport-link-quic-datagram")]
     Datagrams,
     /// A streamed link: the one bidirectional stream, and a unidirectional
     /// stream per priority above Control unless the keys say `multistream=0`
@@ -257,13 +258,14 @@ pub(crate) enum StreamAllowance {
 impl StreamAllowance {
     fn apply(self, transport: &mut TransportConfig) {
         let (bidi, uni) = match self {
+            #[cfg(feature = "transport-link-quic-datagram")]
             StreamAllowance::Datagrams => (0u8, 0u8),
             StreamAllowance::Streamed(streams) => {
                 let uni = match streams.multistream {
                     QuicStreamChoice::Disabled => 0,
                     QuicStreamChoice::Enabled | QuicStreamChoice::Auto => PRIORITY_STREAMS as u8,
                 };
-                (1, uni)
+                (1u8, uni)
             }
         };
         transport.max_concurrent_bidi_streams(bidi.into());
