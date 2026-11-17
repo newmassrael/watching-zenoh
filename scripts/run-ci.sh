@@ -8163,7 +8163,10 @@ layer_c1ay_cargo_test_router_hat() {
     # negotiate both. The DEFAULT-feature build is covered too, by `pre-push`
     # over the changed crate.
     wz_test_args wz-ap-demo exclusive_transport_modes_binary
-    _runci_guarded_test "C1AY exclusive_transport_modes_binary 2" 2 \
+    # 2026-11-18 -- 2 -> 3, printed by hosted run 44165924219: a flag the demo does not read
+    # is refused (f579c00540). The guard measurement of that day deferred this guard (the
+    # shell assembles its target), so only the hosted lane read it.
+    _runci_guarded_test "C1AY exclusive_transport_modes_binary 3" 3 \
         cargo test -p wz-ap-demo --features transport-qos,transport-lowlatency \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2096 (open-debt item 516) — the INVERSE of the arm above: every capability
@@ -22234,7 +22237,14 @@ layer_z_zenohd_interop() {
     # and the runtime's `routing-peer`, are both on this line already. So the
     # Layer Z binary is a superset of E5's in keys as well as in code. Both
     # restatements carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
+    # 2026-11-18 adds `transport-stats`: the drop-in fixture of
+    # `wz_reads_a_stock_zenohd_config` states every honoured key, `stats/filters`
+    # among them since fe69f5b004, and its reader is that capability's, so a demo
+    # built without it refuses the whole file by that key and never dials (hosted
+    # run 44165924219 was the first to reach the leg since). Additive: the flag
+    # it reads, `--stats-filters`, is absent from every other leg's argv. Both
+    # restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -22484,7 +22494,7 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
     # false unconditionally so both documents answer `bare`. Both restatements
     # carry it. `routing-routes` likewise, for the reason at the opening build.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of

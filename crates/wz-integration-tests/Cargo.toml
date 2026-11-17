@@ -351,7 +351,7 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # open seam. Same additive-unification note as access-extauth-usrpwd above.
     "access-extauth-pubkey",
     # The readers of `access_control`, `low_pass_filter`, `downsampling`, `qos/network`, the
-    # `tls/` link's keys and the `unixpipe/` link's are their capabilities'
+    # `tls/` link's keys, the `unixpipe/` link's and `stats/filters` are their capabilities'
     # (`zenoh_config::CAPABILITY_HONOURED_KEYS`), and `wz_reads_a_stock_zenohd_config` reads, in
     # this process, fixtures that state them; without them the reader refuses those keys by name.
     # Same additive-unification note as access-extauth-usrpwd above.
@@ -361,6 +361,7 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "access-qos-overwrite",
     "transport-link-tls",
     "transport-link-unixpipe",
+    "transport-stats",
     # R311wt (pico cross-impl leg) — the storage wildcard-update LIVE-path
     # interop e2e (tests/wz_storage_wildcard_update_pico_interop.rs) drives a
     # foreign zenoh-pico `z_put -k demo/**` wildcard PUT into an IN-PROCESS wz

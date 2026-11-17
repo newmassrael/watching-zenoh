@@ -701,6 +701,10 @@ access-acl-multicast = ["transport-multicast", "wz/access-acl-multicast"]
 # so a node reads the rules and applies none, and says so; a build without it refuses a document
 # that states one by its key. `routing-peer` carries it, as it carries the other three knobs.
 access-qos-overwrite = ["wz/access-qos-overwrite"]
+# The per-key payload counters (`stats/filters`), forwarding the facade's `transport-stats`: what
+# makes the config reader read the key and `--stats-filters` count under it. A build without it
+# refuses a document that states the key, by its key, as it refuses the other capabilities' keys.
+transport-stats = ["wz/transport-stats"]
 # R311y433 (session-extcompression) — opt-in per-batch lz4 COMPRESSION, forwarding
 # the wz facade's `session-extcompression` (which itself pulls
 # `transport-compression`, so ONE demo feature carries both atoms: the
