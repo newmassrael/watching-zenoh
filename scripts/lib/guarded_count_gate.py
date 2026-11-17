@@ -2276,7 +2276,12 @@ def main():
             "\n  Fix the run before reading anything into the numbers above.",
             file=sys.stderr,
         )
-        return final_exit_code(moved, broken, environment, unmeasured)
+        # The counts that did read are not withdrawn by a run that did not: a
+        # guard that printed a number other than its own is a finding of its
+        # own command, measured. Returning here hid them: a run of 2026-11-18
+        # had three storage commands red and seventeen guards moved, and printed
+        # only the three, so the seventeen would have reached hosted CI one
+        # layer at a time.
     if moved:
         print("", file=sys.stderr)
         print("guarded-count gate FAIL:", file=sys.stderr)
