@@ -15973,6 +15973,103 @@ fn session_egress_acl_denies_a_governed_keyexpr() {
     );
 }
 
+/// The answer to a peer's Interest is asked of the same egress policy as the declaration it
+/// repeats: a subscription whose declaration the policy denied is not announced when the peer
+/// asks for the subscribers the session holds. Upstream asks its egress interceptor of every
+/// message the face sends, an Interest's answer included; wz drained that answer below the
+/// session's egress check, so a denied subscription reached the peer the first time a
+/// publisher there asked for its subscribers (the C ABI publisher asks at declaration).
+///
+/// ANTI-VACUITY: the ungoverned subscription is answered under the same policy, and the
+/// chain's `DeclareFinal` ends the Interest, so "nothing was answered" cannot pass.
+#[cfg(all(feature = "access-acl", feature = "declare-subscriber"))]
+#[test]
+fn session_egress_acl_governs_the_answer_to_an_interest() {
+    use crate::interceptor::{InterceptorConfig, InterceptorSink};
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+    };
+    use wz_codecs::declare::DeclareOwnedVariant as Body;
+
+    const INTEREST: u64 = 9;
+    let (session, driver) = build_session();
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+    session.set_interceptors(
+        InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["denied/**".to_owned()],
+                messages: vec![AclMessage::DeclareSubscriber],
+                flow: AclFlow::Egress,
+                permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
+                usernames: Vec::new(),
+                cert_common_names: Vec::new(),
+            }],
+        })),
+    );
+    let _denied = session
+        .declare_subscriber("denied/x", SubscribeOptions::default(), |_| {})
+        .expect("a denied declaration is consumed, not errored");
+    let _free = session
+        .declare_subscriber("allowed/x", SubscribeOptions::default(), |_| {})
+        .expect("an ungoverned declaration is sent");
+
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Interest(
+            wz_session_core_test_support::interest_subscriber(
+                INTEREST, "**", /*current=*/ true, /*future=*/ false,
+                /*aggregate=*/ false,
+            ),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    let (mut declared, mut answered, mut finals) = (0, 0, 0);
+    for idx in 0..driver.frame_count() {
+        let bytes = driver.frame_bytes(idx);
+        let Ok(wz_session_core::inbound::InboundFrame::Frame { payload, .. }) =
+            wz_session_core::inbound::parse_inbound(&bytes)
+        else {
+            continue;
+        };
+        let Ok(messages) = wz_session_core::network_message::parse_frame_payload(&payload) else {
+            continue;
+        };
+        for message in messages {
+            let wz_session_core::network_message::NetworkMessage::Declare(declare) = message else {
+                continue;
+            };
+            match (&declare.body, declare.interest_id) {
+                (Body::CodecZenohDeclSubscriber(_), None) => declared += 1,
+                (Body::CodecZenohDeclSubscriber(_), Some(INTEREST)) => answered += 1,
+                (Body::CodecZenohDeclFinal(_), Some(INTEREST)) => finals += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        declared, 1,
+        "the session's own declarations: the ungoverned one alone"
+    );
+    assert_eq!(
+        answered, 1,
+        "the interest's answer announced the subscription the policy denies"
+    );
+    assert_eq!(finals, 1, "the interest is still ended");
+}
+
 /// A liveliness query that the session's own egress chain refuses is ended for its asker, as
 /// upstream's multiplexer ends a blocked interest (`zenoh/src/net/primitives/mux.rs` @
 /// `send declare final to avoid timeout on blocked interest`): nothing leaves, the get is no

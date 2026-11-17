@@ -1971,19 +1971,37 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     #[cfg(feature = "alloc")]
     pub outbound_mappings: R::Mutex<HashMap<crate::wire_id::ExprId, String>>,
     /// The egress admission of a REPLY: the §5.16 verdict the session that owns this bundle
-    /// installs when it holds an egress policy, asked of every `Response` before it is sent.
+    /// installs when it holds an egress policy, asked of every `Response`, and of every
+    /// `Declare` that answers a peer's Interest, before it is sent.
     ///
-    /// A reply leaves through [`Self::try_send_response`] and not through the session's
+    /// A query reply leaves through `Self::try_send_response` and not through the session's
     /// `send_network_message`, because it is staged by a handler and drained from three places
     /// (a deferred handler job, a query a handler kept, the observer's pending replies), none of
-    /// which holds the session. The one door they share is this bundle, so the verdict is asked
-    /// here, the way the namespace's egress decoration is. `None` for a session with no policy,
-    /// and then [`Self::set_egress_reply_gate`]'s flag keeps the test to one atomic read.
-    #[cfg(all(feature = "alloc", feature = "codec-response"))]
+    /// which holds the session. An Interest's answer (the subscribers, queryables and tokens the
+    /// session holds, then its `DeclareFinal`) is drained by the observer through
+    /// `Self::send_declare` for the same reason. The one door they share is this bundle, so
+    /// the verdict is asked here, the way the namespace's egress decoration is. `None` for a
+    /// session with no policy, and then [`Self::set_egress_reply_gate`]'s flag keeps the test to
+    /// one atomic read.
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-response",
+            feature = "liveliness-token",
+            feature = "declare-subscriber"
+        )
+    ))]
     egress_reply_gate: R::Mutex<Option<ReplyEgressGate>>,
     /// Whether [`Self::egress_reply_gate`] holds a gate: the data path reads this and takes the
     /// lock only when it is set.
-    #[cfg(all(feature = "alloc", feature = "codec-response"))]
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-response",
+            feature = "liveliness-token",
+            feature = "declare-subscriber"
+        )
+    ))]
     egress_reply_gate_set: core::sync::atomic::AtomicBool,
     /// A4 (session-reconnect) — declaration cache. Mirrors zenoh-pico's
     /// `_z_session_t._declaration_cache` slot
@@ -3008,12 +3026,20 @@ where
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
 
 /// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
-/// admits the `Response`. See [`SessionLinkActions::set_egress_reply_gate`].
+/// admits the `Response`, or the `Declare` that answers a peer's Interest. See
+/// [`SessionLinkActions::set_egress_reply_gate`].
 ///
 /// A `Box`, not an `Arc`: the bundle is built for ARMv6-M too, which has no pointer-width atomics
 /// to count references with, so the gate is called where it is stored (under its slot's lock)
 /// and never cloned out.
-#[cfg(all(feature = "alloc", feature = "codec-response"))]
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    )
+))]
 pub type ReplyEgressGate =
     alloc::boxed::Box<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
 
@@ -3807,9 +3833,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
-                #[cfg(all(feature = "alloc", feature = "codec-response"))]
+                #[cfg(all(
+                    feature = "alloc",
+                    any(
+                        feature = "codec-response",
+                        feature = "liveliness-token",
+                        feature = "declare-subscriber"
+                    )
+                ))]
                 egress_reply_gate: R::new_mutex(None::<ReplyEgressGate>),
-                #[cfg(all(feature = "alloc", feature = "codec-response"))]
+                #[cfg(all(
+                    feature = "alloc",
+                    any(
+                        feature = "codec-response",
+                        feature = "liveliness-token",
+                        feature = "declare-subscriber"
+                    )
+                ))]
                 egress_reply_gate_set: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "session-reconnect")]
                 declaration_cache: R::new_mutex(DeclarationCache::new()),
@@ -13711,6 +13751,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc"
     ))]
     pub fn send_declare(&self, declare: DeclareOwned) {
+        // §5.16 egress — the answer to an interest is a `Declare`, and upstream's egress
+        // interceptor is asked of every message a face sends, an Interest's answer included.
+        // Left unasked here, a subscriber, queryable or token whose own declaration the policy
+        // denied is announced anyway the first time a peer's Interest reaches it. Asked of the
+        // key as the user wrote it, before the namespace below decorates it, as a query reply
+        // is; a denied answer is consumed, and the chain's `DeclareFinal`, which no policy
+        // governs, still ends the peer's Interest.
+        let declare = if self
+            .egress_reply_gate_set
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            let message =
+                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
+            if !self.reply_gate_admits(&message) {
+                return;
+            }
+            match message {
+                crate::network_message::NetworkMessage::Declare(declare) => *declare,
+                _ => return,
+            }
+        } else {
+            declare
+        };
         // §5.21 routing-namespace — the answer to an interest is a `Declare` like any other
         // the node makes, and upstream's decorator gives it the prefix whatever the interest id
         // (`handle_declare_egress` reads none). This dispatch is below the egress arm, so it is
@@ -14925,12 +14988,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let message =
             crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
-        // Called under the slot's lock: the gate takes the session's chain and mapping locks and
-        // never this one, so it cannot meet itself here.
-        let admitted = R::with_mutex_mut(&self.egress_reply_gate, |slot| {
-            slot.as_ref().map_or(true, |gate| gate(&message))
-        });
-        if !admitted {
+        if !self.reply_gate_admits(&message) {
             return None;
         }
         match message {
@@ -14973,12 +15031,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// Whether the installed [`ReplyEgressGate`] admits `message`: `true` with none installed.
+    /// A caller that builds an owned record only to ask reads `egress_reply_gate_set` first, so
+    /// a session with no policy builds nothing.
+    ///
+    /// Called under the slot's lock: the gate takes the session's chain and mapping locks and
+    /// never this one, so it cannot meet itself here.
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-response",
+            feature = "liveliness-token",
+            feature = "declare-subscriber"
+        )
+    ))]
+    fn reply_gate_admits(&self, message: &crate::network_message::NetworkMessage) -> bool {
+        R::with_mutex_mut(&self.egress_reply_gate, |slot| {
+            slot.as_ref().map_or(true, |gate| gate(message))
+        })
+    }
+
     /// Install (or, with `None`, remove) the egress admission of this bundle's replies. Called by
     /// the session that owns the bundle when it takes an egress policy; see
     /// [`ReplyEgressGate`]. The gate runs on the thread that sends the reply, possibly under
     /// the session's observer lock (the observer's own pending replies are sent from inside it),
     /// so it must not take that lock.
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-response",
+            feature = "liveliness-token",
+            feature = "declare-subscriber"
+        )
+    ))]
     pub fn set_egress_reply_gate(&self, gate: Option<ReplyEgressGate>) {
         let set = gate.is_some();
         R::with_mutex_mut(&self.egress_reply_gate, |slot| *slot = gate);

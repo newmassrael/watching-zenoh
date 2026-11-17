@@ -1621,7 +1621,8 @@ fn leave_aggregated_subscriber(
 /// turns a nested pair into a sequential one. The cost is one `String` clone per
 /// governed message on a session that HAS a policy installed; a session with no
 /// policy never builds this at all.
-/// The §5.16 egress verdict on one REPLY, asked from the action bundle's reply gate.
+/// The §5.16 egress verdict on one REPLY, asked from the action bundle's reply gate: a query's
+/// `Response`, or a `Declare` that answers a peer's Interest with what this session holds.
 ///
 /// A free function over the two things it needs, the egress chain and the bundle, because the
 /// gate that calls it lives INSIDE the bundle and has to be `Send + Sync` without holding the
@@ -1629,7 +1630,8 @@ fn leave_aggregated_subscriber(
 ///
 /// Replies are sent from inside the observer's own lock (its pending replies flush there), so
 /// this must not take that lock, which `Session::acl_admits_on` does to read the peer's alias
-/// table. A reply's key is the one the queryable wrote: a literal, or an id of OUR space
+/// table. A reply's key is the one the queryable (or the declaration answered) wrote: a
+/// literal, or an id of OUR space
 /// (`outbound_mappings`, its own mutex), and never the peer's, so the peer's table is not
 /// needed and an empty one stands in for it. A key that still does not resolve is denied, as
 /// everywhere in the chain.
