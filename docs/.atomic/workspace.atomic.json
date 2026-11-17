@@ -14015,6 +14015,27 @@
       "carry_forward_bullets": [
         "Open-debt 952 stays open (the pooled stream link's batch count ignores the queue shape). Not measured here: the Qzk images on the kit (no kit run on this tree), hosted C1cs and Qzk readings of this push (the budgets assume pc2's growth over the hosted reading of d8f187dddc), and the egress path of a router relaying another face's Interest answer (brokered_interest), which was not audited. The router_forward chain test needs 2.6 s alone on the workstation against 0.01 s on pc2 and failed 7 of 7 inside a loaded local batch: its 10 s wait is the thing to look at if it reddens. The consumer waiting on the egress fix is told this push's sha once it lands."
       ]
+    },
+    "Round 4505": {
+      "decision_summary": "This round checks what Round 4504 left unverified and pays the hosted red of its own run 44165924219. Its budgets, stack rows and gates all read green there. A group session the host governs had the defect 4504 fixed for unicast: the answer to a member's Interest left through the reply backing, below the session's send, unjudged. The backing now asks the session's egress verdict, and a control run showed the defect first. The router's relays already pass its egress chain. The kit ran the client and admin TLS images; the admin peak grew by exactly the two frames the bound attributed. The router chain test that stalled on the workstation starved its own sender by copying every frame under the sender's lock. Layer Z, reached for the first time since 8e, needed transport-stats in the drop-in leg's builds. C1ay held one guard the measurement had deferred. C1cc remains open-debt 952, which the row before wrongly listed as paid.",
+      "changes_bullets": [
+        "Session: a group session's TokioReplyBacking asks a crate-private GroupReplyGate (the session's egress chain over the group's link) of each Response and declaring Declare it enqueues; id-only withdrawals are not asked, as the unicast session's are not; the after-JOIN answer and the query reply route both build the gated backing; a session test drives a member's Interest under a governed policy.",
+        "Tests: the router egress chain test waits on a lock-free written-byte count of its RoomLink and checks the count against the frames kept.",
+        "Builds: wz-ap-demo gains transport-stats forwarding wz/transport-stats; Layer Z's two demo build lines and wz-integration-tests carry it; C1ay exclusive_transport_modes_binary 3.",
+        "Figures: zephyr-admin-fixed-tls peak_stack_bytes 8584, the kit's reading.",
+        "Ledger: hosted-red-acks row for run 44165924219 with a correction of the row before about C1cc."
+      ],
+      "verification_bullets": [
+        "Hosted run 44165924219 (CI) and 44165924203 (Platform) read: Platform green; CI red only in C1ay, Z and C1cc, every layer Round 4504 moved green. pc2: the group test 2 answers before the fix and 1 after; group, multicast_glue and session suites, unicast egress tests and wz-capi-c interceptors_declare green; wz-runtime-tokio built and clippy -D warnings clean with no default features plus transport-multicast, codec-push and access-acl-multicast alone, with declare-subscriber, and with query-queryable and codec-response-final, and with all of them; wz-ap-demo clippy with transport-stats; Layer C1ay green to its end; Layer Z past the drop-in leg; the TLS expiry leg 5 of 5 alone. pc2's T2G kit: zephyr-client-fixed inside its row, zephyr-admin-fixed-tls peak 8584. Workstation: the chain test 10 of 10 at 0.01 s with the lock-order checker on (2 of 5 past 10 s before); router_forward 330. The round-fed gates, the citation anchor gate and the surface census rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open-debt 952 stays open (C1cc). Layer Z after the TLS expiry leg was not run here: pc2's oracle store held no zenohd for this tree and building one from the pinned tag was not run, so the next hosted run judges those legs; the TLS expiry leg failed once inside a whole-layer run and passed 5 of 5 alone, and if it reddens on hosted its listing of the listener's tls links after expiry is where to look. The other four Qzk images were built and gated but not run on the kit. The consumer pinned at 4504 is told this push's sha once it lands."
+      ]
     }
   },
   "inventory_entries": {
