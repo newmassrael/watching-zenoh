@@ -13,7 +13,7 @@
     "why": "the main thread's stack holds, beneath wz_app_main, the kernel's frames that run it (z_thread_entry, bg_thread_main and the app's main: 56 bytes in the images) and, at the top of the stack, the thread-local storage and the alignment (16 bytes with the 8 of .tbss). Read off the real stack of the plain client on the kit by walking its frame-pointer chain at the deepest write (2026-11-03): wz_app_main's entry was 72 bytes deep, and the bound that started at wz_app_main was 16 bytes under the kit's reading"
   },
   "site_pins": {
-    "engine-turn": {"zephyr-client-fixed": 36, "zephyr-client-heap": 36, "zephyr-client-fixed-batching": 36, "zephyr-client-fixed-get": 36, "zephyr-admin-fixed-tls": 36, "zephyr-client-fixed-tls": 36},
+    "engine-turn": {"zephyr-client-fixed": 35, "zephyr-client-heap": 35, "zephyr-client-fixed-batching": 35, "zephyr-client-fixed-get": 35, "zephyr-admin-fixed-tls": 35, "zephyr-client-fixed-tls": 35},
     "engine-inbox": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
     "engine-host": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
     "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
