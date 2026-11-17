@@ -320,8 +320,17 @@ impl RawAddr {
     /// An IPv6 scope above 255 has no form ([`ZephyrNetError::ScopeTooWide`]). The flow label has
     /// none either: Zephyr's IPv6 socket address carries no such field.
     pub(crate) fn of(at: SocketAddr) -> Result<Self, ZephyrNetError> {
-        let mut storage = SockaddrStorage::default();
-        let target = (&mut storage as *mut SockaddrStorage).cast::<u8>();
+        let mut raw = Self::empty();
+        raw.set(at)?;
+        Ok(raw)
+    }
+
+    /// Write `at` in the stack's form into this address, as [`RawAddr::of`] makes one. The send
+    /// path writes into an address of its own frame: a `Result` holding a whole address, which
+    /// `of` returns, is a second copy of it in the frame of every call on the image's deepest
+    /// stack path, the engine's turn into the socket's send.
+    pub(crate) fn set(&mut self, at: SocketAddr) -> Result<(), ZephyrNetError> {
+        let target = (&mut self.storage as *mut SockaddrStorage).cast::<u8>();
         let len = match at {
             SocketAddr::V4(v4) => {
                 let sin = SockaddrIn {
@@ -349,10 +358,8 @@ impl RawAddr {
                 size_of::<SockaddrIn6>()
             }
         };
-        Ok(Self {
-            storage,
-            len: len as SockLen,
-        })
+        self.len = len as SockLen;
+        Ok(())
     }
 
     /// Room for an address of either family, for a call that writes one (`recvfrom`,
@@ -661,7 +668,8 @@ impl ZephyrUdpSocket {
     /// Send one datagram to `to`. A short or refused send is an error:
     /// UDP either takes the whole datagram or none of it.
     pub fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), ZephyrNetError> {
-        let dest = RawAddr::of(to)?;
+        let mut dest = RawAddr::empty();
+        dest.set(to)?;
         // SAFETY: `bytes` and `dest` are live for the call, lengths match.
         let sent = unsafe {
             sendto(
