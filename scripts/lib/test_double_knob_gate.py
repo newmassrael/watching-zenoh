@@ -123,7 +123,14 @@ TEST_FN_RE = re.compile(r"#\[(?:\w+::)?test\b[^\]]*\]\s*(?:(?:async|pub|unsafe)\
 # One field per line, which is what rustfmt produces and therefore what every
 # tracked file here looks like. The trailing comma is optional so a struct's
 # LAST field is still seen -- rustfmt writes one, but a fixture need not.
-BOOL_FIELD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*bool\s*(?:,|$)", re.M)
+# The indent is `[ \t]*`, never `\s*`: under re.M a `^\s*` that may cross a newline
+# is tried at the start of every line of a blank run and runs to its end each time,
+# so a run of n blank lines costs n squared. A comment blanked by `strip_comments`
+# is such a run: the test module of `router_forward.rs` holds one of 577,761
+# characters, and this pattern and ANY_FIELD_RE took 130 s and 151 s over that one
+# scope (hosted Layer C0 job 133868131936 spent 1,721 s of its 1,800). A field
+# found across blank lines is found from its own line just the same.
+BOOL_FIELD_RE = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*bool\s*(?:,|$)", re.M)
 
 # A struct declaration with a braced body: `struct Name<T> where .. {`. The
 # fields of a RECORD candidate are read from these bodies and from nowhere else,
@@ -131,7 +138,7 @@ BOOL_FIELD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*bool\s*(?:
 # struct literal is never mistaken for a field.
 STRUCT_RE = re.compile(r"\bstruct\s+\w+\s*(?:<[^{;]*>)?\s*(?:where[^{;]*)?\{")
 # One declared field of such a body: `name: Type,` on a line of its own.
-ANY_FIELD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*[^\s=]", re.M)
+ANY_FIELD_RE = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*[^\s=]", re.M)
 
 # What WRITING a field looks like in the double's own code, by receiver-agnostic
 # shape: the record is reached through `self`, through a guard (`st.alloc_calls`)
