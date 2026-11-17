@@ -30,6 +30,10 @@ pub(super) struct RoomLink {
     full: AtomicBool,
     frames: Mutex<Vec<Vec<u8>>>,
     sent: AtomicUsize,
+    /// How many bytes the link was given, read without the frames' lock: a test waiting for a
+    /// sender on another thread reads this, since a wait that took the frames' lock to copy them
+    /// held it against the very sender it waited for.
+    written: AtomicUsize,
     /// What the router asked to be called when the link makes room, as a real writer's queue
     /// keeps it.
     waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -52,6 +56,7 @@ impl RoomLink {
             full: AtomicBool::new(full),
             frames: Mutex::new(Vec::new()),
             sent: AtomicUsize::new(0),
+            written: AtomicUsize::new(0),
             waker: Mutex::new(None),
             stalls: AtomicBool::new(false),
             waiting: AtomicBool::new(false),
@@ -107,6 +112,11 @@ impl RoomLink {
         self.sent.load(Ordering::SeqCst)
     }
 
+    /// How many bytes the link was given so far, without taking the frames' lock.
+    pub(super) fn written(&self) -> usize {
+        self.written.load(Ordering::SeqCst)
+    }
+
     /// Every byte the link was given, in the order it was given.
     pub(super) fn bytes(&self) -> Vec<u8> {
         self.frames
@@ -122,6 +132,7 @@ impl RoomLink {
 impl BoxedLinkDriver for RoomLink {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         self.frames.lock().expect("frames").push(bytes.to_vec());
+        self.written.fetch_add(bytes.len(), Ordering::SeqCst);
         self.sent.fetch_add(1, Ordering::SeqCst);
         LinkSendOutcome::Sent
     }
@@ -1348,16 +1359,23 @@ fn a_message_larger_than_a_destinations_whole_budget_is_held_alone_and_gates_its
     assert_eq!(rig.fwd.egress_held_bytes(), 0);
     // A message this large leaves as a chain of fragments, sent off the router's threads, so it is
     // written after the pass that let it go: it is waited for, and the bytes are counted, every
-    // byte of the payload on the link.
+    // byte of the payload on the link. The wait reads the link's byte count, which takes no lock:
+    // it once copied the frames under their lock on every turn, and the chain's sender, which
+    // takes that lock to write each fragment, waited on the test for seconds at a time.
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10) && rig.link.bytes().len() <= size {
+    while started.elapsed() < Duration::from_secs(10) && rig.link.written() <= size {
         std::thread::yield_now();
     }
     assert!(rig.link.sent() > rig.baseline, "it was written");
+    let written = rig.link.bytes().len();
+    assert_eq!(
+        written,
+        rig.link.written(),
+        "the count is of the frames kept"
+    );
     assert!(
-        rig.link.bytes().len() > size,
-        "all of it: {} bytes written for a payload of {size}",
-        rig.link.bytes().len()
+        written > size,
+        "all of it: {written} bytes written for a payload of {size}"
     );
 }
 
