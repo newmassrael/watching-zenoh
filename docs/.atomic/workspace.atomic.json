@@ -13993,6 +13993,28 @@
       "carry_forward_bullets": [
         "Open-debt 952: the pooled stream link's batch count ignores transport/link/tx/queue/size/*; the C1cc witness stays red until the stream pool's capacity is derived from the queue shape. Open-debt 953: run the C1bnl control (default against WZ_LOCK_ORDER=off) before choosing how the lock-order checker's ledger leaves the measured thread; C1bnl shard 2 stays red until then. The consumer waiting on listener-less matching status is told this push's sha once it lands. Re-grading the three atoms graded against 1.5.0 (open-debt 951) is still owed."
       ]
+    },
+    "Round 4504": {
+      "decision_summary": "This round pays every hosted red of d8f187dddc (CI run 44032688827, Platform 44032688818, Fuzz 44079370263), each job read from its own log first. Two defects are in the product: a client answered a peer's Interest with declarations its egress policy denies, which the publisher's ask of Round 4503 exposed; and a capture walk read a row's whole framing unit once per row, square in a unit's messages, which held the live fuzz target past ten seconds. Two gates were wrong about themselves: the knob gate cost C0 its budget margin by rescanning blank runs from every line, and the guard gate hid moved counts behind a failed run. Open-debt 953 is paid by moving the lock-order checker's tables off the global heap. The rest are readings the landings since moved without moving their gates: Qzk's six images, six C1cs budgets and seventeen count guards, each attributed.",
+      "changes_bullets": [
+        "Session: SessionLinkActions::send_declare asks the reply egress gate before an Interest's answer leaves, a denied one is consumed and DeclareFinal still ends the Interest; the gate's cfg widened to the declaration features; a session test decodes the wire.",
+        "Capture: CaptureOrder walks each list with one forward RowCursor; selection rows walk forward; selected_packets places rows by Messages::head and packets_carrying takes a RowHead; the dissect drain finds a record's row on its head; the timeout input is a pinned live seed.",
+        "Runtime: the lock-order checker's maps, sets and lists use the system allocator, with a witness that a new order allocates nothing on the measured thread. Zephyr: RawAddr::set writes a send's address in place.",
+        "Gates: test_double_knob_gate reads indents with [ \\t]*; guarded_count_gate reports moved guards beside failed runs; FilterAsk is no longer a public doc link; the C1bp test hands both nodes one plugin-key reading.",
+        "Figures: Qzk bounds, chains, texts, owners, engine-turn pin 35 and main stacks 4736/4864/7872/16000; C1cs budgets for pico-client, -udp, pico-peer, capic-router-node, capic-default and -lean; seventeen count guards."
+      ],
+      "verification_bullets": [
+        "pc2: interceptors_declare 6 of 6 and session_egress_acl 3 of 3; the new egress test fails on d8f187dddc with the fix left out (2 answers against 1); fragment_tx_lend_allocations under the 90-feature set 4 of 4 in each of 5 runs; lock_order_allocations 3 and sync::lock_order 13; wz-capture tests default and all-features, wz-capi-dissect tests, clippy -D warnings per crate; fuzz.sh regress live ran 195 inputs, the timeout input 1,597 ms (6,827 before); Layer C1bp green; Layer C1cs run on both trees, every move from those readings; router_forward under all nine feature sets printed its count, the whole suite 330 in 4 of 4 runs.",
+        "Local: kit-lane build of all six Qzk images green with stack, bound and text gates, and the stack-frame, stack-bound, text-owner and kit-lane selftests; the knob gate 6.6 s with output byte-identical to the 385 s original; the 148 round-fed gates, the citation anchor gate, reason pins and the accessor census rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open-debt 952 stays open (the pooled stream link's batch count ignores the queue shape). Not measured here: the Qzk images on the kit (no kit run on this tree), hosted C1cs and Qzk readings of this push (the budgets assume pc2's growth over the hosted reading of d8f187dddc), and the egress path of a router relaying another face's Interest answer (brokered_interest), which was not audited. The router_forward chain test needs 2.6 s alone on the workstation against 0.01 s on pc2 and failed 7 of 7 inside a loaded local batch: its 10 s wait is the thing to look at if it reddens. The consumer waiting on the egress fix is told this push's sha once it lands."
+      ]
     }
   },
   "inventory_entries": {
