@@ -33,13 +33,21 @@
 //!
 //! ## How each node is handed the document
 //!
-//! The wz storage host reads it from `--config`. zenohd reads it from `--config` too, but the
-//! binary turns the lookup on over whatever its file says
-//! (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`), which is the
-//! binary's choice and not the library's reading of the document. So zenohd is also handed the
-//! document's own `plugins_loading/enabled` with `--cfg`, the one channel it applies after that
-//! (`zenohd/src/main.rs` @ `config.insert(key.strip_prefix('/').unwrap_or(key), &mut deserializer)`),
-//! and its library acts on the document's value as the storage host's does.
+//! Each row hands both nodes its keys in one of two readings ([`Reading`]).
+//!
+//! The DAEMON reading is the document as a `--config` file. zenohd turns the lookup on over
+//! whatever its file says
+//! (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`), and the wz
+//! storage host reads a `--config` file with every override zenohd applies, this one included,
+//! so a file's `enabled: false` is looked up on both.
+//!
+//! The STATED reading is the key's value as the plugin plane receives it, past the daemon's
+//! override. zenohd is handed the document with the key again in `--cfg`, the one channel it
+//! applies after that override
+//! (`zenohd/src/main.rs` @ `config.insert(key.strip_prefix('/').unwrap_or(key), &mut deserializer)`).
+//! The storage host is handed the three flags a `--config` file's keys expand to, `--plugins`,
+//! `--plugin-search-dirs` and `--plugins-loading`, the last only when the key is on, with no file
+//! whose reading would add it.
 //!
 //! zenohd's row is asserted first, so an upstream that stopped looking a plugin up this way is
 //! reported as that and not as a wz defect.
@@ -66,6 +74,15 @@ const DISABLED: &str = "will not be loaded as plugin loading is disabled";
 /// How long a node gets to report its lookup after it was started (zenohd) or after its first
 /// session (the storage host, which applies its startup `plugins` section there).
 const LOOKUP_BUDGET: Duration = Duration::from_secs(20);
+
+/// How a row hands its keys to both nodes.
+#[derive(Clone, Copy, Debug)]
+enum Reading {
+    /// The document as a `--config` file, which each binary reads with its daemon's overrides.
+    Daemon,
+    /// The key's value past the daemon's override: zenohd's `--cfg`, the storage host's flags.
+    Stated,
+}
 
 /// What a node's lookup of [`PLUGIN`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,42 +147,60 @@ fn await_lookup(
     }
 }
 
-/// The document every node of a row is handed: the lookup switch, the search list, and one plugin
-/// named without a path.
-fn write_document(dir: &Path, enabled: bool, search_dirs: &[&Path]) -> PathBuf {
+/// The search list as JSON5 text, the document's value and the storage host's flag alike.
+fn search_list(search_dirs: &[&Path]) -> String {
     let list = search_dirs
         .iter()
         .map(|d| format!("{:?}", d.display().to_string()))
         .collect::<Vec<_>>()
         .join(", ");
+    format!("[{list}]")
+}
+
+/// The `plugins` section every row names: one plugin without a path, not required.
+fn plugins_section() -> String {
+    format!("{{ {PLUGIN}: {{}} }}")
+}
+
+/// The document every node of a row is handed: the lookup switch, the search list, and one plugin
+/// named without a path.
+fn write_document(dir: &Path, enabled: bool, search_dirs: &[&Path]) -> PathBuf {
+    let list = search_list(search_dirs);
+    let section = plugins_section();
     let path = dir.join("plugins_loading.json5");
     std::fs::write(
         &path,
         format!(
-            "{{\n  plugins_loading: {{ enabled: {enabled}, search_dirs: [{list}] }},\n  \
-             plugins: {{ {PLUGIN}: {{}} }},\n}}\n"
+            "{{\n  plugins_loading: {{ enabled: {enabled}, search_dirs: {list} }},\n  \
+             plugins: {section},\n}}\n"
         ),
     )
     .expect("write the document");
     path
 }
 
-/// zenohd's lookup for the document at `document`, whose `plugins_loading/enabled` is `enabled`.
-fn zenohd_lookup(document: &Path, enabled: bool, holding: &Path) -> Lookup {
+/// zenohd's lookup for the document at `document`, whose `plugins_loading/enabled` is `enabled`,
+/// in `reading`.
+fn zenohd_lookup(document: &Path, reading: Reading, enabled: bool, holding: &Path) -> Lookup {
     let capture = tempfile::tempfile().expect("tempfile for the zenohd log");
     let writer = capture.try_clone().expect("dup the zenohd log handle");
     let mut reader = capture;
+    let mut command = Command::new(zenohd_binary());
+    command
+        .env("RUST_LOG", "z=info")
+        .env("NO_COLOR", "1")
+        .args(["-l", "tcp/127.0.0.1:0", "--no-multicast-scouting"])
+        .args(["--rest-http-port", "none"])
+        .arg("--config")
+        .arg(document);
+    if let Reading::Stated = reading {
+        command
+            .arg("--cfg")
+            .arg(format!("plugins_loading/enabled:{enabled}"));
+    }
     let mut zenohd = ChildGuard::wrap(
         "zenohd (plugins_loading reference)",
-        Command::new(zenohd_binary())
-            .env("RUST_LOG", "z=info")
-            .env("NO_COLOR", "1")
-            .args(["-l", "tcp/127.0.0.1:0", "--no-multicast-scouting"])
-            .args(["--rest-http-port", "none"])
-            .arg("--config")
-            .arg(document)
-            .arg("--cfg")
-            .arg(format!("plugins_loading/enabled:{enabled}"))
+        command
             .stdout(Stdio::from(
                 writer.try_clone().expect("dup the zenohd stdout handle"),
             ))
@@ -190,8 +225,20 @@ fn names_feature(line: &str, feature: &str) -> bool {
     line.split([' ', '[', ']']).any(|word| word == feature)
 }
 
-/// The wz storage host's lookup for the document at `document`.
-fn storage_host_lookup(demo: &Path, document: &Path, holding: &Path) -> Lookup {
+/// What the wz storage host is handed for a row: the document as a `--config` file, or the
+/// flags its keys expand to.
+enum Handed<'a> {
+    /// The daemon reading of the file at this path.
+    File(&'a Path),
+    /// The stated reading: the plugins section, the search list and the lookup switch as flags.
+    Flags {
+        search_dirs: &'a [&'a Path],
+        enabled: bool,
+    },
+}
+
+/// The wz storage host's lookup for what it is `handed`.
+fn storage_host_lookup(demo: &Path, handed: &Handed<'_>, holding: &Path) -> Lookup {
     let reservation = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", reservation.port());
     let capture = tempfile::tempfile().expect("tempfile for the storage host log");
@@ -199,13 +246,29 @@ fn storage_host_lookup(demo: &Path, document: &Path, holding: &Path) -> Lookup {
         .try_clone()
         .expect("dup the storage host log handle");
     let mut reader = capture;
+    let mut command = Command::new(demo);
+    command.arg("--storage-host").arg(&addr);
+    match handed {
+        Handed::File(document) => {
+            command.arg("--config").arg(document);
+        }
+        Handed::Flags {
+            search_dirs,
+            enabled,
+        } => {
+            command
+                .arg("--plugins")
+                .arg(plugins_section())
+                .arg("--plugin-search-dirs")
+                .arg(search_list(search_dirs));
+            if *enabled {
+                command.arg("--plugins-loading");
+            }
+        }
+    }
     let mut host = ChildGuard::wrap(
-        "wz-ap-demo --storage-host --config (plugins_loading)",
-        Command::new(demo)
-            .arg("--storage-host")
-            .arg(&addr)
-            .arg("--config")
-            .arg(document)
+        "wz-ap-demo --storage-host (plugins_loading)",
+        command
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(writer))
@@ -276,9 +339,10 @@ enum Listed {
     Holding,
 }
 
-/// One document and the lookup zenohd makes for it.
+/// One document, how it is handed, and the lookup zenohd makes for it.
 struct Row {
     name: &'static str,
+    reading: Reading,
     enabled: bool,
     search_dirs: &'static [Listed],
     expect: Lookup,
@@ -308,13 +372,20 @@ fn diff_rows(rows: &[Row]) {
             })
             .collect();
         let document = write_document(documents.path(), row.enabled, &dirs);
-        let reference = zenohd_lookup(&document, row.enabled, holding.path());
+        let reference = zenohd_lookup(&document, row.reading, row.enabled, holding.path());
         assert_eq!(
             reference, row.expect,
             "zenohd's lookup for `{}` is not what this file expects",
             row.name
         );
-        let wz = storage_host_lookup(&demo, &document, holding.path());
+        let handed = match row.reading {
+            Reading::Daemon => Handed::File(&document),
+            Reading::Stated => Handed::Flags {
+                search_dirs: &dirs,
+                enabled: row.enabled,
+            },
+        };
+        let wz = storage_host_lookup(&demo, &handed, holding.path());
         if wz != reference {
             disagreements.push(format!(
                 "{}:\n  zenohd {reference:?}\n  wz     {wz:?}",
@@ -331,9 +402,10 @@ fn diff_rows(rows: &[Row]) {
     );
 }
 
-/// `plugins_loading/enabled`: off, a plugin named without a path is not looked for although a
-/// listed directory holds it; on, the same directory is searched and the plugin found there, on the
-/// wz storage host as on zenohd.
+/// `plugins_loading/enabled`: stated off, a plugin named without a path is not looked for although
+/// a listed directory holds it; stated on, the same directory is searched and the plugin found
+/// there; off in the file the daemon reads, the daemon's override turns it on; on the wz storage
+/// host as on zenohd.
 // wz-proves: plugin-dynamic-loading zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features preset-ap-full,zenoh-config); \
@@ -341,13 +413,22 @@ fn diff_rows(rows: &[Row]) {
 fn wz_storage_host_looks_a_plugin_up_by_name_only_when_enabled_as_zenohd_does() {
     diff_rows(&[
         Row {
-            name: "enabled: false, the listed directory holds the plugin",
+            name: "enabled: false stated, the listed directory holds the plugin",
+            reading: Reading::Stated,
             enabled: false,
             search_dirs: &[Listed::Holding],
             expect: Lookup::Disabled,
         },
         Row {
-            name: "enabled: true, the listed directory holds the plugin",
+            name: "enabled: false in the file the daemon reads, the listed directory holds it",
+            reading: Reading::Daemon,
+            enabled: false,
+            search_dirs: &[Listed::Holding],
+            expect: Lookup::FoundInTheListedDirectory,
+        },
+        Row {
+            name: "enabled: true stated, the listed directory holds the plugin",
+            reading: Reading::Stated,
             enabled: true,
             search_dirs: &[Listed::Holding],
             expect: Lookup::FoundInTheListedDirectory,
@@ -366,12 +447,14 @@ fn wz_storage_host_searches_the_listed_directories_in_order_as_zenohd_does() {
     diff_rows(&[
         Row {
             name: "search_dirs names only a directory without the plugin",
+            reading: Reading::Daemon,
             enabled: true,
             search_dirs: &[Listed::Empty],
             expect: Lookup::NotFound,
         },
         Row {
             name: "search_dirs names the holding directory after an empty one",
+            reading: Reading::Daemon,
             enabled: true,
             search_dirs: &[Listed::Empty, Listed::Holding],
             expect: Lookup::FoundInTheListedDirectory,
