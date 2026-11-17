@@ -5848,7 +5848,8 @@ impl SharedSession {
     /// refused (`None`) and nothing is asked.
     ///
     /// The subscribers a publisher's filter asks for are asked under the
-    /// `aggregation/publishers` aggregate that includes its key, when one does ([`FilterAsk`]).
+    /// `aggregation/publishers` aggregate that includes its key, when one does, the key the
+    /// face session's own publishers count their Interest under.
     pub fn declare_write_filter(
         &self,
         plane: FilterPlane,
