@@ -36,13 +36,41 @@
 //! `WZ_LOCK_ORDER=log` writes the report at ERROR and lets the thread go on (for a process that
 //! is being debugged for something else); `WZ_LOCK_ORDER=off` turns the checker off. A release
 //! build carries none of this: the module is compiled only with debug assertions.
+//!
+//! What the checker learns it keeps on the SYSTEM allocator, never on the program's global one
+//! (open-debt 953). A program that counts its own allocations (this crate's allocation suites
+//! install a counting `#[global_allocator]` and read the count of the thread that sends) would
+//! otherwise count the checker: the first time a thread takes an order it has not taken, the
+//! checker's own sets grow on that thread, and a count that measures the node then reads the
+//! checker's bookkeeping. Kept apart, the checker is invisible to such a count by construction,
+//! as lockdep's tables are not allocated from the memory it checks. Two things still reach the
+//! global allocator, and neither is bookkeeping: the stack captured once for an order new to the
+//! whole PROCESS (`std::backtrace` allocates as it likes), and the text of a report.
 
 use core::panic::Location;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
+use allocator_api2::alloc::System;
+
 use super::{Held, Wait};
+
+/// A map, set or list of the checker, on the system allocator (see the module).
+type Map<K, V> = hashbrown::HashMap<K, V, hashbrown::DefaultHashBuilder, System>;
+type Set<T> = hashbrown::HashSet<T, hashbrown::DefaultHashBuilder, System>;
+type List<T> = allocator_api2::vec::Vec<T, System>;
+
+fn map<K, V>() -> Map<K, V> {
+    Map::with_hasher_in(hashbrown::DefaultHashBuilder::default(), System)
+}
+
+fn set<T>() -> Set<T> {
+    Set::with_hasher_in(hashbrown::DefaultHashBuilder::default(), System)
+}
+
+const fn list<T>() -> List<T> {
+    List::new_in(System)
+}
 
 /// A lock class: the place its locks are made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -97,8 +125,8 @@ fn blocks(entered: Wait, left: Held) -> bool {
 /// Every order seen in the process, by the class it leaves from.
 #[derive(Default)]
 struct Graph {
-    from: HashMap<Class, Vec<(Order, Witness)>>,
-    known: HashSet<Order>,
+    from: Map<Class, List<(Order, Witness)>>,
+    known: Set<Order>,
 }
 
 impl Graph {
@@ -106,17 +134,22 @@ impl Graph {
     /// order of the cycle starting after `new`; `None` when there is none. A breadth-first walk
     /// over (class, whether it was entered by a recursive read) from `new.to` back to
     /// `new.from`.
-    fn cycle_closed_by(&self, new: Order) -> Option<Vec<(Order, Witness)>> {
+    fn cycle_closed_by(&self, new: Order) -> Option<List<(Order, Witness)>> {
         let start = (new.to, new.wait == Wait::Recursive);
         let reaches_the_start =
             |at: (Class, bool)| at.0 == new.from && blocks_entered(at.1, new.held);
         if reaches_the_start(start) {
-            return Some(Vec::new());
+            return Some(list());
         }
-        let mut parent: HashMap<Step, (Step, Order, Witness)> = HashMap::new();
-        let mut seen: HashSet<Step> = HashSet::from([start]);
-        let mut queue = VecDeque::from([start]);
-        while let Some(at) = queue.pop_front() {
+        let mut parent: Map<Step, (Step, Order, Witness)> = map();
+        let mut seen: Set<Step> = set();
+        seen.insert(start);
+        // The walk's queue: every step it reached, in the order reached, and the next to leave.
+        let mut queue: List<Step> = list();
+        queue.push(start);
+        let mut leaves = 0;
+        while let Some(&at) = queue.get(leaves) {
+            leaves += 1;
             for (order, witness) in self.from.get(&at.0).into_iter().flatten() {
                 if !blocks_entered(at.1, order.held) {
                     continue;
@@ -127,7 +160,7 @@ impl Graph {
                 }
                 parent.insert(next, (at, *order, witness.clone()));
                 if reaches_the_start(next) {
-                    let mut path = Vec::new();
+                    let mut path = list();
                     let mut step = next;
                     while step != start {
                         let (before, order, witness) = parent[&step].clone();
@@ -137,7 +170,7 @@ impl Graph {
                     path.reverse();
                     return Some(path);
                 }
-                queue.push_back(next);
+                queue.push(next);
             }
         }
         None
@@ -147,7 +180,7 @@ impl Graph {
         if self.known.insert(order) {
             self.from
                 .entry(order.from)
-                .or_default()
+                .or_insert_with(list)
                 .push((order, witness));
         }
     }
@@ -164,7 +197,7 @@ fn blocks_entered(entered_recursive: bool, left: Held) -> bool {
 struct Process {
     graph: Graph,
     /// `(class, outer instance, inner instance)` for every nesting of two locks of one class.
-    nested: HashMap<(Class, u64, u64), Witness>,
+    nested: Map<(Class, u64, u64), Witness>,
 }
 
 static PROCESS: OnceLock<parking_lot::Mutex<Process>> = OnceLock::new();
@@ -250,14 +283,15 @@ pub(crate) struct Holding {
 
 thread_local! {
     /// The locks this thread holds, oldest first.
-    static HOLDING: RefCell<Vec<Holding>> = const { RefCell::new(Vec::new()) };
+    static HOLDING: RefCell<List<Holding>> = const { RefCell::new(list()) };
     /// The orders this thread has already handed to the process, so that a thread that takes the
     /// same two locks in the same order again does not take the process's lock to say so.
-    static SEEN: RefCell<HashSet<Order>> = RefCell::new(HashSet::new());
+    static SEEN: RefCell<Set<Order>> = RefCell::new(set());
     /// The nestings of two locks of one class, `(class, outer, inner)`, this thread has already
-    /// handed to the process, for the same reason; with [`SEEN`] it keeps a thread that repeats
-    /// what it did from allocating, which the allocation counts of the data path measure.
-    static SEEN_NESTED: RefCell<HashSet<(Class, u64, u64)>> = RefCell::new(HashSet::new());
+    /// handed to the process, for the same reason. Like every set of the checker it grows on the
+    /// system allocator, so an order new to this thread costs the thread's own count nothing
+    /// (see the module).
+    static SEEN_NESTED: RefCell<Set<(Class, u64, u64)>> = RefCell::new(set());
 }
 
 /// A walk's place: a class, and whether it was entered by a recursive read.
@@ -303,7 +337,7 @@ pub(crate) fn before_wait(
     }
     let to = Class::of(made_at);
     let mut findings: Vec<String> = Vec::new();
-    let mut fresh: Vec<(Order, Witness, Option<u64>)> = Vec::new();
+    let mut fresh: List<(Order, Witness, Option<u64>)> = list();
     let _ = HOLDING.try_with(|holding| {
         let Ok(holding) = holding.try_borrow() else {
             return;
@@ -376,7 +410,7 @@ pub(crate) fn before_wait(
                         stack_text("the earlier nesting", other.stack.as_deref())
                     ));
                 }
-                if let std::collections::hash_map::Entry::Vacant(vacant) =
+                if let hashbrown::hash_map::Entry::Vacant(vacant) =
                     process.nested.entry((to, outer, instance))
                 {
                     witness.stack = Some(stack());

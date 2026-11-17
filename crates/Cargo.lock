@@ -4401,6 +4401,7 @@ dependencies = [
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "arc-swap",
  "base64",
  "bytes",

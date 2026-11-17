@@ -1239,6 +1239,7 @@ version = "0.1.0"
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "arc-swap",
  "getrandom 0.2.17",
  "hashbrown 0.15.5",

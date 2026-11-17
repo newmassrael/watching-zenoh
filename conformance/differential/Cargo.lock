@@ -3717,6 +3717,7 @@ version = "0.1.0"
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "arc-swap",
  "bytes",
  "futures-util",
