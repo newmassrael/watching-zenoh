@@ -219,7 +219,7 @@ pub struct TokioReplyBacking {
 /// backing is where it is judged. It reads the session's live chain and link, so a policy set
 /// later governs without the backing being built again.
 #[cfg(feature = "access-acl-multicast")]
-pub type GroupReplyGate =
+pub(crate) type GroupReplyGate =
     std::sync::Arc<dyn Fn(&wz_session_core::network_message::NetworkMessage) -> bool + Send + Sync>;
 
 impl TokioReplyBacking {
@@ -234,8 +234,17 @@ impl TokioReplyBacking {
 
     /// A reply backing that asks `gate` of every answer before it pushes it through `producer`,
     /// as a unicast session's bundle asks its reply gate (`SessionLinkActions::send_declare`).
-    #[cfg(feature = "access-acl-multicast")]
-    pub fn gated(producer: MulticastTxProducer, gate: GroupReplyGate) -> Self {
+    /// Built where the session has either kind of answer to send (`Session::new_multicast`).
+    #[cfg(all(
+        feature = "access-acl-multicast",
+        feature = "codec-push",
+        any(
+            feature = "liveliness-token",
+            feature = "declare-subscriber",
+            all(feature = "query-queryable", feature = "codec-response-final")
+        )
+    ))]
+    pub(crate) fn gated(producer: MulticastTxProducer, gate: GroupReplyGate) -> Self {
         Self {
             producer,
             gate: Some(gate),
