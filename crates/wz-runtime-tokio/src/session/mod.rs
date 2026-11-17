@@ -3332,6 +3332,34 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        #[cfg(feature = "access-acl")]
+        let interceptors_egress: Arc<
+            <R as Runtime>::Mutex<crate::interceptor::InterceptorChain>,
+        > = Arc::new(R::new_mutex(crate::interceptor::InterceptorChain::new()));
+        #[cfg(feature = "access-acl-multicast")]
+        let group_link: Arc<std::sync::OnceLock<wz_session_core::link::LinkSubject>> =
+            Arc::new(std::sync::OnceLock::new());
+        // The answers a member's Interest or query is given leave through the group's reply
+        // backing and not through this session's send, which judges every other message the group
+        // sends: the backing asks the same verdict, over the same chain and link. Built where a
+        // build has either kind of answer to send.
+        #[cfg(all(
+            feature = "access-acl-multicast",
+            feature = "codec-push",
+            any(
+                feature = "liveliness-token",
+                feature = "declare-subscriber",
+                all(feature = "query-queryable", feature = "codec-response-final")
+            )
+        ))]
+        let reply_gate: crate::multicast_glue::GroupReplyGate = {
+            let chain = interceptors_egress.clone();
+            let link = group_link.clone();
+            Arc::new(move |msg| {
+                let link = link.get().unwrap_or(&transport::GROUP_LINK_UNKNOWN);
+                acl_admits_group::<R>(&chain, link, msg)
+            })
+        };
         // Open-debt item 913 — a member's interest is answered after a JOIN, as zenoh-pico
         // answers one (`vendor/zenoh-pico/src/session/interest.c` @
         // `// Push a join in case it's a new node`): the dispatch that stages the answer asks the
@@ -3352,14 +3380,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             let observer = observer.clone();
             let keyexprs = keyexprs.clone();
             let producer = tx.downgrade();
+            #[cfg(feature = "access-acl-multicast")]
+            let reply_gate = reply_gate.clone();
             tx.set_after_join(Arc::new(move || {
                 let Some(producer) = producer.upgrade() else {
                     return;
                 };
+                // The keyexprs a member asks for are not judged: no §5.16 rule governs a keyexpr
+                // declaration, which names a key and grants nothing.
                 keyexprs.answer(&producer);
-                let sink = wz_session_core::multicast_reply_sink::MulticastReplySink::new(
-                    crate::multicast_glue::TokioReplyBacking::new(producer),
-                );
+                #[cfg(feature = "access-acl-multicast")]
+                let backing =
+                    crate::multicast_glue::TokioReplyBacking::gated(producer, reply_gate.clone());
+                #[cfg(not(feature = "access-acl-multicast"))]
+                let backing = crate::multicast_glue::TokioReplyBacking::new(producer);
+                let sink = wz_session_core::multicast_reply_sink::MulticastReplySink::new(backing);
                 R::with_mutex_mut(&observer, |obs| obs.flush_declare_replies(&sink));
             }));
         }
@@ -3370,7 +3405,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 #[cfg(feature = "codec-push")]
                 tx,
                 #[cfg(feature = "access-acl-multicast")]
-                link: Arc::new(std::sync::OnceLock::new()),
+                link: group_link,
+                #[cfg(all(
+                    feature = "access-acl-multicast",
+                    feature = "query-queryable",
+                    feature = "codec-push",
+                    feature = "codec-response-final"
+                ))]
+                reply_gate,
                 #[cfg(feature = "query-get")]
                 request_ids: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 #[cfg(feature = "query-get")]
@@ -3416,10 +3458,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             // installs a policy through `InterceptorSink::set_interceptors`,
             // exactly as a forwarder is driven, so a session that is never
             // configured stays byte-identical to one built before this round.
+            // Built above, so the group's reply gate reads the same chain.
             #[cfg(feature = "access-acl")]
-            interceptors_egress: Arc::new(
-                R::new_mutex(crate::interceptor::InterceptorChain::new()),
-            ),
+            interceptors_egress,
             #[cfg(feature = "access-acl")]
             egress_policy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(all(

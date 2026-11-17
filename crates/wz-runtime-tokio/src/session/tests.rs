@@ -13433,6 +13433,103 @@ fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group
     );
 }
 
+/// A group the host governs asks its egress policy of the answer to a member's Interest, as a
+/// unicast session asks of its own (`session_egress_acl_governs_the_answer_to_an_interest`): a
+/// subscription whose declaration the policy denies is not announced to the group because a
+/// member asked for the subscribers the session holds. The answer leaves through the group's
+/// reply backing and not through the session's send, which is where every other message the
+/// group sends is judged, so the backing asks the same verdict.
+///
+/// ANTI-VACUITY: the ungoverned subscription is answered under the same policy, and the final
+/// ends the Interest, so "nothing was answered" cannot pass.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    feature = "declare-subscriber",
+    feature = "access-acl-multicast"
+))]
+#[test]
+fn a_governed_group_asks_its_egress_policy_of_an_interest_answer() {
+    use crate::interceptor::{InterceptorConfig, InterceptorSink};
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+    };
+    use wz_codecs::declare::DeclareOwnedVariant;
+    use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    const INTEREST: u64 = 7;
+    let (session, mut tap) = tapped_qos_group_session();
+    assert!(
+        session.set_group_link_subject(wz_session_core::link::LinkSubject {
+            kind: Some(wz_session_core::link::LinkKind::Udp),
+            interfaces: Some(vec!["eth0".to_owned()]),
+            cert_common_name: None,
+            cert_credential_zid: None,
+        })
+    );
+    session.set_interceptors(
+        InterceptorConfig::default()
+            .with_acl(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["denied/**".to_owned()],
+                    messages: vec![AclMessage::DeclareSubscriber],
+                    flow: AclFlow::Egress,
+                    permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
+                    usernames: Vec::new(),
+                    cert_common_names: Vec::new(),
+                }],
+            }))
+            .with_govern_multicast(true),
+    );
+    let _denied = session.declare_subscriber("denied/x", SubscribeOptions::default(), |_| {});
+    let _free = session.declare_subscriber("allowed/x", SubscribeOptions::default(), |_| {});
+    while tap.try_next().is_some() {}
+
+    let outcome = DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![NetworkMessage::Interest(
+            wz_session_core_test_support::interest_subscriber(
+                INTEREST, "**", /*current=*/ true, /*future=*/ false,
+                /*aggregate=*/ false,
+            ),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_multicast_iteration_event(IterationEvent::Poll(&outcome));
+    session.transport.tx.run_after_join();
+
+    let (mut answered, mut finals) = (0, 0);
+    while let Some(datagram) = tap.try_next() {
+        let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&datagram) else {
+            continue;
+        };
+        for message in parse_frame_payload(&payload).expect("the frame parses") {
+            let NetworkMessage::Declare(declare) = message else {
+                continue;
+            };
+            match (&declare.body, declare.interest_id) {
+                (DeclareOwnedVariant::CodecZenohDeclSubscriber(_), Some(INTEREST)) => answered += 1,
+                (DeclareOwnedVariant::CodecZenohDeclFinal(_), Some(INTEREST)) => finals += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        answered, 1,
+        "the answer announced to the group the subscription the policy denies"
+    );
+    assert_eq!(finals, 1, "the interest is still ended");
+}
+
 /// R2937 — the band of the next frame a publish pushed onto the group.
 #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 fn next_pushed_band(

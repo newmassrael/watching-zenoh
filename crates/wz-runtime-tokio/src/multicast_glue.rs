@@ -205,17 +205,102 @@ use crate::LinkDriver;
 #[derive(Clone)]
 pub struct TokioReplyBacking {
     producer: MulticastTxProducer,
+    /// The group's §5.16 egress verdict, asked of each answer before it is pushed
+    /// ([`Self::gated`]). `None` for a backing no session's policy can govern.
+    #[cfg(feature = "access-acl-multicast")]
+    gate: Option<GroupReplyGate>,
 }
+
+/// The §5.16 egress verdict a group session hands its reply backing: `true` admits the message.
+///
+/// Every other message a group session sends is judged by the session's own send, before it is
+/// pushed; an answer (a query's `Response`, or the `Declare` that answers a member's Interest)
+/// is staged by the observer and drained through the reply sink, which holds no session, so the
+/// backing is where it is judged. It reads the session's live chain and link, so a policy set
+/// later governs without the backing being built again.
+#[cfg(feature = "access-acl-multicast")]
+pub type GroupReplyGate =
+    std::sync::Arc<dyn Fn(&wz_session_core::network_message::NetworkMessage) -> bool + Send + Sync>;
 
 impl TokioReplyBacking {
     /// A reply backing that pushes through `producer`.
     pub fn new(producer: MulticastTxProducer) -> Self {
-        Self { producer }
+        Self {
+            producer,
+            #[cfg(feature = "access-acl-multicast")]
+            gate: None,
+        }
+    }
+
+    /// A reply backing that asks `gate` of every answer before it pushes it through `producer`,
+    /// as a unicast session's bundle asks its reply gate (`SessionLinkActions::send_declare`).
+    #[cfg(feature = "access-acl-multicast")]
+    pub fn gated(producer: MulticastTxProducer, gate: GroupReplyGate) -> Self {
+        Self {
+            producer,
+            gate: Some(gate),
+        }
+    }
+
+    /// `item` when the gate admits it. Asked of a `Response` and of a `Declare` that declares;
+    /// a withdrawal by id is not asked, as the unicast session's is not: it carries no key for
+    /// an egress rule to judge, and an egress rule refuses a governed message with no key, so
+    /// asking would keep a peer holding a declaration the session has let go. A `DeclareFinal`
+    /// is asked and admitted, since no rule governs it: it ends the member's Interest.
+    #[cfg(feature = "access-acl-multicast")]
+    fn admitted(&self, item: MulticastTxItem) -> Option<MulticastTxItem> {
+        use wz_session_core::network_message::NetworkMessage;
+        let Some(gate) = &self.gate else {
+            return Some(item);
+        };
+        match item {
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            MulticastTxItem::DeclareReply { declare } => {
+                use wz_codecs::declare::DeclareOwnedVariant as Body;
+                if matches!(
+                    declare.body,
+                    Body::CodecZenohUndeclKexpr(_)
+                        | Body::CodecZenohUndeclSubscriber(_)
+                        | Body::CodecZenohUndeclQueryable(_)
+                        | Body::CodecZenohUndeclToken(_)
+                ) {
+                    return Some(MulticastTxItem::DeclareReply { declare });
+                }
+                let message = NetworkMessage::Declare(declare);
+                if !gate(&message) {
+                    return None;
+                }
+                match message {
+                    NetworkMessage::Declare(declare) => {
+                        Some(MulticastTxItem::DeclareReply { declare })
+                    }
+                    _ => None,
+                }
+            }
+            #[cfg(feature = "codec-response")]
+            MulticastTxItem::Response { response } => {
+                let message = NetworkMessage::Response(response);
+                if !gate(&message) {
+                    return None;
+                }
+                match message {
+                    NetworkMessage::Response(response) => {
+                        Some(MulticastTxItem::Response { response })
+                    }
+                    _ => None,
+                }
+            }
+            other => Some(other),
+        }
     }
 }
 
 impl wz_session_core::multicast_reply_sink::MulticastReplyEnqueue for TokioReplyBacking {
     fn enqueue(&self, item: MulticastTxItem) {
+        #[cfg(feature = "access-acl-multicast")]
+        let Some(item) = self.admitted(item) else {
+            return;
+        };
         let _ = self.producer.push(item);
     }
 }

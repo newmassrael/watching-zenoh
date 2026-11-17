@@ -540,6 +540,16 @@ pub struct MulticastPayload {
     /// [`LinkSubject::UNKNOWN`](wz_session_core::link::LinkSubject::UNKNOWN).
     #[cfg(feature = "access-acl-multicast")]
     pub(crate) link: std::sync::Arc<std::sync::OnceLock<wz_session_core::link::LinkSubject>>,
+    /// The session's egress verdict over the group's link, which the reply backing of a query's
+    /// answers asks of each (`TokioReplyBacking::gated`): the answers leave below the session's
+    /// send. The backing of an Interest's answers holds its own copy (`Session::new_multicast`).
+    #[cfg(all(
+        feature = "access-acl-multicast",
+        feature = "query-queryable",
+        feature = "codec-push",
+        feature = "codec-response-final"
+    ))]
+    pub(crate) reply_gate: crate::multicast_glue::GroupReplyGate,
     /// The request ids of the queries this session sends. A group has no handshake to seed one,
     /// so the session counts from zero, as a unicast link does. Shared by the session's clones, as
     /// `link` is, so two handles of one session never send two queries under one id.
@@ -620,9 +630,14 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
         feature = "codec-response-final"
     ))]
     fn reply_route(payload: &Self::Payload) -> Self::ReplyRoute {
-        wz_session_core::multicast_reply_sink::MulticastReplySink::new(
-            crate::multicast_glue::TokioReplyBacking::new(payload.tx.clone()),
-        )
+        #[cfg(feature = "access-acl-multicast")]
+        let backing = crate::multicast_glue::TokioReplyBacking::gated(
+            payload.tx.clone(),
+            payload.reply_gate.clone(),
+        );
+        #[cfg(not(feature = "access-acl-multicast"))]
+        let backing = crate::multicast_glue::TokioReplyBacking::new(payload.tx.clone());
+        wz_session_core::multicast_reply_sink::MulticastReplySink::new(backing)
     }
 
     #[cfg(all(
