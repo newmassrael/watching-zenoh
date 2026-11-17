@@ -65,7 +65,14 @@ READS_CORPUS_OF = {"selector_term": "pcap"}
 PINNED: dict[str, tuple[tuple[bytes, str], ...]] = {
     # `wz_dissect_live_follow_lent` lent a container it then refused as shrunk,
     # and the next read of a flow panicked (`Dissection::follow_lent`).
-    "live": ((bytes([1, 3, 0, 128, 1, 1, 0, 0x44]), "corpus/zenoh-v1-10-0-tcp-full.pcap"),),
+    # The drain's two byte doors found a record's row by decoding every row
+    # before it, each by reading its whole unit again, and a pushed capture of
+    # NTP datagrams that read as many messages each took past ten seconds
+    # (`LiveDissection::resolve` finds the row on its head now).
+    "live": (
+        (bytes([1, 3, 0, 128, 1, 1, 0, 0x44]), "corpus/zenoh-v1-10-0-tcp-full.pcap"),
+        (bytes([0, 4, 0, 128, 1, 1, 0, 0x44]), "corpus/busylan-ntp.pcap"),
+    ),
 }
 
 # Inputs that once made a target fail and are small enough to read: the bytes
