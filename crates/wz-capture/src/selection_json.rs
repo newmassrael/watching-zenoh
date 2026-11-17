@@ -397,8 +397,9 @@ pub(crate) fn for_each_row_after<'d>(
         // is looked up by an index a front trim does not move: the field
         // document's own.
         let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+        let mut rows = crate::RowCursor::new(flow.frames());
         for position in order {
-            let held = flow.frames().row(position);
+            let held = rows.row(position);
             let frame: &wz_session_core::passive::PassiveFrame = &held;
             let key = list.map(|l| RowKey::of(l, &held));
             let verdict = verdicts
@@ -429,8 +430,9 @@ pub(crate) fn for_each_row_after<'d>(
         let from = |reached: u64, first: u64| (reached.max(first) - first) as usize;
         let start = mark.map_or(0, |m| from(m.produced, first_produced));
         let frames = flow.frames();
-        for position in start..frames.len() {
-            let frame = frames.row(position);
+        // One walk forward, which reads each unit once for all of its rows
+        // (see `RowCursor`): a lookup per position read a unit once per row.
+        for (position, frame) in (start..frames.len()).zip(frames.rows_from(start)) {
             let key = list.map(|l| RowKey::of(l, &frame));
             let verdict = verdicts
                 .zip(key.as_ref())

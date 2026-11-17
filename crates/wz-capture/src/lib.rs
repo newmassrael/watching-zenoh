@@ -1427,6 +1427,7 @@ impl<'a> CaptureOrder<'a> {
         CaptureOrderIter {
             lists: &self.lists,
             keys: self.keys.iter(),
+            cursors: ListCursors::new(&self.lists),
         }
     }
 }
@@ -1437,6 +1438,7 @@ impl<'a> IntoIterator for CaptureOrder<'a> {
 
     fn into_iter(self) -> Self::IntoIter {
         CaptureOrderIntoIter {
+            cursors: ListCursors::new(&self.lists),
             lists: self.lists,
             keys: self.keys.into_iter(),
         }
@@ -1452,27 +1454,102 @@ impl<'b, 'a> IntoIterator for &'b CaptureOrder<'a> {
     }
 }
 
+/// The rows of one list looked up by position, by a reader whose positions mostly
+/// go forward.
+///
+/// A list that keeps its messages as entries reads a message again from the
+/// framing unit it was read out of (open-debt item 924), and reading ONE row of a
+/// unit reads the whole unit. A reader that looked each message up by position
+/// read a unit of n messages n times, n squared messages decoded, which a fuzzed
+/// capture of 94 NTP flows (each datagram read as a run of transport messages)
+/// took past libFuzzer's 10 s (Fuzz run 44079370263). A cursor walks the list
+/// forward with one [`messages::RowIter`], which reads each unit once for all of
+/// its rows and skips ahead inside a unit it holds. A position behind the walk
+/// starts the walk again from it, so the answer never depends on the order the
+/// positions come in, only its cost does.
+pub(crate) struct RowCursor<'a> {
+    frames: messages::Messages<'a>,
+    /// The position of the row the walk reads next, and the walk.
+    walk: Option<(usize, messages::RowIter<'a>)>,
+}
+
+impl<'a> RowCursor<'a> {
+    pub(crate) fn new(frames: messages::Messages<'a>) -> Self {
+        Self { frames, walk: None }
+    }
+
+    /// The message at `position`; panics past the end, as [`messages::Messages::row`] does.
+    pub(crate) fn row(&mut self, position: usize) -> messages::Row<'a> {
+        let frames = self.frames;
+        let (next, rows) = match &mut self.walk {
+            Some((next, rows)) if *next <= position => (next, rows),
+            walk => {
+                let (next, rows) = walk.insert((position, frames.rows_from(position).iter()));
+                (next, rows)
+            }
+        };
+        let skip = position - *next;
+        *next = position + 1;
+        match rows.nth(skip) {
+            Some(row) => row,
+            None => frames.row(position),
+        }
+    }
+}
+
+impl core::fmt::Debug for RowCursor<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RowCursor")
+            .field("next", &self.walk.as_ref().map(|(next, _)| *next))
+            .finish_non_exhaustive()
+    }
+}
+
+/// A [`RowCursor`] for each list of a [`CaptureOrder`]: the walk visits each
+/// list's positions in increasing order, as the capture-order sort leaves them.
+#[derive(Debug)]
+struct ListCursors<'a>(Vec<RowCursor<'a>>);
+
+impl<'a> ListCursors<'a> {
+    fn new(lists: &[(FlowKey, messages::Messages<'a>)]) -> Self {
+        Self(
+            lists
+                .iter()
+                .map(|&(_, frames)| RowCursor::new(frames))
+                .collect(),
+        )
+    }
+
+    /// The message at `position` of list `list`.
+    fn row(&mut self, list: usize, position: usize) -> messages::Row<'a> {
+        self.0[list].row(position)
+    }
+}
+
 /// The message a walk key names, with its flow and list.
 fn resolve_key<'a>(
     lists: &[(FlowKey, messages::Messages<'a>)],
+    cursors: &mut ListCursors<'a>,
     (packet, list, position): (usize, usize, usize),
 ) -> (FlowKey, usize, usize, messages::Row<'a>) {
-    let (flow, frames) = lists[list];
-    (flow, list, packet, frames.row(position))
+    let flow = lists[list].0;
+    (flow, list, packet, cursors.row(list, position))
 }
 
 /// [`CaptureOrder`] walked by reference.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CaptureOrderIter<'b, 'a> {
     lists: &'b [(FlowKey, messages::Messages<'a>)],
     keys: core::slice::Iter<'b, (usize, usize, usize)>,
+    cursors: ListCursors<'a>,
 }
 
 impl<'a> Iterator for CaptureOrderIter<'_, 'a> {
     type Item = (FlowKey, usize, usize, messages::Row<'a>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(resolve_key(self.lists, *self.keys.next()?))
+        let key = *self.keys.next()?;
+        Some(resolve_key(self.lists, &mut self.cursors, key))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1487,13 +1564,15 @@ impl ExactSizeIterator for CaptureOrderIter<'_, '_> {}
 pub struct CaptureOrderIntoIter<'a> {
     lists: Vec<(FlowKey, messages::Messages<'a>)>,
     keys: alloc::vec::IntoIter<(usize, usize, usize)>,
+    cursors: ListCursors<'a>,
 }
 
 impl<'a> Iterator for CaptureOrderIntoIter<'a> {
     type Item = (FlowKey, usize, usize, messages::Row<'a>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(resolve_key(&self.lists, self.keys.next()?))
+        let key = self.keys.next()?;
+        Some(resolve_key(&self.lists, &mut self.cursors, key))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
