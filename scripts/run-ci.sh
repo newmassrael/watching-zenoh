@@ -7361,7 +7361,8 @@ layer_c1ax_cargo_test_routing_namespace() {
     # C1q), over the version JOIN that took it 35 -> 36. Each half was printed
     # by its own run; the sum is derived. The label moves with the value.
     # 38 -> 39, open-debt item 913's ungated group face case (see C1q), printed.
-    _runci_guarded_test "C1AX multicast_glue 39" 39 \
+    # 39 -> 45, the six cases C1q's note names, printed by hosted run 43914611055 and pc5.
+    _runci_guarded_test "C1AX multicast_glue 45" 45 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     # Item 900 follow-up — the `--sessions` group session's RE-JOIN loop, which
     # shares the router face's schedule and wait above. The demo compiles it
@@ -8522,13 +8523,18 @@ layer_c1af_cargo_test_shm() {
     # Debt 862 -- 42 -> 44, MEASURED by running this exact command: an owner that lets go
     # last finds its chunk reclaimed whoever collected it (a held-collection test reddened
     # by its mutation, and the real interleaving on four sweeping threads).
-    _runci_guarded_test C1af 44 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # 44 -> 45, the session keys counted as a session's (aff700b6c4), printed by hosted run
+    # 43914611055 and pc5.
+    _runci_guarded_test C1af 45 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3106 -- the segment module's own tests (`posix_shm`), which no lane counted: the cleanup
     # that removes a segment no one holds and keeps one a process holds, and whether a mapping may
     # still be trusted while its name names its object, for the writable mapping of a metadata
     # segment and for the read-only one of a data segment. THREE.
-    _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib posix_shm --quiet \
+    # 3 -> 17, printed on pc5: the module split by platform (606b15d758) and the name a mapped
+    # segment keeps under its provider's lock (90861c7923); `posix_shm::unix` holds 10 of them
+    # and `posix_shm::unix::lifetime` 7. Hosted stopped C1af at its first guard and read none.
+    _runci_guarded_test C1af 17 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib posix_shm --quiet \
         || return 1
     # R3110 -- the auth segment's own tests (`shm_auth_segment`), which no lane counted: the
     # challenge, the protocol list and the receiver's handoff (16), and the node as a SENDER (6)
@@ -8572,7 +8578,11 @@ layer_c1af_cargo_test_shm() {
     # being selected would stop reddening it. FIFTEEN: ten for a Push and five for the value of
     # a query and the payload of a reply, which sit behind `codec-request` and `codec-response`,
     # so this leg carries both.
-    _runci_guarded_test C1af 15 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp,codec-request,codec-response --lib shm_relay --quiet \
+    # 2026-11-17 -- 15 -> 17, MEASURED on pc2: 3c7778f8ca added the two relays of a router
+    # node's multicast group (a descriptor with one reference for the group, and a member's
+    # descriptor mapped there and refused elsewhere). Hosted C1af stopped at the guard above
+    # since then, so this one was never read.
+    _runci_guarded_test C1af 17 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp,codec-request,codec-response --lib shm_relay --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must
@@ -12302,8 +12312,10 @@ layer_c1cb_cargo_test_init_ack_admission() {
     # expected 31; the build host printed `34 passed`).
     # 34 -> 37: three tests of the session driver loop that landed without moving this guard
     # (hosted run 42505060630 read `37 passed`).
+    # 37 -> 39: the batch read on behind a Frame the SN gate refuses (6a04e2c796) and every
+    # link ended on a session-scope Close (363841a62a); hosted run 43914611055 and pc5 read 39.
     wz_test_args wz-runtime-tokio session_fsm_driver_loop
-    _runci_guarded_test C1cb 37 \
+    _runci_guarded_test C1cb 39 \
         cargo test -p wz-runtime-tokio "${WZ_TEST_ARGS[@]}" --quiet || return 1
 }
 
@@ -13274,11 +13286,14 @@ layer_c1q_multicast_glue() {
     # Each half was printed by its own run; the sum is derived.
     # 35/39/41 -> 36/40/42, open-debt item 913's ungated group face case, printed by
     # each run on a build host.
-    _runci_guarded_test C1q 36 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    # 36/40/42 -> 42/46/48, the group face's recorded member bound, the multicast
+    # max_sessions key, the preset's Join rule and the configured beacon profile (f129e1303d,
+    # d5413a2231, c018e7390d, e42fc67341), printed by each run on pc5.
+    _runci_guarded_test C1q 42 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 40 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 46 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 42 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 48 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
     # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
     # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg
@@ -17499,7 +17514,9 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
     # the `.zenoh_datainfo` sidecar (upstream's row, byte for byte, and the
     # lock that refuses a second store) and the key <-> path rules (R2573's six
     # plus the walk's admission: upstream's `keyexpr::new`, ported unbounded).
-    _runci_guarded_test "C1bg filesystem_datainfo" 9 \
+    # datainfo 9 -> 10, the ExprId, RequestId and schema bytes carried through (d34329edfc),
+    # printed by hosted run 43914611055 and pc5.
+    _runci_guarded_test "C1bg filesystem_datainfo" 10 \
         cargo test -p wz-runtime-tokio \
         --features storage-backend-filesystem --lib filesystem_datainfo --quiet || return 1
     _runci_guarded_test "C1bg filesystem_keypath" 9 \
