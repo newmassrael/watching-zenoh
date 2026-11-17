@@ -18244,8 +18244,10 @@ layer_c1bp_plugin_dynamic_loading() {
         --exact "${WZ_TEST_PREFIX}wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico" || return 1
     # `plugins_loading/enabled` and `plugins_loading/search_dirs`: the same document to a zenohd
     # and to this build's storage host, which reads both keys only with `plugin-dynamic-loading`
-    # and takes a `--config` file only with `zenoh-config`. The zenohd is the one the `interop`
-    # job builds before this lane.
+    # and takes a `--config` file only with `zenoh-config`. A row hands it either as the file each
+    # daemon reads, whose `enabled: false` both turn on, or as the key stated past that override
+    # (zenohd's `--cfg`, the storage host's flags). The zenohd is the one the `interop` job
+    # builds before this lane.
     wz_test_args wz-integration-tests wz_storage_host_plugins_loading_matches_zenohd
     _runci_guarded_test "C1bp plugins_loading vs zenohd" 2 \
         cargo test -p wz-integration-tests \
