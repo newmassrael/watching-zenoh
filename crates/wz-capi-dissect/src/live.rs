@@ -920,7 +920,10 @@ impl LiveDissection {
     /// the chain was joined in, which never crossed the wire in one piece.
     pub fn reassembled_bytes(&self, record: &WzDissectRecord) -> ReassembledBytes<'_> {
         let frame = match self.resolve(record) {
-            Ok((_, _, _, frame)) => frame,
+            Ok((_, _, index, list)) => match list.get(index) {
+                Some(frame) => frame,
+                None => return ReassembledBytes::Retired,
+            },
             Err(wz_capture::MessageBytes::NoSource(_)) => return ReassembledBytes::NotReassembled,
             Err(_) => return ReassembledBytes::Retired,
         };
@@ -935,8 +938,17 @@ impl LiveDissection {
     }
 
     /// The record-to-frame walk both byte doors share: which list the record
-    /// came out of, where in it, and the frame itself — or the answer to give
-    /// when there is no such frame.
+    /// came out of, where in it, and the list itself — or the answer to give
+    /// when there is no such message.
+    ///
+    /// The position is found on the row HEADS, which is what the drain wrote
+    /// the record from ([`record_of`]), and no row is decoded here. A list that
+    /// keeps its rows as index entries (open-debt item 924) decodes a row by
+    /// reading its whole framing unit again, so a walk that decoded every row
+    /// up to the one asked for cost a unit's decode per row it passed, and
+    /// draining a list record by record cost the square of its length in unit
+    /// decodes: a 20 KB capture of short datagrams, each read as many
+    /// messages, held the `live` fuzz target past its ten seconds.
     #[allow(clippy::type_complexity)]
     fn resolve(
         &self,
@@ -946,7 +958,7 @@ impl LiveDissection {
             wz_capture::link::FlowKey,
             wz_capture::MessageListOrigin,
             usize,
-            wz_capture::messages::Row<'_>,
+            wz_capture::messages::Messages<'_>,
         ),
         wz_capture::MessageBytes<'_>,
     > {
@@ -995,16 +1007,16 @@ impl LiveDissection {
                 "the list this record came out of is no longer held",
             )));
         };
-        let Some((index, frame)) = list.iter().enumerate().find(|(_, f)| {
-            f.direction == direction
-                && f.stream_offset as u64 == record.anchor
-                && f.batch_index as u32 == record.batch_index
+        let Some(index) = list.heads_from(0).position(|head| {
+            head.direction == direction
+                && head.stream_offset as u64 == record.anchor
+                && head.batch_index as u32 == record.batch_index
         }) else {
             return Err(wz_capture::MessageBytes::Retired(String::from(
                 "this message is no longer in its list",
             )));
         };
-        Ok((flow, origin, index, frame))
+        Ok((flow, origin, index, list))
     }
 
     /// R2453 (open-debt item 700) — THE ANALYSIS PLANES OF WHAT THIS HANDLE HAS
