@@ -3766,28 +3766,18 @@ impl FlowDissection {
     /// held) answers with the packet of its anchor alone, which is what
     /// [`Self::packet_for`] has always named. `None` when that is not
     /// answerable either (see [`crate::tcp::StreamAssembler::packets_in`]).
-    pub fn packets_carrying(&self, frame: &PassiveFrame) -> Option<Vec<usize>> {
-        self.packets_at(frame.direction, frame.stream_offset, frame.wire_end)
-    }
-
-    /// [`Self::packets_carrying`] for a message read by its head, which holds
-    /// every coordinate the answer reads: a reader that has only a position
-    /// asks this rather than decode the message's whole unit again.
-    pub fn packets_carrying_head(&self, head: &messages::RowHead) -> Option<Vec<usize>> {
-        self.packets_at(head.direction, head.stream_offset, head.wire_end)
-    }
-
-    fn packets_at(
-        &self,
-        direction: Direction,
-        stream_offset: usize,
-        wire_end: Option<usize>,
-    ) -> Option<Vec<usize>> {
-        let assembler = self.assembler(direction);
-        match wire_end {
-            Some(end) => assembler.packets_in(stream_offset, end),
+    ///
+    /// It takes the message's HEAD, which holds every coordinate the answer
+    /// reads: a list that keeps a message as an entry decodes it by reading its
+    /// whole unit again (open-debt item 924), and a reader placing rows it has
+    /// only the positions of paid a unit per row for coordinates it never read
+    /// (Fuzz run 44079370263).
+    pub fn packets_carrying(&self, head: &messages::RowHead) -> Option<Vec<usize>> {
+        let assembler = self.assembler(head.direction);
+        match head.wire_end {
+            Some(end) => assembler.packets_in(head.stream_offset, end),
             None => assembler
-                .packet_for_offset(stream_offset)
+                .packet_for_offset(head.stream_offset)
                 .map(|packet| alloc::vec![packet]),
         }
     }
@@ -18553,8 +18543,8 @@ mod ws_flow_tests {
         assert!(flow.framing().is_websocket());
         let carried: Vec<Option<Vec<usize>>> = flow
             .frames()
-            .iter()
-            .map(|f| flow.packets_carrying(&f))
+            .heads_from(0)
+            .map(|head| flow.packets_carrying(&head))
             .collect();
         assert_eq!(
             carried,
@@ -20660,8 +20650,8 @@ mod tls_flow_tests {
         assert_eq!(ends, alloc::vec![Some(67), Some(77), Some(87)]);
         let carried: Vec<Option<Vec<usize>>> = d.flows()[0]
             .frames()
-            .iter()
-            .map(|f| d.flows()[0].packets_carrying(&f))
+            .heads_from(0)
+            .map(|head| d.flows()[0].packets_carrying(&head))
             .collect();
         assert_eq!(
             carried,

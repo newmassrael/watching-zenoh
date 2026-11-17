@@ -177,7 +177,7 @@ pub fn selected_packets_coordinated(
                 flow,
                 position,
             } => {
-                match flow.packets_carrying_head(&head_at(flow.frames(), position)) {
+                match flow.packets_carrying(&head_at(flow.frames(), position)) {
                     Some(packets) => picked.extend(packets),
                     None => summary.rows_unplaced += 1,
                 }
@@ -237,7 +237,7 @@ fn stream_context(
     unplaced: &mut u64,
 ) {
     for position in context_rows(flow.frames(), picked) {
-        match flow.packets_carrying_head(&head_at(flow.frames(), position)) {
+        match flow.packets_carrying(&head_at(flow.frames(), position)) {
             Some(packets) => into.extend(packets),
             None => *unplaced += 1,
         }
