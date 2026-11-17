@@ -3194,6 +3194,15 @@ impl<'a> Messages<'a> {
         }
     }
 
+    /// The head of the message at `index`, decoding nothing; `None` past the
+    /// end. What a reader that needs only where a message stands asks for: a
+    /// [`Self::get`] of a row a list keeps as an entry reads its whole unit
+    /// again (open-debt item 924).
+    #[inline]
+    pub fn head(&self, index: usize) -> Option<RowHead> {
+        self.heads_from(index).next()
+    }
+
     /// The heads of the messages from position `from` on, oldest first: what
     /// a reader that decodes nothing reads.
     pub fn heads_from(&self, from: usize) -> Heads<'a> {

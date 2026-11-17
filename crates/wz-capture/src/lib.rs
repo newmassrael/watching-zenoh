@@ -3767,11 +3767,27 @@ impl FlowDissection {
     /// [`Self::packet_for`] has always named. `None` when that is not
     /// answerable either (see [`crate::tcp::StreamAssembler::packets_in`]).
     pub fn packets_carrying(&self, frame: &PassiveFrame) -> Option<Vec<usize>> {
-        let assembler = self.assembler(frame.direction);
-        match frame.wire_end {
-            Some(end) => assembler.packets_in(frame.stream_offset, end),
+        self.packets_at(frame.direction, frame.stream_offset, frame.wire_end)
+    }
+
+    /// [`Self::packets_carrying`] for a message read by its head, which holds
+    /// every coordinate the answer reads: a reader that has only a position
+    /// asks this rather than decode the message's whole unit again.
+    pub fn packets_carrying_head(&self, head: &messages::RowHead) -> Option<Vec<usize>> {
+        self.packets_at(head.direction, head.stream_offset, head.wire_end)
+    }
+
+    fn packets_at(
+        &self,
+        direction: Direction,
+        stream_offset: usize,
+        wire_end: Option<usize>,
+    ) -> Option<Vec<usize>> {
+        let assembler = self.assembler(direction);
+        match wire_end {
+            Some(end) => assembler.packets_in(stream_offset, end),
             None => assembler
-                .packet_for_offset(frame.stream_offset)
+                .packet_for_offset(stream_offset)
                 .map(|packet| alloc::vec![packet]),
         }
     }

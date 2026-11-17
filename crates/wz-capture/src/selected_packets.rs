@@ -71,7 +71,21 @@ use alloc::vec::Vec;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
-use wz_session_core::passive_messages::Messages;
+use wz_session_core::passive_messages::{Messages, RowHead};
+
+/// The head of the row at `position` of `list`, which a walk handed over: where
+/// the message stands, read without decoding it. A row a list keeps as an entry
+/// is decoded by reading its whole unit again (open-debt item 924), so looking
+/// rows up by position for their coordinates cost a unit per row, the square of
+/// a unit's messages over it (Fuzz run 44079370263).
+fn head_at(list: Messages<'_>, position: usize) -> RowHead {
+    list.head(position).unwrap_or_else(|| {
+        panic!(
+            "row {position} of a list of {} that the walk handed over",
+            list.len()
+        )
+    })
+}
 
 use crate::fields_json::{judged_by, RowCoordinates, RowVerdict};
 use crate::selection_json::{for_each_row, JudgesRows, RowSource};
@@ -163,7 +177,7 @@ pub fn selected_packets_coordinated(
                 flow,
                 position,
             } => {
-                match flow.packets_carrying(&flow.frames().row(position)) {
+                match flow.packets_carrying_head(&head_at(flow.frames(), position)) {
                     Some(packets) => picked.extend(packets),
                     None => summary.rows_unplaced += 1,
                 }
@@ -174,7 +188,7 @@ pub fn selected_packets_coordinated(
                 flow,
                 position,
             } => {
-                picked.insert(flow.frames().row(position).stream_offset);
+                picked.insert(head_at(flow.frames(), position).stream_offset);
                 datagram_picks.entry(index).or_default().push(position);
             }
             // Scouting rows are unjudged by construction and never reach here;
@@ -202,7 +216,7 @@ pub fn selected_packets_coordinated(
         for (index, positions) in &datagram_picks {
             let frames = d.datagram_flows()[*index].frames();
             for position in context_rows(frames, positions) {
-                needed.insert(frames.row(position).stream_offset);
+                needed.insert(head_at(frames, position).stream_offset);
             }
         }
         let added: Vec<usize> = needed.difference(&picked).copied().collect();
@@ -223,7 +237,7 @@ fn stream_context(
     unplaced: &mut u64,
 ) {
     for position in context_rows(flow.frames(), picked) {
-        match flow.packets_carrying(&flow.frames().row(position)) {
+        match flow.packets_carrying_head(&head_at(flow.frames(), position)) {
             Some(packets) => into.extend(packets),
             None => *unplaced += 1,
         }
@@ -240,9 +254,9 @@ fn stream_context(
         let reach = if flow.framing().is_encrypted() {
             picked
                 .iter()
-                .map(|&position| flow.frames().row(position))
-                .filter(|frame| frame.direction == direction)
-                .filter_map(|frame| frame.wire_end)
+                .map(|&position| head_at(flow.frames(), position))
+                .filter(|head| head.direction == direction)
+                .filter_map(|head| head.wire_end)
                 .max()
                 .or(first)
         } else {
