@@ -2204,6 +2204,11 @@ rand = { version = "0.8", optional = true }
 # + `allocator-api2` — match the std::collections::HashMap behaviour
 # the existing call sites already assume.
 hashbrown = "0.15"
+# Open-debt 953 — the allocator trait hashbrown's maps take (`hashbrown` already links this
+# crate), named here for its `std` half: the `Allocator` of `std::alloc::System`, which the
+# lock-order checker of a debug build (`sync::lock_order`) keeps its tables on, so a program's
+# counting `#[global_allocator]` counts the node and not the checker.
+allocator-api2 = "0.2"
 # R311di-pre-a — no_std-compatible atomic ints. `portable-atomic`
 # provides AtomicU64 with the same API as std::sync::atomic::AtomicU64;
 # on AP (this crate, has native u64 atomics) it forwards directly to
