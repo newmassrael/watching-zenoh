@@ -7034,7 +7034,9 @@ layer_c1bb_cargo_test_qos() {
     # ARCHITECTURE section 9.1 — 13 -> 16: a batch frame of an aggregate opened
     # in its routed link's lent slot, the same frame when its conduit moves to
     # the other link, and when its lender leaves the set. MEASURED: 16 passed.
-    _runci_guarded_test C1bb 16 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
+    # 2026-11-18 -- 16 -> 19, printed on a build host: a session-scope Close ends every link
+    # (363841a62a, three cases).
+    _runci_guarded_test C1bb 19 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
     # The `QoSLink` arm of the establishment-extension rejects: the Close reason
     # an acceptor sends for a body it cannot read, and the control that a readable
@@ -7695,10 +7697,14 @@ layer_c1ay_cargo_test_router_hat() {
     # routes (a pair test). PRINTED by each command on pc2.
     # The c2 integration (client hat and admin, router clock): 310 -> 324.
     # MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward 324" 324 \
+    # 2026-11-18 -- 324 -> 330, printed on pc2: the routing commits since (22c5dc0692 three,
+    # 9a8f022b2d, 32aa20e565, 121e7a9ec4, 647a2a812a); every router_forward guard below moved by
+    # the same six, each printed on pc2.
+    _runci_guarded_test "C1AY router_forward 330" 330 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward qos 329" 329 \
+    # 2026-11-18 -- 329 -> 335, printed on pc2 (the six of the first guard's note).
+    _runci_guarded_test "C1AY router_forward qos 335" 335 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -7736,7 +7742,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Step (b), step 5: 266 -> 267.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 324 -> 334 (see the first arm). PRINTED.
     # The c2 integration: 338 -> 353. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward mcast-faces 353" 353 \
+    # 2026-11-18 -- 353 -> 359, printed on a build host (the six of `router_forward 330`).
+    _runci_guarded_test "C1AY router_forward mcast-faces 359" 359 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -7762,7 +7769,8 @@ layer_c1ay_cargo_test_router_hat() {
     # `config-mutate-runtime` must be OFF, which this arm and the hotreload arm below both are.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 305 -> 314 (see the first arm). PRINTED.
     # The c2 integration: 318 -> 332. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward 332" 332 \
+    # 2026-11-18 -- 332 -> 338, printed on pc2 (the six of `router_forward 330`).
+    _runci_guarded_test "C1AY router_forward 338" 338 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -7783,7 +7791,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Item 751 step 7c -- 255 -> 256, the same inert witness as the arm above.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 308 -> 317 (see the first arm). PRINTED.
     # The c2 integration: 321 -> 335. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward hotreload 335" 335 \
+    # 2026-11-18 -- 335 -> 341, printed on pc2 (the six of `router_forward 330`).
+    _runci_guarded_test "C1AY router_forward hotreload 341" 341 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -7803,7 +7812,8 @@ layer_c1ay_cargo_test_router_hat() {
     # so this arm alone moves. Measured on the build host.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 355 -> 364 (see the first arm). PRINTED.
     # The c2 integration: 368 -> 382. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward 382" 382 \
+    # 2026-11-18 -- 382 -> 388, printed on pc2 (the six of `router_forward 330`).
+    _runci_guarded_test "C1AY router_forward 388" 388 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -7811,7 +7821,8 @@ layer_c1ay_cargo_test_router_hat() {
     # appear here. The number moves because the plane correctly is not there.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 297 -> 306 (see the first arm). PRINTED.
     # The c2 integration: 310 -> 324. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward multicast 324" 324 \
+    # 2026-11-18 -- 324 -> 330, printed on pc2 (the six of `router_forward 330`).
+    _runci_guarded_test "C1AY router_forward multicast 330" 330 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -7826,7 +7837,8 @@ layer_c1ay_cargo_test_router_hat() {
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 299 -> 308 (see the first arm). PRINTED.
     # The c2 integration: 312 -> 328. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward linkstate 328" 328 \
+    # 2026-11-18 -- 328 -> 334, printed on pc2 (the six of `router_forward 330`).
+    _runci_guarded_test "C1AY router_forward linkstate 334" 334 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -7849,7 +7861,8 @@ layer_c1ay_cargo_test_router_hat() {
     # on this feature through the same fixture. PRINTED by the command.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 310 -> 319 (see the first arm). PRINTED.
     # The c2 integration: 323 -> 338. MEASURED on pc2 on this exact command.
-    _runci_guarded_test "C1AY router_forward interest broker 338" 338 \
+    # 2026-11-18 -- 338 -> 344, printed on pc2 (the six of `router_forward 330`).
+    _runci_guarded_test "C1AY router_forward interest broker 344" 344 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -8015,7 +8028,10 @@ layer_c1ay_cargo_test_router_hat() {
     # declares a storage, several listen endpoints refused, the withheld
     # verdicts), unconditional inside the module. MEASURED by
     # `guarded_count_gate.py` on this exact command: 42 passed.
-    _runci_guarded_test "C1AY stock_config_tests 42" 42 \
+    # 2026-11-18 -- 42 -> 57, printed on a build host: the 8e configuration witnesses (f579c00540
+    # eight, 736f35bec1 four, ddcf3426ce and the keys honoured beside them). Hosted C1ay stopped
+    # at its first guard since, so this one was never read.
+    _runci_guarded_test "C1AY stock_config_tests 57" 57 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -8073,7 +8089,8 @@ layer_c1ay_cargo_test_router_hat() {
     # `scouting-responder` like the cases around it, so the leg above does not
     # compile it. MEASURED by `guarded_count_gate.py` on this exact command: 48
     # passed.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 48" 48 \
+    # 2026-11-18 -- 48 -> 63, printed on a build host: the fifteen of the guard above.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 63" 63 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
@@ -9240,7 +9257,9 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     wz_test_args wz-runtime-tokio session_multilink_readd_e2e
     _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
-    _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
+    # 2026-11-18 -- 5 -> 8, printed on a build host: a session-scope Close ends every link
+    # (363841a62a, three cases).
+    _runci_guarded_test C1ba 8 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
         || return 1
     # R311y219a — the per-face priority-band POLICY unit test lives in
     # accept_loop::tests (gated transport-multilink) inside the
@@ -13031,7 +13050,10 @@ layer_c1l_reassembly() {
     # 43 -> 47: the four tests of the configured bound
     # (`transport/link/rx/max_message_size`) joined `reassembly_dispatch`.
     # MEASURED under this feature set: `47 passed`.
-    _runci_guarded_test C1l 47 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
+    # 2026-11-18 -- 47 -> 61, printed on pc2 and by hosted run 44032688827: a fault ends the chain
+    # and not the process (90824ba2ec, twelve), the displaced chain reported (15e2b6a495) and the
+    # pool-overflow policy (8075950284).
+    _runci_guarded_test C1l 61 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
         || return 1
     wz_test_args wz-runtime-tokio layer3_reassembly_rx
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly "${WZ_TEST_ARGS[@]}" --quiet \
@@ -13041,7 +13063,8 @@ layer_c1l_reassembly() {
     # the five `duty_tests`, none of them feature-gated; 42 -> 43 with the
     # duplicate-first test, also ungated; 43 -> 47 with the four bound tests,
     # ungated as well (MEASURED: `47 passed`).
-    _runci_guarded_test C1l 47 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
+    # 2026-11-18 -- 47 -> 61, the fourteen of the guard above, ungated, printed.
+    _runci_guarded_test C1l 61 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
         || return 1
     # R2238 (open-debt item 580) — 1 -> 2: the finite-fragment-budget abandon
     # e2e joined this file. MEASURED under THIS feature set (which is not the
@@ -13171,7 +13194,10 @@ layer_c1p_multicast() {
     # Session duties made causal -- both +1, DERIVED and not printed (the agent
     # that wrote it builds nothing): `multicast_dispatch`'s ungated
     # `link_duties_follow_the_session_machine`.
-    _runci_guarded_test C1p 49 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    # 2026-11-18 -- 49 -> 65, printed on a build host: the group's max_sessions (d5413a2231),
+    # compressed batches (b56c4fc48f), the address index (824cd35015) and the Join and chain cases
+    # beside them; C1p was not reached on hosted since.
+    _runci_guarded_test C1p 65 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
     # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
     # only the no-room case compiles here; the rest need `codec-response-final`
@@ -13195,7 +13221,9 @@ layer_c1p_multicast() {
     # 78 -> 79, the printed number: the compressing multicast group's frame budget,
     # `a_compressing_group_frames_one_byte_under_its_batch`, is ungated; its four
     # siblings need `transport-compression`, which no arm here selects.
-    _runci_guarded_test C1p 79 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # 2026-11-18 -- 79 -> 101, printed on a build host: the cases of the guard above and the
+    # reassembly-gated ones beside them.
+    _runci_guarded_test C1p 101 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
