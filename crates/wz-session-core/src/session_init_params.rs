@@ -25,7 +25,7 @@ use wz_codecs::whatami::WhatAmI;
 
 use crate::signing_key::SigningKey;
 
-pub use crate::session_zid::{SessionZid, ZidLengthError, ZID_MAX};
+pub use crate::session_zid::{SessionZid, ZidError, ZID_MAX};
 
 /// The longest cookie a session keeps on the `session-slot` profile, in bytes: the build's
 /// `HANDSHAKE_COOKIE_BYTES` limit, 128 unless it says otherwise. It is the node's own bound and not
@@ -81,12 +81,12 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
 }
 
 /// A zid for [`SessionInitParams::zid`] from bytes the caller wrote itself.
-/// Panics when `src` is not one to [`ZID_MAX`] bytes: a zid of a length the wire
-/// cannot carry is a construction mistake there, not a runtime condition. A zid
-/// that arrives from configuration is made with [`SessionZid::new`], whose
-/// refusal the caller reports.
+/// Panics when `src` is not one to [`ZID_MAX`] bytes or is all zero: a zid the
+/// wire cannot carry is a construction mistake there, not a runtime condition. A
+/// zid that arrives from configuration or from the wire is made with
+/// [`SessionZid::new`], whose refusal the caller reports.
 pub fn zid_bytes(src: &[u8]) -> SessionZid {
-    SessionZid::new(src).expect("a zid is 1 to 16 bytes on the wire")
+    SessionZid::new(src).expect("a zid is 1 to 16 bytes, not all zero")
 }
 
 /// A cookie for [`SessionInitParams::cookie`], written the same way on every

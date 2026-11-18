@@ -70,7 +70,7 @@ use sce_forge_runtime::codec::VecSink;
 use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink, SliceSink};
 
 use crate::accept_state::{AcceptState, NegotiatedExtensions};
-use crate::session_init_params::{session_bytes, SessionBytes};
+use crate::session_zid::SessionZid;
 use crate::signing_key::{cookie_payload_tag, cookie_payload_tag_verify, SigningKey};
 
 /// Bytes of HMAC-SHA256 kept as the authentication tag.
@@ -106,9 +106,9 @@ const COOKIE_EXT_BYTES: usize = NegotiatedExtensions::WIDTH;
 /// nothing here that wz does not already hold in a `SessionLinkActions` slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptCookieState {
-    /// The peer's claimed zid (`body.zid`, 1..=16 bytes). Feeds both
+    /// The peer's claimed zid (`body.zid`). Feeds both
     /// `inbound_peer_zid` and `remote_peer_zid`, which take the same value.
-    pub peer_zid: SessionBytes<MAX_ZID_BYTES>,
+    pub peer_zid: SessionZid,
     /// The peer's WhatAmI as the raw 2-bit wire form (`body.whatami()`).
     pub peer_whatami: u8,
     /// The peer's packed `sn_res` byte, as `PeerInitCaps` reads it.
@@ -277,7 +277,7 @@ pub enum CookieError {
 #[cfg(feature = "alloc")]
 pub fn encode_accept_cookie(key: &SigningKey, state: &AcceptCookieState) -> Option<Vec<u8>> {
     let view = AcceptCookieView {
-        peer_zid: &state.peer_zid,
+        peer_zid: state.peer_zid.as_slice(),
         peer_whatami: state.peer_whatami,
         sn_res: state.sn_res,
         batch_size: state.batch_size,
@@ -437,9 +437,10 @@ pub fn decode_accept_cookie(
     }
     let multilink = MultilinkAcceptState::decode(&payload[tail_at..])?;
     Ok(AcceptCookieState {
-        // At most MAX_ZID_BYTES, checked above: the fixed form always fits.
-        peer_zid: session_bytes::<MAX_ZID_BYTES>(&payload[COOKIE_HEAD_BYTES..ext_at])
-            .ok_or(CookieError::Malformed)?,
+        // The tag verified, so these are bytes this node wrote from a zid; a
+        // payload that names none is still refused rather than trusted.
+        peer_zid: SessionZid::new(&payload[COOKIE_HEAD_BYTES..ext_at])
+            .map_err(|_| CookieError::Malformed)?,
         peer_whatami,
         sn_res,
         batch_size,
@@ -467,7 +468,7 @@ mod tests {
 
     fn state() -> AcceptCookieState {
         AcceptCookieState {
-            peer_zid: session_bytes::<MAX_ZID_BYTES>(&[0xAB; 4]).expect("a 4-byte zid fits"),
+            peer_zid: SessionZid::from([0xAB; 4]),
             peer_whatami: 1,
             sn_res: 2,
             batch_size: 65_535,
@@ -547,7 +548,7 @@ mod tests {
     fn the_widest_cookie_fits_the_generated_field() {
         let k = key();
         let mut s = state();
-        s.peer_zid = session_bytes::<MAX_ZID_BYTES>(&[0xFF; MAX_ZID_BYTES]).expect("16 bytes fit");
+        s.peer_zid = SessionZid::from([0xFF; MAX_ZID_BYTES]);
         s.multilink = MultilinkAcceptState(None);
         let wire = encode_accept_cookie(&k, &s).expect("a 16-byte zid encodes");
         assert_eq!(
@@ -604,20 +605,45 @@ mod tests {
         );
     }
 
-    /// A zid the wire cannot carry is refused at encode rather than minted.
+    /// A zid the wire cannot carry is refused at encode rather than minted. The owned state
+    /// holds a `SessionZid` and cannot name one; the view borrows bytes, and refuses them.
     #[test]
     fn a_zid_outside_the_protocol_bound_does_not_encode() {
         let k = key();
-        let mut s = state();
-        s.peer_zid = session_bytes::<MAX_ZID_BYTES>(&[]).expect("no bytes fit");
-        assert!(encode_accept_cookie(&k, &s).is_none());
-        // One byte too many is a value the fixed form cannot hold at all, which
-        // is the bound enforced earlier; the growable form can and is refused.
-        #[cfg(not(feature = "session-slot"))]
-        {
-            s.peer_zid = vec![0u8; MAX_ZID_BYTES + 1];
-            assert!(encode_accept_cookie(&k, &s).is_none());
+        let s = state();
+        let mut out = [0u8; ACCEPT_COOKIE_MAX_BYTES + 1];
+        for zid in [&[][..], &[0x11; MAX_ZID_BYTES + 1][..]] {
+            let view = AcceptCookieView {
+                peer_zid: zid,
+                peer_whatami: s.peer_whatami,
+                sn_res: s.sn_res,
+                batch_size: s.batch_size,
+                nonce: s.nonce,
+                negotiated: s.negotiated,
+                multilink: None,
+            };
+            assert!(encode_accept_cookie_into(&k, &view, &mut out).is_none());
         }
+    }
+
+    /// A payload whose zid bytes are all zero is refused at decode, as a zid
+    /// no node has, even under a valid tag.
+    #[test]
+    fn a_cookie_naming_a_zero_zid_is_malformed() {
+        let k = key();
+        let s = state();
+        let view = AcceptCookieView {
+            peer_zid: &[0, 0, 0, 0],
+            peer_whatami: s.peer_whatami,
+            sn_res: s.sn_res,
+            batch_size: s.batch_size,
+            nonce: s.nonce,
+            negotiated: s.negotiated,
+            multilink: None,
+        };
+        let mut out = [0u8; ACCEPT_COOKIE_MAX_BYTES];
+        let wire = encode_accept_cookie_into(&k, &view, &mut out).expect("the view writes");
+        assert_eq!(decode_accept_cookie(&k, wire), Err(CookieError::Malformed));
     }
 
     /// THE CLAIM THIS ROUND EXISTS FOR: the cookie carries a state a BIT

@@ -17,6 +17,7 @@ use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
+use wz_session_core::session_zid::SessionZid;
 
 use std::sync::Arc;
 
@@ -59,10 +60,6 @@ impl SessionDrive for SessionState {
 
     fn engine_ref(&self) -> &dyn SessionEngine {
         self.shared.engine_ref()
-    }
-
-    fn zid(&self) -> [u8; 16] {
-        SessionState::zid(self)
     }
 
     fn close(&self) {
@@ -132,8 +129,8 @@ impl SessionEngine for SharedSession {
         SharedSession::is_closed(self)
     }
 
-    fn zid(&self) -> [u8; 16] {
-        SharedSession::zid(self)
+    fn session_zid(&self) -> SessionZid {
+        SharedSession::session_zid(self)
     }
 
     fn now_ms(&self) -> u64 {

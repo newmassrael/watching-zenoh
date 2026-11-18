@@ -4024,7 +4024,7 @@ fn declare_adminspace_reports_the_negotiated_shm_flag() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0xc3, 0xd4]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0xc3, 0xd4].into());
     // The negotiated capability, set the way the establishment FSM sets it.
     session.actions().set_shm_offer(true);
 
@@ -4463,7 +4463,8 @@ fn admin_session_of_peer_files_the_row_under_the_named_peer() {
     *actions
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(peer.clone());
+        .expect("remote_peer_zid poisoned in test fixture") =
+        Some(wz_session_core::session_init_params::zid_bytes(&peer));
     let row = actions
         .admin_session_of_peer()
         .expect("a named peer is a transport");
@@ -4611,7 +4612,7 @@ fn declare_adminspace_answers_the_subscriber_leg_from_the_peer_faces_table() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x70, 0x73, 0x00, 0x03]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x70, 0x73, 0x00, 0x03].into());
     *session
         .actions()
         .peer_whatami
@@ -4704,7 +4705,7 @@ fn declare_adminspace_answers_the_token_leg_from_the_peers_liveliness_tokens() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x70, 0x73, 0x00, 0x03]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x70, 0x73, 0x00, 0x03].into());
     *session
         .actions()
         .peer_whatami
@@ -4832,7 +4833,7 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0xc3, 0xd4]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0xc3, 0xd4].into());
     *session
         .actions()
         .peer_whatami
@@ -15989,7 +15990,7 @@ fn session_egress_acl_denies_a_governed_keyexpr() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
 
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
@@ -16053,7 +16054,7 @@ fn session_egress_acl_governs_the_answer_to_an_interest() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -16144,7 +16145,7 @@ fn session_egress_acl_ends_a_liveliness_query_it_refuses() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -16199,7 +16200,7 @@ fn session_egress_acl_is_inert_with_no_policy_installed() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
 
     let opts = PublishOptions::put().with_locality(Locality::Remote);
     session
@@ -16231,7 +16232,7 @@ fn session_ingress_acl_drops_a_governed_message_from_the_batch() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(acl_ingress_deny_admin());
 
     let mut outcome = two_message_inbound_batch();
@@ -16266,7 +16267,7 @@ fn session_ingress_acl_does_not_apply_an_egress_rule() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -16631,7 +16632,8 @@ fn told_by_a_named_peer(peer: &[u8]) -> Vec<DeclEvent> {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(peer.to_vec());
+        .expect("remote_peer_zid poisoned in test fixture") =
+        Some(wz_session_core::session_init_params::zid_bytes(peer));
     let seen = Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
     let writer = seen.clone();
     let listener = session

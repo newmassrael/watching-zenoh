@@ -231,7 +231,7 @@ fn decode_from_a_lent_frame(batch: &[u8]) -> usize {
 fn session() -> Actions {
     let link = Arc::new(Recorder(Mutex::new(Vec::new())));
     let actions = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
-    *actions.inbound_peer_zid.lock().expect("zid") = Some(vec![0x0A; 4]);
+    *actions.inbound_peer_zid.lock().expect("zid") = Some([0x0A; 4].into());
     actions
 }
 

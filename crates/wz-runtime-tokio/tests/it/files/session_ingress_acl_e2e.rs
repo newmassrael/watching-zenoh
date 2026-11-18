@@ -150,7 +150,7 @@ async fn arrivals_and_hits(wire: Vec<u8>, config: Option<InterceptorConfig>) -> 
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in fixture") = Some([0x5a; 16].into());
 
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = hits.clone();

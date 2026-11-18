@@ -1980,6 +1980,8 @@ pub struct SharedSession {
     clock: TokioTime,
     /// This session's zid — see [`SharedSession::zid`].
     zid: [u8; 16],
+    /// The same zid as its handshake carries it — see [`SharedSession::session_zid`].
+    session_zid: SessionZid,
     /// The node's links to each remote node, from the handshake that names it until the link is
     /// gone: the node's say on a second link to a node it holds, asked while the link is still
     /// being established ([`CApiForwarder::link_admission`]). A node that listens and dials runs
@@ -2298,6 +2300,11 @@ impl SharedSession {
         self.zid
     }
 
+    /// [`Self::zid`] as the handshake carries it: one to sixteen bytes, not zero.
+    pub fn session_zid(&self) -> SessionZid {
+        self.session_zid
+    }
+
     /// R311y820 — FALLIBLE, because the params builder it shares with both
     /// drive roles now draws the cookie signing key from OS entropy. The local
     /// plane never handshakes, so this key never reaches a wire cookie — but it
@@ -2369,9 +2376,7 @@ impl SharedSession {
         // the wire, and Peer is what a session that both publishes and answers
         // queries is. The params otherwise come from the one builder both drive
         // roles use, so the plane cannot drift from them.
-        let mut zid_bytes = [0u8; 16];
-        let n = zid.len().min(16);
-        zid_bytes[..n].copy_from_slice(&zid[..n]);
+        let zid_bytes = zid.to_padded();
         // The plane's driver is inert and queues nothing onto a link, so no
         // transmit model reaches it; zenoh's default is passed as the neutral
         // value rather than the calling ABI's.
@@ -2445,6 +2450,7 @@ impl SharedSession {
         };
         Ok(Self {
             zid: zid_bytes,
+            session_zid: zid,
             #[cfg(feature = "peer")]
             links: Arc::new(wz_runtime_tokio::link_registry::LinkRegistry::new(
                 &zid_bytes,

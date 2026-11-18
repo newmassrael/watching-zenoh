@@ -586,7 +586,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             Arc::new(PicoPlane::new(session, declared)),
             ke,
             advanced_publisher_options(options),
-            engine.zid().into(),
+            engine.session_zid(),
         ) {
             Ok(publisher) => publisher,
             // A derived `@adv` key no peer could take is the caller's key and

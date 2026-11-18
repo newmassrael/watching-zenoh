@@ -181,7 +181,9 @@ pub(super) fn client_over(link: &Arc<RoomLink>, peer: Zid) -> Arc<SessionLinkAct
         TokioTime::new(),
     );
     TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
-        *s = Some(peer.as_slice().to_vec())
+        *s = Some(wz_session_core::session_init_params::zid_bytes(
+            peer.as_slice(),
+        ))
     });
     TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(0b10));
     actions
@@ -878,7 +880,9 @@ fn router_over_a_queue() -> (RouterForwarder, impl Sized, crate::writer_queue::O
     let link = Arc::new(QueueLink { tx });
     let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
     TokioRuntime::with_mutex_mut(&dest.remote_peer_zid, |s| {
-        *s = Some(zid(0xCC).as_slice().to_vec())
+        *s = Some(wz_session_core::session_init_params::zid_bytes(
+            zid(0xCC).as_slice(),
+        ))
     });
     TokioRuntime::with_mutex_mut(&dest.peer_whatami, |s| *s = Some(0b10));
     let fwd = RouterForwarder::new(zid(0x01));
@@ -1009,7 +1013,9 @@ async fn a_real_write_queue_tells_the_router_when_its_writer_makes_room() {
     let link = Arc::new(QueueLink { tx });
     let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
     TokioRuntime::with_mutex_mut(&dest.remote_peer_zid, |s| {
-        *s = Some(zid(0xCC).as_slice().to_vec())
+        *s = Some(wz_session_core::session_init_params::zid_bytes(
+            zid(0xCC).as_slice(),
+        ))
     });
     TokioRuntime::with_mutex_mut(&dest.peer_whatami, |s| *s = Some(0b10));
     let fwd = RouterForwarder::new(zid(0x01));

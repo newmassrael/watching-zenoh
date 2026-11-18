@@ -9054,12 +9054,12 @@ mod stock_config_tests {
         assert_eq!(params.link_rx.buffer_size, 262_140);
     }
 
-    /// A demo session is refused a zid the INIT cannot carry where its parameters are made, and
-    /// opened on one of one or sixteen bytes.
+    /// A demo session is refused a zid the INIT cannot carry, or one that is all zero, where its
+    /// parameters are made, and opened on one of one or sixteen bytes.
     #[test]
-    fn a_session_is_refused_a_zid_of_no_bytes_or_seventeen() {
+    fn a_session_is_refused_a_zid_of_no_bytes_seventeen_or_zero() {
         let tuning = TransportTuning::default();
-        for refused in [vec![], vec![0x0a; 17]] {
+        for refused in [vec![], vec![0x0a; 17], vec![0; 4]] {
             let err = session_init_params_for(WhatAmI::Client, refused, &tuning)
                 .expect_err("a zid outside 1..=16 bytes opens no session");
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);

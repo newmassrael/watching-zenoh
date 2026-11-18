@@ -40,7 +40,9 @@ fn a_session_of_two_links(
     let (primary, _) = recording_actions_over(LinkKind::Tcp);
     let (secondary, _) = recording_actions_over(LinkKind::Tcp);
     TokioRuntime::with_mutex_mut(&primary.remote_peer_zid, |s| {
-        *s = Some(zid_of(peer).as_slice().to_vec())
+        *s = Some(wz_session_core::session_init_params::zid_bytes(
+            zid_of(peer).as_slice(),
+        ))
     });
     TokioRuntime::with_mutex_mut(&primary.peer_whatami, |s| *s = Some(0b01));
     let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
@@ -74,7 +76,9 @@ fn a_put_on_a_joined_link_is_routed_as_the_primary_faces() {
     a_session_of_two_links(&fwd, 0xAA);
     let (client, sink) = recording_actions_over(LinkKind::Tcp);
     TokioRuntime::with_mutex_mut(&client.remote_peer_zid, |s| {
-        *s = Some(zid_of(0xCC).as_slice().to_vec())
+        *s = Some(wz_session_core::session_init_params::zid_bytes(
+            zid_of(0xCC).as_slice(),
+        ))
     });
     TokioRuntime::with_mutex_mut(&client.peer_whatami, |s| *s = Some(0b10));
     fwd.register(FaceId(1), &client);

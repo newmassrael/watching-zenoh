@@ -1321,6 +1321,11 @@ fn parse_init(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPars
     let view = TransportInitView::decode(&mut cursor)?;
     let header = view.header;
     let body = view.body.try_into_owned_in::<HandshakeStorage>()?;
+    // A zid the message names is refused here, where the message is read, as
+    // zenoh's decoder refuses it ([`InboundParseError::InvalidZid`]): what a
+    // session records of its peer is then a zid by type.
+    crate::session_zid::SessionZid::new(body.zid.as_slice())
+        .map_err(InboundParseError::InvalidZid)?;
     // The M (mandatory) bit is judged at the participant seam like every
     // other transport message's ([`InboundFrame::ext_admission`]), by the
     // extension's identity: the decode reads the chain, so a capture
@@ -2334,5 +2339,45 @@ mod init_syn_header_tests {
             );
             assert_eq!(is_init_syn(&wire), decoded_as_syn, "{wire:?}");
         }
+    }
+}
+
+// The zid an INIT names is refused where the message is read when it is zero, as zenoh's
+// decoder refuses it; its length is the header's four bits plus one, so always 1..=16.
+#[cfg(all(test, feature = "codec-init-body"))]
+mod init_zid_tests {
+    use super::*;
+    use crate::session_zid::ZidError;
+
+    /// An InitSyn from a peer whose zid is `zid`, with no sizing fields and no extensions.
+    fn init_syn(zid: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut wire = alloc::vec![
+            wire_const::T_MID_INIT,
+            0x09,
+            0x01 | (((zid.len() as u8) - 1) << 4)
+        ];
+        wire.extend_from_slice(zid);
+        wire
+    }
+
+    #[test]
+    fn an_init_naming_a_zero_zid_is_refused_and_a_zid_with_zero_bytes_is_not() {
+        assert_eq!(
+            parse_inbound(&init_syn(&[0x00])).err(),
+            Some(InboundParseError::InvalidZid(ZidError::AllZero { len: 1 }))
+        );
+        assert_eq!(
+            parse_inbound(&init_syn(&[0x00; 16])).err(),
+            Some(InboundParseError::InvalidZid(ZidError::AllZero { len: 16 }))
+        );
+        // Control: the same message with one byte that is not zero is read, wherever it lies.
+        assert!(matches!(
+            parse_inbound(&init_syn(&[0x00, 0x01])),
+            Ok(InboundFrame::Init { is_ack: false, .. })
+        ));
+        assert!(matches!(
+            parse_inbound(&init_syn(&[0xAA])),
+            Ok(InboundFrame::Init { is_ack: false, .. })
+        ));
     }
 }

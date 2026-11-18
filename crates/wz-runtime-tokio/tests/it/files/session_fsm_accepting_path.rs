@@ -985,7 +985,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
         "the routing zid is back"
     );
     assert_eq!(
-        *actions.inbound_peer_zid.lock().unwrap(),
+        actions.inbound_peer_zid.lock().unwrap().map(|z| z.to_vec()),
         Some(zid),
         "the accept-side zid is back"
     );

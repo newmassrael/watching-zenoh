@@ -1054,22 +1054,28 @@ fn a_session_that_redials_none_ends_with_its_link() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
-/// A configured zid is refused when the session is opened, once, when its wire form is not one
-/// to sixteen bytes: all zero bytes (no bytes on the wire) and seventeen are refused, and one and
-/// sixteen, trailing zeros trimmed, are the zid the session announces.
+/// A configured zid is refused when the session is opened, once: all zero bytes, none, and
+/// seventeen are refused, and one and sixteen, trailing zeros trimmed, are the zid the session
+/// announces.
 #[test]
-fn a_configured_zid_of_no_wire_bytes_or_seventeen_is_refused_at_open() {
+fn a_configured_zid_of_zero_bytes_or_seventeen_is_refused_at_open() {
     use crate::engine::wire_zid;
     use crate::OpenError;
-    use wz_session_core::session_init_params::ZidLengthError;
+    use wz_session_core::session_init_params::ZidError;
 
     assert_eq!(
         wire_zid(&[0, 0, 0, 0]),
-        Err(OpenError::InvalidZid(ZidLengthError { len: 0 }))
+        Err(OpenError::InvalidZid(ZidError::AllZero { len: 4 }))
+    );
+    assert_eq!(
+        wire_zid(&[]),
+        Err(OpenError::InvalidZid(ZidError::LengthOutOfRange { len: 0 }))
     );
     assert_eq!(
         wire_zid(&[0x11; 17]),
-        Err(OpenError::InvalidZid(ZidLengthError { len: 17 }))
+        Err(OpenError::InvalidZid(ZidError::LengthOutOfRange {
+            len: 17
+        }))
     );
     assert_eq!(
         wire_zid(&[0x11, 0, 0]).map(|zid| zid.to_vec()),

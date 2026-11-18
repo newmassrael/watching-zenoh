@@ -157,7 +157,9 @@ impl Network {
     fn open_face(&mut self, node: u8, remote: u8, wire: Wire, far: Far) -> u64 {
         let (actions, sink) = recording_actions();
         TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
-            *s = Some(zid(remote).as_slice().to_vec())
+            *s = Some(wz_session_core::session_init_params::zid_bytes(
+                zid(remote).as_slice(),
+            ))
         });
         TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire as u8));
         let n = self.nodes.get_mut(&node).expect("a node of the network");

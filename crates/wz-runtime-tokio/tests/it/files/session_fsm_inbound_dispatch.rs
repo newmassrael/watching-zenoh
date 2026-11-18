@@ -858,10 +858,10 @@ fn r86_handle_inbound_initsyn_captures_peer_zid() {
         "wire decodes to InitSyn (is_ack=false)"
     );
 
-    let captured = actions.inbound_peer_zid.lock().unwrap().clone();
+    let captured = *actions.inbound_peer_zid.lock().unwrap();
     assert_eq!(
-        captured,
-        Some(vec![0xB0, 0xB1, 0xB2, 0xB3]),
+        captured.as_deref(),
+        Some(&[0xB0, 0xB1, 0xB2, 0xB3][..]),
         "InitSyn arrival must capture peer_zid into inbound_peer_zid slot \
          (R86 wiring for RFC §5.M cookie binding)"
     );
@@ -879,8 +879,8 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     // zid is in body.zid but the SLOT is for inbound peer's zid in
     // the Accepting-side capture path, so semantic-wise InitAck
     // should NOT touch this slot to avoid cross-role confusion).
-    let seeded = vec![0xAA, 0xBB, 0xCC, 0xDD];
-    *actions.inbound_peer_zid.lock().unwrap() = Some(seeded.clone());
+    let seeded = wz_runtime_tokio::session_glue::SessionZid::from([0xAA, 0xBB, 0xCC, 0xDD]);
+    *actions.inbound_peer_zid.lock().unwrap() = Some(seeded);
 
     // Hand-crafted InitAck wire — has different zid bytes
     // [0xC0..0xC3] AND a 4-byte cookie at the end, with both
@@ -906,7 +906,7 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     let frame = actions.handle_inbound(&wire).expect("InitAck parses");
     assert!(matches!(frame, InboundFrame::Init { is_ack: true, .. }));
 
-    let after = actions.inbound_peer_zid.lock().unwrap().clone();
+    let after = *actions.inbound_peer_zid.lock().unwrap();
     assert_eq!(
         after,
         Some(seeded),

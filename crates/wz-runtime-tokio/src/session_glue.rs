@@ -254,7 +254,7 @@ pub use wz_session_core::session_init_params::SessionInitParams;
 /// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
 pub use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
 /// The type of [`SessionInitParams::zid`], named where the bundle is.
-pub use wz_session_core::session_zid::{SessionZid, ZidLengthError};
+pub use wz_session_core::session_zid::{SessionZid, ZidError};
 // Re-exported alongside `SessionInitParams` so a caller naming the param
 // bundle also names its `whatami` field type from one place.
 pub use wz_session_core::WhatAmI;
@@ -4273,8 +4273,8 @@ mod rx_sn_gate_tests {
 
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
-        let zid = vec![0x0A; 4];
-        *actions.inbound_peer_zid.lock().unwrap() = Some(zid);
+        let zid = [0x0A; 4];
+        *actions.inbound_peer_zid.lock().unwrap() = Some(zid.into());
 
         let mut reasm: ReassemblyDispatcher<4, 4096> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
@@ -4343,7 +4343,7 @@ mod rx_sn_gate_tests {
 
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
-        *actions.inbound_peer_zid.lock().unwrap() = Some(vec![0x0A; 4]);
+        *actions.inbound_peer_zid.lock().unwrap() = Some([0x0A; 4].into());
         let mut reasm: ReassemblyDispatcher<1, 4096> = ReassemblyDispatcher::new(
             ReassemblyConfig::new(2, 5_000).with_pool_overflow(PoolOverflow::OldestWins),
         );
@@ -4404,7 +4404,7 @@ mod rx_sn_gate_tests {
 
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
-        *actions.inbound_peer_zid.lock().unwrap() = Some(vec![0x0A; 4]);
+        *actions.inbound_peer_zid.lock().unwrap() = Some([0x0A; 4].into());
         let mut reasm: ReassemblyDispatcher<4, 4096> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
 
@@ -6870,7 +6870,9 @@ mod reconnect_tx_tests {
         TokioRuntime::with_mutex_mut(&actions.link.established_at, |slot| *slot = Some(42));
         TokioRuntime::with_mutex_mut(&actions.link.last_inbound_at, |slot| *slot = Some(43));
         TokioRuntime::with_mutex_mut(&actions.inbound_cookie, |slot| *slot = Some(vec![1, 2]));
-        TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot = Some(vec![9; 4]));
+        TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| {
+            *slot = Some([9; 4].into())
+        });
         TokioRuntime::with_mutex_mut(&actions.link.lease_armed, |armed| *armed = true);
         #[cfg(feature = "transport-keepalive")]
         TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed = true);
