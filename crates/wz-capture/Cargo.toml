@@ -326,8 +326,8 @@ path = "../wz-session-wire-fixtures"
 # The synthetic segment profile (`segment_profile::synthetic`) the split-message
 # tests build their pieces with. It was a `#[cfg(test)]` module while the
 # profile lived here; across the crate boundary it is `wz-app-frame`'s
-# `fixtures` feature, which this crate's own tests need whether or not its
-# `fixtures` feature is on. A dev-dependency, so no consumer is charged for it.
+# `fixtures` feature, which the tests here use with their own `fixtures`
+# feature on or off. It is a dev-dependency: a consumer's build is charged nothing.
 [dev-dependencies.wz-app-frame]
 path = "../wz-app-frame"
 features = ["fixtures"]

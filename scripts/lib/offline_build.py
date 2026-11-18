@@ -271,11 +271,13 @@ def shape_findings(decl: object) -> list[str]:
 
 
 def _repo_path(value: object) -> bool:
-    """A path relative to the repository root that stays inside it."""
+    """A path relative to the repository root that stays inside it.
+
+    The value is a declared string, not a path a walk produced: its segments are read off
+    the string itself, so no directory the repository happens to sit under takes part."""
     if not isinstance(value, str) or not value or "\\" in value:
         return False
-    path = PurePosixPath(value)
-    return not path.is_absolute() and ".." not in path.parts
+    return not PurePosixPath(value).is_absolute() and ".." not in value.split("/")
 
 
 def _no_break(value: object) -> bool:
