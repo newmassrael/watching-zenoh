@@ -290,7 +290,7 @@ choice WZ_POLICY_KEY_SET
 	prompt "key-set"
 	default WZ_POLICY_KEY_SET_OPEN
 	help
-	  Which keys the receive path takes a message on (docs/closed-key-set.md). `open` takes
+	  Which keys the receive path takes a message on (the closed key set). `open` takes
 	  any key a peer sends. `closed` takes only the keys the image declares as its key set,
 	  which the build generates into a read-only table: a message on any other key is dropped
 	  before a subscriber is looked up, and counted by reason. A closed build that is given

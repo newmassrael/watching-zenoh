@@ -4,8 +4,9 @@
 // GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit rust-conformance-items.
 // Do not edit: `wz_config.py --check` fails when this file is stale.
 
-//! The questions a conformance statement answers (docs/build-configuration.md, decision C15),
-//! in the declaration's order, and where a build script finds each answer.
+//! The questions a conformance statement answers (a build states what it is, from
+//! the configuration it was built with), in the declaration's order, and where a
+//! build script finds each answer.
 
 /// `format` of the statement.
 pub const FORMAT: &str = "wz-conformance-statement";

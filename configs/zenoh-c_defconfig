@@ -4,7 +4,7 @@
 # GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit defconfig:zenoh-c.
 # Do not edit: `wz_config.py --check` fails when this file is stale.
 #
-# zenoh-c's own default build in wz's switches (docs/build-configuration.md step 2):
+# zenoh-c's own default build in wz's switches (from upstream_on and upstream_off):
 # its choice on each global axis, and every capability it is judged for whose value
 # differs from the Kconfig default. A capability its ABIs do not reach keeps the default.
 # A preset whose `# base:` is zenoh-c is merged onto this file.
