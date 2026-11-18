@@ -242,6 +242,15 @@ fn question_everything(
         string_door("live_fields_since_window", |o| {
             wz_dissect_live_fields_since_window(handle, b, n, dec, 1, 3, o)
         });
+        // One path in the shape a decoded field writes: the walk and the
+        // payload reading are what is reached, whatever the declarations decode.
+        let paths = c"1\n$.x".as_ptr();
+        string_door("live_field_values_since", |o| {
+            wz_dissect_live_field_values_since(handle, dec, sel, paths, 0, o)
+        });
+        string_door("live_field_values_since_window", |o| {
+            wz_dissect_live_field_values_since_window(handle, dec, sel, paths, 1, 3, o)
+        });
         string_door("live_retention", |o| wz_dissect_live_retention(handle, o));
         string_door("live_memory", |o| wz_dissect_live_memory(handle, o));
         string_door("live_health", |o| wz_dissect_live_health(handle, o));
