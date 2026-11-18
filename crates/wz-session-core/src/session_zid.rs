@@ -11,7 +11,7 @@
 //! non-zero `u128`, so a decoder reading one from the wire refuses bytes that
 //! spell zero (`commons/zenoh-codec/src/core/zenohid.rs` @
 //! `ZenohIdProto::try_from(&id[..size]).map_err(|_| DidntRead)`). A
-//! [`SessionZid`] is refused once, where it is made, so the session and
+//! [`crate::session_zid::SessionZid`] is refused once, where it is made, so the session and
 //! everything that names an entity by a zid read a value that cannot be out of
 //! range or name no node.
 //!

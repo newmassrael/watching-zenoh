@@ -1765,8 +1765,8 @@ pub const ADMIN_READ_DENIED: &str = "final_only";
 /// `config_write.keys`.
 ///
 /// With a heap, `**`: any path, which the host places against the keys it can change
-/// at run time and refuses by name when it cannot ([`parse_admin_config_write`]
-/// decodes the path and leaves the placing to the host). Without one, the write
+/// at run time and refuses by name when it cannot (`parse_admin_config_write`, a
+/// heap build's, decodes the path and leaves the placing to the host). Without one, the write
 /// surface is the `admin_connect` module's, which carries `connect/endpoints` alone.
 /// Without either, a write decodes to nothing and the list is empty.
 pub fn admin_config_write_keys() -> &'static [&'static str] {
@@ -1784,7 +1784,7 @@ pub fn admin_config_write_keys() -> &'static [&'static str] {
 /// order.
 ///
 /// Spelled per build for the reason [`admin_unspoken_fields`] is: the storage and
-/// volume arms of [`parse_admin_config_write`] are compiled under
+/// volume arms of `parse_admin_config_write` (a heap build's) are compiled under
 /// `adminspace-config-hotreload` alone, and a name whose arm is compiled out decodes
 /// as an unknown key. A node with no heap decodes no action.
 pub fn admin_config_write_actions() -> &'static [&'static str] {

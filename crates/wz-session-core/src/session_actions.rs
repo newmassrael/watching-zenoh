@@ -12028,7 +12028,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// How many frames of room `msg` takes on the link a message of `reliable` leaves on, never
     /// fewer than it takes: one for a message that fits a frame, its fragment count for one that
-    /// does not ([`crate::frame_encode::chain_frames`]), measured over the body the send encodes
+    /// does not (`frame_encode::chain_frames`, compiled with `transport-fragmentation`; without
+    /// it no message is cut, so every message counts one), measured over the body the send encodes
     /// and the frame budget the send cuts by. Any message but a Push is counted one frame, as
     /// only a Push is sent under a reservation. What [`Self::try_reserve_wire_frames`] is asked
     /// for by a sender that reserves a whole chain before it sends.
