@@ -1,0 +1,13 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"]
+decision = '''
+The design note Round 4507 added as `docs/application-plane.md` leaves the tracked tree by the owner's decision; the plan is kept outside the repository. Round 4507 stays as filed (the ledger is frozen) and this round records the removal.
+'''
+changes = '''
+`docs/application-plane.md` removed; nothing else in the tree named it.
+'''
+verification = '''
+`git grep application-plane` outside the store finds nothing at the parent; the only reference is Round 4507's own text in the store.
+'''
+carry = '''
+Round 4507's carry (step 0 and the two owner decisions) continues outside the repository until a step lands code.
+'''
