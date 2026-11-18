@@ -57,7 +57,7 @@ type Engine = CoopEngine<PosixLinks, PosixClock>;
 pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami,
-        zid: vec![zid; 4],
+        zid: [zid; 4].into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
@@ -1055,6 +1055,39 @@ fn a_session_that_redials_none_ends_with_its_link() {
         SessionDrive::is_closed(&*engine)
     });
     assert!(SessionDrive::read(&*engine, false).is_err());
+}
+
+/// A configured zid is refused when the session is opened, once: all zero bytes, none, and
+/// seventeen are refused, and one and sixteen, trailing zeros trimmed, are the zid the session
+/// announces.
+#[test]
+fn a_configured_zid_of_zero_bytes_or_seventeen_is_refused_at_open() {
+    use crate::engine::wire_zid;
+    use crate::OpenError;
+    use wz_session_core::session_init_params::ZidError;
+
+    assert_eq!(
+        wire_zid(&[0, 0, 0, 0]),
+        Err(OpenError::InvalidZid(ZidError::AllZero { len: 4 }))
+    );
+    assert_eq!(
+        wire_zid(&[]),
+        Err(OpenError::InvalidZid(ZidError::LengthOutOfRange { len: 0 }))
+    );
+    assert_eq!(
+        wire_zid(&[0x11; 17]),
+        Err(OpenError::InvalidZid(ZidError::LengthOutOfRange {
+            len: 17
+        }))
+    );
+    assert_eq!(
+        wire_zid(&[0x11, 0, 0]).map(|zid| zid.to_vec()),
+        Ok(std::vec![0x11])
+    );
+    assert_eq!(
+        wire_zid(&[0x22; 16]).map(|zid| zid.to_vec()),
+        Ok(std::vec![0x22; 16])
+    );
 }
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]

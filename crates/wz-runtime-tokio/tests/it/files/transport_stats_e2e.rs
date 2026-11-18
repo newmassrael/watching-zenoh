@@ -37,7 +37,7 @@ async fn handshake_increments_tx_and_rx_counters() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -51,7 +51,7 @@ async fn handshake_increments_tx_and_rx_counters() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         let cfg = DialConfig::default();
         connect_and_open_session(
             locator,
@@ -131,7 +131,7 @@ async fn a_publish_moves_the_network_and_payload_counters() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -145,7 +145,7 @@ async fn a_publish_moves_the_network_and_payload_counters() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         let cfg = DialConfig::default();
         connect_and_open_session(
             locator,
@@ -227,7 +227,7 @@ async fn a_publish_is_recorded_in_the_registry_on_its_link() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -241,7 +241,7 @@ async fn a_publish_is_recorded_in_the_registry_on_its_link() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         let cfg = DialConfig::default();
         connect_and_open_session(
             locator,

@@ -619,7 +619,8 @@ fn fresh_scout_zid() -> Vec<u8> {
     let mut zid = [0u8; 16];
     if getrandom::getrandom(&mut zid).is_err() {
         // Entropy is unavailable only in a profile that cannot open a session
-        // either; scouting with a zeroed id still emits a well-formed Scout.
+        // either. Zero bytes are no zid, so the Scout then names no asker
+        // (the scout window reads them that way), which upstream's Scout allows.
         return vec![0u8; 16];
     }
     zid.to_vec()

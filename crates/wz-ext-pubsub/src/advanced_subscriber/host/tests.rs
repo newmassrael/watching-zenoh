@@ -25,6 +25,7 @@ use wz_session_core::query_options::QueryOptions;
 use wz_session_core::reply::{InboundReply, InboundReplyBody};
 use wz_session_core::sample::{Sample, SourceInfo};
 use wz_session_core::serde_codec::z_serialize;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use super::super::options::{
@@ -123,10 +124,8 @@ impl SessionEngine for Script {
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
-    fn zid(&self) -> [u8; 16] {
-        let mut zid = [0u8; 16];
-        zid[..ZID.len()].copy_from_slice(&ZID);
-        zid
+    fn session_zid(&self) -> SessionZid {
+        ZID.into()
     }
     fn now_ms(&self) -> u64 {
         self.now.load(Ordering::SeqCst)
@@ -835,11 +834,21 @@ fn a_session_with_no_id_left_refuses_the_subscriber() {
 /// identity holds.
 #[test]
 fn a_subscriber_without_a_host_identity_reports_its_subscription_id() {
-    let id = super::identity_of(&ZID, u32::MAX, None).expect("the zid is 1 to 16 bytes");
+    let id = super::identity_of(ZID.into(), u32::MAX, None);
     assert_eq!((id.zid(), id.eid()), (&ZID[..], u32::MAX));
-    assert_eq!(
-        super::identity_of(&[], 7, None),
-        Err(HostError::SessionZid { len: 0 }),
-        "an empty zid has no identity"
-    );
+}
+
+/// A subscriber's identity is its engine's zid as the handshake carries it, read from the
+/// engine and not from the padded form a C ABI's id holds.
+#[test]
+fn a_subscriber_is_named_by_its_engines_session_zid() {
+    let script = Script::new(1);
+    let declared = EngineSubscriber::declare(
+        &engine(&script),
+        "demo/data",
+        AdvancedSubscriberOptions::new(),
+        |_| {},
+    )
+    .expect("the scripted engine declares");
+    assert_eq!(declared.id().zid(), &ZID[..]);
 }

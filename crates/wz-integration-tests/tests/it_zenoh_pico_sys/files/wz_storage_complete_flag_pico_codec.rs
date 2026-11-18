@@ -138,7 +138,7 @@ async fn wire_complete_seen_by_pico(config_complete: bool) -> bool {
 
     let mut config = StorageConfig::new("probe", STORAGE_KEYEXPR, "mem");
     config.complete = config_complete;
-    let _storage = StorageService::declare(&session, &config, vec![0x01])
+    let _storage = StorageService::declare(&session, &config, [0x01].into())
         .expect("wz storage declares against the recording-driver session");
 
     // Scan the frames emitted by the declare for the (single) DeclareQueryable.

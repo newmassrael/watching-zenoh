@@ -1693,7 +1693,7 @@ pub struct GroupBeacon {
 #[derive(Debug, Clone)]
 pub struct RouterGroupProfile {
     /// The router's zid, which its beacon carries and its RX gate drops.
-    pub zid: Vec<u8>,
+    pub zid: wz_session_core::session_zid::SessionZid,
     /// Whether the group offers per-priority conduits.
     pub qos: bool,
     /// Whether the group's datagrams are batches with the one-byte `BatchHeader`, compressed
@@ -2830,7 +2830,7 @@ mod tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid.to_vec(),
+            zid: wz_session_core::multicast_params::zid_vec(zid),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,
@@ -3033,7 +3033,7 @@ mod tests {
         };
         assert_ne!(operator, TxQueueConf::default());
         let group = router_group_params(RouterGroupProfile {
-            zid: vec![0x0A],
+            zid: [0x0A].into(),
             qos: true,
             compression: true,
             tx_queue: operator,
@@ -3069,7 +3069,7 @@ mod tests {
             batch_size: 8_192,
         };
         let group = router_group_params(RouterGroupProfile {
-            zid: vec![0x0B],
+            zid: [0x0B].into(),
             qos: false,
             compression: false,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
@@ -3994,7 +3994,11 @@ mod tests {
         };
         let member = |n: usize| {
             let n = u16::try_from(n).expect("a few members");
-            (n.to_le_bytes(), src(1_000 + n))
+            // One more than the index: member 0's zid would otherwise be zero, which no node has.
+            (
+                wz_session_core::session_zid::SessionZid::from((n + 1).to_le_bytes()),
+                src(1_000 + n),
+            )
         };
         let joined = |cap: Option<usize>| {
             let profile = MulticastParams {
@@ -4017,13 +4021,13 @@ mod tests {
         for n in 0..GROUP_FACE_ROWS {
             let (zid, at) = member(n);
             assert_eq!(
-                unstated.ingest_join(&zid, at, baseline, 0),
+                unstated.ingest_join(zid, at, baseline, 0),
                 JoinOutcome::Admitted
             );
         }
         let (zid, at) = member(GROUP_FACE_ROWS);
         assert_eq!(
-            unstated.ingest_join(&zid, at, baseline, 0),
+            unstated.ingest_join(zid, at, baseline, 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull),
             "no cap is stated, so the rows are the bound"
         );
@@ -4033,14 +4037,14 @@ mod tests {
         for n in 0..cap {
             let (zid, at) = member(n);
             assert_eq!(
-                stated.ingest_join(&zid, at, baseline, 0),
+                stated.ingest_join(zid, at, baseline, 0),
                 JoinOutcome::Admitted,
                 "member {n} of a stated cap of {cap}"
             );
         }
         let (zid, at) = member(cap);
         assert_eq!(
-            stated.ingest_join(&zid, at, baseline, 0),
+            stated.ingest_join(zid, at, baseline, 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
         assert_eq!(stated.active_peers(), cap);

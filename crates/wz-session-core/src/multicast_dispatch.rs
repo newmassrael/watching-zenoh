@@ -153,10 +153,7 @@ use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
 #[cfg(feature = "routing-namespace")]
 use crate::namespace::NamespaceIngress;
 
-/// Maximum ZID byte length (zenoh ZID is up to 16 bytes; the wire form is
-/// length-prefixed). The peer key copies the ZID into a fixed buffer so the
-/// Router holds no allocation per peer.
-const ZID_MAX: usize = 16;
+use crate::session_zid::SessionZid;
 
 /// Each peer's JOIN-advertised role. The on-group Designated-Router election
 /// (§5.21 router-multicast-faces, I3b) classifies Router members by it, and
@@ -520,8 +517,10 @@ struct PeerSlot {
     src: Option<SocketAddr>,
     /// The peer's zenoh id, learned from its JOIN — the protocol identity
     /// (§3.2 "one per zid"), stored alongside the addr key. `Some` iff
-    /// `src.is_some()`.
-    zid: Option<([u8; ZID_MAX], u8)>,
+    /// `src.is_some()`. Held by value with no allocation per peer, and a zid by
+    /// type: the JOIN that named it was refused if it named none
+    /// ([`crate::join_decode::decode_join_named`]).
+    zid: Option<SessionZid>,
     /// Absolute monotonic-ms instant of the peer's most recent inbound
     /// message (valid iff `src.is_some()`); the lease is measured from here.
     last_seen_ms: u64,
@@ -777,13 +776,7 @@ impl PeerSlot {
     /// Does this slot hold the given peer ZID (the protocol-identity index,
     /// used by [`MulticastDispatcher::peer_state`])?
     fn matches_zid(&self, zid: &[u8]) -> bool {
-        match &self.zid {
-            Some((buf, len)) => {
-                let n = core::cmp::min(zid.len(), ZID_MAX);
-                *len as usize == n && buf[..n] == zid[..n]
-            }
-            None => false,
-        }
+        self.zid.is_some_and(|held| held.as_slice() == zid)
     }
 
     /// The duties this slot's machine recorded since they were last taken.
@@ -799,13 +792,13 @@ impl PeerSlot {
     fn admit(
         &mut self,
         src: SocketAddr,
-        zid: &[u8],
+        zid: SessionZid,
         baseline: JoinBaseline,
         qos_next_sns: Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]>,
         now_ms: u64,
     ) {
         self.src = Some(src);
-        self.zid = Some(copy_zid(zid));
+        self.zid = Some(zid);
         self.last_seen_ms = now_ms;
         // The node role the member view reports and the Designated-Router
         // election (§5.21 I3b) filters on.
@@ -829,7 +822,7 @@ impl PeerSlot {
     /// legible symptom where a panic in a sweep is not.
     fn departure(&self, reason: MulticastPeerLostReason) -> MulticastPeerLost {
         let peer = match &self.zid {
-            Some((buf, len)) => MulticastPeerId::from_wire(&buf[..*len as usize]),
+            Some(zid) => MulticastPeerId::from_wire(zid),
             None => MulticastPeerId::from_wire(&[]),
         };
         MulticastPeerLost { peer, reason }
@@ -1453,9 +1446,9 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     pub fn members(&self) -> impl Iterator<Item = MulticastMember> + '_ {
         self.peers.iter().filter_map(|p| {
             let locator = p.src?;
-            let (buf, len) = p.zid.as_ref()?;
+            let zid = p.zid.as_ref()?;
             Some(MulticastMember {
-                peer: MulticastPeerId::from_wire(&buf[..*len as usize]),
+                peer: MulticastPeerId::from_wire(zid),
                 whatami: p.whatami,
                 locator,
             })
@@ -1505,11 +1498,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         self.peers
             .iter()
             .filter(|p| !p.is_free() && p.whatami == Some(WhatAmI::Router))
-            .filter_map(|p| {
-                p.zid
-                    .as_ref()
-                    .map(|(buf, len)| buf[..*len as usize].to_vec())
-            })
+            .filter_map(|p| p.zid.as_ref().map(|zid| zid.to_vec()))
             .collect()
     }
 
@@ -1648,7 +1637,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// authoritative). `now_ms` is the runtime monotonic clock.
     pub fn ingest_join_qos(
         &mut self,
-        zid: &[u8],
+        zid: SessionZid,
         src: SocketAddr,
         baseline: JoinBaseline,
         qos_next_sns: Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]>,
@@ -1676,7 +1665,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             // fix: SN state is JOIN-authoritative-reset by seed_from_join, so the
             // namespace correlation must follow the same identity-reset rule.)
             #[cfg(feature = "routing-namespace")]
-            if !self.peers[idx].matches_zid(zid) {
+            if !self.peers[idx].matches_zid(&zid) {
                 self.peers[idx].namespace_ingress = None;
             }
             // §5.21 router-multicast-faces — the SAME in-place recycle hazard for the
@@ -1695,11 +1684,11 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             // dead peer's ..." invariant on the in-place path (the keyexpr_table leak
             // predates S2 — the I3a R311y196 in-place gap — surfaced with remote_subs).
             #[cfg(feature = "multicast-declarations")]
-            if !self.peers[idx].matches_zid(zid) {
+            if !self.peers[idx].matches_zid(&zid) {
                 self.peers[idx].keyexpr_table.clear();
                 self.peers[idx].remote_subs.clear();
             }
-            self.peers[idx].zid = Some(copy_zid(zid));
+            self.peers[idx].zid = Some(zid);
             // The re-seed is the Router's refresh, not `init_rx_seq`: the machine
             // states that duty for a peer entering Discovered, and an Active
             // peer's JOIN is another inbound message the machine does not see
@@ -1827,7 +1816,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// `ext_qos` and passes the decoded per-priority next-SNs to `ingest_join_qos`.
     pub fn ingest_join(
         &mut self,
-        zid: &[u8],
+        zid: SessionZid,
         src: SocketAddr,
         baseline: JoinBaseline,
         now_ms: u64,
@@ -2027,10 +2016,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// the sender only by its address.
     pub fn peer_zid_by_src(&self, src: SocketAddr) -> Option<&[u8]> {
         let idx = self.find_by_src(src)?;
-        self.peers[idx]
-            .zid
-            .as_ref()
-            .map(|(buf, len)| &buf[..*len as usize])
+        self.peers[idx].zid.as_ref().map(|zid| zid.as_slice())
     }
 
     /// Refresh a live peer's lease on any non-Join inbound message attributed
@@ -2680,23 +2666,14 @@ pub fn abort_peer_chains<const SLOTS: usize, const CAP: usize, S>(
     }
 }
 
-/// Copy a peer ZID into the fixed `([u8; ZID_MAX], len)` key form, clamping
-/// to `ZID_MAX` (a zenoh ZID is 1..=16 bytes).
-fn copy_zid(zid: &[u8]) -> ([u8; ZID_MAX], u8) {
-    let mut buf = [0u8; ZID_MAX];
-    let n = core::cmp::min(zid.len(), ZID_MAX);
-    buf[..n].copy_from_slice(&zid[..n]);
-    (buf, n as u8)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    const ZID_A: &[u8] = &[0xAA; 16];
-    const ZID_B: &[u8] = &[0xBB; 16];
-    const ZID_C: &[u8] = &[0xCC; 16];
+    const ZID_A: SessionZid = SessionZid::from_array([0xAA; 16]);
+    const ZID_B: SessionZid = SessionZid::from_array([0xBB; 16]);
+    const ZID_C: SessionZid = SessionZid::from_array([0xCC; 16]);
 
     // Distinct peer source addresses (the addr-keyed peer table's primary
     // key); the port distinguishes them on a shared loopback host.
@@ -2774,11 +2751,11 @@ mod tests {
         assert_eq!(d.members().count(), 0, "an empty table has no member");
 
         assert_eq!(
-            d.ingest_join(&[0xA1], SRC_A, sn0_whatami(WhatAmI::Client), 0),
+            d.ingest_join([0xA1].into(), SRC_A, sn0_whatami(WhatAmI::Client), 0),
             JoinOutcome::Admitted
         );
         assert_eq!(
-            d.ingest_join(&[0xB2, 0xB3], SRC_B, sn0_whatami(WhatAmI::Router), 0),
+            d.ingest_join([0xB2, 0xB3].into(), SRC_B, sn0_whatami(WhatAmI::Router), 0),
             JoinOutcome::Admitted
         );
         // Compared as iterators, with no collection: the view is allocation-free
@@ -2797,7 +2774,7 @@ mod tests {
         ]));
 
         assert_eq!(
-            d.ingest_join(&[0xC4], SRC_A, sn0_whatami(WhatAmI::Peer), 1_000),
+            d.ingest_join([0xC4].into(), SRC_A, sn0_whatami(WhatAmI::Peer), 1_000),
             JoinOutcome::Refreshed,
             "a new zid at a known address takes the slot and announces nothing"
         );
@@ -2930,9 +2907,9 @@ mod tests {
         let mut d = running_dispatcher::<4>(5_000);
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(d.active_peers(), 1);
-        assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state(&ZID_A), Some(MulticastPeerState::Active));
         assert_eq!(d.peer_state_by_src(SRC_A), Some(MulticastPeerState::Active));
-        assert_eq!(d.peer_state(ZID_B), None);
+        assert_eq!(d.peer_state(&ZID_B), None);
         assert_eq!(d.peer_state_by_src(SRC_B), None);
     }
 
@@ -3370,7 +3347,7 @@ mod tests {
             JoinOutcome::Refreshed
         );
         assert_eq!(d.active_peers(), 1);
-        assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state(&ZID_A), Some(MulticastPeerState::Active));
     }
 
     /// The peer table is keyed by ADDRESS: the SAME zid from two distinct
@@ -3515,7 +3492,7 @@ mod tests {
         assert_eq!(d.stated_cap_fits(), Ok(()));
         for n in 0..3u8 {
             assert_eq!(
-                d.ingest_join(&[0x10 + n], member_src(u16::from(n)), sn0(), 0),
+                d.ingest_join([0x10 + n].into(), member_src(u16::from(n)), sn0(), 0),
                 JoinOutcome::Admitted,
                 "member {n} of a cap of three on one row"
             );
@@ -3527,14 +3504,14 @@ mod tests {
             "the second grown row"
         );
         assert_eq!(
-            d.ingest_join(&[0x13], member_src(3), sn0(), 0),
+            d.ingest_join([0x13].into(), member_src(3), sn0(), 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
         assert_eq!(d.join_refusals(), 1);
 
         assert!(d.close_by_src(member_src(1)));
         assert_eq!(
-            d.ingest_join(&[0x13], member_src(3), sn0(), 1),
+            d.ingest_join([0x13].into(), member_src(3), sn0(), 1),
             JoinOutcome::Admitted
         );
         assert_eq!(
@@ -3573,14 +3550,23 @@ mod tests {
     fn the_src_index_follows_each_place_a_row_changes_hands() {
         let mut d = running_growing::<1>(MulticastConfig::new(5_000).with_max_sessions(Some(4)));
         let (a, b, c) = (member_src(0), member_src(1), member_src(2));
-        assert_eq!(d.ingest_join(&[1], a, sn0(), 0), JoinOutcome::Admitted);
-        assert_eq!(d.ingest_join(&[2], b, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(
+            d.ingest_join([1].into(), a, sn0(), 0),
+            JoinOutcome::Admitted
+        );
+        assert_eq!(
+            d.ingest_join([2].into(), b, sn0(), 0),
+            JoinOutcome::Admitted
+        );
         assert_eq!(d.by_src.lookup(&a), Some(Some(0)), "admission, fixed row");
         assert_eq!(d.by_src.lookup(&b), Some(Some(1)), "admission, grown row");
 
         assert!(d.close_by_src(a));
         assert_eq!(d.by_src.lookup(&a), Some(None), "a Close");
-        assert_eq!(d.ingest_join(&[3], c, sn0(), 1_000), JoinOutcome::Admitted);
+        assert_eq!(
+            d.ingest_join([3].into(), c, sn0(), 1_000),
+            JoinOutcome::Admitted
+        );
         assert_eq!(
             d.by_src.lookup(&c),
             Some(Some(0)),
@@ -3643,7 +3629,7 @@ mod tests {
                 let k = draw(pool.len() as u64) as usize;
                 match draw(4) {
                     0 | 1 => {
-                        let _ = d.ingest_join(&[k as u8 + 1], pool[k], sn0(), now);
+                        let _ = d.ingest_join([k as u8 + 1].into(), pool[k], sn0(), now);
                     }
                     2 => {
                         let _ = d.close_by_src(pool[k]);
@@ -3686,7 +3672,7 @@ mod tests {
         d.ingest_join(ZID_A, SRC_A, sn0(), 0);
         assert!(d.close_by_src(SRC_A));
         assert_eq!(d.active_peers(), 0);
-        assert_eq!(d.peer_state(ZID_A), None);
+        assert_eq!(d.peer_state(&ZID_A), None);
     }
 
     /// Closing an unknown address is a no-op returning `false`.
@@ -3710,7 +3696,7 @@ mod tests {
         // Sweep at t=6_000: only A (deadline 5_000) expires.
         assert_eq!(d.sweep(6_000), 1);
         assert_eq!(d.active_peers(), 1);
-        assert_eq!(d.peer_state(ZID_B), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state(&ZID_B), Some(MulticastPeerState::Active));
         // Sweep at t=10_000: B (deadline 9_000) expires too.
         assert_eq!(d.sweep(10_000), 1);
         assert_eq!(d.active_peers(), 0);
@@ -3743,8 +3729,8 @@ mod tests {
         );
         // t=3_000: A (window 2_000) expires, B (window 8_000) survives.
         assert_eq!(d.sweep(3_000), 1);
-        assert_eq!(d.peer_state(ZID_A), None);
-        assert_eq!(d.peer_state(ZID_B), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state(&ZID_A), None);
+        assert_eq!(d.peer_state(&ZID_B), Some(MulticastPeerState::Active));
         // t=8_000: B's own deadline arrives.
         assert_eq!(d.sweep(8_000), 1);
         assert_eq!(d.active_peers(), 0);
@@ -3812,7 +3798,7 @@ mod tests {
         assert!(d.refresh_by_src(SRC_A, 4_000)); // deadline now 9_000
                                                  // Sweep at t=6_000: A survives because of the refresh.
         assert_eq!(d.sweep(6_000), 0);
-        assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state(&ZID_A), Some(MulticastPeerState::Active));
     }
 
     /// Refreshing an unknown address returns `false`.
@@ -3840,8 +3826,8 @@ mod tests {
             d.ingest_join(ZID_B, SRC_B, sn0(), 100),
             JoinOutcome::Admitted
         );
-        assert_eq!(d.peer_state(ZID_B), Some(MulticastPeerState::Active));
-        assert_eq!(d.peer_state(ZID_A), None);
+        assert_eq!(d.peer_state(&ZID_B), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state(&ZID_A), None);
     }
 
     // ── A1a — per-peer Frame SN admission (§3.1 Frame -> per-peer
@@ -3962,7 +3948,7 @@ mod tests {
             FrameIngest::Admitted
         ); // deadline now 9_000
         assert_eq!(d.sweep(6_000), 0);
-        assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state(&ZID_A), Some(MulticastPeerState::Active));
     }
 
     /// A frame past the half-window is ambiguous-stale and dropped; one
@@ -4155,7 +4141,7 @@ mod tests {
         // read-before-`evict()` ordering lives: reading after would report an
         // empty zid, and the loops could not tell the difference.
         assert_eq!(departed.len(), 1);
-        assert_eq!(departed[0].peer.as_slice(), ZID_A);
+        assert_eq!(departed[0].peer.as_slice(), ZID_A.as_slice());
         assert_eq!(
             departed[0].reason,
             MulticastPeerLostReason::LeaseExpired,
@@ -4183,7 +4169,7 @@ mod tests {
         assert_eq!(d.peer_index_by_src(SRC_B), None);
         assert_eq!(d.peer_index_by_src(SRC_A), Some(0));
         assert_eq!(departed.len(), 1);
-        assert_eq!(departed[0].peer.as_slice(), ZID_B);
+        assert_eq!(departed[0].peer.as_slice(), ZID_B.as_slice());
         assert_eq!(
             departed[0].reason,
             MulticastPeerLostReason::CapabilitiesChanged
@@ -4214,7 +4200,7 @@ mod tests {
         let mut departed = std::vec::Vec::new();
         assert!(d.close_by_src_with(SRC_A, |lost| departed.push(lost)));
         assert_eq!(departed.len(), 1);
-        assert_eq!(departed[0].peer.as_slice(), ZID_A);
+        assert_eq!(departed[0].peer.as_slice(), ZID_A.as_slice());
         assert_eq!(
             departed[0].reason,
             MulticastPeerLostReason::Closed,

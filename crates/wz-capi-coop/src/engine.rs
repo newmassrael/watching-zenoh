@@ -80,7 +80,7 @@ use wz_session_core::push_build;
 use wz_session_core::sample::{Sample, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_init_params::{
-    KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+    KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
 };
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -227,12 +227,17 @@ pub enum OpenError {
     Unreachable(String),
     /// The platform gave no entropy for the session's zid or its cookie key.
     EntropyUnavailable,
+    /// The configured zid is not one: it is not one to sixteen bytes, or its bytes are all zero.
+    InvalidZid(ZidError),
 }
 
-/// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id.
-fn wire_zid(zid: &[u8]) -> Vec<u8> {
-    let len = zid.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
-    zid[..len].to_vec()
+/// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id. Refused
+/// when the configured bytes are not one to sixteen or are all zero, here and once, so the
+/// session it opens holds a zid.
+pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
+    let stated = SessionZid::new(zid).map_err(OpenError::InvalidZid)?;
+    let len = stated.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
+    SessionZid::new(&stated[..len]).map_err(OpenError::InvalidZid)
 }
 
 /// The session's entropy source, which every draw of the session goes through: its zid, the
@@ -256,7 +261,7 @@ impl EntropySource for SharedEntropy {
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
-fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<Vec<u8>, OpenError> {
+fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
     let mut zid = [0u8; 16];
     entropy
         .try_fill_bytes(&mut zid)
@@ -264,7 +269,7 @@ fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<Vec<u8>, OpenError> {
     if zid.iter().all(|b| *b == 0) {
         return Err(OpenError::EntropyUnavailable);
     }
-    Ok(wire_zid(&zid))
+    wire_zid(&zid)
 }
 
 /// One session the program steps; see the module doc.
@@ -292,7 +297,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// What the liveliness subscribers' sinks queued for their callbacks (`liveliness`).
     #[cfg(feature = "liveliness")]
     live_samples: LivelinessQueue,
-    zid: [u8; 16],
+    zid: SessionZid,
     closed: AtomicBool,
     /// The entity ids the session's declarations and Interests take, from 1: `u32`, upstream's
     /// `EntityId`, and refused once spent rather than wrapped (`SessionEngine::next_entity_id`).
@@ -438,7 +443,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     entropy: SharedEntropy,
     config: CoopConfig,
     /// The zid in its wire form, which every handshake of the session announces.
-    wire_zid: Vec<u8>,
+    wire_zid: SessionZid,
     /// The session's say on a link to a node it holds a link to, asked while the link's handshake
     /// runs (`install_link_admission`, `listen`).
     #[cfg(feature = "listen")]
@@ -820,7 +825,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // cookie key of its own per attempt.
         let params = SessionInitParams {
             whatami: self.config.whatami,
-            zid: self.wire_zid.clone(),
+            zid: self.wire_zid,
             seq_num_res: self.config.sn_resolution.wire_code(),
             req_id_res: 2,
             batch_size: self.config.batch_size,
@@ -1475,12 +1480,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ) -> Result<Arc<Self>, OpenError> {
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match &config.zid {
-            Some(zid) => wire_zid(zid),
+            Some(zid) => wire_zid(zid)?,
             None => fresh_zid(&mut entropy)?,
         };
-        let mut zid = [0u8; 16];
-        let n = wire.len().min(16);
-        zid[..n].copy_from_slice(&wire[..n]);
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         let mut core = Core {
@@ -1563,7 +1565,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             faces,
             #[cfg(feature = "liveliness")]
             live_samples: Arc::new(Mutex::new(VecDeque::new())),
-            zid,
+            zid: wire,
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
             #[cfg(any(feature = "query", feature = "ticker"))]
@@ -2243,7 +2245,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.closed.load(Ordering::Acquire)
     }
 
-    fn zid(&self) -> [u8; 16] {
+    fn session_zid(&self) -> SessionZid {
         self.zid
     }
 
@@ -3191,10 +3193,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self
     }
 
-    fn zid(&self) -> [u8; 16] {
-        self.zid
-    }
-
     fn close(&self) {
         // The read task stops first, so the close is the last thing the session does. A close
         // from the read task itself stops nothing and leaves the thread to see the session
@@ -3375,10 +3373,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive f
 
     fn engine_ref(&self) -> &dyn SessionEngine {
         &*self.0
-    }
-
-    fn zid(&self) -> [u8; 16] {
-        self.0.zid
     }
 
     fn close(&self) {

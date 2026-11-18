@@ -80,7 +80,7 @@ const ITER_CAP: usize = 64;
 
 fn initiator_params() -> SessionInitParams {
     let mut p = fixture_session_init_params();
-    p.zid = vec![0x01; 4];
+    p.zid = [0x01; 4].into();
     p
 }
 
@@ -122,7 +122,7 @@ async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, WriterHan
     let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
 
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4]; // distinct zid from the initiator
+    params.zid = [0x02; 4].into(); // distinct zid from the initiator
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
@@ -195,7 +195,7 @@ async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, WriterHan
     let (mut inbound, outbound, writer_handle) = wire_udp_socket(socket, src);
 
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4]; // distinct zid from the initiator
+    params.zid = [0x02; 4].into(); // distinct zid from the initiator
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
@@ -436,7 +436,7 @@ async fn static_listen_accepts_a_dialing_peer_and_announces_peer_mode() {
     let endpoint = format!("tcp/127.0.0.1:{port}");
 
     let mut acceptor_params = fixture_session_init_params();
-    acceptor_params.zid = vec![0x02; 4]; // distinct zid from the initiator
+    acceptor_params.zid = [0x02; 4].into(); // distinct zid from the initiator
 
     // Deliberately CLIENT. pico's listen arm inserts `mode=peer` OVER whatever
     // the config said (session.c:96, :110) precisely because its own default is

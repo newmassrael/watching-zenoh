@@ -82,7 +82,8 @@ pub async fn open_both_to_established_with_zids(
             .await
             .expect("server tls handshake");
         let mut params = fixture_session_init_params();
-        params.zid = acceptor_zid;
+        params.zid = wz_runtime_tokio::session_glue::SessionZid::new(&acceptor_zid)
+            .expect("a test zid is 1 to 16 bytes");
         accept_and_open_session(
             // R2608 — `false`: this harness drives the plain open path, whose
             // subject is the handshake and not `close_link_on_expiration`.
@@ -106,7 +107,8 @@ pub async fn open_both_to_established_with_zids(
             server_name,
         });
         let mut params = fixture_session_init_params();
-        params.zid = initiator_zid;
+        params.zid = wz_runtime_tokio::session_glue::SessionZid::new(&initiator_zid)
+            .expect("a test zid is 1 to 16 bytes");
         connect_and_open_session(
             locator,
             params,

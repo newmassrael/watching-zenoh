@@ -170,7 +170,9 @@ fn scout_window(
         };
         let actions = ScoutingActions::new(ScoutParams {
             what,
-            zid,
+            // A Scout names its asker optionally: no bytes, or bytes that are no zid, ask as
+            // nobody rather than put an id on the wire that no node has.
+            zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
             // The caller's whole budget IS the window: upstream hands its
             // `timeout` straight to `__z_scout_loop`'s `while elapsed <
             // period` (`src/session/scout.c:60-63`).

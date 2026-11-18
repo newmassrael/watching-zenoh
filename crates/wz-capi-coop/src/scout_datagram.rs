@@ -55,7 +55,8 @@ where
 {
     let params = ScoutParams {
         what,
-        zid,
+        // A Scout names its asker optionally: no bytes, or bytes that are no zid, ask as nobody.
+        zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
         timeout_ms: budget_ms,
         exit_on_first: false,
     };
@@ -80,7 +81,8 @@ where
 {
     let params = ScoutParams {
         what,
-        zid,
+        // As `run_scout`'s: an asker named only by a zid.
+        zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
         timeout_ms: budget_ms,
         exit_on_first: true,
     };

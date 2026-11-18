@@ -246,7 +246,7 @@ fn session_init_params(
 ) -> Result<SessionInitParams, wz::runtime_tokio::session_glue::EntropyUnavailable> {
     Ok(SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: REPLAY_ZID.to_vec(),
+        zid: REPLAY_ZID.into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,

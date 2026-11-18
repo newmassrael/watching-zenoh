@@ -225,7 +225,7 @@ mod tests {
     fn fixture_actions_mode(exit_on_first: bool) -> Arc<ScoutingActions> {
         ScoutingActions::new(ScoutParams {
             what: 0x03, // ROUTER | PEER
-            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            zid: Some([0xAA, 0xBB, 0xCC, 0xDD].into()),
             timeout_ms: 1000,
             exit_on_first,
         })
@@ -712,7 +712,7 @@ mod tests {
         let mut driver = ScriptedScoutLink::with([malformed, good]);
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
-            zid: vec![0xAA],
+            zid: Some([0xAA].into()),
             timeout_ms: 400,
             exit_on_first: true,
         });
@@ -788,7 +788,7 @@ mod tests {
         let mut driver = ScriptedScoutLink::with(observed);
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
-            zid: OUR_ZID.to_vec(),
+            zid: Some(wz_session_core::session_init_params::zid_bytes(OUR_ZID)),
             timeout_ms: 400,
             exit_on_first: false,
         });
@@ -834,7 +834,7 @@ mod tests {
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
             // NOT the zid in the datagram above.
-            zid: vec![0xBB],
+            zid: Some([0xBB].into()),
             timeout_ms: 200,
             exit_on_first: false,
         });
@@ -873,7 +873,7 @@ mod tests {
         ]);
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
-            zid: vec![0xAA],
+            zid: Some([0xAA].into()),
             timeout_ms: 400,
             exit_on_first: true,
         });
@@ -923,7 +923,7 @@ mod tests {
         ]);
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
-            zid: vec![0xAA],
+            zid: Some([0xAA].into()),
             timeout_ms: 400,
             exit_on_first: false,
         });

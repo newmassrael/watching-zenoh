@@ -204,7 +204,7 @@ unsafe extern "C" fn released(context: *mut c_void) {
 fn init_params(zid: [u8; 16]) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Client,
-        zid: zid.to_vec(),
+        zid: zid.into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 2048,

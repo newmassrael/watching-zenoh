@@ -238,7 +238,7 @@ where
     let storage = StorageService::declare_with_backend(
         &session,
         &StorageConfig::new("demo", STORAGE_KEYEXPR, "hist"),
-        vec![0x01],
+        [0x01].into(),
         backend,
     )
     .expect("declare the wz storage on demo/**");

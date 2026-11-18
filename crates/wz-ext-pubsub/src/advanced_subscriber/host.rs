@@ -48,6 +48,7 @@ use wz_session_core::reply_sink::ReplyView;
 use wz_session_core::sample::{EntityGlobalId, Sample};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::serde_codec::z_deserialize;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::sink::SampleView;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
@@ -70,11 +71,6 @@ pub enum HostError {
     /// a degradation: the caller asked for it, and a subscriber that quietly lacks it is the
     /// failure nobody can see from outside.
     Refused(&'static str),
-    /// The session's own zid is not 1..=16 bytes, so this subscriber has no global identity.
-    SessionZid {
-        /// The zid's length.
-        len: usize,
-    },
     /// The session has handed out every declaration id it can put on the wire, so the
     /// subscription was not declared.
     IdsExhausted,
@@ -89,9 +85,6 @@ impl std::fmt::Display for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(what) => write!(f, "the engine refused an advanced subscriber: {what}"),
-            Self::SessionZid { len } => {
-                write!(f, "the session's zid is {len} bytes, not 1 to 16")
-            }
             Self::IdsExhausted => {
                 f.write_str("the session has handed out every 32-bit declaration id")
             }
@@ -249,17 +242,6 @@ fn form_of(
     forms.map(|f| ask(f.forms())).unwrap_or_default()
 }
 
-/// The session's own zid, trimmed to its length: the port hands it zero-padded to 16 bytes, and
-/// zenoh's identifier is its bytes without the trailing zeros.
-fn session_zid(engine: &dyn SessionEngine) -> Result<Vec<u8>, HostError> {
-    let padded = engine.zid();
-    let len = padded.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
-    if len == 0 {
-        return Err(HostError::SessionZid { len });
-    }
-    Ok(padded[..len].to_vec())
-}
-
 impl EngineSubscriber {
     /// Declare an advanced subscriber on `keyexpr` over `engine`, delivering to `on_sample`.
     ///
@@ -310,7 +292,7 @@ impl EngineSubscriber {
         if engine.is_closed() {
             return Err(HostError::Refused("the session is closed"));
         }
-        let zid = session_zid(&**engine)?;
+        let zid = engine.session_zid();
         let recovery = options.recovery;
         let retransmission = recovery.is_some();
         let history = options.history;
@@ -363,7 +345,7 @@ impl EngineSubscriber {
             options.allowed_origin,
             live_sink,
         )?;
-        let id = identity_of(&zid, subscriber.entity.id, forms.as_ref())?;
+        let id = identity_of(zid, subscriber.entity.id, forms.as_ref());
 
         // The retention sweep and the periodic re-ask: jobs the engine runs.
         let retention = match recovery.map(|c| c.retention_period()) {
@@ -604,14 +586,14 @@ impl EngineSubscriber {
 /// The identity a subscriber reports: its host's, when the host has one, else its subscription's
 /// own id, which is the entity id its declaration carries.
 fn identity_of(
-    zid: &[u8],
+    zid: SessionZid,
     subscription: SubId,
     forms: Option<&FormsHandle>,
-) -> Result<EntityGlobalId, HostError> {
+) -> EntityGlobalId {
     let eid = forms
         .and_then(|f| f.forms().entity_id())
         .unwrap_or(subscription);
-    EntityGlobalId::new(zid, eid).ok_or(HostError::SessionZid { len: zid.len() })
+    EntityGlobalId::of_session(zid, eid)
 }
 
 /// Declare a plain subscription on `keyexpr` in `form`.

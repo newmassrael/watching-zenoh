@@ -4047,9 +4047,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///
     /// ## R236 — auto-wire self-echo dedup from `SessionInitParams.zid`
     ///
-    /// When `actions.params.zid` carries a valid 1..=16 byte zid
-    /// (the wire-form `_z_id_t` range), this constructor forwards it
-    /// into the inbound subscriber registry via
+    /// `actions.params.zid` is a
+    /// [`SessionZid`](wz_session_core::session_zid::SessionZid), one to sixteen bytes by
+    /// construction (the wire-form `_z_id_t` range), and this constructor
+    /// forwards it into the inbound subscriber registry via
     /// [`Session::set_own_zid`] so the application is shielded by the
     /// R231 self-echo dedup guard without writing an explicit hook
     /// against a future FSM `Established` event. Mirrors
@@ -4058,14 +4059,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// `vendor/zenoh-pico/src/session/utils.c` @ `zn->_local_zid = *zid;`
     /// (`_z_session_init` sets it before any RX/TX driver runs).
     ///
-    /// Silent skip on `zid.is_empty()` so test fixtures that
-    /// construct a Session with a placeholder `SessionInitParams`
-    /// (no zid declared) are not affected; the registry's `own_zid`
-    /// stays `None`, dedup remains disabled, and every wire-arrived
-    /// Push fires its matching subscribers (the pre-R231 default).
-    /// Silent skip also on `zid.len() > 16` for the same reason —
-    /// `set_own_zid`'s range check rejects the install and returns
-    /// `false`; no panic, no diagnostic noise during construction.
     /// An application that wants to override or re-install the
     /// dedup zid after construction still has the explicit
     /// `set_own_zid` / `clear_own_zid` surface available.
@@ -4102,7 +4095,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // no fallible re-projection of a value this ctor builds as `Unicast`
         // by construction (R311ne — drops the defensive `if let Ok` that
         // re-asked a known-`Ok` question).
-        let zid = actions.params.zid.clone();
+        let zid = actions.params.zid;
         // R311y450 — build THIS node's HLC once, here, from the same handshake
         // identity and role the dedup install below reads. Derived rather than
         // passed so the 100-plus existing `Session::new` call sites keep working
@@ -4174,12 +4167,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 std::collections::HashMap::new(),
             )),
         });
-        // Forward the zid into the subscriber registry so wire-arrived
-        // self-echo Pushes are dedup'd from session creation onward. The
-        // `1..=16` range check inside `set_own_zid` quietly rejects an
-        // out-of-range value (returns `false`); empty zid skipped here so the
-        // registry stays in its pre-R231 default state for test fixtures that
-        // don't supply a zid.
         // The spans of upstream's routing code, for a registration this session makes of what its
         // link declared: the node's own zid names them, as upstream's `demux` does.
         #[cfg(all(
@@ -4187,9 +4174,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             any(feature = "declare-subscriber", feature = "declare-queryable")
         ))]
         session.open_routing_spans(&wz_session_core::zid_hex::zid_to_zenoh_hex(&zid));
-        if !zid.is_empty() {
-            let _ = session.set_own_zid(zid);
-        }
+        // Wire-arrived self-echo Pushes are dedup'd from session creation onward. The install
+        // cannot be refused: a `SessionZid` is in the range `set_own_zid` checks.
+        let _ = session.set_own_zid(zid.to_vec());
         // R311y739 — hand the inbound registries OUR id space, so a peer that
         // names an id WE declared (`M=0`, which zenoh PREFERS emitting once we
         // have declared one) resolves instead of being dropped.
@@ -4447,14 +4434,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// disagree with the session it rode on. An entity that asks the session
     /// cannot.
     ///
-    /// ⚠ A slice, not a validated id: `SessionInitParams::zid` documents
-    /// `1..=16` bytes and nothing enforces it, so a caller that needs a GLOBAL
-    /// identity builds an [`wz_session_core::sample::EntityGlobalId`] from this
-    /// and handles the refusal.
+    /// A validated id, one to sixteen bytes by its type, so an entity that
+    /// names itself by it has nothing to refuse
+    /// ([`wz_session_core::sample::EntityGlobalId::of_session`]).
     ///
     /// [`SessionInitParams::zid`]: wz_session_core::session_init_params::SessionInitParams::zid
-    pub fn zid(&self) -> &[u8] {
-        &self.transport.params.zid
+    pub fn zid(&self) -> wz_session_core::session_zid::SessionZid {
+        self.transport.params.zid
     }
 
     /// The stamp a queryable declared with `options` replies with: this session's node identity and
@@ -4463,7 +4449,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// cannot name. Make it before declaring and move it into the callback ([`NodeStamp`]).
     #[cfg(feature = "pubsub-timestamp")]
     pub fn queryable_stamp(&self, options: &QueryableOptions) -> NodeStamp {
-        NodeStamp::new(self.zid(), options.stamp_timestamp())
+        NodeStamp::new(&self.zid(), options.stamp_timestamp())
     }
 
     /// R311y450 — borrow THIS node's §5.18 clock, wz's counterpart of zenoh's

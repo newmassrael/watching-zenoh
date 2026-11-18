@@ -84,7 +84,7 @@ fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
         .map_err(|e| format!("draw the cookie signing key: {:?}", e))?;
     Ok(SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: vec![zid; 4],
+        zid: [zid; 4].into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
@@ -102,7 +102,7 @@ fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
 fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: zid.to_vec(),
+        zid: wz_session_core::multicast_params::zid_vec(zid),
         lease_ms,
         join_interval_ms: GROUP_JOIN_INTERVAL_MS,
         seq_num_res: 0x02,

@@ -87,7 +87,7 @@ const DELIVERY_BUDGET: Duration = Duration::from_secs(15);
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: vec![0x7a; 4],
+        zid: [0x7a; 4].into(),
         lease_ms: 5_000,
         join_interval_ms: 50,
         seq_num_res: PICO_SN_RESOLUTION,

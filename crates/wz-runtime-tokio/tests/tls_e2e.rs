@@ -588,7 +588,7 @@ async fn a_tls_locator_carrying_its_own_material_handshakes_with_no_ambient_conf
             .await
             .expect("accept the inbound tls peer");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -601,7 +601,7 @@ async fn a_tls_locator_carrying_its_own_material_handshakes_with_no_ambient_conf
     };
     let init_open = async {
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             dial,
             params,

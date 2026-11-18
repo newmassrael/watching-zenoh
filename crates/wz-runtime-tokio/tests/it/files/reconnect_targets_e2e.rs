@@ -150,7 +150,7 @@ async fn accept_one_before_deadline(listener: &TcpListener, what: &str) -> Opene
 async fn accept_one(listener: &TcpListener) -> OpenedSession {
     let (stream, _peer) = listener.accept().await.expect("accept");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4]; // distinct zid from the initiator
+    params.zid = [0x02; 4].into(); // distinct zid from the initiator
     accept_and_open_session(
         DialedLink::Tcp(stream),
         params,
@@ -173,7 +173,7 @@ async fn open_supervised(
     OpenedSession,
 ) {
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     tokio::join!(
         async {
             open_session_with_reconnect(

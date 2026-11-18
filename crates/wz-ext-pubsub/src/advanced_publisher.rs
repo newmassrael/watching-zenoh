@@ -34,6 +34,7 @@ use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::{SampleKind, SourceInfo, TimestampHint};
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 #[cfg(feature = "ext-pubsub-sample-miss-detection")]
@@ -328,9 +329,6 @@ impl std::error::Error for PlaneError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AdvancedPublisherError {
-    /// `local_zid` was empty or longer than 16 bytes (the `SourceInfo`
-    /// wire constraint).
-    InvalidZid,
     /// The cache queryable declaration was rejected.
     Cache(PlaneError),
     /// The `@adv` liveliness token declaration was rejected.
@@ -644,7 +642,7 @@ pub struct AdvancedPublisherOn<P: AdvancedPublisherPlane> {
     beacon: Option<DeclaredBeacon<P>>,
     cache: Option<DeclaredCache<P>>,
     keyexpr: String,
-    zid: Vec<u8>,
+    zid: SessionZid,
     eid: u32,
     seqnum: Option<Arc<AtomicU32>>,
     /// R2618 — the publisher's wire knobs, applied to every Put and Del it
@@ -675,16 +673,15 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// and the beacon's publisher. Everything that can be refused without a
     /// declaration is refused BEFORE the first one, so a refusal does not put a
     /// publisher on the wire only to retract it.
+    ///
+    /// `local_zid` is the zid of the session the plane rides on: the publisher's
+    /// source identity in every sample's `SourceInfo` and in the `@adv` key.
     pub fn declare_on(
         plane: Arc<P>,
         keyexpr: impl Into<String>,
         options: AdvancedPublisherOptions,
-        local_zid: Vec<u8>,
+        local_zid: SessionZid,
     ) -> Result<Self, AdvancedPublisherError> {
-        if local_zid.is_empty() || local_zid.len() > 16 {
-            return Err(AdvancedPublisherError::InvalidZid);
-        }
-
         // R2558 — ASKING FOR MISS DETECTION *IS* ASKING FOR SEQUENCE NUMBERS,
         // and until now wz let a caller state otherwise and then quietly did
         // nothing.
@@ -1012,7 +1009,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         };
         Ok(TimestampHint {
             time: self.plane.order_stamp(proposed)?,
-            zid: self.zid.clone(),
+            zid: self.zid.to_vec(),
         })
     }
 
@@ -1213,7 +1210,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// subscriber that reads a sample's origin and a caller that asks the
     /// publisher who it is now get the same answer by construction.
     pub fn id(&self) -> (&[u8], u32) {
-        (&self.zid, self.eid)
+        (self.zid.as_slice(), self.eid)
     }
 
     /// R2619 — undeclare this publisher, upstream's

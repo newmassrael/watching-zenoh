@@ -164,12 +164,8 @@ impl SessionEngine for RouterState {
         RouterState::is_closed(self)
     }
 
-    fn zid(&self) -> [u8; 16] {
-        let mut padded = [0u8; 16];
-        let zid = RouterState::zid(self);
-        let len = zid.len().min(16);
-        padded[..len].copy_from_slice(&zid[..len]);
-        padded
+    fn session_zid(&self) -> wz_session_core::session_zid::SessionZid {
+        *RouterState::zid(self)
     }
 
     fn now_ms(&self) -> u64 {

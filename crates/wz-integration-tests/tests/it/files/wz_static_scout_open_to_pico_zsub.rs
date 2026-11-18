@@ -80,7 +80,7 @@ const ITER_CAP: usize = 64;
 
 fn initiator_params() -> SessionInitParams {
     let mut p = fixture_session_init_params();
-    p.zid = vec![0x01; 4];
+    p.zid = [0x01; 4].into();
     p
 }
 

@@ -103,7 +103,7 @@ fn dial(port: u16, credential: Option<(&str, &str)>) -> Result<(), OpenError> {
     runtime.block_on(async {
         let locator = parse_any_locator(&format!("tcp/127.0.0.1:{port}")).expect("a locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x07; 4];
+        params.zid = [0x07; 4].into();
         let cfg = DialConfig::default();
         let opened = match credential {
             Some((user, password)) => {
@@ -287,7 +287,7 @@ fn dial_with_key(port: u16, key: wz_runtime_tokio::rsa::RsaPrivateKey) -> Result
     runtime.block_on(async {
         let locator = parse_any_locator(&format!("tcp/127.0.0.1:{port}")).expect("a locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x08; 4];
+        params.zid = [0x08; 4].into();
         let auth = AuthDispatch::new(vec![Box::new(PubKeyMethod::initiator(key)) as _]);
         connect_and_open_session_with_auth(
             locator,
@@ -397,7 +397,7 @@ fn a_client_presents_the_pubkey_identity_its_own_config_states() {
             let (stream, _) = listener.accept().await.expect("the client dials");
             let accepted_at = std::time::Instant::now();
             let mut params = fixture_session_init_params();
-            params.zid = vec![0x09; 4];
+            params.zid = [0x09; 4].into();
             let auth = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
                 responder_key,
                 Some(vec![client_public]),

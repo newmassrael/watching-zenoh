@@ -183,7 +183,7 @@ async fn wz_storage_applies_a_pico_wildcard_update_over_the_wire() {
     let storage = StorageService::declare(
         &session,
         &StorageConfig::new("demo", STORAGE_KEYEXPR, "mem"),
-        vec![0x01],
+        [0x01].into(),
     )
     .expect("declare the wz storage on demo/**");
 

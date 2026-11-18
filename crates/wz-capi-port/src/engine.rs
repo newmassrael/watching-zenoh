@@ -28,6 +28,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::sample::TimestampHint;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
@@ -48,8 +49,14 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// session does: nothing is sent and nothing is declared.
     fn is_closed(&self) -> bool;
 
-    /// The session's own zid, zero-padded to 16 bytes.
-    fn zid(&self) -> [u8; 16];
+    /// The session's own zid, as its handshake carries it.
+    fn session_zid(&self) -> SessionZid;
+
+    /// The session's own zid, zero-padded to 16 bytes: [`Self::session_zid`] in the form a
+    /// C ABI's id holds, so the two cannot disagree.
+    fn zid(&self) -> [u8; 16] {
+        self.session_zid().to_padded()
+    }
 
     /// The engine's own clock, in whole milliseconds since an epoch of its choosing: monotonic,
     /// and the one its periodic jobs ([`Self::start_ticker`]) and its deadlines run on. A caller

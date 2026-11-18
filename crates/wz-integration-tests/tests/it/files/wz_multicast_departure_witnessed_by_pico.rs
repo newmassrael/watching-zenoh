@@ -133,7 +133,7 @@ const LEASE_BUDGET: Duration = Duration::from_secs(20);
 fn wz_mc_params(zid: Vec<u8>, lease_ms: u64) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid,
+        zid: wz_session_core::multicast_params::zid_vec(&zid),
         lease_ms,
         join_interval_ms: 50,
         seq_num_res: PICO_SN_RESOLUTION,

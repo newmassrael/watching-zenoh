@@ -93,7 +93,7 @@ async fn wz_to_wz_over_udp_fragments_and_reassembles_oversize_put() {
             .await
             .expect("peek initiator InitSyn datagram");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::Udp {
                 socket: acc_socket,
@@ -110,7 +110,7 @@ async fn wz_to_wz_over_udp_fragments_and_reassembles_oversize_put() {
     let init_open = async {
         let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

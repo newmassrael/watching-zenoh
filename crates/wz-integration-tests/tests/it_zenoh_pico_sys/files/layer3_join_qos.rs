@@ -182,7 +182,7 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
 
     let params = MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: vec![0x01, 0x02, 0x03],
+        zid: [0x01, 0x02, 0x03].into(),
         // whole seconds -> the T flag rides (lease in seconds on the wire).
         lease_ms: 8000,
         join_interval_ms: 1000,

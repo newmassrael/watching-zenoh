@@ -42,7 +42,7 @@ async fn handshake_negotiates_the_patch_level_on_both_sides() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -56,7 +56,7 @@ async fn handshake_negotiates_the_patch_level_on_both_sides() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         let cfg = DialConfig::default();
         connect_and_open_session(
             locator,
@@ -113,7 +113,7 @@ async fn a_peer_without_the_patch_ext_leaves_the_markers_off() {
     let acc = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -126,7 +126,7 @@ async fn a_peer_without_the_patch_ext_leaves_the_markers_off() {
     });
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     let opened = connect_and_open_session(
         locator,
         params,

@@ -773,7 +773,7 @@ mod multicast {
     fn params() -> MulticastParams {
         MulticastParams {
             whatami: wz_session_core::WhatAmI::Peer,
-            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            zid: [0xAA, 0xBB, 0xCC, 0xDD].into(),
             lease_ms: 5_000,
             join_interval_ms: 100,
             seq_num_res: 0x02,

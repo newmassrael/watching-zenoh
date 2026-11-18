@@ -381,7 +381,7 @@ mod tests {
         *actions
             .remote_peer_zid
             .lock()
-            .expect("remote_peer_zid poisoned in test fixture") = Some(vec![zid; 4]);
+            .expect("remote_peer_zid poisoned in test fixture") = Some([zid; 4].into());
         *actions
             .peer_whatami
             .lock()

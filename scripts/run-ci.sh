@@ -9925,7 +9925,8 @@ layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
     # registry is every build's surface — so every advanced_subscriber lane
     # moves by the same two.
     # R2815 — 7 -> 8: a_session_without_a_zid_gives_no_subscriber_an_identity,
-    # ungated. It REPLACES detection_refuses_a_zid_that_is_not_a_zid, which was
+    # ungated; renamed a_subscriber_is_named_by_its_sessions_zid when the
+    # session's zid became a type and a session without one became unbuildable. It REPLACES detection_refuses_a_zid_that_is_not_a_zid, which was
     # recovery-gated, so C1at and C1av trade one for one and stay put.
     # R2816 — 8 -> 9: detect_publishers_hears_this_keyexprs_publishers_only,
     # ungated, so every advanced_subscriber lane moves by one.

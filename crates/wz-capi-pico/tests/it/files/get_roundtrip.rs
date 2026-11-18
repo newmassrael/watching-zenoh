@@ -275,11 +275,11 @@ const Z_ERR_SESSION_CLOSED: i8 = -73;
 use wz_runtime_tokio_test_support::free_port;
 
 fn init_params(whatami: WhatAmI) -> SessionInitParams {
-    let mut zid = vec![0u8; 16];
+    let mut zid = [0u8; 16];
     getrandom::getrandom(&mut zid).expect("OS entropy");
     SessionInitParams {
         whatami,
-        zid,
+        zid: zid.into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,

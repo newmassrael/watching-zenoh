@@ -433,11 +433,6 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
 fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        // The heap form names the slice's own `to_vec`; the fixed form links no `alloc`
-        // to name it through, so it asks the session tier for the value.
-        #[cfg(not(feature = "fixed-memory"))]
-        zid: zid.to_vec(),
-        #[cfg(feature = "fixed-memory")]
         zid: wz_session_core::multicast_params::zid_vec(zid),
         lease_ms: 5_000,
         join_interval_ms: 1,

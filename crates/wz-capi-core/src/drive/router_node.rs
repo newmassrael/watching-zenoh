@@ -64,7 +64,7 @@ impl NodeRole {
 /// A running router node. Dropping it does not stop it; [`RouterState::close`] does, and joins the
 /// thread the node runs on.
 pub struct RouterState {
-    zid: Vec<u8>,
+    zid: SessionZid,
     forwarder: Arc<RouterForwarder>,
     listen_locators: Vec<String>,
     /// The node's own face, for liveliness: what the program is told of the tokens of the other
@@ -112,7 +112,7 @@ impl RouterState {
     }
 
     /// The identity the node announces, as its wire form.
-    pub fn zid(&self) -> &[u8] {
+    pub fn zid(&self) -> &SessionZid {
         &self.zid
     }
 
@@ -462,7 +462,7 @@ struct JoinedGroup {
 /// is on.
 async fn join_group(
     join: &GroupJoin,
-    zid: &[u8],
+    zid: SessionZid,
     link_conf: LinkConf,
 ) -> Result<JoinedGroup, OpenError> {
     let Some(ResolvedGroup {
@@ -492,7 +492,7 @@ async fn join_group(
         group,
         port,
         wz_runtime_tokio::multicast_glue::RouterGroupProfile {
-            zid: zid.to_vec(),
+            zid,
             qos: join.profile.is_qos,
             compression: join.profile.compression,
             tx_queue: link_conf.tx.queue,
@@ -683,7 +683,7 @@ pub(crate) fn open_router_blocking(
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = handoff::<Result<Vec<String>, OpenError>>();
-    let node_zid = wire_zid.clone();
+    let node_zid = wire_zid;
     let node_forwarder = forwarder.clone();
     let node_shutdown = shutdown.clone();
     let node_stop = stop.clone();
@@ -828,7 +828,7 @@ pub(crate) fn open_router_blocking(
 #[allow(clippy::too_many_arguments)]
 async fn run_router(
     role: NodeRole,
-    zid: Vec<u8>,
+    zid: SessionZid,
     connect: Vec<String>,
     dial: DialPhase,
     listen: Vec<String>,
@@ -851,7 +851,7 @@ async fn run_router(
         &listen,
         listen_phase,
         &tls,
-        &zid,
+        zid,
         link_conf,
         offer,
         clock,
@@ -887,7 +887,7 @@ async fn run_router(
     // cannot be joined fails the open. Its locator is among the node's own, as the manager of
     // upstream lists its multicast listener beside the unicast ones.
     let group = match groups.first() {
-        Some(join) => match join_group(join, &zid, link_conf).await {
+        Some(join) => match join_group(join, zid, link_conf).await {
             Ok(group) => Some(group),
             Err(cause) => {
                 let _ = tx.send(Err(cause));
@@ -965,7 +965,7 @@ async fn run_router(
             return;
         }
     };
-    let params = match init_params(role.whatami(), zid.clone(), link_conf) {
+    let params = match init_params(role.whatami(), zid, link_conf) {
         Ok(params) => params,
         Err(error) => {
             log_open_failure("session parameters of the router node", &error);

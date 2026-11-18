@@ -341,7 +341,7 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
     // InitSyn BODY field, and `SessionInitParams::req_id_res` is the value
     // `encode_init` puts on the wire.
     params.req_id_res = advertised_req_id_res;
-    let own_zid = params.zid.clone();
+    let own_zid = params.zid.to_vec();
     let stream = TcpStream::connect(("127.0.0.1", relay.port()))
         .await
         .expect("wz dials the sn-recording relay");

@@ -179,7 +179,9 @@ use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
 use crate::session_fsm_unicast::SessionFsmUnicastActions as SessionFsmUnicastActionsTrait;
-use crate::session_init_params::{SessionBytes, SessionInitParams, COOKIE_MAX, ZID_MAX};
+use crate::session_init_params::{
+    SessionBytes, SessionInitParams, SessionZid, COOKIE_MAX, ZID_MAX,
+};
 // R2769 — the accept cookie replaced the bare tag at both ends, so the mint
 // reaches for the carrier's encoder here and the verify names
 // `decode_accept_cookie` at its own site.
@@ -1571,8 +1573,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// arrived yet (handshake hasn't started) and the action falls
     /// back to `params.cookie` verbatim — callers that need strict
     /// HMAC-only behavior must validate the slot before signalling
-    /// `inbound.start`.
-    pub inbound_peer_zid: R::Mutex<Option<SessionBytes<ZID_MAX>>>,
+    /// `inbound.start`. A zid by type: the parser refused an INIT whose zid
+    /// is zero ([`crate::parse_error::InboundParseError::InvalidZid`]).
+    pub inbound_peer_zid: R::Mutex<Option<SessionZid>>,
     /// R311qh — the remote peer's zid learned at handshake, captured for the
     /// ROUTING layer from BOTH the inbound InitSyn (Accepting side) and the
     /// inbound InitAck (Initiating side) — the remote peer's stable network
@@ -1583,7 +1586,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// touching it, to avoid cross-role confusion), whereas this slot is the
     /// role-agnostic remote identity a face exposes once Established. Reset on
     /// re-handshake alongside the other captured slots.
-    pub remote_peer_zid: R::Mutex<Option<SessionBytes<ZID_MAX>>>,
+    pub remote_peer_zid: R::Mutex<Option<SessionZid>>,
     /// The zid of the node this session's dial was made for, or `None` for a
     /// dial made to a locator alone (decision D4 of
     /// `docs/session-lifecycle-intent.md`). Set by the opener before the
@@ -3778,8 +3781,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
                 awaiting_open_ack: R::new_mutex(false),
                 clock: clock,
-                inbound_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
-                remote_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
+                inbound_peer_zid: R::new_mutex(None::<SessionZid>),
+                remote_peer_zid: R::new_mutex(None::<SessionZid>),
                 expected_peer_zid: R::new_mutex(None),
                 peer_whatami: R::new_mutex(None::<u8>),
                 inbound_opensyn_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
@@ -6608,7 +6611,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     pub(crate) fn accept_cookie_state(
         &self,
-        peer_zid: Vec<u8>,
+        peer_zid: SessionZid,
         nonce: u64,
     ) -> crate::accept_cookie::AcceptCookieState {
         let (peer_whatami, sn_res, batch_size, negotiated, multilink) =
@@ -6942,8 +6945,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
     fn install_accept_head(&self, head: Option<&crate::accept_cookie::AcceptCookieState>) {
-        let zid = head.map(|h| h.peer_zid.clone());
-        R::with_mutex_mut(&self.inbound_peer_zid, |s| *s = zid.clone());
+        let zid = head.map(|h| h.peer_zid);
+        R::with_mutex_mut(&self.inbound_peer_zid, |s| *s = zid);
         R::with_mutex_mut(&self.remote_peer_zid, |s| *s = zid);
         R::with_mutex_mut(&self.peer_whatami, |s| *s = head.map(|h| h.peer_whatami));
         self.set_peer_init_caps(
@@ -7765,7 +7768,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<Option<crate::extbound::Bound>, crate::region_partition::RegionError> {
         // The slot's own form, copied: the public `peer_zid` hands out a
         // vector, which this decision (run on every handshake) must not need.
-        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| slot.clone()).unwrap_or_default();
+        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot);
         let whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
         let region = self.peer_region();
         #[cfg(feature = "alloc")]
@@ -7782,7 +7785,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let decided = match whatami {
             Some(whatami) => {
                 let facts = crate::region_partition::RemoteFacts {
-                    zid: &zid,
+                    zid: zid.as_deref().unwrap_or(&[]),
                     whatami,
                     region_name: region.as_ref().map(|name| name.as_str()),
                     interfaces: &interfaces,
@@ -9297,9 +9300,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // `body.zid`), so this mirrors the `is_ack: false` capture below
                 // into `remote_peer_zid`, giving the routing layer the remote
                 // peer's identity for BOTH handshake directions.
+                // The parser refused an INIT whose zid is no zid (`parse_init`), so the
+                // conversion holds for every frame it produced; a frame built by hand
+                // that names none records none.
                 R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-                    *slot =
-                        crate::session_init_params::session_bytes::<ZID_MAX>(body.zid.as_slice());
+                    *slot = SessionZid::new(body.zid.as_slice()).ok();
                 });
                 // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
                 // alongside its zid. Both Init arms capture it (a face may be
@@ -9337,17 +9342,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // R86 — Accepting-side InitSyn arrival: capture the
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
+                // As the InitAck arm's: `parse_init` refused a zid that is none.
+                let zid = SessionZid::new(body.zid.as_slice()).ok();
                 R::with_mutex_mut(&self.inbound_peer_zid, |slot| {
-                    *slot =
-                        crate::session_init_params::session_bytes::<ZID_MAX>(body.zid.as_slice());
+                    *slot = zid;
                 });
                 // R311qh — also capture it into the role-agnostic routing
                 // identity slot (the Initiating side captures the same from the
                 // InitAck above), so a held face exposes its remote peer's zid
                 // regardless of which side opened it.
                 R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-                    *slot =
-                        crate::session_init_params::session_bytes::<ZID_MAX>(body.zid.as_slice());
+                    *slot = zid;
                 });
                 // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
                 // alongside its zid; see the InitAck arm above for why both
@@ -16628,8 +16633,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             let nonce: Option<u64> = R::with_mutex_mut(&a.cookie_nonce, |slot| *slot);
             #[cfg(not(feature = "tx-lend-only"))]
             let cookie_carried = {
-                let peer_zid: Option<Vec<u8>> =
-                    R::with_mutex_mut(&a.inbound_peer_zid, |slot| slot.clone());
+                let peer_zid: Option<SessionZid> =
+                    R::with_mutex_mut(&a.inbound_peer_zid, |slot| *slot);
                 let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
                     (Some(zid), Some(n)) => encode_accept_cookie(
                         &a.params.cookie_signing_key,
@@ -16651,27 +16656,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 cookie_bytes.is_some()
             };
             // Fixed-memory step S4 — the same InitAck with no heap in it: the
-            // peer's zid is copied (at most 16 bytes) into a stack array, the
-            // cookie is minted into a stack array of the widest cookie
+            // peer's zid is copied out of its slot (sixteen bytes and a length),
+            // the cookie is minted into a stack array of the widest cookie
             // (`ACCEPT_COOKIE_MAX_BYTES`, held under the codec's 128 cap by the
             // same test), and the message is written into a lent slot or refused
-            // and counted. A cookie that cannot be minted (no zid, no nonce, a zid
-            // outside 1..=16) leaves as an InitAck with the parameters' own, as
-            // the heap form does, and the state below is then not released.
+            // and counted. A cookie that cannot be minted (no zid, no nonce)
+            // leaves as an InitAck with the parameters' own, as the heap form
+            // does, and the state below is then not released.
             #[cfg(feature = "tx-lend-only")]
             let cookie_carried = {
-                let mut zid = [0u8; 16];
-                let zid_len = R::with_mutex_mut(&a.inbound_peer_zid, |slot| {
-                    slot.as_deref().map(|z| {
-                        let n = z.len().min(zid.len());
-                        zid[..n].copy_from_slice(&z[..n]);
-                        z.len()
-                    })
-                });
-                let peer_zid: Option<&[u8]> = match zid_len {
-                    Some(len) if (1..=zid.len()).contains(&len) => Some(&zid[..len]),
-                    _ => None,
-                };
+                let zid: Option<SessionZid> = R::with_mutex_mut(&a.inbound_peer_zid, |slot| *slot);
+                let peer_zid: Option<&[u8]> = zid.as_deref();
                 let mut cookie_buf = [0u8; crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES];
                 let cookie: Option<&[u8]> = match (peer_zid, nonce) {
                     (Some(zid), Some(n)) => a.mint_accept_cookie_into(zid, n, &mut cookie_buf),

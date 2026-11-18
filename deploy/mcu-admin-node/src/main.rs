@@ -151,7 +151,7 @@ impl EntropySource for ClockSeededXorshift {
 fn params(signing_key: &[u8]) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: ZID.to_vec(),
+        zid: ZID.into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1500,

@@ -46,7 +46,7 @@ use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
     IterationEvent, KeepAliveConf, LinkRxConf, OsEntropy, SessionInitParams, SessionTimeouts,
-    SigningKey, TxQueueConf, WhatAmI,
+    SessionZid, SigningKey, TxQueueConf, WhatAmI,
 };
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::session_open::{bind_endpoint_with_config, AcceptConfig, BoundListener};
@@ -1253,19 +1253,18 @@ fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
 ///
 /// A free function and not a block in [`open_blocking`] so that the choice can be
 /// held by a test that has no peer to look at the INIT.
-fn session_zids(configured: Option<ConfiguredZid>) -> Option<([u8; ZID_LENGTH], Vec<u8>)> {
+fn session_zids(configured: Option<ConfiguredZid>) -> Option<([u8; ZID_LENGTH], SessionZid)> {
     match configured {
-        Some(configured) => Some((configured.padded(), configured.wire().to_vec())),
-        None => Some(minted_zids(fresh_zid()?)),
+        Some(configured) => Some((configured.padded(), configured.wire)),
+        None => minted_zids(fresh_zid()?),
     }
 }
 
-/// The two forms of an id the session minted for itself, see [`session_zids`].
-fn minted_zids(minted: [u8; ZID_LENGTH]) -> ([u8; ZID_LENGTH], Vec<u8>) {
-    (
-        minted,
-        wz_runtime_tokio::zid_hex::canonical_zid(&minted).to_vec(),
-    )
+/// The two forms of an id the session minted for itself, see [`session_zids`]. `None` for
+/// sixteen zero bytes, which trim to no zid at all.
+fn minted_zids(minted: [u8; ZID_LENGTH]) -> Option<([u8; ZID_LENGTH], SessionZid)> {
+    let wire = SessionZid::new(wz_runtime_tokio::zid_hex::canonical_zid(&minted)).ok()?;
+    Some((minted, wire))
 }
 
 /// The zid a config STATES for its session, checked and in the form zenoh puts
@@ -1289,7 +1288,7 @@ fn minted_zids(minted: [u8; ZID_LENGTH]) -> ([u8; ZID_LENGTH], Vec<u8>) {
 /// own caller, which is the property the random path gets from minting once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfiguredZid {
-    wire: Vec<u8>,
+    wire: SessionZid,
 }
 
 impl ConfiguredZid {
@@ -1297,11 +1296,10 @@ impl ConfiguredZid {
     pub fn from_zenoh_text(text: &str) -> Option<Self> {
         let wire = wz_runtime_tokio::zid_hex::zenoh_hex_to_zid(text)?;
         // `zenoh_hex_to_zid` answers one to sixteen bytes for every text it
-        // accepts, and the constructor is the one place that is relied on.
-        if wire.is_empty() || wire.len() > ZID_LENGTH {
-            return None;
-        }
-        Some(Self { wire })
+        // accepts, and the `SessionZid` is the one place that is relied on.
+        Some(Self {
+            wire: SessionZid::new(&wire).ok()?,
+        })
     }
 
     /// The id whose INIT form is `wire`: one to sixteen bytes, the last of them not zero (zenoh
@@ -1310,17 +1308,17 @@ impl ConfiguredZid {
     /// For an ABI whose config names the id in a form of its own: zenoh-pico's key is a UUID
     /// (`wz-capi-pico`), where [`Self::from_zenoh_text`] reads zenoh's `u128` text.
     pub fn from_wire(wire: &[u8]) -> Option<Self> {
-        if wire.is_empty() || wire.len() > ZID_LENGTH || wire.last() == Some(&0) {
+        if wire.last() == Some(&0) {
             return None;
         }
         Some(Self {
-            wire: wire.to_vec(),
+            wire: SessionZid::new(wire).ok()?,
         })
     }
 
     /// The form an INIT carries.
     pub fn wire(&self) -> &[u8] {
-        &self.wire
+        self.wire.as_slice()
     }
 
     /// The form `z_info_zid` reports: sixteen bytes, zero-padded.
@@ -1395,7 +1393,7 @@ pub const DEFAULT_LEASE_MS: u64 = 10_000;
 /// anyone could read.
 pub(crate) fn init_params(
     whatami: WhatAmI,
-    zid: Vec<u8>,
+    zid: SessionZid,
     link_conf: LinkConf,
 ) -> Result<SessionInitParams, EntropyUnavailable> {
     Ok(SessionInitParams {
@@ -1428,7 +1426,7 @@ struct DriveContext {
     /// thread, from the same value as [`SessionState::zid`], so the two cannot
     /// disagree. Sixteen random bytes on the default path; the trimmed bytes of a
     /// [`ConfiguredZid`] when the config stated one.
-    zid: Vec<u8>,
+    zid: SessionZid,
     shared: Arc<SharedSession>,
     /// Unblocks `z_open`: `true` once the role has reached its ready point
     /// (handshake settled for dial, bind complete for listen), `false` on any
@@ -1514,7 +1512,7 @@ fn prepare_dial(
     // R311y820 — fallible the way the step above is: report the open failure to the C caller
     // rather than dial with a cookie key anybody could forge. Minted ONCE, before the phase: it
     // is not a connect failure, so it is not what `connect/retry` re-attempts.
-    let params = match init_params(whatami, ctx.zid.to_vec(), ctx.link_conf) {
+    let params = match init_params(whatami, ctx.zid, ctx.link_conf) {
         Ok(params) => params,
         Err(error) => {
             log_open_failure("session parameters of the dial", &error);
@@ -1658,7 +1656,7 @@ async fn drive_dial(
         &listen,
         listen_phase,
         &tls,
-        &zid,
+        zid,
         link_conf,
         offer,
         clock,
@@ -1722,7 +1720,7 @@ async fn drive_dial(
             listen,
             late,
             scouting,
-            zid,
+            zid.to_vec(),
             dials,
             responder,
             router_hold,
@@ -3083,7 +3081,7 @@ struct BoundListeners {
 struct LateBinds {
     pending: Vec<PendingBind>,
     tls: CapiTlsConfig,
-    zid: Vec<u8>,
+    zid: SessionZid,
     link_conf: LinkConf,
     offer: SessionOffer,
     clock: TokioTime,
@@ -3161,13 +3159,13 @@ impl LateBinds {
         pending
             .into_iter()
             .map(|pending| {
-                let (tls, zid) = (tls.clone(), zid.clone());
+                let tls = tls.clone();
                 let (shared, gate) = (shared.clone(), gate.clone());
                 let (locators, bound_before) = (locators.clone(), bound_before.clone());
                 let mut closing = closing.clone();
                 tokio::task::spawn_local(CallerSpan::current().carry(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
-                        bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
+                        bind_one(&pending.endpoint, &tls, zid, link_conf, whatami)
                     });
                     let listening = tokio::select! {
                         listening = bound => listening,
@@ -3218,12 +3216,12 @@ impl LateBinds {
                 let held: Vec<_> = pending
                     .into_iter()
                     .map(|pending| {
-                        let (tls, zid) = (tls.clone(), zid.clone());
+                        let tls = tls.clone();
                         let locators = locators.clone();
                         let (shared, bound_before) = (shared.clone(), bound_before.clone());
                         tokio::task::spawn_local(CallerSpan::current().carry(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
-                                bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
+                                bind_one(&pending.endpoint, &tls, zid, link_conf, whatami)
                             })
                             .await;
                             // A client that answers a Scout names its listener as it binds, and
@@ -3273,7 +3271,7 @@ fn log_open_failure(what: &str, why: &dyn core::fmt::Debug) {
 async fn bind_one(
     endpoint: &str,
     tls: &CapiTlsConfig,
-    zid: &[u8],
+    zid: SessionZid,
     link_conf: LinkConf,
     whatami: WhatAmI,
 ) -> Result<Listening, OpenError> {
@@ -3308,7 +3306,7 @@ async fn bind_listeners(
     endpoints: &[String],
     phase: ListenPhase,
     tls: &CapiTlsConfig,
-    zid: &[u8],
+    zid: SessionZid,
     link_conf: LinkConf,
     offer: SessionOffer,
     clock: TokioTime,
@@ -3348,7 +3346,7 @@ async fn bind_listeners(
         late: LateBinds {
             pending,
             tls: tls.clone(),
-            zid: zid.to_vec(),
+            zid,
             link_conf,
             offer,
             clock,
@@ -3371,7 +3369,7 @@ async fn bind_listeners(
 async fn bind_listener(
     endpoint: &str,
     tls: &CapiTlsConfig,
-    zid: &[u8],
+    zid: SessionZid,
     link_conf: LinkConf,
     whatami: WhatAmI,
 ) -> Result<Listening, OpenError> {
@@ -3422,7 +3420,7 @@ async fn bind_listener(
     // The role the session was opened as, which is what the INIT answer tells a node that
     // dials in: a `mode: router` session says Router, so the dialler lists it among its
     // routers (`z_info_routers_zid`) and not among its peers. It was always Peer here.
-    let params = init_params(whatami, zid.to_vec(), link_conf).map_err(|e| {
+    let params = init_params(whatami, zid, link_conf).map_err(|e| {
         log_open_failure(&format!("session parameters for {endpoint}"), &e);
         OpenError::DriveFailed
     })?;
@@ -3572,7 +3570,7 @@ async fn drive_listen(
         &endpoints,
         listen_phase,
         &tls,
-        &zid,
+        zid,
         link_conf,
         offer,
         clock,
@@ -3701,7 +3699,7 @@ struct GroupSetup {
     shared: Arc<SharedSession>,
     /// The session's wire zid, which every group's beacon carries and its receive gate
     /// drops when its own traffic loops back.
-    zid: Vec<u8>,
+    zid: SessionZid,
     whatami: WhatAmI,
     tx_queue: TxQueueConf,
     /// The session's receive half, which bounds what each group rejoins from fragments as it
@@ -3747,7 +3745,7 @@ impl ResolvedGroup {
     /// which fails the open.
     fn resolve(
         join: &GroupJoin,
-        zid: &[u8],
+        zid: SessionZid,
         whatami: WhatAmI,
         tx_queue: TxQueueConf,
         link_rx: LinkRxConf,
@@ -3771,7 +3769,7 @@ impl ResolvedGroup {
             link,
             params: wz_runtime_tokio::multicast_glue::MulticastParams {
                 whatami,
-                zid: zid.to_vec(),
+                zid,
                 lease_ms,
                 join_interval_ms,
                 seq_num_res,
@@ -3845,7 +3843,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
     }
     let Some(groups) = joins
         .iter()
-        .map(|join| ResolvedGroup::resolve(join, &zid, whatami, tx_queue, link_rx))
+        .map(|join| ResolvedGroup::resolve(join, zid, whatami, tx_queue, link_rx))
         .collect::<Option<Vec<_>>>()
     else {
         // An endpoint that names no group this build can join: pico's listen of it finds no
@@ -4583,7 +4581,7 @@ pub fn open_blocking(
     let shared = Arc::new(
         SharedSession::new_with_resources(
             clock,
-            wire_zid.clone(),
+            wire_zid,
             SessionResources {
                 node_hlc,
                 shm_clients,
@@ -4674,7 +4672,7 @@ pub fn open_blocking(
             let group_setup = GroupSetup {
                 joins: groups,
                 shared: drive_shared.clone(),
-                zid: wire_zid.clone(),
+                zid: wire_zid,
                 whatami: dial_whatami,
                 tx_queue: link_conf.tx.queue,
                 link_rx: link_conf.rx,
@@ -4804,7 +4802,7 @@ mod tests {
             },
             accept: AcceptBounds::default(),
         };
-        let params = init_params(WhatAmI::Client, vec![0xC1; 4], stated).expect("entropy");
+        let params = init_params(WhatAmI::Client, [0xC1; 4].into(), stated).expect("entropy");
         assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
         assert_eq!(params.batch_size, 2048);
         assert_eq!(params.lease_ms, 4000);
@@ -4968,7 +4966,7 @@ mod tests {
     fn a_minted_id_with_a_zero_tail_goes_on_the_wire_trimmed() {
         let mut minted = [0x11u8; ZID_LENGTH];
         minted[ZID_LENGTH - 1] = 0;
-        let (state, wire) = minted_zids(minted);
+        let (state, wire) = minted_zids(minted).expect("not all zero");
         assert_eq!(state, minted, "z_info_zid reports all sixteen");
         assert_eq!(
             wire.as_slice(),
@@ -4978,8 +4976,12 @@ mod tests {
 
         let mut longer = [0x22u8; ZID_LENGTH];
         longer[ZID_LENGTH - 3..].fill(0);
-        let (_, wire) = minted_zids(longer);
+        let (_, wire) = minted_zids(longer).expect("not all zero");
         assert_eq!(wire.len(), ZID_LENGTH - 3, "every trailing zero byte goes");
+
+        // Sixteen zero bytes trim to no zid, and the session is refused one rather than opened
+        // on an empty INIT zid.
+        assert_eq!(minted_zids([0u8; ZID_LENGTH]), None);
     }
 
     /// Decision D4 on the C ABI: a scouted open is made for the node the Hello named, so a
@@ -5024,7 +5026,7 @@ mod tests {
                 open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Client,
-                    vec![0xC1; 4],
+                    [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
                             queue: TxQueueConf::default(),
@@ -5161,7 +5163,7 @@ mod tests {
                 open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Peer,
-                    vec![0xC1; 4],
+                    [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
                             queue: TxQueueConf::default(),
@@ -5240,7 +5242,7 @@ mod tests {
                 open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Peer,
-                    vec![0xC1; 4],
+                    [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
                             queue: TxQueueConf::default(),
@@ -6097,7 +6099,7 @@ mod multicast_face_tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid.to_vec(),
+            zid: wz_session_core::multicast_params::zid_vec(zid),
             lease_ms: 10_000,
             join_interval_ms: 100,
             seq_num_res: 0x02,
@@ -6114,7 +6116,9 @@ mod multicast_face_tests {
 
     /// A session with the zid `byte` repeated.
     fn session(byte: u8) -> Arc<SharedSession> {
-        Arc::new(SharedSession::new(TokioTime::new(), vec![byte; 16]).expect("test host entropy"))
+        Arc::new(
+            SharedSession::new(TokioTime::new(), [byte; 16].into()).expect("test host entropy"),
+        )
     }
 
     /// Serve `shared`'s group face on this task's `LocalSet` until `stop` changes, joined

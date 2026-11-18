@@ -951,7 +951,7 @@ mod tests {
     fn params(is_qos: bool) -> MulticastParams {
         MulticastParams {
             whatami: wz_session_core::WhatAmI::Peer,
-            zid: vec![1, 2, 3, 4],
+            zid: [1, 2, 3, 4].into(),
             lease_ms: 5_000,
             join_interval_ms: 100,
             seq_num_res: 0x02,

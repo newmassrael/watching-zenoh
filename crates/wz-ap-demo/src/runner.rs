@@ -987,7 +987,8 @@ pub(crate) async fn scout_for_peer_locator(
     // carries. `--zid` therefore reaches here, not only the session params.
     let actions = ScoutingActions::new(ScoutParams {
         what: SCOUT_WHAT,
-        zid,
+        // The node's zid names the asker; bytes that are no zid ask as nobody.
+        zid: wz::runtime_tokio::session_glue::SessionZid::new(&zid).ok(),
         timeout_ms: SCOUT_CYCLE_MS,
         // The IMPLICIT scout: this path wants one dial target and returns as
         // soon as it has one, which is what pico's session-open scout passes
@@ -1307,7 +1308,7 @@ async fn spawn_scouting_autoconnect(
         // with no consequence, and asking for fewer would hide a peer the policy
         // admits.
         what: role_bits(args.matcher),
-        zid: zid.to_vec(),
+        zid: wz::runtime_tokio::session_glue::SessionZid::new(zid).ok(),
         timeout_ms: SCOUT_CYCLE_MS,
         // SURVEY mode. `--scout` sets this because it wants ONE dial target;
         // this plane must see every responder in the window, which is the arm
@@ -2382,15 +2383,13 @@ fn spawn_background_tasks(
         log::warn!(
             "wz-ap-demo: --advanced-publish='{}' is INERT (built without the \
              `advanced` feature); no cache will be declared. Also ignored: \
-             value='{}' count={} cache_max={:?} interval_ms={} heartbeat_ms={:?} \
-             zid={:02x?}",
+             value='{}' count={} cache_max={:?} interval_ms={} heartbeat_ms={:?}",
             spec.keyexpr,
             spec.value,
             spec.count,
             spec.cache_max,
             spec.interval_ms,
             spec.heartbeat_ms,
-            spec.zid,
         );
     }
 
@@ -2873,7 +2872,7 @@ async fn install_rescout_plan(
         driver,
         ScoutParams {
             what: SCOUT_WHAT,
-            zid: plan.zid.clone(),
+            zid: wz::runtime_tokio::session_glue::SessionZid::new(&plan.zid).ok(),
             timeout_ms: SCOUT_CYCLE_MS,
             // Overwritten to `true` by `ScoutedGroup::new` (pico's
             // `_z_locators_by_scout` passes `true`); named here so the value
@@ -6839,7 +6838,7 @@ async fn run_router_hat_until(
             // `transport/link/tx/queue`, as the unicast sessions do, and its
             // `transport/link/rx/max_message_size`.
             wz::runtime_tokio::multicast_glue::RouterGroupProfile {
-                zid: params.zid.clone(),
+                zid: params.zid,
                 qos: multicast_qos,
                 compression: false,
                 tx_queue: params.tx_queue,
@@ -8769,7 +8768,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         crate::args::resolve_node_zid(None)?,
         &tuning,
     )?;
-    let node_zid = params.zid.clone();
+    let node_zid = params.zid;
     let zid_hex = zid_to_zenoh_hex(&node_zid);
     let whatami_str = params.whatami.to_str();
 
@@ -9248,7 +9247,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // zenoh-pico measured before this call existed. Failure is logged and
         // the session is still served: the admin surface remains reachable, which
         // is how an operator would diagnose it.
-        if let Err(e) = manager.rebind_all(&session, node_zid.clone()) {
+        if let Err(e) = manager.rebind_all(&session, node_zid) {
             log::warn!(
                 "wz-ap-demo storage-host: could not rebind hosted storages onto this \
                  client session: {e} — the admin plane is still served, but storage \
@@ -9271,7 +9270,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 &mut library_plane,
                 &plugin_records,
                 &session,
-                &node_zid,
+                node_zid,
                 "plugins",
                 Some(&section),
                 "from --plugins",
@@ -9299,113 +9298,109 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // rather than borrowed, so the closure's captures stay uniform.
         let dispatch_leaves = storage_leaves.clone();
         let dispatch_version = version.clone();
-        let dispatch_zid = node_zid.clone();
+        let dispatch_zid = node_zid;
         // The operator-chosen host volume every AddStorage is mapped onto (Copy).
         let dispatch_volume_id = hosted_volume_id;
         // R2787 — the live config, for the `plugins/...` writes the subscriber
         // stashes: they are applied HERE, with the manager as their sink.
         #[cfg(feature = "zenoh-config")]
         let dispatch_cfg = admin_cfg.clone();
-        let mut dispatch =
-            |event: IterationEvent<'_, '_>| {
-                // Fires the admin GET queryable + config-write subscriber; the config-write
-                // handler stashes any AddStorage/RemoveStorage intent into `pending`. This
-                // call also flushes staged replies + drains the deferred ResponseFinal
-                // fires (session/mod.rs), so the querier's terminating Final is sent.
-                session_for_dispatch.dispatch_iteration_event_with(event, |_obs| {});
-                // Drain the stashed intents and apply them to the hoisted manager. Copied
-                // out first so the pending lock is released before the (potentially
-                // re-entrant-to-the-observer) add_storage runs.
-                let drained: Vec<AdminConfigWrite> = {
-                    let mut guard = dispatch_pending
-                        .lock()
-                        .expect("storage-host pending mutex poisoned");
-                    guard.drain(..).collect()
-                };
-                for intent in &drained {
-                    match intent {
-                        AdminConfigWrite::AddStorage {
-                            name,
-                            volume_id: named_volume,
-                            ..
-                        } => {
-                            match intent.to_storage_config() {
-                                Some(mut cfg) => {
-                                    // R311y497 — the host's volume choice applies ONLY
-                                    // when the client named none. Before this, the
-                                    // override was unconditional because the wire could
-                                    // not carry a volume, which made every registered
-                                    // volume beyond the host's own flag unreachable.
-                                    // A client that NAMES a volume gets that volume, or
-                                    // a VolumeNotFound it can see — not a silent
-                                    // substitution, which is the shape that would make
-                                    // a durable-looking storage volatile.
-                                    if named_volume.is_none() {
-                                        cfg.volume_id = dispatch_volume_id.to_string();
-                                        // R2802 — upstream's fs volume REQUIRES a
-                                        // per-storage `dir`. A storage this host maps
-                                        // onto its own volume named no volume at all,
-                                        // so the host names the directory too: the
-                                        // storage's own name, which is the layout
-                                        // `--storage-host-dir` has always produced
-                                        // (`<dir>/<name>`).
-                                        if cfg.volume_id == "fs" && cfg.volume_cfg.is_empty() {
-                                            cfg.volume_cfg.push((
-                                                String::from("dir"),
-                                                wz::runtime_tokio::json5::Json5Value::String(
-                                                    name.clone(),
-                                                ),
-                                            ));
-                                        }
+        let mut dispatch = |event: IterationEvent<'_, '_>| {
+            // Fires the admin GET queryable + config-write subscriber; the config-write
+            // handler stashes any AddStorage/RemoveStorage intent into `pending`. This
+            // call also flushes staged replies + drains the deferred ResponseFinal
+            // fires (session/mod.rs), so the querier's terminating Final is sent.
+            session_for_dispatch.dispatch_iteration_event_with(event, |_obs| {});
+            // Drain the stashed intents and apply them to the hoisted manager. Copied
+            // out first so the pending lock is released before the (potentially
+            // re-entrant-to-the-observer) add_storage runs.
+            let drained: Vec<AdminConfigWrite> = {
+                let mut guard = dispatch_pending
+                    .lock()
+                    .expect("storage-host pending mutex poisoned");
+                guard.drain(..).collect()
+            };
+            for intent in &drained {
+                match intent {
+                    AdminConfigWrite::AddStorage {
+                        name,
+                        volume_id: named_volume,
+                        ..
+                    } => {
+                        match intent.to_storage_config() {
+                            Some(mut cfg) => {
+                                // R311y497 — the host's volume choice applies ONLY
+                                // when the client named none. Before this, the
+                                // override was unconditional because the wire could
+                                // not carry a volume, which made every registered
+                                // volume beyond the host's own flag unreachable.
+                                // A client that NAMES a volume gets that volume, or
+                                // a VolumeNotFound it can see — not a silent
+                                // substitution, which is the shape that would make
+                                // a durable-looking storage volatile.
+                                if named_volume.is_none() {
+                                    cfg.volume_id = dispatch_volume_id.to_string();
+                                    // R2802 — upstream's fs volume REQUIRES a
+                                    // per-storage `dir`. A storage this host maps
+                                    // onto its own volume named no volume at all,
+                                    // so the host names the directory too: the
+                                    // storage's own name, which is the layout
+                                    // `--storage-host-dir` has always produced
+                                    // (`<dir>/<name>`).
+                                    if cfg.volume_id == "fs" && cfg.volume_cfg.is_empty() {
+                                        cfg.volume_cfg.push((
+                                            String::from("dir"),
+                                            wz::runtime_tokio::json5::Json5Value::String(
+                                                name.clone(),
+                                            ),
+                                        ));
                                     }
-                                    // R311y503 — the HOST's garbage-collection
-                                    // policy, applied to every storage it spawns.
-                                    // Host-side by design (see `StorageGcArgs`):
-                                    // the wire intent carries a name and a
-                                    // keyexpr, never a retention policy. Absent
-                                    // flags leave `GarbageCollectionConfig`'s
-                                    // zenoh defaults untouched.
-                                    if let Some(ms) = storage_gc.period_ms {
-                                        cfg.garbage_collection.period =
-                                            core::time::Duration::from_millis(ms);
-                                    }
-                                    if let Some(ms) = storage_gc.lifespan_ms {
-                                        cfg.garbage_collection.lifespan =
-                                            core::time::Duration::from_millis(ms);
-                                    }
-                                    match manager.add_storage(
-                                        &session_for_dispatch,
-                                        &cfg,
-                                        dispatch_zid.clone(),
-                                    ) {
-                                        // The volume goes at the END, and that position
-                                        // is load-bearing rather than cosmetic. TWO
-                                        // integration tests pin this line THROUGH its
-                                        // `— storage_manager Started` tail
-                                        // (apfull_adminspace_pico_interop.rs,
-                                        // wz_storage_host_config_hotreload_pico.rs), so
-                                        // inserting the volume mid-line breaks them —
-                                        // which it did, and both lanes (E12, E6h) caught
-                                        // it. Appending leaves every existing barrier a
-                                        // prefix of the new line, so a witness can assert
-                                        // WHICH volume a storage landed on without any
-                                        // consumer being edited.
-                                        // R2743 — the BINDING STATE is appended, because
-                                        // `Ok` no longer implies the storage answers.
-                                        // A declare the transport could not carry now
-                                        // leaves the storage hosted-but-unbound rather
-                                        // than losing the write, and `rebind_all`
-                                        // attaches it on the next accepted session — so
-                                        // a log saying only "spawned live storage" would
-                                        // overclaim for exactly the case this round
-                                        // added. Appended, per the note above: every
-                                        // existing barrier stays a prefix of this line.
-                                        Ok(()) => {
-                                            let bound = manager
-                                                .storage(name)
-                                                .map(|s| s.is_bound())
-                                                .unwrap_or(false);
-                                            log::info!(
+                                }
+                                // R311y503 — the HOST's garbage-collection
+                                // policy, applied to every storage it spawns.
+                                // Host-side by design (see `StorageGcArgs`):
+                                // the wire intent carries a name and a
+                                // keyexpr, never a retention policy. Absent
+                                // flags leave `GarbageCollectionConfig`'s
+                                // zenoh defaults untouched.
+                                if let Some(ms) = storage_gc.period_ms {
+                                    cfg.garbage_collection.period =
+                                        core::time::Duration::from_millis(ms);
+                                }
+                                if let Some(ms) = storage_gc.lifespan_ms {
+                                    cfg.garbage_collection.lifespan =
+                                        core::time::Duration::from_millis(ms);
+                                }
+                                match manager.add_storage(&session_for_dispatch, &cfg, dispatch_zid)
+                                {
+                                    // The volume goes at the END, and that position
+                                    // is load-bearing rather than cosmetic. TWO
+                                    // integration tests pin this line THROUGH its
+                                    // `— storage_manager Started` tail
+                                    // (apfull_adminspace_pico_interop.rs,
+                                    // wz_storage_host_config_hotreload_pico.rs), so
+                                    // inserting the volume mid-line breaks them —
+                                    // which it did, and both lanes (E12, E6h) caught
+                                    // it. Appending leaves every existing barrier a
+                                    // prefix of the new line, so a witness can assert
+                                    // WHICH volume a storage landed on without any
+                                    // consumer being edited.
+                                    // R2743 — the BINDING STATE is appended, because
+                                    // `Ok` no longer implies the storage answers.
+                                    // A declare the transport could not carry now
+                                    // leaves the storage hosted-but-unbound rather
+                                    // than losing the write, and `rebind_all`
+                                    // attaches it on the next accepted session — so
+                                    // a log saying only "spawned live storage" would
+                                    // overclaim for exactly the case this round
+                                    // added. Appended, per the note above: every
+                                    // existing barrier stays a prefix of this line.
+                                    Ok(()) => {
+                                        let bound = manager
+                                            .storage(name)
+                                            .map(|s| s.is_bound())
+                                            .unwrap_or(false);
+                                        log::info!(
                                     "wz-ap-demo storage-host: spawned live storage '{name}' \
                                      — storage_manager Started (volume '{}'){}",
                                     cfg.volume_id,
@@ -9417,189 +9412,193 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                                           accepted session]"
                                     }
                                 )
-                                        }
-                                        Err(e) => log::warn!(
-                                    "wz-ap-demo storage-host: add_storage '{name}' failed: {e}"
-                                ),
                                     }
+                                    Err(e) => log::warn!(
+                                        "wz-ap-demo storage-host: add_storage '{name}' failed: {e}"
+                                    ),
                                 }
-                                None => log::warn!(
-                                    "wz-ap-demo storage-host: AddStorage intent produced no \
+                            }
+                            None => log::warn!(
+                                "wz-ap-demo storage-host: AddStorage intent produced no \
                              StorageConfig; ignored"
-                                ),
-                            }
+                            ),
                         }
-                        AdminConfigWrite::RemoveStorage(name) => {
-                            if manager.remove_storage(name) {
-                                log::info!(
+                    }
+                    AdminConfigWrite::RemoveStorage(name) => {
+                        if manager.remove_storage(name) {
+                            log::info!(
                                 "wz-ap-demo storage-host: despawned '{name}' — storage_manager {}",
-                                if manager.is_empty() { "Loaded" } else { "Started" }
+                                if manager.is_empty() {
+                                    "Loaded"
+                                } else {
+                                    "Started"
+                                }
                             );
-                            } else {
-                                log::warn!(
-                                    "wz-ap-demo storage-host: remove_storage '{name}' — \
+                        } else {
+                            log::warn!(
+                                "wz-ap-demo storage-host: remove_storage '{name}' — \
                                  no such storage"
-                                );
-                            }
+                            );
                         }
-                        // R2696 — the VOLUME half. `build_volume` resolves the
-                        // backend this build carries; an unknown one is refused BY
-                        // NAME, never registered as something else.
-                        AdminConfigWrite::AddVolume {
-                            volume_id,
-                            backend,
+                    }
+                    // R2696 — the VOLUME half. `build_volume` resolves the
+                    // backend this build carries; an unknown one is refused BY
+                    // NAME, never registered as something else.
+                    AdminConfigWrite::AddVolume {
+                        volume_id,
+                        backend,
+                        volume_cfg,
+                    } => {
+                        // Upstream's own default: a volume that names no
+                        // backend is backed by the backend of its own name
+                        // (`plugins/zenoh-backend-traits/src/config.rs` @
+                        // `pub fn backend(&self) -> &str {`).
+                        let backend_name = backend.as_deref().unwrap_or(volume_id.as_str());
+                        match wz::runtime_tokio::storage_manager_service::build_volume(
+                            backend_name,
                             volume_cfg,
-                        } => {
-                            // Upstream's own default: a volume that names no
-                            // backend is backed by the backend of its own name
-                            // (`plugins/zenoh-backend-traits/src/config.rs` @
-                            // `pub fn backend(&self) -> &str {`).
-                            let backend_name = backend.as_deref().unwrap_or(volume_id.as_str());
-                            match wz::runtime_tokio::storage_manager_service::build_volume(
-                                backend_name,
-                                volume_cfg,
-                            ) {
-                                Ok(volume) => {
-                                    manager.register_volume(volume_id.clone(), volume);
-                                    log::info!(
-                                        "wz-ap-demo storage-host: registered storage volume \
+                        ) {
+                            Ok(volume) => {
+                                manager.register_volume(volume_id.clone(), volume);
+                                log::info!(
+                                    "wz-ap-demo storage-host: registered storage volume \
                                          '{volume_id}' (backend '{backend_name}'); a client \
                                          mounts on it with \
                                          `storage-add <name>@{volume_id}:<keyexpr>`"
-                                    );
-                                }
-                                Err(e) => log::warn!(
-                                    "wz-ap-demo storage-host: volume-add '{volume_id}' \
+                                );
+                            }
+                            Err(e) => log::warn!(
+                                "wz-ap-demo storage-host: volume-add '{volume_id}' \
                                      refused: {e}"
-                                ),
-                            }
+                            ),
                         }
-                        // The cascade is upstream's `kill_volume`, and the log
-                        // names every storage it took with it: this is the one
-                        // intent whose effect reaches storages the caller did not
-                        // name, so an operator reading the log must not have to
-                        // infer which ones went.
-                        AdminConfigWrite::RemoveVolume(volume_id) => {
-                            match manager.remove_volume(volume_id) {
-                                Some(hosted) if hosted.is_empty() => log::info!(
-                                    "wz-ap-demo storage-host: unregistered storage volume \
+                    }
+                    // The cascade is upstream's `kill_volume`, and the log
+                    // names every storage it took with it: this is the one
+                    // intent whose effect reaches storages the caller did not
+                    // name, so an operator reading the log must not have to
+                    // infer which ones went.
+                    AdminConfigWrite::RemoveVolume(volume_id) => {
+                        match manager.remove_volume(volume_id) {
+                            Some(hosted) if hosted.is_empty() => log::info!(
+                                "wz-ap-demo storage-host: unregistered storage volume \
                                      '{volume_id}' (no storage was hosted on it)"
-                                ),
-                                Some(hosted) => log::info!(
-                                    "wz-ap-demo storage-host: unregistered storage volume \
+                            ),
+                            Some(hosted) => log::info!(
+                                "wz-ap-demo storage-host: unregistered storage volume \
                                      '{volume_id}', despawning {} — storage_manager {}",
-                                    hosted.join(", "),
-                                    if manager.is_empty() {
-                                        "Loaded"
-                                    } else {
-                                        "Started"
-                                    }
-                                ),
-                                None => log::warn!(
-                                    "wz-ap-demo storage-host: volume-del '{volume_id}' — \
+                                hosted.join(", "),
+                                if manager.is_empty() {
+                                    "Loaded"
+                                } else {
+                                    "Started"
+                                }
+                            ),
+                            None => log::warn!(
+                                "wz-ap-demo storage-host: volume-del '{volume_id}' — \
                                      no such volume"
-                                ),
-                            }
+                            ),
                         }
-                        // Not a storage intent; this run-mode hosts no interceptor chain.
-                        AdminConfigWrite::AclDeny(_) => log::warn!(
-                            "wz-ap-demo storage-host: acl-deny config-write ignored \
+                    }
+                    // Not a storage intent; this run-mode hosts no interceptor chain.
+                    AdminConfigWrite::AclDeny(_) => log::warn!(
+                        "wz-ap-demo storage-host: acl-deny config-write ignored \
                          (this mode hosts no interceptor chain)"
-                        ),
-                        // R2374 — never queued: the subscriber applies it where it
-                        // stands, because a permission that waited for the next
-                        // iteration event would take effect later than it was
-                        // granted. The arm exists so the match stays exhaustive and
-                        // so an intent that DID arrive here is reported rather than
-                        // dropped, which is what a `_` would have done.
-                        AdminConfigWrite::AdminReadPermit(read) => log::warn!(
-                            "wz-ap-demo storage-host: admin-read {read} reached the \
+                    ),
+                    // R2374 — never queued: the subscriber applies it where it
+                    // stands, because a permission that waited for the next
+                    // iteration event would take effect later than it was
+                    // granted. The arm exists so the match stays exhaustive and
+                    // so an intent that DID arrive here is reported rather than
+                    // dropped, which is what a `_` would have done.
+                    AdminConfigWrite::AdminReadPermit(read) => log::warn!(
+                        "wz-ap-demo storage-host: admin-read {read} reached the \
                          dispatch queue; it is applied in the subscriber and \
                          should never be stashed"
-                        ),
-                        // R2644 — the generic config-key write. Never queued, for the
-                        // same reason `AdminReadPermit` is not: the subscriber applies
-                        // it where it stands against the live config, so a copy that
-                        // waited for the next iteration would take effect later than
-                        // it was granted. The arm exists so the match stays exhaustive
-                        // and so an intent that DID arrive here is reported.
-                        // R2646 — the delete twin, never queued for the same reason.
-                        //
-                        // R2787 — EXCEPT the `plugins/...` keys, which the subscriber
-                        // stashes ON PURPOSE: their validator is the storage manager,
-                        // and this is the one place that holds it. Applied through
-                        // the config's own write gate with the manager as the sink, so
-                        // the merge, the validator and the notification are the
-                        // config's rather than a second copy of them here.
-                        #[cfg(feature = "zenoh-config")]
-                        AdminConfigWrite::SetKey { key, value }
-                            if wz::runtime_tokio::config::is_plugins_key(key) =>
-                        {
-                            apply_storage_plugin_write(
-                                &dispatch_cfg,
-                                &mut manager,
-                                &mut library_plane,
-                                &plugin_records,
-                                &session_for_dispatch,
-                                &dispatch_zid,
-                                key,
-                                Some(value.as_str()),
-                                "over the wire",
-                            )
-                        }
-                        #[cfg(feature = "zenoh-config")]
-                        AdminConfigWrite::RemoveKey { key }
-                            if wz::runtime_tokio::config::is_plugins_key(key) =>
-                        {
-                            apply_storage_plugin_write(
-                                &dispatch_cfg,
-                                &mut manager,
-                                &mut library_plane,
-                                &plugin_records,
-                                &session_for_dispatch,
-                                &dispatch_zid,
-                                key,
-                                None,
-                                "over the wire",
-                            )
-                        }
-                        AdminConfigWrite::RemoveKey { key } => log::warn!(
-                            "wz-ap-demo storage-host: config key {key} delete reached \
+                    ),
+                    // R2644 — the generic config-key write. Never queued, for the
+                    // same reason `AdminReadPermit` is not: the subscriber applies
+                    // it where it stands against the live config, so a copy that
+                    // waited for the next iteration would take effect later than
+                    // it was granted. The arm exists so the match stays exhaustive
+                    // and so an intent that DID arrive here is reported.
+                    // R2646 — the delete twin, never queued for the same reason.
+                    //
+                    // R2787 — EXCEPT the `plugins/...` keys, which the subscriber
+                    // stashes ON PURPOSE: their validator is the storage manager,
+                    // and this is the one place that holds it. Applied through
+                    // the config's own write gate with the manager as the sink, so
+                    // the merge, the validator and the notification are the
+                    // config's rather than a second copy of them here.
+                    #[cfg(feature = "zenoh-config")]
+                    AdminConfigWrite::SetKey { key, value }
+                        if wz::runtime_tokio::config::is_plugins_key(key) =>
+                    {
+                        apply_storage_plugin_write(
+                            &dispatch_cfg,
+                            &mut manager,
+                            &mut library_plane,
+                            &plugin_records,
+                            &session_for_dispatch,
+                            dispatch_zid,
+                            key,
+                            Some(value.as_str()),
+                            "over the wire",
+                        )
+                    }
+                    #[cfg(feature = "zenoh-config")]
+                    AdminConfigWrite::RemoveKey { key }
+                        if wz::runtime_tokio::config::is_plugins_key(key) =>
+                    {
+                        apply_storage_plugin_write(
+                            &dispatch_cfg,
+                            &mut manager,
+                            &mut library_plane,
+                            &plugin_records,
+                            &session_for_dispatch,
+                            dispatch_zid,
+                            key,
+                            None,
+                            "over the wire",
+                        )
+                    }
+                    AdminConfigWrite::RemoveKey { key } => log::warn!(
+                        "wz-ap-demo storage-host: config key {key} delete reached \
                          the dispatch queue; it is applied in the subscriber and \
                          should never be stashed"
-                        ),
-                        AdminConfigWrite::SetKey { key, .. } => log::warn!(
-                            "wz-ap-demo storage-host: config key {key} reached the \
+                    ),
+                    AdminConfigWrite::SetKey { key, .. } => log::warn!(
+                        "wz-ap-demo storage-host: config key {key} reached the \
                          dispatch queue; it is applied in the subscriber and \
                          should never be stashed"
-                        ),
-                        // R2393 — the router-hat's connect-list intent. This host runs
-                        // no face loop and holds no reconcile sender, so there is
-                        // nothing here to apply it to. Reported rather than dropped,
-                        // for the reason the arm above gives: a `_` would have hidden
-                        // it, and the compiler forcing this decision when the variant
-                        // was added is what the exhaustive match is for.
-                        AdminConfigWrite::ConnectAdd(eps) => log::warn!(
-                            "wz-ap-demo storage-host: connect-add ({} endpoint(s)) \
+                    ),
+                    // R2393 — the router-hat's connect-list intent. This host runs
+                    // no face loop and holds no reconcile sender, so there is
+                    // nothing here to apply it to. Reported rather than dropped,
+                    // for the reason the arm above gives: a `_` would have hidden
+                    // it, and the compiler forcing this decision when the variant
+                    // was added is what the exhaustive match is for.
+                    AdminConfigWrite::ConnectAdd(eps) => log::warn!(
+                        "wz-ap-demo storage-host: connect-add ({} endpoint(s)) \
                          ignored; this mode hosts no face loop to reconcile",
-                            eps.len()
-                        ),
-                    }
+                        eps.len()
+                    ),
                 }
-                // Reflect the LIVE storage state the GET handler reads. Binding to
-                // !manager.is_empty() ties the witness to REAL add_storage / remove_storage
-                // — never a bare bool flip that would report Started without a live storage
-                // (an OVER-CLAIM this design forbids).
-                dispatch_started.store(!manager.is_empty(), Relaxed);
-                // R311y828 — and the sub-tree, re-rendered from the SAME manager in
-                // the same statement group, so an admin GET can never see a
-                // storage_manager reported Started whose `storages/**` is still the
-                // pre-add snapshot (or the reverse after a `storage-del`).
-                *dispatch_leaves
-                    .lock()
-                    .expect("storage admin leaves poisoned") =
-                    manager.admin_status_leaves(&dispatch_version);
-            };
+            }
+            // Reflect the LIVE storage state the GET handler reads. Binding to
+            // !manager.is_empty() ties the witness to REAL add_storage / remove_storage
+            // — never a bare bool flip that would report Started without a live storage
+            // (an OVER-CLAIM this design forbids).
+            dispatch_started.store(!manager.is_empty(), Relaxed);
+            // R311y828 — and the sub-tree, re-rendered from the SAME manager in
+            // the same statement group, so an admin GET can never see a
+            // storage_manager reported Started whose `storages/**` is still the
+            // pre-add snapshot (or the reverse after a `storage-del`).
+            *dispatch_leaves
+                .lock()
+                .expect("storage admin leaves poisoned") =
+                manager.admin_status_leaves(&dispatch_version);
+        };
 
         // Drive this client session to terminal (it ends when the pico one-shot
         // disconnects). The engine + inbound half live in this stack frame (not inside
@@ -9713,7 +9712,7 @@ fn apply_storage_plugin_write(
     library_plane: &mut LibraryPlane,
     records: &std::sync::Mutex<Vec<wz::runtime_tokio::adminspace::AdminPlugin>>,
     session: &TokioSession,
-    local_zid: &[u8],
+    local_zid: wz::runtime_tokio::session_glue::SessionZid,
     key: &str,
     value: Option<&str>,
     origin: &str,

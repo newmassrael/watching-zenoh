@@ -586,13 +586,13 @@ fn vanishing_subscriber_peer(
         let dialed = dial_endpoint(&endpoint, &DialConfig::default())
             .await
             .expect("dial the C listener");
-        let mut zid = vec![0u8; 16];
+        let mut zid = [0u8; 16];
         getrandom::getrandom(&mut zid).expect("OS entropy");
         let opened = initiate_and_open_session(
             dialed,
             SessionInitParams {
                 whatami: WhatAmI::Client,
-                zid,
+                zid: zid.into(),
                 seq_num_res: 2,
                 req_id_res: 2,
                 batch_size: 65535,

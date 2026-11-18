@@ -218,9 +218,13 @@ fn a_plane_sees_the_entities_declared_and_retracted_in_the_reference_order() {
         publisher_detection: true,
         ..AdvancedPublisherOptions::default()
     };
-    let publisher =
-        AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/order", options, vec![0x01])
-            .expect("the declaration is accepted");
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/order",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("the declaration is accepted");
     publisher.put(b"x").expect("a put is accepted");
     drop(publisher);
 
@@ -258,9 +262,13 @@ fn a_plane_sees_the_beacon_publisher_declared_after_the_token_and_retracted_befo
         sample_miss_detection: MissDetectionConfig::default().heartbeat(Duration::from_secs(3600)),
         ..AdvancedPublisherOptions::default()
     };
-    let publisher =
-        AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/order", options, vec![0x01])
-            .expect("the declaration is accepted");
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/order",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("the declaration is accepted");
     drop(publisher);
 
     let declared: Vec<String> = plane
@@ -318,7 +326,7 @@ fn the_tick_is_the_beacons_decision_and_ends_with_the_publisher() {
                 sample_miss_detection: config,
                 ..AdvancedPublisherOptions::default()
             },
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("the declaration is accepted");
         (plane, publisher)
@@ -388,7 +396,7 @@ fn timestamp_sequencing_follows_the_planes_answer_and_not_the_node_clock() {
                 Arc::new(RecordingPlane::new(false)),
                 "demo/ts",
                 options.clone(),
-                vec![0x01],
+                SessionZid::from([0x01]),
             ),
             Err(AdvancedPublisherError::TimestampingDisabled)
         ),
@@ -399,7 +407,7 @@ fn timestamp_sequencing_follows_the_planes_answer_and_not_the_node_clock() {
             Arc::new(RecordingPlane::new(true)),
             "demo/ts",
             options,
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .is_ok(),
         "a plane that stamps must accept it with no node clock at all"
@@ -417,9 +425,13 @@ fn a_put_and_a_delete_carry_the_time_the_plane_orders() {
         publisher_detection: false,
         ..AdvancedPublisherOptions::default()
     };
-    let publisher =
-        AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/ordered", options, vec![0x01])
-            .expect("the declaration is accepted");
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/ordered",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("the declaration is accepted");
     publisher.put(b"x").expect("a put is accepted");
     publisher.delete().expect("a delete is accepted");
     assert_eq!(plane.stamped(), [(Some(42), Some(0)), (Some(43), Some(1))]);
@@ -448,7 +460,7 @@ fn declare_plain(plane: &Arc<RecordingPlane>, key: &str) -> AdvancedPublisherOn<
         publisher_detection: false,
         ..AdvancedPublisherOptions::default()
     };
-    AdvancedPublisherOn::declare_on(Arc::clone(plane), key, options, vec![0x01])
+    AdvancedPublisherOn::declare_on(Arc::clone(plane), key, options, SessionZid::from([0x01]))
         .expect("the declaration is accepted")
 }
 

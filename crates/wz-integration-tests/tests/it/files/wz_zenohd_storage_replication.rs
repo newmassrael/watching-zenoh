@@ -676,7 +676,7 @@ async fn zenohd_converges_to_wz_replica() {
             None,
             TimestampHint {
                 time: wall_clock_ntp64(),
-                zid: wz_zid.clone(),
+                zid: wz_zid.to_vec(),
             },
         )
         .expect("the in-memory backend commits");
@@ -690,11 +690,9 @@ async fn zenohd_converges_to_wz_replica() {
     //    (@zid/<wz-zid>/<fp>/aligner, Remote) + spawn the periodic digest
     //    publisher (@-digest/<wz-zid>/<fp>). Both reach zenohd through its
     //    routing tables; the handles are held for the whole test (RAII).
-    let _aligner =
-        AlignerService::declare(&session, replica.clone(), config.clone(), wz_zid.clone())
-            .expect("wz declares its aligner answer queryable");
-    let _digest_pub =
-        DigestPublisher::spawn(&session, replica.clone(), config.clone(), wz_zid.clone());
+    let _aligner = AlignerService::declare(&session, replica.clone(), config.clone(), wz_zid)
+        .expect("wz declares its aligner answer queryable");
+    let _digest_pub = DigestPublisher::spawn(&session, replica.clone(), config.clone(), wz_zid);
 
     let session_drive = session.clone();
     let drive = drive_session_until_terminal(

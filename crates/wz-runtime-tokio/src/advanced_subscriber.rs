@@ -91,6 +91,7 @@ use std::sync::{Arc, Mutex};
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::sample::{EntityGlobalId, Sample};
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::sink::SampleView;
 
 use crate::session::{
@@ -130,10 +131,7 @@ use wz_ext_pubsub::advanced_subscriber::{MissHandlers, State};
 /// signature-stability invariant); mirrors the publisher's dedicated
 /// [`crate::advanced_publisher::AdvancedPublisherError`].
 ///
-/// R2815 — in EVERY build, and both `declare` forms return it. It was
-/// recovery-gated because only `declare_with_options` could fail in an
-/// advanced way; since a subscriber carries a global identity, the plain form
-/// can too ([`Self::SessionZid`]). Returning the
+/// R2815 — in EVERY build, and both `declare` forms return it. Returning the
 /// same type from both builds keeps the signature-stability invariant the
 /// plain `declare` documents.
 #[derive(Debug)]
@@ -145,18 +143,6 @@ pub enum AdvancedSubscribeError {
     /// ([`EntityForm`]) was rejected: the declaration it names is not held, or
     /// the key it resolves to is not one the wire takes.
     Alias(SubscribeAliasError),
-    /// R2815 — the session's own zid is not 1..=16 bytes, so this subscriber
-    /// has no global identity to report through [`AdvancedSubscriber::id`] or
-    /// to name its detection token with. `SessionInitParams::zid` documents
-    /// that range and nothing enforces it; refused here, before anything is
-    /// declared, rather than handed out as an identity no reference parses.
-    ///
-    /// Replaces R311y826's `DetectionZid`, which refused a zid the CALLER
-    /// supplied for the token. The caller no longer supplies one.
-    SessionZid {
-        /// The session zid's length.
-        len: usize,
-    },
     /// R311y100 — the late-publisher-detection liveliness subscriber
     /// declaration was rejected (only reachable with
     /// `HistoryConfig::detect_late_publishers`). Additive + gated, safe on the
@@ -1120,16 +1106,6 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     }
 }
 
-/// R2815 — refuse a session whose own zid cannot be an identity, BEFORE
-/// anything is declared. See [`AdvancedSubscribeError::SessionZid`].
-fn require_session_zid(zid: &[u8]) -> Result<(), AdvancedSubscribeError> {
-    if (1..=16).contains(&zid.len()) {
-        Ok(())
-    } else {
-        Err(AdvancedSubscribeError::SessionZid { len: zid.len() })
-    }
-}
-
 /// R2815 — the subscriber's global identity: its session's zid and the id its
 /// declaration carries on the wire, which is upstream's
 /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn id(&self) -> EntityGlobalId {`
@@ -1137,13 +1113,9 @@ fn require_session_zid(zid: &[u8]) -> Result<(), AdvancedSubscribeError> {
 ///
 /// The eid is the plain subscription's id because that IS what the
 /// declaration sends (`announce_subscriber`: "the wire subscriber id IS the
-/// local SubscriptionId"). `zid` has passed [`require_session_zid`].
-fn global_id_of<R: SessionRuntime>(
-    zid: &[u8],
-    subscriber: &Subscriber<R>,
-) -> Result<EntityGlobalId, AdvancedSubscribeError> {
-    let eid = subscriber.id().entity_id();
-    EntityGlobalId::new(zid, eid).ok_or(AdvancedSubscribeError::SessionZid { len: zid.len() })
+/// local SubscriptionId").
+fn global_id_of<R: SessionRuntime>(zid: SessionZid, subscriber: &Subscriber<R>) -> EntityGlobalId {
+    EntityGlobalId::of_session(zid, subscriber.id().entity_id())
 }
 
 /// The identity a subscriber reports: its host's, when the host has one
@@ -1154,13 +1126,12 @@ fn global_id_of<R: SessionRuntime>(
 /// for it and as many plain subscription ids as it has connections, and the
 /// identity is what the detection token is named with.
 fn identity_of<R: SessionRuntime>(
-    zid: &[u8],
+    zid: SessionZid,
     subscriber: &Subscriber<R>,
     forms: Option<&FormsHandle>,
-) -> Result<EntityGlobalId, AdvancedSubscribeError> {
+) -> EntityGlobalId {
     match forms.and_then(|f| f.forms().entity_id()) {
-        Some(eid) => EntityGlobalId::new(zid, eid)
-            .ok_or(AdvancedSubscribeError::SessionZid { len: zid.len() }),
+        Some(eid) => EntityGlobalId::of_session(zid, eid),
         None => global_id_of(zid, subscriber),
     }
 }
@@ -1557,7 +1528,6 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
-        require_session_zid(session.zid())?;
         let state = Arc::new(Mutex::new(State::new(
             Box::new(on_sample),
             MissHandlers::default(),
@@ -1578,7 +1548,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                     .handle(view, cb_clock.now_monotonic_ms());
             },
         )?;
-        let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref())?;
+        let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref());
         Ok(Self {
             _subscriber: subscriber,
             session: session.clone(),
@@ -1615,7 +1585,6 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
-        require_session_zid(session.zid())?;
         let state = Arc::new(Mutex::new(State::new(
             Box::new(on_sample),
             MissHandlers::default(),
@@ -1636,7 +1605,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                     .handle_live(view, cb_clock.now_monotonic_ms());
             },
         )?;
-        let id = global_id_of(session.zid(), &subscriber)?;
+        let id = global_id_of(session.zid(), &subscriber);
         Ok(Self {
             // The option-free form has no host to name anything: literal.
             _subscriber: Held::new(subscriber, &EntityForm::literal()),
@@ -1769,10 +1738,6 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 return Err(AdvancedSubscribeError::HistoryBoundZero { knob: "max_age" });
             }
         }
-        // R2815 — after upstream's own config check, before anything is
-        // declared: a session with no valid zid gives this subscriber no
-        // identity, and every refusal below this line has something to retract.
-        require_session_zid(session.zid())?;
         // R311y91 (review M1) — recovery + history are INDEPENDENT (zenoh keeps
         // `.recovery()` / `.history()` separate): `retransmission` is driven by
         // `options.recovery`, `history_pending` by `options.history` — a
@@ -1877,7 +1842,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // R2815 — read off the plain subscription just declared; the detection
         // token below is named with the same pair. A host with ONE identity for
         // a subscriber it declares on every connection supplies it instead.
-        let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref())?;
+        let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref());
 
         // R311y83 — the periodic recovery trigger: a background loop that
         // re-asks every known source `_sn=last+1..` every `period`. Spawned
@@ -2698,27 +2663,22 @@ mod tests {
         .expect("advanced subscriber declares");
         let _listener = sub.sample_miss_listener(move |_miss: Miss| *m.lock().unwrap() += 1);
 
-        // A REAL publisher with its OWN zid (its genuine identity) +
+        // A REAL publisher named by its session's zid +
         // SequenceNumber sequencing; default Locality::Any -> the loopback
         // leg fires the local subscriber (own-zid loopback delivers — no
         // self-echo dedup on the loopback path).
-        let publisher = AdvancedPublisher::declare(
-            &session,
-            "demo/data",
-            {
-                // `#[non_exhaustive]` and another crate's: no struct literal can name it here.
-                let mut options = AdvancedPublisherOptions::default();
-                options.sequencing = Sequencing::SequenceNumber;
-                options.cache = Some(CacheConfig {
-                    max_samples: 8,
-                    ..CacheConfig::default()
-                });
-                options.publisher_detection = true;
-                options.sample_miss_detection = MissDetectionConfig::default();
-                options
-            },
-            vec![0x09],
-        )
+        let publisher = AdvancedPublisher::declare(&session, "demo/data", {
+            // `#[non_exhaustive]` and another crate's: no struct literal can name it here.
+            let mut options = AdvancedPublisherOptions::default();
+            options.sequencing = Sequencing::SequenceNumber;
+            options.cache = Some(CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            });
+            options.publisher_detection = true;
+            options.sample_miss_detection = MissDetectionConfig::default();
+            options
+        })
         .expect("advanced publisher declares");
 
         for v in 0u8..3 {
@@ -4275,13 +4235,9 @@ mod tests {
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let _pub = AdvancedPublisher::declare(
-            &session,
-            "demo/data",
-            AdvancedPublisherOptions::default(),
-            vec![0x09],
-        )
-        .expect("advanced publisher declares");
+        let _pub =
+            AdvancedPublisher::declare(&session, "demo/data", AdvancedPublisherOptions::default())
+                .expect("advanced publisher declares");
 
         let _sub = AdvancedSubscriber::declare(&session, "demo/data", |_sample: Sample| {})
             .expect("advanced subscriber declares");
@@ -4436,18 +4392,13 @@ mod tests {
         })
     }
 
-    /// R2815 — a SESSION whose zid is not 1..=16 bytes gives its subscribers no
-    /// identity, so both declare forms REFUSE before declaring anything. This
-    /// replaces R311y826's test of a caller-supplied detection zid: the caller
-    /// no longer supplies one, and the zid that matters is the session's.
-    ///
-    /// The refusal must leave nothing on the wire. The recorder is read for
-    /// that, with a CONTROL session holding a valid zid on the same fixture, so
-    /// "nothing on the wire" cannot be satisfied by a recorder that never sees
-    /// a declaration at all.
+    /// R2815 — a subscriber's identity is its SESSION's zid: the caller supplies
+    /// none, and a session's zid is one to sixteen bytes by its type, so the
+    /// declare has no zid to refuse. Two sessions with different zids give their
+    /// subscribers the two identities.
     #[test]
-    fn a_session_without_a_zid_gives_no_subscriber_an_identity() {
-        let session_with = |zid: Vec<u8>| {
+    fn a_subscriber_is_named_by_its_sessions_zid() {
+        let session_with = |zid: SessionZid| {
             let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
             params.zid = zid;
             let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
@@ -4456,36 +4407,19 @@ mod tests {
             (TokioSession::new(actions, observer, clock), driver)
         };
 
-        let (control, control_driver) = session_with(vec![0x0a, 0x0b]);
-        let declared = AdvancedSubscriber::declare(&control, "demo/data", |_s: Sample| {})
-            .expect("CONTROL: a session with a valid zid declares");
-        assert_eq!(
-            declared.id().zid(),
-            &[0x0a, 0x0b],
-            "id() reads the session's zid"
-        );
-        assert_eq!(declared.keyexpr(), "demo/data");
-        assert!(
-            frames_carrying(&control_driver, "demo/data") > 0,
-            "CONTROL: a declaration reaches this recorder"
-        );
-
-        for bad in [vec![], vec![0u8; 17]] {
-            let len = bad.len();
-            let (session, driver) = session_with(bad);
-            // `expect_err` would need AdvancedSubscriber: Debug; match instead.
-            let Err(err) = AdvancedSubscriber::declare(&session, "demo/data", |_s: Sample| {})
-            else {
-                panic!("a session without a zid must be refused, not accepted");
-            };
-            assert!(
-                matches!(err, AdvancedSubscribeError::SessionZid { len: got } if got == len),
-                "refusal names the session zid's length, got {err:?}"
-            );
+        for zid in [SessionZid::from([0x0a, 0x0b]), SessionZid::from([0x0c; 16])] {
+            let (session, driver) = session_with(zid);
+            let declared = AdvancedSubscriber::declare(&session, "demo/data", |_s: Sample| {})
+                .expect("a session declares an advanced subscriber");
             assert_eq!(
-                frames_carrying(&driver, "demo/data"),
-                0,
-                "a refused declare leaves nothing on the wire"
+                declared.id().zid(),
+                zid.as_slice(),
+                "id() reads the session's zid"
+            );
+            assert_eq!(declared.keyexpr(), "demo/data");
+            assert!(
+                frames_carrying(&driver, "demo/data") > 0,
+                "the declaration reaches the recorder"
             );
         }
     }
@@ -4544,13 +4478,9 @@ mod tests {
         // caller, not dropped here: the teardown test drops the SUBSCRIBER and
         // counts frames, so the publisher must still be alive at that point
         // and must not contribute a teardown of its own.
-        let publisher = AdvancedPublisher::declare(
-            &session,
-            "demo/data",
-            AdvancedPublisherOptions::default(),
-            vec![0x09],
-        )
-        .expect("advanced publisher declares");
+        let publisher =
+            AdvancedPublisher::declare(&session, "demo/data", AdvancedPublisherOptions::default())
+                .expect("advanced publisher declares");
 
         // R2815 — an UNRELATED plain subscription first, kept alive. It moves
         // the subscription-id counter and not the session's entity counter, so

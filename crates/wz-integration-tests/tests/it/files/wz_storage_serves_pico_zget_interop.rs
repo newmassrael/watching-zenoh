@@ -166,7 +166,7 @@ async fn wz_storage_serves_a_stored_value_to_a_pico_zget() {
     let storage = StorageService::declare(
         &session,
         &StorageConfig::new("demo", STORAGE_KEYEXPR, "mem"),
-        vec![0x01],
+        [0x01].into(),
     )
     .expect("declare the wz storage on demo/**");
     let _ = storage

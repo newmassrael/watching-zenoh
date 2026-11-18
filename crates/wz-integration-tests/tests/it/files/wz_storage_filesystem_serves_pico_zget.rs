@@ -178,7 +178,7 @@ async fn wz_filesystem_storage_serves_a_durable_value_to_a_pico_zget() {
         ApplicationLayerObserver::new(),
     ));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
-    let storage = StorageService::declare_with_backend(&session, &config, vec![0x01], backend)
+    let storage = StorageService::declare_with_backend(&session, &config, [0x01].into(), backend)
         .expect("declare the wz filesystem storage on demo/**");
     let _ = storage
         .shared_state()

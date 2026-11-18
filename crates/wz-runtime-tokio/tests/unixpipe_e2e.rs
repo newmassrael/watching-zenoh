@@ -72,7 +72,7 @@ async fn wz_to_wz_over_unixpipe_reaches_established_and_delivers_put() {
     let acc_open = async {
         let link = acc.recv_new_link().await.expect("accept a unixpipe client");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::Unixpipe(link),
             params,
@@ -87,7 +87,7 @@ async fn wz_to_wz_over_unixpipe_reaches_established_and_delivers_put() {
         let locator =
             parse_any_locator(&format!("unixpipe/{base}")).expect("parse unixpipe locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         let cfg = DialConfig::default();
         connect_and_open_session(
             locator,
@@ -249,7 +249,7 @@ async fn wz_accepts_a_session_over_unixpipe_via_the_bind_endpoint_seam() {
             .await
             .expect("unixpipe post-accept handshake (a direct wrap)");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -264,7 +264,7 @@ async fn wz_accepts_a_session_over_unixpipe_via_the_bind_endpoint_seam() {
         let locator =
             parse_any_locator(&format!("unixpipe/{base}")).expect("parse unixpipe locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

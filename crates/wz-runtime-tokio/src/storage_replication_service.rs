@@ -183,7 +183,7 @@ impl DigestPublisher {
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
         config: ReplicationConfig,
-        local_zid: Vec<u8>,
+        local_zid: wz_session_core::session_zid::SessionZid,
     ) -> Self
     where
         R: SessionRuntime + 'static,
@@ -215,7 +215,7 @@ impl DigestPublisher {
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
         config: ReplicationConfig,
-        local_zid: Vec<u8>,
+        local_zid: wz_session_core::session_zid::SessionZid,
     ) -> Self
     where
         R: SessionRuntime + 'static,
@@ -250,7 +250,7 @@ impl DigestPublisher {
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
         config: ReplicationConfig,
-        local_zid: Vec<u8>,
+        local_zid: wz_session_core::session_zid::SessionZid,
         wall_now_unix_ms: W,
     ) -> Self
     where
@@ -606,7 +606,7 @@ mod tests {
         let storage = StorageService::declare(
             &session,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            [0x01].into(),
         )
         .expect("storage declares");
         let config = cfg();
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn digest_frame_carries_the_current_digest_and_keyexpr() {
         let config = cfg();
-        let zid = vec![0x01];
+        let zid = wz_session_core::session_zid::SessionZid::from([0x01]);
         let now = wall_clock_ntp64();
         let state = put_state(now);
 
@@ -711,7 +711,7 @@ mod tests {
         let session = TokioSession::new(actions, observer, clock);
 
         let config = cfg();
-        let zid = vec![0x01];
+        let zid = wz_session_core::session_zid::SessionZid::from([0x01]);
         let state = put_state(wall_clock_ntp64());
 
         // Loopback subscriber on the exact digest keyexpr, recording payloads.
@@ -771,7 +771,7 @@ mod tests {
 
         let state = put_state(wall_clock_ntp64());
         let observed = Arc::downgrade(&state);
-        let publisher = DigestPublisher::spawn(&session, state, cfg(), vec![0x01]);
+        let publisher = DigestPublisher::spawn(&session, state, cfg(), [0x01].into());
         assert!(
             observed.upgrade().is_none(),
             "the storage outlived its owner: the live publisher is holding it"
@@ -824,7 +824,7 @@ mod tests {
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let zid = vec![0x01];
+        let zid = wz_session_core::session_zid::SessionZid::from([0x01]);
         let state = put_state(wall_clock_ntp64());
 
         let spawned_at = tokio::time::Instant::now();

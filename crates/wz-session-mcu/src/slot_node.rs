@@ -54,7 +54,7 @@ use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, Endpoin
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_init_params::{
-    cookie_bytes, zid_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
+    cookie_bytes, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
 };
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -667,8 +667,7 @@ pub fn install_entities<const N: usize>(
 /// Who the node claims to be, and the secret it signs its cookies with.
 #[derive(Clone)]
 pub struct NodeIdentity {
-    zid: [u8; ZID_MAX],
-    zid_len: usize,
+    zid: SessionZid,
     key: [u8; SIGNING_KEY_BYTES],
 }
 
@@ -676,21 +675,15 @@ impl NodeIdentity {
     /// An identity from `zid` (1 to [`ZID_MAX`] bytes) and the signing secret. `None` when the
     /// zenoh id does not fit.
     pub fn new(zid: &[u8], key: [u8; SIGNING_KEY_BYTES]) -> Option<Self> {
-        if zid.is_empty() || zid.len() > ZID_MAX {
-            return None;
-        }
-        let mut bytes = [0u8; ZID_MAX];
-        bytes[..zid.len()].copy_from_slice(zid);
         Some(Self {
-            zid: bytes,
-            zid_len: zid.len(),
+            zid: SessionZid::new(zid).ok()?,
             key,
         })
     }
 
     /// The zenoh id.
     pub fn zid(&self) -> &[u8] {
-        &self.zid[..self.zid_len]
+        self.zid.as_slice()
     }
 
     /// The zenoh id in its hex form, in fixed text.
@@ -714,7 +707,7 @@ impl NodeIdentity {
     fn params_as(&self, whatami: WhatAmI, batch_size: u16) -> SessionInitParams {
         SessionInitParams {
             whatami,
-            zid: zid_bytes(self.zid()),
+            zid: self.zid,
             seq_num_res: 2,
             req_id_res: 2,
             batch_size,

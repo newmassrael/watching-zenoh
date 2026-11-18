@@ -283,7 +283,7 @@ where
 {
     let acc_open = async move {
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end_acc),
@@ -299,7 +299,7 @@ where
     };
     let init_open = async move {
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         initiate_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end_init),
@@ -1417,7 +1417,7 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
     //    wrapped the way the dial side would wrap it.
     let acc_open = async {
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             accepted,
             params,
@@ -1430,7 +1430,7 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
     };
     let init_open = async {
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         initiate_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end.master),

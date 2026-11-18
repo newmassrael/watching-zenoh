@@ -245,7 +245,7 @@ async fn run(ctx: Ctx) {
     };
     let actions = ScoutingActions::new(ScoutParams {
         what: mask,
-        zid: ctx.session.zid().to_vec(),
+        zid: Some(ctx.session.zid()),
         timeout_ms: ctx.int("timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS),
         // The survey arm: every node of the window is reported, not the first.
         exit_on_first: false,

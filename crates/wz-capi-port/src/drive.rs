@@ -40,8 +40,11 @@ pub trait SessionDrive: Send + Sync + 'static {
     /// The engine, borrowed for the length of one call.
     fn engine_ref(&self) -> &dyn SessionEngine;
 
-    /// The session's own zid, zero-padded to 16 bytes: the id its handshakes carry.
-    fn zid(&self) -> [u8; 16];
+    /// The session's own zid, zero-padded to 16 bytes: the id its handshakes carry, which is
+    /// its engine's, so a drive and its engine cannot name two.
+    fn zid(&self) -> [u8; 16] {
+        self.engine_ref().zid()
+    }
 
     /// Close the session: a Close to each peer, the links shut, every callback finished.
     /// Idempotent.

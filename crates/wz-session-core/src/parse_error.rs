@@ -105,6 +105,17 @@ pub enum InboundParseError {
         /// The version byte the message announced.
         version: u8,
     },
+    /// The message names a zid that is no zid: its bytes are all zero, or its
+    /// length is outside `1..=16`.
+    ///
+    /// zenoh's decoder reads a zid's bytes and then refuses the id they spell
+    /// when it is not a non-zero `u128` of at most sixteen bytes
+    /// (`commons/zenoh-codec/src/core/zenohid.rs` @
+    /// `ZenohIdProto::try_from(&id[..size]).map_err(|_| DidntRead)`), so the
+    /// message is refused whole, as a malformed one is. Distinct from
+    /// [`Self::Codec`]: the bytes are well-formed and the value they spell is
+    /// the one no node has.
+    InvalidZid(crate::session_zid::ZidError),
 }
 
 impl fmt::Display for InboundParseError {
@@ -136,6 +147,7 @@ impl fmt::Display for InboundParseError {
                 version,
                 wz_codecs::wire_const::PROTOCOL_VERSION
             ),
+            Self::InvalidZid(why) => write!(f, "inbound message names no zid: {why}"),
         }
     }
 }

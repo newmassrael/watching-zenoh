@@ -272,7 +272,8 @@ fn window_hellos<C: ClockSource + Clone + 'static>(
     let members = Members::open(group, port, &interface_addresses());
     let params = ScoutParams {
         what,
-        zid,
+        // A Scout names its asker optionally: no bytes, or bytes that are no zid, ask as nobody.
+        zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
         // The caller's whole budget IS the window: upstream hands its `timeout` straight to
         // `__z_scout_loop`'s `while elapsed < period`.
         timeout_ms: budget_ms,

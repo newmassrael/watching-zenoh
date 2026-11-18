@@ -94,7 +94,7 @@ fn frame_carrying_put(keyexpr: &str) -> Vec<u8> {
     // anti-vacuity test below caught, and which would otherwise have made the
     // deny assertion pass without any policy being consulted.
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4];
+    params.zid = [0x02; 4].into();
     let actions = new_session_actions(outbound, params, TokioTime::new());
     *actions
         .link
@@ -150,7 +150,7 @@ async fn arrivals_and_hits(wire: Vec<u8>, config: Option<InterceptorConfig>) -> 
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in fixture") = Some([0x5a; 16].into());
 
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = hits.clone();

@@ -102,7 +102,7 @@ async fn wz_accepts_a_session_over_udp_via_the_bind_endpoint_seam() {
             .await
             .expect("udp post-accept handshake (a direct wrap)");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -116,7 +116,7 @@ async fn wz_accepts_a_session_over_udp_via_the_bind_endpoint_seam() {
     let init_open = async {
         let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse udp locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -356,7 +356,7 @@ async fn udp_stray_new_src_does_not_tear_down_a_one_shot_session() {
             .await
             .expect("udp post-accept handshake");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -370,7 +370,7 @@ async fn udp_stray_new_src_does_not_tear_down_a_one_shot_session() {
     let init_open = async {
         let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse udp locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -507,7 +507,7 @@ async fn a_named_udp_listen_resolves_and_accepts_a_named_dial() {
         );
         let link = accepted.handshake().await.expect("udp post-accept wrap");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -522,7 +522,7 @@ async fn a_named_udp_listen_resolves_and_accepts_a_named_dial() {
         let locator =
             parse_any_locator(&format!("udp/localhost:{port}")).expect("parse udp name locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

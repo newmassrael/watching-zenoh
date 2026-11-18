@@ -58,14 +58,13 @@ const DATA_VALUE: &[u8] = b"value-x-put-by-the-peer";
 /// `remove_storage` ends it by name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_storage_the_manager_hosts_answers_a_peer_with_its_put_and_ends_by_name() {
-    let zid_host = vec![0x0A; 4];
-    let zid_peer = vec![0x0B; 4];
+    let zid_host = wz_runtime_tokio::session_glue::SessionZid::from([0x0A; 4]);
+    let zid_peer = wz_runtime_tokio::session_glue::SessionZid::from([0x0B; 4]);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
 
     let host_open = {
-        let zid_host = zid_host.clone();
         async move {
             let (stream, _peer) = listener.accept().await.expect("accept");
             let mut params = fixture_session_init_params();
@@ -113,7 +112,7 @@ async fn a_storage_the_manager_hosts_answers_a_peer_with_its_put_and_ends_by_nam
         .add_storage(
             &host,
             &StorageConfig::new(STORAGE, STORAGE_KEYEXPR, "mem"),
-            zid_host.clone(),
+            zid_host,
         )
         .expect("the manager hosts the storage on the memory volume");
     assert_eq!(manager.storage_names().collect::<Vec<_>>(), vec![STORAGE]);

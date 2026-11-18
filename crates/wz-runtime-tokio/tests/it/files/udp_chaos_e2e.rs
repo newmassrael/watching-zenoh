@@ -161,7 +161,7 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
             .await
             .expect("peek initiator InitSyn datagram");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Udp {
                 socket: acc_socket,
@@ -178,7 +178,7 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
     let init_open = async {
         let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -410,7 +410,7 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
             .await
             .expect("peek initiator InitSyn datagram");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Udp {
                 socket: acc_socket,
@@ -427,7 +427,7 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
     let init_open = async {
         let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -631,7 +631,7 @@ async fn udp_reordered_fragment_aborts_then_channel_recovers() {
             .await
             .expect("peek initiator InitSyn datagram");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Udp {
                 socket: acc_socket,
@@ -648,7 +648,7 @@ async fn udp_reordered_fragment_aborts_then_channel_recovers() {
     let init_open = async {
         let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

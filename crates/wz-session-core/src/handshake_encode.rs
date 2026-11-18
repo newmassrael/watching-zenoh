@@ -302,8 +302,7 @@ fn init_message<'p, 'e>(
     } else {
         None
     };
-    // zid is the protocol-bounded peer id (1..=16), refused before `init_cbyte`
-    // packs its length, which holds only a length in those bounds.
+    // A `SessionZid` is 1..=16 bytes, the lengths `init_cbyte` can pack.
     let zid = crate::codec_owned::sent(params.zid.as_slice())?;
     let body = InitBody {
         // The protocol's, not a parameter: see `SessionInitParams`.
@@ -805,21 +804,6 @@ mod tests {
             cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte test key"),
         }
-    }
-
-    /// A zid outside the protocol's 1..=16 bytes is refused with `LengthOutOfRange`
-    /// before a byte of the Init is written, and the zid of the fixture is not.
-    #[cfg(feature = "codec-open-body")]
-    #[test]
-    fn an_init_with_an_empty_zid_is_refused() {
-        let mut params = open_params(10_000);
-        let caps = super::InitCaps::of(&params);
-        assert!(super::init_message(&params, caps, false, &[], None).is_ok());
-        params.zid = crate::session_init_params::zid_bytes(&[]);
-        assert_eq!(
-            super::init_message(&params, caps, false, &[], None).err(),
-            Some(sce_forge_runtime::codec::CodecError::LengthOutOfRange)
-        );
     }
 
     /// R311ku — encode_open derives the `_Z_FLAG_T_OPEN_T` flag from the

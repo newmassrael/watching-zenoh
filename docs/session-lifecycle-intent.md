@@ -1884,3 +1884,52 @@ the status of a fixed image, which is still the image owner's. The cost of
 binding one verb alone, against all three, is not measured, since no image
 binds any: the next image that does should record its chain and flash for the
 verbs it takes.
+
+## 7. The session's own zid as a type (2026-11-18)
+
+Step 1 was already landed when this note was written: the derivation and the
+check of a peer's key (1a), the guard that keeps the verbs out of a build with
+no secure channel (1b), and the channel on the fixed-memory profile (1b).
+What follows is the session's side of D1, the zid a node presents for itself.
+
+`SessionInitParams::zid` is a `SessionZid` (`wz_session_core::session_zid`):
+one to sixteen bytes held by value, with no allocator, so every profile keeps
+the same type. A length outside that range is refused once, where the
+parameters are made, and the session never meets one: the C ABI's and the
+cooperative engine's openers refuse a configured zid whose wire form is not
+one to sixteen bytes, the demo refuses an operator's `--zid` before it opens a
+session, and a board whose zid does not fit stops before it builds a node.
+The checks further in that this made unreachable are gone: the advanced
+publisher takes its zid from its session (`Session::zid`) and refuses none,
+and the advanced subscriber's identity is `EntityGlobalId::of_session`, which
+cannot fail. A zid derived from a credential (sixteen bytes) is a
+`SessionZid` through `From<[u8; 16]>`.
+
+The D2 guard's message now names the fixed-memory profile's channel
+(`wz-tls-mbedtls`) instead of saying that profile has none.
+
+A `SessionZid` is also never zero, as upstream's id is a non-zero `u128`. The
+peer's zid a session records (`inbound_peer_zid`, `remote_peer_zid`, and the
+accept cookie that carries it) is a `SessionZid`: an INIT whose zid is zero is
+refused where it is parsed (`InboundParseError::InvalidZid`), as zenoh's
+decoder refuses it. The C ABI engines state their zid as one
+(`SessionEngine::session_zid`, with the padded form derived from it), so the
+advanced subscriber's host has no zid to refuse either, and the storage
+services take their stamping zid as one.
+
+The multicast and scouting parameters' zids are typed too:
+`MulticastParams::zid` is a `SessionZid` and so is every member of the group
+peer table, and `ScoutParams::zid` is an `Option<SessionZid>` (a Scout names
+its asker optionally). A participant refuses a JOIN, Scout or Hello whose zid
+is out of range or zero where it reads it (`decode_join_named`,
+`parse_scouting`, `decode_scouted_hello`). The C ABI's scout calls turn a zid
+that is not one into a Scout that names no asker.
+
+An observer is not a participant: a capture of a peer that sends a zero zid
+must still dissect. The refusal therefore lives in the participant's entry
+points (`parse_inbound*`, `parse_scouting`), and the passive reader uses the
+lenient parse (`parse_inbound_observed`) and reports the frame on its row
+(`PassiveFrame::names_no_zid`) instead of failing the capture.
+
+Not done: `ScoutedHello::zid` is still bytes, and a passive scouting row does
+not yet report a Scout or Hello that names a zero zid.

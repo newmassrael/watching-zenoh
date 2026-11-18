@@ -123,7 +123,7 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
     let acc_open = async {
         let (stream, _peer) = link.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -137,7 +137,7 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
     let bridge_open = async {
         let locator = parse_any_locator(&format!("tcp/{link_addr}")).expect("parse locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         let cfg = DialConfig::default();
         connect_and_open_session(
             locator,

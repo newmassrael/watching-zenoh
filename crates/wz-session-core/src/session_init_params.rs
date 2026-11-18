@@ -7,7 +7,7 @@
 //! `SessionInitParams` is the bundle of codec field values that drive
 //! the 4-way handshake + close (version / whatami / zid / resolutions /
 //! batch size / lease / cookie + signing key). It is a pure owned value
-//! type — alloc-gated (it holds `Vec<u8>` zid + cookie and a
+//! type — alloc-gated (it holds a `Vec<u8>` cookie and a
 //! [`crate::signing_key::SigningKey`]) with no codec / async / tokio
 //! coupling, so it belongs on the runtime-agnostic side: an MCU profile
 //! drives the session FSM with the same typed params as the tokio AP
@@ -25,9 +25,7 @@ use wz_codecs::whatami::WhatAmI;
 
 use crate::signing_key::SigningKey;
 
-/// The longest zid on the wire, in bytes: the INIT `cbyte` carries `len - 1` in
-/// four bits.
-pub const ZID_MAX: usize = 16;
+pub use crate::session_zid::{SessionZid, ZidError, ZID_MAX};
 
 /// The longest cookie a session keeps on the `session-slot` profile, in bytes: the build's
 /// `HANDSHAKE_COOKIE_BYTES` limit, 128 unless it says otherwise. It is the node's own bound and not
@@ -82,11 +80,13 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
 }
 
-/// A zid for [`SessionInitParams::zid`], written the same way on every
-/// profile. Panics when `src` is longer than [`ZID_MAX`]: a zid longer than the
-/// wire carries is a construction mistake, not a runtime condition.
-pub fn zid_bytes(src: &[u8]) -> SessionBytes<ZID_MAX> {
-    session_bytes::<ZID_MAX>(src).expect("a zid is at most 16 bytes on the wire")
+/// A zid for [`SessionInitParams::zid`] from bytes the caller wrote itself.
+/// Panics when `src` is not one to [`ZID_MAX`] bytes or is all zero: a zid the
+/// wire cannot carry is a construction mistake there, not a runtime condition. A
+/// zid that arrives from configuration or from the wire is made with
+/// [`SessionZid::new`], whose refusal the caller reports.
+pub fn zid_bytes(src: &[u8]) -> SessionZid {
+    SessionZid::new(src).expect("a zid is 1 to 16 bytes, not all zero")
 }
 
 /// A cookie for [`SessionInitParams::cookie`], written the same way on every
@@ -115,9 +115,10 @@ pub struct SessionInitParams {
     /// the codec edge — the typed role is stored, not a pre-encoded byte,
     /// so the API-vs-wire form is no longer ambiguous across call sites.
     pub whatami: WhatAmI,
-    /// ZenohID — 1..=16 bytes. The codec encodes the length in the
-    /// high 4 bits of `cbyte` as `zid_len - 1`.
-    pub zid: SessionBytes<ZID_MAX>,
+    /// ZenohID, one to sixteen bytes by its type, so a session is refused an
+    /// invalid zid where its parameters are made and never later. The codec
+    /// encodes the length in the high 4 bits of `cbyte` as `zid_len - 1`.
+    pub zid: SessionZid,
     /// Sequence-number resolution (0..=3 → 8 / 16 / 32 / 64-bit).
     pub seq_num_res: u8,
     /// Request-id resolution (0..=3).

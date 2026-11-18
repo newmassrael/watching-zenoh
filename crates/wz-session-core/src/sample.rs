@@ -562,6 +562,19 @@ impl EntityGlobalId {
         })
     }
 
+    /// The identity of entity `eid` of the session whose zid is `zid`. Cannot be
+    /// refused: a [`SessionZid`](crate::session_zid::SessionZid) is already in
+    /// the range [`Self::new`] checks.
+    pub fn of_session(zid: crate::session_zid::SessionZid, eid: u32) -> Self {
+        let mut padded = [0u8; 16];
+        padded[..zid.len()].copy_from_slice(&zid);
+        Self {
+            zid: padded,
+            zid_len: zid.len() as u8,
+            eid,
+        }
+    }
+
     /// The entity's session zid — the meaningful prefix only.
     pub fn zid(&self) -> &[u8] {
         &self.zid[..self.zid_len as usize]
@@ -1043,6 +1056,25 @@ fn decode_source_info_payload(bytes: &[u8]) -> Option<SourceInfo> {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// A session's zid makes the same identity the checked constructor does, at both ends
+    /// of the range, and a shorter zid with the same leading bytes is another identity.
+    #[test]
+    fn a_session_zid_names_the_identity_the_checked_constructor_does() {
+        use crate::session_zid::SessionZid;
+        for bytes in [&[0x0a][..], &[0x0b; 16][..]] {
+            let zid = SessionZid::new(bytes).expect("in range");
+            assert_eq!(
+                EntityGlobalId::of_session(zid, 7),
+                EntityGlobalId::new(bytes, 7).expect("in range")
+            );
+            assert_eq!(EntityGlobalId::of_session(zid, 7).zid(), bytes);
+        }
+        assert_ne!(
+            EntityGlobalId::of_session(SessionZid::from([0x0b; 15]), 7),
+            EntityGlobalId::of_session(SessionZid::from([0x0b; 16]), 7)
+        );
+    }
 
     /// A schema that is not UTF-8 crosses the codec both ways as its bytes:
     /// the hint encodes it, the wire carries it, and the decode reads it back

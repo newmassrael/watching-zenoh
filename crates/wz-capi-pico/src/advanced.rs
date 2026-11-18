@@ -582,12 +582,11 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         // The publisher's source identity is the session's own zid, the one its
         // peers see in the handshake.
         let engine = session.engine.clone();
-        let zid = engine.zid().to_vec();
         let publisher = match AdvancedPublisherOn::declare_on(
             Arc::new(PicoPlane::new(session, declared)),
             ke,
             advanced_publisher_options(options),
-            zid,
+            engine.session_zid(),
         ) {
             Ok(publisher) => publisher,
             // A derived `@adv` key no peer could take is the caller's key and
@@ -1959,7 +1958,7 @@ mod tests {
         let shared = Arc::new(
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
-                vec![0x11; 16],
+                [0x11; 16].into(),
             )
             .expect("test host entropy"),
         );
@@ -2045,7 +2044,7 @@ mod tests {
         let shared = Arc::new(
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
-                vec![0x11; 16],
+                [0x11; 16].into(),
             )
             .expect("test host entropy"),
         );

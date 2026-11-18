@@ -2841,8 +2841,6 @@ fn demo_main() -> ExitCode {
             cache_max: advanced_cache_max,
             interval_ms: 200,
             heartbeat_ms: advanced_publish_heartbeat_ms,
-            // R2885 — the node's one identity (see `node_zid`).
-            zid: node_zid.clone(),
         }),
     };
     let remote_log_spec = RemoteLogSpec {

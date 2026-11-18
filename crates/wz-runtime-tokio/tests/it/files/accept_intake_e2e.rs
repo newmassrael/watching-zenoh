@@ -106,7 +106,7 @@ impl FaceForwarder for HoldsTheFirstAdmission {
 
 fn node_params(zid: u8) -> SessionInitParams {
     let mut params = fixture_session_init_params();
-    params.zid = vec![zid; 4];
+    params.zid = [zid; 4].into();
     params
 }
 

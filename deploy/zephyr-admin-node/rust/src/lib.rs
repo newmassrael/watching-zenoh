@@ -68,7 +68,7 @@ use wz_session_core::query_sink::BoxedQuerySink;
 #[cfg(all(role_client, not(storage_fixed)))]
 use wz_session_core::sample::EncodingHint;
 #[cfg(not(storage_fixed))]
-use wz_session_core::session_init_params::SessionInitParams;
+use wz_session_core::session_init_params::{SessionInitParams, SessionZid};
 #[cfg(not(storage_fixed))]
 use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(not(storage_fixed))]
@@ -267,10 +267,10 @@ pub trait NodeNet {
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
 #[cfg(not(storage_fixed))]
-fn params(whatami: WhatAmI, zid: &[u8], signing_key: &[u8]) -> SessionInitParams {
+fn params(whatami: WhatAmI, zid: SessionZid, signing_key: &[u8]) -> SessionInitParams {
     SessionInitParams {
         whatami,
-        zid: zid.to_vec(),
+        zid,
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: BATCH_SIZE,
@@ -305,11 +305,13 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     let clock = ZephyrClock::<TICK_HZ>;
     let runtime = CoopRuntime::new(clock);
     let local = CoopLocalSet::new(&runtime);
-    let zid = net.zid();
+    let Ok(zid) = SessionZid::new(&net.zid()) else {
+        log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");
+        return 2;
+    };
     let zid_hex = zid_to_zenoh_hex(&zid);
     let locators: Vec<String> = net.addresses().into_iter().map(locator).collect();
     let accept_runtime = runtime.clone();
-    let (dial_zid, accept_zid) = (zid.clone(), zid.clone());
     let node = AdminNode::new(
         &local,
         net.links(),
@@ -323,11 +325,11 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         },
         LISTEN_PORT,
         SessionTimeouts::from_build(),
-        move || params(WhatAmI::Peer, &dial_zid, &key),
+        move || params(WhatAmI::Peer, zid, &key),
         move |sink| {
             new_session_actions(
                 sink,
-                params(WhatAmI::Peer, &accept_zid, &key),
+                params(WhatAmI::Peer, zid, &key),
                 CoopTime::new(&accept_runtime),
                 ZephyrEntropy,
             )
@@ -457,14 +459,17 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
     let clock = ZephyrClock::<TICK_HZ>;
     let runtime = CoopRuntime::new(clock);
     let local = CoopLocalSet::new(&runtime);
-    let zid = net.zid();
+    let Ok(zid) = SessionZid::new(&net.zid()) else {
+        log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");
+        return 2;
+    };
     let zid_hex = zid_to_zenoh_hex(&zid);
     let mut node = ClientNode::new(
         &local,
         net.links(),
         &ENDPOINTS,
         SessionTimeouts::from_build(),
-        move || params(WhatAmI::Client, &zid, &key),
+        move || params(WhatAmI::Client, zid, &key),
     );
     if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()
         || node.queryable(CONFIG_KEY, answer(CONFIG_BODY)).is_err()

@@ -24,7 +24,9 @@ fn zid(b: u8) -> Zid {
 fn face(peer: Zid, wire_whatami: u8) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let (actions, sink) = recording_actions();
     TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
-        *s = Some(peer.as_slice().to_vec())
+        *s = Some(wz_session_core::session_init_params::zid_bytes(
+            peer.as_slice(),
+        ))
     });
     TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire_whatami));
     (actions, sink)

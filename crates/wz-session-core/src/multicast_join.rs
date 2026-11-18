@@ -93,9 +93,8 @@ const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_hea
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
 /// before these, so the next data frame this node mints is admitted).
 ///
-/// Panics when `params.zid` is empty, which [`MulticastParams::zid`] does not
-/// admit: the cbyte states the zid's length less one, so no Join carries an
-/// empty zid ([`encode_join_into`] refuses it).
+/// [`MulticastParams::zid`] is a zid by its type, so the write the cbyte's length
+/// nibble needs always holds.
 #[cfg(feature = "alloc")]
 pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec<u8> {
     let mut dgram = Vec::with_capacity(JOIN_MAX_BYTES);
@@ -404,7 +403,7 @@ pub(crate) fn join_without_chain(dgram: &[u8]) -> std::vec::Vec<u8> {
 // consumer and is not a multicast participant. Re-exported here so every
 // existing `multicast_join::decode_join` caller is unchanged, and so this
 // module still reads as the JOIN wire SSOT it is.
-pub use crate::join_decode::{decode_join, decode_join_zid};
+pub use crate::join_decode::{decode_join, decode_join_named, decode_join_zid};
 
 /// §3.2 rejection rules for an inbound JOIN announcement, ahead of
 /// [`MulticastDispatcher::ingest_join`](crate::multicast_dispatch::MulticastDispatcher::ingest_join)
@@ -1140,6 +1139,29 @@ mod tests {
         let dgram = [wz_codecs::wire_const::T_MID_KEEP_ALIVE, 0x00];
         assert_eq!(decode_join_zid(&dgram), None);
         assert_eq!(decode_join_zid(&[]), None);
+    }
+
+    /// A JOIN whose zid is zero is no JOIN: it is refused where it is read, and the same
+    /// JOIN naming a zid is read with that zid as the member's identity.
+    #[test]
+    fn a_join_naming_a_zero_zid_is_refused_where_it_is_read() {
+        let p = params(&[0x01]);
+        let named = encode_join(
+            &p,
+            &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
+        );
+        let (_, zid) = decode_join_named(&named).expect("a Join naming a zid");
+        assert_eq!(zid, [0x01]);
+        // Header, version, cbyte, then the one byte of the zid.
+        assert_eq!(
+            named[3], 0x01,
+            "the zid's byte is where the fixture writes it"
+        );
+        let mut zero = named.clone();
+        zero[3] = 0x00;
+        assert!(decode_join_named(&zero).is_none());
+        assert!(decode_join(&zero).is_none());
+        assert_eq!(decode_join_zid(&zero), None);
     }
 
     /// R311y227 — the qos JOIN round-trips its per-priority next-SN advertisement:

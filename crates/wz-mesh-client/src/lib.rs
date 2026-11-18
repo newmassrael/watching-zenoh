@@ -54,7 +54,8 @@ use wz_runtime_tokio::session::{
     TokioSession,
 };
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, CloseReason, EntropySource, OsEntropy, SessionInitParams, WhatAmI,
+    drive_session_until_terminal, CloseReason, EntropySource, OsEntropy, SessionInitParams,
+    SessionZid, WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
     dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
@@ -302,9 +303,12 @@ fn session_params() -> Result<SessionInitParams, ClientError> {
     }
     // A zenoh id is the bytes up to its last non-zero one.
     let significant = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let zid = SessionZid::new(&zid[..significant]).map_err(|refused| {
+        ClientError::new(format!("the drawn identity is not a zid: {refused}"))
+    })?;
     Ok(SessionInitParams {
         whatami: WhatAmI::Client,
-        zid: zid[..significant].to_vec(),
+        zid,
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: BATCH_SIZE,

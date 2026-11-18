@@ -94,8 +94,8 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     // Distinct replica zids. A is the acceptor/source, B the initiator/dest;
     // the storage zid each passes to its drivers is its own session zid, so the
     // keyexprs A declares on are exactly the ones B derives from A's digest.
-    let zid_a = vec![0x0A; 4];
-    let zid_b = vec![0x0B; 4];
+    let zid_a = wz_runtime_tokio::session_glue::SessionZid::from([0x0A; 4]);
+    let zid_b = wz_runtime_tokio::session_glue::SessionZid::from([0x0B; 4]);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
@@ -103,7 +103,6 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     // ── Open both sessions to Established (engines are `!Send`, driven on the
     //    current task; the `tokio::join!` open pattern).
     let a_open = {
-        let zid_a = zid_a.clone();
         async move {
             let (stream, _peer) = listener.accept().await.expect("accept");
             let mut params = fixture_session_init_params();
@@ -120,7 +119,6 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
         }
     };
     let b_open = {
-        let zid_b = zid_b.clone();
         async move {
             let locator =
                 parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
@@ -162,7 +160,7 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
             None,
             TimestampHint {
                 time: wall_clock_ntp64(),
-                zid: zid_a.clone(),
+                zid: zid_a.to_vec(),
             },
         )
         .expect("the in-memory backend commits");
@@ -174,11 +172,9 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
         observer_a,
         Arc::new(opened_a.clock),
     );
-    let _aligner_a =
-        AlignerService::declare(&session_a, state_a.clone(), config.clone(), zid_a.clone())
-            .expect("A declares its aligner answer queryable");
-    let _digest_pub_a =
-        DigestPublisher::spawn(&session_a, state_a.clone(), config.clone(), zid_a.clone());
+    let _aligner_a = AlignerService::declare(&session_a, state_a.clone(), config.clone(), zid_a)
+        .expect("A declares its aligner answer queryable");
+    let _digest_pub_a = DigestPublisher::spawn(&session_a, state_a.clone(), config.clone(), zid_a);
     let session_a_drive = session_a.clone();
     let drive_a = drive_session_until_terminal(
         &mut opened_a.inbound,

@@ -76,7 +76,7 @@ fn burst_of_frames() -> Vec<Vec<u8>> {
     let recorder = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4];
+    params.zid = [0x02; 4].into();
     let actions = new_session_actions(outbound, params, TokioTime::new());
     *actions
         .link

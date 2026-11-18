@@ -358,7 +358,7 @@ async fn a_rel_one_locator_opens_a_session_over_reliable_udp_from_the_strings_al
             .expect("accept the reliable udp peer");
         assert_eq!(link.transport_name(), "udp-reliable");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -372,7 +372,7 @@ async fn a_rel_one_locator_opens_a_session_over_reliable_udp_from_the_strings_al
     let init_open = async {
         let locator = parse_any_locator(&format!("udp/{addr}?rel=1")).expect("parse dial locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

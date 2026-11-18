@@ -550,6 +550,25 @@ impl InboundFrame {
             _ => None,
         }
     }
+
+    /// Why the zid this message names is no zid, for the messages that name
+    /// one (Init and Join), and `None` for a zid and for every other kind. A
+    /// participant refuses such a message where it reads it
+    /// ([`InboundParseError::InvalidZid`]); an observer reads it and reports
+    /// this on its row ([`parse_inbound_observed`]).
+    pub fn names_no_zid(&self) -> Option<crate::session_zid::ZidError> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            InboundFrame::Init { body, .. } => {
+                crate::session_zid::SessionZid::new(body.zid.as_slice()).err()
+            }
+            #[cfg(all(feature = "alloc", feature = "codec-join"))]
+            InboundFrame::Join { body, .. } => {
+                crate::session_zid::SessionZid::new(body.zid.as_slice()).err()
+            }
+            _ => None,
+        }
+    }
 }
 
 /// R311y215 — project the QoS priority carried by a decoded Frame/Fragment ext
@@ -735,6 +754,20 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
 /// the payload handed out here is the tail of the unit, and the reader of the
 /// batch cuts it where the walk ended and reads on from there.
 pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
+    // Returned where it lies: the frame is not moved into a second `Ok`.
+    let parsed = parse_inbound_observed(bytes);
+    if let Ok((frame, _)) = &parsed {
+        refuse_unnamed_zid(frame)?;
+    }
+    parsed
+}
+
+/// [`parse_inbound_consuming`] for a reader that observes a link and takes part
+/// in nothing: a message that names a zid no node has is read and handed back,
+/// so that a capture of a peer that sends one still reads past it, and the
+/// reader reports [`InboundFrame::names_no_zid`] on its row. Every participant's
+/// read refuses the same message ([`InboundParseError::InvalidZid`]).
+pub fn parse_inbound_observed(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
     #[cfg(feature = "alloc")]
     {
         parse_unit(bytes, None)
@@ -742,6 +775,19 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
     #[cfg(not(feature = "alloc"))]
     {
         parse_unit(bytes)
+    }
+}
+
+/// A participant's refusal of a message that names a zid no node has: zenoh's
+/// decoder reads the bytes of an id and refuses the message when they are not a
+/// non-zero id of at most sixteen bytes
+/// (`commons/zenoh-codec/src/core/zenohid.rs` @
+/// `ZenohIdProto::try_from(&id[..size]).map_err(|_| DidntRead)`), so every zid a
+/// session records of a peer is a [`crate::session_zid::SessionZid`].
+fn refuse_unnamed_zid(frame: &InboundFrame) -> Result<(), InboundParseError> {
+    match frame.names_no_zid() {
+        Some(refused) => Err(InboundParseError::InvalidZid(refused)),
+        None => Ok(()),
     }
 }
 
@@ -760,7 +806,11 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
 pub fn parse_inbound_consuming_in(
     unit: &RxBytes,
 ) -> Result<(InboundFrame, usize), InboundParseError> {
-    parse_unit(unit.as_slice(), Some(unit))
+    let parsed = parse_unit(unit.as_slice(), Some(unit));
+    if let Ok((frame, _)) = &parsed {
+        refuse_unnamed_zid(frame)?;
+    }
+    parsed
 }
 
 /// [`parse_inbound_consuming`] that writes the message into `out` and returns where it ended:
@@ -771,13 +821,11 @@ pub fn parse_inbound_consuming_into(
     out: &mut InboundFrame,
 ) -> Result<usize, InboundParseError> {
     #[cfg(feature = "alloc")]
-    {
-        parse_unit_into(bytes, None, out)
-    }
+    let used = parse_unit_into(bytes, None, out)?;
     #[cfg(not(feature = "alloc"))]
-    {
-        parse_unit_into(bytes, out)
-    }
+    let used = parse_unit_into(bytes, out)?;
+    refuse_unnamed_zid(out)?;
+    Ok(used)
 }
 
 /// [`parse_inbound_consuming_into`] over a unit that can be shared (see
@@ -787,7 +835,9 @@ pub fn parse_inbound_consuming_in_into(
     unit: &RxBytes,
     out: &mut InboundFrame,
 ) -> Result<usize, InboundParseError> {
-    parse_unit_into(unit.as_slice(), Some(unit), out)
+    let used = parse_unit_into(unit.as_slice(), Some(unit), out)?;
+    refuse_unnamed_zid(out)?;
+    Ok(used)
 }
 
 /// The form a Frame's or a Fragment's own extension chain is kept in, taken
@@ -2334,5 +2384,45 @@ mod init_syn_header_tests {
             );
             assert_eq!(is_init_syn(&wire), decoded_as_syn, "{wire:?}");
         }
+    }
+}
+
+// The zid an INIT names is refused where the message is read when it is zero, as zenoh's
+// decoder refuses it; its length is the header's four bits plus one, so always 1..=16.
+#[cfg(all(test, feature = "codec-init-body"))]
+mod init_zid_tests {
+    use super::*;
+    use crate::session_zid::ZidError;
+
+    /// An InitSyn from a peer whose zid is `zid`, with no sizing fields and no extensions.
+    fn init_syn(zid: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut wire = alloc::vec![
+            wire_const::T_MID_INIT,
+            0x09,
+            0x01 | (((zid.len() as u8) - 1) << 4)
+        ];
+        wire.extend_from_slice(zid);
+        wire
+    }
+
+    #[test]
+    fn an_init_naming_a_zero_zid_is_refused_and_a_zid_with_zero_bytes_is_not() {
+        assert_eq!(
+            parse_inbound(&init_syn(&[0x00])).err(),
+            Some(InboundParseError::InvalidZid(ZidError::AllZero { len: 1 }))
+        );
+        assert_eq!(
+            parse_inbound(&init_syn(&[0x00; 16])).err(),
+            Some(InboundParseError::InvalidZid(ZidError::AllZero { len: 16 }))
+        );
+        // Control: the same message with one byte that is not zero is read, wherever it lies.
+        assert!(matches!(
+            parse_inbound(&init_syn(&[0x00, 0x01])),
+            Ok(InboundFrame::Init { is_ack: false, .. })
+        ));
+        assert!(matches!(
+            parse_inbound(&init_syn(&[0xAA])),
+            Ok(InboundFrame::Init { is_ack: false, .. })
+        ));
     }
 }

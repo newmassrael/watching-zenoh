@@ -898,7 +898,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let initiator_wire = Arc::new(RecordingOutboundDriver::default());
     let initiator_out: Arc<dyn BoxedLinkDriver + Send + Sync> = initiator_wire.clone();
     let mut initiator_params = fixture_session_init_params();
-    initiator_params.zid = vec![0x5A; 4];
+    initiator_params.zid = [0x5A; 4].into();
     initiator_params.whatami = WhatAmI::Client;
     initiator_params.seq_num_res = 0;
     initiator_params.req_id_res = 1;
@@ -985,7 +985,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
         "the routing zid is back"
     );
     assert_eq!(
-        *actions.inbound_peer_zid.lock().unwrap(),
+        actions.inbound_peer_zid.lock().unwrap().map(|z| z.to_vec()),
         Some(zid),
         "the accept-side zid is back"
     );

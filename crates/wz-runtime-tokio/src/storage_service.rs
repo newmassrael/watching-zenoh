@@ -77,6 +77,7 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 // the tests below.
 #[cfg(test)]
 use wz_session_core::sample::TimestampHint;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::sink::SampleView;
 use wz_storage::storage_backend::{MemoryStorage, StorageBackend, StorageReadError};
 use wz_storage::storage_config::StorageConfig;
@@ -162,7 +163,7 @@ where
     /// `Box<dyn StorageBackend + Send>`
     /// ([`crate::storage_service`] composition). `local_zid` is the storage's
     /// identity for stamping un-timestamped samples (the fallback `zid`; see
-    /// the module-level fallback note) — must be non-empty.
+    /// the module-level fallback note), a zid by its type.
     ///
     /// The queryable is declared COMPLETE
     /// ([`QueryableOptions::with_complete`]) when `config.complete` is `true`: a
@@ -177,12 +178,9 @@ where
     pub fn declare_with_backend(
         session: &Session<R, T, Unicast>,
         config: &StorageConfig,
-        local_zid: Vec<u8>,
+        local_zid: SessionZid,
         backend: B,
     ) -> Result<Self, StorageServiceError> {
-        if local_zid.is_empty() {
-            return Err(StorageServiceError::InvalidZid);
-        }
         // The newer-wins gate over the backend, with the config's `strip_prefix`
         // applied to the live capture + query key path (R311y61): a stored key
         // is held RELATIVE to the mount point, and restored to its full keyexpr
@@ -255,11 +253,8 @@ where
         &mut self,
         session: &Session<R, T, Unicast>,
         config: &StorageConfig,
-        local_zid: Vec<u8>,
+        local_zid: SessionZid,
     ) -> Result<(), StorageServiceError> {
-        if local_zid.is_empty() {
-            return Err(StorageServiceError::InvalidZid);
-        }
         let (subscriber, queryable) =
             Self::declare_handles(session, config, &self.state, local_zid)?;
         // Assigned AFTER both declares succeed: a failed rebind leaves the
@@ -290,7 +285,7 @@ where
         session: &Session<R, T, Unicast>,
         config: &StorageConfig,
         state: &SharedState<B>,
-        local_zid: Vec<u8>,
+        local_zid: SessionZid,
     ) -> Result<(Subscriber<R>, Queryable<R, T>), StorageServiceError> {
         let keyexpr: String = config.key_expr.clone();
 
@@ -312,8 +307,10 @@ where
         // Matches how zenoh's own storage plugin reaches the clock — through the
         // session (`Session::new_timestamp()`, `zenoh/src/api/session.rs:833`,
         // used at `plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs:182`).
-        let stamper =
-            crate::timestamp_source::FallbackStamp::new(local_zid, session.node_hlc().clone());
+        let stamper = crate::timestamp_source::FallbackStamp::new(
+            local_zid.to_vec(),
+            session.node_hlc().clone(),
+        );
         let subscriber = session.declare_subscriber(
             keyexpr.clone(),
             SubscribeOptions::default(),
@@ -382,7 +379,7 @@ where
     pub fn declare(
         session: &Session<R, T, Unicast>,
         config: &StorageConfig,
-        local_zid: Vec<u8>,
+        local_zid: SessionZid,
     ) -> Result<Self, StorageServiceError> {
         Self::declare_with_backend(session, config, local_zid, MemoryStorage::new())
     }
@@ -416,7 +413,7 @@ fn is_unreachable_transport(e: &StorageServiceError) -> bool {
 }
 
 /// Why a [`StorageService::declare`] failed: a rejected subscriber or
-/// queryable declaration, or an invalid `local_zid`.
+/// queryable declaration, or a backend that could not open.
 #[derive(Debug)]
 pub enum StorageServiceError {
     /// The capture subscriber declaration was rejected (e.g. the outbound
@@ -426,9 +423,6 @@ pub enum StorageServiceError {
     /// The answering queryable declaration was rejected (e.g.
     /// `query-queryable` is disabled, or the announce was rejected).
     Queryable(QueryableError),
-    /// `local_zid` was empty (the fallback timestamp needs a non-empty
-    /// identity for its newer-wins zid tiebreak).
-    InvalidZid,
     /// R2800 — the backend could not list what it holds when the storage
     /// opened, so the newer-wins record could not be hydrated and nothing is
     /// hosted. Upstream refuses the storage at the same point
@@ -711,7 +705,7 @@ mod tests {
         let storage = StorageService::declare(
             &session,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            [0x01].into(),
         )
         .expect("storage declare succeeds against the test link");
 
@@ -772,8 +766,9 @@ mod tests {
         let backend = MemoryVolume
             .create_storage(&mut config)
             .expect("in-memory volume create");
-        let storage = StorageService::declare_with_backend(&session, &config, vec![0x01], backend)
-            .expect("strip-configured storage declares against the test link");
+        let storage =
+            StorageService::declare_with_backend(&session, &config, [0x01].into(), backend)
+                .expect("strip-configured storage declares against the test link");
 
         // A loopback publish UNDER the mount fires the capture subscriber.
         let fired = session

@@ -149,7 +149,7 @@ async fn wz_storage_strips_the_mount_prefix_from_a_pico_put() {
         ApplicationLayerObserver::new(),
     ));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
-    let storage = StorageService::declare(&session, &config, vec![0x01])
+    let storage = StorageService::declare(&session, &config, [0x01].into())
         .expect("declare the wz strip-prefix storage on home/kitchen/**");
 
     let timeouts = SessionTimeouts::spec_defaults();

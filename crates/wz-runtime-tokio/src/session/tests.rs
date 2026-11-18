@@ -1908,69 +1908,28 @@ fn session_new_auto_wires_set_own_zid_from_params() {
     );
 }
 
+/// A session's zid is one to sixteen bytes by its type, so the install at construction holds for
+/// a zid at either end of the range and is never skipped: the session zid and the registry's
+/// own zid are the same bytes.
 #[test]
-fn session_new_with_empty_zid_skips_auto_wire() {
-    // R236 — empty zid in SessionInitParams (test fixtures or a
-    // pre-handshake placeholder) results in no auto-install. The
-    // registry stays in its pre-R231 default state, dedup is
-    // disabled, and every wire-arrived Push fires its matching
-    // subscribers (the safe default that preserves
-    // backwards-compatible behavior for callers who never opt
-    // into dedup).
-    let mut params = fixture_session_init_params();
-    params.zid = Vec::new();
-    let (actions, _driver) = recording_actions_with_params(params);
-    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
-    // R311cw — Session::new gained third `clock: Arc<T>` argument.
-    let clock = Arc::new(TokioTime::new());
-    // R311da — Session::new lifted to the R-generic block; the
-    // explicit `TokioSession` alias name pins R = TokioRuntime so
-    // type inference resolves through the observer parameter's
-    // concrete `Arc<std::sync::Mutex<...>>` shape.
-    let session = TokioSession::new(actions, observer, clock);
-    assert!(
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .subscribers
-            .own_zid()
-            .is_none(),
-        "Session::new with empty params.zid leaves own_zid uninstalled"
-    );
-}
-
-#[test]
-fn session_new_with_overlength_zid_silently_skips_auto_wire() {
-    // R236 — params.zid.len() > 16 violates the wire-form
-    // `_z_id_t` range (transport.h: zid_len ∈ 1..=16).
-    // `set_own_zid`'s internal range check rejects the install
-    // (returns false) and the constructor swallows the
-    // rejection — no panic, no log noise at construction
-    // boundary. The registry stays uninstalled; the application
-    // can still call `set_own_zid` later with a valid zid to
-    // opt into dedup.
-    let mut params = fixture_session_init_params();
-    params.zid = vec![0u8; 17];
-    let (actions, _driver) = recording_actions_with_params(params);
-    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
-    // R311cw — Session::new gained third `clock: Arc<T>` argument.
-    let clock = Arc::new(TokioTime::new());
-    // R311da — Session::new lifted to the R-generic block; the
-    // explicit `TokioSession` alias name pins R = TokioRuntime so
-    // type inference resolves through the observer parameter's
-    // concrete `Arc<std::sync::Mutex<...>>` shape.
-    let session = TokioSession::new(actions, observer, clock);
-    assert!(
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .subscribers
-            .own_zid()
-            .is_none(),
-        "Session::new with len-17 params.zid silently skips auto-wire"
-    );
+fn session_new_installs_a_zid_at_either_end_of_the_range() {
+    for zid in [
+        wz_session_core::session_zid::SessionZid::from([0xA1]),
+        wz_session_core::session_zid::SessionZid::from([0xB2; 16]),
+    ] {
+        let mut params = fixture_session_init_params();
+        params.zid = zid;
+        let (actions, _driver) = recording_actions_with_params(params);
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+        assert_eq!(session.zid(), zid);
+        assert_eq!(
+            session.observer().lock().unwrap().subscribers.own_zid(),
+            Some(zid.as_slice()),
+            "Session::new installs the session zid as the registry's own zid"
+        );
+    }
 }
 
 // ── R232 PublishOptions metadata propagation ──
@@ -2177,7 +2136,7 @@ fn a_stamping_publisher_stamps_the_given_time_with_its_own_nodes_identity() {
     assert_eq!(stamp.time, 0xABCD);
     assert_eq!(
         stamp.zid,
-        session.zid(),
+        session.zid().as_slice(),
         "the identity is the session's, which the caller had no way to name"
     );
 }
@@ -2615,7 +2574,7 @@ fn publish_loopback_propagates_all_metadata_in_one_chain() {
 fn build_router_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
     let mut params = fixture_session_init_params();
     params.whatami = wz_codecs::whatami::WhatAmI::Router;
-    params.zid = vec![0xD1, 0xD2, 0xD3, 0xD4];
+    params.zid = [0xD1, 0xD2, 0xD3, 0xD4].into();
     let (actions, driver) = recording_actions_with_params(params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
@@ -4065,7 +4024,7 @@ fn declare_adminspace_reports_the_negotiated_shm_flag() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0xc3, 0xd4]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0xc3, 0xd4].into());
     // The negotiated capability, set the way the establishment FSM sets it.
     session.actions().set_shm_offer(true);
 
@@ -4263,7 +4222,7 @@ fn declare_adminspace_answers_root_get_with_local_data_json() {
 fn build_client_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
     let mut params = fixture_session_init_params();
     params.whatami = wz_codecs::whatami::WhatAmI::Client;
-    params.zid = vec![0xC1, 0x1E, 0x47, 0x0A];
+    params.zid = [0xC1, 0x1E, 0x47, 0x0A].into();
     let (actions, driver) = recording_actions_with_params(params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
@@ -4504,7 +4463,8 @@ fn admin_session_of_peer_files_the_row_under_the_named_peer() {
     *actions
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(peer.clone());
+        .expect("remote_peer_zid poisoned in test fixture") =
+        Some(wz_session_core::session_init_params::zid_bytes(&peer));
     let row = actions
         .admin_session_of_peer()
         .expect("a named peer is a transport");
@@ -4652,7 +4612,7 @@ fn declare_adminspace_answers_the_subscriber_leg_from_the_peer_faces_table() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x70, 0x73, 0x00, 0x03]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x70, 0x73, 0x00, 0x03].into());
     *session
         .actions()
         .peer_whatami
@@ -4745,7 +4705,7 @@ fn declare_adminspace_answers_the_token_leg_from_the_peers_liveliness_tokens() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x70, 0x73, 0x00, 0x03]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x70, 0x73, 0x00, 0x03].into());
     *session
         .actions()
         .peer_whatami
@@ -4873,7 +4833,7 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0xc3, 0xd4]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0xc3, 0xd4].into());
     *session
         .actions()
         .peer_whatami
@@ -13541,7 +13501,7 @@ fn tapped_qos_group_session() -> (
 ) {
     let params = wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Peer,
-        zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        zid: [0xAA, 0xBB, 0xCC, 0xDD].into(),
         lease_ms: 5_000,
         join_interval_ms: 100,
         seq_num_res: 0x02,
@@ -16251,7 +16211,7 @@ fn session_egress_acl_denies_a_governed_keyexpr() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
 
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
@@ -16315,7 +16275,7 @@ fn session_egress_acl_governs_the_answer_to_an_interest() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -16406,7 +16366,7 @@ fn session_egress_acl_ends_a_liveliness_query_it_refuses() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -16461,7 +16421,7 @@ fn session_egress_acl_is_inert_with_no_policy_installed() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
 
     let opts = PublishOptions::put().with_locality(Locality::Remote);
     session
@@ -16493,7 +16453,7 @@ fn session_ingress_acl_drops_a_governed_message_from_the_batch() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(acl_ingress_deny_admin());
 
     let mut outcome = two_message_inbound_batch();
@@ -16528,7 +16488,7 @@ fn session_ingress_acl_does_not_apply_an_egress_rule() {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -16893,7 +16853,8 @@ fn told_by_a_named_peer(peer: &[u8]) -> Vec<DeclEvent> {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(peer.to_vec());
+        .expect("remote_peer_zid poisoned in test fixture") =
+        Some(wz_session_core::session_init_params::zid_bytes(peer));
     let seen = Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
     let writer = seen.clone();
     let listener = session

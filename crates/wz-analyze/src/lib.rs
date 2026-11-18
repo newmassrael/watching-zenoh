@@ -9034,6 +9034,7 @@ mod message_name_tests {
             observed_at_ns: None,
             reserved_header_bits: 0,
             undefined_mandatory_ext: None,
+            names_no_zid: false,
             decompressed: None,
             unit_read_whole: false,
         };
@@ -9080,6 +9081,7 @@ mod message_name_tests {
             observed_at_ns: None,
             reserved_header_bits: 0,
             undefined_mandatory_ext: None,
+            names_no_zid: false,
             decompressed: None,
             unit_read_whole: true,
         }

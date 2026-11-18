@@ -102,7 +102,7 @@ impl wz_session_core::entropy::EntropySource for Counting {
 fn unicast_params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: vec![zid; 4],
+        zid: [zid; 4].into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
