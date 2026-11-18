@@ -790,9 +790,12 @@ fn a_growing_file_is_read_to_its_complete_blocks_only_when_asked() {
         said.contains(&format!("of {cut_len} byte(s)")) && said.contains("NOT in this report"),
         "the line says how far the read reached: {said}"
     );
+    let report = String::from_utf8_lossy(&partial.stdout);
     assert!(
-        !partial.stdout.is_empty(),
-        "the complete blocks are reported"
+        report.starts_with("growing: read ")
+            && report.contains(&format!(" of {cut_len} byte(s) of the file, "))
+            && report.contains("complete: no"),
+        "the report itself says how far it read: {report}"
     );
 
     let finished = run(whole.as_path(), true);
@@ -803,6 +806,43 @@ fn a_growing_file_is_read_to_its_complete_blocks_only_when_asked() {
         "a file that ends on a boundary is read whole: {said}"
     );
     assert!(said.contains("nothing was left unread"), "{said}");
+    let report = String::from_utf8_lossy(&finished.stdout);
+    assert!(
+        report.starts_with(&format!(
+            "growing: read {0} of {0} byte(s) of the file, 0 unread",
+            file.len()
+        )) && report.contains("complete: yes"),
+        "{report}"
+    );
+
+    // The JSON report carries the same as its first key; the ordinary one
+    // carries none.
+    let json = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&cut)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--growing")
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("the growing report is one JSON document");
+    assert_eq!(doc["growing"]["file_bytes"], serde_json::json!(cut_len));
+    assert_eq!(
+        doc["growing"]["unread_bytes"].as_u64().map(|u| u > 0),
+        Some(true)
+    );
+    assert_eq!(doc["growing"]["complete"], serde_json::json!(false));
+    let ordinary = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&whole)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&ordinary.stdout).expect("the ordinary report is JSON");
+    assert!(doc.get("growing").is_none(), "only asked for, never added");
 }
 
 /// R311y664 — a key log the caller named and that cannot be read is a hard

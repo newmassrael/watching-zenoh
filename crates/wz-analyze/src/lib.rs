@@ -358,6 +358,9 @@ pub enum UsageError {
     /// Two renderings and one stdout. Picking either silently would make the
     /// other flag's presence meaningless, which is this parser's standing rule.
     CsvAndJson,
+    /// `--growing` and `--csv` together: a growing read writes how far it read
+    /// into the report, and a CSV stream is one table with no place for it.
+    GrowingAndCsv,
 }
 
 impl core::fmt::Display for UsageError {
@@ -410,6 +413,11 @@ impl core::fmt::Display for UsageError {
                 "--csv and --json are two renderings and there is one output; \
                  give one"
             ),
+            Self::GrowingAndCsv => write!(
+                f,
+                "--growing writes how far it read into the report, and a --csv \
+                 table has no place for it; use the report or --json"
+            ),
         }
     }
 }
@@ -446,11 +454,14 @@ OPTIONS:
                       COMPLETE blocks only, and say how far that is. Without
                       it a file whose last block is cut in half is refused as
                       truncated, because reading it as if it were whole would
-                      hide what is missing. With it the line before the report
-                      names the bytes read and the bytes left unread (a block
-                      still being written), and the exit code is 1 when any
-                      were left. A file that is damaged, not merely unfinished,
-                      is still refused. Refused together with --interface.
+                      hide what is missing. With it the report says how far it
+                      read -- its first line in text, a `growing` object first
+                      in JSON: bytes read, bytes in the file, bytes left unread
+                      (a block still being written) and whether that is none --
+                      the same is said on stderr before it, and the exit code is
+                      1 when any were left. A file that is damaged, not merely
+                      unfinished, is still refused. Refused together with
+                      --interface, and with --csv, a table with no place for it.
     --keylog <file>   an NSS key log (SSLKEYLOGFILE) to decrypt TLS flows with.
                       Repeatable, and every one given is used -- a two-sided
                       capture usually has one log per endpoint. Keys carried
@@ -989,6 +1000,9 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     if csv.is_some() && format == Format::Json {
         return Err(UsageError::CsvAndJson);
     }
+    if csv.is_some() && growing {
+        return Err(UsageError::GrowingAndCsv);
+    }
     // The selector is compiled last, so `--node-names` may follow it. A `node`
     // term is resolved to the `zid` term its name stands for before the parser
     // sees it, which is the step `wz_dissect_selector_bind` is for the C
@@ -1293,6 +1307,56 @@ impl GrowingRead {
             )
         }
     }
+
+    /// Whether every byte of the file was in a complete block, so the report is
+    /// about the whole file as it stood.
+    pub fn complete(&self) -> bool {
+        self.unread() == 0
+    }
+
+    /// The extent as the JSON report carries it: the value of its `growing`
+    /// key.
+    pub fn json(&self) -> String {
+        format!(
+            "{{\"read_bytes\":{},\"file_bytes\":{},\"unread_bytes\":{},\"complete\":{}}}",
+            self.read,
+            self.held,
+            self.unread(),
+            self.complete()
+        )
+    }
+
+    /// The extent as the text report carries it: its first line.
+    pub fn text(&self) -> String {
+        format!(
+            "growing: read {} of {} byte(s) of the file, {} unread (a block still being \
+             written); complete: {}\n",
+            self.read,
+            self.held,
+            self.unread(),
+            if self.complete() { "yes" } else { "no" }
+        )
+    }
+
+    /// `rendered`, the report on the complete blocks, with the extent in it:
+    /// the first line of the text, the first key of the JSON. A CSV rendering
+    /// is one table and has no place for it, which is why the command line
+    /// refuses `--csv` with `--growing`.
+    fn into_report(self, rendered: String, request: &Request<'_>) -> String {
+        if request.csv.is_some() {
+            return rendered;
+        }
+        match request.format {
+            Format::Text => format!("{}{rendered}", self.text()),
+            Format::Json => match rendered.strip_prefix('{') {
+                Some(rest) => {
+                    let comma = if rest.starts_with('}') { "" } else { "," };
+                    format!("{{\"growing\":{}{comma}{rest}", self.json())
+                }
+                None => rendered,
+            },
+        }
+    }
 }
 
 /// The complete blocks of a capture file that may still be being written: a
@@ -1313,7 +1377,9 @@ pub fn complete_blocks(capture: &[u8]) -> Result<GrowingRead, CaptureError> {
 }
 
 /// [`analyze_request`] over a capture file still being written: the report on
-/// its complete blocks ([`complete_blocks`]) and how far that is.
+/// its complete blocks ([`complete_blocks`]) and how far that is, written into
+/// the report itself ([`GrowingRead::json`], [`GrowingRead::text`]) so the
+/// document says what it covers.
 ///
 /// The prefix the blocks fill is itself a whole container, so it is read by
 /// the reader every other flag goes through and every option applies to it as
@@ -1343,7 +1409,7 @@ pub fn analyze_growing(
     } else {
         analyze_request(&prefix)?
     };
-    Ok((rendered, outcome, growing))
+    Ok((growing.into_report(rendered, request), outcome, growing))
 }
 
 /// Report on a dissection the CALLER built, as [`Request`] describes.
@@ -5487,6 +5553,11 @@ mod tests {
         let asked = parse(&args(&["cap.pcapng", "--growing"])).expect("a growing read");
         assert!(asked.growing);
         assert!(!parse(&args(&["cap.pcapng"])).expect("a file").growing);
+        assert_eq!(
+            parse(&args(&["cap.pcapng", "--growing", "--csv", "throughput"])),
+            Err(UsageError::GrowingAndCsv),
+            "a CSV table has no place for how far the read reached"
+        );
     }
 
     /// The request every growing test below reads under: no option set.
@@ -5549,16 +5620,51 @@ mod tests {
             "{line}"
         );
 
+        // The report is the prefix's, with how far it read as its first line.
         let (rendered, _, read) =
             analyze_growing(&plain_request(cut)).expect("the complete blocks are read");
         assert_eq!(read, growing);
         let (prefix, _) = analyze_request(&plain_request(&file[..after_first]))
             .expect("the prefix is a whole file");
-        assert_eq!(rendered, prefix, "the report is the prefix's");
+        let unread = cut.len() - after_first;
+        assert_eq!(
+            rendered,
+            format!(
+                "growing: read {after_first} of {} byte(s) of the file, {unread} unread \
+                 (a block still being written); complete: no\n{prefix}",
+                cut.len()
+            ),
+            "the text report says how far it read, then is the prefix's"
+        );
+
+        // The same in JSON: a `growing` object first, then the prefix's keys.
+        let json_request = Request {
+            format: Format::Json,
+            ..plain_request(cut)
+        };
+        let (json, _, _) = analyze_growing(&json_request).expect("the JSON report");
+        let (prefix_json, _) = analyze_request(&Request {
+            capture: &file[..after_first],
+            ..json_request
+        })
+        .expect("the prefix in JSON");
+        let extent = format!(
+            "{{\"growing\":{{\"read_bytes\":{after_first},\"file_bytes\":{},\
+             \"unread_bytes\":{unread},\"complete\":false}},",
+            cut.len()
+        );
+        assert_eq!(
+            json,
+            format!("{extent}{}", &prefix_json[1..]),
+            "the JSON report carries the extent as its first key"
+        );
+        // And the ordinary report carries none: the key exists only on request.
+        assert!(!prefix_json.contains("\"growing\""), "{prefix_json}");
 
         let (whole, _, read) =
             analyze_growing(&plain_request(&file)).expect("a finished file reads");
         assert_eq!(read.unread(), 0);
+        assert!(read.complete());
         assert!(
             read.line("cap.pcap").contains("nothing was left unread"),
             "{}",
@@ -5566,8 +5672,17 @@ mod tests {
         );
         let (plain, _) = analyze_request(&plain_request(&file)).expect("a finished file");
         assert_eq!(
-            whole, plain,
-            "a file that ends on a boundary reads as itself"
+            whole,
+            format!(
+                "growing: read {0} of {0} byte(s) of the file, 0 unread (a block still \
+                 being written); complete: yes\n{plain}",
+                file.len()
+            ),
+            "a file that ends on a boundary reads as itself, and says so"
+        );
+        assert!(
+            !plain.starts_with("growing:"),
+            "the ordinary text report is unchanged: {plain}"
         );
 
         let (_, _, unstarted) =
