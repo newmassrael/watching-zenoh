@@ -1908,7 +1908,15 @@ cannot fail. A zid derived from a credential (sixteen bytes) is a
 The D2 guard's message now names the fixed-memory profile's channel
 (`wz-tls-mbedtls`) instead of saying that profile has none.
 
-Not done: the peer's zid a session records (`inbound_peer_zid`,
-`remote_peer_zid`) and the multicast and scouting parameters' zids are still
-bytes, and the C ABI hosts of the advanced subscriber still refuse a zid of
-their engine (`HostError::SessionZid`), which the type could also retire.
+A `SessionZid` is also never zero, as upstream's id is a non-zero `u128`. The
+peer's zid a session records (`inbound_peer_zid`, `remote_peer_zid`, and the
+accept cookie that carries it) is a `SessionZid`: an INIT whose zid is zero is
+refused where it is parsed (`InboundParseError::InvalidZid`), as zenoh's
+decoder refuses it. The C ABI engines state their zid as one
+(`SessionEngine::session_zid`, with the padded form derived from it), so the
+advanced subscriber's host has no zid to refuse either, and the storage
+services take their stamping zid as one.
+
+Not done: the multicast and scouting parameters' zids (`MulticastParams::zid`,
+`ScoutParams::zid`) are still bytes, and the zids a JOIN or a Hello carries
+are not yet refused where they are parsed.
