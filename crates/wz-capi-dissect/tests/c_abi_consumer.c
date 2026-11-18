@@ -1758,6 +1758,36 @@ static int check_follow_door(void) {
                   0,
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
+        doc = NULL;
+
+        /* (ABI 59) -- the windowed values door refuses what the door it widens
+         * refuses, with no string, and a window of 0 is that door's document. */
+        rc = wz_dissect_live_field_values_since_window(NULL, "", "", "1", 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null handle field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "", "", NULL, 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null paths field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "", "", "1", 0, 3, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+              "null out field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "", "key ==", "1", 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && doc == NULL,
+              "bad selector field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "demo/**=nosuch", "", "1", 0, 3,
+                                                       &doc);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && doc == NULL,
+              "bad declarations field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "demo/**=protobuf", "", "1", 0,
+                                                       0, &doc);
+        CHECK(rc == WZ_DISSECT_OK && doc != NULL,
+              "field_values_since_window rc=%d", rc);
+        CHECK(strncmp(doc,
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                  0,
+              "the windowed door writes the same document: %s", doc);
+        wz_dissect_string_free(doc);
     }
     /* (ABI 55) -- the row-facts door: each pointer refused when null, a refused
      * declaration text leaves `needed` at 0, a short buffer is written nothing

@@ -2113,7 +2113,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 58
+#define WZ_DISSECT_ABI_REVISION 59
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -7729,6 +7729,61 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
                                        const char *declarations,
                                        const char *selector, const char *paths,
                                        uint64_t after_seq, char **out);
+
+/* (ABI 59) -- wz_dissect_live_field_values_since FOR THE RECORDS OF AT MOST
+ * `max_rows` SEQUENCE NUMBERS, so the document and the string that holds it are
+ * as large as a window and not as large as the capture.
+ *
+ * WHAT IT IS FOR. The first call over a capture that was already large (a file
+ * replayed into a handle, or a tap a consumer joins late) writes every record
+ * the selector picks in one document. This door writes them a window at a time.
+ *
+ * THE WINDOW is wz_dissect_live_fields_since_window's: the numbers
+ * `after_seq + 1` through `after_seq + max_rows`, never past the highest number
+ * the handle has issued. The records of the rows in it are read by the
+ * declarations and written, and `window.through_seq` is the last number covered:
+ * pass it as the next `after_seq` and the next window starts where this one
+ * ended.
+ *
+ *     uint64_t cursor = 0;
+ *     for (;;) {
+ *         char *doc;
+ *         wz_dissect_live_field_values_since_window(h, decls, sel, "1", cursor,
+ *                                                   5000, &doc);
+ *         ... read the records; cursor = window.through_seq ...
+ *         wz_dissect_string_free(doc);
+ *         if (cursor >= highest_number_issued) break;
+ *     }
+ *
+ * `max_rows` of 0 is no limit and is wz_dissect_live_field_values_since
+ * exactly. The windows of a finished capture, taken in order, write each record
+ * once. The document is the same `field_values` document at the same revision.
+ *
+ * IT BOUNDS NUMBERS AND NOT RECORDS. A row may batch several records, and a row
+ * the selector does not pick or no rule covers has a number and no record, so a
+ * window may hold more records than `max_rows`, or none.
+ *
+ * WHAT IT DOES NOT BOUND. The selector's walk is the values door's fold in
+ * capture order, and the numbers follow the handle's lists and not capture
+ * order, so no prefix of that walk ends at a number: the walk takes every
+ * message that arrived, as wz_dissect_live_field_values_since's does, and the
+ * payloads it picked past the window stay in the handle until a cursor passes
+ * them. That is what the next window reads, without walking again.
+ *
+ * @bound max_rows work-ceiling -- it bounds the records read by the declarations
+ * and written, which is the work that grows with the document; the numbers past
+ * the window are the next window's, asked for by passing `window.through_seq` as
+ * the next `after_seq`, so nothing is dropped. The selector's walk is not
+ * bounded by it (see above).
+ *
+ * Refused as wz_dissect_live_field_values_since is. `h` is not const, for
+ * wz_dissect_live_fields_since's reason. */
+int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
+                                              const char *declarations,
+                                              const char *selector,
+                                              const char *paths,
+                                              uint64_t after_seq,
+                                              uint64_t max_rows, char **out);
 
 /* (ABI 55) -- THE ROWS AFTER A CURSOR WITHOUT THEIR FIELD TREES, in CBOR: the
  * `row_facts` document, into a buffer YOU own.

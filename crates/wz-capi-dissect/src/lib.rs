@@ -476,6 +476,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // `wz_dissect_live_selection_since_declaring`: the selection documents with
     // the samples read by declarations, so a selector's `e2e` terms are decided
     // under a profile rule. The documents and their revisions do not move.
+    // 59, for `wz_dissect_live_field_values_since_window`: the values document
+    // for the records of at most `max_rows` sequence numbers, so the document
+    // and its string are as large as a window. The document does not move.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -493,7 +496,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 58;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 59;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -5252,6 +5255,82 @@ pub unsafe extern "C" fn wz_dissect_live_field_values_since(
     after_seq: u64,
     out: *mut *mut c_char,
 ) -> c_int {
+    // SAFETY: the caller contract above is the helper's.
+    unsafe { field_values_door(handle, declarations, selector, paths, after_seq, 0, out) }
+}
+
+/// (ABI 59) — [`wz_dissect_live_field_values_since`] FOR THE RECORDS OF AT MOST
+/// `max_rows` SEQUENCE NUMBERS, so the document and the string that holds it are
+/// as large as a window and not as large as the capture.
+///
+/// # The window
+///
+/// [`wz_dissect_live_fields_since_window`]'s: the numbers
+/// `after_seq + 1 ..= after_seq + max_rows`, never past the highest number the
+/// handle has issued. The records of the rows in it are read by the declarations
+/// and written; `window.through_seq` is the last number covered, so passing it as
+/// the next `after_seq` starts the next window where this one ended. `max_rows`
+/// of `0` is no limit and is [`wz_dissect_live_field_values_since`] exactly. The
+/// windows of a finished capture, taken in order, write each record once.
+///
+/// It bounds NUMBERS and not records: a row may batch several records, and a row
+/// the selector does not pick, or no rule covers, has a number and no record, so
+/// a window may hold more records than `max_rows` or none.
+///
+/// # What it bounds, and what it does not
+///
+/// It bounds the document, its string, and the reading of payloads by the
+/// declarations. It does not bound the selector's walk, which is the values
+/// door's fold in capture order: the numbers follow the handle's lists and not
+/// capture order, so no prefix of that walk ends at a number. The walk takes
+/// every message that arrived, as [`wz_dissect_live_field_values_since`]'s does,
+/// and the payloads it picked past the window are kept until a cursor passes
+/// them, which is what the next window reads.
+///
+/// # Errors
+///
+/// Those of [`wz_dissect_live_field_values_since`].
+///
+/// # Safety
+/// The contract of [`wz_dissect_live_field_values_since`].
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_field_values_since_window(
+    handle: *mut live::LiveDissection,
+    declarations: *const c_char,
+    selector: *const c_char,
+    paths: *const c_char,
+    after_seq: u64,
+    max_rows: u64,
+    out: *mut *mut c_char,
+) -> c_int {
+    // SAFETY: the caller contract above is the helper's.
+    unsafe {
+        field_values_door(
+            handle,
+            declarations,
+            selector,
+            paths,
+            after_seq,
+            max_rows,
+            out,
+        )
+    }
+}
+
+/// The body both values doors share, so a window of `0` cannot differ from the
+/// door that has none.
+///
+/// # Safety
+/// The contract of [`wz_dissect_live_field_values_since`].
+unsafe fn field_values_door(
+    handle: *mut live::LiveDissection,
+    declarations: *const c_char,
+    selector: *const c_char,
+    paths: *const c_char,
+    after_seq: u64,
+    max_rows: u64,
+    out: *mut *mut c_char,
+) -> c_int {
     if handle.is_null()
         || declarations.is_null()
         || selector.is_null()
@@ -5273,7 +5352,14 @@ pub unsafe extern "C" fn wz_dissect_live_field_values_since(
     };
     // SAFETY: caller contract above.
     let handle = unsafe { &mut *handle };
-    match handle.field_values_since(declarations, selector, &filter, paths, after_seq) {
+    match handle.field_values_since_windowed(
+        declarations,
+        selector,
+        &filter,
+        paths,
+        after_seq,
+        max_rows,
+    ) {
         Ok(doc) => write_string(doc, out),
         Err(wz_capture::field_values::ValuesError::Declarations(_)) => WZ_DISSECT_ERR_DECLARATION,
         Err(wz_capture::field_values::ValuesError::Paths(_)) => WZ_DISSECT_ERR_INVALID_ARG,
@@ -10329,7 +10415,10 @@ mod tests {
         // declaration text a C string beside what the older doors take, a
         // `char*` released by `wz_dissect_string_free` out; the handle keeps a
         // selection memory per selector and declaration text; no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 58);
+        // 59, for `wz_dissect_live_field_values_since_window`: one symbol, the
+        // values door with one more integer in, a `char*` released by
+        // `wz_dissect_string_free` out; no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 59);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -12579,6 +12668,165 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         doc
+    }
+
+    /// `wz_dissect_live_field_values_since_window` on `handle`: the document, or
+    /// the code it refused with (and then no string).
+    fn call_field_values_window(
+        handle: *mut live::LiveDissection,
+        declarations: &str,
+        selector: &str,
+        paths: &str,
+        after: u64,
+        max_rows: u64,
+    ) -> Result<String, c_int> {
+        let (decls, sel, paths) = (
+            CString::new(declarations).expect("no NUL"),
+            CString::new(selector).expect("no NUL"),
+            CString::new(paths).expect("no NUL"),
+        );
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_field_values_since_window(
+                handle,
+                decls.as_ptr(),
+                sel.as_ptr(),
+                paths.as_ptr(),
+                after,
+                max_rows,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "a refusal hands back no string");
+            return Err(rc);
+        }
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf-8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// The records array of a values document, without its brackets.
+    fn values_records(doc: &str) -> &str {
+        doc.split_once("\"records\":[")
+            .and_then(|(_, rest)| rest.strip_suffix("]}"))
+            .unwrap_or_else(|| panic!("no records array closing the document: {doc}"))
+    }
+
+    /// (ABI 59) THE VALUES WINDOW WRITES EACH RECORD ONCE, A WINDOW AT A TIME,
+    /// and hands back the cursor that starts the next.
+    ///
+    /// Three samples on a covered key, read whole by the unbounded door on one
+    /// handle and one number at a time by the windowed door on another: each
+    /// window ends one number past its cursor, the windows' records joined in
+    /// order are the whole document's records byte for byte, a window of `0` is
+    /// the unbounded door's document, a window asked from the last number is
+    /// empty and ends there, and the refusals are the unbounded door's.
+    #[test]
+    fn the_values_window_writes_each_record_once_and_hands_back_the_cursor() {
+        let pcap = capture_declaring_many(&[
+            (5, br#"{"temp":1}"#.as_slice()),
+            (5, br#"{"temp":2}"#.as_slice()),
+            (5, br#"{"temp":3}"#.as_slice()),
+        ]);
+        let declarations = "demo/sensor=json";
+        let whole_handle = replayed(&pcap);
+        let whole = call_field_values(whole_handle, declarations, "", "$.temp", 0);
+        unsafe { wz_dissect_live_close(whole_handle) };
+        assert_eq!(
+            values_records(&whole).matches("{\"seq\":").count(),
+            3,
+            "one record per sample: {whole}"
+        );
+        let last = json_count(&whole, "through_seq") as u64;
+
+        let handle = replayed(&pcap);
+        let mut after = 0u64;
+        let mut joined: Vec<String> = Vec::new();
+        while after < last {
+            let doc = call_field_values_window(handle, declarations, "", "$.temp", after, 1)
+                .expect("the window answers");
+            assert!(
+                doc.contains(&format!(
+                    "\"window\":{{\"after_seq\":{after},\"through_seq\":{}}}",
+                    after + 1
+                )),
+                "a window of one number ends one past its cursor: {doc}"
+            );
+            let records = values_records(&doc);
+            if !records.is_empty() {
+                joined.push(records.to_string());
+            }
+            after += 1;
+        }
+        assert_eq!(
+            joined.join(","),
+            values_records(&whole),
+            "the windows, in order, write the whole document's records once"
+        );
+
+        let past = call_field_values_window(handle, declarations, "", "$.temp", last, 5)
+            .expect("a window past the end answers");
+        assert!(
+            past.contains(&format!(
+                "\"window\":{{\"after_seq\":{last},\"through_seq\":{last}}}"
+            )),
+            "a window never passes the last number issued: {past}"
+        );
+        assert_eq!(values_records(&past), "", "{past}");
+
+        // Asked from 0 again, below the cursor the memory was last asked at, the
+        // walk begins again and a window of 0 is the unbounded door's document.
+        let unbounded = call_field_values_window(handle, declarations, "", "$.temp", 0, 0)
+            .expect("a window of 0 answers");
+        assert_eq!(unbounded, whole, "a window of 0 is no limit");
+
+        assert_eq!(
+            call_field_values_window(handle, declarations, "key ==", "$.temp", 0, 1),
+            Err(WZ_DISSECT_ERR_SELECTOR)
+        );
+        assert_eq!(
+            call_field_values_window(handle, "demo/**=nosuch", "", "$.temp", 0, 1),
+            Err(WZ_DISSECT_ERR_DECLARATION)
+        );
+        assert_eq!(
+            call_field_values_window(handle, declarations, "", "", 0, 1),
+            Err(WZ_DISSECT_ERR_INVALID_ARG)
+        );
+        let paths = CString::new("$.temp").expect("no NUL");
+        let empty = CString::new("").expect("no NUL");
+        assert_eq!(
+            unsafe {
+                wz_dissect_live_field_values_since_window(
+                    handle,
+                    empty.as_ptr(),
+                    empty.as_ptr(),
+                    paths.as_ptr(),
+                    0,
+                    1,
+                    core::ptr::null_mut(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe {
+                wz_dissect_live_field_values_since_window(
+                    core::ptr::null_mut(),
+                    empty.as_ptr(),
+                    empty.as_ptr(),
+                    paths.as_ptr(),
+                    0,
+                    1,
+                    core::ptr::null_mut(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     /// One values document per record state that brings keys, through the ABI:

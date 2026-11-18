@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 58
+EXPECTED_VERSION = 59
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -456,6 +456,13 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # and a cursor in, one string out, released by `wz_dissect_string_free`; the
     # memory rule does not move.
     "wz_dissect_live_field_values_since": 53,
+    # (ABI 59) -- the same values document for the records of at most
+    # `max_rows` sequence numbers. One more integer in than the door above; the
+    # window's last number is `window.through_seq`, the cursor for the next
+    # window, and `0` is no limit. The memory rule does not move: the document
+    # is a `char*` released by `wz_dissect_string_free`, and the payloads past a
+    # window are the ones the handle already kept for the door above.
+    "wz_dissect_live_field_values_since_window": 59,
     # (ABI 42) -- the callback a long call asks how it is going and that can stop it.
     # One symbol: a function pointer and a `void *` the CALLER owns go in, nothing
     # comes out, and a null pointer clears the hook. A stopped call answers

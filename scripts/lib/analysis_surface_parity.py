@@ -993,6 +993,18 @@ ONLY_CAPI = {
         "is no earlier answer for a later one to be relative to.",
         (),
     ),
+    # (ABI 59) -- the same values, bounded to a window of sequence numbers.
+    # Filed in the round that added the symbol.
+    "a WINDOW of the typed values of a few payload field paths after a cursor": (
+        "wz_dissect_live_field_values_since_window",
+        "DELIBERATE, for the reasons the two rows above give. It is the values "
+        "document with one more integer in, a count of sequence numbers, so a "
+        "consumer that links this library can bound the document and the string "
+        "that builds it to a window. The command line prints each decoded field "
+        "once on its listing, so there is no document to bound and no cursor to "
+        "continue from.",
+        (),
+    ),
     # The rows after a cursor without their field trees, in CBOR. Filed in the
     # round that added the symbols.
     "the rows AFTER a cursor without their field trees, as CBOR into a buffer the caller owns": (
