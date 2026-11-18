@@ -3,7 +3,7 @@
  *
  * The statements of a call beyond the zenoh-c options, made from a REAL C
  * translation unit: the three statement structs, their _default functions and
- * the nine wz_capi_c_*_ext doors, compiled against wz_capi_c.h and linked
+ * the ten wz_capi_c_*_ext doors, compiled against wz_capi_c.h and linked
  * against the library as a consumer's program is.
  *
  * What the Rust tests of the same doors cannot show, and this can: that the
@@ -258,6 +258,23 @@ static void check_liveliness_doors(void) {
     CHECK(!z_internal_subscriber_check(&watcher), "a liveliness subscriber left behind by a refusal");
 }
 
+/* Revision 17: the liveliness get takes the same entity statement. */
+static void check_liveliness_get_door(void) {
+    wz_capi_c_entity_ext_t none;
+    wz_capi_c_entity_ext_default(&none);
+    wz_capi_c_entity_ext_t links;
+    links.link_mask = 0x6;
+
+    z_moved_closure_reply_t reply;
+    memset(&reply, 0, sizeof reply);
+    CHECK(wz_capi_c_liveliness_get_ext(NULL, NULL, &reply, NULL, NULL) == Z_ENULL,
+          "liveliness get, NULL ext");
+    CHECK(wz_capi_c_liveliness_get_ext(NULL, NULL, &reply, NULL, &none) == Z_ENULL,
+          "liveliness get, default ext");
+    z_result_t rc = wz_capi_c_liveliness_get_ext(NULL, NULL, &reply, NULL, &links);
+    CHECK(STATED(rc), "liveliness get, links answered %d", rc);
+}
+
 int main(void) {
     CHECK(wz_capi_c_abi_version() == WZ_CAPI_C_ABI_REVISION,
           "the library reports revision %d, the header is %d", (int)wz_capi_c_abi_version(),
@@ -269,6 +286,7 @@ int main(void) {
     check_query_doors();
     check_entity_doors();
     check_liveliness_doors();
+    check_liveliness_get_door();
     if (failures != 0) {
         fprintf(stderr, "switch_doors: %d failure(s)\n", failures);
         return 1;

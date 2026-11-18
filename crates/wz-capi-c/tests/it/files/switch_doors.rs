@@ -721,3 +721,113 @@ fn a_limited_liveliness_declaration_is_refused_while_its_policy_is_off() {
         free_when_dropped(&drops, ctx);
     }
 }
+
+/// One liveliness get on [`KEYEXPR`] through the door, with the statement `ext` (null for none),
+/// counted into `ctx`.
+#[cfg(feature = "liveliness-get")]
+unsafe fn liveliness_get_ext(
+    session: &z_owned_session_t,
+    ctx: *mut Counts,
+    ext: Option<&wz_capi_c_entity_ext_t>,
+) -> i8 {
+    let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+    z_closure_reply(&mut closure, Some(on_reply), Some(on_drop), ctx.cast());
+    let ke = CString::new(KEYEXPR).unwrap();
+    let view = view_of(&ke);
+    wz_capi_c_liveliness_get_ext(
+        z_session_loan(session),
+        z_view_keyexpr_loan(&view),
+        (&mut closure as *mut z_owned_closure_reply_t).cast::<z_moved_closure_reply_t>(),
+        std::ptr::null_mut(),
+        ext.map_or(std::ptr::null(), std::ptr::from_ref),
+    )
+}
+
+/// A token on [`KEYEXPR`] declared through `z_liveliness_declare_token`.
+#[cfg(feature = "liveliness-get")]
+unsafe fn declare_token(session: &z_owned_session_t) -> z_owned_liveliness_token_t {
+    let ke = CString::new(KEYEXPR).unwrap();
+    let view = view_of(&ke);
+    let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+    assert_eq!(
+        wz_capi_c::liveliness::z_liveliness_declare_token(
+            z_session_loan(session),
+            &mut token,
+            z_view_keyexpr_loan(&view),
+            std::ptr::null(),
+        ),
+        Z_OK
+    );
+    token
+}
+
+/// A liveliness get that states nothing is the get `z_liveliness_get` makes: the session's own
+/// token answers it once and the snapshot ends, for a null statement and for the default one, in
+/// any build.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn a_liveliness_get_stating_nothing_is_the_get_the_z_function_makes() {
+    unsafe {
+        let session = open_alone();
+        let mut token = declare_token(&session);
+        let none = entity_ext();
+
+        for ext in [None, Some(&none)] {
+            let (hits, drops, ctx) = counts();
+            assert_eq!(liveliness_get_ext(&session, ctx, ext), Z_OK);
+            assert_eq!(
+                settle(&drops, 1, Duration::ZERO),
+                1,
+                "the snapshot ends with no peer to ask"
+            );
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "the session's own token answers once"
+            );
+            drop(Box::from_raw(ctx));
+        }
+
+        z_liveliness_undeclare_token(
+            (&mut token as *mut z_owned_liveliness_token_t).cast::<z_moved_liveliness_token_t>(),
+        );
+        close_session(session);
+    }
+}
+
+/// A liveliness get limited to links is refused while the policy is off: nothing is asked, no
+/// reply arrives and the closure is dropped once. A build whose policy is on takes it, and the
+/// session's own token, which is behind no link, still answers.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn a_limited_liveliness_get_is_refused_while_its_policy_is_off() {
+    unsafe {
+        let session = open_alone();
+        let mut token = declare_token(&session);
+        let mut mask = entity_ext();
+        mask.link_mask = 0b10;
+
+        let (hits, drops, ctx) = counts();
+        assert_eq!(
+            liveliness_get_ext(&session, ctx, Some(&mask)),
+            answer_when(links_on()),
+            "a limited liveliness get"
+        );
+        assert_eq!(
+            settle(&drops, 1, Duration::ZERO),
+            1,
+            "the closure is dropped once, refused or answered"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            usize::from(links_on()),
+            "a refused get hears nothing; a taken one hears the session's own token"
+        );
+        drop(Box::from_raw(ctx));
+
+        z_liveliness_undeclare_token(
+            (&mut token as *mut z_owned_liveliness_token_t).cast::<z_moved_liveliness_token_t>(),
+        );
+        close_session(session);
+    }
+}

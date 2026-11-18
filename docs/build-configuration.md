@@ -214,9 +214,10 @@ original reproduced by naming it. Three things follow from it:
   `wz-capi-c`, a capability that implies `query`, `queryable` and `liveliness`): the option
   structs of the `z_*` functions are upstream's layout and the `z_` symbols are held to the
   reference library's, so nothing is a field of one and nothing is a new `z_`, `zc_` or `ze_`
-  export. Nine `wz_capi_c_*_ext` doors take what `z_put`, `z_delete`, `z_declare_publisher`,
+  export. Ten `wz_capi_c_*_ext` doors take what `z_put`, `z_delete`, `z_declare_publisher`,
   `z_get`, `z_declare_querier`, `z_declare_subscriber`, `z_declare_queryable`,
-  `z_liveliness_declare_token` and `z_liveliness_declare_subscriber` take and one more
+  `z_liveliness_declare_token`, `z_liveliness_declare_subscriber` and, in a build with
+  `liveliness-get`, `z_liveliness_get` take and one more
   argument, a pointer to a statement struct (`wz_capi_c_entity_ext_t`: `link_mask`;
   `wz_capi_c_publish_ext_t`: `link_mask`, `attempts`, `delay_ms`, `all_or_none`;
   `wz_capi_c_query_ext_t`: `link_mask`, `has_target`, `target`), each with a `_default`
@@ -231,8 +232,7 @@ original reproduced by naming it. Three things follow from it:
   `Z_EINVAL` whatever the policy. A session that is a node (`router-node`) reads none of the
   four, so a call stating one there answers `Z_EUNAVAILABLE`, the code of every operation a
   node does not carry. Still open: the router, cooperative and lwIP engines do not read them,
-  and liveliness tokens, subscribers and gets, the advanced publisher and subscriber, and the
-  querying subscriber have no statement door.
+  and the advanced publisher and subscriber and the querying subscriber have no statement door.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and

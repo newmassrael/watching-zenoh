@@ -448,8 +448,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_capi_c_identity_make` and the struct it fills, declared in `wz_capi_c.h`; off by
         # default for the size of the certificate writer it links.
         # `switch-doors` the same: it gates `pub mod switch_doors`, whose public items are the
-        # nine `wz_capi_c_*_ext` doors, the three `_default` functions and the three statement
-        # structs, declared in `wz_capi_c.h`; off by default, as upstream has no such statements.
+        # ten `wz_capi_c_*_ext` doors (the liveliness get's with `liveliness-get` too), the three
+        # `_default` functions and the three statement structs, declared in `wz_capi_c.h`; off by
+        # default, as upstream has no such statements.
         # `segment-sender` the same: it gates `pub mod segment_sender`, whose public items are the
         # `wz_capi_c_segment_*` doors and the structs and constants they take, declared in
         # `wz_capi_c.h`; off by default, as upstream has no such doors.

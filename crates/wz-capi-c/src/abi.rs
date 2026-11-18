@@ -1640,7 +1640,11 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// Under that policy an advanced publisher, every sample of which carries a time, refuses its put
 /// (`Z_EGENERIC`) and its delete until the clock is reported synchronised, and sends nothing;
 /// before it, the sample went out stamped with the system clock.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 16;
+///
+/// It moves to 17 for the door that states the links of a liveliness get
+/// (`wz_capi_c_liveliness_get_ext`), one new symbol taking the revision-12 `wz_capi_c_entity_ext_t`,
+/// in a build with `switch-doors` and `liveliness-get`.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 17;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

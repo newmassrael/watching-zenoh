@@ -20,6 +20,7 @@ mod link_kinds_roundtrip;
 mod listen_set;
 mod listener_auth;
 mod listener_auth_zenohd_interop;
+mod liveliness_get_own_tokens;
 mod local_delivery_thread;
 mod locality_roundtrip;
 mod multicast_endpoints;
