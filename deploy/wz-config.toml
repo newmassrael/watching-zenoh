@@ -2792,8 +2792,12 @@ The lease is the smaller of the two the peers advertised.
 #
 # The build narrows each policy to its domain, the values a later stage may select: one
 # `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value (Kconfig: one `default y` bool per value), `off`
-# leaving the value out and an unset name allowing it. The build's value of the policy is always
-# inside its domain; a domain of one value makes the policy a constant of the build.
+# leaving the value out and `on` keeping it. An unset name allows its value on a target with an
+# operating system; on a target with none it allows only the policy's default, so an image pays
+# for a second value only where it states one. `WZ_POLICY_DOMAINS` = `full` or `defaults` forces
+# either rule; it is not a cargo feature, which would unify across a graph and narrow host builds.
+# The build's value of the policy is always inside its domain; a domain of one value makes the
+# policy a constant of the build, held in no byte.
 [[policy]]
 id = "multicast-loopback"
 kind = "choice"

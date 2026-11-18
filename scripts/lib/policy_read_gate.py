@@ -104,6 +104,8 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/key_gate.rs", "of_build", "the gate a registry starts from; the session hands its own in step 3b"),
     ("crates/wz-session-core/src/key_gate_open.rs", "of_build", "the build-time refusal of a closed default without the feature"),
     # Outside session-core: every site that still reads the build.
+    ("crates/wz-ap-demo/src/args.rs", "default", STEP_3B),
+    ("crates/wz-ap-demo/src/args.rs", "session_init_params_for", STEP_3B),
     ("crates/wz-ap-demo/src/runner.rs", "run_router_hat_until", STEP_3B),
     ("crates/wz-capi-c/src/offload.rs", "overload_of", STEP_3B),
     ("crates/wz-capi-coop/src/engine.rs", "open_wire", STEP_3B),

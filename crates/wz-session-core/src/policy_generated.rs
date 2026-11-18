@@ -11,14 +11,19 @@
 //!
 //! Each policy's value type, an `Off` and `On` enum of its own for a bool policy, implements
 //! [`PolicyValue`]: the domain the build allows (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`, an unset name
-//! allowing the value), the build's default, which the domain must hold, and where the policy is
-//! bound.
+//! taking the rule of `DEFAULTS_ONLY`), the build's default, which the domain must hold, and
+//! where the policy is bound. A field of [`SessionPolicy`] holds no byte for a policy whose domain
+//! is one value.
 
-use super::{policy_allows, policy_bool, policy_choice};
+use super::{policy_bool, policy_choice, policy_defaults_only};
 
 use crate::policy_binding::{
     default_is_allowed, Binding, Bound, Domain, Mutability, OutsideDomain, PolicyValue, Scope, Wire,
 };
+
+/// Whether an allowance the build does not state keeps only the build default: what
+/// `WZ_POLICY_DOMAINS` states, else whether the target has no operating system.
+const DEFAULTS_ONLY: bool = policy_defaults_only(option_env!("WZ_POLICY_DOMAINS"));
 
 /// `multicast-loopback`: Whether a datagram a node sends to a multicast group is also
 /// delivered to members of that group on the same host. `os-default` leaves the operating
@@ -598,98 +603,98 @@ impl Default for LinkTieOrder {
 pub struct SessionPolicy {
     /// `multicast-loopback`. Upstream: Never sets IP_MULTICAST_LOOP on a multicast socket,
     /// so each sending socket keeps the operating system's setting.
-    multicast_loopback: Bound<MulticastLoopback>,
+    multicast_loopback: MulticastLoopbackBound,
     /// `tx-no-progress-deadline`. Upstream: Gives a blocking message one wait_before_close
     /// for the whole of it, however many fragments go out: its deadline has no cap to
     /// extend by, so a fragment out leaves the deadline where it is.
-    tx_no_progress_deadline: Bound<TxNoProgressDeadline>,
+    tx_no_progress_deadline: TxNoProgressDeadlineBound,
     /// `tx-expiry-keeps-session`. Upstream: Closes the session as unresponsive when a
     /// blocking message found no room in its deadline, and tells the sender nothing.
-    tx_expiry_keeps_session: Bound<TxExpiryKeepsSession>,
+    tx_expiry_keeps_session: TxExpiryKeepsSessionBound,
     /// `declaration-sync-pacing`. Upstream: Replays every declaration it holds to a new
     /// peer in one call, as soon as the session is open again.
-    declaration_sync_pacing: Bound<DeclarationSyncPacing>,
+    declaration_sync_pacing: DeclarationSyncPacingBound,
     /// `datagram-fragment-pacing`. Upstream: Writes the fragments of a large message to a
     /// datagram socket back to back, as fast as the socket takes them, however small the
     /// receiver's buffer.
-    datagram_fragment_pacing: Bound<DatagramFragmentPacing>,
+    datagram_fragment_pacing: DatagramFragmentPacingBound,
     /// `multicast-link-requires-iface`. Upstream: Opens a multicast link whose locator
     /// names no interface on the first interface that can carry multicast, or on the
     /// kernel's choice when the host has none, so the link may sit on an interface nobody
     /// chose.
-    multicast_link_requires_iface: Bound<MulticastLinkRequiresIface>,
+    multicast_link_requires_iface: MulticastLinkRequiresIfaceBound,
     /// `reliable-gap-reconnect`. Upstream: Accepts a forward jump of the reliable channel's
     /// sequence number without a word: the frames in between are lost, the session stays
     /// open and nothing is repaired, so a peer's declaration lost that way is never
     /// noticed.
-    reliable_gap_reconnect: Bound<ReliableGapReconnect>,
+    reliable_gap_reconnect: ReliableGapReconnectBound,
     /// `entity-link-restriction`. Upstream: Lets every entity use every link of the
     /// session: a put reaches every link that wants it, a declaration is made to every
     /// link, a query goes to every link.
-    entity_link_restriction: Bound<EntityLinkRestriction>,
+    entity_link_restriction: EntityLinkRestrictionBound,
     /// `targeted-query`. Upstream: Sends a query to every link whose peers declared a
     /// queryable it matches, and a caller cannot name the peer a query is for.
-    targeted_query: Bound<TargetedQuery>,
+    targeted_query: TargetedQueryBound,
     /// `publisher-admission-retry`. Upstream: Sends a put to every link at once and waits
     /// on each link for room in its queue; a put that finds none on a link is dropped there
     /// (or closes the session) and still reports success, and a caller cannot ask for it to
     /// be tried again.
-    publisher_admission_retry: Bound<PublisherAdmissionRetry>,
+    publisher_admission_retry: PublisherAdmissionRetryBound,
     /// `multi-route-atomic-tx`. Upstream: Sends a put to each link on its own terms: a link
     /// whose queue is full drops the frame or waits for room while the other links take it,
     /// so one put can reach some links and not others.
-    multi_route_atomic_tx: Bound<MultiRouteAtomicTx>,
+    multi_route_atomic_tx: MultiRouteAtomicTxBound,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
-    entity_timestamp_opt_in: Bound<EntityTimestampOptIn>,
+    entity_timestamp_opt_in: EntityTimestampOptInBound,
     /// `reply-auto-timestamp`. Upstream: Sends a reply with the timestamp its handler gave
     /// it and with none when the handler gave none.
-    reply_auto_timestamp: Bound<ReplyAutoTimestamp>,
+    reply_auto_timestamp: ReplyAutoTimestampBound,
     /// `subscriber-overload`. Upstream: Hands a sample to a channel handler that blocks its
     /// sender when the handler is full, so a slow consumer applies backpressure into the
     /// session and no sample is lost.
-    subscriber_overload: Bound<SubscriberOverload>,
+    subscriber_overload: SubscriberOverloadBound,
     /// `key-set`. Upstream: Takes a message on any key a peer sends, and finds the
     /// subscribers it reaches by matching that key against each subscription's pattern as
     /// text.
-    key_set: Bound<KeySet>,
+    key_set: KeySetBound,
     /// `sn-resolution`. Upstream: Advertises the 32-bit sequence-number resolution in its
     /// InitSyn and in the Join of a group unless its configuration states another: zenoh
     /// reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and
     /// zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another.
-    sn_resolution: Bound<SnResolution>,
+    sn_resolution: SnResolutionBound,
     /// `supervision-after-expiry`. Upstream: Supervises nothing: an application that stops
     /// making progress is not noticed by the library, so there is no expiry and nothing for
     /// a later feed to do.
-    supervision_after_expiry: Bound<SupervisionAfterExpiry>,
+    supervision_after_expiry: SupervisionAfterExpiryBound,
     /// `event-ring-full`. Upstream: Keeps no record of the events a node has: a log call
     /// with no logger installed is dropped, so neither the oldest nor the newest of them
     /// survives.
-    event_ring_full: Bound<EventRingFull>,
+    event_ring_full: EventRingFullBound,
     /// `clock-quality-stamping`. Upstream: Stamps with whatever time the system clock
     /// reads, and has no notion of whether that clock is set or follows a reference.
-    clock_quality_stamping: Bound<ClockQualityStamping>,
+    clock_quality_stamping: ClockQualityStampingBound,
     /// `routing-face-drive`. Upstream: Reads each link of a node on a task of its own,
     /// spawned on the node's receive runtime (two worker threads unless the runtime is
     /// configured otherwise), and routes what that link brings on the same task under a
     /// read lock of the routing tables, so the links of a node are served by several
     /// threads at once.
-    routing_face_drive: Bound<RoutingFaceDrive>,
+    routing_face_drive: RoutingFaceDriveBound,
     /// `routing-table-sharing`. Upstream: Keeps a router's routing tables behind one
     /// reader-writer lock (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face
     /// coming up or one leaving waits for the messages being routed, and they wait for it.
-    routing_table_sharing: Bound<RoutingTableSharing>,
+    routing_table_sharing: RoutingTableSharingBound,
     /// `reassembly-pool-overflow`. Upstream: Keeps one defragmentation buffer for each peer
     /// and channel, so a new fragmented message never waits on another peer's and there is
     /// no shared pool to fill. None of the three values is upstream's, since upstream has
     /// no such moment; `reject` is what wz did before the policy existed.
-    reassembly_pool_overflow: Bound<ReassemblyPoolOverflow>,
+    reassembly_pool_overflow: ReassemblyPoolOverflowBound,
     /// `link-tie-order`. Upstream: Two nodes that dial each other at once keep one
     /// transport; zenoh orders the two zids as the 128-bit numbers they are, the wire
     /// carrying a zid's little-endian bytes. zenoh-pico keeps no such rule, and compares
     /// two ids byte by byte from the first wire byte (`_z_id_cmp`).
-    link_tie_order: Bound<LinkTieOrder>,
+    link_tie_order: LinkTieOrderBound,
 }
 
 impl SessionPolicy {
@@ -1055,17 +1060,22 @@ impl Default for SessionPolicy {
     }
 }
 
+/// How `multicast-loopback` is held: in no byte when its domain is one value.
+type MulticastLoopbackBound = Bound<MulticastLoopback, { MulticastLoopback::HELD }>;
+
 impl PolicyValue for MulticastLoopback {
     const POLICY: &'static str = "multicast-loopback";
     const ALL: &'static [Self] = &[Self::OsDefault, Self::On, Self::Off];
     const IDS: &'static [&'static str] = &["os-default", "on", "off"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OS_DEFAULT"
-        )),
-        policy_allows(option_env!("WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_ON")),
-        policy_allows(option_env!("WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OFF")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OS_DEFAULT"),
+            option_env!("WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_ON"),
+            option_env!("WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OFF"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
@@ -1139,14 +1149,21 @@ impl Default for TxNoProgressDeadline {
     }
 }
 
+/// How `tx-no-progress-deadline` is held: in no byte when its domain is one value.
+type TxNoProgressDeadlineBound = Bound<TxNoProgressDeadline, { TxNoProgressDeadline::HELD }>;
+
 impl PolicyValue for TxNoProgressDeadline {
     const POLICY: &'static str = "tx-no-progress-deadline";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
@@ -1220,14 +1237,21 @@ impl Default for TxExpiryKeepsSession {
     }
 }
 
+/// How `tx-expiry-keeps-session` is held: in no byte when its domain is one value.
+type TxExpiryKeepsSessionBound = Bound<TxExpiryKeepsSession, { TxExpiryKeepsSession::HELD }>;
+
 impl PolicyValue for TxExpiryKeepsSession {
     const POLICY: &'static str = "tx-expiry-keeps-session";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
@@ -1301,14 +1325,21 @@ impl Default for DeclarationSyncPacing {
     }
 }
 
+/// How `declaration-sync-pacing` is held: in no byte when its domain is one value.
+type DeclarationSyncPacingBound = Bound<DeclarationSyncPacing, { DeclarationSyncPacing::HELD }>;
+
 impl PolicyValue for DeclarationSyncPacing {
     const POLICY: &'static str = "declaration-sync-pacing";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Live;
@@ -1382,14 +1413,21 @@ impl Default for DatagramFragmentPacing {
     }
 }
 
+/// How `datagram-fragment-pacing` is held: in no byte when its domain is one value.
+type DatagramFragmentPacingBound = Bound<DatagramFragmentPacing, { DatagramFragmentPacing::HELD }>;
+
 impl PolicyValue for DatagramFragmentPacing {
     const POLICY: &'static str = "datagram-fragment-pacing";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
@@ -1463,18 +1501,22 @@ impl Default for MulticastLinkRequiresIface {
     }
 }
 
+/// How `multicast-link-requires-iface` is held: in no byte when its domain is one value.
+type MulticastLinkRequiresIfaceBound =
+    Bound<MulticastLinkRequiresIface, { MulticastLinkRequiresIface::HELD }>;
+
 impl PolicyValue for MulticastLinkRequiresIface {
     const POLICY: &'static str = "multicast-link-requires-iface";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_OFF"
-        )),
-        policy_allows(option_env!(
-            "WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_ON"
-        )),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
@@ -1492,19 +1534,22 @@ const _: () = assert!(
     "the default of multicast-link-requires-iface is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `reliable-gap-reconnect` is held: in no byte when its domain is one value.
+type ReliableGapReconnectBound = Bound<ReliableGapReconnect, { ReliableGapReconnect::HELD }>;
+
 impl PolicyValue for ReliableGapReconnect {
     const POLICY: &'static str = "reliable-gap-reconnect";
     const ALL: &'static [Self] = &[Self::Off, Self::UntilDeclarationsSynced, Self::Always];
     const IDS: &'static [&'static str] = &["off", "until-declarations-synced", "always"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_OFF")),
-        policy_allows(option_env!(
-            "WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED"
-        )),
-        policy_allows(option_env!(
-            "WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_ALWAYS"
-        )),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED"),
+            option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_ALWAYS"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
@@ -1578,14 +1623,21 @@ impl Default for EntityLinkRestriction {
     }
 }
 
+/// How `entity-link-restriction` is held: in no byte when its domain is one value.
+type EntityLinkRestrictionBound = Bound<EntityLinkRestriction, { EntityLinkRestriction::HELD }>;
+
 impl PolicyValue for EntityLinkRestriction {
     const POLICY: &'static str = "entity-link-restriction";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
@@ -1659,14 +1711,21 @@ impl Default for TargetedQuery {
     }
 }
 
+/// How `targeted-query` is held: in no byte when its domain is one value.
+type TargetedQueryBound = Bound<TargetedQuery, { TargetedQuery::HELD }>;
+
 impl PolicyValue for TargetedQuery {
     const POLICY: &'static str = "targeted-query";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_TARGETED_QUERY_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_TARGETED_QUERY_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_TARGETED_QUERY_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_TARGETED_QUERY_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Live;
@@ -1740,16 +1799,22 @@ impl Default for PublisherAdmissionRetry {
     }
 }
 
+/// How `publisher-admission-retry` is held: in no byte when its domain is one value.
+type PublisherAdmissionRetryBound =
+    Bound<PublisherAdmissionRetry, { PublisherAdmissionRetry::HELD }>;
+
 impl PolicyValue for PublisherAdmissionRetry {
     const POLICY: &'static str = "publisher-admission-retry";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_OFF"
-        )),
-        policy_allows(option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Live;
@@ -1823,14 +1888,21 @@ impl Default for MultiRouteAtomicTx {
     }
 }
 
+/// How `multi-route-atomic-tx` is held: in no byte when its domain is one value.
+type MultiRouteAtomicTxBound = Bound<MultiRouteAtomicTx, { MultiRouteAtomicTx::HELD }>;
+
 impl PolicyValue for MultiRouteAtomicTx {
     const POLICY: &'static str = "multi-route-atomic-tx";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Live;
@@ -1904,14 +1976,21 @@ impl Default for EntityTimestampOptIn {
     }
 }
 
+/// How `entity-timestamp-opt-in` is held: in no byte when its domain is one value.
+type EntityTimestampOptInBound = Bound<EntityTimestampOptIn, { EntityTimestampOptIn::HELD }>;
+
 impl PolicyValue for EntityTimestampOptIn {
     const POLICY: &'static str = "entity-timestamp-opt-in";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
@@ -1985,14 +2064,21 @@ impl Default for ReplyAutoTimestamp {
     }
 }
 
+/// How `reply-auto-timestamp` is held: in no byte when its domain is one value.
+type ReplyAutoTimestampBound = Bound<ReplyAutoTimestamp, { ReplyAutoTimestamp::HELD }>;
+
 impl PolicyValue for ReplyAutoTimestamp {
     const POLICY: &'static str = "reply-auto-timestamp";
     const ALL: &'static [Self] = &[Self::Off, Self::On];
     const IDS: &'static [&'static str] = &["off", "on"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_OFF")),
-        policy_allows(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_ON")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
@@ -2010,17 +2096,22 @@ const _: () = assert!(
     "the default of reply-auto-timestamp is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `subscriber-overload` is held: in no byte when its domain is one value.
+type SubscriberOverloadBound = Bound<SubscriberOverload, { SubscriberOverload::HELD }>;
+
 impl PolicyValue for SubscriberOverload {
     const POLICY: &'static str = "subscriber-overload";
     const ALL: &'static [Self] = &[Self::Block, Self::Reject, Self::KeepLatest];
     const IDS: &'static [&'static str] = &["block", "reject", "keep-latest"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_BLOCK")),
-        policy_allows(option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_REJECT")),
-        policy_allows(option_env!(
-            "WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_KEEP_LATEST"
-        )),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_BLOCK"),
+            option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_REJECT"),
+            option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_KEEP_LATEST"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
@@ -2038,14 +2129,21 @@ const _: () = assert!(
     "the default of subscriber-overload is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `key-set` is held: in no byte when its domain is one value.
+type KeySetBound = Bound<KeySet, { KeySet::HELD }>;
+
 impl PolicyValue for KeySet {
     const POLICY: &'static str = "key-set";
     const ALL: &'static [Self] = &[Self::Open, Self::Closed];
     const IDS: &'static [&'static str] = &["open", "closed"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_KEY_SET_ALLOWS_OPEN")),
-        policy_allows(option_env!("WZ_POLICY_KEY_SET_ALLOWS_CLOSED")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_KEY_SET_ALLOWS_OPEN"),
+            option_env!("WZ_POLICY_KEY_SET_ALLOWS_CLOSED"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Open;
@@ -2063,16 +2161,23 @@ const _: () = assert!(
     "the default of key-set is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `sn-resolution` is held: in no byte when its domain is one value.
+type SnResolutionBound = Bound<SnResolution, { SnResolution::HELD }>;
+
 impl PolicyValue for SnResolution {
     const POLICY: &'static str = "sn-resolution";
     const ALL: &'static [Self] = &[Self::Bits32, Self::Bits8, Self::Bits16, Self::Bits64];
     const IDS: &'static [&'static str] = &["bits-32", "bits-8", "bits-16", "bits-64"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_32")),
-        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_8")),
-        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_16")),
-        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_64")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_32"),
+            option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_8"),
+            option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_16"),
+            option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_64"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Open;
@@ -2090,18 +2195,21 @@ const _: () = assert!(
     "the default of sn-resolution is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `supervision-after-expiry` is held: in no byte when its domain is one value.
+type SupervisionAfterExpiryBound = Bound<SupervisionAfterExpiry, { SupervisionAfterExpiry::HELD }>;
+
 impl PolicyValue for SupervisionAfterExpiry {
     const POLICY: &'static str = "supervision-after-expiry";
     const ALL: &'static [Self] = &[Self::Latch, Self::Rearm];
     const IDS: &'static [&'static str] = &["latch", "rearm"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_LATCH"
-        )),
-        policy_allows(option_env!(
-            "WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_REARM"
-        )),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_LATCH"),
+            option_env!("WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_REARM"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Live;
@@ -2119,16 +2227,21 @@ const _: () = assert!(
     "the default of supervision-after-expiry is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `event-ring-full` is held: in no byte when its domain is one value.
+type EventRingFullBound = Bound<EventRingFull, { EventRingFull::HELD }>;
+
 impl PolicyValue for EventRingFull {
     const POLICY: &'static str = "event-ring-full";
     const ALL: &'static [Self] = &[Self::OverwriteOldest, Self::DropNewest];
     const IDS: &'static [&'static str] = &["overwrite-oldest", "drop-newest"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_EVENT_RING_FULL_ALLOWS_OVERWRITE_OLDEST"
-        )),
-        policy_allows(option_env!("WZ_POLICY_EVENT_RING_FULL_ALLOWS_DROP_NEWEST")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_EVENT_RING_FULL_ALLOWS_OVERWRITE_OLDEST"),
+            option_env!("WZ_POLICY_EVENT_RING_FULL_ALLOWS_DROP_NEWEST"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Live;
@@ -2146,18 +2259,21 @@ const _: () = assert!(
     "the default of event-ring-full is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `clock-quality-stamping` is held: in no byte when its domain is one value.
+type ClockQualityStampingBound = Bound<ClockQualityStamping, { ClockQualityStamping::HELD }>;
+
 impl PolicyValue for ClockQualityStamping {
     const POLICY: &'static str = "clock-quality-stamping";
     const ALL: &'static [Self] = &[Self::Always, Self::TrustedOnly];
     const IDS: &'static [&'static str] = &["always", "trusted-only"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_ALWAYS"
-        )),
-        policy_allows(option_env!(
-            "WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_TRUSTED_ONLY"
-        )),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_ALWAYS"),
+            option_env!("WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_TRUSTED_ONLY"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Live;
@@ -2175,16 +2291,21 @@ const _: () = assert!(
     "the default of clock-quality-stamping is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `routing-face-drive` is held: in no byte when its domain is one value.
+type RoutingFaceDriveBound = Bound<RoutingFaceDrive, { RoutingFaceDrive::HELD }>;
+
 impl PolicyValue for RoutingFaceDrive {
     const POLICY: &'static str = "routing-face-drive";
     const ALL: &'static [Self] = &[Self::TaskPerFace, Self::OneTask];
     const IDS: &'static [&'static str] = &["task-per-face", "one-task"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_TASK_PER_FACE"
-        )),
-        policy_allows(option_env!("WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_ONE_TASK")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_TASK_PER_FACE"),
+            option_env!("WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_ONE_TASK"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Open;
@@ -2202,16 +2323,21 @@ const _: () = assert!(
     "the default of routing-face-drive is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `routing-table-sharing` is held: in no byte when its domain is one value.
+type RoutingTableSharingBound = Bound<RoutingTableSharing, { RoutingTableSharing::HELD }>;
+
 impl PolicyValue for RoutingTableSharing {
     const POLICY: &'static str = "routing-table-sharing";
     const ALL: &'static [Self] = &[Self::Rwlock, Self::Snapshot];
     const IDS: &'static [&'static str] = &["rwlock", "snapshot"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_RWLOCK")),
-        policy_allows(option_env!(
-            "WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_SNAPSHOT"
-        )),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_RWLOCK"),
+            option_env!("WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_SNAPSHOT"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Open;
@@ -2229,21 +2355,22 @@ const _: () = assert!(
     "the default of routing-table-sharing is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `reassembly-pool-overflow` is held: in no byte when its domain is one value.
+type ReassemblyPoolOverflowBound = Bound<ReassemblyPoolOverflow, { ReassemblyPoolOverflow::HELD }>;
+
 impl PolicyValue for ReassemblyPoolOverflow {
     const POLICY: &'static str = "reassembly-pool-overflow";
     const ALL: &'static [Self] = &[Self::Reject, Self::DiagnosticEvent, Self::OldestWins];
     const IDS: &'static [&'static str] = &["reject", "diagnostic-event", "oldest-wins"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!(
-            "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_REJECT"
-        )),
-        policy_allows(option_env!(
-            "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_DIAGNOSTIC_EVENT"
-        )),
-        policy_allows(option_env!(
-            "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_OLDEST_WINS"
-        )),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_REJECT"),
+            option_env!("WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_DIAGNOSTIC_EVENT"),
+            option_env!("WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_OLDEST_WINS"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
@@ -2261,14 +2388,21 @@ const _: () = assert!(
     "the default of reassembly-pool-overflow is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+/// How `link-tie-order` is held: in no byte when its domain is one value.
+type LinkTieOrderBound = Bound<LinkTieOrder, { LinkTieOrder::HELD }>;
+
 impl PolicyValue for LinkTieOrder {
     const POLICY: &'static str = "link-tie-order";
     const ALL: &'static [Self] = &[Self::ZidNumber, Self::ZidBytes];
     const IDS: &'static [&'static str] = &["zid-number", "zid-bytes"];
-    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
-        policy_allows(option_env!("WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_NUMBER")),
-        policy_allows(option_env!("WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_BYTES")),
-    ]);
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_NUMBER"),
+            option_env!("WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_BYTES"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
     const DEFAULT: Self = Self::stated();
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;

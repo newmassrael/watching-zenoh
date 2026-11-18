@@ -142,10 +142,14 @@ limit and binds the name the code uses to the generated value.
 ## Domains
 
 A policy's domain is the set of its values a stage after the build may select. The build states
-it as one `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value (`off` leaves the value out; unset or `on`
-allows it), from Kconfig through one `default y` bool per value whose prompt hides while the value
-is the chosen default, so the default is always allowed. The generated module refuses, in a
-constant, a build whose domain leaves out its default, and so does `--resolve-env`.
+it as one `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value (`off` leaves the value out, `on` allows
+it), from Kconfig through one `default y` bool per value whose prompt hides while the value is the
+chosen default, so the default is always allowed. A value the build does not state is allowed on
+a target with an operating system and, on a target with none, only when it is the default;
+`WZ_POLICY_DOMAINS` (`full` or `defaults`) forces either rule, and `--resolve-env` states `on`
+for an allowance a fragment assigns so that a configuration means the same on both. The generated
+module refuses, in a constant, a build whose domain leaves out its default, and so does
+`--resolve-env`.
 
 Usage:
     wz_config.py --check | --selftest | --write | --check-presets
@@ -1481,22 +1485,42 @@ def policy_allows_symbol(pol: dict, value: str) -> str:
     return f"{pol['kconfig']}_ALLOWS_{snake(value).upper()}"
 
 
-def policy_domain(pol: dict, env: dict[str, str]) -> list[str]:
+# The variable that forces the rule an unstated allowance follows, whatever the target: `full`
+# allows its value, `defaults` keeps the policy's default alone.
+POLICY_DOMAINS_ENV = "WZ_POLICY_DOMAINS"
+
+
+def policy_defaults_only(env: dict[str, str], no_os: bool) -> bool:
+    """Whether an allowance `env` does not state keeps only the policy's default: what
+    `WZ_POLICY_DOMAINS` states, else whether the build's target has no operating system (`no_os`),
+    as `policy_defaults_only` of the generated module decides it in the build."""
+    text = env.get(POLICY_DOMAINS_ENV)
+    if text is None:
+        return no_os
+    if text not in ("full", "defaults"):
+        raise ValueError(f"{POLICY_DOMAINS_ENV} is neither `full` nor `defaults` ({text})")
+    return text == "defaults"
+
+
+def policy_domain(pol: dict, env: dict[str, str], no_os: bool = False) -> list[str]:
     """The values of `pol` a build whose environment states `env` allows, in the declaration's
-    order: one whose `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` is `on` or unset is allowed, `off` leaves it
-    out, so a build that narrows nothing allows every value. The build's default (its
-    `WZ_POLICY_<NAME>`, else upstream's) must be one of them; a domain without it is refused here,
-    as the generated module's constant refuses it in the build."""
+    order: one whose `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` is `on` is allowed and `off` leaves it out.
+    One it does not state is allowed, except where `policy_defaults_only` holds (a target with no
+    operating system, `no_os`, or `WZ_POLICY_DOMAINS=defaults`): then only the default is. The
+    build's default (its `WZ_POLICY_<NAME>`, else upstream's) must be one of them; a domain
+    without it is refused here, as the generated module's constant refuses it in the build."""
+    default = env.get(pol["kconfig"], pol["default"])
+    defaults_only = policy_defaults_only(env, no_os)
     allowed: list[str] = []
     for value in policy_values(pol):
         name = policy_allows_symbol(pol, value)
-        text = env.get(name, "on")
+        unstated = "off" if defaults_only and value != default else "on"
+        text = env.get(name, unstated)
         if text not in ("on", "off"):
             raise ValueError(f"a WZ_POLICY_*_ALLOWS_* value is neither `on` nor `off` "
                              f"({name}={text})")
         if text == "on":
             allowed.append(value)
-    default = env.get(pol["kconfig"], pol["default"])
     if default not in allowed:
         raise ValueError(f"policy {pol['id']}: its default {default!r} is outside the domain the "
                          f"build allows ({', '.join(allowed) or 'no value'})")
@@ -2352,6 +2376,7 @@ def policy_domain_kconfig(pol: dict) -> list[str]:
                 "\tdefault y",
                 "\thelp",
                 f"\t  Whether `{value}` stays selectable after the build; the chosen default always does.",
+                "\t  A target with no operating system keeps only the default unless this is set here.",
                 ""]
     return out
 
@@ -2423,12 +2448,13 @@ def emit_rust_policies(decl: dict) -> str:
             "//!",
             "//! Each policy's value type, an `Off` and `On` enum of its own for a bool policy, implements",
             "//! [`PolicyValue`]: the domain the build allows (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`, an unset name",
-            "//! allowing the value), the build's default, which the domain must hold, and where the policy is",
-            "//! bound.",
+            "//! taking the rule of `DEFAULTS_ONLY`), the build's default, which the domain must hold, and",
+            "//! where the policy is bound. A field of [`SessionPolicy`] holds no byte for a policy whose domain",
+            "//! is one value.",
         ]
     out.append("")
-    helpers = ((["policy_allows"] if pols else []) + (["policy_bool"] if bools else [])
-               + (["policy_choice"] if choices else []))
+    helpers = ((["policy_bool"] if bools else []) + (["policy_choice"] if choices else [])
+               + (["policy_defaults_only"] if pols else []))
     if len(helpers) == 1:
         out += [f"use super::{helpers[0]};", ""]
     elif helpers:
@@ -2437,7 +2463,11 @@ def emit_rust_policies(decl: dict) -> str:
         # A group of its own, so rustfmt keeps it after the `super` import as written.
         out += ["use crate::policy_binding::{",
                 "    default_is_allowed, Binding, Bound, Domain, Mutability, OutsideDomain, PolicyValue, Scope, Wire,",
-                "};", ""]
+                "};", "",
+                "/// Whether an allowance the build does not state keeps only the build default: what",
+                f"/// `{POLICY_DOMAINS_ENV}` states, else whether the target has no operating system.",
+                f'const DEFAULTS_ONLY: bool = policy_defaults_only(option_env!("{POLICY_DOMAINS_ENV}"));',
+                ""]
     for pol in choices:
         name = camel(pol["id"])
         values = pol["choices"]
@@ -2473,7 +2503,7 @@ def emit_rust_policies(decl: dict) -> str:
         out.append("pub struct SessionPolicy {")
         for pol in pols:
             out += rust_doc(f"`{pol['id']}`. Upstream: {pol['upstream'].strip()}", "    ")
-            out.append(f"    {snake(pol['id'])}: Bound<{camel(pol['id'])}>,")
+            out.append(f"    {snake(pol['id'])}: {camel(pol['id'])}Bound,")
         out.append("}")
     else:
         out.append("pub struct SessionPolicy {}")
@@ -2547,14 +2577,24 @@ def rust_const_slice(name: str, ty: str, items: list[str]) -> list[str]:
 
 
 def rust_domain_entry(word: str) -> list[str]:
-    """One entry of a `Domain::from_allowed(&[..])`, `policy_allows(option_env!(<word>)),`, as
-    rustfmt lays it out: on one line when the argument of `policy_allows` fits its call width,
-    else the macro's argument on a line of its own (measured: rustfmt breaks inside the macro and
-    adds no comma there)."""
-    call = f"option_env!({word})"
-    if len(call) <= RUST_FN_CALL_WIDTH:
-        return [f"        policy_allows({call}),"]
-    return ["        policy_allows(option_env!(", f"            {word}", "        )),"]
+    """One entry of the array a `Domain::from_stated` is given, `option_env!(<word>),`, as rustfmt
+    lays it out: on one line when the line fits its width (measured: a single literal argument is
+    not held to the call width), else the macro's argument on a line of its own."""
+    one = f"            option_env!({word}),"
+    if len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return ["            option_env!(", f"                {word}", "            ),"]
+
+
+def rust_bound_alias(pol: dict) -> list[str]:
+    """The type a field of `SessionPolicy` holds `pol` in, `Bound` with the store length the
+    build's domain gives it (`PolicyValue::HELD`), followed by a blank line: on one line when it
+    fits, else broken after the `=` (measured, as rustfmt lays out a type alias)."""
+    name = camel(pol["id"])
+    target = f"Bound<{name}, {{ {name}::HELD }}>;"
+    one = f"type {name}Bound = {target}"
+    lines = [one] if len(one) <= RUST_MAX_WIDTH else [f"type {name}Bound =", f"    {target}"]
+    return [f"/// How `{pol['id']}` is held: in no byte when its domain is one value."] + lines + [""]
 
 
 def rust_boundary(text: str) -> list[str]:
@@ -2618,14 +2658,18 @@ def policy_value_rust(pol: dict) -> list[str]:
     name = camel(pol["id"])
     values = policy_values(pol)
     out = bool_value_rust(pol) if pol["kind"] == "bool" else []
+    out += rust_bound_alias(pol)
     out += [f"impl PolicyValue for {name} {{",
             f"    const POLICY: &'static str = {rust_word(pol['id'])};"]
     out += rust_const_slice("ALL", "&'static [Self]", [f"Self::{camel(v)}" for v in values])
     out += rust_const_slice("IDS", "&'static [&'static str]", [rust_word(v) for v in values])
-    out.append("    const DOMAIN: Domain<Self> = Domain::from_allowed(&[")
+    out += ["    const DOMAIN: Domain<Self> = Domain::from_stated(", "        &["]
     for value in values:
         out += rust_domain_entry(rust_word(policy_allows_symbol(pol, value)))
-    out += ["    ]);",
+    out += ["        ],",
+            "        Self::DEFAULT as usize,",
+            "        DEFAULTS_ONLY,",
+            "    );",
             "    const DEFAULT: Self = Self::stated();",
             f"    const SCOPE: Scope = Scope::{camel(pol['scope'])};",
             f"    const BINDING: Binding = Binding::{camel(pol['binding'])};",
@@ -3186,16 +3230,25 @@ def resolved_policy_domain(kconf, pol: dict) -> list[str]:
 def resolved_policy_env(decl: dict, kconf) -> list[str]:
     """`WZ_POLICY_<NAME>=<value>` for every policy the configuration sets off upstream's, each
     followed by `WZ_POLICY_<NAME>_ALLOWS_<VALUE>=off` for every value the configuration leaves out
-    of its domain, so a configuration that narrows nothing states no allowance. A domain without
-    the policy's value is refused, as the build would refuse it."""
+    of its domain and `=on` for every other value a fragment assigns its allowance, so a
+    configuration that narrows nothing states no allowance. An assigned `on` is what keeps a value
+    on a target with no operating system, where an unstated allowance keeps the default alone
+    (`policy_defaults_only`); the default's own allowance has no prompt and is never assigned. A
+    domain without the policy's value is refused, as the build would refuse it on either target."""
     out: list[str] = []
     for pol in decl["policies"]:
         value = resolved_policy(kconf, pol)
         env = {} if value == pol["default"] else {pol["kconfig"]: value}
         domain = resolved_policy_domain(kconf, pol)
-        env.update({policy_allows_symbol(pol, v): "off" for v in policy_values(pol) if v not in domain})
+        for v in policy_values(pol):
+            symbol = policy_allows_symbol(pol, v)
+            if v not in domain:
+                env[symbol] = "off"
+            elif v != value and kconf.syms[symbol].user_value == 2:
+                env[symbol] = "on"
         try:
             policy_domain(pol, env)
+            policy_domain(pol, env, no_os=True)
         except ValueError as exc:
             raise PresetError(str(exc)) from exc
         out += [f"{name}={text}" for name, text in env.items()]
@@ -4289,11 +4342,17 @@ def cmd_selftest() -> int:
     expect("a bool policy reads its environment and nothing else",
            '        let stated = option_env!("WZ_POLICY_EAGER_FLUSH");\n'
            "        Self::from_bool(policy_bool(stated))\n" in rpolicies
-           and "use super::{policy_allows, policy_bool, policy_choice};" in rpolicies)
+           and "use super::{policy_bool, policy_choice, policy_defaults_only};" in rpolicies)
     expect("each field of SessionPolicy is private and bound inside the build's domain",
-           "    wire_mode: Bound<WireMode>,\n" in rpolicies
-           and "    eager_flush: Bound<EagerFlush>,\n" in rpolicies
+           "    wire_mode: WireModeBound,\n" in rpolicies
+           and "    eager_flush: EagerFlushBound,\n" in rpolicies
            and "    pub eager_flush" not in rpolicies and "    pub wire_mode" not in rpolicies)
+    expect("a field holds as many values as the domain gives it, none for a one-value domain",
+           "type WireModeBound = Bound<WireMode, { WireMode::HELD }>;\n" in rpolicies
+           and "type EagerFlushBound = Bound<EagerFlush, { EagerFlush::HELD }>;\n" in rpolicies)
+    expect("an unstated allowance takes the rule the build or its target states",
+           "const DEFAULTS_ONLY: bool = policy_defaults_only(option_env!(\"WZ_POLICY_DOMAINS\"));\n"
+           in rpolicies and rpolicies.count("        DEFAULTS_ONLY,\n") == len(pdecl["policies"]))
     expect("a bool policy is read as a `bool` beside a value type of its own",
            "    pub const fn eager_flush(&self) -> bool {\n        self.eager_flush.get().is_on()\n"
            in rpolicies
@@ -4307,10 +4366,10 @@ def cmd_selftest() -> int:
            and "impl PolicyValue for EagerFlush {" in rpolicies
            and "    const ALL: &'static [Self] = &[Self::OsDefault, Self::On, Self::Off];\n" in rpolicies
            and '    const IDS: &\'static [&\'static str] = &["off", "on"];\n' in rpolicies
-           and "    const DOMAIN: Domain<Self> = Domain::from_allowed(&[\n"
-               '        policy_allows(option_env!("WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF")),\n'
-               '        policy_allows(option_env!("WZ_POLICY_EAGER_FLUSH_ALLOWS_ON")),\n'
-               "    ]);\n" in rpolicies)
+           and "    const DOMAIN: Domain<Self> = Domain::from_stated(\n        &[\n"
+               '            option_env!("WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF"),\n'
+               '            option_env!("WZ_POLICY_EAGER_FLUSH_ALLOWS_ON"),\n'
+               "        ],\n        Self::DEFAULT as usize,\n        DEFAULTS_ONLY,\n    );\n" in rpolicies)
     expect("each policy carries where it is bound, and only a quiescent one a boundary",
            "    const SCOPE: Scope = Scope::Link;\n    const BINDING: Binding = Binding::Live;\n"
            "    const MUTABILITY: Mutability = Mutability::Quiescent;\n"
@@ -4341,10 +4400,15 @@ def cmd_selftest() -> int:
     expect("a select within the width stays on one line",
            "    pub fn select_wire_mode(&mut self, value: WireMode) -> Result<(), OutsideDomain<WireMode>> {\n"
            in rpolicies)
-    expect("an allowance past rustfmt's call width breaks inside the macro, as the formatter leaves it",
-           "        policy_allows(option_env!(\n"
-           '            "WZ_POLICY_A_BOOL_POLICY_WHOSE_NAME_IS_LONG_ENOUGH_TO_CROSS_THE_LINE_WIDTH'
-           '_ALLOWS_OFF"\n        )),\n' in rlong)
+    expect("an allowance past rustfmt's width breaks inside the macro, and one within it does not",
+           "            option_env!(\n"
+           '                "WZ_POLICY_A_BOOL_POLICY_WHOSE_NAME_IS_LONG_ENOUGH_TO_CROSS_THE_LINE_WIDTH'
+           '_ALLOWS_OFF"\n            ),\n' in rlong
+           and rust_domain_entry('"' + "W" * 60 + '"') == ['            option_env!("' + "W" * 60 + '"),'])
+    expect("a field type past rustfmt's width breaks after the `=`, as the formatter leaves it",
+           "type ABoolPolicyWhoseNameIsLongEnoughToCrossTheLineWidthBound =\n"
+           "    Bound<ABoolPolicyWhoseNameIsLongEnoughToCrossTheLineWidth, "
+           "{ ABoolPolicyWhoseNameIsLongEnoughToCrossTheLineWidth::HELD }>;\n" in rlong)
     expect("a default check past rustfmt's call width goes one argument a line",
            "    default_is_allowed::<ABoolPolicyWhoseNameIsLongEnoughToCrossTheLineWidth>(\n"
            "        ABoolPolicyWhoseNameIsLongEnoughToCrossTheLineWidth::DEFAULT as usize,\n"
@@ -4366,7 +4430,7 @@ def cmd_selftest() -> int:
     one = emit_rust_policies({"policies": [p for p in pdecl["policies"] if p["kind"] == "bool"]})
     expect("one policy's literal is past rustfmt's struct width and goes one field a line",
            "        Self {\n            eager_flush: Bound::build_default(),\n        }\n" in one
-           and "use super::{policy_allows, policy_bool};" in one)
+           and "use super::{policy_bool, policy_defaults_only};" in one)
     # Where each limit is bound.
     rbindings = emit_rust_limit_bindings(sdecl)
     expect("each limit is a LimitBinding constant of its own name, in the declaration's words",
@@ -4435,6 +4499,17 @@ def cmd_selftest() -> int:
                                       "WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF": "off"}) == ["on"])
     expect("an allowance that is neither on nor off is refused",
            _refuses_domain(weager, {"WZ_POLICY_EAGER_FLUSH_ALLOWS_ON": "y"}))
+    expect("a target with no operating system keeps the default alone where nothing is stated",
+           policy_domain(weager, {}, no_os=True) == ["off"]
+           and policy_domain(wmode, {}, no_os=True) == ["os-default"]
+           and policy_domain(weager, {"WZ_POLICY_EAGER_FLUSH": "on"}, no_os=True) == ["on"])
+    expect("a stated allowance wins over the target's rule, so an image may widen a domain",
+           policy_domain(wmode, {"WZ_POLICY_WIRE_MODE_ALLOWS_OFF": "on"}, no_os=True)
+           == ["os-default", "off"])
+    expect("WZ_POLICY_DOMAINS forces either rule, and any other text is refused",
+           policy_domain(wmode, {"WZ_POLICY_DOMAINS": "full"}, no_os=True) == ["os-default", "on", "off"]
+           and policy_domain(wmode, {"WZ_POLICY_DOMAINS": "defaults"}) == ["os-default"]
+           and _refuses_domain(wmode, {"WZ_POLICY_DOMAINS": "all"}))
     expect("each value of a policy is an allowance: default y, its prompt hidden while it is the default",
            "config WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF\n"
            "\tbool \"eager-flush allows off\" if WZ_POLICY_EAGER_FLUSH\n\tdefault y\n\thelp\n" in kpolicies
@@ -5182,6 +5257,11 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
                    resolved_policy_domain(narrowed, peager) == ["off"]
                    and resolved_policy_env(wpdecl, narrowed)
                    == ["WZ_POLICY_WIRE_MODE_ALLOWS_ON=off", "WZ_POLICY_EAGER_FLUSH_ALLOWS_ON=off"])
+            widened = policy_tree("CONFIG_WZ_POLICY_EAGER_FLUSH_ALLOWS_ON=y")
+            expect("an allowance a fragment assigns reaches the environment as on, for a target "
+                   "with no operating system",
+                   resolved_policy_domain(widened, peager) == ["off", "on"]
+                   and resolved_policy_env(wpdecl, widened) == ["WZ_POLICY_EAGER_FLUSH_ALLOWS_ON=on"])
             pinned = policy_tree("CONFIG_WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF=n")
             expect("the chosen default's allowance has no prompt, so turning it off does not take",
                    resolved_policy_domain(pinned, peager) == ["off", "on"]

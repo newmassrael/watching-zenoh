@@ -101,12 +101,13 @@ pub const fn policy_bool(stated: Option<&str>) -> bool {
 }
 
 /// Whether the build allows one value of a policy (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`): `on`
-/// allows it, `off` leaves it out of the policy's domain, and a build that states nothing allows
-/// it, so a build that narrows nothing leaves every value selectable.
+/// allows it, `off` leaves it out of the policy's domain, and a build that states nothing gets
+/// `unstated`, which [`crate::policy_binding::Domain::from_stated`] decides by
+/// [`policy_defaults_only`].
 #[doc(hidden)]
-pub const fn policy_allows(stated: Option<&str>) -> bool {
+pub const fn policy_allows(stated: Option<&str>, unstated: bool) -> bool {
     let Some(text) = stated else {
-        return true;
+        return unstated;
     };
     if same(text, "on") {
         true
@@ -114,6 +115,27 @@ pub const fn policy_allows(stated: Option<&str>) -> bool {
         false
     } else {
         panic!("a WZ_POLICY_*_ALLOWS_* value is neither `on` nor `off`")
+    }
+}
+
+/// Whether an allowance the build does not state keeps only the build default of its policy, from
+/// what the build states as `WZ_POLICY_DOMAINS`: `full` allows every such value, `defaults` keeps
+/// the default alone, and a build that states nothing gets the rule of its target. A target with
+/// no operating system keeps the default alone, so an image pays for a second value only where it
+/// allows one on purpose; every other target allows every value. A target and not a cargo
+/// feature decides it: features unify across a graph, and one crate's choice would narrow the
+/// host builds of every other. Any other text stops the build.
+#[doc(hidden)]
+pub const fn policy_defaults_only(stated: Option<&str>) -> bool {
+    let Some(text) = stated else {
+        return cfg!(target_os = "none");
+    };
+    if same(text, "full") {
+        false
+    } else if same(text, "defaults") {
+        true
+    } else {
+        panic!("WZ_POLICY_DOMAINS is neither `full` nor `defaults`")
     }
 }
 
@@ -252,6 +274,43 @@ mod tests {
         );
     }
 
+    /// A snapshot holds a byte for each policy whose domain is wider than one value and none for
+    /// the rest, so a build that fixes every policy (a target with no operating system that
+    /// widens none) carries a snapshot of no byte.
+    #[test]
+    fn a_snapshot_holds_a_byte_only_for_a_policy_with_more_than_one_value() {
+        let held = [
+            MulticastLoopback::HELD,
+            TxNoProgressDeadline::HELD,
+            TxExpiryKeepsSession::HELD,
+            DeclarationSyncPacing::HELD,
+            DatagramFragmentPacing::HELD,
+            MulticastLinkRequiresIface::HELD,
+            ReliableGapReconnect::HELD,
+            EntityLinkRestriction::HELD,
+            TargetedQuery::HELD,
+            PublisherAdmissionRetry::HELD,
+            MultiRouteAtomicTx::HELD,
+            EntityTimestampOptIn::HELD,
+            ReplyAutoTimestamp::HELD,
+            SubscriberOverload::HELD,
+            KeySet::HELD,
+            SnResolution::HELD,
+            SupervisionAfterExpiry::HELD,
+            EventRingFull::HELD,
+            ClockQualityStamping::HELD,
+            RoutingFaceDrive::HELD,
+            RoutingTableSharing::HELD,
+            ReassemblyPoolOverflow::HELD,
+            LinkTieOrder::HELD,
+        ];
+        assert_eq!(
+            core::mem::size_of::<SessionPolicy>(),
+            held.iter().sum::<usize>()
+        );
+        assert_eq!(KeySet::HELD, KeySet::DOMAIN.held());
+    }
+
     /// The accessors are `const`, so a constant can still be computed from a snapshot.
     #[test]
     fn an_accessor_is_read_in_a_constant() {
@@ -316,17 +375,37 @@ mod tests {
         assert_eq!(policy.multicast_loopback(), MulticastLoopback::DEFAULT);
     }
 
+    /// An allowance the build does not name takes what the domain rule gives it; one the build
+    /// states wins over that rule either way, so an image may widen a domain on purpose.
     #[test]
-    fn a_value_the_build_does_not_name_is_allowed() {
-        assert!(policy_allows(None));
-        assert!(policy_allows(Some("on")));
-        assert!(!policy_allows(Some("off")));
+    fn a_value_the_build_does_not_name_takes_the_domain_rule() {
+        assert!(policy_allows(None, true));
+        assert!(!policy_allows(None, false));
+        assert!(policy_allows(Some("on"), false));
+        assert!(policy_allows(Some("on"), true));
+        assert!(!policy_allows(Some("off"), true));
+        assert!(!policy_allows(Some("off"), false));
     }
 
     #[test]
     #[should_panic(expected = "_ALLOWS_* value is neither `on` nor `off`")]
     fn an_allowance_that_is_neither_on_nor_off_stops_the_build() {
-        policy_allows(Some("y"));
+        policy_allows(Some("y"), true);
+    }
+
+    /// `WZ_POLICY_DOMAINS` forces either rule, and a build that states nothing gets its target's:
+    /// the default alone with no operating system, every value otherwise.
+    #[test]
+    fn the_domain_rule_is_stated_or_the_targets() {
+        assert!(!policy_defaults_only(Some("full")));
+        assert!(policy_defaults_only(Some("defaults")));
+        assert_eq!(policy_defaults_only(None), cfg!(target_os = "none"));
+    }
+
+    #[test]
+    #[should_panic(expected = "WZ_POLICY_DOMAINS is neither `full` nor `defaults`")]
+    fn a_domain_rule_that_is_neither_stops_the_build() {
+        policy_defaults_only(Some("all"));
     }
 
     /// The value types agree with the fields of `SessionPolicy` in whatever build the test runs:
