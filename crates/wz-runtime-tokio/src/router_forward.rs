@@ -474,6 +474,8 @@ mod local_publish;
 mod peer_differential_tests;
 #[cfg(test)]
 mod peer_network_tests;
+#[cfg(test)]
+mod policy_tests;
 mod routing_spans;
 mod shed;
 #[cfg(test)]
@@ -3258,6 +3260,10 @@ pub struct RouterForwarder {
     /// controllable `base + offset` closure via [`with_clock`](Self::with_clock),
     /// exactly as the retired single-net forwarder did. Production is `Instant::now`.
     clock: Box<dyn Fn() -> Instant + Send + Sync>,
+    /// The snapshot of this node's policies its creator resolved: the node's machines (its table
+    /// sharing, its link admission, the rule for a second link to one node) read them here and
+    /// never from the build.
+    policy: wz_session_core::policy::SessionPolicy,
     /// R311y450 — THIS router's §5.18 wall-clock HLC, the source of the
     /// forward-path timestamp [`route_push`](Self::route_push) applies. A distinct
     /// axis from `clock` above (that one is the opaque MONOTONIC clock for query
@@ -4701,12 +4707,43 @@ impl RouterForwarder {
         self_zid: Zid,
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
-        Self::build(
+        Self::for_node(
             WhatAmI::Router,
+            self_zid,
+            timestamping,
+            &Self::resolve_policy(),
+        )
+    }
+
+    /// The forwarder of a node of role `node_mode` (a router, a peer or a client: the hats each
+    /// role runs are [`Self::with_timestamping`]'s, [`Self::peer_with_timestamping`]'s and
+    /// [`Self::client_with_timestamping`]'s), whose machines read `policy`, the snapshot the
+    /// node's creator resolved from its configuration.
+    pub fn for_node(
+        node_mode: WhatAmI,
+        self_zid: Zid,
+        timestamping: crate::node_clock::TimestampingEnabled,
+        policy: &wz_session_core::policy::SessionPolicy,
+    ) -> Self {
+        Self::build(
+            node_mode,
             self_zid,
             Box::new(Instant::now),
             timestamping,
+            policy,
         )
+    }
+
+    /// The snapshot a forwarder made by a constructor that is handed none resolves: the build
+    /// defaults, until a run-time document is read here. A node whose creator holds its own
+    /// snapshot uses [`Self::for_node`].
+    fn resolve_policy() -> wz_session_core::policy::SessionPolicy {
+        wz_session_core::policy::SessionPolicy::defaults()
+    }
+
+    /// The snapshot of this node's policies.
+    pub fn policy(&self) -> &wz_session_core::policy::SessionPolicy {
+        &self.policy
     }
 
     /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder).
@@ -4851,8 +4888,8 @@ impl RouterForwarder {
     }
 
     /// Share the routing tables as `sharing` says (`docs/router-table-snapshots.md`), in place of
-    /// the build's value of the `routing-table-sharing` policy: what a test of one value's
-    /// behaviour calls, and a host that chooses the value when it starts.
+    /// the snapshot's value of the `routing-table-sharing` policy: what a test of one value's
+    /// behaviour calls.
     ///
     /// Call it before any face registers and before any view of the tables is taken (the admin
     /// views, the session directory): a view holds the tables it was taken from, and would go on
@@ -4871,7 +4908,7 @@ impl RouterForwarder {
         self
     }
 
-    /// How this router shares its routing tables: the build's value of the
+    /// How this router shares its routing tables: the snapshot's value of the
     /// `routing-table-sharing` policy, or the one [`Self::with_table_sharing`] named.
     pub fn table_sharing(&self) -> RoutingTableSharing {
         self.tables.sharing()
@@ -4946,6 +4983,7 @@ impl RouterForwarder {
             self_zid,
             clock,
             crate::node_clock::TimestampingEnabled::default(),
+            &Self::resolve_policy(),
         )
     }
 
@@ -4964,11 +5002,11 @@ impl RouterForwarder {
         self_zid: Zid,
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
-        Self::build(
+        Self::for_node(
             WhatAmI::Peer,
             self_zid,
-            Box::new(Instant::now),
             timestamping,
+            &Self::resolve_policy(),
         )
     }
 
@@ -4988,11 +5026,11 @@ impl RouterForwarder {
         self_zid: Zid,
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
-        Self::build(
+        Self::for_node(
             WhatAmI::Client,
             self_zid,
-            Box::new(Instant::now),
             timestamping,
+            &Self::resolve_policy(),
         )
     }
 
@@ -5017,20 +5055,22 @@ impl RouterForwarder {
             self_zid,
             clock,
             crate::node_clock::TimestampingEnabled::default(),
+            &Self::resolve_policy(),
         )
     }
 
     /// The inner constructor every public constructor funnels through, so the
-    /// field initialiser lives ONCE (only the monotonic clock and the
-    /// `timestamping.enabled` map vary).
+    /// field initialiser lives ONCE (only the monotonic clock, the
+    /// `timestamping.enabled` map and the node's snapshot vary).
     fn build(
         node_mode: WhatAmI,
         self_zid: Zid,
         clock: Box<dyn Fn() -> Instant + Send + Sync>,
         timestamping: crate::node_clock::TimestampingEnabled,
+        policy: &wz_session_core::policy::SessionPolicy,
     ) -> Self {
         Self {
-            // Shared as the build's `routing-table-sharing` value says; a test names the other
+            // Shared as the snapshot's `routing-table-sharing` value says; a test names the other
             // value with [`Self::with_table_sharing`].
             tables: Arc::new(TablesCell::new(
                 Tables {
@@ -5058,7 +5098,7 @@ impl RouterForwarder {
                     mesh_ids: Arc::new(MeshDeclaredIds::default()),
                     local_face_sink: None,
                 },
-                RoutingTableSharing::default(),
+                policy.routing_table_sharing(),
             )),
             // R311y450 — this node's §5.18 clock, over the SAME `node_mode`
             // both nets above are seeded with, so the timestamping gate cannot
@@ -5077,7 +5117,10 @@ impl RouterForwarder {
             credit: Arc::new(egress::Credit::default()),
             own_zid: self_zid,
             #[cfg(feature = "routing-accept")]
-            links: Arc::new(crate::link_registry::LinkRegistry::new(self_zid.as_slice())),
+            links: Arc::new(crate::link_registry::LinkRegistry::with_order(
+                self_zid.as_slice(),
+                policy.link_tie_order(),
+            )),
             shed_registry: Arc::default(),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
             // enables autoconnect behaves byte-for-byte as before.
@@ -5152,6 +5195,7 @@ impl RouterForwarder {
             recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
+            policy: *policy,
         }
     }
 }
@@ -14796,7 +14840,8 @@ impl FaceForwarder for RouterForwarder {
         remote_zid: &[u8],
     ) -> Option<wz_session_core::link_admission::SecondLink> {
         let tables = self.tables.read();
-        Some(wz_session_core::link_admission::judge_second_link(
+        Some(wz_session_core::link_admission::judge_second_link_by(
+            self.policy.link_tie_order(),
             held_dialled,
             new_dialled,
             tables.north_net().self_zid().as_slice(),

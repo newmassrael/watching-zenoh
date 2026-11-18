@@ -140,6 +140,8 @@ pub async fn bind_scout_sockets(
             bind: None,
             dscp: None,
             loopback: Default::default(),
+            // A scouting socket is not a link, which is all the policy governs.
+            link_requires_iface: false,
         };
         match UdpDriver::bind_multicast_tx(group, port, cfg).await {
             Ok(driver) => bound.push(driver),
@@ -162,6 +164,8 @@ pub async fn bind_scout_sockets(
             bind: None,
             dscp: None,
             loopback: Default::default(),
+            // A scouting socket is not a link, which is all the policy governs.
+            link_requires_iface: false,
         };
         match UdpDriver::bind_multicast_tx(group, port, cfg).await {
             Ok(driver) => bound.push(driver),

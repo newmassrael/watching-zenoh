@@ -1400,7 +1400,7 @@ where
     // Established-only: fragments arriving before Established are reported
     // but not reassembled (this loop runs the data plane).
     #[cfg(feature = "reassembly")]
-    let mut reasm = TokioReassembly::new(reassembly_config());
+    let mut reasm = TokioReassembly::new(reassembly_config(&actions.params.policy));
     // The Established lease / keepalive wake, kept ARMED across iterations for a
     // caller that signals its own deadline revisions (`ExtraDeadline::revised`).
     // Both deadlines only move LATER while the session stands (every inbound

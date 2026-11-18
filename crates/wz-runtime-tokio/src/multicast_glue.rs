@@ -1212,7 +1212,7 @@ where
     // `defrag_buff_size` bounds every upstream multicast peer's.
     #[cfg(feature = "reassembly")]
     let mut reasm = crate::reassembly::TokioReassembly::new(
-        crate::reassembly::reassembly_config()
+        crate::reassembly::reassembly_config_of_build()
             .with_max_message_bytes(params.link_rx.max_message_size),
     );
 

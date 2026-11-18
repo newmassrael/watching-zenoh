@@ -4630,17 +4630,13 @@ async fn run_peer_until(
     // the peer hat in `North` and a broker hat for the clients south of it.
     // A client node runs the pin's client hat in `North`, as the node engine opens one
     // (`RouterForwarder::client_with_timestamping`); a peer runs the peer hat.
-    let forwarder = if opts.as_client {
-        RouterForwarder::client_with_timestamping(
-            Zid::from_slice(&params.zid),
-            opts.timestamping.map_for(role),
-        )
-    } else {
-        RouterForwarder::peer_with_timestamping(
-            Zid::from_slice(&params.zid),
-            opts.timestamping.map_for(role),
-        )
-    };
+    // The forwarder's machines read the node's snapshot, the one its sessions are handed.
+    let forwarder = RouterForwarder::for_node(
+        role,
+        Zid::from_slice(&params.zid),
+        opts.timestamping.map_for(role),
+        &params.policy,
+    );
     let forwarder = forwarder
         .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
         // Item 751, step 7d — the south partition, before ANYTHING else is set on the hats: it
@@ -6458,9 +6454,7 @@ async fn run_router_hat_until(
     #[cfg(not(feature = "scouting-responder"))]
     let _ = scout_listen;
     use std::time::Duration;
-    use wz::runtime_tokio::accept_loop::{
-        peer_loop_shared, AcceptEvent, FaceSources, RoutingFaceDrive,
-    };
+    use wz::runtime_tokio::accept_loop::{peer_loop_shared, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::Zid;
     use wz::runtime_tokio::router_forward::RouterForwarder;
     // Cadence of the OBSERVE-only application driver (a pure router originates no
@@ -6554,10 +6548,16 @@ async fn run_router_hat_until(
     //
     // Shared, because under the `routing-face-drive` policy's upstream value each face's drive
     // is a task of its own and holds the forwarder (`peer_loop_shared`).
+    // The router's machines read the node's snapshot, the one its sessions are handed.
     let forwarder = Arc::new(
-        RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping)
-            .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
-            .with_south_partition(opts.south_partition.clone()),
+        RouterForwarder::for_node(
+            wz::runtime_tokio::session_glue::WhatAmI::Router,
+            Zid::from_slice(&params.zid),
+            node_timestamping,
+            &params.policy,
+        )
+        .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
+        .with_south_partition(opts.south_partition.clone()),
     );
 
     // R2634 — the ONE live `WzConfig` this host runs on, built before the first
@@ -6737,7 +6737,11 @@ async fn run_router_hat_until(
         const MCAST_GROUP: IpAddr = IpAddr::V4(Ipv4Addr::new(224, 0, 0, 225));
         const MCAST_PORT: u16 = 7452;
         match multicast_locator {
-            None => (MCAST_GROUP, MCAST_PORT, McastGroupOptions::default()),
+            None => (
+                MCAST_GROUP,
+                MCAST_PORT,
+                McastGroupOptions::of_policy(&params.policy),
+            ),
             // A malformed value is a HARD ERROR, never a warn-and-default: a deploy
             // that meant to pin its group to one interface and silently got the
             // default multicast route would egress somewhere it did not ask for.
@@ -6769,7 +6773,8 @@ async fn run_router_hat_until(
                         joins: p.mcast_join,
                         bind: p.socket.as_ref().and_then(|s| s.bind.clone()),
                         dscp: p.socket.as_ref().and_then(|s| s.dscp),
-                        loopback: Default::default(),
+                        loopback: params.policy.multicast_loopback(),
+                        link_requires_iface: params.policy.multicast_link_requires_iface(),
                     },
                 ),
                 Err(e) => {
@@ -7641,6 +7646,8 @@ async fn run_router_hat_until(
     // The node's id as the host loop's heartbeat names it, read before `params` moves into the
     // face loop below.
     let host_zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid);
+    // How each face is driven, from the node's snapshot, read before `params` moves too.
+    let face_drive = params.policy.routing_face_drive();
     let loop_fut = peer_loop_shared(
         FaceSources {
             // R2099 (item 512) — EVERY bound `listen/endpoints` member.
@@ -7710,7 +7717,7 @@ async fn run_router_hat_until(
             }
         },
         forwarder.clone(),
-        RoutingFaceDrive::default(),
+        face_drive,
     );
     tokio::pin!(loop_fut);
 

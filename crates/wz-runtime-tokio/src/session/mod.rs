@@ -1073,6 +1073,11 @@ where
     /// `Session` clone (each helper propagates one) hands out the SAME clock
     /// rather than forking it.
     node_hlc: crate::node_clock::NodeHlc,
+    /// The value of every policy this session's machines read: on a unicast session the snapshot
+    /// its creator put in its `SessionInitParams`, on a multicast session the one
+    /// [`Session::with_policy`] installs. A declaration that states no choice of its own takes
+    /// the session's from here, never from the build.
+    policy: wz_session_core::policy::SessionPolicy,
     /// R311y531 — requests whose `ResponseFinal` a queryable handler has taken
     /// over, keyed by rid.
     ///
@@ -1389,6 +1394,12 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         WeakSession(Arc::downgrade(&self.0))
     }
 
+    /// The snapshot of this session's policies: what a declaration that states no choice of its
+    /// own is given.
+    pub fn policy(&self) -> &wz_session_core::policy::SessionPolicy {
+        &self.policy
+    }
+
     /// Whether `other` is a handle on THIS session — not merely an equal one.
     ///
     /// For a host that files work under a key it may later find reused: a
@@ -1549,6 +1560,7 @@ where
             // An Arc bump, deliberately: a fork must SHARE the node clock, not
             // copy it (see the field doc).
             node_hlc: self.node_hlc.clone(),
+            policy: self.policy,
             // Shared, for the same reason: a fork that copied the hold map
             // would let one handle emit a terminator another still holds.
             #[cfg(feature = "query-queryable")]
@@ -3297,7 +3309,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     ) -> (SubscriptionId, SampleCell<R>) {
         // `entity-timestamp-opt-in`: the one place a subscriber's samples are handed to its
         // callback, so the one place the declaration's choice about the timestamp is applied.
-        let expose_timestamp = options.expose_timestamp();
+        let expose_timestamp = options.expose_timestamp_by(&self.policy);
         let callback = move |sample: &dyn SampleView| {
             if expose_timestamp {
                 callback(sample);
@@ -3343,6 +3355,19 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
 // error rather than a runtime guard.
 #[cfg(feature = "transport-multicast")]
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
+    /// Install `policy`, the snapshot the creator of this group session resolved, in place of the
+    /// build defaults [`Self::new_multicast`] starts from. Chain it onto the constructor, before
+    /// anything is declared: a declaration takes the session's value when it is made.
+    #[must_use]
+    pub fn with_policy(mut self, policy: wz_session_core::policy::SessionPolicy) -> Self
+    where
+        <Multicast as TransportState<R, T>>::Payload: Clone,
+    {
+        // `make_mut` for the reason `with_local_delivery_drain` gives.
+        Arc::make_mut(&mut self.0).policy = policy;
+        self
+    }
+
     /// R311mn (Level B, B2) / R311nf — construct a multicast `Session` from the
     /// shared observer + clock (the handshake-free multicast transport has no
     /// `SessionLinkActions` bundle). R311mo (B3) adds the `codec-push`-gated
@@ -3470,6 +3495,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             // multicast transport, and no auto-stamp consumer takes a multicast
             // session (both take `Session<R, T, Unicast>`).
             node_hlc: crate::node_clock::NodeHlc::disabled(),
+            // A group's parameters carry no snapshot yet, so the session starts from the build
+            // defaults and its creator installs its own with `with_policy`.
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
             // R2690 — allocated but never filled on a multicast session: the
             // admin declare surface is `Session<R, T, Unicast>`-only, and a
             // multicast session holds no face whose declarations could be
@@ -4097,6 +4125,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // by construction (R311ne — drops the defensive `if let Ok` that
         // re-asked a known-`Ok` question).
         let zid = actions.params.zid;
+        // The snapshot the creator handed the session's machines, read before `actions` moves.
+        let policy = actions.params.policy;
         // R311y450 — build THIS node's HLC once, here, from the same handshake
         // identity and role the dedup install below reads. Derived rather than
         // passed so the 100-plus existing `Session::new` call sites keep working
@@ -4129,6 +4159,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
             node_hlc,
+            policy,
             #[cfg(feature = "query-queryable")]
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]

@@ -281,15 +281,15 @@ pub struct ReconnectingSession {
     liveliness_session: Option<TokioSession>,
     /// How the declaration cache is replayed after a reopen: `None` is upstream's one call, and
     /// `Some` is the paced replay of the `declaration-sync-pacing` policy
-    /// ([`ReplayPacing::from_build`] sets it from the build).
+    /// ([`ReplayPacing::of_policy`] sets it from the snapshot the session was opened with).
     replay_pacing: Option<ReplayPacing>,
 }
 
 /// The pace of a paced declaration replay (`declaration-sync-pacing`), shared with the
 /// slot node and so defined in `wz-session-core`. The supervisor holds it as an `Option`, so a
-/// test, or a caller that wants it on regardless of the build, can state it
-/// ([`ReconnectingSession::set_replay_pacing`]); the build states it through
-/// [`ReplayPacing::from_build`].
+/// test, or a caller that wants it on regardless of the session's snapshot, can state it
+/// ([`ReconnectingSession::set_replay_pacing`]); the snapshot states it through
+/// [`ReplayPacing::of_policy`].
 pub use wz_session_core::replay_pacing::ReplayPacing;
 
 /// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
@@ -328,12 +328,17 @@ impl ReconnectingSession {
         self.liveliness_session = Some(session);
     }
 
-    /// State how the declaration cache is replayed after a reopen, overriding the build's
-    /// ([`ReplayPacing::from_build`]): `None` is upstream's one call, `Some` the paced replay.
-    /// A setter for the reason [`Self::set_liveliness_flush`] is one, and for a test that must
-    /// name the value it is about, which a build-time policy cannot give it.
+    /// State how the declaration cache is replayed after a reopen, overriding the session's
+    /// snapshot ([`ReplayPacing::of_policy`]): `None` is upstream's one call, `Some` the paced
+    /// replay. A setter for the reason [`Self::set_liveliness_flush`] is one, and for a test that
+    /// must name the value it is about.
     pub fn set_replay_pacing(&mut self, pacing: Option<ReplayPacing>) {
         self.replay_pacing = pacing;
+    }
+
+    /// How the declaration cache is replayed after a reopen: see [`Self::set_replay_pacing`].
+    pub fn replay_pacing(&self) -> Option<ReplayPacing> {
+        self.replay_pacing
     }
 
     /// [`drive_session_until_terminal`] over the current connection, with the turns of a paced
@@ -495,8 +500,10 @@ impl ReconnectingSession {
                 let dialed = dial_locator(locator.into(), &self.dial_config)
                     .await
                     .map_err(OpenError::Dial)?;
+                // The snapshot the session was opened with, so every link a reconnect wires
+                // reads as the first did.
                 let (inbound, outbound, writer_handle) =
-                    wire_dialed_link_with_rx(dialed, self.link_rx);
+                    wire_dialed_link_with_rx(dialed, self.link_rx, &self.actions.params.policy);
                 let old = self.swappable.swap(outbound);
                 drop(old);
                 // R311ju — engine build + Initiator activation + open loop live
@@ -836,11 +843,15 @@ pub async fn open_session_with_reconnect(
     // `.into()`) and move the original into the supervisor for the re-dials.
     // The dial and the handshake are one open, bounded by `transport/unicast/open_timeout`.
     let link_rx = params.link_rx;
+    // The replay pace is the session's `declaration-sync-pacing`, from the snapshot its creator
+    // handed it in `params`.
+    let replay_pacing = ReplayPacing::of_policy(&params.policy);
     let (swappable, opened) = open_within(dial_config.open_timeout, async {
         let dialed = dial_locator(locator.clone().into(), &dial_config)
             .await
             .map_err(OpenError::Dial)?;
-        let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(dialed, link_rx);
+        let (inbound, outbound, writer_handle) =
+            wire_dialed_link_with_rx(dialed, link_rx, &params.policy);
         let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
         let actions = new_session_actions(sink, params, clock);
@@ -874,7 +885,7 @@ pub async fn open_session_with_reconnect(
         opened,
         reconnects: 0,
         liveliness_session: None,
-        replay_pacing: ReplayPacing::BUILD,
+        replay_pacing,
     })
 }
 

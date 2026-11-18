@@ -594,13 +594,15 @@ async fn run_group(
     // One bind for the first join and every re-join, so a re-join installs
     // exactly the membership the first one did. Each join's session binds it
     // when it asks for its link.
+    // The node's snapshot decides the two link policies of the group's sockets.
+    let snapshot = crate::args::resolve_policy();
     let bind = || {
         UdpDriver::bind_multicast(
             group,
             port,
             McastSocketConfig {
                 iface: iface.as_deref(),
-                ..Default::default()
+                ..McastSocketConfig::of_policy(&snapshot)
             },
         )
     };
@@ -736,13 +738,15 @@ where
 
     let producer = MulticastTxProducer::new();
     let clock = Arc::new(TokioTime::new());
+    // The node's snapshot, which the session's declarations read.
     let session = TokioMulticastSession::new_multicast(
         Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
             ApplicationLayerObserver::new(),
         )),
         clock.clone(),
         producer.clone(),
-    );
+    )
+    .with_policy(crate::args::resolve_policy());
     // The policy this session is held to, when the document asks for one: installed once, read
     // by the group's egress check and by the ingress gate every dispatcher below carries.
     #[cfg(feature = "access-acl-multicast")]

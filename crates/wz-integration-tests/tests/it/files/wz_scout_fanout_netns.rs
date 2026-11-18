@@ -94,6 +94,7 @@ async fn in_a_netns_the_fan_out_reaches_an_interface_the_default_route_does_not(
             bind: None,
             dscp: None,
             loopback: wz_runtime_tokio::policy::MulticastLoopback::On,
+            link_requires_iface: false,
         },
     )
     .await

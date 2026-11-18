@@ -446,11 +446,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let session = self.downgrade();
         // The clock a reply is stamped with: this session's own, shared with every other
         // consumer of it (`Session::node_hlc`), and held only where the policy asks for it.
-        let reply_clock = reply_clock_for(
-            &wz_session_core::policy::SessionPolicy::from_build(),
-            stamps,
-            &self.node_hlc,
-        );
+        let reply_clock = reply_clock_for(&self.policy, stamps, &self.node_hlc);
         let sink = move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
             // The registry-provided responder (`_out`, bound to the
             // observer's pending_replies) is deliberately unused: the

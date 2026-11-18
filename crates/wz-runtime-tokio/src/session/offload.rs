@@ -717,7 +717,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| OffloadError::NoRuntime)?;
         let lane = Arc::new(OffloadLane::new());
         let cell = Arc::new(CallbackCell::new(callback));
-        let overload = options.overload();
+        let overload = options.overload_by(self.policy());
         let sink_lane = lane.clone();
         let subscriber = self
             .declare_subscriber(keyexpr, options, move |view| {
