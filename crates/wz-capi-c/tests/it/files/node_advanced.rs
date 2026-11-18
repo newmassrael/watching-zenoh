@@ -38,7 +38,7 @@ use wz_capi_c::advanced::{
 };
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
-use wz_capi_c::entity::z_entity_global_id_zid;
+use wz_capi_c::entity::{z_entity_global_id_eid, z_entity_global_id_zid};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::matching::{z_matching_status_t, ze_advanced_publisher_get_matching_status};
 use wz_capi_c::result::Z_OK;
@@ -81,18 +81,28 @@ fn endpoint(port: u16) -> String {
     format!("[\"tcp/127.0.0.1:{port}\"]")
 }
 
-/// A node that keeps a south of clients apart, and a registry peer that dials it.
-unsafe fn node_and_peer() -> (z_owned_session_t, z_owned_session_t) {
-    let (port_node, port_peer) = (free_port(), free_port());
-    let node = open_with(&[
+/// A node that keeps a south of clients apart, listening on `port`.
+unsafe fn open_node_on(port: u16) -> z_owned_session_t {
+    open_with(&[
         ("scouting/multicast/enabled", "false".to_owned()),
         ("mode", "\"peer\"".to_owned()),
-        ("listen/endpoints", endpoint(port_node)),
+        ("listen/endpoints", endpoint(port)),
         (
             "gateway",
             r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
         ),
-    ]);
+    ])
+}
+
+/// `open_node_on` a port of its own.
+unsafe fn open_node() -> z_owned_session_t {
+    open_node_on(free_port())
+}
+
+/// A node that keeps a south of clients apart, and a registry peer that dials it.
+unsafe fn node_and_peer() -> (z_owned_session_t, z_owned_session_t) {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let node = open_node_on(port_node);
     let peer = open_with(&[
         ("scouting/multicast/enabled", "false".to_owned()),
         ("mode", "\"peer\"".to_owned()),
@@ -243,6 +253,43 @@ fn an_advanced_publisher_on_a_node_puts_and_deletes_to_a_peer() {
         );
         close_session(node);
         close_session(peer);
+    }
+}
+
+/// An advanced publisher on a node takes its entity id from that node's own space, as upstream's
+/// takes its runtime's: two nodes opened alike number their first publisher alike, where one
+/// counter shared by every node of the process would give the second node's publisher the next
+/// id. The ids are read through the publisher's global id.
+#[test]
+fn an_advanced_publisher_takes_its_entity_id_from_its_own_node() {
+    unsafe {
+        let first_node = open_node();
+        let second_node = open_node();
+        let mut first = declare_publisher(&first_node, 1);
+        let mut second = declare_publisher(&second_node, 1);
+        let first_id = ze_advanced_publisher_id(ze_advanced_publisher_loan(&first));
+        let second_id = ze_advanced_publisher_id(ze_advanced_publisher_loan(&second));
+        assert_ne!(
+            z_entity_global_id_eid(&first_id),
+            0,
+            "a declared publisher has an entity id"
+        );
+        assert_eq!(
+            z_entity_global_id_eid(&first_id),
+            z_entity_global_id_eid(&second_id),
+            "each node numbers its own publishers"
+        );
+        for publisher in [&mut first, &mut second] {
+            assert_eq!(
+                ze_undeclare_advanced_publisher(
+                    (publisher as *mut ze_owned_advanced_publisher_t)
+                        .cast::<ze_moved_advanced_publisher_t>()
+                ),
+                Z_OK
+            );
+        }
+        close_session(first_node);
+        close_session(second_node);
     }
 }
 
