@@ -4813,6 +4813,24 @@
       "carry_forward_bullets": [
         "The sending side (`e2e_sender`, `segment_sender`) still reads the capture crate's JSON shapes and stays there; a runtime door for it is later work."
       ]
+    },
+    "Round 4512": {
+      "decision_summary": "Two nodes that dial each other at the same moment keep the link the node with the lower zid dialled, and \"lower\" now follows a policy, `link-tie-order`, default `zid-number`: the zid read as the 128-bit number zenoh reads, its first wire byte the least significant, which is what wz did. `zid-bytes` compares the ids byte by byte from the first wire byte, as zenoh-pico compares ids. The two orders disagree on most pairs, and two ends stating different values each keep their own dial and close the other's, so no link survives; the policy exists so a node can state the order its peers use. The one rule function reads the policy, so every engine that asks it follows.",
+      "changes_bullets": [
+        "`deploy/wz-config.toml`: policy `link-tie-order` (choice `zid-number`, `zid-bytes`), and its generated outputs (`Kconfig.policies`, `policy_generated.rs`, the conformance items and statement vectors, whose digests move with the new question).",
+        "`crates/wz-session-core/src/link_admission.rs`: `zid_order_key` replaces `zid_value`; `judge_second_link` reads the build's policy and `judge_second_link_by` takes the order; four tests: each value by name, one link kept per order, none kept across two orders, and the build reading its policy."
+      ],
+      "verification_bullets": [
+        "On pc2: `cargo test -p wz-session-core --lib link_admission` 15 passed in the default build and 15 with `WZ_POLICY_LINK_TIE_ORDER=zid-bytes`; `--lib policy` 30 passed; `cargo test -p wz-conformance-build` 12 passed with the regenerated vectors; `cargo clippy -p wz-session-core --all-targets -D warnings` clean; `cargo fmt --check` after formatting.",
+        "Locally: `wz_config.py --check`, reason review pins, store reason citations and the cross-implementation proof audit pass; no file outside the statement vectors pins a conformance digest."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "No end-to-end lane yet dials two nodes at once with each order; the C ABIs do not yet offer the policy at run time (it is a build value, as every policy is today)."
+      ]
     }
   },
   "inventory_entries": {
