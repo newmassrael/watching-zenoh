@@ -126,3 +126,51 @@ pub const Z_ERR_TRANSPORT_OPEN_FAILED: ZResult = -102;
 /// An allocation failed. Matches pico `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 /// (`utils/result.h`).
 pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;
+
+/// A wz door (`wz_ext.h`) was asked for something this build's policy does not
+/// allow: a get addressed to one node (`wz_ext_get_to_peer`) while the
+/// `targeted-query` policy is off. Nothing was sent. Not `Z_EINVAL`, which says
+/// the value is wrong: the same call is right in a build whose policy is on.
+/// wz's own code, outside pico's (which run from -128 to -65, beside the
+/// collapsed [`Z_ERR_INVALID`]), so a later pico code cannot take it.
+pub const WZ_EXT_ERR_POLICY_OFF: ZResult = -2;
+
+/// The engine the session runs on does not do what a wz door asked: the
+/// cooperative engine watches no peer's declarations and addresses no get to one
+/// node, and a build without a plane hears no declaration of it. Nothing was
+/// declared or sent. wz's own code, for the reason [`WZ_EXT_ERR_POLICY_OFF`] is.
+pub const WZ_EXT_ERR_UNSUPPORTED: ZResult = -3;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wz codes are errors to a caller's `< 0` test, differ from each other and from every
+    /// code this file transcribes from pico.
+    #[test]
+    fn the_wz_codes_are_errors_of_their_own() {
+        let pico = [
+            Z_ERR_GENERIC,
+            Z_ERR_OVERFLOW,
+            Z_ERR_NULL,
+            Z_ERR_INVALID,
+            Z_ERR_KEYEXPR_NOT_MATCH,
+            Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION,
+            Z_ERR_CANCELLED,
+            Z_ERR_TIMESTAMP_GENERATION_FAILED,
+            Z_ERR_SESSION_CLOSED,
+            Z_EINVAL,
+            Z_ERR_SCOUT_NO_RESULTS,
+            Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
+            Z_ERR_CONFIG_INVALID_MODE,
+            Z_ERR_TRANSPORT_NOT_AVAILABLE,
+            Z_ERR_TRANSPORT_OPEN_FAILED,
+            Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        ];
+        for wz in [WZ_EXT_ERR_POLICY_OFF, WZ_EXT_ERR_UNSUPPORTED] {
+            assert!(wz < 0, "{wz} must read as a failure");
+            assert!(!pico.contains(&wz), "{wz} is a pico code");
+        }
+        assert_ne!(WZ_EXT_ERR_POLICY_OFF, WZ_EXT_ERR_UNSUPPORTED);
+    }
+}

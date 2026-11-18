@@ -166,6 +166,13 @@ pub mod connectivity;
 // surface (the clock of the observation plane).
 #[cfg(feature = "clock-source")]
 pub mod clock_source;
+// What the peers of a session declare and retract, told to C: wz doors (`wz_ext.h`) in a build with
+// either capability that reads them (the declaration watch).
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
@@ -179,6 +186,10 @@ pub mod event_log;
 mod ffi;
 #[cfg(feature = "query")]
 pub mod get;
+// A get addressed to one node by its zenoh id: a wz door (`wz_ext.h`), refused while the build's
+// `targeted-query` policy is off.
+#[cfg(feature = "query")]
+pub mod get_to_peer;
 pub mod handlers;
 pub mod keyexpr;
 mod last_timestamp;

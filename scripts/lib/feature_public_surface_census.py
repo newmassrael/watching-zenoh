@@ -499,11 +499,18 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # public items are pico's `z_scout`, `z_hello_*` and `z_closure_hello*` doors, each
         # `#[no_mangle] extern "C"`, and the types they take; the feature only changes the window
         # the doors ask through (one datagram socket of the engine's stack, for an image).
+        # `remote-declaration-watch` and `declarations-synced-event` each gate `pub mod
+        # decl_watch` (either one is enough), whose public items are wz's own doors
+        # `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`, the event struct, the owned
+        # watch and the constants they take, declared in `wz_ext.h`, off by default as the
+        # observation plane's doors are.
         frozenset(
             {
                 "admin-space",
                 "clock-source",
+                "declarations-synced-event",
                 "event-ring",
+                "remote-declaration-watch",
                 "resource-snapshot",
                 "scout-mcu",
                 "supervision",

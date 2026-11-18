@@ -672,12 +672,13 @@ CASES: tuple[Case, ...] = (
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
-         exports=804,
+         exports=805,
          note="every capability on: the symbol count is the drop-in's. 809 -> 802 when the "
               "seven single-threaded entry points left the multi-threaded arm; 804 with the "
               "conformance digest's door (`wz_ext_conformance_digest`, decision C15); 803 with the "
               "door that answers what a configuration asks of the operating system "
-              "(`wz_ext_config_device_requires`). 4,216,542 "
+              "(`wz_ext_config_device_requires`); 805 with the get addressed to one node "
+              "(`wz_ext_get_to_peer`, in every build with the query plane). 4,216,542 "
               "measured with the multicast transport pico's default has (open-debt item 913), "
               "3,790,610 without it. 4,301,320 measured locally on the head of the round that "
               "ends the queries pending on a face with it (1,320 over 4,300,000), the growth "

@@ -1104,16 +1104,20 @@ fn transmit_parameters(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> 
 /// (pico's contract — its own `z_get` takes the closure by value up front and
 /// `z_bytes_drop`s payload/attachment at every exit, `src/api/api.c:1753-1786`).
 ///
+/// `addressed` is the node the get is addressed to (`wz_ext_get_to_peer`), or
+/// the code its refusal answers; `Ok(None)` for every `z_*` entry point.
+///
 /// # Safety
 /// The pointers must be null or valid values of their types; `parameters` must
 /// be null or readable for `parameters_len` bytes.
-unsafe fn get_inner(
+pub(crate) unsafe fn get_inner(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
     parameters: *const std::ffi::c_char,
     parameters_len: usize,
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
+    addressed: Result<Option<Vec<u8>>, ZResult>,
 ) -> ZResult {
     // Consume the moved payload / attachment FIRST — before the null-callback
     // return below, which is a path they must also be freed on. `z_bytes_*` IS
@@ -1154,6 +1158,13 @@ unsafe fn get_inner(
     // frees it — and, because the drop IS the completion signal, an early error
     // also correctly reports "this get is over".
     let cclosure = adopt_reply_closure(callback);
+    // A refused target is answered before the session is read, as the zenoh-c
+    // ABI's statement doors answer theirs; the closure adopted above runs its
+    // drop, so the get is reported over with nothing sent.
+    let target_peer = match addressed {
+        Ok(target_peer) => target_peer,
+        Err(code) => return code,
+    };
 
     let Some(handle) = session_handle(zs) else {
         return Z_ERR_NULL;
@@ -1227,6 +1238,7 @@ unsafe fn get_inner(
         value_meta,
         cclosure,
         token,
+        target_peer,
     )
 }
 
@@ -1318,6 +1330,12 @@ impl PicoQueryQos {
 ///
 /// The caller has already adopted the C closure, so `closure` owns the
 /// `drop(context)` from here: every path below completes the get.
+///
+/// `target_peer` is the node the get is addressed to (`wz_ext_get_to_peer`),
+/// already admitted by the build's `targeted-query` policy; `None` is the get
+/// every `z_*` entry point asks. An engine that cannot address a get to one node
+/// asks no link and the get answers `WZ_EXT_ERR_UNSUPPORTED`, completed with no
+/// reply.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn issue_get(
     engine: &Engine,
@@ -1334,6 +1352,7 @@ pub(crate) fn issue_get(
     value_meta: PicoQueryValueMeta,
     closure: Arc<CReplyClosure>,
     token: Option<Arc<CancellationToken>>,
+    target_peer: Option<Vec<u8>>,
 ) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
 
@@ -1358,9 +1377,28 @@ pub(crate) fn issue_get(
         value_meta,
     );
 
-    fan_get(closure, gate, token, |fan, leg| {
-        engine.get_on_wire(&keyexpr, &wire, &opts, fan, leg)
-    })
+    let Some(target_peer) = target_peer else {
+        return fan_get(closure, gate, token, |fan, leg| {
+            engine.get_on_wire(&keyexpr, &wire, &opts, fan, leg)
+        });
+    };
+    let opts = opts.with_target_peer(target_peer);
+    // The engine's refusal issues no leg, so the fan completes the get with no reply and answers
+    // `Z_OK`; the refusal is what the caller is told.
+    let mut refused = false;
+    let issued = fan_get(closure, gate, token, |fan, leg| {
+        engine
+            .get_stated(&keyexpr, &wire, &opts, fan, leg)
+            .unwrap_or_else(|_| {
+                refused = true;
+                Some(0)
+            })
+    });
+    if refused {
+        crate::result::WZ_EXT_ERR_UNSUPPORTED
+    } else {
+        issued
+    }
 }
 
 /// Fan one C get across every connected face and, where its destination admits
@@ -1523,7 +1561,7 @@ pub unsafe extern "C" fn z_get(
         } else {
             std::ffi::CStr::from_ptr(parameters).to_bytes().len()
         };
-        get_inner(zs, keyexpr, parameters, len, callback, options)
+        get_inner(zs, keyexpr, parameters, len, callback, options, Ok(None))
     })
 }
 
@@ -1539,7 +1577,17 @@ pub unsafe extern "C" fn z_get_with_parameters_substr(
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
 ) -> ZResult {
-    guarded(|| get_inner(zs, keyexpr, parameters, parameters_len, callback, options))
+    guarded(|| {
+        get_inner(
+            zs,
+            keyexpr,
+            parameters,
+            parameters_len,
+            callback,
+            options,
+            Ok(None),
+        )
+    })
 }
 
 // --- loaned-reply accessors ------------------------------------------------
