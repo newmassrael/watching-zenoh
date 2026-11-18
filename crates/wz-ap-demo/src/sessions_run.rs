@@ -1188,7 +1188,7 @@ mod group_rejoin_tests {
             async move {
                 let end = serve_group(
                     ENDPOINT,
-                    &group_params(vec![0xC3], 100, 1_000),
+                    &group_params(SessionZid::from([0xC3]), 100, 1_000),
                     bind,
                     None,
                     &mut stop,
@@ -1232,7 +1232,7 @@ mod group_rejoin_tests {
         let binds = Cell::new(0u16);
         let end = serve_group(
             ENDPOINT,
-            &group_params(vec![0xD4], 100, 1_000),
+            &group_params(SessionZid::from([0xD4]), 100, 1_000),
             || {
                 binds.set(binds.get() + 1);
                 std::future::ready(Err::<GroupBusLink, _>(io::Error::other(
@@ -1268,8 +1268,11 @@ mod group_access_tests {
 
     /// A group session over a tapped pipeline, and the tap that sees what it sends.
     fn session_and_tap() -> (TokioMulticastSession, MulticastTxTap) {
-        let (producer, tap) =
-            MulticastTxTap::attach(&group_params(vec![0xAA, 0xBB, 0xCC, 0xDD], 100, 1_000));
+        let (producer, tap) = MulticastTxTap::attach(&group_params(
+            SessionZid::from([0xAA, 0xBB, 0xCC, 0xDD]),
+            100,
+            1_000,
+        ));
         let session = TokioMulticastSession::new_multicast(
             Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
                 ApplicationLayerObserver::new(),
