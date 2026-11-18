@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"]
+decision = '''
+The zenoh-pico C ABI gains three wz-own door families, each behind its existing switch: a declaration watch (`wz_ext_decl_watch_*`, capabilities `remote-declaration-watch` and `declarations-synced-event`, now exported by pico) that tells a program what a peer declares and retracts, with the peer's zid, and when the peer has sent everything it held; a get addressed to one peer (`wz_ext_get_to_peer`, policy `targeted-query`, refused by name with the policy off); and the segment sender (`wz_ext_segment_sender_*`, capability `segment-sender`). The segment piece writer moves into `wz-app-frame`, so the zenoh-c ABI's `segment-sender` no longer links the capture crate. The cooperative engine refuses the declaration watch and the targeted get by name. The targeted-query policy is read as a const item where the doors read it, so a build with it off keeps no addressed path.
+'''
+changes = '''
+`wz-capi-port`: `decl_watch` (plane, event, sink, refusal) and two `SessionEngine` methods whose default refuses; `wz-capi-core`: faces install, retire and clear the watches; `wz-capi-pico`: `decl_watch.rs`, `get_to_peer.rs`, `segment_sender.rs`, codes `WZ_EXT_ERR_POLICY_OFF` (-2), `WZ_EXT_ERR_UNSUPPORTED` (-3), `Z_ERR_CONFIG_INVALID_VALUE` (-89); `wz_ext.h` declares the doors.
+`segment_sender` moved from `wz-capture` to `wz-app-frame` (re-exported); `wz-capi-c`'s `segment-sender` depends on `wz-app-frame`.
+`deploy/wz-config.toml`: the three capabilities exported by pico; generated outputs regenerated; `nondefault-tests-gate.sh` legs and `feature_public_surface_census.py` rows for the new features; the pico-default export count 805.
+'''
+verification = '''
+On pc2: port decl_watch 3, coop decl_watch 1, pico get_to_peer unit 2 and integration 2 with the policy off and 2 with `WZ_POLICY_TARGETED_QUERY=on`, result codes 1, decl_watch unit 6 and integration 2 with both capabilities and 2 with `remote-declaration-watch` alone, segment_sender_doors 7, capture segment_sender 11, capi-c segment_sender_roundtrip 4, wz-app-frame 34, conformance-build 12; clippy -D warnings over nine feature combinations of wz-capi-pico, wz-capi-core, wz-capi-port and wz-capi-coop; fmt; feature census and diagnostic.
+Capability cost: every case read on pc2 at this tree and at main; the default pico build's text symbols grow 966 bytes over main (the door, the key spelling it needs, the watch's vtable slot), within each case's headroom; the other cases grow 4 to 250 bytes.
+'''
+carry = '''
+The cooperative engine provides neither the declaration watch nor the targeted get; no lane sets `WZ_POLICY_TARGETED_QUERY=on`, so that arm runs only by hand; the end-to-end sender (`e2e_sender`) still reads the capture crate's JSON and stays there.
+'''
