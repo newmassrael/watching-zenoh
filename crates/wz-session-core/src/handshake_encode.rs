@@ -806,6 +806,47 @@ mod tests {
         }
     }
 
+    /// An Init's Z flag says exactly whether its extension chain was written, at every patch
+    /// level the chain can carry, and an InitAck that answers a peer that announced no patch
+    /// still writes the patch entry (at level 0) behind a set Z. zenoh-pico 1.10.2 lowers its
+    /// InitAck's level to the peer's and keeps Z, then writes no entry for level 0
+    /// (`src/transport/unicast/transport.c:239-241`), so a peer that announced no patch reads
+    /// a Z with nothing behind it. Here the flag is derived from the chain the encoder is given,
+    /// so the two cannot part.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-init-body",
+        feature = "codec-open-body"
+    ))]
+    #[test]
+    fn an_init_sets_z_exactly_when_its_patch_entry_is_written() {
+        use crate::extpatch::{encode_patch_ext_at, CURRENT_PATCH, NO_PATCH, PATCH_EXT_ID};
+        let params = open_params(10_000);
+        let entry_header = PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64;
+        for is_ack in [false, true] {
+            for level in [NO_PATCH, CURRENT_PATCH] {
+                let chain = [encode_patch_ext_at(level)];
+                let wire = super::encode_init(&params, is_ack, &chain, None).expect("encodes");
+                assert_ne!(
+                    wire[0] & wire_const::FLAG_T_Z,
+                    0,
+                    "is_ack={is_ack} level={level}: a written entry sets Z"
+                );
+                assert_eq!(
+                    &wire[wire.len() - 2..],
+                    &[entry_header, level],
+                    "is_ack={is_ack} level={level}: the entry closes the message, last in its chain"
+                );
+            }
+            let bare = super::encode_init(&params, is_ack, &[], None).expect("encodes");
+            assert_eq!(
+                bare[0] & wire_const::FLAG_T_Z,
+                0,
+                "is_ack={is_ack}: no chain, no Z"
+            );
+        }
+    }
+
     /// R311ku — encode_open derives the `_Z_FLAG_T_OPEN_T` flag from the
     /// lease value itself (pico `_z_t_msg_make_open_syn/_ack` parity,
     /// definitions/transport.c:196-214): a whole-second lease compacts
