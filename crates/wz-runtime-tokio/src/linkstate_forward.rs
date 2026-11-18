@@ -549,7 +549,11 @@ pub(crate) use crate::client_store::ClientSubStore;
 /// because every source reaches the same leaf faces; the inbound face is
 /// excluded at send time, as upstream excludes the source face when it walks
 /// a route rather than when it computes one.
-pub(crate) type ClientRoutes = RouteCache<Arc<[FaceId]>, ()>;
+///
+/// A route names each face as `F`: by its id, or by what the router holds of
+/// the face while it is up, as upstream's route holds each face's state
+/// (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) dst_face: Arc<FaceState>,`).
+pub(crate) type ClientRoutes<F = FaceId> = RouteCache<Arc<[F]>, ()>;
 
 /// R2909 — the client leg of the data route for `keyexpr`: every held client
 /// face with a subscriber whose keyexpr intersects it, in face order, served
@@ -559,13 +563,16 @@ pub(crate) type ClientRoutes = RouteCache<Arc<[FaceId]>, ()>;
 /// reads the resource's `session_ctxs`); wz keeps them as a second route
 /// because they are sent a differently stamped carrier (source 0).
 ///
-/// `wire` and the resource test as [`data_route`] takes them.
-pub(crate) fn client_route(
+/// `held` gives the route's entry for a face of the store, read from the
+/// tables the store belongs to; a face it gives nothing for is left out of the
+/// route. `wire` and the resource test as [`data_route`] takes them.
+pub(crate) fn client_route<F: Clone>(
     store: &ClientSubStore,
-    cached: Cached<'_, ClientRoutes>,
+    cached: Cached<'_, ClientRoutes<F>>,
     keyexpr: &str,
     wire: bool,
-) -> Arc<[FaceId]> {
+    held: impl FnMut(FaceId) -> Option<F>,
+) -> Arc<[F]> {
     // A store holding no client has no client leg; a router keeps one per
     // leaf region, most of them empty, and none of those is worth a route.
     if store.is_empty() {
@@ -575,7 +582,11 @@ pub(crate) fn client_route(
     cached
         .routes
         .get_or_compute(client_inputs(store), &(), keyexpr, resource, || {
-            store.faces_intersecting(keyexpr).into()
+            store
+                .faces_intersecting(keyexpr)
+                .into_iter()
+                .filter_map(held)
+                .collect()
         })
 }
 

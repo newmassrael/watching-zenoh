@@ -736,13 +736,12 @@ What the index costs is paid by a reader: a miss that keeps its route also inser
 index, a walk of the key's chunks and a copy of the nodes on that path. A hit reads the routes
 alone, as before.
 
-**A delivery's face lookups.** A route names its faces by id and every delivery finds each in the
-version's face table (`fan_out_to_faces_qos`), the persistent map of section 6.6. A route that held
-each face's state would read it where the route holds it, as upstream's `Direction` holds its
-`Arc<FaceState>` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) dst_face: Arc<FaceState>,`).
-Nothing is changed here: the instrument measures what the lookups cost a delivery first. If the
-reading asks for the change, a route that held face state outlives the version it was computed
-from, and one of these rules has to say when it is stale:
+**A delivery's face lookups.** A route named its faces by id and every delivery found each in the
+version's face table (the targeted fan-out, `fan_out_to_faces_qos` then), the persistent map of
+section 6.6. A route that held each face's state would read it where the route holds it, as
+upstream's `Direction` holds its `Arc<FaceState>` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) dst_face: Arc<FaceState>,`).
+The instrument measured what the lookups cost a delivery first. A route that holds face state
+outlives the version it was computed from, and one of these rules has to say when it is stale:
 
 - (a) The face table's version joins the route inputs: any face that comes, goes or changes empties
   every memo whose routes name faces. Simplest, and it makes every face transition recompute every
@@ -752,10 +751,33 @@ from, and one of these rules has to say when it is stale:
   that changed. Exact, at the cost of a second index kept by every miss.
 - (c) The route holds only what does not change while the face is up (its runtime and send seam,
   which `deregister` closes), and reads the facts that can change (its tier) from that runtime at
-  delivery. No new invalidation: a face that leaves closes its runtime, which a delivery observes
-  (no such mark is set today, section 7). It moves the tier, or whatever else a delivery reads, out
-  of the version.
+  delivery. No new invalidation: a face that leaves closes its runtime, which a delivery observes.
+  It moves the tier, or whatever else a delivery reads, out of the version.
 - (d) Keep ids, as now, if the lookups are measured to cost a delivery nothing a run tells.
+
+The reading below rules out (d), and (c) is built, in the form the code allows
+(`router_forward/held_route.rs`):
+
+- The client leg's route holds a `HeldFace` for each face: its id, tier, routing zid and runtime,
+  each fixed from `register` to `deregister` (a face's tier is fixed when it is inserted, and a face
+  that changes tier is taken out and put in again with a runtime of its own). The route is computed
+  from the version's own face table, so it holds the runtime that version holds.
+- `deregister` closes the face's runtime (`FaceRuntime::close`), and so does a `register` that
+  replaces a face under its id. A delivery through a held route reads the mark and does not send to
+  a closed runtime, and counts it (`RouterForwarder::held_route_closed_skips`). The routes of the
+  version that took the face out do not name it: its declarations went with it, and the change of
+  their keys left out every route they reach (section 6.8).
+- The one fact of a face a send could read that changes while the face is up is its aliases
+  (`RouterFaceState::keyexpr_table`, moved by the face's own alias declarations), read only to
+  resolve the message's key for the egress interceptors and their verdict cache. The held route's
+  egress (`egress_held`) takes a `LiteralPush` and nothing else: a Put whose key expression is a
+  literal by construction, made by the client leg (`client_carrier`) and refused for an aliased
+  Put. Its interceptor context (`HeldFaceContext`) reads the key off the message and no alias table,
+  and the verdict cache is keyed by the face's id and that key.
+- A send that reads only fixed facts takes `SendFace` (the runtime and the zid) rather than the
+  face's routing facts: `credited_send`, `hold` and the chain's send. Both doors, the one by id
+  (`egress_to_face`, which still numbers a declaration from the face's aliases) and the held one,
+  go through one egress (`egress_through`), with the interceptor context each one has.
 
 **How the readings are taken.** On pc2, one build of `wz-runtime-tokio` with `--release`, each
 instrument in a process of its own, `uptime` recorded per run, two or three runs:
@@ -779,7 +801,10 @@ instrument in a process of its own, `uptime` recorded per run, two or three runs
 - A delivery's face lookups: `cargo test -p wz-runtime-tokio --release --features
   routing-router-hat --lib the_face_lookups_of_a_delivery_measured_against_the_faces_held --
   --ignored --nocapture`. 256 to 2,048 client faces, fan-outs 1 to 512; the lookups by id and the
-  held state take turns in one process. A `perf record --comm wz-publisher` of
+  held faces take turns in one process. The reading below was taken of a held form that read the
+  tier of a held `RouterFaceState` (`held_state`); the instrument's held form is now the route as
+  the client leg keeps it (`held_face`), which reads the tier and the closed mark of a `HeldFace`,
+  and its reading is not taken yet. A `perf record --comm wz-publisher` of
   `the_puts_routed_measured_against_the_faces_up` at 2,048 faces gives the share of a Put's cycles
   in `PersistentMap::get` beside it.
 
@@ -873,8 +898,8 @@ At a fan-out of 4 the held state saves a delivery 30 to 36 ns with 256 faces up 
 with 2,048, beside the 1,900 to 2,500 ns of a core the readers spent a Put in the busy-writer
 windows of the same runs (a fan-out of 4, a few faces up); at a fan-out of 512 it saves 7.7 to
 11.7 us a delivery. The instrument times the lookups alone, not the rest of a delivery. Rule (d)
-is ruled out: the lookups cost a delivery what a run tells. Rule (c) is the one to build, and one
-fact a delivery reads is in the way (section 7).
+is ruled out: the lookups cost a delivery what a run tells. Rule (c) is built (above, after the
+rules).
 
 ## 7. What is not decided, and what could make this wrong
 
@@ -886,21 +911,13 @@ fact a delivery reads is in the way (section 7).
   instructions per Put, no time a run tells from its spread. A route names its faces by id and
   each message looks each one up; a route that held its faces' state would take the lookups off
   the message, but a route outlives the version it was computed from, so it would read a face's
-  facts as they were, and what may be read stale is not yet stated. Section 6.9 measured the
-  lookups at 7 to 15 times what reading held state costs, which rules out keeping the ids, and
-  names rule (c): a route holds what is fixed while the face is up and reads the rest through the
-  face's runtime. Not built, because a delivery reads one fact of the face that is neither: the
-  face's keyexpr aliases (`RouterFaceState::keyexpr_table`), which the face's own alias
-  declarations change while it is up (a copy of its state in the next version) and which are not
-  in its runtime. A delivery reads them through the egress interceptors' context and the hot-reload
-  verdict cache, to resolve the message's key, and through the numbering of a declaration. The
-  client leg's Put is a literal key, whose resolution reads no alias, but the read is there.
-  Whether the aliases move into the runtime, the held form's context resolves a literal key
-  without them, or the route holds the face's state as of its computation, is not decided. Nor
-  does anything close a face's runtime today: `deregister` empties what the runtime holds and
-  takes the face out of the table, and a send through a runtime held past that is handed to the
-  face's session whatever the session's state; a delivery that should observe the face gone needs
-  a mark that `deregister` sets.
+  facts as they were. Section 6.9 measured the lookups at 7 to 15 times what reading held state
+  costs, and built rule (c) for the client leg: the route holds what is fixed while a face is up,
+  a closed mark that `deregister` sets stops a send through a route kept from before, and the face's
+  aliases, the one fact that moves while it is up, are kept out of the held route's egress by its
+  type (a literal Put, whose key needs no alias). What is not built: the mesh legs still name their
+  next hops by zid, and the query plane's client leg (`ClientQueryRoutes`) by face id; the held
+  form's own reading (`held_face`) is not taken.
 - **The memo of a route a writer reads.** A writer that routes through its own draft (a replay,
   an interest answered while it declares) reads at inputs no memo has yet, and computes its route
   without keeping it (section 6.8). Section 6.9 counted none in the declaring window of its

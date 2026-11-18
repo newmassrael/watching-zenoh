@@ -105,6 +105,7 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::session_actions::Unsent;
 
+use super::face_runtime::{FaceRuntime, SendFace};
 use super::{peer_label, OnTables, RouterFaceState, RouterForwarder, Tables};
 use crate::accept_loop::FaceId;
 use crate::counter::{Counter, Gauge};
@@ -611,7 +612,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     pub(super) fn credited_send(
         &self,
         dest: FaceId,
-        state: &RouterFaceState,
+        face: SendFace<'_>,
         msg: NetworkMessage,
         reliable: bool,
         express: bool,
@@ -621,27 +622,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // being sent in that lane, whatever room it has now: a message that went past its
         // predecessors would put one source's messages out of order.
         let lane = Lane::of(&msg);
-        if !state.runtime.held.lane(lane).guard().is_empty()
-            || state.runtime.chain_in_flight[lane.index()].load(Ordering::SeqCst)
+        if !face.runtime.held.lane(lane).guard().is_empty()
+            || face.runtime.chain_in_flight[lane.index()].load(Ordering::SeqCst)
         {
-            self.hold_and_recheck(dest, state, msg, reliable, express, priority);
+            self.hold_and_recheck(dest, face, msg, reliable, express, priority);
             return Credited::Held;
         }
-        match state
+        match face
             .runtime
             .actions
             .try_send_network_message_qos(msg, reliable, express, priority)
         {
             Ok(()) => Credited::Sent,
             Err(Unsent::NoRoom(msg)) => {
-                self.hold_and_recheck(dest, state, msg, reliable, express, priority);
+                self.hold_and_recheck(dest, face, msg, reliable, express, priority);
                 Credited::Held
             }
             // A chain of fragments cannot be sent without waiting for room between its
             // fragments: it is sent off the router's threads, and what follows it to this
             // destination in its lane is held behind it until it has gone.
             Err(Unsent::Chain(msg)) => {
-                self.send_chain_off_thread(state, msg, reliable, express, priority);
+                self.send_chain_off_thread(face.runtime, msg, reliable, express, priority);
                 Credited::Sent
             }
             Err(Unsent::Failed(_)) => Credited::Refused,
@@ -659,20 +660,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn hold_and_recheck(
         &self,
         dest: FaceId,
-        state: &RouterFaceState,
+        face: SendFace<'_>,
         msg: NetworkMessage,
         reliable: bool,
         express: bool,
         priority: Priority,
     ) {
-        if self.hold(dest, state, msg, reliable, express, priority) {
+        if self.hold(dest, face, msg, reliable, express, priority) {
             self.release_gates();
         }
     }
 }
 
 impl RouterForwarder {
-    /// Send a chain of fragments to the destination of `state` off the router's threads.
+    /// Send a chain of fragments to the destination whose runtime is `runtime` off the router's
+    /// threads.
     ///
     /// A chain needs room for each of its fragments in turn, so its send waits between them, up
     /// to the message's `wait_before_close` for one that may not be dropped. Made where it was
@@ -687,7 +689,7 @@ impl RouterForwarder {
     /// faces.
     pub(super) fn send_chain_off_thread(
         &self,
-        state: &RouterFaceState,
+        runtime: &FaceRuntime,
         msg: NetworkMessage,
         reliable: bool,
         express: bool,
@@ -707,13 +709,13 @@ impl RouterForwarder {
             }
         }
         let lane = Lane::of(&msg).index();
-        state.runtime.chain_in_flight[lane].store(true, Ordering::SeqCst);
+        runtime.chain_in_flight[lane].store(true, Ordering::SeqCst);
         let gone = Gone {
-            in_flight: Arc::clone(&state.runtime.chain_in_flight),
+            in_flight: Arc::clone(&runtime.chain_in_flight),
             lane,
             wake: Arc::clone(&self.credit.room_waker),
         };
-        let actions = Arc::clone(&state.runtime.actions);
+        let actions = Arc::clone(&runtime.actions);
         let own_zid = self.own_zid;
         let kind = super::kind_label(&msg);
         let send = move || {
@@ -755,7 +757,7 @@ impl RouterForwarder {
     fn hold(
         &self,
         dest: FaceId,
-        state: &RouterFaceState,
+        face: SendFace<'_>,
         msg: NetworkMessage,
         reliable: bool,
         express: bool,
@@ -764,7 +766,7 @@ impl RouterForwarder {
         let cost = message_cost(&msg);
         let lane = Lane::of(&msg);
         let (destination_bytes, pool_bytes) = {
-            let mut queue = state.runtime.held.lane(lane).guard();
+            let mut queue = face.runtime.held.lane(lane).guard();
             let first = queue.is_empty();
             // Counted before the message can be taken out by a pass that drains this queue, which
             // cannot start until the queue is let go: a gauge is never subtracted from before the
@@ -785,13 +787,12 @@ impl RouterForwarder {
                      ({cost} bytes): its link has no room",
                     self.own_zid,
                     dest.0,
-                    peer_label(state.peer_zid)
+                    peer_label(face.peer_zid)
                 );
                 // The link tells the router when it has room, for as long as it holds something.
                 // Room may have been made between the probe that found none and this call, which
                 // the link cannot have told it of, so the loop is woken once to look.
-                state
-                    .runtime
+                face.runtime
                     .actions
                     .watch_link_room(Some(Arc::clone(&self.credit.room_waker)));
                 self.credit.loop_wake.notify_one();
@@ -943,7 +944,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 Err(Unsent::Chain(msg)) => {
                     self.credit.held.sub(1);
                     self.credit.held_bytes.sub(cost);
-                    self.send_chain_off_thread(state, msg, reliable, express, priority);
+                    self.send_chain_off_thread(&state.runtime, msg, reliable, express, priority);
                     self.credit.released.bump();
                     self.note_sent(was_push);
                     took = true;

@@ -774,6 +774,7 @@ fn route_every_key(memo: &ClientRoutes, store: &ClientSubStore, names: &[String]
             },
             name,
             true,
+            Some,
         ));
     }
     began.elapsed() / names.len().max(1) as u32
@@ -942,10 +943,11 @@ const LOOKUPS_A_WINDOW: u64 = 4_000_000;
 const LOOKUP_WINDOWS: u64 = 6;
 
 /// What a delivery's lookups of its faces by id cost against the faces the router holds
-/// (`docs/router-table-snapshots.md`, section 6.9): a route names its faces by id, and every
-/// delivery finds each one in the version's face table and reads its tier, as
-/// `fan_out_to_faces_qos` does. The other form is a route that held its faces' state, which reads
-/// the tier where the route holds it.
+/// (`docs/router-table-snapshots.md`, section 6.9): `by_id` is a route that names its faces by id,
+/// whose every delivery finds each one in the version's face table and reads its tier, as the
+/// targeted fan-out did before its routes held their faces. `held_face` is the route as the client
+/// leg keeps it now ([`HeldFace`]), whose delivery reads each face's tier and its closed mark where
+/// the route holds them, as `fan_out_to_held_faces` and `egress_held` do.
 ///
 /// Client faces come up [`BAND`] at a time to [`ADMITTED`], and at each band a route of each fan-out
 /// in [`DELIVERY_FAN_OUTS`] is spread over the faces up. The two forms take turns over
@@ -957,7 +959,7 @@ const LOOKUP_WINDOWS: u64 = 6;
             held (docs/router-table-snapshots.md, section 6.9); run with --release --ignored \
             --nocapture on a build host"]
 fn the_face_lookups_of_a_delivery_measured_against_the_faces_held() {
-    const FORMS: [&str; 2] = ["by_id", "held_state"];
+    const FORMS: [&str; 2] = ["by_id", "held_face"];
     let fwd = RouterForwarder::new(zid(0x01));
     let structure = fwd.table_sharing().id();
     let mut held = Vec::new();
@@ -975,9 +977,11 @@ fn the_face_lookups_of_a_delivery_measured_against_the_faces_held() {
             .filter(|fan_out| *fan_out <= up)
         {
             let ids: Vec<FaceId> = (0..fan_out).map(|n| FaceId(n * up / fan_out)).collect();
-            let states: Vec<Arc<RouterFaceState>> =
-                ids.iter().map(|id| Arc::clone(&tables.faces[id])).collect();
-            let tier = states[0].tier;
+            let faces: Vec<HeldFace> = ids
+                .iter()
+                .map(|id| HeldFace::of(*id, &tables.faces[id]))
+                .collect();
+            let tier = faces[0].tier;
             let deliveries = LOOKUPS_A_WINDOW / fan_out;
             let mut took: [Vec<Duration>; 2] = Default::default();
             for window in 0..LOOKUP_WINDOWS {
@@ -993,8 +997,8 @@ fn the_face_lookups_of_a_delivery_measured_against_the_faces_held() {
                                 );
                             }
                         } else {
-                            for state in std::hint::black_box(&states) {
-                                found += u64::from(state.tier == tier);
+                            for face in std::hint::black_box(&faces) {
+                                found += u64::from(face.tier == tier && !face.is_closed());
                             }
                         }
                     }
