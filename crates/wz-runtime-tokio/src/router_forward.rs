@@ -2128,10 +2128,10 @@ impl RouterSessionsView {
             .values()
             .map(|face| {
                 let zid = peer_zid_routing(&face.runtime.actions);
-                // R2860 — `links`, `shm` and `region` are the face's own, read by
+                // R2860 — `links` and `shm` are the face's own, read by
                 // `admin_session`; the router supplies the identity it filed the
                 // face under and the one value only its graph holds.
-                face.runtime.actions.admin_session(
+                let mut row = face.runtime.actions.admin_session(
                     zid.map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
                         .unwrap_or_default(),
                     Some(String::from(
@@ -2150,7 +2150,17 @@ impl RouterSessionsView {
                             src_weight: i.src_weight,
                         }
                     }),
-                )
+                );
+                // The region is the node's placement of the face, not a fact of
+                // the session: the session can only compute the `auto` table from
+                // the two modes and the announced bound, and a node whose south is
+                // a list of subregions places the remote by its rules. Upstream
+                // recomputes the placement from the node's config for this field
+                // (`zenoh/src/net/runtime/adminspace.rs` @
+                // `region::compute_region_of(&peer, &config, transient_remote_bound.as_ref()).ok()?;`),
+                // which is the region the face was registered in here.
+                row.region = Some(face.tier.to_string());
+                row
             })
             .collect()
     }
@@ -16201,6 +16211,48 @@ mod tests {
         let on = fwd.on_tables();
         assert_eq!(on.tables.faces[&FaceId(0)].tier, sub0(WhatAmI::Peer));
         assert_eq!(on.tables.faces[&FaceId(1)].tier, NORTH_REGION);
+    }
+
+    /// The admin `sessions[].region` of a face is where the node's rules placed it, in
+    /// upstream's words: the peer the rule names in `south:0:peer`, the one it does not in
+    /// `north`. Two faces with different answers, so a row that reported one region for
+    /// every face, or the `auto` table the session computes alone (`north` for a peer meeting
+    /// a peer), is red on one of them.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn admin_sessions_report_the_region_the_rules_placed_each_face_in() {
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let partition = SouthPartition::Custom(vec![SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                zids: Some(vec![zid(0xAA).as_slice().to_vec()]),
+                ..RegionFilter::default()
+            }]),
+        }]);
+        let fwd = RouterForwarder::peer(zid(0x05)).with_south_partition(partition);
+        let (named, _a) = face(zid(0xAA), WIRE_PEER);
+        let (other, _b) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &named);
+        fwd.register(FaceId(1), &other);
+
+        let region_of = |b: u8| {
+            let hex = zid_to_zenoh_hex(zid(b).as_slice());
+            fwd.admin_sessions()
+                .into_iter()
+                .find(|s| s.peer_zid_hex == hex)
+                .and_then(|s| s.region)
+        };
+        assert_eq!(
+            region_of(0xAA),
+            Some(String::from("south:0:peer")),
+            "the peer the rule names is reported in the subregion it was placed in"
+        );
+        assert_eq!(
+            region_of(0xBB),
+            Some(String::from("north")),
+            "the peer no rule names is reported in the north region"
+        );
     }
 
     #[test]
