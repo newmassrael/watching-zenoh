@@ -10746,7 +10746,13 @@ layer_c1y_cargo_test_routing_peer() {
     # (`a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage`), gated
     # `all(routing-peer, target_os = "linux")` as the gossip re-dial test that moved this guard
     # 21 -> 22 and not C1v's.
-    _runci_guarded_test "C1y accept_loop" 27 \
+    # 27 -> 34, the printed number: Round 4506 (a9bf75ef4) re-dials a configured connect list
+    # in every peer loop, so six `accept_loop::tests` cases that were gated on
+    # `router-connect-reconcile` compile under `routing-peer` now, and it adds
+    # `a_configured_endpoint_is_dialled_again_until_its_listener_comes_up`. Hosted run
+    # 44201914197 printed 27 at 4050dd889, 44412368690 printed 34 at 458774b1f; the build host
+    # printed 34 at 5f5342ae1.
+    _runci_guarded_test "C1y accept_loop" 34 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
@@ -13270,7 +13276,11 @@ layer_c1p_multicast() {
     # siblings need `transport-compression`, which no arm here selects.
     # 2026-11-18 -- 79 -> 101, printed on a build host: the cases of the guard above and the
     # reassembly-gated ones beside them.
-    _runci_guarded_test C1p 101 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # 101 -> 102, the printed number: the typed multicast zid of Round 4506 adds
+    # `a_join_naming_a_zero_zid_is_refused_where_it_is_read` (hosted run 44201914197
+    # printed 101 at 4050dd889, 44412368690 printed 102 at 458774b1f; the build host
+    # printed 102 at 5f5342ae1).
+    _runci_guarded_test C1p 102 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
