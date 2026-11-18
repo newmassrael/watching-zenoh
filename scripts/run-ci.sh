@@ -25984,6 +25984,27 @@ layer_c1cc_api_compat_c() {
     grep -q '^switch_doors: ok$' <<<"$c_sw_out" || {
         echo "  C1cc FAIL: the switch doors C consumer printed no verdict"
         echo "$c_sw_out"; return 1; }
+    # The offloaded subscriber, declared from C the same way: the two structs' layout written out
+    # in the consumer, the default statement, a callback that runs on a thread other than the one
+    # that put, the lane's stats, and the refusals (NULL, block, a value naming no answer, a plain
+    # subscriber's stats). The build above carries `rx-callback-offload`
+    # (`_runci_build_capi_c_for_oracle`).
+    local c_off_bin c_off_out
+    c_off_bin="$(mktemp -d)/c_offload_consumer"
+    c_off_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pthread \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_offload_consumer.c \
+        -L "$WZ_ARTIFACTS"/crates/target/debug -lwz_capi_c -o "$c_off_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the offload C consumer did not compile or link"
+        echo "$c_off_out"; return 1; }
+    c_off_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS"/crates/target/debug "$c_off_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the offload C consumer failed"
+        echo "$c_off_out"; rm -rf "$(dirname "$c_off_bin")"; return 1; }
+    rm -rf "$(dirname "$c_off_bin")"
+    grep -q '^c_offload_consumer: ok$' <<<"$c_off_out" || {
+        echo "  C1cc FAIL: the offload C consumer printed no verdict"
+        echo "$c_off_out"; return 1; }
     # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
     # now that this lane has established an oracle is present. `--require`
     # rather than the bare form on purpose: past this point the checkout and

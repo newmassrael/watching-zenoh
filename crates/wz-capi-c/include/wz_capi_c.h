@@ -1471,7 +1471,9 @@ z_result_t wz_capi_c_liveliness_declare_subscriber_ext(
  * only, as z_declare_subscriber's is.
  *
  * What a full lane does is `overload`:
- *   - WZ_CAPI_C_OVERLOAD_REJECT: the new sample is refused and counted;
+ *   - WZ_CAPI_C_OVERLOAD_REJECT: the new sample is refused and counted.
+ *     This is what NULL and the _default function state, in every
+ *     build;
  *   - WZ_CAPI_C_OVERLOAD_KEEP_LATEST: the newest samples waiting
  *     behind the one being delivered are taken out until it fits, so
  *     the last sample to arrive is delivered;
@@ -1479,10 +1481,9 @@ z_result_t wz_capi_c_liveliness_declare_subscriber_ext(
  *     make the receive path wait for room, and this library's receive
  *     path is several threads and the caller's own put, none of which
  *     can wait for a lane;
- *   - WZ_CAPI_C_OVERLOAD_BUILD (NULL, and the _default function): the
- *     build's subscriber-overload policy, so Z_EUNAVAILABLE in a build
- *     whose policy is block, the default. Such a build states its
- *     answer at each declaration.
+ *   - WZ_CAPI_C_OVERLOAD_BUILD: the build's subscriber-overload policy,
+ *     asked for by name, so Z_EUNAVAILABLE in a build whose policy is
+ *     block (the default policy), for the reason above.
  * Any other value is Z_EINVAL. A refused declaration leaves
  * `subscriber` in its gravestone state and has consumed `callback`.
  * Undeclaring the subscriber stops the lane: a sample waiting at that
@@ -1515,11 +1516,11 @@ typedef struct wz_capi_c_offload_stats_t {
   uint8_t overload;
 } wz_capi_c_offload_stats_t;
 
-/* Write WZ_CAPI_C_OVERLOAD_BUILD. NULL is no write. */
+/* Write WZ_CAPI_C_OVERLOAD_REJECT. NULL is no write. */
 void wz_capi_c_offload_options_default(wz_capi_c_offload_options_t *this_);
 
 /* z_declare_subscriber with its callback behind a lane (`offload`, NULL
- * for the build's answer). */
+ * for the default statement). */
 z_result_t wz_capi_c_declare_subscriber_offloaded(
     const z_loaned_session_t *session, z_owned_subscriber_t *subscriber,
     const z_loaned_keyexpr_t *key_expr, z_moved_closure_sample_t *callback,

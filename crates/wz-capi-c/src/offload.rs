@@ -21,9 +21,9 @@
 //! the receive path. `block` is refused with `Z_EUNAVAILABLE`: it makes the receive path wait for
 //! room in a drain step that a session's drive loop awaits, and this ABI's subscription is fed by
 //! several sessions and by puts on the caller's thread, so there is no one loop whose wait it
-//! would be. A declaration that states nothing takes the build's `subscriber-overload` policy, and
-//! so is refused in a build whose policy is `block` (the default): such a build states its answer
-//! at each declaration.
+//! would be. A declaration that states nothing (NULL, or the `_default` statement) takes `reject`,
+//! the answer every build of this door can give. `WZ_CAPI_C_OVERLOAD_BUILD` asks for the build's
+//! `subscriber-overload` policy by name, and is refused in a build whose policy is `block`.
 //!
 //! What the lane holds, refused and took out is read with
 //! [`wz_capi_c_subscriber_offload_stats`]. Undeclaring the subscriber stops the lane: a sample
@@ -39,11 +39,12 @@ use crate::sub::{declare_subscriber_delivered, offload_of, z_subscriber_options_
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::policy::SubscriberOverload;
 
-/// The build's `subscriber-overload` policy.
+/// The build's `subscriber-overload` policy, asked for by name: refused where that is `block`.
 pub const WZ_CAPI_C_OVERLOAD_BUILD: u8 = 0;
 /// `block`: refused by this door (see the module note).
 pub const WZ_CAPI_C_OVERLOAD_BLOCK: u8 = 1;
-/// `reject`: a sample the lane has no room for is refused and counted.
+/// `reject`: a sample the lane has no room for is refused and counted. What a declaration that
+/// states nothing takes.
 pub const WZ_CAPI_C_OVERLOAD_REJECT: u8 = 2;
 /// `keep-latest`: the newest samples queued behind the head are taken out until it fits.
 pub const WZ_CAPI_C_OVERLOAD_KEEP_LATEST: u8 = 3;
@@ -108,7 +109,13 @@ fn wide(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
-/// Write the statement of nothing: the build's `subscriber-overload` policy. NULL is no write.
+/// The statement of nothing, which NULL stands for too: `reject`, an answer this lane gives in
+/// every build, where the build's own policy may be `block`, which it cannot.
+const STATED_NOTHING: wz_capi_c_offload_options_t = wz_capi_c_offload_options_t {
+    overload: WZ_CAPI_C_OVERLOAD_REJECT,
+};
+
+/// Write the statement of nothing: `reject`. NULL is no write.
 ///
 /// # Safety
 /// `this_` must be null or valid and writable.
@@ -120,18 +127,14 @@ pub unsafe extern "C" fn wz_capi_c_offload_options_default(
         return;
     }
     // SAFETY: the caller's contract.
-    unsafe {
-        *this_ = wz_capi_c_offload_options_t {
-            overload: WZ_CAPI_C_OVERLOAD_BUILD,
-        }
-    };
+    unsafe { *this_ = STATED_NOTHING };
 }
 
 /// `z_declare_subscriber` whose callback runs off the receive path, behind a lane of its own, with
-/// the answer `offload` states to a full lane (NULL for the build's). A value that names no answer
-/// is `Z_EINVAL`; `block`, stated or the build's, is `Z_EUNAVAILABLE`. A refused declaration leaves
-/// `subscriber` in its gravestone state and has consumed `callback`, as `z_declare_subscriber`
-/// does on every path.
+/// the answer `offload` states to a full lane (NULL for the default statement, `reject`). A value
+/// that names no answer is `Z_EINVAL`; `block`, stated or asked of a build whose policy it is
+/// (`WZ_CAPI_C_OVERLOAD_BUILD`), is `Z_EUNAVAILABLE`. A refused declaration leaves `subscriber` in
+/// its gravestone state and has consumed `callback`, as `z_declare_subscriber` does on every path.
 ///
 /// # Safety
 /// As `z_declare_subscriber`; `offload` must be null or a valid statement.
@@ -145,7 +148,10 @@ pub unsafe extern "C" fn wz_capi_c_declare_subscriber_offloaded(
     offload: *const wz_capi_c_offload_options_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `offload`.
-    let stated = unsafe { offload.as_ref() }.map_or(WZ_CAPI_C_OVERLOAD_BUILD, |o| o.overload);
+    let stated = unsafe { offload.as_ref() }
+        .copied()
+        .unwrap_or(STATED_NOTHING)
+        .overload;
     let (links, delivery) = match overload_of(stated) {
         Some(overload) => (Ok(LinkRestriction::Any), Delivery::Offloaded(overload)),
         // Refused through the declaration's own refusal path, which consumes the closure.
@@ -228,16 +234,20 @@ mod tests {
         assert_eq!(overload_of(WZ_CAPI_C_OVERLOAD_KEEP_LATEST + 1), None);
     }
 
-    /// The default statement is the build's policy, and NULL is no write.
+    /// The default statement is `reject`, which every build takes, and NULL is no write.
     #[test]
-    fn the_default_statement_is_the_builds_policy() {
+    fn the_default_statement_is_reject() {
         let mut options = wz_capi_c_offload_options_t { overload: 9 };
         // SAFETY: a live local, and null.
         unsafe {
             wz_capi_c_offload_options_default(&mut options);
             wz_capi_c_offload_options_default(std::ptr::null_mut());
         }
-        assert_eq!(options.overload, WZ_CAPI_C_OVERLOAD_BUILD);
+        assert_eq!(options.overload, WZ_CAPI_C_OVERLOAD_REJECT);
+        assert_eq!(
+            overload_of(options.overload),
+            Some(SubscriberOverload::Reject)
+        );
     }
 
     /// A null subscriber or output is `Z_ENULL` and writes nothing.

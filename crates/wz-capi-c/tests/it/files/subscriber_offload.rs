@@ -26,8 +26,9 @@ use wz_capi_c::bytes::{z_bytes_copy_from_buf, z_bytes_len};
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::offload::{
-    wz_capi_c_declare_subscriber_offloaded, wz_capi_c_offload_options_t, wz_capi_c_offload_stats_t,
-    wz_capi_c_subscriber_offload_stats, WZ_CAPI_C_OVERLOAD_BLOCK, WZ_CAPI_C_OVERLOAD_KEEP_LATEST,
+    wz_capi_c_declare_subscriber_offloaded, wz_capi_c_offload_options_default,
+    wz_capi_c_offload_options_t, wz_capi_c_offload_stats_t, wz_capi_c_subscriber_offload_stats,
+    WZ_CAPI_C_OVERLOAD_BLOCK, WZ_CAPI_C_OVERLOAD_BUILD, WZ_CAPI_C_OVERLOAD_KEEP_LATEST,
     WZ_CAPI_C_OVERLOAD_REJECT,
 };
 use wz_capi_c::put::z_put;
@@ -373,8 +374,8 @@ fn keep_latest_takes_out_the_newest_waiting_and_delivers_the_last_put() {
 }
 
 /// `block` is refused: nothing is declared, the subscriber is a gravestone and the C closure is
-/// dropped once. A declaration that states nothing takes the build's policy, and is refused the
-/// same way exactly when that policy is `block`.
+/// dropped once. Asking for the build's policy by name is refused the same way exactly when that
+/// policy is `block`, and taken as that policy otherwise.
 #[test]
 fn block_is_refused_and_the_callback_is_dropped_once() {
     const KEY: &str = "wz/offload/block";
@@ -388,20 +389,54 @@ fn block_is_refused_and_the_callback_is_dropped_once() {
     assert!(!unsafe { z_internal_subscriber_check(&sub) });
     assert_eq!(stated.drops.load(Ordering::SeqCst), 1);
 
-    let unstated = new_ctx(false);
+    let asked = new_ctx(false);
     // SAFETY: as above.
-    let (rc, sub) = unsafe { declare_offloaded(&session, KEY, unstated, None) };
-    let build_blocks = wz_session_core::policy::SubscriberOverload::default()
-        == wz_session_core::policy::SubscriberOverload::Block;
-    if build_blocks {
+    let (rc, sub) =
+        unsafe { declare_offloaded(&session, KEY, asked, Some(WZ_CAPI_C_OVERLOAD_BUILD)) };
+    let policy = wz_session_core::policy::SubscriberOverload::default();
+    if policy == wz_session_core::policy::SubscriberOverload::Block {
         assert_eq!(rc, Z_EUNAVAILABLE);
-        assert_eq!(unstated.drops.load(Ordering::SeqCst), 1);
+        assert!(!unsafe { z_internal_subscriber_check(&sub) });
+        assert_eq!(asked.drops.load(Ordering::SeqCst), 1);
     } else {
         assert_eq!(rc, Z_OK);
+        // SAFETY: the subscriber is live.
+        let overload = unsafe { stats_of(&sub) }.overload;
+        assert_ne!(overload, WZ_CAPI_C_OVERLOAD_BLOCK);
         // SAFETY: the subscriber is live and owned here.
         unsafe { undeclare(sub) };
     }
 
+    // SAFETY: the session is live and owned here.
+    unsafe { close_session(session) };
+}
+
+/// A declaration that states nothing (NULL, or the `_default` statement) takes `reject` in every
+/// build, the build whose policy is `block` among them, and is declared.
+#[test]
+fn a_declaration_that_states_nothing_takes_reject() {
+    const KEY: &str = "wz/offload/unstated";
+    // SAFETY: a fresh session owned by this test until it is closed.
+    let session = unsafe { open_peer() };
+    let mut defaults = wz_capi_c_offload_options_t { overload: 9 };
+    // SAFETY: a live local.
+    unsafe { wz_capi_c_offload_options_default(&mut defaults) };
+    for statement in [None, Some(defaults.overload)] {
+        let ctx = new_ctx(false);
+        // SAFETY: the session is live.
+        let (rc, sub) = unsafe { declare_offloaded(&session, KEY, ctx, statement) };
+        assert_eq!(rc, Z_OK, "statement {statement:?}");
+        // SAFETY: the subscriber is live.
+        assert_eq!(
+            unsafe { stats_of(&sub) }.overload,
+            WZ_CAPI_C_OVERLOAD_REJECT
+        );
+        // SAFETY: the session and the subscriber are live.
+        unsafe { put_n(&session, KEY, 2) };
+        assert!(wait_until(|| numbers(ctx) == [2]));
+        // SAFETY: the subscriber is live and owned here.
+        unsafe { undeclare(sub) };
+    }
     // SAFETY: the session is live and owned here.
     unsafe { close_session(session) };
 }

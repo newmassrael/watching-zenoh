@@ -268,8 +268,13 @@ The capability `rx-callback-offload` (off by default, `abis = core, c`) exports 
   and this lane is fed by several loops and by a put on the caller's thread (`LocalDeliveryDrain::
   Caller`), so no one loop owns the wait; the zenoh-c ABI's FIFO channel declines to block its
   drive thread for the same reason (`crates/wz-capi-c/src/handlers.rs`). `reject` and
-  `keep-latest` are taken as the Rust session takes them. A declaration that states nothing takes
-  the build's `subscriber-overload` policy, so it is refused in a build whose policy is `block`.
+  `keep-latest` are taken as the Rust session takes them. A declaration that states nothing (NULL,
+  or `wz_capi_c_offload_options_default`) takes `reject`, which this lane can give in every build;
+  `WZ_CAPI_C_OVERLOAD_BUILD` asks for the build's `subscriber-overload` policy by name and is
+  refused where that policy is `block`.
+- **A C consumer** (`crates/wz-capi-c/tests/c_offload_consumer.c`, run by Layer C1cc) declares an
+  offloaded subscriber from C, receives on a thread other than the putting one, reads the stats and
+  meets the refusals.
 - **Counters** are read through `wz_capi_c_subscriber_offload_stats`, the lane's snapshot and the
   losses by how the sample was sent.
 
@@ -278,8 +283,8 @@ The capability `rx-callback-offload` (off by default, `abis = core, c`) exports 
 - Whether the zenoh-c door should carry `block` at all. Doing it means registering the lane's drain
   on every face's session as the declaration is replayed onto it, and deciding what a put on the
   caller's thread does when the lane is full (wait in the put, as zenoh-c's FIFO handler blocks its
-  sender, or refuse). Until that is decided the door refuses it, and a build whose default policy
-  is `block` states `reject` or `keep-latest` at each declaration.
+  sender, or refuse). Until that is decided the door refuses it, and a declaration that states
+  nothing takes `reject`.
 
 - What the transport does with a reliable sample the lane refused is not decided here. The receive
   path records the failure as local; whether it then stops reading, drops with the counter, or ends the
