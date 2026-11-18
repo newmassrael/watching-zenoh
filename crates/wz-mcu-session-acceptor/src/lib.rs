@@ -89,6 +89,7 @@ use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -705,7 +706,7 @@ where
     // nonce from the supplied `EntropySource`, the way the AP's
     // `new_session_actions` draws from `getrandom`.
     let mut entropy = entropy;
-    let params = acceptor_params(&mut entropy);
+    let params = acceptor_params(&mut entropy, &resolve_policy());
     let actions = wz::runtime_coop::session_runtime::new_session_actions(
         topology.acceptor_sink(),
         params,
@@ -773,8 +774,12 @@ where
 /// cookie nonce comes from, so a board that supplies a source gets both
 /// secrets from it. A source that cannot produce the key stops the e2e loudly:
 /// a session with no signing key would admit nothing.
+///
+/// `policy` is the snapshot the e2e resolved for its session ([`resolve_policy`]): the session's
+/// machines read it, and its queue is made from it.
 pub(crate) fn acceptor_params(
     entropy: &mut impl wz_session_core::entropy::EntropySource,
+    policy: &SessionPolicy,
 ) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
@@ -792,11 +797,47 @@ pub(crate) fn acceptor_params(
         // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
         // fixture demonstrates the production shape rather than the literal a
         // board would otherwise copy.
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-        policy: wz_session_core::policy::SessionPolicy::defaults(),
+        policy: *policy,
         cookie_signing_key: SigningKey::from_entropy(entropy)
             .expect("the entropy source produced no signing key"),
+    }
+}
+
+/// The snapshot of the e2e's acceptor session. The e2e opens that session from parameters of its
+/// own ([`acceptor_params`]), so it is the session's creator, and this is where it resolves the
+/// snapshot: the build defaults until it reads a run-time document.
+pub(crate) fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wz_session_core::policy::TxNoProgressDeadline;
+
+    /// The acceptor's session reads the snapshot the e2e hands it and not the build: each value
+    /// of `tx-no-progress-deadline` the build's domain holds, selected and handed in, is the value
+    /// the session's snapshot and its queue carry.
+    #[test]
+    fn the_acceptor_session_carries_the_snapshot_it_is_handed() {
+        let mut built = 0;
+        for on in [false, true] {
+            let mut policy = SessionPolicy::defaults();
+            if policy
+                .select_tx_no_progress_deadline(TxNoProgressDeadline::from(on))
+                .is_err()
+            {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            let params = acceptor_params(&mut FixtureEntropy, &policy);
+            assert_eq!(params.policy, policy);
+            assert_eq!(params.tx_queue.no_progress_us.is_some(), on, "{on}");
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
     }
 }
 

@@ -119,12 +119,12 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-capi-pico/src/session.rs", "PICO_GROUP", STEP_3B),
     ("crates/wz-capi-pico/src/session.rs", "open_on_tokio", STEP_3B),
     ("crates/wz-capi-pico/src/session.rs", "open_on_coop", STEP_3B),
-    ("crates/wz-mcu-session-acceptor/src/lib.rs", "acceptor_params", STEP_3B),
-    ("crates/wz-mesh-client/src/lib.rs", "session_params", STEP_3B),
-    ("crates/wz-node-time/src/event_log.rs", "global", STEP_3B),
-    ("crates/wz-node-time/src/node_clock.rs", "over_source", STEP_3B),
-    ("crates/wz-replay/src/live.rs", "session_init_params", STEP_3B),
-    ("crates/wz-runtime-coop/src/reassembly_rx.rs", "mcu_reassembly_config", STEP_3B),
+    ("crates/wz-mcu-multicast-e2e/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-mcu-session-acceptor/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-mesh-client/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-node-time/src/event_log.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-node-time/src/node_clock.rs", "build_defaults", WRAPPER + " (NodeHlc::for_node_by and its two siblings)"),
+    ("crates/wz-replay/src/live.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-runtime-tokio-test-support/src/lib.rs", "fixture_session_init_params", STEP_3B + "; a test fixture"),
     ("crates/wz-runtime-tokio-test-support/src/lib.rs", "zenoh_interop_session_init_params", STEP_3B + "; a test fixture"),
     ("crates/wz-runtime-tokio/src/datagram_pacing.rs", "OfBuild", STEP_3B + "; a fold, derived from the domain then"),
@@ -133,7 +133,6 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-runtime-tokio/src/router_forward.rs", "build", STEP_3B),
     ("crates/wz-runtime-tokio/src/session/queryable.rs", "deferred_query_sink", STEP_3B),
     ("crates/wz-runtime-tokio/src/session/subscriber.rs", "default", STEP_3B),
-    ("crates/wz-session-mcu/src/slot_node.rs", "params_as", STEP_3B),
 )
 
 #: The items a read can be in. A `const fn` is a `fn`; `const` and `static` are named by the
