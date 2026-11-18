@@ -921,11 +921,11 @@ ROOTLESS_TOTAL_BUDGET = 472
 PICO_LINE_BUDGET = 311
 PICO_BARE_BUDGET = 126
 #: The basename axis, held both ways. MEASURED with the same grep: 2079
-#: `BASENAME_LINE_CITE` tokens over `tracked_files()`, of which 1188 name a file
+#: `BASENAME_LINE_CITE` tokens over `tracked_files()`, of which 1187 name a file
 #: no `git ls-files` path ends in (530 `.c`, 280 `.h`, 378 `.rs`). Tracking a
 #: new file whose name one of them uses moves that token out of this count; the
 #: refusal says so, and the number moves down with it.
-BASENAME_LINE_BUDGET = 1188
+BASENAME_LINE_BUDGET = 1187
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
