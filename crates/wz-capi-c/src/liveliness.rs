@@ -643,6 +643,11 @@ pub unsafe extern "C" fn z_liveliness_get(
     }
 }
 
+/// One leg's reply callback, as the registry's walk mints it: the port's `ReplyCallback`, named
+/// here because this crate takes the port only with some of its features.
+#[cfg(feature = "liveliness-get")]
+type LegCallback = Box<dyn FnMut(&dyn wz_runtime_tokio::reply_sink::ReplyView) + Send>;
+
 /// The body of [`z_liveliness_get`], for a get that may be limited to some links. `links` is the
 /// restriction the get stated or the code its refusal answers; the closure and the options'
 /// cancellation token are taken on every path, so a refused get runs the C `drop(context)` once
@@ -742,7 +747,7 @@ pub(crate) unsafe fn liveliness_get_on(
 
         // Each leg owns its share of the closure, the gate and the registration, and its drop is
         // that leg's end, which covers a real final, a timeout sweep and a face death alike.
-        let mut leg = || -> Box<dyn FnMut(&dyn wz_runtime_tokio::reply_sink::ReplyView) + Send> {
+        let mut leg = || -> LegCallback {
             let per_leg = crate::get::LegReply {
                 closure: closure.clone(),
                 gate: gate.clone(),
