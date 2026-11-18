@@ -14282,10 +14282,15 @@
       "status": "deprecated",
       "reason": "CLOSED R311y857: the gate reports ZERO open rows. Do not quote a count from here -- run `python3 scripts/lib/analysis_surface_parity.py` (Layer C0), which stays and is the reason this can be closed rather than re-opened by the next capability. Closed in order: the four census planes (R311y851), the selector and its diagnostic (R311y854), the FIELD LAYER over a capture with both halves (R311y855), PAYLOAD FORMAT DECODING and the declared field names that ride it (R311y856, ABI 6 -- which needed the decoder, the declaration dialect and the decode core to move out of `wz-analyze` and beside the map first, because the cdylib must not link `ring` to walk varints), and the loss/health counters (R311y857). ONE CORRECTION belongs on the record: this row's own reason for the last item was OVERSTATED. It said the command line \"has no flag for these (capture drops, retransmits, sequence gaps, checksums, framing desyncs)\"; measured by RUNNING wz-analyze, the report's `capture` object had carried every one of those unconditionally. What that surface genuinely could not reach was exactly two things -- the fragment CHAIN statistics, and the checksums that VERIFIED or were ABSENT, so a reader saw a failure count with no denominator. The registry reason had outlived the code, which is the debt-47 shape, and it was found by running the binary rather than reading the row. Every surviving one-sided row now carries a stated DECISION and no \"not done yet\"; the gate's third arm refuses a reason that argues otherwise without leading with the tag."
     },
-    "debt-atomic-tx-reservation-held-across-the-send": {
+    "debt-atomic-tx-multicast-group-unreserved": {
       "status": "active",
       "source": "open-debt register",
-      "reason": "OPEN: the all-or-none publish (policy multi-route-atomic-tx, atomic_passes in wz-capi-core faces.rs, landed in ledger rounds 4432-4433) reserves room on each face in a first phase and sends under the reservations in a second. Recorded at landing and not re-measured since: a reservation is held across the send of an earlier face, so a publish can abort for room its own earlier send is occupying, which is a spurious abort; only the first frame of a fragment chain is atomic; a multicast group is skipped on an abort. The first step is a test that forces the case, and the answer is either a reservation taken just before its own send or a stated limit in the policy's own text. Off by default, so no default image moves."
+      "reason": "OPEN: the all-or-none publish (policy multi-route-atomic-tx) reserves room on every unicast face's writer queue for the whole chain, but a multicast group's writer has no door that sends under a reservation, so a group takes no reservation and is skipped on an abort; the policy help states it. Closes when the multicast session gets a reserved send path and the group joins phase 1."
+    },
+    "debt-atomic-tx-reservation-held-across-the-send": {
+      "status": "deprecated",
+      "source": "open-debt register",
+      "reason": "CLOSED (c7 integration round), with one limit moved to debt-atomic-tx-multicast-group-unreserved: the all-or-none publish now reserves, per face and summed per writer queue, room for the whole fragment chain before anything is sent (try_reserve_rooms_for, send_network_message_reserved_chain), so later frames never wait for room the publish holds and the whole chain is atomic. No link kind shares one writer queue between faces today (udp_pipeline.rs, stream_link.rs, multicast_pipeline.rs each build their own)."
     },
     "debt-bounded-output-parity": {
       "status": "deprecated",
@@ -14692,9 +14697,9 @@
       "reason": "OPEN, UNREPRODUCED: Layer E6h test wz_storage_host_plugins_section_from_a_config_file_serves_via_pico read an empty answer once on a hosted run (the key boot/a was not served) and passed on the next head. Commits between the passing and the failing head touched none of the runtime, session-core, demo and storage crates, so the cause is a race inside the host: the storage host applies the config file's plugins section on the FIRST client session and serves ONE client session at a time, so either the put reached the first session before the storage started on it, or the second session was bound after the query was answered. Round 4444 made the final assertion print the host's whole log; the item closes when a failing run's log names which order occurred and the order is fixed in the host (not in the test), or when a stress run on the build machine shows it cannot happen."
     },
     "debt-field-values-window": {
-      "status": "active",
+      "status": "deprecated",
       "source": "carry of Round 4385",
-      "reason": "OPEN: wz_dissect_live_field_values_since (ABI 53, document field_values) has no max_rows window. One call writes every record the selector picks after the cursor, so on a large capture the first call returns one document for the whole capture, where wz_dissect_live_fields_since_window bounds a call by its max_rows work ceiling and hands the next cursor back as window.through_seq. The window and the cursor are already in the document (window.after_seq, window.through_seq), so a bounded door adds the ceiling and leaves the reading unchanged; it is a new C symbol and an ABI revision."
+      "reason": "CLOSED (c7 integration round): wz_dissect_live_field_values_since_window bounds a values call by max_rows with the fields window's ceiling and hands the next cursor back as window.through_seq; capi-dissect ABI 59. The bound is a work ceiling on the document, not on the selector fold, as the header states."
     },
     "debt-host-slot-node-let-unit-value": {
       "status": "active",
@@ -14712,19 +14717,19 @@
       "reason": "CLOSED R311y892 by `scripts/lib/job_budget_binding.py` (Layer C0). A job time budget is ONE fact in TWO places -- the `timeout-minutes` the RUNNER enforces, and the seconds argument `job-budget-margin.sh` grades against -- and the pair was bound only by a comment at each call site saying \"the two numbers are one fact, so move that and move this\". Nothing checked it. Move the argument alone and the gate grades against a ceiling that is not the ceiling; move `timeout-minutes` alone and a job can be CANCELLED at its real ceiling with the margin gate reporting comfort the whole way up. Found while lowering the e2e-demo job from 20 minutes to 15 (the budget FLOOR had fired on hosted runs 32323298824 and 32321994673 at 29% of 1200s), where both numbers had to be moved by hand and nothing would have spoken if only one had. Layer C0b already selftests the SCRIPT in both directions; what had no gate was the binding between its argument and the job. The lint also pins the margin step to a stamp step its own job writes, and REPORTS the population (4 of 14 jobs carry a budget gate) rather than demanding one per job, which would be arguing for work nobody has scoped."
     },
     "debt-link-restriction-c-abi-liveliness-get": {
-      "status": "active",
+      "status": "deprecated",
       "source": "open-debt register",
-      "reason": "OPEN: the liveliness get can be limited to some links from the registry (SharedSession::liveliness_get_on_links, ledger round 4466) and from the Rust API (LivelinessGetBuilder::allowed_links, crate feature link-restriction), and the C library has no door for it. z_liveliness_get takes no statement of links and no wz_capi_c_liveliness_get_ext exists beside the nine wz_capi_c_*_ext doors of the switch-doors feature. The door takes the existing wz_capi_c_entity_ext_t and calls the registry door; the options struct of z_liveliness_get is upstream's layout, so the statement goes beside it as for every other door. A door moves the capi-c ABI revision (13 to 14) with the pinned symbol set in scripts/lib/capi_c_abi_pin.py, the stamp in scripts/lib/abi_stamp_gate.py and the header in the same change; the gate that reddened a hosted run at revision 12 is that pairing. Off by default, so no default image moves."
+      "reason": "CLOSED (c7 integration round): wz_capi_c_liveliness_get_ext states the links of a liveliness get beside z_liveliness_get through the shared body liveliness_get_on; capi-c ABI revision 18. z_liveliness_get now also answers the session's own tokens, as upstream does."
     },
     "debt-link-restriction-engines-without-a-set": {
-      "status": "active",
+      "status": "deprecated",
       "source": "open-debt register",
-      "reason": "OPEN: only the tokio registry reads a set of links (policy entity-link-restriction, off by default). The router engine of the Rust API refuses a stated set; a router-node session of the C library answers Z_EUNAVAILABLE for one; the cooperative engine (wz-capi-coop), the lwIP session and the pico ABI do not mention LinkRestriction at all and have no door (a search of those crates at 2026-11-13 finds none). So a build on those engines cannot state a set, and the Rust and C doors say so only where an engine arm exists. The long-term shape is one of two: the port trait takes the set and every engine decides, or each engine states by name that it refuses; a silent ignore is not allowed because it would make a limited entity unrestricted without saying so. A per-session policy was judged not worth doing (SessionPolicy::from_build has about forty call sites by design, one build per firmware) and is not part of this item."
+      "reason": "CLOSED (c7 integration round): the port trait takes the stated set (and the other three statements: admission retry, all-or-none, target peer) and every engine decides; the tokio registry honours them, the router engine, the cooperative engine and a C router-node session refuse each by name (StatementNotHonoured / LinksNotHonoured, Z_EUNAVAILABLE in C); none ignores a stated value."
     },
     "debt-memory-document-values-door": {
-      "status": "active",
+      "status": "deprecated",
       "source": "carry of Round 4385",
-      "reason": "OPEN: wz_dissect_live_memory does not count what the field-values door keeps. The handle holds the payloads the selector picked past the cursor in its ValuesMemory (live.rs values_memory) until a cursor passes them, and the memory document lists lists.rows, the reassembled bytes and the selection memories, not these. A consumer that keeps a cursor behind on a busy capture therefore sees memory the document does not name. The figure belongs in the memory document as its own member, read from ValuesMemory, with the document's revision moved."
+      "reason": "CLOSED (c7 integration round): the memory document counts the values door's ValuesMemory as its own member values (memory document revision 3); with fragment pieces the figure is a lower bound because the per-piece verdict B-tree is not modelled, as the document says."
     },
     "debt-packet-edit-after-build": {
       "status": "deprecated",
@@ -14735,8 +14740,8 @@
       "reason": "CLOSED R311y888 by scripts/lib/packet_fixture_lint.py (Layer C0), first arm. Do not quote a count from here -- RUN the gate. The item: R311y886 gave three crates real checksums and left six crates building healthy packets with only three of them SAYING so. A builder is correct until somebody edits it, and that edit costs nothing in a file whose every assertion is about flows, message counts or exit codes -- none of which a corrupt checksum moves. That is precisely the state open-debt item 357 was found in, and it stood for months because nothing looked. The gate reads its population from the MANIFESTS (every workspace member depending on wz-packet-fixtures, which is exactly the set that lays packets by hand), so a seventh crate cannot join quietly, and it checks that each named witness READS a checksum counter rather than merely existing. Witnesses added this round for wz-capture, wz-analyze, wz-replay and wz-integration-tests; wz-capi-dissect and wz-tls-record got theirs in R311y886. The wz-replay one drives all six of that module's captures, because the builders and the ASSEMBLY are different claims and datagram_capture is the one where a zero UDP checksum is RFC 768's declining form rather than a defect."
     },
     "debt-peer-redial-behind-a-router-feature": {
-      "status": "active",
-      "reason": "OPEN, and it is a REPLACEMENT gap rather than a test problem. A wz peer dials each address in its connect list ONCE and never re-dials unless `router-connect-reconcile` is on -- accept_loop.rs:1645-1659 builds the RedialSchedule under any(router-connect-reconcile, transport-multilink), and only the first of those reconciles a desired peer that never connected (multilink paces link RE-ADDS). Upstream's peer_connector_retry retries forever by default for every mode with a connect list. Measured 2026-08-18 at Layer Z's own feature set and at preset-ap-client: control config, dead port, six seconds -> ONE attempt, while the admin config rendered zenoh's 1s/4s/2.0. So the node reports a cadence it does not run, and a client-tier drop-in cannot reconnect to a router that restarts -- the exact scenario R311y849 opened with. preset-ap-full carries the feature and is unaffected. The fix is a decision about which feature owns the peer re-dial (the capability is misnamed `router-*`, not miscoded), which is why R311y851 corrected the lane and the leg's guard instead of moving the gate."
+      "status": "deprecated",
+      "reason": "CLOSED (c7 integration round): re-dialling a configured connect list is base behaviour of routing-peer (loop_peers, PeerRetryDue, the peers machine), not of router-connect-reconcile, which keeps only the reconcile channel; the rendered cadence (connect_retry) is the one every peer loop runs. Witness: a_configured_endpoint_is_dialled_again_until_its_listener_comes_up without router-connect-reconcile."
     },
     "debt-pf-5": {
       "status": "active",
@@ -14744,9 +14749,9 @@
       "reason": "OPEN (M): no e2e format. The AUTOSAR profile CRC polynomial is not in this machine's sources (grep for 0x1021 / crc16 finds nothing). Inventing one is forbidden; open as a seam only."
     },
     "debt-reliable-gap-reconnect-without-a-door": {
-      "status": "active",
+      "status": "deprecated",
       "source": "open-debt register",
-      "reason": "OPEN: the policy reliable-gap-reconnect (choices off, until-declarations-synced and always) is fixed at build time and read by the session core, and no door states it: a search of wz-zenoh and wz-capi-c for it finds nothing. Whether a door is wanted is the open question, and it is decided by a use and not by symmetry with the entity switches: the choice is session-wide, so the build setting may be the whole contract, and if a client must choose at run time the textbook door is a configuration key, which reaches every ABI at once, rather than a call argument. Off by default, so no default image moves."
+      "reason": "CLOSED (c7 integration round) by decision, no code: the owner's directive of 2026-10-23 makes the switches a deployment states (this policy among them) build-time Kconfig-combinable switches, so the build setting is the whole contract and no run-time door is owed. A future consumer that must choose per session would reopen it as a configuration key, which reaches every ABI at once."
     },
     "debt-req-1": {
       "status": "active",
