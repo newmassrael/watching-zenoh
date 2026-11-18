@@ -796,25 +796,32 @@ fn bring_timed(memo: &mut Arc<ClientRoutes>, store: &ClientSubStore) -> Duration
 /// that misses (`docs/router-table-snapshots.md`, section 6.9).
 ///
 /// [`ADMITTED`] client faces declare the keys of each step of [`MEMO_KEYS`], `mesh/dev_<k>`, and
-/// two memos of the client leg route every one of them: one built with no index, as the memos were
-/// before section 6.9, and one indexed. Every write moves the store once and brings each memo to
-/// it, timed alone: a key no route meets (declared, then withdrawn), a key one route meets (a
-/// second face declaring it, then withdrawing it), and `mesh/**`, which meets every route. A miss
-/// is timed by routing every key into an emptied memo, and a hit by routing them again. The two
-/// forms take turns, in one order and then the other, in one process. Asserts its population: the
-/// two memos keep the same number of routes after every write, the number the write leaves.
+/// three memos of the client leg route every one of them: `scan`, built with no index and taking
+/// each route a change reaches out one by one, as the memos were before section 6.9; `index`,
+/// indexed and taking each reached route out one by one, as section 6.9 built them; and
+/// `index_wholesale`, the memo as the router builds it now, which starts the new memo from the
+/// routes that stay when a change reaches more than half of them. Every write moves the store once
+/// and brings each memo to it, timed alone: a key no route meets (declared, then withdrawn), a key
+/// one route meets (a second face declaring it, then withdrawing it), and `mesh/**`, which meets
+/// every route. A miss is timed by routing every key into an emptied memo, and a hit by routing
+/// them again. The forms take turns, each turn starting at the next, in one process. Asserts its
+/// population: the memos keep the same number of routes after every write, the number the write
+/// leaves.
 #[test]
 #[ignore = "a measurement of the routes a change reaches found by an index and by a scan \
             (docs/router-table-snapshots.md, section 6.9); run with --release --ignored \
             --nocapture on a build host"]
 fn the_routes_a_change_reaches_measured_found_by_the_index_and_by_a_scan() {
-    const FORMS: [&str; 2] = ["scan", "index"];
+    const FORMS: [&str; 3] = ["scan", "index", "index_wholesale"];
     const WRITES: [&str; 3] = [
         "reaches_no_route",
         "reaches_one_route",
         "reaches_every_route",
     ];
-    let order = |turn: u64| if turn % 2 == 0 { [0, 1] } else { [1, 0] };
+    let order = |turn: u64| {
+        let first = (turn % 3) as usize;
+        [first, (first + 1) % 3, (first + 2) % 3]
+    };
     let steps: Vec<u64> = std::env::var("WZ_MEMO_KEYS").map_or_else(
         |_| MEMO_KEYS.to_vec(),
         |steps| {
@@ -831,13 +838,14 @@ fn the_routes_a_change_reaches_measured_found_by_the_index_and_by_a_scan() {
             store.insert(FaceId(k % ADMITTED), 1 + k / ADMITTED, name, ());
         }
         let mut memos = [
-            Arc::new(ClientRoutes::new()),
+            Arc::new(ClientRoutes::new().retiring_by_route()),
+            Arc::new(ClientRoutes::indexed().retiring_by_route()),
             Arc::new(ClientRoutes::indexed()),
         ];
         for memo in &mut memos {
             bring_client_routes(memo, &store);
         }
-        let kept = |memos: &[Arc<ClientRoutes>; 2], want: usize, after: &str| {
+        let kept = |memos: &[Arc<ClientRoutes>; 3], want: usize, after: &str| {
             for (memo, form) in memos.iter().zip(FORMS) {
                 assert_eq!(
                     memo.len(),
@@ -846,9 +854,9 @@ fn the_routes_a_change_reaches_measured_found_by_the_index_and_by_a_scan() {
                 );
             }
         };
-        let mut misses: [Vec<Duration>; 2] = Default::default();
-        let mut hits: [Vec<Duration>; 2] = Default::default();
-        let mut writes: [[Vec<Duration>; 2]; 3] = Default::default();
+        let mut misses: [Vec<Duration>; 3] = Default::default();
+        let mut hits: [Vec<Duration>; 3] = Default::default();
+        let mut writes: [[Vec<Duration>; 3]; 3] = Default::default();
         let wide = "mesh/**";
         for turn in 0..MEMO_WIDE_ROUNDS {
             for (step, change) in [true, false].into_iter().enumerate() {
