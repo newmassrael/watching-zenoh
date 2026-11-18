@@ -1064,9 +1064,14 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let zid = state.zid();
             let drive = state.into_drive();
             #[cfg(feature = "connectivity")]
-            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, &drive.engine());
+            let ext = crate::session_ext::PicoSessionExt::new(
+                session_mode,
+                &zid,
+                policy,
+                &drive.engine(),
+            );
             #[cfg(not(feature = "connectivity"))]
-            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid);
+            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy);
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
@@ -1209,9 +1214,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let zid = wz_capi_port::SessionDrive::zid(&*engine);
     let drive = wz_capi_coop::CoopEngine::into_drive(engine);
     #[cfg(feature = "connectivity")]
-    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, &drive.engine());
+    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, &drive.engine());
     #[cfg(not(feature = "connectivity"))]
-    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid);
+    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy);
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
     let handle = PicoSessionHandle::new(drive, ext);

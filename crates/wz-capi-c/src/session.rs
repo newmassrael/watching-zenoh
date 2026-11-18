@@ -102,6 +102,17 @@ impl SessionHandle {
         }
     }
 
+    /// The policies the session runs under, as its open resolved them: the registry's or the
+    /// node's. What a door admits a statement a policy governs by; compiled where such a door is.
+    #[cfg(any(feature = "rx-callback-offload", feature = "switch-doors"))]
+    pub(crate) fn session_policy(&self) -> &SessionPolicy {
+        match self {
+            Self::Registry(state) => state.shared.session_policy(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.session_policy(),
+        }
+    }
+
     /// What the session applies itself above its links, as its open compiled it from the
     /// configuration: the registry's or the node's, read the same way.
     pub(crate) fn session_defaults(&self) -> &wz_capi_core::session_defaults::SessionDefaults {

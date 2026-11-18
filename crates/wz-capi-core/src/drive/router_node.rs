@@ -102,8 +102,8 @@ impl RouterState {
     }
 
     /// The policies the node runs under, which an ABI admits what a program states on the node
-    /// by, as it does by [`SharedSession::session_policy`](crate::faces::SharedSession::session_policy)
-    /// on a registry.
+    /// by, as it does on a registry by
+    /// [`SharedSession::session_policy`](crate::faces::SharedSession::session_policy).
     pub fn session_policy(&self) -> &SessionPolicy {
         &self.session_policy
     }

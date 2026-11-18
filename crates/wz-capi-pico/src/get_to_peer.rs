@@ -10,18 +10,20 @@
 //! link to is not asked and the get is not widened to the others; it completes with no reply.
 //! The id names a node, not a link or a queryable (`wz_session_core::peer_target`).
 //!
-//! The policy is the build's and off unless the build states it (`WZ_POLICY_TARGETED_QUERY`).
-//! Off, the door refuses with `WZ_EXT_ERR_POLICY_OFF` and sends nothing, as the zenoh-c ABI's
-//! `wz_capi_c_get_ext` refuses a target; an id of no bytes is `Z_ERR_INVALID`. On, a session
-//! whose engine cannot address a get to one node (the cooperative engine) answers
-//! `WZ_EXT_ERR_UNSUPPORTED` and asks no link. The callback and the moved parts of the options
-//! are consumed on every path, a refusal included, as `z_get` consumes them; on a refusal the
-//! callback's `drop(context)` runs before the door returns, which is the get reported over with
-//! no reply.
+//! The policy is the session's, as its open resolved it, and off unless the build states it
+//! (`WZ_POLICY_TARGETED_QUERY`). Off, the door refuses with `WZ_EXT_ERR_POLICY_OFF` and sends
+//! nothing, as the zenoh-c ABI's `wz_capi_c_get_ext` refuses a target; an id of no bytes is
+//! `Z_ERR_INVALID`. On, a session whose engine cannot address a get to one node (the cooperative
+//! engine) answers `WZ_EXT_ERR_UNSUPPORTED` and asks no link. The callback and the moved parts of
+//! the options are consumed on every path, a refusal included, as `z_get` consumes them; on a
+//! refusal the callback's `drop(context)` runs before the door returns, which is the get reported
+//! over with no reply.
 
 use std::ffi::{c_char, CStr};
 
 use wz_session_core::peer_target::{self, PeerTargetError};
+use wz_session_core::policy::{SessionPolicy, TargetedQuery};
+use wz_session_core::policy_binding::PolicyValue;
 
 use crate::abi::z_loaned_keyexpr_t;
 use crate::get::{get_inner, z_get_options_t, z_moved_closure_reply_t};
@@ -37,9 +39,20 @@ fn wire_bytes(id: &[u8; Z_ID_SIZE]) -> Vec<u8> {
     id[..len].to_vec()
 }
 
-/// The node `peer` names, admitted by a build whose `targeted-query` policy is `enabled`, or the
-/// code the door answers: `Z_ERR_NULL` for no id, `WZ_EXT_ERR_POLICY_OFF` with the policy off,
-/// `Z_ERR_INVALID` for an id that names no node.
+/// Whether the build's domain allows the `targeted-query` policy on: whether any session's
+/// snapshot can admit a target. A build that allows only off keeps neither the read of the
+/// snapshot nor the addressed path of a get (`get::issue_get`).
+pub(crate) const TARGETED_IN_DOMAIN: bool =
+    <TargetedQuery as PolicyValue>::DOMAIN.contains_index(TargetedQuery::On as usize);
+
+/// Whether `policy`, the snapshot of the session a get is asked on, admits a target.
+fn targeted_by(policy: &SessionPolicy) -> bool {
+    TARGETED_IN_DOMAIN && policy.targeted_query()
+}
+
+/// The node `peer` names, admitted by a session whose `targeted-query` policy is `enabled`, or
+/// the code the door answers: `Z_ERR_NULL` for no id, `WZ_EXT_ERR_POLICY_OFF` with the policy
+/// off, `Z_ERR_INVALID` for an id that names no node.
 fn addressed(peer: Option<&z_id_t>, enabled: bool) -> Result<Option<Vec<u8>>, ZResult> {
     let Some(peer) = peer else {
         return Err(Z_ERR_NULL);
@@ -52,10 +65,10 @@ fn addressed(peer: Option<&z_id_t>, enabled: bool) -> Result<Option<Vec<u8>>, ZR
     }
 }
 
-/// `z_get`, addressed to the node `peer` names (see the module doc). `WZ_EXT_ERR_POLICY_OFF` in a
-/// build whose `targeted-query` policy is off, `Z_ERR_INVALID` for an all-zero id, `Z_ERR_NULL`
-/// for a null `peer`, and `WZ_EXT_ERR_UNSUPPORTED` from an engine that cannot address a get;
-/// each sends nothing. Otherwise what `z_get` answers.
+/// `z_get`, addressed to the node `peer` names (see the module doc). `WZ_EXT_ERR_POLICY_OFF` on a
+/// session whose `targeted-query` policy is off, `Z_ERR_INVALID` for an all-zero id, `Z_ERR_NULL`
+/// for a null `peer` or session, and `WZ_EXT_ERR_UNSUPPORTED` from an engine that cannot address
+/// a get; each sends nothing. Otherwise what `z_get` answers.
 ///
 /// # Safety
 /// As `z_get`; `peer` must be null or point to a readable `z_id_t`.
@@ -74,10 +87,12 @@ pub unsafe extern "C" fn wz_ext_get_to_peer(
         } else {
             CStr::from_ptr(parameters).to_bytes().len()
         };
-        // A `const` item, so the build's value is folded and a build with the policy off keeps
-        // only the refusal (as `get::issue_get` reads it).
-        const ENABLED: bool = wz_session_core::policy::SessionPolicy::from_build().targeted_query();
-        let target = addressed(peer.as_ref(), ENABLED);
+        // The target is admitted by the snapshot of the session it is asked on; with no session
+        // there is no snapshot, and the door answers it as `z_get` answers a null session.
+        let target = match crate::session::session_handle(zs) {
+            Some(handle) => addressed(peer.as_ref(), targeted_by(&handle.ext.policy)),
+            None => Err(Z_ERR_NULL),
+        };
         get_inner(zs, keyexpr, parameters, len, callback, options, target)
     })
 }
@@ -118,5 +133,23 @@ mod tests {
         );
         assert_eq!(addressed(None, true), Err(Z_ERR_NULL));
         assert_eq!(addressed(None, false), Err(Z_ERR_NULL));
+    }
+
+    /// A target is admitted by the snapshot of the session it is asked on and not by the build:
+    /// in a build that allows both values, the snapshot that selects `on` admits one and the one
+    /// that selects `off` does not, whatever the build's default is.
+    #[test]
+    fn a_target_is_admitted_by_the_snapshot_of_its_session() {
+        let mut on = SessionPolicy::defaults();
+        let mut off = SessionPolicy::defaults();
+        let on_allowed = on.select_targeted_query(TargetedQuery::On).is_ok();
+        let off_allowed = off.select_targeted_query(TargetedQuery::Off).is_ok();
+        assert_eq!(on_allowed, TARGETED_IN_DOMAIN, "the fold is the domain's");
+        if on_allowed {
+            assert!(targeted_by(&on), "a snapshot with the policy on admits");
+        }
+        if off_allowed {
+            assert!(!targeted_by(&off), "a snapshot with the policy off refuses");
+        }
     }
 }
