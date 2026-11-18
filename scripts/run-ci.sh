@@ -23698,6 +23698,15 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     wz_test_args wz-integration-tests wz_router_subregion_two_gateways_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    # The placement of a peer node that partitions its south, read side by side: a
+    # zenohd in mode peer and a wz `--peer --gateway-south` given one `gateway/south`
+    # text and the same two remotes (the pinned `z_pub` by zid, a wz peer by role),
+    # each asked for its admin root by the pinned `z_get`, and the `region` each
+    # gives the remotes compared. Needs zenohd, the core examples z_pub and z_get
+    # and the demo built above with `routing-peer,zenoh-config`. GUARDED at 1.
+    wz_test_args wz-integration-tests wz_peer_gateway_placement_matches_a_stock_gateway
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y430 — `scouting-autoconnect`, the last unproven scouting atom, on a
     # THREE-node topology the peer-tier leg above cannot host: a zenohd ROUTER, a
     # THIRD-PARTY zenohd PEER listening beside it, and a wz `--peer --autoconnect`
