@@ -7704,12 +7704,17 @@ layer_c1ay_cargo_test_router_hat() {
     # of docs/router-table-snapshots.md), five ungated witnesses (a route from before a face left
     # does not send to it, a face registered again is reached, the client leg's carrier is a
     # literal, and `held_route`'s two); every router_forward guard below moves by the same five.
-    _runci_guarded_test "C1AY router_forward 335" 335 \
+    # +1 on every router_forward guard below (the frozen scenes aside), counted from the source:
+    # the ungated test that a peer's aggregate option is cleared.
+    # +2 on every router_forward guard below (+3 with the token tables), counted from the source:
+    # a late future asker told what a second holder declares, one ungated test per subscriber and
+    # queryable plane and one for tokens.
+    _runci_guarded_test "C1AY router_forward 338" 338 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 329 -> 335, printed on pc2 (the six of the first guard's note).
-    # 335 -> 340: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward qos 340" 340 \
+    # 335 -> 343: the five and the three of the first guard's note.
+    _runci_guarded_test "C1AY router_forward qos 343" 343 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -7748,8 +7753,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 324 -> 334 (see the first arm). PRINTED.
     # The c2 integration: 338 -> 353. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 353 -> 359, printed on a build host (the six of `router_forward 330`).
-    # 359 -> 364: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward mcast-faces 364" 364 \
+    # 359 -> 367: the five and the three of the first guard's note.
+    _runci_guarded_test "C1AY router_forward mcast-faces 367" 367 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -7776,8 +7781,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 305 -> 314 (see the first arm). PRINTED.
     # The c2 integration: 318 -> 332. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 332 -> 338, printed on pc2 (the six of `router_forward 330`).
-    # 338 -> 343: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward 343" 343 \
+    # 338 -> 346: the five and the three of the first guard's note.
+    _runci_guarded_test "C1AY router_forward 346" 346 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -7799,8 +7804,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 308 -> 317 (see the first arm). PRINTED.
     # The c2 integration: 321 -> 335. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 335 -> 341, printed on pc2 (the six of `router_forward 330`).
-    # 341 -> 346: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward hotreload 346" 346 \
+    # 341 -> 349: the five and the three of the first guard's note.
+    _runci_guarded_test "C1AY router_forward hotreload 349" 349 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -7821,8 +7826,10 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 355 -> 364 (see the first arm). PRINTED.
     # The c2 integration: 368 -> 382. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 382 -> 388, printed on pc2 (the six of `router_forward 330`).
-    # 388 -> 393: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward 393" 393 \
+    # 388 -> 389, counted from the source: the late peer of a router told no token until it asks.
+    # 389 -> 390, counted from the source: a router's peer told a later token for its interest.
+    # 390 -> 399: the five, the one and the three (token tables) of the first guard's note.
+    _runci_guarded_test "C1AY router_forward 399" 399 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -7831,8 +7838,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 297 -> 306 (see the first arm). PRINTED.
     # The c2 integration: 310 -> 324. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 324 -> 330, printed on pc2 (the six of `router_forward 330`).
-    # 330 -> 335: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward multicast 335" 335 \
+    # 330 -> 338: the five and the three of the first guard's note.
+    _runci_guarded_test "C1AY router_forward multicast 338" 338 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -7848,8 +7855,10 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 299 -> 308 (see the first arm). PRINTED.
     # The c2 integration: 312 -> 328. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 328 -> 334, printed on pc2 (the six of `router_forward 330`).
-    # 334 -> 339: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward linkstate 339" 339 \
+    # 334 -> 335, counted from the source: the `adminspace-core`-gated test of the region a
+    # partitioning node reports for each face, which only this arm's features reach.
+    # 335 -> 343: the five and the three of the first guard's note.
+    _runci_guarded_test "C1AY router_forward linkstate 343" 343 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -7873,8 +7882,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 310 -> 319 (see the first arm). PRINTED.
     # The c2 integration: 323 -> 338. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 338 -> 344, printed on pc2 (the six of `router_forward 330`).
-    # 344 -> 349: the five of the first guard's note.
-    _runci_guarded_test "C1AY router_forward interest broker 349" 349 \
+    # 344 -> 352: the five and the three of the first guard's note.
+    _runci_guarded_test "C1AY router_forward interest broker 352" 352 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -9094,7 +9103,10 @@ layer_c1ak_cargo_test_transport_stats() {
     # 57 -> 59 with C1AM's guard (see there): the two ungated tests of one answerer for every role
     # and a client's manifest, which that guard's step named for every leg below it and this leg,
     # above it, missed. The pc5 run of the 8e integration branch printed 59.
-    _runci_guarded_test C1ak 59 cargo test -p wz-admin --features adminspace-metrics,wz-session-core/transport-stats --lib adminspace --quiet \
+    # 59 -> 62 here and in every `--lib adminspace` guard below, counted from the source: the
+    # three ungated tests of the surface document's `read_denied`, `config_write` and
+    # `aggregated_links`.
+    _runci_guarded_test C1ak 62 cargo test -p wz-admin --features adminspace-metrics,wz-session-core/transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -9377,7 +9389,8 @@ layer_c1am_cargo_test_adminspace() {
     # crate gates, so every `--lib adminspace` leg below moves by two (by three under
     # `adminspace-router-linkstate`, whose region tests replaced two and added one). The hosted
     # run of 3148fdfc84 printed 59 here; the others are counted from the source.
-    _runci_guarded_test "C1AM adminspace 59" 59 \
+    # 59 -> 62: the surface document's three declaration tests (see C1ak).
+    _runci_guarded_test "C1AM adminspace 62" 62 \
         cargo test -p wz-admin --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
@@ -9465,9 +9478,11 @@ layer_c1am_cargo_test_adminspace() {
     # 54 -> 56 and 54 -> 57, counted from the source: the two role tests of the first guard of
     # this layer, and under `adminspace-router-linkstate` its peer's region answer, with the two
     # region tests that replaced the both-dots and routers-leg ones.
-    _runci_guarded_test "C1AM adminspace introspection 56" 56 \
+    # 56 -> 59 and 57 -> 60, counted from the source: the surface document's three declaration
+    # tests (see C1ak).
+    _runci_guarded_test "C1AM adminspace introspection 59" 59 \
         cargo test -p wz-admin --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 57" 57 \
+    _runci_guarded_test "C1AM adminspace 60" 60 \
         cargo test -p wz-admin --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
@@ -9476,7 +9491,8 @@ layer_c1am_cargo_test_adminspace() {
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
     # 62 -> 64 and 4 -> 6, counted from the source: the role tests here and in the runtime crate.
-    _runci_guarded_test "C1AM adminspace 64" 64 \
+    # 64 -> 67, counted from the source: the surface document's three declaration tests (see C1ak).
+    _runci_guarded_test "C1AM adminspace 67" 67 \
         cargo test -p wz-admin --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
@@ -9504,7 +9520,8 @@ layer_c1am_cargo_test_adminspace() {
     # 66 -> 67: the one more `adminspace` test the lib gained (the other four commands of this
     # layer moved with it); re-derived on the build host, which printed 67.
     # 70 -> 72, counted from the source: the two role tests of the first guard of this layer.
-    _runci_guarded_test "C1AM adminspace 72" 72 \
+    # 72 -> 75, counted from the source: the surface document's three declaration tests (see C1ak).
+    _runci_guarded_test "C1AM adminspace 75" 75 \
         cargo test -p wz-admin --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -9602,7 +9619,9 @@ layer_c1am_cargo_test_adminspace() {
     # 11 -> 13, counted from the source: `admin_session_of_peer_files_the_row_under_the_named_peer`
     # and `the_admin_queryable_is_declared_incomplete` (`session/tests.rs`), whose names carry the
     # filter and whose features this build has.
-    _runci_guarded_test "C1AM router introspection admin_ 13" 13 \
+    # 13 -> 14, counted from the source: `admin_sessions_report_the_region_the_rules_placed_each_face_in`
+    # (`router_forward.rs`), `adminspace-core`-gated, whose name carries the filter.
+    _runci_guarded_test "C1AM router introspection admin_ 14" 14 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     # Server-layer split, step 7: the admin space is the wz-admin crate's, so its every leg is
     # linted there, with every admin feature on (the MCU write surface among them).
@@ -9651,11 +9670,13 @@ layer_c1an_cargo_test_adminspace_nodefault() {
     # R2859 — both +2, as the C1AM guards (see there).
     # 46 -> 49 and 51 -> 54: the null-meaning list's three tests (see C1ak), PRINTED on the build machine.
     # 49 -> 51 and 54 -> 57, counted from the source: the same role and region tests as C1AM's.
-    _runci_guarded_test "C1AN adminspace 51" 51 \
+    # 51 -> 54 and 57 -> 60, counted from the source: the surface document's three declaration
+    # tests (see C1ak).
+    _runci_guarded_test "C1AN adminspace 54" 54 \
         cargo test -p wz-admin --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
     # The one more `adminspace` test the lib gained is in each of these four commands (C1AM 51
     # and 59 above, C1AN 46 and 51), re-derived on the build host.
-    _runci_guarded_test "C1AN adminspace 57" 57 \
+    _runci_guarded_test "C1AN adminspace 60" 60 \
         cargo test -p wz-admin --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # +1 on each of the three, counted from the source: a client answered under its own role. The
     # other of C1AM's two (its queryable announced on the wire) needs `declare-queryable`, which
@@ -23719,6 +23740,15 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # `router-hat-router,zenoh-config`. GUARDED at 2, one per leg.
     wz_test_args wz-integration-tests wz_router_subregion_two_gateways_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    # The placement of a peer node that partitions its south, read side by side: a
+    # zenohd in mode peer and a wz `--peer --gateway-south` given one `gateway/south`
+    # text and the same two remotes (the pinned `z_pub` by zid, a wz peer by role),
+    # each asked for its admin root by the pinned `z_get`, and the `region` each
+    # gives the remotes compared. Needs zenohd, the core examples z_pub and z_get
+    # and the demo built above with `routing-peer,zenoh-config`. GUARDED at 1.
+    wz_test_args wz-integration-tests wz_peer_gateway_placement_matches_a_stock_gateway
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y430 — `scouting-autoconnect`, the last unproven scouting atom, on a
     # THREE-node topology the peer-tier leg above cannot host: a zenohd ROUTER, a

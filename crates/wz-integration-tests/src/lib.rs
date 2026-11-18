@@ -3650,6 +3650,46 @@ pub mod common {
     /// never runs is not calibrated. In this crate's lib the units run in the
     /// ordinary Layer C1 workspace lane.
     pub fn parse_zenoh_admin_sessions(admin_body: &str) -> Vec<ZenohSession> {
+        admin_session_objects(admin_body)
+            .into_iter()
+            .map(|obj| {
+                let links = obj
+                    .find("\"links\":")
+                    .map(|i| i + "\"links\":".len())
+                    .and_then(|i| bracketed(obj, i, b'[', b']'))
+                    .map(|arr| arr.matches("\"dst\":").count())
+                    .unwrap_or(0);
+                ZenohSession {
+                    peer: string_field(obj, "peer").unwrap_or_default(),
+                    whatami: string_field(obj, "whatami").unwrap_or_default(),
+                    links,
+                }
+            })
+            .collect()
+    }
+
+    /// Each session of an adminspace `local_data` body as `(peer, region)`: the zid
+    /// the node files the session under and the region it says it placed that peer
+    /// in, or `None` for a session object with no `region` (a multicast member,
+    /// which upstream writes without one).
+    ///
+    /// The region is what a node's `gateway/south` rules decided for the remote, so
+    /// this is the reading two nodes given the same rules are compared on.
+    pub fn parse_zenoh_admin_session_regions(admin_body: &str) -> Vec<(String, Option<String>)> {
+        admin_session_objects(admin_body)
+            .into_iter()
+            .map(|obj| {
+                (
+                    string_field(obj, "peer").unwrap_or_default(),
+                    string_field(obj, "region"),
+                )
+            })
+            .collect()
+    }
+
+    /// The objects of the `sessions` array of an adminspace body, each whole, found
+    /// by bracket depth so a locator holding a bracket cannot cut one short.
+    fn admin_session_objects(admin_body: &str) -> Vec<&str> {
         let marker = "\"sessions\":";
         let Some(idx) = admin_body.find(marker).map(|i| i + marker.len()) else {
             return Vec::new();
@@ -3665,17 +3705,7 @@ pub mod common {
                 break;
             };
             cursor = start + obj.len();
-            let links = obj
-                .find("\"links\":")
-                .map(|i| i + "\"links\":".len())
-                .and_then(|i| bracketed(obj, i, b'[', b']'))
-                .map(|arr| arr.matches("\"dst\":").count())
-                .unwrap_or(0);
-            out.push(ZenohSession {
-                peer: string_field(obj, "peer").unwrap_or_default(),
-                whatami: string_field(obj, "whatami").unwrap_or_default(),
-                links,
-            });
+            out.push(obj);
         }
         out
     }
@@ -8252,9 +8282,10 @@ mod tests {
     use super::common::{
         cargo_tree_of_demo, configured_zid_value, demo_newest_source, face_zid_value,
         has_zid_shape, hello_zid_value, line_with, parse_build_features, parse_igmp_devices,
-        parse_zenoh_admin_sessions, project_root, read_whole, stale_demo_message,
-        still_running_reason, wait_for_tcp_accept_alive, workspace_crate_dirs_in, CaptureTooLarge,
-        ChildGuard, DemoScope, ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
+        parse_zenoh_admin_session_regions, parse_zenoh_admin_sessions, project_root, read_whole,
+        stale_demo_message, still_running_reason, wait_for_tcp_accept_alive,
+        workspace_crate_dirs_in, CaptureTooLarge, ChildGuard, DemoScope, ZenohSession,
+        ZENOHD_TCP_ACCEPT_BUDGET,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -9236,6 +9267,31 @@ mod tests {
         let sessions = parse_zenoh_admin_sessions(body);
         assert_eq!(sessions.len(), 2);
         assert!(sessions.iter().all(|s| s.links == 1));
+    }
+
+    /// The placement reading: each session's zid with the region the node placed it
+    /// in, and `None` for a multicast member, whose object upstream writes without a
+    /// `region`. The `links` of the first session hold a `{` of their own, so a scan
+    /// that took the first `}` would end the first object early and lose its region.
+    #[test]
+    fn reads_the_region_each_session_was_placed_in() {
+        let body = "{\"locators\":[],\"metadata\":null,\"plugins\":{},\"sessions\":[\
+            {\"links\":[{\"dst\":\"tcp/127.0.0.1:41000\",\"src\":\"tcp/127.0.0.1:52000\"}],\
+            \"peer\":\"a1b2c1\",\"region\":\"south:0:peer\",\"shm\":false,\"weight\":null,\
+            \"whatami\":\"peer\"},\
+            {\"links\":[],\"peer\":\"b1b2c1\",\"region\":\"south:1:peer\",\"shm\":false,\
+            \"weight\":null,\"whatami\":\"peer\"},\
+            {\"group\":\"udp/224.0.0.224:7446\",\"links\":[],\"peer\":\"e5f6\",\
+            \"whatami\":\"peer\"}],\"version\":\"v1.10.2\",\"zid\":\"c1b2c1\"}";
+        assert_eq!(
+            parse_zenoh_admin_session_regions(body),
+            vec![
+                ("a1b2c1".to_string(), Some("south:0:peer".to_string())),
+                ("b1b2c1".to_string(), Some("south:1:peer".to_string())),
+                ("e5f6".to_string(), None),
+            ]
+        );
+        assert!(parse_zenoh_admin_session_regions("{\"zid\":\"c1b2c1\"}").is_empty());
     }
 
     /// A `]` inside a locator STRING must not terminate the links array — the

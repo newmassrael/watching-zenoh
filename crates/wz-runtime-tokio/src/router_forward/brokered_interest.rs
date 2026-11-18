@@ -206,15 +206,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// two clients may legally choose the same id, and the gateway answers against the id it
     /// was given. The id rewrite back to the client's own is [`Self::relay_brokered_declare`]'s
     /// job. The client's options are forwarded as the pin forwards `options: msg.options`: its
-    /// kind set, and its AGGREGATE bit, by which the client matches the answer it gets back.
+    /// kind set, and its AGGREGATE bit (`aggregate`, as admitted: cleared where the pin's
+    /// dispatcher clears it before routing), by which the client matches the answer it gets back.
     /// An unrestricted interest (`target == None`) is propagated unrestricted, because upstream's
     /// matcher admits the whole table for an absent resource
     /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `res.is_none_or`).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn propagate_current_interest(
         &self,
         inbound: FaceId,
         src_interest_id: u64,
         options: &InterestBodyOwned,
+        aggregate: bool,
         current_future: bool,
         target: Option<&str>,
         upstreams: Vec<FaceId>,
@@ -236,7 +239,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let Ok(msg) = build_interest_propagated(
                 up_id,
                 kinds,
-                options.ag(),
+                aggregate,
                 current_future,
                 target.map(|t| (0, Some(t))),
             ) else {
@@ -288,6 +291,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound: FaceId,
         src_interest_id: u64,
         options: &InterestBodyOwned,
+        aggregate: bool,
         future: bool,
         target: Option<&str>,
     ) -> usize {
@@ -307,7 +311,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     (inbound, src_interest_id),
                     HeldInterest {
                         kinds,
-                        aggregate: options.ag(),
+                        aggregate,
                         target: target.map(str::to_owned),
                     },
                 );
@@ -318,6 +322,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             inbound,
             src_interest_id,
             options,
+            aggregate,
             future,
             target,
             upstreams,

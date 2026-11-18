@@ -1747,6 +1747,56 @@ pub fn admin_nullable_fields() -> &'static [AdminNullable] {
     FIELDS
 }
 
+/// What a GET this node's read permission refuses is answered with, the surface
+/// document's `read_denied`: `final_only`, the terminating Final and nothing before
+/// it, neither a reply nor an error reply. It is the answer a GET that reaches no
+/// admin key gets too, so a consumer that receives only the Final cannot tell the
+/// two apart from the wire.
+///
+/// Both answerers return before their first leg when `read` is false
+/// ([`AdminAnswerOutcome::DeniedRead`]), and the dispatch still ends the query, as
+/// upstream ends a denied GET with a bare Final (`zenoh/src/net/runtime/adminspace.rs`
+/// @ `permissions().read`). No feature of this crate changes that. Whether a node can
+/// be told to deny is its host's read gate, which this document cannot see; a
+/// consumer reading it was not denied the GET that served it.
+pub const ADMIN_READ_DENIED: &str = "final_only";
+
+/// The config paths a write this build decodes may name, the surface document's
+/// `config_write.keys`.
+///
+/// With a heap, `**`: any path, which the host places against the keys it can change
+/// at run time and refuses by name when it cannot ([`parse_admin_config_write`]
+/// decodes the path and leaves the placing to the host). Without one, the write
+/// surface is the `admin_connect` module's, which carries `connect/endpoints` alone.
+/// Without either, a write decodes to nothing and the list is empty.
+pub fn admin_config_write_keys() -> &'static [&'static str] {
+    #[cfg(feature = "alloc")]
+    const KEYS: &[&str] = &["**"];
+    #[cfg(all(not(feature = "alloc"), feature = "adminspace-write"))]
+    const KEYS: &[&str] = &[crate::admin_connect::CONNECT_ENDPOINTS_SUBKEY];
+    #[cfg(not(any(feature = "alloc", feature = "adminspace-write")))]
+    const KEYS: &[&str] = &[];
+    KEYS
+}
+
+/// wz's own action sub-keys of the config space a write this build decodes, the
+/// surface document's `config_write.actions`, in [`ADMIN_CONFIG_WRITE_ACTIONS`]'
+/// order.
+///
+/// Spelled per build for the reason [`admin_unspoken_fields`] is: the storage and
+/// volume arms of [`parse_admin_config_write`] are compiled under
+/// `adminspace-config-hotreload` alone, and a name whose arm is compiled out decodes
+/// as an unknown key. A node with no heap decodes no action.
+pub fn admin_config_write_actions() -> &'static [&'static str] {
+    #[cfg(feature = "adminspace-config-hotreload")]
+    const ACTIONS: &[&str] = ADMIN_CONFIG_WRITE_ACTIONS;
+    #[cfg(all(feature = "alloc", not(feature = "adminspace-config-hotreload")))]
+    const ACTIONS: &[&str] = &["acl-deny", "connect-add", "admin-read"];
+    #[cfg(not(feature = "alloc"))]
+    const ACTIONS: &[&str] = &[];
+    ACTIONS
+}
+
 /// R2413 (open-debt item 676) — the adminspace surface document: the body this
 /// node replies under [`admin_surface_key`].
 ///
@@ -1755,8 +1805,27 @@ pub fn admin_nullable_fields() -> &'static [AdminNullable] {
 ///  "legs":[{"key":"@/<zid>/peer","encoding":"application/json","cardinality":"single"}, …],
 ///  "unspoken":["plugins"],
 ///  "nulls":[{"path":"metadata","null_is":"answer","reason":"config_unset"},
-///           {"path":"plugins","null_is":"silence","reason":"feature_off"}, …]}
+///           {"path":"plugins","null_is":"silence","reason":"feature_off"}, …],
+///  "read_denied":"final_only",
+///  "config_write":{"permit_default":false,"reply":"none","keys":["**"],
+///                  "actions":["acl-deny","connect-add","admin-read"]},
+///  "aggregated_links":false}
 /// ```
+///
+/// The last three keys declare what the legs cannot show a consumer that was
+/// answered: what a GET the node's read permission refuses gets
+/// ([`ADMIN_READ_DENIED`]); what a write to `<root>/config/**` can do on this build,
+/// that is, whether it is refused unless the node's config grants writes
+/// (`permit_default`, upstream's `permissions.write` default), that no reply answers
+/// it, and which config paths ([`admin_config_write_keys`]) and wz action sub-keys
+/// ([`admin_config_write_actions`]) it decodes; and whether a `sessions[]` row's
+/// `links` can hold more than one link of one session
+/// ([`wz_session_core::link::SESSION_LINKS_AGGREGATE`]). The legs list one node's
+/// answers, and these three are the build's answers to questions no leg is asked.
+/// Whether the node's host subscribes to its config space or consults its read
+/// permission at all is the host's build, which this document cannot see. They
+/// came without moving `revision`, as `nulls` did: a consumer of the shape before
+/// them reads every key it knew the same way.
 ///
 /// `nulls` ([`admin_nullable_fields`]) names EVERY path of the root document at
 /// which this build can write `null`, with what that `null` means: `null_is` is
@@ -1859,8 +1928,29 @@ pub fn write_admin_surface_json<W: TextOut + ?Sized, K: AdminBuffer>(
         push_json_str(nullable.meaning.word(), &mut out);
         out.push('}');
     }
-    out.push_str("]}");
+    out.push_str("],\"read_denied\":");
+    push_json_str(ADMIN_READ_DENIED, &mut out);
+    // A write is a Put or a Del, and neither has a reply on the wire: the writer
+    // learns what was applied by reading the `config` leg back.
+    out.push_str(",\"config_write\":{\"permit_default\":");
+    out.push_str(json_bool(AdminSpacePermissions::default().write));
+    out.push_str(",\"reply\":\"none\",\"keys\":");
+    wz_session_core::json::push_str_array(admin_config_write_keys(), &mut out);
+    out.push_str(",\"actions\":");
+    wz_session_core::json::push_str_array(admin_config_write_actions(), &mut out);
+    out.push_str("},\"aggregated_links\":");
+    out.push_str(json_bool(wz_session_core::link::SESSION_LINKS_AGGREGATE));
+    out.push('}');
     Ok(())
+}
+
+/// A JSON boolean literal.
+fn json_bool(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 /// The declaring-node buckets for an admin introspection entry — the wz analogue of
@@ -6737,6 +6827,218 @@ mod tests {
             let kind = m.kind_word();
             assert!(kind == "silence" || kind == "answer", "{m:?} {kind}");
         }
+    }
+
+    /// The document's `read_denied` is what the answerers do with a refused GET: nothing is
+    /// written into the reply sink, neither a reply nor an error, so the dispatch's Final is
+    /// the whole answer. The same wildcard GET with `read` granted writes replies, so an
+    /// answerer that wrote nothing either way could not pass.
+    #[test]
+    fn a_denied_read_is_answered_with_the_final_alone_as_the_document_says() {
+        /// Counts every call an answerer makes on its reply sink, of any kind.
+        #[derive(Default)]
+        struct EveryCall(usize);
+        impl wz_session_core::query_sink::ReplyOut for EveryCall {
+            fn reply(&mut self, _: &[u8]) {
+                self.0 += 1;
+            }
+            fn reply_keyed(
+                &mut self,
+                _: &str,
+                _: &[u8],
+            ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+                self.0 += 1;
+                Ok(())
+            }
+            fn reply_keyed_encoded(
+                &mut self,
+                _: &str,
+                _: &[u8],
+                _: Option<&wz_session_core::sample::EncodingHint>,
+            ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+                self.0 += 1;
+                Ok(())
+            }
+            fn reply_del(&mut self) {
+                self.0 += 1;
+            }
+            fn reply_err(&mut self, _: Option<u32>, _: Option<&[u8]>, _: &[u8]) {
+                self.0 += 1;
+            }
+            fn with_responder(&mut self, _: &[u8], _: u32) {}
+            fn clear_responder(&mut self) {}
+            fn responder(&self) -> Option<(&[u8], u32)> {
+                None
+            }
+        }
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&admin_surface_json("a1b2", "peer")).expect("JSON");
+        assert_eq!(doc["read_denied"], "final_only");
+        assert_eq!(doc["read_denied"], ADMIN_READ_DENIED);
+
+        let view = admin_view("@/a1b2/peer/**");
+        let answer = |read: bool| {
+            let mut out = EveryCall::default();
+            let outcome = answer_admin_query(
+                &view,
+                &mut out,
+                &admin_ctx(read),
+                &[],
+                &fixture_declarations(),
+                &fixture_plugins(),
+                "{}",
+            );
+            (outcome, out.0)
+        };
+        assert_eq!(
+            answer(false),
+            (AdminAnswerOutcome::DeniedRead, 0),
+            "a refused GET is answered with nothing before the Final"
+        );
+        let (outcome, calls) = answer(true);
+        assert_eq!(outcome, AdminAnswerOutcome::Served);
+        assert!(calls > 0, "the control: the same GET granted is answered");
+
+        #[cfg(feature = "adminspace-router-linkstate")]
+        {
+            let regions = [(String::from("north"), String::from("graph {\n}\n"))];
+            let mut out = EveryCall::default();
+            let outcome = answer_router_admin_query(
+                &view,
+                &mut out,
+                &AdminRouterCtx {
+                    zid_hex: "a1b2",
+                    whatami: "peer",
+                    linkstate: &regions,
+                    successors: &[],
+                    read: false,
+                },
+            );
+            assert_eq!(
+                (outcome, out.0),
+                (AdminAnswerOutcome::DeniedRead, 0),
+                "the router-tier answerer refuses the same way"
+            );
+        }
+    }
+
+    /// The document's `config_write` is what the decoder of this build decodes: each wz
+    /// action it names decodes as that action and each it leaves out as an unknown key
+    /// (a DEL of an action is refused as not deletable, which is the decoder naming it),
+    /// a config path decodes when the host's registry holds it, and the permission's
+    /// default refuses the write. The action list moves with `adminspace-config-hotreload`.
+    #[test]
+    fn the_document_declares_the_config_write_this_build_decodes() {
+        let doc: serde_json::Value =
+            serde_json::from_str(&admin_surface_json("a1b2", "peer")).expect("JSON");
+        let write = &doc["config_write"];
+        assert_eq!(write["permit_default"], serde_json::Value::Bool(false));
+        assert_eq!(write["reply"], "none");
+        assert_eq!(write["keys"], serde_json::json!(["**"]));
+        assert_eq!(
+            write["actions"],
+            serde_json::Value::from(admin_config_write_actions())
+        );
+
+        #[cfg(feature = "adminspace-config-hotreload")]
+        assert_eq!(admin_config_write_actions(), ADMIN_CONFIG_WRITE_ACTIONS);
+        #[cfg(not(feature = "adminspace-config-hotreload"))]
+        assert_eq!(
+            admin_config_write_actions(),
+            &["acl-deny", "connect-add", "admin-read"][..]
+        );
+
+        let space = AdminConfigWriteSpace::new("a1b2", "peer");
+        let decoded: Vec<&str> = ADMIN_CONFIG_WRITE_ACTIONS
+            .iter()
+            .copied()
+            .filter(|action| {
+                let key = format!("@/a1b2/peer/config/{action}");
+                match parse_admin_config_write(
+                    &space,
+                    &key,
+                    AdminConfigWriteBody::Del,
+                    true,
+                    &|_| false,
+                ) {
+                    AdminConfigWriteOutcome::NotDeletable(_) => true,
+                    AdminConfigWriteOutcome::UnknownKey(_) => false,
+                    other => {
+                        panic!("`{action}` decoded as {other:?}, neither an action nor unknown")
+                    }
+                }
+            })
+            .collect();
+        assert_eq!(
+            decoded.as_slice(),
+            admin_config_write_actions(),
+            "the document names exactly the actions the decoder of this build decodes"
+        );
+
+        let path = "@/a1b2/peer/config/a/config/path";
+        assert_eq!(
+            parse_admin_config_write(&space, path, AdminConfigWriteBody::Del, true, &|key| key
+                == "a/config/path"),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
+                key: String::from("a/config/path")
+            }),
+            "`**`: a config path the host holds decodes"
+        );
+        assert_eq!(
+            parse_admin_config_write(
+                &space,
+                path,
+                AdminConfigWriteBody::Del,
+                AdminSpacePermissions::default().write,
+                &|_| true
+            ),
+            AdminConfigWriteOutcome::Denied,
+            "`permit_default`: a node whose config grants nothing refuses the write"
+        );
+    }
+
+    /// The document's `aggregated_links` is the build's, and the row it describes holds
+    /// one entry per link of its session: a session over two links is one row whose
+    /// `links` has two entries, not two rows.
+    #[test]
+    fn the_document_declares_whether_a_session_row_aggregates_links() {
+        let doc: serde_json::Value =
+            serde_json::from_str(&admin_surface_json("a1b2", "peer")).expect("JSON");
+        assert_eq!(
+            doc["aggregated_links"],
+            serde_json::Value::Bool(wz_session_core::link::SESSION_LINKS_AGGREGATE)
+        );
+
+        let link = |port: u16| AdminLink {
+            src: String::from("tcp/127.0.0.1:7447"),
+            dst: format!("tcp/127.0.0.1:{port}"),
+        };
+        let data = AdminLocalData {
+            zid_hex: String::from("a1b2"),
+            version: String::from("0.1.0"),
+            locators: vec![],
+            sessions: vec![AdminSession {
+                peer_zid_hex: String::from("c3d4"),
+                whatami: Some(String::from("peer")),
+                links: vec![link(50000), link(50001)],
+                shm: false,
+                weight: None,
+                region: None,
+            }],
+            multicast_peers: vec![],
+            plugins: vec![],
+            metadata_json: String::from("null"),
+        };
+        let root: serde_json::Value =
+            serde_json::from_str(&data.to_json()).expect("local_data is JSON");
+        let sessions = root["sessions"].as_array().expect("`sessions` is an array");
+        assert_eq!(sessions.len(), 1, "one row per session");
+        assert_eq!(
+            sessions[0]["links"].as_array().map(Vec::len),
+            Some(2),
+            "every link of the session is in its row"
+        );
     }
 
     /// The specificity a manifest row carries under the document's stated

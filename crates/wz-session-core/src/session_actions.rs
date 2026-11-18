@@ -7836,8 +7836,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R2858 — this session's `sessions[].region`, as upstream's `local_data`
     /// writes it: this node's mode, the peer's, and the bound the peer
     /// announced, or `"unknown"` where that does not compute
-    /// ([`crate::extbound::admin_region`]). Every admin host reads it here, so
-    /// no host can compute it differently.
+    /// ([`crate::extbound::admin_region`]). Every admin host that holds the
+    /// session alone reads it here, so no such host can compute it differently.
+    /// A node that partitions its south places a remote by its rules, which a
+    /// session cannot see, and reports the region it placed the face in instead.
     #[cfg(feature = "alloc")]
     pub fn admin_region(&self) -> alloc::string::String {
         crate::extbound::admin_region(

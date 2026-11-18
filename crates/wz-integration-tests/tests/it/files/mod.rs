@@ -133,6 +133,7 @@ mod wz_peer_adminspace_write_from_pico_zput_from_a_config_file;
 mod wz_peer_data_forward;
 mod wz_peer_downsampling_pico_interop;
 mod wz_peer_future_push_pico_interop;
+mod wz_peer_gateway_placement_matches_a_stock_gateway;
 mod wz_peer_gossip_query_zenohd_interop;
 mod wz_peer_interest_pending_gc_pico_interop;
 mod wz_peer_interest_pending_gc_pico_interop_from_a_config_file;

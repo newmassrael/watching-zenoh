@@ -1397,8 +1397,7 @@ trait DeclPlane {
     /// Whether the faces of a south region the peer hat serves are told this plane's
     /// declarations only for an interest they hold ([`Tables::serves_asking_peers`]). The
     /// plane then also supplies [`push_asked`](Self::push_asked) and
-    /// [`retract_asked`](Self::retract_asked); the liveliness plane has its own rule for them
-    /// and keeps the flood.
+    /// [`retract_asked`](Self::retract_asked).
     const ASKED_FOR: bool = false;
     /// Advertise `value` for `keyexpr` to the faces of `target` that asked for it.
     fn push_asked<T: std::ops::DerefMut<Target = Tables>>(
@@ -1563,6 +1562,22 @@ impl DeclPlane for TokenPlane {
     }
     fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
         build_undeclare_token_with_keyexpr(keyexpr)
+    }
+    const ASKED_FOR: bool = true;
+    fn push_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+        (): (),
+    ) {
+        fwd.push_token_to_asking(target, keyexpr);
+    }
+    fn retract_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) {
+        fwd.retract_token_from_asking(target, keyexpr);
     }
     const KEEPS_SENT: bool = true;
     /// Advertised if it was sent (the record) or if the rule says it is held (the fold): a token
@@ -2159,10 +2174,10 @@ impl RouterSessionsView {
             .values()
             .map(|face| {
                 let zid = peer_zid_routing(&face.runtime.actions);
-                // R2860 — `links`, `shm` and `region` are the face's own, read by
+                // R2860 — `links` and `shm` are the face's own, read by
                 // `admin_session`; the router supplies the identity it filed the
                 // face under and the one value only its graph holds.
-                face.runtime.actions.admin_session(
+                let mut row = face.runtime.actions.admin_session(
                     zid.map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
                         .unwrap_or_default(),
                     Some(String::from(
@@ -2181,7 +2196,17 @@ impl RouterSessionsView {
                             src_weight: i.src_weight,
                         }
                     }),
-                )
+                );
+                // The region is the node's placement of the face, not a fact of
+                // the session: the session can only compute the `auto` table from
+                // the two modes and the announced bound, and a node whose south is
+                // a list of subregions places the remote by its rules. Upstream
+                // recomputes the placement from the node's config for this field
+                // (`zenoh/src/net/runtime/adminspace.rs` @
+                // `region::compute_region_of(&peer, &config, transient_remote_bound.as_ref()).ok()?;`),
+                // which is the region the face was registered in here.
+                row.region = Some(face.tier.to_string());
+                row
             })
             .collect()
     }
@@ -7856,7 +7881,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 None
             }
         };
-        let aggregate = body.ag();
+        // The aggregate option of an interest that asks for tokens is cleared before anything
+        // reads it, for every kind the interest asks for
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option for tokens (illegal)`),
+        // and so is the option of any interest a peer sends
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option from peer (unsupported)`).
+        let from_peer = self
+            .tables
+            .faces
+            .get(&inbound)
+            .is_some_and(|s| peer_whatami_routing(&s.runtime.actions) == WhatAmI::Peer);
+        let aggregate = body.ag() && !body.to() && !from_peer;
         // FUTURE (`f()`) half: STORE the subscriber interest so a matching sub
         // learned LATER is pushed to this face (the pub-before-sub close). CLIENT
         // faces only — zenoh pushes future subs to `whatami==Client` faces
@@ -7950,9 +7985,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the sub/qabl future store). CLIENT-only + literal-target, same gate — the
         // full-net token replay is client-directed (zenoh declare_token_interest:1001).
         #[cfg(feature = "routing-token-tables")]
-        // Only a client is told of the tokens that come alive after its interest: a peer of the
-        // peer hat is replayed the router's tokens when its face comes up and is sent each
-        // withdrawal by the mesh, so a stored interest would tell it a withdrawal twice.
         let store_future_token = interest.f() && body.to() && self.is_client_face(inbound);
         #[cfg(feature = "routing-token-tables")]
         if store_future_token {
@@ -7965,11 +7997,33 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 );
             }
         }
+        // A face of a south region the peer hat serves is told a token of another region only
+        // for an interest it holds (`zenoh/src/net/routing/hat/peer/token.rs` @
+        // `if dst_face.region.bound().is_north()`), so its interest is kept as its subscriber and
+        // queryable interests are.
+        #[cfg(feature = "routing-token-tables")]
+        if interest.f() && body.to() && peer_hat_face {
+            if let Some(t) = target.as_deref() {
+                self.tables.future_tokens_mut().store_peer_hat_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
         // CURRENT (`c()`) half: dump the matching declarations wz holds + the single
         // terminating DeclareFinal (sent regardless of dump size — 0 matches keeps
         // the peer's write-filter armed = "no subscriber yet", correct). A
         // FUTURE-only interest (no `c()`) gets neither — an ongoing subscription has
         // no current snapshot to close.
+        //
+        // A CURRENT-only interest in subscribers or queryables is answered too, where the pin
+        // drops it (`zenoh/src/net/routing/dispatcher/interests.rs` @
+        // `Current interests may only refer to tokens (illegal)`): zenoh-pico's peers send it
+        // (`vendor/zenoh-pico/src/net/filtering.c` @
+        // `uint8_t flags = interest_flag | _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT;`),
+        // and answering serves them and every zenoh sender alike.
         if interest.c() {
             let self_zid = *self.north_net().self_zid();
             if body.su() {
@@ -7992,14 +8046,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     store_future_qabl || (interest.f() && peer_hat_face),
                 );
             }
-            // §5.21 routing-token-tables (slice-4): the CURRENT liveliness-TOKEN dump —
-            // the FIRST reader of the token tables (makes the slice-1/2/3 bubble
-            // observable). CLIENT-GATED, UNLIKE the sub/qabl dumps above: zenoh
-            // `declare_token_interest` (token.rs:1001) gates the token replay on
-            // `Client || (Peer && !full_net)`, and wz is full-net (peers land in
-            // `linkstatepeer_tokens`), so it reduces to CLIENT-ONLY (`declare_sub_interest`
-            // is bare `if mode.current()`). A peer's token Interest(current) gets only the
-            // DeclareFinal below — peers learn tokens via the linkstate flood, not replay.
+            // §5.21 routing-token-tables: the CURRENT liveliness-token dump, for the faces
+            // [`asks_for_tokens`](Self::asks_for_tokens) names. A FUTURE interest's reply carries
+            // the id the face is told the token under from then on, as its later pushes do.
             #[cfg(feature = "routing-token-tables")]
             if body.to() && self.asks_for_tokens(inbound) {
                 self.dump_interest_tokens(
@@ -8008,7 +8057,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     aggregate,
                     &self_zid,
                     interest_id,
-                    store_future_token,
+                    store_future_token || (interest.f() && peer_hat_face),
                 );
             }
             // R311y512 (`routing-interest-pending-gc`) — the peer hat's BROKER leg. zenoh does
@@ -8025,6 +8074,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 inbound,
                 interest_id,
                 body,
+                aggregate,
                 interest.f(),
                 target.as_deref(),
             ) > 0
@@ -9613,7 +9663,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// guard `|| dst.zid == tables.zid` (zenoh `propagate_simple_token_to:98`, the
     /// token-only disjunct absent from the sub guard) targets the router's own
     /// co-located local-session face; wz's forwarder has NO self-session face (external
-    /// transport faces only, and `future_tokens` stores CLIENT faces only), so the
+    /// transport faces only), so the
     /// guard is a faithful NO-OP here — if wz later co-locates a session on the router
     /// node, this push must NOT exclude a face whose zid == self's zid.
     #[cfg(feature = "routing-token-tables")]
@@ -9621,10 +9671,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let pushes =
-            self.tables
-                .future_tokens_mut()
-                .pushes_for_new(new_ke, Some(origin), |_, _, _| ());
+        // A face of a south peer-hat region is offered every registration of a token another
+        // region holds, whether or not what self advertises into its region moved, and is told
+        // the token if it asked and was not told it yet: the pin propagates each registration to
+        // every region the inter-region filter admits
+        // (`zenoh/src/net/routing/dispatcher/token.rs` @ `tables.hats[dst].propagate_token(ctx!(), res.clone());`),
+        // where a face already told the token is skipped
+        // (`zenoh/src/net/routing/hat/peer/token.rs` @ `if self.face_hat(dst_face).local_tokens.contains_key(res) {`).
+        // So the push reaches such a face where the filter lets the token into its region, and
+        // never from a holder of the same region.
+        let origin_tier = self.tables.faces.get(&origin).map(|s| s.tier);
+        let admitted: Vec<Region> = self
+            .tables
+            .hats
+            .regions()
+            .filter(|region| {
+                self.tables.serves_asking_peers(*region)
+                    && Some(*region) != origin_tier
+                    && self.self_advertises_token_into(*region, new_ke)
+            })
+            .collect();
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let pushes = Arc::make_mut(&mut tables.future_tokens).pushes_for_new_in(
+            new_ke,
+            Some(origin),
+            |face, role| {
+                role != InterestOrigin::PeerHat
+                    || faces.get(&face).is_some_and(|s| admitted.contains(&s.tier))
+            },
+            |_, _, _| (),
+        );
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_token(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -10178,6 +10255,79 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
+    /// The liveliness-token twin of
+    /// [`push_subscriber_to_asking`](Self::push_subscriber_to_asking): the token self now
+    /// advertises into the south peer-hat region `target`, told to each face of it that holds a
+    /// matching token interest, at most once.
+    #[cfg(feature = "routing-token-tables")]
+    fn push_token_to_asking(&mut self, target: Region, keyexpr: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let pushes = Arc::make_mut(&mut tables.future_tokens).pushes_for_new_in(
+            keyexpr,
+            None,
+            |face, _| faces.get(&face).is_some_and(|s| s.tier == target),
+            |_, _, _| (),
+        );
+        for (face, reply_ke, id, ()) in pushes {
+            match build_declare_token(id, 0, Some(&reply_ke)) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_token_pushes.bump();
+                }
+                Err(e) => log::warn!(
+                    "router forward: peer-hat token push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
+        }
+    }
+
+    /// The liveliness-token twin of
+    /// [`retract_subscriber_from_asking`](Self::retract_subscriber_from_asking), with the arm the
+    /// token plane alone has: a face of `target` that asked and was never told the token is told
+    /// it is gone by a one-shot `UndeclareToken` carrying the keyexpr
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `Token has never been declared on this face.`).
+    #[cfg(feature = "routing-token-tables")]
+    fn retract_token_from_asking(&mut self, target: Region, keyexpr: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let forgets = Arc::make_mut(&mut tables.future_tokens).forgets_for_withdrawn_in(
+            keyexpr,
+            |face| faces.get(&face).is_some_and(|s| s.tier == target),
+            |reply_ke, aggregate| aggregate || reply_ke != keyexpr,
+        );
+        let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
+        let told = self.tables.future_tokens.unannounced_withdrawals_in(
+            keyexpr,
+            &announced,
+            |face, origin| {
+                origin == InterestOrigin::PeerHat
+                    && self
+                        .tables
+                        .faces
+                        .get(&face)
+                        .is_some_and(|s| s.tier == target)
+            },
+        );
+        // Each withdrawal names its key: a token leaves for a south peer face under the number
+        // the face was given it by ([`declaration_ids`]), which the egress finds by the key.
+        let withdrawals = forgets
+            .into_iter()
+            .map(|(face, reply_ke, _)| (face, reply_ke))
+            .chain(told.into_iter().map(|face| (face, keyexpr.to_owned())));
+        for (face, reply_ke) in withdrawals {
+            if let Ok(undeclare) = build_undeclare_token_with_keyexpr(&reply_ke) {
+                self.send_one_to_face(face, NetworkMessage::Declare(Box::new(undeclare)));
+            }
+        }
+    }
+
     /// Bring what self advertises of the liveliness tokens into line with what the rule admits
     /// now: declare what it admits and self has not advertised, retract what self advertised and
     /// it no longer admits. The rule is the pin's inter-region filter, whose answer moves when a
@@ -10205,11 +10355,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .unwrap_or_default();
             for keyexpr in desired.iter().filter(|keyexpr| !sent.contains(*keyexpr)) {
                 TokenPlane::remember(self, target, keyexpr, Some(()));
-                self.flood_self_sourced(target, keyexpr, |ke| TokenPlane::declare(ke, ()));
+                self.advertise_change::<TokenPlane>(target, keyexpr, Some(()));
             }
             for keyexpr in sent.iter().filter(|keyexpr| !desired.contains(*keyexpr)) {
                 TokenPlane::remember(self, target, keyexpr, None);
-                self.flood_self_sourced(target, keyexpr, TokenPlane::undeclare);
+                self.advertise_change::<TokenPlane>(target, keyexpr, None);
             }
         }
     }
@@ -10468,11 +10618,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let tables: &mut Tables = &mut self.tables;
+        // A face of a south peer-hat region is told the withdrawal of what self advertised into
+        // its region ([`retract_token_from_asking`](Self::retract_token_from_asking)), and not
+        // from here.
+        let asking: Vec<Region> = tables
+            .hats
+            .regions()
+            .filter(|region| tables.serves_asking_peers(*region))
+            .collect();
         let hats = &tables.hats;
-        let forgets = Arc::make_mut(&mut tables.future_tokens)
-            .forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
-                any_token_matches_in(hats, rk, aggregate)
-            });
+        let faces = &tables.faces;
+        let forgets = Arc::make_mut(&mut tables.future_tokens).forgets_for_withdrawn_in(
+            withdrawn_ke,
+            |face| !faces.get(&face).is_some_and(|s| asking.contains(&s.tier)),
+            |rk, aggregate| any_token_matches_in(hats, rk, aggregate),
+        );
         let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
         for (face, reply_ke, id) in forgets {
             self.send_one_to_face_about(
@@ -13360,7 +13520,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // and a face that has just come up has asked for nothing yet
         // ([`Tables::serves_asking_peers`]); upstream's peer hat does the same on a new face
         // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `New south-bound peer remote; not propagating subscribers`).
-        // The tokens below keep their own rule.
+        // The tokens below follow the same rule.
         let told_what_it_asks = self.tables.serves_asking_peers(tier);
         // Nor to a CLIENT face, in any node mode: the pin's broker hat, which
         // owns it, re-propagates nothing to a new face, "the broker hat is never
@@ -13459,8 +13619,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // for, so "what upstream's router does" does not settle what a wz
         // cross-tier advertisement should do -- and nothing was measured about
         // it. The Client arm is the one the evidence reaches.
+        //
+        // A face of a south region the peer hat serves is left out for the reason the
+        // subscriber and queryable planes leave it out: it is told the tokens it asks for, and a
+        // face that has just come up has asked for nothing
+        // (`zenoh/src/net/routing/hat/peer/token.rs` @ `New south-bound peer remote; not propagating tokens`).
         #[cfg(feature = "routing-token-tables")]
-        if !is_leaf(tier, self.tables.node_mode) {
+        if !is_leaf(tier, self.tables.node_mode) && !told_what_it_asks {
             for keyexpr in self.derived_cross_tier_tokens_into(tier) {
                 match build_declare_token(0, 0, Some(&keyexpr)) {
                     Ok(decl) => {
@@ -15590,8 +15755,9 @@ mod tests {
         }
     }
 
-    /// `face` holds a future interest in the subscribers and the queryables of every keyexpr, as
-    /// a peer does that has declared a publisher and a querier. A face of a south region the peer
+    /// `face` holds a future interest in the subscribers, the queryables and the liveliness
+    /// tokens of every keyexpr, as a peer does that has declared a publisher, a querier and a
+    /// liveliness subscriber. A face of a south region the peer
     /// hat serves is told what another region holds only for an interest like this one
     /// ([`Tables::serves_asking_peers`]), so a test that watches such a face for an advertisement
     /// has the face ask first.
@@ -15605,6 +15771,12 @@ mod tests {
         let queryables = build_interest_queryables(9002, false, true, 0, Some("**"))
             .expect("build queryables interest");
         forward_one(fwd, face, NetworkMessage::Interest(queryables));
+        #[cfg(feature = "routing-token-tables")]
+        forward_one(
+            fwd,
+            face,
+            token_interest_msg(9003, "**", false, true, false),
+        );
     }
 
     /// A literal `DeclareSubscriber` for `keyexpr` (id 0, no ext_nodeid — the
@@ -15661,6 +15833,71 @@ mod tests {
         );
     }
 
+    /// A peer of a router that asks for subscribers with a FUTURE-only interest after a
+    /// subscriber on `K` is already advertised is told `K` when a second holder declares it: the
+    /// pin offers every registration to each region that another region's subscriber reaches
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);`)
+    /// and tells a face that asked what it was not told yet
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn maybe_propagate_subscriber`).
+    #[test]
+    fn a_late_future_subscriber_asker_is_told_a_subscriber_a_second_holder_declares() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sf) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xBB), WIRE_CLIENT);
+        let (peer, sink_p) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &peer);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/k"));
+        forward_one(
+            &fwd,
+            FaceId(2),
+            interest_with_mode(5, "demo/**", false, true, true, false, false),
+        );
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/k"));
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the second holder's registration tells the late asker the subscriber"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_)
+        ));
+    }
+
+    /// The queryable twin of
+    /// [`a_late_future_subscriber_asker_is_told_a_subscriber_a_second_holder_declares`]
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn maybe_propagate_queryable`).
+    #[test]
+    fn a_late_future_queryable_asker_is_told_a_queryable_a_second_holder_declares() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sf) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xBB), WIRE_CLIENT);
+        let (peer, sink_p) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &peer);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/k", false));
+        forward_one(
+            &fwd,
+            FaceId(2),
+            interest_with_mode(5, "demo/**", false, true, false, true, false),
+        );
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/k", false));
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the second holder's registration tells the late asker the queryable"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_)
+        ));
+    }
+
     /// The peer of a router that comes up late has asked for nothing, so it is told nothing
     /// when its face registers: upstream's peer hat does not repropagate subscribers to a
     /// south-bound peer
@@ -15685,6 +15922,12 @@ mod tests {
             "no declaration reached the wire unasked"
         );
 
+        // A CURRENT-only interest in subscribers, answered on purpose. The pin drops it
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Current interests may only refer to tokens (illegal)`),
+        // but a zenoh-pico peer with no router among its peers puts its write filter's interest in
+        // exactly this shape (`vendor/zenoh-pico/src/net/filtering.c` @
+        // `uint8_t flags = interest_flag | _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT;`),
+        // and so does wz's own C ABI multicast face; answering it keeps both working.
         let interest =
             build_interest_subscribers(1, true, false, 0, Some("demo/**")).expect("build interest");
         forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
@@ -16277,6 +16520,48 @@ mod tests {
         let on = fwd.on_tables();
         assert_eq!(on.tables.faces[&FaceId(0)].tier, sub0(WhatAmI::Peer));
         assert_eq!(on.tables.faces[&FaceId(1)].tier, NORTH_REGION);
+    }
+
+    /// The admin `sessions[].region` of a face is where the node's rules placed it, in
+    /// upstream's words: the peer the rule names in `south:0:peer`, the one it does not in
+    /// `north`. Two faces with different answers, so a row that reported one region for
+    /// every face, or the `auto` table the session computes alone (`north` for a peer meeting
+    /// a peer), is red on one of them.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn admin_sessions_report_the_region_the_rules_placed_each_face_in() {
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let partition = SouthPartition::Custom(vec![SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                zids: Some(vec![zid(0xAA).as_slice().to_vec()]),
+                ..RegionFilter::default()
+            }]),
+        }]);
+        let fwd = RouterForwarder::peer(zid(0x05)).with_south_partition(partition);
+        let (named, _a) = face(zid(0xAA), WIRE_PEER);
+        let (other, _b) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &named);
+        fwd.register(FaceId(1), &other);
+
+        let region_of = |b: u8| {
+            let hex = zid_to_zenoh_hex(zid(b).as_slice());
+            fwd.admin_sessions()
+                .into_iter()
+                .find(|s| s.peer_zid_hex == hex)
+                .and_then(|s| s.region)
+        };
+        assert_eq!(
+            region_of(0xAA),
+            Some(String::from("south:0:peer")),
+            "the peer the rule names is reported in the subregion it was placed in"
+        );
+        assert_eq!(
+            region_of(0xBB),
+            Some(String::from("north")),
+            "the peer no rule names is reported in the north region"
+        );
     }
 
     #[test]
@@ -21207,6 +21492,56 @@ mod tests {
         assert_eq!(run(WIRE_CLIENT), 1, "a client's interest is answered");
     }
 
+    /// The aggregate option of a peer's interest is cleared before it is answered
+    /// (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option from peer (unsupported)`):
+    /// a peer that asks for the subscribers of `demo/**` with the option set is told each
+    /// subscriber on its own key, and not one declaration on the interest's key. The control is
+    /// a client, whose option stands.
+    #[test]
+    fn the_aggregate_option_of_a_peers_interest_is_cleared() {
+        let run = |wire| -> (usize, Vec<String>) {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (a, _sa) = face(zid(0xAA), WIRE_CLIENT);
+            let (b, _sb) = face(zid(0xBB), WIRE_CLIENT);
+            let (asker, sink) = face(zid(0xCC), wire);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &b);
+            fwd.register(FaceId(2), &asker);
+            forward_one(&fwd, FaceId(0), declare_sub("demo/a"));
+            forward_one(&fwd, FaceId(1), declare_sub("demo/b"));
+            sink.reset();
+            forward_one(
+                &fwd,
+                FaceId(2),
+                interest_with_mode(7, "demo/**", true, true, true, false, true),
+            );
+            let mut keys: Vec<String> = (0..sink.frame_count())
+                .filter_map(|i| match forwarded_declare(&sink.frame_bytes(i)).body {
+                    DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match d.keyexpr.body {
+                        WireexprOwnedVariant::WireexprLocal(w) => w
+                            .suffix
+                            .as_ref()
+                            .map(|s| s.as_text().into_inner().to_owned()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            keys.sort();
+            (sink.frame_count(), keys)
+        };
+        assert_eq!(
+            run(WIRE_PEER),
+            (3, vec![String::from("demo/a"), String::from("demo/b")]),
+            "a peer is told each subscriber on its own key, then the DeclareFinal"
+        );
+        assert_eq!(
+            run(WIRE_CLIENT),
+            (2, vec![String::from("demo/**")]),
+            "control: a client's aggregate interest is answered on the interest's key"
+        );
+    }
+
     /// R2882 — a token stamped with an interest id is an answer, and one from a
     /// south-bound face is refused before any hat registers it. Control: the
     /// same token unstamped registers, and a stamped one from a router face
@@ -25266,6 +25601,9 @@ mod tests {
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         fwd.register(FaceId(2), &p);
+        // The peer asked for tokens, as the pin's peer hat requires of a south face before it
+        // is told one (`zenoh/src/net/routing/hat/peer/token.rs` @ `if dst_face.region.bound().is_north()`).
+        peer_asks_for_everything(&fwd, FaceId(2));
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
         fwd.tick();
@@ -25581,6 +25919,9 @@ mod tests {
             } else {
                 discover_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
             }
+            // AA asks for tokens as BB does through `advertise_link_back`: a south peer face is
+            // told a token only for an interest it holds.
+            peer_asks_for_everything(&fwd, FaceId(0));
             fwd.tick();
             sink_a.reset();
             sink_b.reset();
@@ -25989,17 +26330,22 @@ mod tests {
         // client declared the token — the face-up replay reads
         // derived_cross_tier_tokens_into (slice-3 taught it to fold client_tokens).
         // Token twin of a_late_joining_peer_is_told_the_derived_self_sub_at_face_up
-        // (R2890, 751 rule 8c: at face-up, not on a tree delta).
-        let fwd = RouterForwarder::new(zid(0x01));
+        // (R2890, 751 rule 8c: at face-up, not on a tree delta). The node is a PEER node, whose
+        // peers are north of it and told unasked; the peer of a ROUTER is south and is told what
+        // it asks for ([`a_late_peer_of_a_router_is_told_no_token_until_it_asks`]).
+        let fwd = RouterForwarder::peer(zid(0x01));
         let (client, _) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
         forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data")); // no peer yet
         let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // joins LATER
         fwd.register(FaceId(1), &p);
+        // Two declares: the token, and the `DeclareFinal` that ends the node's initial
+        // declarations to a peer that meets it north-bound.
         assert_eq!(
             declare_frame_count(&sink_p),
-            1,
-            "the derived self cross-tier token told to the late-joining peer at face-up"
+            2,
+            "the derived self cross-tier token and the end of the declarations, told to the \
+             late-joining peer at face-up"
         );
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 6);
         sink_p.reset();
@@ -26009,6 +26355,156 @@ mod tests {
             0,
             "the tick re-advertises nothing more"
         );
+    }
+
+    /// The peer of a router that comes up late has asked for nothing, so it is told no token
+    /// when its face registers, as the pin's peer hat tells a south-bound peer nothing on a new
+    /// face (`zenoh/src/net/routing/hat/peer/token.rs` @ `New south-bound peer remote; not propagating tokens`).
+    /// Its current token interest, when it comes, is answered with the token the router holds.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_late_peer_of_a_router_is_told_no_token_until_it_asks() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
+
+        let (peer, sink_p) = face(zid(0xBB), WIRE_PEER);
+        sink_p.reset();
+        fwd.register(FaceId(1), &peer);
+        assert_eq!(fwd.face_up_replays_seen(), 0, "no replay to a south peer");
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            0,
+            "no token reached the wire unasked"
+        );
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(5, "live/**", true, false, false),
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            2,
+            "the interest is answered with the token, then the DeclareFinal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+        ));
+    }
+
+    /// A peer of a router is told a token that comes alive after its future token interest, and
+    /// the token's withdrawal, as the pin's peer hat tells a south face what it asked for
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `if dst_face.region.bound().is_north()`). A
+    /// peer that did not ask is told neither, and one that asked after the token came alive is
+    /// told the withdrawal by a one-shot `UndeclareToken` with id 0, carrying the key.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_peer_of_a_router_is_told_a_later_token_only_for_its_future_interest() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        let (asker, sink_asker) = face(zid(0xBB), WIRE_PEER);
+        let (quiet, sink_quiet) = face(zid(0xCC), WIRE_PEER);
+        let (late, sink_late) = face(zid(0xDD), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &asker);
+        fwd.register(FaceId(2), &quiet);
+        fwd.register(FaceId(3), &late);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(5, "live/**", false, true, false),
+        );
+        sink_asker.reset();
+        sink_quiet.reset();
+        sink_late.reset();
+
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
+        assert_eq!(declare_frame_count(&sink_asker), 1, "the asker is told");
+        assert!(matches!(
+            forwarded_declare(&sink_asker.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+        ));
+        assert_eq!(
+            declare_frame_count(&sink_quiet),
+            0,
+            "a south peer that asked for nothing is told nothing"
+        );
+        assert_eq!(declare_frame_count(&sink_late), 0, "nor yet the late one");
+
+        forward_one(
+            &fwd,
+            FaceId(3),
+            token_interest_msg(6, "live/**", false, true, false),
+        );
+        sink_asker.reset();
+        sink_late.reset();
+        forward_one(&fwd, FaceId(0), undeclare_client_token_msg(7));
+        assert_eq!(
+            declare_frame_count(&sink_asker),
+            1,
+            "the asker is told the withdrawal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_asker.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+        assert_eq!(
+            declare_frame_count(&sink_quiet),
+            0,
+            "the quiet peer still nothing"
+        );
+        assert_eq!(
+            declare_frame_count(&sink_late),
+            1,
+            "the late asker is told the withdrawal"
+        );
+        match forwarded_declare(&sink_late.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
+                assert_eq!(
+                    u.id, 0,
+                    "a one-shot id: the late asker was never told the token"
+                )
+            }
+            other => panic!("expected an UndeclToken, got {other:?}"),
+        }
+    }
+
+    /// A peer of a router that asks for tokens with a FUTURE-only interest after a token on `K` is
+    /// already advertised is not told it then, and is told it when a second holder declares `K`:
+    /// the pin propagates every registration, not only one that moves the fold
+    /// (`zenoh/src/net/routing/dispatcher/token.rs` @ `tables.hats[dst].propagate_token(ctx!(), res.clone());`),
+    /// and tells a face that asked the token it was not told yet
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `if self.face_hat(dst_face).local_tokens.contains_key(res) {`).
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_late_future_token_asker_is_told_a_token_a_second_holder_declares() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sf) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xBB), WIRE_CLIENT);
+        let (peer, sink_p) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &peer);
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/k"));
+        forward_one(
+            &fwd,
+            FaceId(2),
+            token_interest_msg(5, "live/**", false, true, false),
+        );
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_client_token_msg(8, "live/k"));
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the second holder's registration tells the late asker the token"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+        ));
     }
 
     #[cfg(feature = "routing-token-tables")]
@@ -26478,10 +26974,11 @@ mod tests {
 
     #[cfg(feature = "routing-token-tables")]
     #[test]
-    fn aggregate_token_interest_replies_once_keyed_on_the_interest_ke() {
-        // An AGGREGATE token interest for a wildcard gets ONE reply keyed on the INTEREST
-        // keyexpr (pico matches aggregate replies by keyexpr EQUALITY), not one per
-        // matched token — parity with the aggregate sub dump.
+    fn an_aggregate_token_interest_is_answered_per_token() {
+        // The pin clears the aggregate option of a token interest before any hat reads it
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option for tokens (illegal)`),
+        // so an aggregate token interest for a wildcard is answered with one DeclareToken per
+        // matching token, each on its own key, and not with one reply on the interest's key.
         let fwd = RouterForwarder::new(zid(0x01));
         let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
         let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
@@ -26497,20 +26994,28 @@ mod tests {
         );
         assert_eq!(
             sink_c.frame_count(),
-            2,
-            "ONE aggregate DeclareToken reply + DeclareFinal"
+            3,
+            "one DeclareToken per matching token, then the DeclareFinal"
         );
-        match &forwarded_declare(&sink_c.frame_bytes(0)).body {
-            DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
-                WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
-                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
-                    Some("demo/**"),
-                    "aggregate reply is keyed on the interest keyexpr, not demo/a|demo/b"
-                ),
-                _ => panic!("reply keyexpr must be literal"),
-            },
-            other => panic!("expected a DeclToken reply, got {other:?}"),
-        }
+        let mut keys: Vec<String> = (0..2)
+            .map(|i| match &forwarded_declare(&sink_c.frame_bytes(i)).body {
+                DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => w
+                        .suffix
+                        .as_ref()
+                        .map(|s| s.as_text().into_inner().to_owned())
+                        .expect("a literal reply key"),
+                    _ => panic!("reply keyexpr must be literal"),
+                },
+                other => panic!("expected a DeclToken reply, got {other:?}"),
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["demo/a", "demo/b"],
+            "each reply is keyed on its token, not on the interest's demo/**"
+        );
     }
 
     #[cfg(feature = "routing-token-tables")]

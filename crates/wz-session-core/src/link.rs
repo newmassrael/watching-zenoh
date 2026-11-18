@@ -1309,6 +1309,17 @@ pub struct TxSlotGrant {
     pub headroom: usize,
 }
 
+/// Whether a session of this build can carry more than one link to its peer: the
+/// `transport-multilink` build, in which a second link is joined to the session it
+/// names and the session's `link_endpoints_all` lists every one of them. Without it
+/// a session is one link, and that list has one entry.
+///
+/// A constant of the build rather than a fact a host supplies, because the admin
+/// space declares it: a `sessions[]` row lists every link of its session, and a
+/// consumer reading one link cannot otherwise tell "this session holds one" from
+/// "this build holds no more".
+pub const SESSION_LINKS_AGGREGATE: bool = cfg!(feature = "transport-multilink");
+
 /// R311y473 — one link's locator pair, the wz counterpart of the `{src,dst}`
 /// object zenoh's `link_to_json` emits per link of a transport
 /// (`net/runtime/adminspace.rs:608-613`). Populated into the wz-admin crate's
@@ -2477,6 +2488,16 @@ pub enum LostCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session aggregates links in a `transport-multilink` build and in no other, so the
+    /// admin space's declaration of it moves with that feature and with nothing else.
+    #[test]
+    fn a_session_aggregates_links_in_a_multilink_build_and_no_other() {
+        fn built_with_multilink() -> bool {
+            cfg!(feature = "transport-multilink")
+        }
+        assert_eq!(SESSION_LINKS_AGGREGATE, built_with_multilink());
+    }
 
     /// Each allocation mode reads back from zenoh's spelling of it, and nothing else names one.
     #[test]
