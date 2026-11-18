@@ -1,0 +1,14 @@
+impact = ["wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"]
+decision = '''
+The examples of a key named by a fixed id plus a suffix, in the dissect header's prose and in the capture crate's tests and comments, use an arbitrary verbatim chunk `@sidecar` instead of a deployment's convention. Nothing in the code treated the suffix specially; the tests ask the same questions with a chunk of the same length.
+'''
+changes = '''
+`crates/wz-capi-dissect/include/wz_dissect.h` (three comment lines) and seven files of `crates/wz-capture/src` (comments and test keys): the example suffix becomes `@sidecar`.
+'''
+verification = '''
+`cargo test -p wz-capture --lib` on pc2: 1365 passed, 0 failed, 6 ignored, the edited key-binding, segment-chain, segment-row and reply-segment tests among them.
+The ABI pin of the dissect library reads its symbol set, which a comment does not move.
+'''
+carry = '''
+None.
+'''
