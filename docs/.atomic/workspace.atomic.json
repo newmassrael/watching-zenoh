@@ -4920,6 +4920,21 @@
       "carry_forward_bullets": [
         "The creators outside the session core still read the build defaults (the gate lists them: the tokio runtime and router, the C ABI engines, the cooperative runtime, the node clock and event log, the MCU nodes, the demo and test fixtures) and the const folds outside the core still fold on the build default rather than on the domain; both move in the next step. No run-time document selects a value yet."
       ]
+    },
+    "Round 4518": {
+      "decision_summary": "The three firmware builds of Layer Qa (the admin node image with an allocator, its fixed-memory image, and the fixed-memory image over tcp/) are declared as entries of a `firmware` section of `deploy/offline-build.json`: manifest, lockfile, target, profile, binary, features, the lwIP port as a repository-relative path, the system tools and submodules the build reads, the product path and the zenoh id the image announces with where the source states it. `offline_build.py --check` holds each entry to the tree, and the lane builds from the entries it prints, so a build that consumes the firmware reads the same definition the lane runs instead of a shell statement.",
+      "changes_bullets": [
+        "`deploy/offline-build.json`: the `firmware` section and the cross tools it names; `scripts/lib/offline_build.py`: the section's shape and tree checks (tracked manifest and lockfile, features and binary in the manifest, lwIP port tracked and read by a build script, submodules in `.gitmodules`, rustup target in the toolchain file, the zid recomputed from the image's constant, the lane naming the entries in order), printers `--firmware-ids/-cargo/-env/-commands/-field`, 60 selftest cases; `scripts/run-ci.sh`: `layer_qa_mcu_admin_node_vs_zenohd` builds and runs its scenarios from the entries; `scripts/lib/runci_plan.py` Qa commands; `docs/target-build-contract.md` 5d."
+      ],
+      "verification_bullets": [
+        "`offline_build.py --selftest` 95 cases; `--check` on pc2: 4 bundles and 3 firmware builds; the printed argv equals the commands the lane ran before; `run-ci.sh --layer 0` passes; `WZ_QA_REQUIRE=1 run-ci.sh --layer Qa` on pc2 (zenohd 1.10.2 built there): the three images built from the entries and every scenario OK, Qa 1-6, Qa.fixed 1-6, Qa.tcp 1-6 and 36-44; runci_plan selftest and check, the artifact root lint, reason review pins, store reason citations, the prose name gate and the cross-implementation proof audit pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The lane now requires every command of the declared tools (`arm-none-eabi-ar`, `as`, `cc`, `ld` besides `arm-none-eabi-gcc`), stricter than the C build's own fallbacks; `scripts/lib/no_allocator_link_gate.py` keeps its own copy of the same three images and could read the entries."
+      ]
     }
   },
   "inventory_entries": {
