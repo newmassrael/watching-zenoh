@@ -6176,10 +6176,17 @@ pub unsafe extern "C" fn wz_dissect_live_set_selector_memories(
 /// number of milliseconds before); `null` when nothing held has a clock, which
 /// is a different fact from a clock reading zero.
 ///
+/// # What a call costs
+///
+/// No message is read: each list keeps its count and the earliest instant it
+/// holds as messages enter and leave it, so a call reads one figure per list and
+/// per flow, whatever they hold, and the figures are what a walk of every
+/// message held would find.
+///
 /// # A READ, and the handle is `const` to say so
 ///
-/// The lists are counted in place: no record is handed out and no id is settled,
-/// so the next [`wz_dissect_live_drain`] returns exactly what it would have.
+/// No record is handed out and no id is settled, so the next
+/// [`wz_dissect_live_drain`] returns exactly what it would have.
 /// The document is `retention` at revision one, and its `dropped_by_limits`
 /// group is the same one every other document carries, from the same emitter.
 ///
@@ -20406,6 +20413,119 @@ mod tests {
             }
         }
         println!("WORK: {:?}", unsafe { (*handle).selection_work() });
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// The walk the retention figures stand in for: every message and scouting
+    /// datagram held, counted, and the earliest instant among them.
+    fn walk_every_message_held(d: &wz_capture::Dissection) -> (usize, Option<u64>) {
+        let (mut count, mut oldest) = (0usize, None::<u64>);
+        for (_, _, list) in d.message_lists_with_origin() {
+            for row in list.iter() {
+                count += 1;
+                oldest = oldest.into_iter().chain(row.observed_at_ns).min();
+            }
+        }
+        for flow in d.datagram_flows().iter() {
+            for datagram in flow.scouting().iter() {
+                count += 1;
+                oldest = oldest.into_iter().chain(datagram.observed_at_ns).min();
+            }
+        }
+        (count, oldest)
+    }
+
+    /// MEASUREMENT, NOT A GATE (run in release with `--ignored --nocapture`): what
+    /// one beat of the census, retention and row-facts doors costs on a handle
+    /// holding `WZ_BENCH_HELD` messages under a ceiling that trims its front on
+    /// every beat once it is full, fed `WZ_BENCH_STRIDE` packets a beat. Beside
+    /// each door it prints what the census's work counter did, and two references
+    /// taken at the same state: the walk of every message held that the retention
+    /// figures stand in for, and the part of a row-facts call that is the
+    /// conversion of the writer's text to CBOR.
+    #[test]
+    #[ignore = "a measurement, printed"]
+    fn measure_live_door_costs_at_a_large_holding() {
+        let env = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let (held, beyond, stride) = (
+            env("WZ_BENCH_HELD", 100_000),
+            env("WZ_BENCH_BEYOND", 20_000),
+            env("WZ_BENCH_STRIDE", 2_000).max(1),
+        );
+        let file = wz_capture::fixtures::push_run_capture(
+            held + beyond,
+            wz_capture::fixtures::RunTransport::Datagram,
+        );
+        let ends = pcap_record_ends(&file);
+        let limits = wz_capture::DissectionLimits {
+            frames_per_flow: Some(held),
+            frames_total: Some(held),
+            ..wz_capture::DissectionLimits::for_live_tap()
+        };
+        let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+        let mut cursor = 0u64;
+        let mut census_before = unsafe { (*handle).census_work() };
+        println!(
+            "held at most {held}, {} packets, a beat every {stride}",
+            ends.len()
+        );
+        for (i, &end) in ends.iter().enumerate() {
+            unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            if i % stride != stride - 1 && i + 1 != ends.len() {
+                continue;
+            }
+            let t = std::time::Instant::now();
+            let census = call_live_census(handle, "").expect("the census renders");
+            let census_took = t.elapsed();
+            let census_work = unsafe { (*handle).census_work() };
+
+            let t = std::time::Instant::now();
+            let retention = live_retention(handle).expect("the retention renders");
+            let retention_took = t.elapsed();
+            let t = std::time::Instant::now();
+            let walked = walk_every_message_held(unsafe { (*handle).dissection() });
+            let walk_took = t.elapsed();
+            let kept = wz_capture::retention_json::Retention::of(unsafe { (*handle).dissection() });
+            assert_eq!(
+                (kept.frames + kept.scouting, kept.oldest_ns),
+                walked,
+                "the kept figures are the walk's"
+            );
+
+            let t = std::time::Instant::now();
+            let facts = live_row_facts(handle, &file[..end], cursor, 1 << 20);
+            let facts_took = t.elapsed();
+            let text =
+                wz_capture::cbor_of_json::json_of_cbor(&facts).expect("the document reads back");
+            let t = std::time::Instant::now();
+            let again = wz_capture::cbor_of_json::cbor_of_json(&text).expect("the text converts");
+            let convert_took = t.elapsed();
+            assert_eq!(
+                again, facts,
+                "the conversion timed is the one the door made"
+            );
+            cursor = through_seq_of(&text);
+
+            println!(
+                "packets {:>7} held {:>7}: census {census_took:?} (folded {}, restarts {}, \
+                 {} B); retention {retention_took:?} (walk {walk_took:?}, {} B); row facts \
+                 {facts_took:?} for {} rows (conversion {convert_took:?}, {} B)",
+                i + 1,
+                walked.0,
+                census_work.messages_folded - census_before.messages_folded,
+                census_work.restarts - census_before.restarts,
+                census.len(),
+                retention.len(),
+                cbor_rows(&facts),
+                facts.len(),
+            );
+            census_before = census_work;
+        }
         unsafe { wz_dissect_live_close(handle) };
     }
 
