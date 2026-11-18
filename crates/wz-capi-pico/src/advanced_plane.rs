@@ -259,7 +259,12 @@ mod tests {
     #[test]
     fn the_beacon_timer_is_the_engines_periodic_job_and_ends_with_its_handle() {
         let shared = Arc::new(
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy"),
+            SharedSession::new(
+                TokioTime::new(),
+                [0x11; 16].into(),
+                wz_session_core::policy::SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
         );
         let plane = PicoPlane::new(
             PicoSession {
@@ -318,8 +323,14 @@ mod tests {
         hlc: &NodeHlc,
         time: &SessionTime,
     ) -> (Arc<SharedSession>, AdvancedPublisherOn<PicoPlane>) {
-        let shared =
-            Arc::new(SharedSession::new(TokioTime::new(), ZID.into()).expect("test host entropy"));
+        let shared = Arc::new(
+            SharedSession::new(
+                TokioTime::new(),
+                ZID.into(),
+                wz_session_core::policy::SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        );
         let plane = Arc::new(PicoPlane::new(
             PicoSession {
                 engine: shared.as_engine(),

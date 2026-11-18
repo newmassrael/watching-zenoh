@@ -21,6 +21,7 @@ use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 use wz_capi_core::faces::{FaceEventSink, FaceSnapshot};
 use wz_capi_core::open_plan::{dial_role, AbiChoices, OpenPlan, OpenRefusal, StatedEndpoints};
+use wz_runtime_tokio::policy::SessionPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::TxQueueConf;
 
@@ -333,10 +334,11 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
 
 /// What this ABI decides about an open, beyond what the config says.
 ///
-/// zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
-fn abi_choices(shm_clients: OpenShmClients) -> AbiChoices {
+/// zenoh's own bounded queue and waits: this ABI stands for zenoh-c. The queue carries two
+/// policies, taken from `policy`, the plan's snapshot.
+fn abi_choices(shm_clients: OpenShmClients, policy: &SessionPolicy) -> AbiChoices {
     AbiChoices {
-        tx_queue: TxQueueConf::default(),
+        tx_queue: TxQueueConf::of_policy(policy),
         // zenoh-c has no switch for a session's read task: its runtime drives the session from
         // the open.
         start_read_task: true,
@@ -513,7 +515,8 @@ pub(crate) unsafe fn open_session(
     #[cfg(feature = "router-node")]
     let node = plan.node_role(plan.role);
     #[allow(unused_mut)]
-    let mut arguments = plan.into_arguments(abi_choices(shm_clients));
+    let choices = abi_choices(shm_clients, &plan.session_policy);
+    let mut arguments = plan.into_arguments(choices);
     // R3065 -- a session opened over a client storage advertises the protocols of THAT
     // reader: the stance takes both from the one set, so the list a peer's sender reads is
     // never wider than what the session resolves.

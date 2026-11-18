@@ -84,6 +84,7 @@ use crate::result::{
 use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, SessionState};
 #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
 use wz_capi_port::tls_material::CapiTlsConfig;
+use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
 use wz_session_core::WhatAmI;
 
@@ -177,13 +178,11 @@ const fn pico_socket_timeout(ms: usize) -> u32 {
 /// the numbers this build states for them ([`wz_session_core::caps::PICO_LEASE_MS`],
 /// [`wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES`]), pico's own by default: pico refuses a
 /// member whose Join states another batch size. The join interval and the two resolutions are
-/// fixed in pico's config template, not switches; the build's `sn-resolution` policy
+/// fixed in pico's config template, not switches; the open's `sn-resolution` policy
 /// ([`wz_session_core::policy::SnResolution`]) states another width of the sequence number for a
 /// group whose members are built with one, as pico refuses a Join that states another than its own.
 #[cfg(feature = "multicast-transport")]
-const fn pico_group(
-    sn_resolution: wz_session_core::policy::SnResolution,
-) -> wz_capi_core::drive::GroupProfile {
+const fn pico_group(sn_resolution: SnResolution) -> wz_capi_core::drive::GroupProfile {
     wz_capi_core::drive::GroupProfile {
         lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
         join_interval_ms: 2_500,
@@ -198,10 +197,18 @@ const fn pico_group(
     }
 }
 
-/// The group profile of this build.
-#[cfg(feature = "multicast-transport")]
-const PICO_GROUP: wz_capi_core::drive::GroupProfile =
-    pico_group(wz_session_core::policy::SessionPolicy::from_build().sn_resolution());
+/// The policies a session [`z_open`] opens from `config` runs under: the one place this ABI's open
+/// decides them, resolved once and handed to the engine and to the session's handle. The build
+/// defaults, until pico's configuration has a key for a policy.
+fn resolve_policy(_config: &ConfigState) -> SessionPolicy {
+    SessionPolicy::defaults()
+}
+
+/// pico's transmit model and the width of the sequence numbers its handshake advertises, under
+/// `policy`, the snapshot of the open: what both engines' opens are given.
+fn pico_link_policy(policy: &SessionPolicy) -> (TxQueueConf, SnResolution) {
+    (TxQueueConf::pico_of_policy(policy), policy.sn_resolution())
+}
 
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
 ///
@@ -604,6 +611,7 @@ pub unsafe extern "C" fn z_open(
             #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
             (None, None) => return crate::result::Z_ERR_SCOUT_NO_RESULTS,
         };
+        let policy = resolve_policy(&cfg);
         drop(cfg);
         // A build without the `peer` feature is a client build: it opens to the endpoint it is
         // given, and a listener or `mode=peer` is a role it does not have. (zenoh-pico's own
@@ -631,6 +639,7 @@ pub unsafe extern "C" fn z_open(
             start_admin_space,
             #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
+            policy,
         };
         #[cfg(feature = "engine-tokio")]
         return open_on_tokio(zs, request);
@@ -870,6 +879,9 @@ struct OpenRequest {
     /// rustls configs from it, the cooperative engine the Mbed TLS channel's dial and listen.
     #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
     tls: CapiTlsConfig,
+    /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
+    /// with the session's handle.
+    policy: SessionPolicy,
 }
 
 /// Open `request` on the tokio engine and install the session in `zs`.
@@ -887,7 +899,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         #[cfg(feature = "admin-space")]
         start_admin_space,
         tls,
+        policy,
     } = request;
+    let (tx_queue, sn_resolution) = pico_link_policy(&policy);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
     // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
     // config keys, and this shim resolves pico's numeric keys instead.
@@ -923,7 +937,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             Vec::new(),
             vec![wz_capi_core::drive::GroupJoin {
                 endpoint,
-                profile: PICO_GROUP,
+                profile: pico_group(sn_resolution),
                 is_shm: false,
                 // pico declares its entities over whatever transport it holds, a group too
                 // (MEASURED off the group's wire: `decl_subscriber(1, ..)`), and with
@@ -956,7 +970,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             ..DialPhase::ONCE
         },
         OpenStance {
-            tx_queue: TxQueueConf::pico(),
+            tx_queue,
             // pico's batch size and lease are build switches of its, not config keys
             // (`BATCH_UNICAST_SIZE`, `Z_TRANSPORT_LEASE`): its InitSyn carries
             // `Z_BATCH_UNICAST_SIZE` (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
@@ -965,7 +979,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             keep_alive: PICO_KEEP_ALIVE,
-            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution(),
+            sn_resolution,
             link_rx: PICO_LINK_RX,
             accept: PICO_ACCEPT,
             // pico negotiates no transport capability on unicast: its InitSyn
@@ -1035,6 +1049,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // pico's config has no `qos/publication` and no `transport/shared_memory` keys, so
             // its session applies nothing above its links.
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
+            session_policy: policy,
         },
     ) {
         Ok(state) => {
@@ -1109,6 +1124,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     }
     let dial_whatami = request.dial_whatami;
     let connect = request.connect;
+    let policy = request.policy;
+    let (tx_queue, sn_resolution) = pico_link_policy(&policy);
     // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
     // carries.
     let zid = request.zid;
@@ -1154,9 +1171,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             keep_alive: PICO_KEEP_ALIVE,
-            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution(),
+            sn_resolution,
             link_rx: PICO_LINK_RX,
-            tx_queue: TxQueueConf::pico(),
+            tx_queue,
             // How long an inbound link may take to complete its handshake is pico's
             // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
             // `PICO_ACCEPT` says; how long a dialled one may take is its
@@ -2175,6 +2192,32 @@ mod build_numbers {
         );
     }
 
+    /// What an open is given of its links follows the snapshot it is handed and not the build:
+    /// the width its handshake advertises and the two policies its transmit queue carries.
+    #[test]
+    fn the_links_of_an_open_follow_the_snapshot_it_is_handed() {
+        let build = SessionPolicy::defaults();
+        let other = if build.sn_resolution() == SnResolution::Bits16 {
+            SnResolution::Bits8
+        } else {
+            SnResolution::Bits16
+        };
+        let mut handed = SessionPolicy::defaults();
+        if handed.select_sn_resolution(other).is_err() {
+            // The build allows one width: there is no other snapshot to hand.
+            return;
+        }
+        let (queue, width) = pico_link_policy(&handed);
+        assert_eq!(width, other);
+        assert_eq!(queue, TxQueueConf::pico_of_policy(&handed));
+        // Control: the open that resolves its own snapshot is given the build's width.
+        let config = ConfigState::default();
+        assert_eq!(
+            pico_link_policy(&resolve_policy(&config)).1,
+            build.sn_resolution()
+        );
+    }
+
     /// Pico's group Join states the width the `sn-resolution` policy states, each value its own
     /// code, and nothing else of pico's Join moves with it: pico refuses a member whose Join
     /// states another batch size or width than its own.
@@ -2204,7 +2247,10 @@ mod build_numbers {
     #[test]
     fn the_pico_group_states_no_member_cap() {
         use wz_session_core::policy::SnResolution;
-        assert_eq!(PICO_GROUP.max_sessions, None);
+        assert_eq!(
+            pico_group(SessionPolicy::defaults().sn_resolution()).max_sessions,
+            None
+        );
         for width in [SnResolution::Bits8, SnResolution::Bits64] {
             assert_eq!(pico_group(width).max_sessions, None, "{}", width.id());
         }

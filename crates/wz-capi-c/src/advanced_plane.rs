@@ -468,8 +468,13 @@ mod tests {
     fn clocked() -> Arc<SharedSession> {
         let clock = NodeHlc::for_node(&test_zid(), WhatAmI::Peer, TimestampingEnabled::all(true));
         Arc::new(
-            SharedSession::new_with_node_clock(TokioTime::new(), test_zid(), clock)
-                .expect("test host entropy"),
+            SharedSession::new_with_node_clock(
+                TokioTime::new(),
+                test_zid(),
+                clock,
+                wz_session_core::policy::SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
         )
     }
 
@@ -502,8 +507,14 @@ mod tests {
     #[test]
     fn a_cache_without_miss_detection_is_refused_on_a_node_with_no_clock_and_accepted_on_one_with()
     {
-        let bare =
-            Arc::new(SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy"));
+        let bare = Arc::new(
+            SharedSession::new(
+                TokioTime::new(),
+                test_zid(),
+                wz_session_core::policy::SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        );
         assert!(
             matches!(
                 declare(&bare, "wz/adv", cache_only()),
@@ -599,8 +610,14 @@ mod tests {
     /// one that does not.
     #[test]
     fn a_heartbeat_declares_on_the_plane_from_a_thread_that_is_inside_no_runtime() {
-        let shared =
-            Arc::new(SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy"));
+        let shared = Arc::new(
+            SharedSession::new(
+                TokioTime::new(),
+                test_zid(),
+                wz_session_core::policy::SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        );
         let mut options = AdvancedPublisherOptions::default();
         options.sequencing = Sequencing::SequenceNumber;
         options.sample_miss_detection =

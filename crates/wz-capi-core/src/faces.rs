@@ -123,6 +123,7 @@ use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::wire_id::{next_u32_id, EntityId, ExprId};
 
 #[cfg(feature = "multicast-transport")]
@@ -299,17 +300,58 @@ struct WireCalls<P, Rv, Rd> {
     reserved: Rd,
 }
 
-/// Whether this build has a policy under which a publish can state something about its wire
-/// legs: the admission retry or the all-faces-or-none send. A build with neither never reads
-/// `opts.admission_retry` or `opts.atomic_tx` as anything but their defaults (every entry point
-/// that takes one from a caller refuses it first, by `admit_in_build`), so the legs are
-/// unreachable there and are left out of the binary instead of linked and never called. This
-/// crate's own unit tests state a retry or an atomic send on the options directly, past the
-/// entry points, so the legs are there in a test build whatever the policy says.
-const WIRE_LEGS_IN_BUILD: bool = cfg!(test) || {
-    let policy = wz_session_core::policy::SessionPolicy::from_build();
-    policy.publisher_admission_retry() || policy.multi_route_atomic_tx()
+/// Whether this build allows a policy value under which a publish can state something about its
+/// wire legs: the admission retry or the all-faces-or-none send turned on. A build whose domains
+/// leave both out never reads `opts.admission_retry` or `opts.atomic_tx` as anything but their
+/// defaults (every entry point that takes one from a caller refuses it first, by `admit_by` and
+/// the session's snapshot, which cannot hold a value its domain leaves out), so the legs are
+/// unreachable there and are left out of the binary instead of linked and never called. A build
+/// that allows either links them whatever its default is, since a snapshot may select it.
+const WIRE_LEGS_ALLOWED: bool = {
+    use wz_session_core::policy::{MultiRouteAtomicTx, PublisherAdmissionRetry};
+    use wz_session_core::policy_binding::PolicyValue;
+    <PublisherAdmissionRetry as PolicyValue>::DOMAIN
+        .contains_index(PublisherAdmissionRetry::On as usize)
+        || <MultiRouteAtomicTx as PolicyValue>::DOMAIN
+            .contains_index(MultiRouteAtomicTx::On as usize)
 };
+
+/// `WIRE_LEGS_ALLOWED`, and always in this crate's own unit tests, which state a retry or an
+/// atomic send on the options directly, past the entry points.
+const WIRE_LEGS_IN_BUILD: bool = cfg!(test) || WIRE_LEGS_ALLOWED;
+
+#[cfg(test)]
+mod wire_legs_tests {
+    use super::WIRE_LEGS_ALLOWED;
+    use wz_session_core::policy::{MultiRouteAtomicTx, PublisherAdmissionRetry, SessionPolicy};
+    use wz_session_core::policy_binding::PolicyValue;
+
+    /// The legs are linked wherever the build lets a snapshot turn either policy on, and not only
+    /// where its default is on: a host build whose defaults are off still links them.
+    #[test]
+    fn the_wire_legs_fold_on_the_domain_and_not_on_the_default() {
+        let allows = PublisherAdmissionRetry::DOMAIN.contains(PublisherAdmissionRetry::On)
+            || MultiRouteAtomicTx::DOMAIN.contains(MultiRouteAtomicTx::On);
+        assert_eq!(WIRE_LEGS_ALLOWED, allows);
+        let mut handed = SessionPolicy::defaults();
+        if handed
+            .select_publisher_admission_retry(PublisherAdmissionRetry::On)
+            .is_ok()
+        {
+            assert!(
+                WIRE_LEGS_ALLOWED,
+                "a snapshot may turn the retry on, so the legs are linked"
+            );
+        }
+        let defaults = SessionPolicy::defaults();
+        if defaults.publisher_admission_retry() || defaults.multi_route_atomic_tx() {
+            assert!(
+                WIRE_LEGS_ALLOWED,
+                "a default that is on is inside its domain"
+            );
+        }
+    }
+}
 
 /// What asking one face to reserve room found, with `H` the reservation it gave.
 enum Reserved<H> {
@@ -992,7 +1034,7 @@ struct FaceEntry {
     peer_zid: Option<Vec<u8>>,
     /// Whether this session dialled the link (the dial role's face) and not took it off its
     /// port. Two links to one node that went opposite ways are decided by
-    /// [`wz_session_core::link_admission::judge_second_link`], which reads it.
+    /// [`wz_session_core::link_admission::judge_second_link_by`], which reads it.
     dialled: bool,
 }
 
@@ -1104,16 +1146,17 @@ struct LinkAnnounced {
 /// this session dialled it). The rule is `wz_session_core::link_admission`'s, which the
 /// cooperative engine's face table calls too: the first up when two links went the same way, and
 /// of two that went opposite ways the one the lower zid dialled, so that both ends of a link
-/// keep the same one. A face with no zid (its handshake named none) cannot be matched and is
-/// held.
+/// keep the same one, the zids ordered by `order`, the `link-tie-order` of the node's snapshot.
+/// A face with no zid (its handshake named none) cannot be matched and is held.
 fn admission_of<'a>(
+    order: wz_session_core::policy::LinkTieOrder,
     local_zid: &[u8],
     held: impl Iterator<Item = (u64, Option<&'a [u8]>, bool)>,
     id: u64,
     zid: Option<&[u8]>,
     dialled: bool,
 ) -> Admission {
-    use wz_session_core::link_admission::{judge_second_link, SecondLink};
+    use wz_session_core::link_admission::{judge_second_link_by, SecondLink};
     let Some(zid) = zid else {
         return Admission::Admit;
     };
@@ -1125,7 +1168,7 @@ fn admission_of<'a>(
         if !wz_runtime_tokio::zid_hex::same_zid(held_zid, zid) {
             continue;
         }
-        return match judge_second_link(held_dialled, dialled, local_zid, zid) {
+        return match judge_second_link_by(order, held_dialled, dialled, local_zid, zid) {
             SecondLink::Refuse => Admission::Refuse,
             SecondLink::Replace => Admission::Replace(held_id),
         };
@@ -2104,6 +2147,8 @@ pub struct SharedSession {
     zid: [u8; 16],
     /// The same zid as its handshake carries it — see [`SharedSession::session_zid`].
     session_zid: SessionZid,
+    /// The policies the node runs under — see [`SharedSession::session_policy`].
+    session_policy: SessionPolicy,
     /// The node's links to each remote node, from the handshake that names it until the link is
     /// gone: the node's say on a second link to a node it holds, asked while the link is still
     /// being established ([`CApiForwarder::link_admission`]). A node that listens and dials runs
@@ -2329,6 +2374,10 @@ pub struct SessionResources {
     /// aggregate by the first entity replayed to it. None is a node that declares each entity
     /// as its own key, which every node was until the keys reached a session.
     pub aggregation: DeclarationAggregation,
+    /// The policies the node runs under, as its open resolved them: the plane is made under them,
+    /// every face session is handed them, and the node's admission of a second link orders zids
+    /// by their `link-tie-order`.
+    pub session_policy: SessionPolicy,
 }
 
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
@@ -2342,10 +2391,11 @@ pub struct GossipSetup {
     pub dials: DialIntentSender,
 }
 
-impl Default for SessionResources {
+impl SessionResources {
     /// No clock, the default reader and the executor's thread for a local delivery, no
-    /// initial interest and no gossip: what a node was before it could be given any of them.
-    fn default() -> Self {
+    /// initial interest and no gossip: what a node was before it could be given any of them,
+    /// under the policies `session_policy`.
+    pub fn under(session_policy: SessionPolicy) -> Self {
         Self {
             node_hlc: NodeHlc::disabled(),
             shm_clients: no_shm_clients(),
@@ -2359,6 +2409,7 @@ impl Default for SessionResources {
             #[cfg(feature = "routing-namespace")]
             namespace: None,
             aggregation: DeclarationAggregation::none(),
+            session_policy,
         }
     }
 }
@@ -2427,17 +2478,26 @@ impl SharedSession {
         self.session_zid
     }
 
+    /// The policies the node runs under, as its creator resolved them: what an entry point of an
+    /// ABI admits a statement by, and what the node's own machines read, never the build.
+    pub fn session_policy(&self) -> &SessionPolicy {
+        &self.session_policy
+    }
+
     /// R311y820 — FALLIBLE, because the params builder it shares with both
     /// drive roles now draws the cookie signing key from OS entropy. The local
     /// plane never handshakes, so this key never reaches a wire cookie — but it
     /// takes the same path anyway rather than keeping a literal here with an
     /// "it is inert" note, because that note is exactly the shape that let the
     /// literal survive at four sites until R311y820 counted them.
+    ///
+    /// The node runs under `session_policy`, the snapshot its creator resolved.
     pub fn new(
         clock: TokioTime,
         zid: SessionZid,
+        session_policy: SessionPolicy,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
-        Self::new_with_resources(clock, zid, SessionResources::default())
+        Self::new_with_resources(clock, zid, SessionResources::under(session_policy))
     }
 
     /// [`Self::new`] for a node that holds the clock `node_hlc` (R3064): the plane and every face
@@ -2447,13 +2507,14 @@ impl SharedSession {
         clock: TokioTime,
         zid: SessionZid,
         node_hlc: NodeHlc,
+        session_policy: SessionPolicy,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
         Self::new_with_resources(
             clock,
             zid,
             SessionResources {
                 node_hlc,
-                ..SessionResources::default()
+                ..SessionResources::under(session_policy)
             },
         )
     }
@@ -2479,6 +2540,7 @@ impl SharedSession {
             #[cfg(feature = "routing-namespace")]
             namespace,
             aggregation,
+            session_policy,
         } = resources;
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
@@ -2500,21 +2562,22 @@ impl SharedSession {
         // roles use, so the plane cannot drift from them.
         let zid_bytes = zid.to_padded();
         // The plane's driver is inert and queues nothing onto a link, so no
-        // transmit model reaches it; zenoh's default is passed as the neutral
-        // value rather than the calling ABI's.
+        // transmit model reaches it; zenoh's queue is passed as the neutral
+        // value rather than the calling ABI's. The policies are the node's.
         let params = crate::drive::init_params(
             wz_runtime_tokio::session_glue::WhatAmI::Peer,
             zid,
             crate::drive::LinkConf {
                 tx: crate::drive::LinkTx {
-                    queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+                    queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&session_policy),
                     batch_size: crate::drive::DEFAULT_BATCH_SIZE,
                     lease_ms: crate::drive::DEFAULT_LEASE_MS,
                     keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
-                    sn_resolution: wz_runtime_tokio::policy::SnResolution::default(),
+                    sn_resolution: session_policy.sn_resolution(),
                 },
                 rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
                 accept: wz_runtime_tokio::accept_bounds::AcceptBounds::default(),
+                policy: session_policy,
             },
         )?;
         let actions = new_session_actions(driver, params, clock);
@@ -2579,9 +2642,11 @@ impl SharedSession {
         Ok(Self {
             zid: zid_bytes,
             session_zid: zid,
+            session_policy,
             #[cfg(feature = "peer")]
-            links: Arc::new(wz_runtime_tokio::link_registry::LinkRegistry::new(
+            links: Arc::new(wz_runtime_tokio::link_registry::LinkRegistry::with_order(
                 &zid_bytes,
+                session_policy.link_tie_order(),
             )),
             inner: StdMutex::new(inner),
             clock,
@@ -2755,6 +2820,7 @@ impl SharedSession {
         let mut guard = self.lock();
         loop {
             let verdict = admission_of(
+                self.session_policy.link_tie_order(),
                 &self.zid,
                 guard
                     .faces
@@ -3401,6 +3467,7 @@ impl SharedSession {
         let guard = self.lock();
         // No face has id `u64::MAX`, so every held face is a candidate.
         admission_of(
+            self.session_policy.link_tie_order(),
             &self.zid,
             guard
                 .faces
@@ -6900,7 +6967,8 @@ mod matching_aggregate_tests {
     /// real router's answer.
     #[test]
     fn a_write_filter_starts_active_and_a_retracted_one_does_not_suppress() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let publisher = shared
             .declare_write_filter(
                 FilterPlane::Subscribers,
@@ -6942,7 +7010,8 @@ mod matching_aggregate_tests {
     /// nothing recorded, where upstream's counter would wrap onto an id a live one holds.
     #[test]
     fn a_session_hands_out_its_last_entity_id_and_then_refuses() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         shared.lock().next_entity_id = u64::from(u32::MAX);
         let no_op: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
 
@@ -7006,7 +7075,8 @@ mod matching_aggregate_tests {
     /// undeclare, as pico's write filter calls its listeners there.
     #[test]
     fn the_sessions_own_subscriber_counts_where_the_filter_counts_local_entities() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let counting = shared
             .declare_write_filter(
                 FilterPlane::Subscribers,
@@ -7071,7 +7141,8 @@ mod matching_aggregate_tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use wz_capi_port::SessionEngine;
 
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let runs = Arc::new(AtomicUsize::new(0));
         let count = runs.clone();
         let id = SessionEngine::start_ticker(
@@ -7116,7 +7187,8 @@ mod matching_aggregate_tests {
     /// different claim that only the drain establishes.
     #[test]
     fn publish_all_delivers_locally_with_no_face() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let seen = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
         let sink_log = seen.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -7161,7 +7233,8 @@ mod matching_aggregate_tests {
     /// peer never reached its own queryable (open-debt item 914).
     #[test]
     fn a_faceless_get_issues_one_local_leg_where_its_destination_admits_one() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         for (destination, expected) in [
             (Locality::Any, vec![Locality::SessionLocal]),
             (Locality::SessionLocal, vec![Locality::SessionLocal]),
@@ -7186,7 +7259,8 @@ mod matching_aggregate_tests {
     /// not tell the difference (it declares `Any`).
     #[test]
     fn a_remote_origin_subscriber_is_not_widened_by_the_local_plane() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let hits = Arc::new(StdMutex::new(0usize));
         let sink_hits = hits.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -7222,7 +7296,8 @@ mod matching_aggregate_tests {
     /// put delivers on the wire and to nobody in-process.
     #[test]
     fn publish_aliased_all_delivers_locally_with_no_face() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let seen = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
         let sink_log = seen.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -7278,7 +7353,8 @@ mod matching_aggregate_tests {
     /// is plain whatever subscribes here.
     #[test]
     fn a_plain_put_on_a_declared_key_steps_aside_for_a_local_subscriber() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let mapping = shared
             .declare_keyexpr("wz/plain/target".to_owned())
             .expect("the first alias id is not exhausted");
@@ -7366,7 +7442,7 @@ mod matching_aggregate_tests {
                 test_zid(),
                 SessionResources {
                     policy,
-                    ..SessionResources::default()
+                    ..SessionResources::under(SessionPolicy::defaults())
                 },
             )
             .expect("test host entropy");
@@ -7405,7 +7481,8 @@ mod matching_aggregate_tests {
     /// that id goes on to the lane, and a put this node's own subscriber wants steps aside.
     #[test]
     fn a_plain_put_behind_a_write_filter_answers_as_the_filter_and_the_lane_do() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let mapping = shared
             .declare_keyexpr("wz/plain/filtered".to_owned())
             .expect("the first alias id is not exhausted");
@@ -7484,7 +7561,8 @@ mod matching_aggregate_tests {
     /// the faces had dropped.
     #[test]
     fn an_undeclared_alias_no_longer_delivers_locally() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let hits = Arc::new(StdMutex::new(0usize));
         let sink_hits = hits.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -7523,7 +7601,8 @@ mod matching_aggregate_tests {
     /// peer no longer has.
     #[test]
     fn a_key_acquired_twice_is_retracted_by_its_last_holder() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let hits = Arc::new(StdMutex::new(0usize));
         let sink_hits = hits.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -7581,7 +7660,8 @@ mod matching_aggregate_tests {
     /// what this change must leave alone.
     #[test]
     fn declare_keyexpr_still_gives_every_call_its_own_id() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let first = shared
             .declare_keyexpr("wz/res/own".to_owned())
             .expect("the first id is not exhausted");
@@ -7601,7 +7681,8 @@ mod matching_aggregate_tests {
     /// to the C subscriber.
     #[test]
     fn a_delete_reaches_the_local_plane_as_a_del() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
         let kinds = Arc::new(StdMutex::new(Vec::<bool>::new()));
         let sink_kinds = kinds.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -7966,7 +8047,7 @@ mod matching_aggregate_tests {
                 test_zid(),
                 SessionResources {
                     liveliness_to_self: to_self,
-                    ..SessionResources::default()
+                    ..SessionResources::under(SessionPolicy::defaults())
                 },
             )
             .expect("test host entropy");
@@ -8049,7 +8130,59 @@ mod admission_tests {
         zid: Option<&[u8]>,
         dialled: bool,
     ) -> Admission {
-        admission_of(local, held.iter().copied(), 1, zid, dialled)
+        admission_of(
+            SessionPolicy::defaults().link_tie_order(),
+            local,
+            held.iter().copied(),
+            1,
+            zid,
+            dialled,
+        )
+    }
+
+    /// The zids are ordered by the `link-tie-order` the registry is handed: two zids the two
+    /// orders rank apart keep opposite links under each.
+    #[test]
+    fn the_link_kept_follows_the_tie_order_it_is_handed() {
+        use wz_session_core::policy::LinkTieOrder;
+        const A: [u8; 2] = [0x01, 0xff];
+        const B: [u8; 2] = [0x02, 0x00];
+        let kept = |order: LinkTieOrder| {
+            admission_of(
+                order,
+                &A[..],
+                [(2u64, Some(&B[..]), false)].into_iter(),
+                1,
+                Some(&B[..]),
+                true,
+            )
+        };
+        // As a number, least significant byte first, B is the lower zid: the held link, which B
+        // dialled, stays.
+        assert_eq!(kept(LinkTieOrder::ZidNumber), Admission::Refuse);
+        // As bytes from the first, A is the lower zid: the new link, which A dialled, replaces it.
+        assert_eq!(kept(LinkTieOrder::ZidBytes), Admission::Replace(2));
+    }
+
+    /// A registry holds the snapshot it is made under, not the build's, and orders its zids by
+    /// that snapshot's `link-tie-order`.
+    #[test]
+    fn a_registry_holds_the_snapshot_it_is_made_under() {
+        use wz_session_core::policy::LinkTieOrder;
+        let other = if SessionPolicy::defaults().link_tie_order() == LinkTieOrder::ZidNumber {
+            LinkTieOrder::ZidBytes
+        } else {
+            LinkTieOrder::ZidNumber
+        };
+        let mut handed = SessionPolicy::defaults();
+        if handed.select_link_tie_order(other).is_err() {
+            // The build allows one order: there is no other snapshot to hand.
+            return;
+        }
+        let shared = SharedSession::new(TokioTime::new(), [0x11; 16].into(), handed)
+            .expect("test host entropy");
+        assert_eq!(*shared.session_policy(), handed);
+        assert_eq!(shared.session_policy().link_tie_order(), other);
     }
 
     #[test]
@@ -8167,7 +8300,7 @@ mod face_up_order_tests {
                     policy: GossipPolicy::shipped(WhatAmI::Peer),
                     dials,
                 }),
-                ..SessionResources::default()
+                ..SessionResources::under(SessionPolicy::defaults())
             },
         )
         .expect("test host entropy");
@@ -8261,7 +8394,7 @@ mod face_up_order_tests {
                     },
                     dials,
                 }),
-                ..SessionResources::default()
+                ..SessionResources::under(SessionPolicy::defaults())
             },
         )
         .expect("test host entropy");
@@ -8354,8 +8487,12 @@ mod face_up_order_tests {
         use wz_runtime_tokio_test_support::establish_capability_pair_between;
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
-        let shared =
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         assert!(
             shared.face_up(1, &near.resp_actions, false),
             "listener 0: slot 1"
@@ -8408,8 +8545,12 @@ mod face_up_order_tests {
         use wz_runtime_tokio_test_support::establish_capability_pair_between;
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
-        let shared =
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
         assert!(
             shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
@@ -9019,7 +9160,7 @@ mod face_up_order_tests {
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
             SessionZid::from([0x11; 16]),
-            SessionResources::default(),
+            SessionResources::under(SessionPolicy::defaults()),
         )
         .expect("test host entropy");
         let sent = std::cell::Cell::new(0usize);
@@ -9216,8 +9357,12 @@ mod face_up_order_tests {
         use wz_runtime_tokio_test_support::establish_capability_pair_between;
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
-        let shared =
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
         assert!(
             shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
@@ -9298,8 +9443,12 @@ mod face_up_order_tests {
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let late_near = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
         let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
-        let shared =
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
 
         assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
@@ -9357,7 +9506,7 @@ mod face_up_order_tests {
             [0x11; 16].into(),
             SessionResources {
                 liveliness_to_self: true,
-                ..SessionResources::default()
+                ..SessionResources::under(SessionPolicy::defaults())
             },
         )
         .expect("test host entropy");
@@ -9459,8 +9608,12 @@ mod face_up_order_tests {
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let late_near = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
         let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
-        let shared =
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         let sink: LivelinessSink = Arc::new(|| Box::new(|_sample: LivelinessSample<'_>| {}));
         let sent = |pair: &wz_runtime_tokio_test_support::EstablishedPair| {
             pair.resp_driver.snapshot().sends.len()
@@ -9517,8 +9670,12 @@ mod face_up_order_tests {
         use wz_runtime_tokio_test_support::establish_capability_pair_between;
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
-        let shared =
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false));
         assert!(shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false));
 
@@ -9571,7 +9728,7 @@ mod face_up_order_tests {
             [0x11; 16].into(),
             SessionResources {
                 liveliness_to_self: true,
-                ..SessionResources::default()
+                ..SessionResources::under(SessionPolicy::defaults())
             },
         )
         .expect("test host entropy");
@@ -9633,7 +9790,7 @@ mod face_up_order_tests {
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
             SessionZid::from([0x11; 16]),
-            SessionResources::default(),
+            SessionResources::under(SessionPolicy::defaults()),
         )
         .expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
@@ -9693,8 +9850,12 @@ mod face_up_order_tests {
         use wz_runtime_tokio_test_support::establish_capability_pair_between;
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
-        let shared =
-            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false));
         assert!(shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false));
         let near_zid = near
@@ -9803,8 +9964,12 @@ mod aggregation_tests {
     async fn each_face_is_declared_an_aggregate_once_for_the_subscribers_it_includes() {
         let control_link =
             establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
-        let control =
-            SharedSession::new(TokioTime::new(), [0x10; 16].into()).expect("test host entropy");
+        let control = SharedSession::new(
+            TokioTime::new(),
+            [0x10; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
         assert!(control.face_up(1, &control_link.resp_actions, false));
         let before = control_link.resp_driver.snapshot().sends.len();
         control.declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op());
@@ -9823,7 +9988,7 @@ mod aggregation_tests {
             [0x11; 16].into(),
             SessionResources {
                 aggregation: aggregation.clone(),
-                ..SessionResources::default()
+                ..SessionResources::under(SessionPolicy::defaults())
             },
         )
         .expect("test host entropy");

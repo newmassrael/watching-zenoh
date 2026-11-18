@@ -168,6 +168,45 @@ fn pair() -> (Arc<RouterState>, Client) {
     (router, peer)
 }
 
+/// A node runs under the snapshot its open hands it and not under the build's: it holds the
+/// handed one, whose `routing-face-drive` is not the build's, and opens under it.
+#[test]
+fn a_node_holds_the_snapshot_its_open_hands_it() {
+    use wz_session_core::policy::{RoutingFaceDrive, SessionPolicy};
+    let build = SessionPolicy::defaults();
+    let other = if build.routing_face_drive() == RoutingFaceDrive::TaskPerFace {
+        RoutingFaceDrive::OneTask
+    } else {
+        RoutingFaceDrive::TaskPerFace
+    };
+    let mut handed = SessionPolicy::defaults();
+    if handed.select_routing_face_drive(other).is_err() {
+        // The build allows one face drive: there is no other snapshot to hand.
+        return;
+    }
+    let plan = OpenPlan::resolve_under(
+        WhatAmI::Router,
+        StatedEndpoints {
+            connect: Vec::new(),
+            listen: vec![format!(
+                "tcp/127.0.0.1:{}",
+                wz_runtime_tokio_test_support::free_port()
+            )],
+        },
+        Some(r#"{ mode: "router", scouting: { multicast: { enabled: false } } }"#),
+        |_| handed,
+    )
+    .expect("a document a router opens on");
+    let node = plan
+        .into_arguments(abi_choices())
+        .run_node(NodeRole::Router)
+        .expect("the node opens");
+    assert_eq!(*node.session_policy(), handed);
+    assert_eq!(node.session_policy().routing_face_drive(), other);
+    assert_ne!(*node.session_policy(), build);
+    node.close();
+}
+
 /// The port's queryable answers a query a face asks, and a get through the port finds both the
 /// queryable of another node and the node's own.
 #[test]

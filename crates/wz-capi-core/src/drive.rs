@@ -39,7 +39,7 @@ use wz_runtime_tokio::accept_loop::{
     DialIntentSender, FaceExecutor, SpawnedDrive,
 };
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
-use wz_runtime_tokio::policy::SnResolution;
+use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
@@ -1372,6 +1372,9 @@ pub struct LinkConf {
     /// How long an inbound link gets to complete its handshake and how many get it at once:
     /// see [`OpenStance::accept`]. Read by the accepting roles only.
     pub accept: AcceptBounds,
+    /// The policies of the session the links belong to: see [`OpenStance::session_policy`].
+    /// Carried here because `init_params` is where every role hands them to a session.
+    pub policy: SessionPolicy,
 }
 
 /// The batch size a session advertises when its config states none: zenoh's own default
@@ -1408,7 +1411,7 @@ pub(crate) fn init_params(
         cookie: Vec::new(),
         tx_queue: link_conf.tx.queue,
         link_rx: link_conf.rx,
-        policy: wz_session_core::policy::SessionPolicy::defaults(),
+        policy: link_conf.policy,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }
@@ -4100,9 +4103,9 @@ pub struct OpenStance {
     /// adopted lease.
     pub keep_alive: KeepAliveConf,
     /// The width of the sequence numbers the session advertises at its handshake: the
-    /// `sn-resolution` policy of the build (`SessionPolicy::sn_resolution`), which is the 32
-    /// bits both zenoh and zenoh-pico advertise unless the build states another. The two sides
-    /// of a unicast session run the narrower of the two advertised widths.
+    /// `sn-resolution` policy of [`Self::session_policy`] (`SessionPolicy::sn_resolution`),
+    /// which is the 32 bits both zenoh and zenoh-pico advertise unless the snapshot states
+    /// another. The two sides of a unicast session run the narrower of the two advertised widths.
     pub sn_resolution: SnResolution,
     /// What the session's links, unicast and every group's, rejoin from fragments; see
     /// [`LinkConf`]. A zenoh-c session reads it from `transport/link/rx/max_message_size` and one
@@ -4217,6 +4220,10 @@ pub struct OpenStance {
     /// API compile it from their configuration; zenoh-pico's reads no such keys and says the
     /// default, which applies nothing.
     pub session_defaults: crate::session_defaults::SessionDefaults,
+    /// The snapshot of the policies the session runs under, resolved once by the open that
+    /// created it (`open_plan::resolve_policy` for a plan, the ABI's own open otherwise). Every session, link and face the open makes is handed it; none reads the
+    /// build.
+    pub session_policy: SessionPolicy,
 }
 
 /// Open-debt item 913 — whether `endpoint` names a multicast group in zenoh's sense: a `udp/`
@@ -4498,6 +4505,7 @@ pub fn open_blocking(
         namespace,
         groups,
         session_defaults,
+        session_policy,
         ..
     } = stance;
     // The prefix as the decorator takes it. The plan validated the text, so a text that does not
@@ -4557,6 +4565,7 @@ pub fn open_blocking(
         },
         rx: link_rx,
         accept,
+        policy: session_policy,
     };
     let clock = TokioTime::new();
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
@@ -4600,6 +4609,7 @@ pub fn open_blocking(
                 #[cfg(feature = "routing-namespace")]
                 namespace,
                 aggregation: session_defaults.aggregation.clone(),
+                session_policy,
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,
@@ -4802,6 +4812,7 @@ mod tests {
                 max_message_size: 4096,
             },
             accept: AcceptBounds::default(),
+            policy: SessionPolicy::defaults(),
         };
         let params = init_params(WhatAmI::Client, [0xC1; 4].into(), stated).expect("entropy");
         assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
@@ -4813,6 +4824,41 @@ mod tests {
         // reaching the parameters and not defaults both sides share.
         assert_ne!(stated.rx, LinkRxConf::default());
         assert_ne!(stated.tx.keep_alive, KeepAliveConf::default());
+    }
+
+    /// The parameters every role mints carry the snapshot its links were handed, not the build's.
+    #[test]
+    fn the_parameters_a_session_is_given_carry_the_snapshot_of_its_links() {
+        use wz_runtime_tokio::policy::LinkTieOrder;
+        let build = SessionPolicy::defaults();
+        let other = if build.link_tie_order() == LinkTieOrder::ZidNumber {
+            LinkTieOrder::ZidBytes
+        } else {
+            LinkTieOrder::ZidNumber
+        };
+        let mut handed = SessionPolicy::defaults();
+        if handed.select_link_tie_order(other).is_err() {
+            // The build allows one order: there is no other snapshot to hand.
+            return;
+        }
+        let link_conf = LinkConf {
+            tx: LinkTx {
+                queue: TxQueueConf::of_policy(&handed),
+                batch_size: DEFAULT_BATCH_SIZE,
+                lease_ms: DEFAULT_LEASE_MS,
+                keep_alive: KeepAliveConf::default(),
+                sn_resolution: handed.sn_resolution(),
+            },
+            rx: LinkRxConf::default(),
+            accept: AcceptBounds::default(),
+            policy: handed,
+        };
+        let params = init_params(WhatAmI::Peer, [0xC2; 4].into(), link_conf).expect("entropy");
+        assert_eq!(params.policy, handed);
+        assert_ne!(
+            params.policy, build,
+            "the handed snapshot is not the build's"
+        );
     }
 
     /// The session runtime is the drive thread's alone only for a serial drive,
@@ -5038,6 +5084,7 @@ mod tests {
                         },
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
+                        policy: SessionPolicy::defaults(),
                     },
                 )
                 .expect("entropy"),
@@ -5175,6 +5222,7 @@ mod tests {
                         },
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
+                        policy: SessionPolicy::defaults(),
                     },
                 )
                 .expect("entropy"),
@@ -5254,6 +5302,7 @@ mod tests {
                         },
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
+                        policy: SessionPolicy::defaults(),
                     },
                 )
                 .expect("entropy"),
@@ -5843,7 +5892,40 @@ mod tests {
             gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             groups: Vec::new(),
             session_defaults: Default::default(),
+            session_policy: SessionPolicy::defaults(),
         }
+    }
+
+    /// The registry an open makes holds the snapshot its stance handed it, not the build's.
+    #[cfg(feature = "peer")]
+    #[test]
+    fn the_registry_an_open_makes_holds_the_snapshot_of_its_stance() {
+        use wz_runtime_tokio::policy::LinkTieOrder;
+        let other = if SessionPolicy::defaults().link_tie_order() == LinkTieOrder::ZidNumber {
+            LinkTieOrder::ZidBytes
+        } else {
+            LinkTieOrder::ZidNumber
+        };
+        let mut handed = SessionPolicy::defaults();
+        if handed.select_link_tie_order(other).is_err() {
+            // The build allows one order: there is no other snapshot to hand.
+            return;
+        }
+        let state = open_blocking(
+            Vec::new(),
+            Vec::new(),
+            CapiTlsConfig::default(),
+            WhatAmI::Peer,
+            DialPhase::ONCE,
+            OpenStance {
+                session_policy: handed,
+                ..peer_stance()
+            },
+        )
+        .expect("a peer with nothing to dial or bind opens alone");
+        assert_eq!(*state.shared.session_policy(), handed);
+        assert_ne!(*state.shared.session_policy(), SessionPolicy::defaults());
+        state.close();
     }
 
     /// The `seq_num_res` code of the first InitSyn a session dialling `stance` puts on the wire,
@@ -6118,7 +6200,12 @@ mod multicast_face_tests {
     /// A session with the zid `byte` repeated.
     fn session(byte: u8) -> Arc<SharedSession> {
         Arc::new(
-            SharedSession::new(TokioTime::new(), [byte; 16].into()).expect("test host entropy"),
+            SharedSession::new(
+                TokioTime::new(),
+                [byte; 16].into(),
+                wz_runtime_tokio::policy::SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
         )
     }
 
