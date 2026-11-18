@@ -4885,6 +4885,16 @@ pub unsafe extern "C" fn wz_dissect_pcap_local_options_of_link_type(
 /// A door per combination would have been four names for a choice the handle
 /// has already made.
 ///
+/// # What a handle's census counts, once a ceiling has trimmed
+///
+/// Every message its planes have folded since they began, the trimmed ones
+/// included (census revision 25): the census a container door writes over a
+/// capture that kept all of them, where the bounded container door counts only
+/// what its capture holds. The two are the same bytes until a list is trimmed;
+/// after that the handle's `observed.trimmed` counts the messages it still
+/// counts and no longer holds. See [`live::LiveDissection::census`] for when
+/// the planes begin again, and what a call costs.
+///
 /// # It is a READ, and the handle is `const` to say so
 ///
 /// Drawing a window must not change what the tap decodes. Exactly one act

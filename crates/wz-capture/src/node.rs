@@ -1015,6 +1015,10 @@ struct NodeSaved {
     census: NodeCensus,
     lists: Vec<crate::ListMark>,
     ends: Vec<[Option<usize>; 2]>,
+    /// Messages folded since the census began: more than the lists hold says
+    /// it went on across a front trim and holds history.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    folded: u64,
 }
 
 /// The node census of a capture, kept between calls so that a call after a few
@@ -1053,6 +1057,29 @@ impl NodeMemory {
     /// The work this memory has done since it was made.
     pub fn stats(&self) -> NodeStats {
         self.stats
+    }
+
+    /// Let go of what was folded, so the next call begins again over what the
+    /// lists hold: what a census over its history asks when its planes began
+    /// again there, so the node plane covers the same messages they do.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn begin_again(&mut self) {
+        self.saved = None;
+    }
+
+    /// Whether every message this census has folded is still held by the lists
+    /// of `dissection`: then it is the census of what is held, and beginning it
+    /// again over them would fold the same messages to the same census.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn covers_only_what_is_held(&self, dissection: &crate::Dissection) -> bool {
+        let held: u64 = dissection
+            .message_lists_with_origin()
+            .map(|(_, _, frames)| frames.len() as u64)
+            .sum();
+        match &self.saved {
+            Some(saved) => saved.folded <= held,
+            None => true,
+        }
     }
 
     /// The node census of `dissection`, continuing the last one when it may.
@@ -1128,6 +1155,11 @@ impl NodeMemory {
             census,
             lists,
             ends: all_ends,
+            #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+            folded: current
+                .iter()
+                .map(|(_, _, frames)| frames.len() as u64)
+                .sum(),
         });
         self.stats.restarts += 1;
     }
@@ -1193,6 +1225,10 @@ impl NodeMemory {
                     .census
                     .observe_flow_from(flow, *frames, list, start, &mut ends);
                 self.stats.messages_folded += (frames.len() - start) as u64;
+                #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+                {
+                    saved.folded += (frames.len() - start) as u64;
+                }
             }
             lists.push(crate::ListMark {
                 flow: *flow,

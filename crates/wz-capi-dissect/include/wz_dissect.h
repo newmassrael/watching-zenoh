@@ -1685,7 +1685,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":24,
+ *     {"document":{"name":"census","revision":25,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1737,7 +1737,7 @@
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":24,"key":"mode","values":[...],
+ *     {"name":"census","revision":25,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -7211,20 +7211,39 @@ int wz_dissect_pcap_local_options_of_link_type(
  * It is a READ, and `h` is const to say so. Drawing a window must not change
  * what the tap decodes; the one act that would is wz_dissect_live_end below.
  *
- * WHAT A CALL COSTS. The planes that are folds over the messages are kept
- * between calls, for the selector of the last call, so a census drawn again
- * after a few more packets folds those packets and not the capture. The
- * document is the one a call that starts over writes, byte for byte. A call
- * starts over when the capture is not the last one plus messages that sort
- * after it (a list trimmed at its front, a flow that appeared in front of the
- * datagram flows, a message decoded after a packet that followed it), when the
- * session grouping changes (a message that names a node), or when the selector
- * is another one. Two costs remain: the scouting lists are folded on every
- * call, and every exchange still open is judged on every call, so a capture
- * whose queries never close pays for each. Measured on this library's own test
- * population and not on a consumer's capture, with 40,000 messages held: 1.5 ms
- * for a call that continues, 76 ms for one that starts over. The two numbers
- * were taken on a loaded build host and differ by their ratio, not their size.
+ * WHAT IT COUNTS ONCE A CEILING HAS TRIMMED (census revision 25). Every
+ * message the planes have folded since they began, the trimmed ones included,
+ * as this handle's field documents and end-to-end judge read them: a record
+ * whose declaration a ceiling took keeps its key, where a census of what is
+ * held would call it unresolved for a reason that is the ceiling's and not the
+ * traffic's. The document is the one a container door writes over a capture
+ * that kept every one of those messages; until a list is trimmed it is the
+ * container door's for the same packets. Its "observed" object says what it
+ * covers:
+ *
+ *     "observed":{"messages":M,"trimmed":T,"first_packet":P,"last_packet":Q}
+ *
+ * M is the transport messages folded since the planes began, T how many of
+ * those the lists no longer hold (0 for every container door, and for a
+ * handle until it is trimmed), and P and Q the capture packets the first and
+ * the last of them resolve to (null when none was folded). A reader that
+ * wants a census of what is held only reads T > 0 as "this is history".
+ *
+ * WHAT A CALL COSTS. The planes are kept between calls, for the selector of
+ * the last call, so a census drawn again folds the messages that arrived,
+ * whether or not a list was trimmed at its front since: a beat costs what
+ * arrived in it. The planes begin again, over what is held (T back to 0), only
+ * where a fold cannot go on at all: a flow that appeared in front of the
+ * datagram flows or left a flow table, a message decoded after a packet that
+ * followed it, a session grouping that changes (a message that names a node),
+ * another selector, a call the progress callback stopped, and exchanges still
+ * open that alone outgrow four times the messages held. The node plane begins
+ * again with the others and they with it, so every plane of one document
+ * covers the messages its "observed" names. What the planes keep
+ * per row is given up for the rows no list holds as it doubles, so it stays
+ * near what the lists hold. Two costs remain: the scouting lists are folded
+ * on every call, and every exchange still open is judged on every call, so a
+ * capture whose queries never close pays for each.
  *
  * The document is the one the census doors emit, so a consumer keeps one
  * reader and one schema across both halves. A selector that does not compile

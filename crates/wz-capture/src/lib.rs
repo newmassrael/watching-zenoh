@@ -1387,6 +1387,17 @@ pub struct CaptureOrder<'a> {
 }
 
 impl<'a> CaptureOrder<'a> {
+    /// How many messages the walk takes.
+    pub(crate) fn messages(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// The capture packet the walk's first message resolves to, and its last's;
+    /// `None` for a walk that takes nothing.
+    pub(crate) fn packet_range(&self) -> Option<(usize, usize)> {
+        Some((self.keys.first()?.0, self.keys.last()?.0))
+    }
+
     /// The bytes this crate can read of the transport message `row` of the
     /// list at `list` was read from, from its first byte to the end of its
     /// framing unit, or `None` where it can read none (bytes a retention
@@ -1617,21 +1628,26 @@ enum TotalList {
 /// trimmed since, which [`Dissection::capture_order_since`] must be told.
 ///
 /// The two answers are two different folds, and which one a caller has is a fact
-/// about what it keeps, not a preference:
+/// about what its answer means, not a preference:
 ///
 /// * a fold that must equal the fold over the messages the capture HOLDS NOW (a
-///   census plane: its document is held byte for byte to the whole-capture door's)
+///   census of a capture read whole, or one kept by a memory made with
+///   `CensusMemory::new`, each held byte for byte to the whole-capture door's)
 ///   cannot go on, because it already counted the trimmed message and the door that
 ///   reads the capture afresh does not;
 /// * a fold that keeps the HISTORY of what it has taken (the state a since-document
 ///   writes rows from: the keyexpr table, the exchange pairing, the chain
-///   identities) loses nothing by a trim, and refusing it would make every call
-///   after the first trim cost the whole capture, which is the cost a ceiling
-///   exists to remove.
+///   identities; and a live handle's census, `CensusMemory::over_history`)
+///   loses nothing by a trim. A record whose declaration a ceiling took still has
+///   the key it was declared under, and a fold over what is held would report it
+///   unresolved for a reason that is the holding limit's and not the traffic's.
+///   Refusing to go on would also make every call after the first trim cost the
+///   whole holding, which is the cost a ceiling exists to remove.
 #[cfg_attr(not(feature = "dissect"), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum TrimPolicy {
     /// A trim from a list's front ends the point: the fold begins again.
+    #[default]
     Restart,
     /// A trim is not a reason to begin again: the fold takes the messages that
     /// arrived and the ones it already took stay folded.

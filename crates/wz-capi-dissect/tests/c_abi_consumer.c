@@ -321,6 +321,12 @@ static int check_live_door(void) {
               "the live door must emit the CENSUS document: %s", census);
         CHECK(strstr(census, "\"planes\":[") != NULL,
               "and it must carry the plane list: %s", census);
+        /* Census revision 25: what the planes folded, and how much of it the
+         * lists no longer hold, which a handle's census goes on counting. */
+        CHECK(strstr(census, "\"observed\":{\"messages\":") != NULL,
+              "and it must say what it observed: %s", census);
+        CHECK(strstr(census, "\"trimmed\":") != NULL,
+              "including what was trimmed of it: %s", census);
         wz_dissect_string_free(census);
 
         /* An empty selector is the identity; a broken one is refused BY NAME
@@ -4320,8 +4326,11 @@ int main(void) {
      * move under stationary keys.
      * 24: `fragment_chains.aborted_superseded` counts the chains a restart
      * stranded, off the router's word for the other chain a fragment ended;
-     * it read 0 on every capture before. Values move under stationary keys. */
-    revisioned[0].revision = 24;
+     * it read 0 on every capture before. Values move under stationary keys.
+     * 25: the document gains `observed` (`messages`, `trimmed`,
+     * `first_packet`, `last_packet`), and a live handle's census goes on
+     * across a front trim, counting what its planes folded since they began. */
+    revisioned[0].revision = 25;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);

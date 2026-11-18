@@ -817,7 +817,7 @@ fn said_of(said: &Said, coordinates: &dyn RowCoordinates, key: &RowKey) -> Optio
 
 /// Whether the list of `key` still holds its row, by the produced-index of each
 /// list's oldest row ([`first_held`]).
-fn is_held(first: &[u64], key: &RowKey) -> bool {
+pub(crate) fn is_held(first: &[u64], key: &RowKey) -> bool {
     let (list, _, produced) = key.parts();
     first
         .get(list)
@@ -1205,7 +1205,7 @@ fn push_revised_row(row: &Written, was: RowVerdict, first: &mut bool, out: &mut 
 }
 
 /// The produced-index of the oldest row each list holds, by the list's place.
-fn first_held(d: &crate::Dissection) -> Vec<u64> {
+pub(crate) fn first_held(d: &crate::Dissection) -> Vec<u64> {
     d.message_lists_with_origin()
         .map(|(_, _, frames)| frames.produced() - frames.len() as u64)
         .collect()
