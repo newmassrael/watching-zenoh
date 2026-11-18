@@ -1,0 +1,14 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/4-conflict-policy", "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets"]
+decision = '''
+Every policy and limit of the build declaration now states where its value may be bound: the scope it may differ at (runtime, session, link, entity, message), the latest stage it may be decided at (build, open, live), whether a live value changes at any time or only at a stated boundary, and whether it changes what a peer sees on the wire. A limit also states whether it sizes storage (capacity), bounds use at run time (quota) or both, and its binding in the heap and the fixed-memory profile. The values were read from the code that consumes each one; no switch changes behaviour, and the generator requires and validates the new keys but does not emit from them yet. This is the declaration the staged binding of configuration (build narrows each value's domain, open selects within it, live changes only what is declared live) is built on.
+'''
+changes = '''
+`deploy/wz-config.toml`: `scope`, `binding`, `mutability`, `boundary` (quiescent rows) and `wire` on the 23 policies; `storage`, `scope`, `binding_heap`, `binding_fixed` and `wire` on the 57 limits; a header section defining them.
+`scripts/lib/wz_config.py`: the allowed values, a limit unknown-key check, the cross-field rules (mutability follows binding, boundary iff quiescent, a capacity is never live, a quota is never build, both is fixed at build and open or live on the heap) and their selftest cases.
+'''
+verification = '''
+`wz_config.py --selftest`: 299 of 299 arms pass, the new refusals and acceptances among them; `--check`: every generated file current, so no output moved; reason review pins, store reason citations, the prose identifier gate and the cross-implementation proof audit pass.
+'''
+carry = '''
+The generator emits nothing from the new keys yet (the domains, the bound value type, the schema of the run-time document). On the heap profile the session tables a `both` limit sizes still enforce nothing; their quotas are stated, not yet checked. `MAX_MULTICAST_REPLIES` is declared but read by no code; the multicast reply queue's size is the image's own.
+'''
