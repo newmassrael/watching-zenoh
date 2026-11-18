@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The conformance digest of the build a build script runs in (docs/build-configuration.md,
-//! decision C15).
+//! The conformance digest of the build a build script runs in: a build states what it is, from
+//! the configuration it was built with.
 //!
 //! # What it is
 //!
@@ -313,7 +313,7 @@ pub fn emit(abi: &'static str) {
         "// Written by wz-conformance-build for this build; see its crate documentation.\n\n",
     );
     text.push_str(
-        "/// The conformance digest of this build (docs/build-configuration.md, decision C15).\n",
+        "/// The conformance digest of this build, from the configuration it was built with.\n",
     );
     let _ = writeln!(
         text,

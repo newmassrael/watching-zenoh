@@ -1381,7 +1381,7 @@ def key_set_entities(data: dict) -> list[dict]:
 
 def key_set_lines(data: dict) -> list[str]:
     """The module `key_set` of the node's `declared.rs`: its table when it states a closed key set
-    (`docs/closed-key-set.md`, the entities it declares are the keys), and nothing when it does not.
+    (the `key-set` policy; the entities it declares are the keys), and nothing when it does not.
     A node that is open has no table to adopt, and the closed key set is code a build has only with
     the `key-set-closed` feature of `wz-session-core`, so a module that names it would not compile
     in the open build. Valid input only."""

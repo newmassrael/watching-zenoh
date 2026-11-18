@@ -7,7 +7,7 @@
   Whether `timeout` ticks have passed since `last`, on a 32-bit tick counter that wraps.
 
   A deadline and a sampling period are the same question, so the supervisor
-  (docs/observation-plane.md M3) and the resource sampler (M4) ask it through this one document.
+  (`supervision`) and the resource sampler (`resource-snapshot`) ask it through this one document.
 
   `wrappingSub(now, last)` is the number of ticks that passed, modulo 2^32, provided fewer than
   2^32 did (RFC 1982's serial-number premise): a wrap of the counter between the two readings is

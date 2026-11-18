@@ -3,7 +3,7 @@
 
 //! The structure the abstract test suite is written to: its test configurations, its test
 //! purposes, the abstract service primitives the upper tester offers, and the test management
-//! protocol that carries them (docs/conformance-suite.md sections 7 and 8).
+//! protocol that carries them.
 //!
 //! None of it says how a test is executed; that is the abstract test suite's, in the SCE test
 //! profile. What is held here is that each part names only what exists: a purpose names

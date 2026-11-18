@@ -3,9 +3,9 @@
 #
 # The conformance requirements of the zenoh conformance test suite: the base layer, network part
 # (the messages a Frame carries, key expressions, and what a node observably forwards).
-# docs/conformance-suite.md section 3 defines every field; crates/wz-conformance-suite holds the
-# file to it. The rules of base-transport.toml's header hold here too: every source is an anchor
-# into the pinned upstream, and a requirement whose sources do not settle it carries an `issue`.
+# crates/wz-conformance-suite defines every field and holds the file to it. The rules of
+# base-transport.toml's header hold here too: every source is an anchor into the pinned upstream,
+# and a requirement whose sources do not settle it carries an `issue`.
 #
 # What a Push, a Request and a Response carry as their body (Put, Del, Query, Reply, Err) is the
 # zenoh message part, not this one.

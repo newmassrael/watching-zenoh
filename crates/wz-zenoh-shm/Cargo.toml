@@ -10,7 +10,7 @@
 # mapping), the segments of arrays and structures built on them, the chunk header and the
 # metadata and watchdog subsystems that keep a buffer alive across processes, and the provider API
 # (`ShmProvider`, `ZShm`, `ZShmMut`) over watching-zenoh (inventory atom `api-compat-rust`,
-# open-debt item 910, docs/build-configuration.md C13).
+# open-debt item 910: upstream's package name and public API).
 #
 # Named `zenoh-shm` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). Two processes share a segment

@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 """R3439 (no register item) -- what each Zephyr image asks cargo for, read from its own build.
 
-Step 1 of docs/build-configuration.md moves the images' hand-written Kconfig choices and their
+Moving the images onto the one declaration takes their hand-written Kconfig choices and their
 hand-written mapping to cargo into the one declaration and its generated bridge, and it is done
 only when every existing image builds with the same features and environment as before. This is
 the instrument of that comparison: it configures each image of the board table

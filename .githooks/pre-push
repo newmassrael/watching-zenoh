@@ -1120,7 +1120,7 @@ round_fed_gates=(
     # dissect_schema::tests::every_published_fact_still_holds. A text read and one git show.
     "publish_selector_paths.py --selftest"
     "publish_selector_paths.py --check origin/main"
-    # The closed key set's generator (docs/closed-key-set.md, phase 1). Round-fed by
+    # The closed key set's generator (the declaration, its refusals and the table). Round-fed by
     # deploy/wz-config.toml (the key limit) and crates/wz-session-core/tests/key_set_data/: the
     # selftest holds each refusal and ends by checking the fixture's derived table and matcher corpus
     # are current. MEASURED: 0.43s, a text read, no build. The Rust half, which compares them with

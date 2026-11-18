@@ -748,7 +748,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         query-queryable,\
         query-reply-err\
         |"
-    # The closed key set (`docs/closed-key-set.md`), a row of its own because
+    # The closed key set (the `key-set` policy), a row of its own because
     # `key-set-closed` ADDS modules (the table, the allowance, the closed gate) and the
     # tests of them: the three modules' unit tests, the lent and owned receive paths and
     # the reply registry under a closed gate, and the proof files `key_catalogue_model`

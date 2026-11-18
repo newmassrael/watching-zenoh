@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # wz-conformance-suite — the front half of the zenoh conformance test suite, as data a test
-# system reads (docs/conformance-suite.md).
+# system reads.
 #
 # The conformance requirements, the PICS and PIXIT proformas and wz's answers to the PICS live in
 # `conformance/suite/` as TOML, because they are documents of the suite and not of any one
@@ -10,8 +10,8 @@
 # and against the others (a selection names a PICS item that exists, a PICS item names
 # requirements that exist, a wz answer names a capability, limit or policy of
 # `deploy/wz-config.toml`), and answers the PICS for a wz build from its conformance statement
-# (decision C15 of docs/build-configuration.md). Nothing of the engine is linked here: the suite
-# is the same for every implementation it tests.
+# (what the build states it is, from its configuration). Nothing of the engine is linked here:
+# the suite is the same for every implementation it tests.
 
 [package]
 name = "wz-conformance-suite"

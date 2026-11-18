@@ -61,7 +61,7 @@
 #
 # WHAT IT WILL NOT DO: flash a file that is not the padded region it just built, flash while a debugger,
 # a capture or a ping runs or the console is held, or run while another lane run holds the lock. The kit
-# has a saved original CM0+ image (docs/storage-policy-and-link-layer.md, the lab's restore): this lane
+# has a saved original CM0+ image (the lab's restore): this lane
 # writes the M7_0 region only, and the CM0+ launcher it needs must already be in place.
 set -uo pipefail
 

@@ -10,7 +10,7 @@
 # they are made of (zenoh ids, locators, endpoints, wire expressions, encodings, parameters, regions),
 # the extensions every message may carry, and the transport, network, zenoh and scouting messages
 # with their ids, flags and constants, over watching-zenoh (inventory atom `api-compat-rust`,
-# open-debt item 910, docs/build-configuration.md C13).
+# open-debt item 910: upstream's package name and public API).
 #
 # Named `zenoh-protocol` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The types of this crate are the

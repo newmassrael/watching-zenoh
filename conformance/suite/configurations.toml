@@ -3,8 +3,8 @@
 #
 # The test configurations of the zenoh conformance test suite (ISO/IEC 9646-2): how many lower
 # tester components stand around the implementation under test, which role each takes, over which
-# link, and in which mode the implementation runs. docs/conformance-suite.md section 7 defines
-# every field; crates/wz-conformance-suite holds the file to it. A test purpose names the one
+# link, and in which mode the implementation runs. crates/wz-conformance-suite defines every
+# field and holds the file to it. A test purpose names the one
 # configuration it runs in, and the abstract test suite realises each configuration once.
 #
 # `lower` lists the lower tester's components: `role` is the zenoh role it takes (client, peer,

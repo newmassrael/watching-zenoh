@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# The build configuration of wz, declared ONCE (docs/build-configuration.md, decision C1).
+# The build configuration of wz, declared ONCE: this file is the one source, and every other form
+# of the configuration is generated from it.
 #
 # Every switch a build can turn is declared here, and everything else is derived from this file by
 # `scripts/lib/wz_config.py`, which `--check`s each derived file against it:
@@ -41,7 +42,8 @@
 # liveliness and the query switch).
 #
 # `upstream_on` and `upstream_off` say what each upstream original's own default build has
-# (docs/build-configuration.md, C2 and step 2): the originals are `zenoh`, `zenoh-c` and
+# (a capability defaults to what its family's original turns on, and each original's defconfig
+# is generated from these keys): the originals are `zenoh`, `zenoh-c` and
 # `zenoh-pico`. A capability names `zenoh-pico` when the pico ABI exports it, and `zenoh-c` and
 # `zenoh` when the zenoh-c ABI does, in exactly one of the two keys. These are not `default`:
 # `default` is the drop-in's own default, which keeps what the reference builds turn on, while
@@ -119,7 +121,7 @@ always = ["threads", "entropy"]
 # ─── Platforms (docs/target-build-contract.md T3) ─────────────────────────────────────────────
 #
 # A platform is one concrete operating system, libc and target triple a build is packaged for; the
-# `target` axis of docs/build-configuration.md is the class above it (a host Linux, an MCU image).
+# `target` axis of the build configuration is the class above it (a host Linux, an MCU image).
 # Each row is DECLARED here and CHECKED against the compiler (`wz_config.py --check`): the triple
 # must be a target of the pinned rustc, `os` its `target_os`, and `libc` what its `target_os` and
 # `target_env` give, so a row cannot say what the compiler does not.
@@ -885,14 +887,16 @@ abis = ["core", "pico", "c"]
 implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
 help = "The advanced publisher and subscriber (cache, history, miss detection)."
 
-# A clock the application registers (docs/observation-plane.md M1): a hardware clock or a time
+# A clock the application registers (the observation plane's time, a clock with a quality): a
+# hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no
 # counterpart in an upstream library, so it is off in every original and part of the unstable
 # surface, as `wz_ext_config_device_requires` is.
 [[capability]]
 id = "clock-source"
 # The bit this capability has in the `features` word of a resource snapshot
-# (`docs/observation-plane.md` M4). Assigned once and never moved or reused: a reader of an older or
+# (the observation plane's sampled record of the node's resources). Assigned once and never moved
+# or reused: a reader of an older or
 # newer image reads the bits it knows, so a bit is a name the snapshot's layout has promised.
 observation_bit = 0
 kconfig = "WZ_CAP_CLOCK_SOURCE"
@@ -903,7 +907,7 @@ abis = ["core", "pico", "c"]
 implies = ["timestamping", "unstable-api"]
 help = "Register a clock source the node reads instead of the system clock, and report whether it is synchronised."
 
-# The node's event log (docs/observation-plane.md M2): a ring of fixed-size records that the node
+# The node's event log (the observation plane's events): a ring of fixed-size records that the node
 # and the program write events into and that a program reads back, with no text stored. wz's own
 # doors, with no counterpart in an upstream library, so off in every original and part of the
 # unstable surface. The ring's size is `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS`, and what a full
@@ -919,10 +923,11 @@ abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "Write events into the node's event ring and read them back, with no text stored."
 
-# The node's supervisor (docs/observation-plane.md M3): checkpoints an application feeds, each with
-# a deadline, an expiry hook that runs once, and a verdict on whether every one is healthy that a
-# node can feed a hardware watchdog from. wz's own doors, with no counterpart in an upstream
-# library, so off in every original and part of the unstable surface. How many checkpoints is the
+# The node's supervisor (the observation plane's supervision): checkpoints an application feeds,
+# each with a deadline, an expiry hook that runs once, and a verdict on whether every one is
+# healthy that a node can feed a hardware watchdog from. wz's own doors, with no counterpart in an
+# upstream library, so off in every original and part of the unstable surface. How many
+# checkpoints is the
 # `SUPERVISION_CHECKPOINTS` limit, and what an expired one does on the next feed is the
 # `supervision-after-expiry` policy.
 [[capability]]
@@ -936,11 +941,11 @@ abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "Supervise checkpoints an application feeds, and run a hook once when one misses its deadline."
 
-# The node's resource snapshot (docs/observation-plane.md M4): a fixed-layout, versioned record of
-# CPU use, memory, tasks and the spacing of the messages the session receives, taken on a period
-# and read as bytes. wz's own doors, with no counterpart in an upstream library, so off in every
-# original and part of the unstable surface. How often is the `SNAPSHOT_PERIOD_MS` limit, and how
-# fine the message-interval histogram is the `SNAPSHOT_HISTOGRAM_BUCKETS` limit.
+# The node's resource snapshot (the observation plane's resources): a fixed-layout, versioned
+# record of CPU use, memory, tasks and the spacing of the messages the session receives, taken on
+# a period and read as bytes. wz's own doors, with no counterpart in an upstream library, so off in
+# every original and part of the unstable surface. How often is the `SNAPSHOT_PERIOD_MS` limit,
+# and how fine the message-interval histogram is the `SNAPSHOT_HISTOGRAM_BUCKETS` limit.
 [[capability]]
 id = "resource-snapshot"
 observation_bit = 3
@@ -952,7 +957,7 @@ abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "Take a snapshot of the node's resources and the spacing of the messages it receives."
 
-# The pools of the node (docs/pool-monitor.md): each fixed table states how many entries it holds,
+# The pools of the node (the pool monitor): each fixed table states how many entries it holds,
 # how many it held at most, and how many it refused for want of room, and the node enumerates them
 # under one name each. wz's own, with no counterpart in an upstream library, so off in every original.
 # What it costs is the high-water mark each pool keeps, which a build without it does not store.
@@ -966,7 +971,7 @@ abis = ["core"]
 implies = []
 help = "Record how full each of the node's fixed pools has been and list every pool's occupancy and refusals."
 
-# The peer's initial declarations are final (docs/declarations-synced-event.md): a declaration
+# The peer's initial declarations are final (the declarations-synced event): a declaration
 # listener is told, once, that the declarations it has been given are everything the peer held
 # when the session was established and the ones after are live. wz's own, with no counterpart in
 # an upstream library, so off in every original.
@@ -980,7 +985,7 @@ abis = ["core"]
 implies = []
 help = "Tell a declaration listener when the peer has sent everything it held, so what follows is live."
 
-# A declaration event names the peer it came from (docs/remote-declaration-watch.md). A session
+# A declaration event names the peer it came from. A session
 # is one link, and a session that reconnects can meet another peer, so a listener that outlives
 # the link needs the identity beside each event rather than a separate read it could not order
 # against them. wz's own, so off in every original.
@@ -1252,7 +1257,7 @@ kconfig = "WZ_CAP_RX_CALLBACK_OFFLOAD"
 # Off by default: zenoh-c runs a subscriber's callback where the sample arrives, and so does a build
 # made as it is. The lane is bounded by the limits DELIVERY_LANE_EVENTS and DELIVERY_LANE_BYTES,
 # and what a full lane does is the subscriber-overload policy or the declaration's own answer
-# (docs/rx-delivery-lane.md). The door takes reject and keep-latest and refuses block, which needs
+# (the receive delivery lane). The door takes reject and keep-latest and refuses block, which needs
 # a drain no loop of this ABI's sessions owns.
 default = "off"
 os_needs = []
@@ -1303,7 +1308,7 @@ abis = ["core", "c"]
 implies = []
 help = "The traffic policy a node's config states: access_control, low_pass_filter, downsampling and the qos/network overwrite, enforced on every face; a build without it refuses a config that states one, by its key."
 
-# ## The upstream switches (docs/build-configuration.md, C7)
+# ## The upstream switches (a complete map: every upstream switch is classified)
 #
 # Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c
 # (each cargo feature it declares, less `default` and the implicit ones of optional dependencies),
@@ -2426,11 +2431,11 @@ The lease is the smaller of the two the peers advertised.
 '''
 
 # A policy is behaviour upstream does not have; it is declared with what upstream does and
-# defaults to that, so a build that states nothing is the original's (docs/build-configuration.md,
-# C2). `kind` is `bool` (default `off`) or `choice` (`choices`, one of them the default). Each is a
-# field of `SessionPolicy` (crates/wz-session-core/src/policy_generated.rs, generated) and a Kconfig
-# symbol; a build states it as `WZ_POLICY_<NAME>`. A policy enters in its own change, with a pair
-# of tests that name each of its values.
+# defaults to that, so a build that states nothing is the original's (a policy is never on in an
+# upstream defconfig). `kind` is `bool` (default `off`) or `choice` (`choices`, one of them the
+# default). Each is a field of `SessionPolicy` (crates/wz-session-core/src/policy_generated.rs,
+# generated) and a Kconfig symbol; a build states it as `WZ_POLICY_<NAME>`. A policy enters in its
+# own change, with a pair of tests that name each of its values.
 [[policy]]
 id = "multicast-loopback"
 kind = "choice"
@@ -2721,7 +2726,7 @@ default = "open"
 upstream = "Takes a message on any key a peer sends, and finds the subscribers it reaches by matching that key against each subscription's pattern as text."
 since = 2
 help = '''
-Which keys the receive path takes a message on (docs/closed-key-set.md). `open` takes
+Which keys the receive path takes a message on (the closed key set). `open` takes
 any key a peer sends. `closed` takes only the keys the image declares as its key set,
 which the build generates into a read-only table: a message on any other key is dropped
 before a subscriber is looked up, and counted by reason. A closed build that is given
@@ -2876,7 +2881,7 @@ A peer already holding its quota of messages is refused before the pool is
 looked at, whatever the value.
 '''
 
-# ─── Protocol facts (docs/build-configuration.md, decision C15) ──────────────────────────────
+# ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #
 # A protocol fact is something a session of an ABI states on the wire that no switch of this
 # declaration moves: it is the same for every build of the ABI at this catalogue version. The

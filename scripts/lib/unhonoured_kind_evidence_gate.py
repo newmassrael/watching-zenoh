@@ -312,7 +312,7 @@ def citations(key: str, files: dict[str, str]) -> list[tuple[str, int, str]]:
 
 
 #: The notice a file of the zenoh compatibility family carries when it is upstream's file with
-#: a header changed (`docs/build-configuration.md` C13, the family notice gate).
+#: a header changed (the family carries upstream's package names; the family notice gate).
 DERIVED_FROM_UPSTREAM = re.compile(r"Derived from zenoh[\w-]* \d")
 
 

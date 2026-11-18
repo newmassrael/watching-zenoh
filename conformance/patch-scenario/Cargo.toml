@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # The family's replacement, as a user does it: one `[patch.crates-io]` entry per crate, and a graph
-# that holds an UPSTREAM crate depending on a patched one (inventory atom `api-compat-rust`,
-# docs/build-configuration.md C13).
+# that holds an UPSTREAM crate depending on a patched one (inventory atom `api-compat-rust`: the
+# family carries upstream's package names, so the patch reaches every crate of the graph).
 #
 # The probe is a type that only exists once. The upstream crate here is taken from the registry and
 # is built against a `zenoh_result`; when it rejects a key expression it raises a `ZError` of the

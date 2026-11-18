@@ -6,10 +6,10 @@
 crates under it, derived from rustdoc JSON and committed as the surface wz's compatibility
 crates must equal.
 
-Open-debt item 910 (inventory atom `api-compat-rust`, `docs/build-configuration.md`
-C13): a Rust user replaces zenoh, so wz owes the upstream crates' public paths, kinds and
-trait relations. This script is the DENOMINATOR of that claim, and the same normaliser run
-over each compatibility crate and diffed against these files is the other half.
+Open-debt item 910 (inventory atom `api-compat-rust`, the family of crates that carry
+upstream's package names): a Rust user replaces zenoh, so wz owes the upstream crates' public
+paths, kinds and trait relations. This script is the DENOMINATOR of that claim, and the same
+normaliser run over each compatibility crate and diffed against these files is the other half.
 
 ## The family
 

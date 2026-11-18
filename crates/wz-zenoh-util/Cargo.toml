@@ -9,7 +9,7 @@
 # zenoh-util -- the utilities of the zenoh family: the time range language of a query selector, the
 # logging setup, the home directory of zenoh, the dynamic library loader and its search path, the
 # network interface enumeration and the timer, over watching-zenoh (inventory atom
-# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+# `api-compat-rust`, open-debt item 910: upstream's package name and public API).
 #
 # Named `zenoh-util` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `zenoh-config` and the plugins

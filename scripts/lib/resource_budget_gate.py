@@ -3,7 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 """R3449 (no register item) -- the resource budget of an image is a figure that is committed, and a
-change that moves it moves the row (docs/build-configuration.md step 13, storage-policy D5).
+change that moves it moves the row (resource claims are judged by gates against a committed
+figure per image, not stated).
 
 ## What was missing
 

@@ -2532,7 +2532,7 @@ layer_c0_test_discipline() {
     # The text of an image told by who owns it: the symbol reader and the rule driven over a small
     # table. The ELF half is the kit lane's build step, where the images are built.
     _runci_leg text_owner_gate.selftest -- python3 scripts/lib/text_owner_gate.py --selftest
-    # R3449 -- the resource budget (D5, build-configuration step 13): each image whose worst chain
+    # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
     _runci_leg resource_budget_gate.selftest -- python3 scripts/lib/resource_budget_gate.py --selftest
@@ -3364,7 +3364,7 @@ layer_c0_test_discipline() {
     # extern, while a declaration with no door LINKS and fails at load.
     _runci_leg capi_c_wz_door_header.selftest -- python3 scripts/lib/capi_c_wz_door_header.py --selftest >/dev/null
     _runci_leg capi_c_wz_door_header --after capi_c_wz_door_header.selftest -- python3 scripts/lib/capi_c_wz_door_header.py
-    # R3440 (decision C10 of docs/build-configuration.md) -- the pico drop-in
+    # R3440 (drop-in and extension are separate namespaces) -- the pico drop-in
     # header declares only what zenoh-pico's own header declares at the pin, read
     # through the preprocessor under three configurations, and wz_ext.h only
     # wz_ext_* doors.
@@ -3812,11 +3812,11 @@ layer_c0_test_discipline() {
     # on synthetic text, before the lane that needs a network and an hour uses them.
     _runci_leg z8_upstream_suite.selftest -- python3 scripts/lib/z8_upstream_suite.py --selftest
     _runci_leg z8_expectation_gate.selftest -- python3 scripts/lib/z8_expectation_gate.py --selftest
-    # The build configuration is declared once (deploy/wz-config.toml, docs/build-configuration.md
-    # C1): the capability graph and the limits an image can state for itself. The generated
-    # Kconfig files, the generated limit values, caps.rs's bindings and the three C ABI manifests
-    # are held to it. The selftest also pins that a Kconfig selection derives the very features
-    # the size gate above grades.
+    # The build configuration is declared once (deploy/wz-config.toml; everything else is
+    # generated from it): the capability graph and the limits an image can state for itself. The
+    # generated Kconfig files, the generated limit values, caps.rs's bindings and the three C ABI
+    # manifests are held to it. The selftest also pins that a Kconfig selection derives the very
+    # features the size gate above grades.
     _runci_leg wz_config.selftest -- python3 scripts/lib/wz_config.py --selftest
     _runci_leg wz_config --after wz_config.selftest -- python3 scripts/lib/wz_config.py --check
     # Every registered profile (configs/profiles) resolves, strictly (C9), on the one pinned
@@ -4120,8 +4120,9 @@ layer_c0_test_discipline() {
     _runci_leg upstream_feature_census --after upstream_feature_census.selftest -- python3 scripts/lib/upstream_feature_census.py
     # R3406 -- the same census for the other two originals wz replaces: every zenoh-pico
     # `Z_FEATURE_*` switch and every zenoh-c cargo feature, judged once against the drop-in
-    # crates (docs/build-configuration.md C7). The pico arm reads the vendor submodule, so it
-    # runs here; the zenoh-c arm needs the provisioned checkout and runs in Layer C1cc.
+    # crates (a complete map: an unclassified switch fails). The pico arm reads the vendor
+    # submodule, so it runs here; the zenoh-c arm needs the provisioned checkout and runs in Layer
+    # C1cc.
     _runci_leg upstream_switch_map.selftest -- python3 scripts/lib/upstream_switch_map.py --selftest
     _runci_leg upstream_switch_map --after upstream_switch_map.selftest -- python3 scripts/lib/upstream_switch_map.py
     # R3406 (open-debt item 910) -- the committed public-API surfaces of the pinned zenoh
@@ -12772,7 +12773,7 @@ layer_c1co_pico_client_dials_a_listener() {
         --features "engine-coop,link-udp,scout" \
         "${WZ_TEST_ARGS[@]}" || return 1
     # A sixth: the observation plane's instruments hosted by the cooperative engine with no task
-    # and no tokio engine in the build (`docs/observation-plane.md` M3). The supervisor and the
+    # and no tokio engine in the build (the supervision instrument). The supervisor and the
     # event log are the node's and not a session's (`wz-capi-port`'s `observation`), so the same
     # two door tests the default build runs run here, one test each, and a build that stopped
     # linking them without the tokio engine would fail to compile or to run them.
@@ -18959,10 +18960,11 @@ layer_e_ap_demo_round_trip() {
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         (cd crates && cargo build -p wz-capi-pico $arm_features \
             --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-$arm" --quiet) || return 1
-        # Step 2 of docs/build-configuration.md: the default arm is zenoh-pico configured with no
-        # switch passed, so wz's build of it must be the build configs/zenoh-pico_defconfig
-        # resolves to, and the default-arm leg below is then that defconfig's interop lane. The
-        # job provisions the pinned interpreter; --original-features never skips.
+        # Each upstream defconfig passes its original's interop lane: the default arm is
+        # zenoh-pico configured with no switch passed, so wz's build of it must be the build
+        # configs/zenoh-pico_defconfig resolves to, and the default-arm leg below is then that
+        # defconfig's interop lane. The job provisions the pinned interpreter;
+        # --original-features never skips.
         if [[ "$arm" == default ]]; then
             local defconfig_features
             defconfig_features="$(python3 scripts/lib/wz_config.py --original-features zenoh-pico)" \
@@ -20913,7 +20915,7 @@ PY
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation,routing-accept,transport-stats \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
-    # `resource-snapshot` (docs/observation-plane.md M4) — the same group face spaces the
+    # `resource-snapshot` (the observation plane's resources) — the same group face spaces the
     # transport messages its members send, on the same recorder seam the registry counts them on,
     # into a meter its host reads for the node's snapshot. The meter half is `resource-snapshot`-
     # gated, which the legs above do not compose, so the witness is compiled out there and counted
@@ -21502,7 +21504,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # The same router PROCESS counts what its group delivers in its resource snapshot
-    # (`docs/observation-plane.md` M4): a router alone in a group, then with a second member whose
+    # (`resource-snapshot`): a router alone in a group, then with a second member whose
     # beacons arrive on `lo`, and the count rises by what they are. It rebuilds the demo with the
     # admin read permit and the snapshot, a different feature set from the build above, so it is
     # built here and not shared. Needs no foreign binary and no namespace (`#iface=lo`). 1 = the
@@ -24749,7 +24751,7 @@ layer_e6f_adminspace_metrics() {
     _runci_guarded_test "Layer E6f (the peer's node registry)" 1 \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet || return 1
-    # The peer's resource snapshot (`docs/observation-plane.md` M4), at `wz/@/<zid>/snapshot`
+    # The peer's resource snapshot (the `resource-snapshot` capability), at `wz/@/<zid>/snapshot`
     # beside the router's: served to a session client, denied with the read permit. Its own demo
     # build, run straight after it is built, since cargo uplifts every feature variant of the one
     # `--bin` to a single path and a variant is only safe inside the step that built it. With
@@ -25219,7 +25221,7 @@ layer_e7g_router_adminspace_read_deny() {
     _runci_guarded_test "E7g capacity report" 2 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
-    # The router's resource snapshot (`docs/observation-plane.md` M4), served at
+    # The router's resource snapshot (the `resource-snapshot` capability), served at
     # `wz/@/<zid>/snapshot` beside the report above, under the same root and the same permit: served
     # and the node's own, its count surviving the link that carried it, absent from upstream's
     # answers, denied with the permit. The demo is the build above, which carries
@@ -27423,7 +27425,7 @@ layer_e17_stats_registry_writes_upstreams_document() {
 # ─── Layer E18 — the zenoh family's crates, against upstream's ───
 #
 # R3483 (open-debt item 910, inventory atom `api-compat-rust`). A Rust user replaces zenoh by a
-# `[patch.crates-io]` entry per crate of the family (docs/build-configuration.md C13), so each
+# `[patch.crates-io]` entry per crate of the family, so each
 # crate wz carries has upstream's package name, and three things have to hold of it that the
 # surface gate (`rust_api_surface.py`, Layer C0 and Z) cannot say:
 #
@@ -27895,7 +27897,7 @@ layer_qz_zephyr_boot() {
     [[ "$rc" -eq 10 ]] && return 0
     [[ "$rc" -ne 0 ]] && return 1
 
-    # R3441 (decision C11 of docs/build-configuration.md) -- the Kconfig interpreter the host
+    # R3441 (one Kconfig interpreter, pinned) -- the Kconfig interpreter the host
     # tools pin and the one this Zephyr tree runs give the same configuration from the same
     # tree and inputs (the defaults and every registered profile). This lane is where a Zephyr
     # tree is: it provisions the pinned one, and a job that arms the lane arms both.

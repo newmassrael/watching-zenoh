@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # Differential tests of the family: the same input to upstream's crate and to wz's, and the outputs
-# held equal (inventory atom `api-compat-rust`, docs/build-configuration.md C13). The surface gate
+# held equal (inventory atom `api-compat-rust`: the family carries upstream's package names and
+# public APIs over wz). The surface gate
 # (`scripts/lib/rust_api_surface.py`) says the two crates have the same names and signatures; this
 # says they do the same thing.
 #

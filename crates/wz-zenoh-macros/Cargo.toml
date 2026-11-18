@@ -9,8 +9,8 @@
 # zenoh-macros -- the procedural macros of the zenoh family: the compile-time checked key expression
 # literals `ke!` and `nonwild_ke!`, the key expression format macros `kedefine!`, `kewrite!` and
 # `keformat!`, the attributes that mark an item unstable or internal, and the derives of the runtime
-# pool's configuration, over watching-zenoh (inventory atom `api-compat-rust`, open-debt item 910,
-# docs/build-configuration.md C13).
+# pool's configuration, over watching-zenoh (inventory atom `api-compat-rust`, open-debt item 910:
+# upstream's package name and public API).
 #
 # Named `zenoh-macros` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The macros of this crate are

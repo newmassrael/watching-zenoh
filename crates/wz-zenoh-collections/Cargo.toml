@@ -9,7 +9,7 @@
 # zenoh-collections -- the small containers of the zenoh family: a value that is one element or a
 # vector (`SingleOrVec`), the same for a hash set, a map keyed by small integers that is a vector
 # while the keys are dense, and two bounded buffers, over watching-zenoh (inventory atom
-# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+# `api-compat-rust`, open-debt item 910: upstream's package name and public API).
 #
 # Named `zenoh-collections` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). Its types are fields of the
