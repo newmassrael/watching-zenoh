@@ -49,7 +49,7 @@
 //!   `Interest(Final)` (pico sends one on every publisher/querier drop —
 //!   `net/primitives.c:_z_remove_interest`) removes exactly one.
 //! - `ClientFutureInterests::pushed` = zenoh's `face_hat.local_subs` /
-//!   `local_qabls` (`reply keyexpr -> (decl id, last-declared value)`). Seeded by
+//!   `local_qabls` (`reply keyexpr -> (decl id, last-declared value, aggregate)`). Seeded by
 //!   the current dump and by every FUTURE push; read for the value-diff re-push
 //!   decision and to keep the `(decl_id, peer)` a pico write-filter target is keyed
 //!   on (`filtering.c:202`) consistent for the deferred undeclare-push.
@@ -70,8 +70,9 @@
 //!
 //! The undeclare-push (a declaration WITHDRAWN clears `pushed` + re-arms the filter,
 //! zenoh `propagate_forget_simple_subscription/_queryable`) is a SEPARATE unit
-//! (R311y151). See [`remove_interest`](FutureInterestStore::remove_interest) for the
-//! stale-`pushed` residual it closes.
+//! (R311y151). It reaches every face `pushed` names, whether or not an interest of the face is
+//! still live: ending an interest keeps what was declared to the face (see
+//! [`remove_interest`](FutureInterestStore::remove_interest)).
 //!
 //! ## Persistent, and written only where it changes
 //!
@@ -116,6 +117,21 @@ pub type FutureQablStore = FutureInterestStore<QueryableInfo>;
 #[derive(Debug, Clone)]
 struct FutureInterest {
     target: String,
+    aggregate: bool,
+}
+
+/// What a face was told for one reply keyexpr: one entry of upstream's `local_subs` /
+/// `local_qabls` / `local_tokens`.
+#[derive(Debug, Clone, Copy)]
+struct Declared<V> {
+    /// The decl id the face was told the reply under.
+    id: u64,
+    /// The value last declared with it.
+    value: V,
+    /// Whether the reply was declared for an aggregate interest, and so stands for everything
+    /// its keyexpr meets. Kept with the entry because the entry outlives the interest: upstream
+    /// keeps an aggregated resource, and what it aggregates, after the interest that made it ends
+    /// (`zenoh/src/net/routing/dispatcher/local_resources.rs` @ `fn remove_simple_resource(`).
     aggregate: bool,
 }
 
@@ -173,14 +189,18 @@ struct FaceFutureInterests<V> {
     origin: InterestOrigin,
     /// Declared FUTURE interests, keyed by the soliciting `interest_id`.
     interests: PersistentMap<u64, FutureInterest>,
-    /// `reply keyexpr -> (decl id declared to this face, last-declared value)`
-    /// (zenoh `face_hat.local_subs` / `local_qabls`). Seeded by the current dump
-    /// (get-or-alloc, so a redundant re-declare REUSES the id) and by each FUTURE
-    /// push. The value drives the re-push decision (a change re-pushes the SAME id).
-    pushed: PersistentMap<String, (u64, V)>,
+    /// What was declared to this face, by reply keyexpr (zenoh `face_hat.local_subs` /
+    /// `local_qabls`). Seeded by the current dump (get-or-alloc, so a redundant re-declare
+    /// REUSES the id) and by each FUTURE push, and emptied only by a retraction or by the face
+    /// going down: the face holds each entry as a row until it is retracted, whether or not an
+    /// interest still asks. The value drives the re-push decision (a change re-pushes the SAME
+    /// id).
+    pushed: PersistentMap<String, Declared<V>>,
     /// Per-face monotonic decl-id source. Ids start at 1 (0 is a NON-future
     /// current-dump reply id and pico's declarations-propagation sentinel, so any
-    /// interned id is `>= 1`) and are never recycled.
+    /// interned id is `>= 1`) and are not recycled while the entry lives. The entry is dropped
+    /// only once the face holds no interest and nothing declared, so an id the face may still
+    /// hold a row under is never handed out again.
     next_id: u64,
 }
 
@@ -200,12 +220,27 @@ impl<V> Default for FaceFutureInterests<V> {
 }
 
 impl<V: Copy + PartialEq> FaceFutureInterests<V> {
+    /// Whether the face holds no interest and was told nothing: an entry that carries nothing
+    /// and is dropped.
+    fn is_idle(&self) -> bool {
+        self.interests.is_empty() && self.pushed.is_empty()
+    }
+
     /// The id `reply_ke` was declared to this face under, when it was declared with `value`
-    /// already: the answer [`intern`](Self::intern) gives without writing anything.
+    /// already: whether interning it would push.
     fn interned_as(&self, reply_ke: &str, value: V) -> Option<u64> {
         self.pushed
             .get(reply_ke)
-            .and_then(|&(id, stored)| (stored == value).then_some(id))
+            .and_then(|declared| (declared.value == value).then_some(declared.id))
+    }
+
+    /// [`interned_as`](Self::interned_as), when interning would also record nothing: the
+    /// answer [`intern`](Self::intern) gives without writing anything.
+    fn settled_as(&self, reply_ke: &str, value: V) -> Option<u64> {
+        let aggregate = self.asks_aggregate(reply_ke);
+        self.pushed.get(reply_ke).and_then(|declared| {
+            (declared.value == value && (declared.aggregate || !aggregate)).then_some(declared.id)
+        })
     }
 
     /// Get-or-allocate the decl id for `reply_ke` carrying `value`, returning
@@ -213,20 +248,31 @@ impl<V: Copy + PartialEq> FaceFutureInterests<V> {
     /// declaration) or its value CHANGED (a value-aware re-push, same id, updated
     /// value); `false` when the same value was already declared (dedup). For
     /// `V = ()` a value never changes, so `should_push == is_new` — presence-only,
-    /// the subscriber behavior. A dedup writes nothing.
+    /// the subscriber behavior. A dedup writes nothing, unless an aggregate interest of the
+    /// face now asks for a reply that was not declared as one, which it records.
     fn intern(&mut self, reply_ke: &str, value: V) -> (u64, bool) {
-        if let Some(id) = self.interned_as(reply_ke, value) {
+        if let Some(id) = self.settled_as(reply_ke, value) {
             return (id, false);
         }
+        let aggregate = self.asks_aggregate(reply_ke);
         match self.pushed.get_mut(reply_ke) {
-            Some((id, stored)) => {
-                *stored = value;
-                (*id, true)
+            Some(declared) => {
+                let changed = declared.value != value;
+                declared.value = value;
+                declared.aggregate |= aggregate;
+                (declared.id, changed)
             }
             None => {
                 self.next_id += 1;
                 let id = self.next_id;
-                self.pushed.insert(reply_ke.to_owned(), (id, value));
+                self.pushed.insert(
+                    reply_ke.to_owned(),
+                    Declared {
+                        id,
+                        value,
+                        aggregate,
+                    },
+                );
                 (id, true)
             }
         }
@@ -253,11 +299,21 @@ impl<V: Copy + PartialEq> FaceFutureInterests<V> {
         reply_kes
     }
 
-    /// Whether `reply_ke` is the target of an aggregate interest of this face.
-    fn aggregates(&self, reply_ke: &str) -> bool {
+    /// Whether `reply_ke` is the target of an aggregate interest this face holds now.
+    fn asks_aggregate(&self, reply_ke: &str) -> bool {
         self.interests
             .values()
             .any(|interest| interest.aggregate && interest.target == reply_ke)
+    }
+
+    /// Whether the reply `reply_ke` stands for everything its keyexpr meets: it was declared
+    /// for an aggregate interest, which stays so after the interest ends, or an aggregate
+    /// interest of this face asks for it now.
+    fn aggregates(&self, reply_ke: &str) -> bool {
+        self.pushed
+            .get(reply_ke)
+            .is_some_and(|declared| declared.aggregate)
+            || self.asks_aggregate(reply_ke)
     }
 }
 
@@ -372,12 +428,17 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     }
 
     /// Forget the push of `reply_ke` to `face`, with its index entry, returning the id it was
-    /// declared under.
+    /// declared under. A face left with no interest and nothing declared is dropped.
     fn forget_at(&mut self, face: FaceId, reply_ke: &str) -> Option<u64> {
-        let (id, _) = self.by_face.get_mut(&face)?.pushed.remove(reply_ke)?;
+        let state = self.by_face.get_mut(&face)?;
+        let declared = state.pushed.remove(reply_ke)?;
+        let idle = state.is_idle();
         let unindexed = self.by_reply.remove(reply_ke, &(face, reply_ke.to_owned()));
         debug_assert!(unindexed, "a held reply is indexed");
-        Some(id)
+        if idle {
+            self.drop_face(face);
+        }
+        Some(declared.id)
     }
 
     /// Record `face`'s interest `interest_id` in `target`, under `origin` when one is given, and
@@ -491,7 +552,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         if let Some(id) = self
             .by_face
             .get(&face)
-            .and_then(|state| state.interned_as(reply_ke, value))
+            .and_then(|state| state.settled_as(reply_ke, value))
         {
             return id;
         }
@@ -577,38 +638,30 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// Remove a FUTURE interest by `interest_id` on `face` — an inbound
     /// `Interest(Final)`. Returns `true` if one was removed.
     ///
-    /// When the face's LAST interest is removed, the whole face entry (including
-    /// `pushed`) is pruned: pico sends an `Interest(Final)` precisely because a
-    /// publisher/querier DROPPED (`net/filtering.c:_z_write_filter_clear` ->
-    /// `_z_remove_interest`), so with no interests left the face has no
-    /// publisher/querier and pico holds no write-filter — a retained `pushed` record
-    /// would then wrongly DEDUP-SUPPRESS a push to a FUTURE publisher/querier on the
-    /// same face (a later `store_interest` re-starts a fresh registry). While OTHER
-    /// interests remain, `pushed` is kept — a shared reply ke may still back a live
-    /// publisher/querier.
+    /// Ending an interest removes the interest and nothing else: what was declared to the face
+    /// (`pushed`) and the face's id counter stay, even when it was the face's last interest.
+    /// The face still holds a row for each declaration it was told, and is told its
+    /// retraction when the declaration is withdrawn, as upstream's broker hat removes only
+    /// the remote interest
+    /// (`zenoh/src/net/routing/hat/broker/interests.rs` @ `fn unregister_interest(`) and
+    /// retracts whatever its record of declarations holds, asked for or not
+    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `fn maybe_unpropagate_subscriber(`).
+    /// Dropping the record with the last interest would leave the face holding a row no
+    /// retraction ever reaches, and would let a later declaration reuse an id the face still
+    /// holds. A later interest of the face is answered under the ids already declared, by its
+    /// current dump ([`intern_current_reply`](Self::intern_current_reply)).
     ///
-    /// RESIDUAL (CLOSED by the undeclare-push — R311y151 graceful + R311y152 detach,
-    /// NOT a silent gap): a subscriber/queryable that WITHDRAWS while an interest is
-    /// still live would leave the `pushed` entry stale, so a second publisher/querier
-    /// on that ke declared during the absence could miss its re-push when the
-    /// declaration reappears — and for the QUERYABLE plane strictly WORSE, the stale
-    /// `(id, value)` also pinning a stale COMPLETENESS (an ALL_COMPLETE filter
-    /// mis-armed). Both the GRACEFUL explicit-Undeclare (R311y151) and the UNGRACEFUL
-    /// face-down / link-down / topology-detach (R311y152) now run
-    /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) → clear `pushed` + re-arm
-    /// the filter (zenoh `propagate_forget_simple_subscription/_queryable`). The qabl
-    /// completeness-DOWNGRADE on a PARTIAL withdrawal (the reply ke stays backed at a
-    /// lower folded completeness) — case (c), a value-aware re-push rather than a
-    /// `pushed`-clear — is CLOSED by
-    /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn) (R311y153).
+    /// The face entry goes once it holds no interest and nothing declared, here or when its
+    /// last declaration is retracted ([`forgets_for_withdrawn`](Self::forgets_for_withdrawn)),
+    /// and in full when the face goes down ([`purge_face`](Self::purge_face)).
     pub fn remove_interest(&mut self, face: FaceId, interest_id: u64) -> bool {
-        // Read first, so that an id the face does not hold writes nothing unless the face is
-        // left with no interest, which drops it as before.
+        // Read first, so that an id the face does not hold writes nothing unless the face
+        // holds nothing at all, which drops it.
         let Some(held) = self.by_face.get(&face) else {
             return false;
         };
         if !held.interests.contains_key(&interest_id) {
-            if held.interests.is_empty() {
+            if held.is_idle() {
                 self.drop_face(face);
             }
             return false;
@@ -619,9 +672,9 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         let Some(removed) = state.interests.remove(&interest_id) else {
             return false;
         };
-        let emptied = state.interests.is_empty();
+        let idle = state.is_idle();
         self.by_target.remove(&removed.target, &(face, interest_id));
-        if emptied {
+        if idle {
             self.drop_face(face);
         }
         true
@@ -637,17 +690,20 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// `true` and NOT be undeclared — the aggregate multi-backer case). The caller
     /// builds an unsolicited `Undeclare{Subscriber,Queryable}(id)` (interest_id
     /// `None`) and sends it to `face`; clearing `pushed` re-arms the pico write-filter
-    /// AND lets a later re-declaration of the ke re-push (the stale-`pushed` residual
-    /// [`remove_interest`](Self::remove_interest) documents). Value-agnostic — an
+    /// AND lets a later re-declaration of the ke re-push. A face is told the retraction
+    /// whether or not an interest of it is still live, since it holds the row until told
+    /// ([`remove_interest`](Self::remove_interest)); a face left with no interest and
+    /// nothing declared is dropped here. Value-agnostic — an
     /// undeclare drops the entry regardless of `V` (the qabl value-downgrade on a
     /// PARTIAL withdrawal, where the reply ke stays backed, is a separate unit —
     /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn), R311y153 — NOT
     /// touched here, since this method is value-agnostic).
     ///
-    /// `still_backed(reply_ke, aggregate)` is told whether the reply ke is the target of an
-    /// aggregate interest of the face: only such a reply stands for everything its target
-    /// meets, so it alone stays backed by a declaration that merely intersects it. A reply
-    /// for a resource is backed while something is declared on that very key.
+    /// `still_backed(reply_ke, aggregate)` is told whether the reply ke was declared for, or
+    /// is now the target of, an aggregate interest of the face: only such a reply stands for
+    /// everything its target meets, so it alone stays backed by a declaration that merely
+    /// intersects it. A reply for a resource is backed while something is declared on that
+    /// very key.
     pub fn forgets_for_withdrawn<B: Fn(&str, bool) -> bool>(
         &mut self,
         withdrawn_ke: &str,
@@ -898,10 +954,11 @@ mod tests {
         FaceId(n)
     }
 
-    /// A store with no interest pushes nothing for a declaration and forgets nothing for a
-    /// withdrawal, before any interest and after the last one ended.
+    /// A store with no interest pushes nothing for a declaration, before any interest and after
+    /// the last one ended, and forgets nothing for a withdrawal but what it declared.
+    // wz-proves: none -- a unit test of the router's own store; no foreign implementation runs.
     #[test]
-    fn a_store_with_no_interest_pushes_and_forgets_nothing() {
+    fn a_store_with_no_interest_pushes_nothing_and_forgets_only_what_it_declared() {
         let mut store = FutureQablStore::default();
         let info = |_: &str, _: FaceId, _: bool| QueryableInfo::DEFAULT;
         assert!(store.pushes_for_new("demo/a", None, info).is_empty());
@@ -913,9 +970,17 @@ mod tests {
         assert_eq!(pushed.len(), 1, "the interest is pushed to: {pushed:?}");
         assert!(store.remove_interest(face(1), 7));
         assert!(store.pushes_for_new("demo/b", None, info).is_empty());
+        let forgets = store.forgets_for_withdrawn("demo/a", |_, _| false);
+        assert_eq!(
+            forgets,
+            [(face(1), "demo/a".to_owned(), pushed[0].2)],
+            "what was declared is retracted after the interest ended"
+        );
         assert!(store
             .forgets_for_withdrawn("demo/a", |_, _| false)
             .is_empty());
+        assert_eq!(store.face_count(), 0, "a face holding nothing is gone");
+        store.assert_indexed();
     }
 
     // ── SUBSCRIBER plane (V = ()): the R311y146 presence-only behavior, unchanged
@@ -1049,36 +1114,42 @@ mod tests {
         assert!(!s.remove_interest(face(1), 7), "removing again is a no-op");
     }
 
+    // wz-proves: none -- a unit test of the router's own store; no foreign implementation runs.
     #[test]
-    fn interest_final_of_the_last_interest_prunes_pushed() {
-        // Removing the LAST interest (the publisher DROPPED — pico's write-filter is
-        // gone) prunes the whole face, so a stale `pushed` entry cannot suppress a
-        // push to a FUTURE publisher on the same face.
+    fn interest_final_of_the_last_interest_keeps_what_was_declared() {
+        // Removing the LAST interest (the publisher dropped) keeps the declaration the face
+        // was told: the face still holds it, and a later publisher on the face is answered
+        // under the same id by its current dump, as upstream's record of declarations
+        // outlives the interest.
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
+        let pushed = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert_eq!(s.pushed_count(face(1)), 1);
         assert!(s.remove_interest(face(1), 7));
+        assert_eq!(s.interest_count(face(1)), 0);
         assert_eq!(
-            s.face_count(),
-            0,
-            "the face is pruned once its last interest is gone"
-        );
-        // A FRESH publisher on the same face + same aggregate ke, pub-before-sub,
-        // is NOT suppressed by the pruned registry.
-        s.store_interest(face(1), 9, "demo/**".to_owned(), true);
-        let pushes = s.pushes_for_new("demo/late", Some(face(9)), |_, _, _| ());
-        assert_eq!(
-            pushes.len(),
+            s.pushed_count(face(1)),
             1,
-            "the new publisher's later sub is pushed, not dedup-suppressed"
+            "what was declared outlives the last interest"
         );
+        s.store_interest(face(1), 9, "demo/**".to_owned(), true);
+        assert_eq!(
+            s.intern_current_reply(face(1), "demo/**", ()),
+            pushed[0].2,
+            "the new publisher's current dump names the id the face holds"
+        );
+        assert!(
+            s.pushes_for_new("demo/late", Some(face(9)), |_, _, _| ())
+                .is_empty(),
+            "a later sub under the declared aggregate needs no new declaration"
+        );
+        s.assert_indexed();
     }
 
     #[test]
     fn interest_final_of_one_of_several_keeps_pushed_for_the_rest() {
         // Removing ONE of several interests keeps `pushed` — a shared reply ke may
-        // still back a live publisher; only when the last goes is it pruned.
+        // still back a live publisher — and so does removing the last.
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         s.store_interest(face(1), 8, "other/**".to_owned(), true);
@@ -1092,7 +1163,12 @@ mod tests {
             "pushed kept while an interest remains"
         );
         assert!(s.remove_interest(face(1), 8));
-        assert_eq!(s.face_count(), 0, "the last removal prunes the face");
+        assert_eq!(
+            s.pushed_count(face(1)),
+            1,
+            "pushed kept after the last interest"
+        );
+        assert_eq!(s.face_count(), 1, "the face is kept while it holds a row");
     }
 
     #[test]
@@ -1114,14 +1190,140 @@ mod tests {
     fn ids_start_at_one_and_advance_within_a_face_lifetime() {
         // Ids start at 1 (0 is reserved for a non-future current reply + pico's
         // declarations-propagation sentinel) and advance per distinct reply ke while
-        // the face entry lives. (Across a face prune the counter restarts from a
-        // fresh entry — the old publisher is gone, so no live id can collide.)
+        // the face entry lives. (The entry goes only once every id it handed out was
+        // retracted, so a fresh entry's ids collide with no row the face holds.)
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), false);
         let a = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
         let b = s.pushes_for_new("demo/b", Some(face(9)), |_, _, _| ());
         assert_eq!(a[0].2, 1, "first alloc is 1 (0 is reserved)");
         assert_eq!(b[0].2, 2, "second distinct ke gets a fresh id");
+    }
+
+    // ── What was declared to a face outlives the interest that asked for it. ─────────────
+
+    /// A declaration pushed to a face whose only interest then ended is retracted when it is
+    /// withdrawn: the face still holds the row it was told, as a client of upstream's broker
+    /// hat does.
+    // wz-proves: none -- a unit test of the router's own store; no foreign implementation runs.
+    #[test]
+    fn a_declaration_is_retracted_after_the_interest_that_asked_for_it_ended() {
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/key".to_owned(), false);
+        let pushed = s.pushes_for_new("demo/key", Some(face(9)), |_, _, _| ());
+        assert_eq!(pushed, [(face(1), "demo/key".to_owned(), 1_u64, ())]);
+        assert!(s.remove_interest(face(1), 7));
+        assert_eq!(s.interest_count(face(1)), 0);
+        let forgets = s.forgets_for_withdrawn("demo/key", |_, _| false);
+        assert_eq!(
+            forgets,
+            [(face(1), "demo/key".to_owned(), 1_u64)],
+            "the face is told the retraction of the row it holds"
+        );
+        s.assert_indexed();
+    }
+
+    /// An id the face may still hold a row under is not handed out again: a declaration made
+    /// after the face's last interest ended and another began takes the next id.
+    // wz-proves: none -- a unit test of the router's own store; no foreign implementation runs.
+    #[test]
+    fn a_face_whose_interest_ended_is_not_given_an_id_it_still_holds() {
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), false);
+        let first = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
+        assert_eq!(first[0].2, 1);
+        assert!(s.remove_interest(face(1), 7));
+        s.store_interest(face(1), 8, "demo/**".to_owned(), false);
+        let second = s.pushes_for_new("demo/b", Some(face(9)), |_, _, _| ());
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].2, 2, "id 1 is still the face's row for demo/a");
+        assert_eq!(
+            s.forgets_for_withdrawn("demo/a", |_, _| false),
+            [(face(1), "demo/a".to_owned(), 1_u64)],
+            "the earlier row keeps its own id"
+        );
+        s.assert_indexed();
+    }
+
+    /// The face entry goes once it holds no interest and nothing declared, whichever of the two
+    /// empties last; ending an interest the face never held drops nothing; and the face-down
+    /// purge still drops the entry whole.
+    // wz-proves: none -- a unit test of the router's own store; no foreign implementation runs.
+    #[test]
+    fn a_face_holding_nothing_is_dropped_and_the_purge_drops_everything() {
+        let mut s = FutureSubStore::new();
+        // Nothing declared: the end of its only interest drops it.
+        s.store_interest(face(1), 7, "demo/**".to_owned(), false);
+        assert!(s.remove_interest(face(1), 7));
+        assert_eq!(s.face_count(), 0, "a face that was told nothing goes");
+        // Declared, then the interest ended: kept until the retraction of its last row.
+        s.store_interest(face(1), 7, "demo/**".to_owned(), false);
+        let _ = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
+        assert!(s.remove_interest(face(1), 7));
+        assert_eq!(s.face_count(), 1, "a face holding a row is kept");
+        assert_eq!(s.forgets_for_withdrawn("demo/a", |_, _| false).len(), 1);
+        assert_eq!(s.face_count(), 0, "the retraction of its last row drops it");
+        s.assert_indexed();
+        // An end of an interest the face does not hold leaves the rows it holds.
+        s.store_interest(face(1), 7, "demo/**".to_owned(), false);
+        let _ = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
+        assert!(s.remove_interest(face(1), 7));
+        assert!(
+            !s.remove_interest(face(1), 99),
+            "an id never held ends nothing"
+        );
+        assert_eq!(s.pushed_count(face(1)), 1, "and drops no row");
+        // The face goes down.
+        assert!(s.purge_face(face(1)));
+        assert_eq!(s.face_count(), 0);
+        assert!(
+            s.forgets_for_withdrawn("demo/a", |_, _| false).is_empty(),
+            "a purged face is told nothing"
+        );
+        s.assert_indexed();
+    }
+
+    /// A reply declared for an aggregate interest stays an aggregate after the interest ends,
+    /// so a withdrawal that leaves something else under it does not retract it; and a reply
+    /// first declared for a resource becomes an aggregate once an aggregate interest is
+    /// answered with it.
+    // wz-proves: none -- a unit test of the router's own store; no foreign implementation runs.
+    #[test]
+    fn a_reply_declared_for_an_aggregate_interest_stays_one_after_the_interest_ends() {
+        // The forwarder's backing rule, with `demo/b` still declared: an aggregate reply is
+        // backed by anything under it, a reply for a resource only by its own key.
+        let backed = |reply_ke: &str, aggregate: bool| aggregate || reply_ke == "demo/b";
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
+        assert!(s.remove_interest(face(1), 7));
+        assert!(
+            s.forgets_for_withdrawn("demo/a", backed).is_empty(),
+            "the aggregate is still backed by demo/b"
+        );
+        assert_eq!(
+            s.forgets_for_withdrawn("demo/b", |_, _| false),
+            [(face(1), "demo/**".to_owned(), 1_u64)],
+            "and is retracted with its last backer"
+        );
+
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/*".to_owned(), false);
+        let _ = s.pushes_for_new("demo/x", Some(face(9)), |_, _, _| ());
+        s.store_interest(face(1), 8, "demo/x".to_owned(), true);
+        assert_eq!(
+            s.intern_current_reply(face(1), "demo/x", ()),
+            1,
+            "the aggregate interest is answered under the id already declared"
+        );
+        assert!(s.remove_interest(face(1), 7));
+        assert!(s.remove_interest(face(1), 8));
+        assert!(
+            s.forgets_for_withdrawn("demo/x", |_, aggregate| aggregate)
+                .is_empty(),
+            "the reply was recorded as an aggregate when the aggregate interest was answered"
+        );
+        s.assert_indexed();
     }
 
     // ── QUERYABLE plane (V = QueryableInfo): the R311y150 VALUE-AWARE behavior the
@@ -1208,17 +1410,23 @@ mod tests {
     fn qabl_interest_final_and_purge_mirror_the_sub_plane() {
         let mut s = FutureQablStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(false));
+        let pushed = s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(false));
         assert_eq!(s.pushed_count(face(1)), 1);
         assert!(s.remove_interest(face(1), 7));
-        assert_eq!(s.face_count(), 0, "last interest gone -> face pruned");
-        // A fresh querier on the same face is not suppressed by the pruned registry.
+        assert_eq!(
+            s.pushed_count(face(1)),
+            1,
+            "last interest gone -> what was declared stays"
+        );
+        // A fresh querier on the same face is answered under the id it holds.
         s.store_interest(face(1), 9, "demo/**".to_owned(), true);
         assert_eq!(
-            s.pushes_for_new("demo/late", Some(face(9)), |_, _, _| info(false))
-                .len(),
-            1,
+            s.intern_current_reply(face(1), "demo/**", info(false)),
+            pushed[0].2
         );
+        assert!(s.purge_face(face(1)));
+        assert_eq!(s.face_count(), 0, "the face-down purge drops everything");
+        s.assert_indexed();
     }
 
     // ── undeclare-push (R311y151): the withdrawal side. ──────────────────────────

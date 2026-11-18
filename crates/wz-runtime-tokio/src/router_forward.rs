@@ -11300,9 +11300,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// End the interest `interest_id` the `Local` face asked tokens under
-    /// ([`ask_local_tokens`](Self::ask_local_tokens)): no token is told for it from then on, and
-    /// once the face has no interest left what the router remembered telling it goes. `false`
-    /// for an id the face holds no interest under.
+    /// ([`ask_local_tokens`](Self::ask_local_tokens)): no token is told for it from then on. What
+    /// the router told the face stays remembered, under the ids it was told, until each token is
+    /// retracted, as for any other face. `false` for an id the face holds no interest under.
     #[cfg(feature = "routing-token-tables")]
     pub fn forget_local_tokens(&mut self, interest_id: u64) -> bool
     where
