@@ -81,6 +81,14 @@
 //! before by a cfg that silently compiles a proof out.
 
 use wz_codecs::whatami::WhatAmI;
+use wz_session_core::policy::SessionPolicy;
+
+/// The build defaults, which the constructors that take no snapshot ([`NodeHlc::for_node`] and its
+/// two siblings) build the clock with. A node's creator resolves the snapshot of its node and hands
+/// it to the `_by` form instead.
+fn build_defaults() -> SessionPolicy {
+    SessionPolicy::defaults()
+}
 
 /// zenoh's `timestamping.enabled` per-role map: whether a node of a given role
 /// timestamps data messages that do not already carry one.
@@ -341,11 +349,31 @@ impl NodeHlc {
     /// it twice re-introduces the duplicate-`ID` defect the module note
     /// describes; that is why the parameter list is the node's identity and
     /// role rather than anything a per-consumer call site would have handy.
-    #[cfg_attr(not(feature = "time-hlc"), allow(unused_variables))]
+    ///
+    /// The `clock-quality-stamping` policy is the build default's; a creator that holds the
+    /// snapshot of its node builds the clock with [`Self::for_node_by`].
     pub fn for_node(zid: &[u8], whatami: WhatAmI, enabled: TimestampingEnabled) -> Self {
+        Self::for_node_by(zid, whatami, enabled, &build_defaults())
+    }
+
+    /// [`Self::for_node`] for the node whose creator resolved the snapshot `policy`: the node's
+    /// `clock-quality-stamping` policy is the one `policy` holds, read once, here.
+    #[cfg_attr(not(feature = "time-hlc"), allow(unused_variables))]
+    pub fn for_node_by(
+        zid: &[u8],
+        whatami: WhatAmI,
+        enabled: TimestampingEnabled,
+        policy: &SessionPolicy,
+    ) -> Self {
         #[cfg(all(feature = "time-hlc", feature = "clock-source"))]
         {
-            Self::for_node_with_registry(zid, whatami, enabled, &crate::clock_registry::GLOBAL)
+            Self::for_node_with_registry_by(
+                zid,
+                whatami,
+                enabled,
+                &crate::clock_registry::GLOBAL,
+                policy,
+            )
         }
         #[cfg(all(feature = "time-hlc", not(feature = "clock-source")))]
         {
@@ -355,6 +383,7 @@ impl NodeHlc {
                 enabled,
                 crate::timestamp_source::SystemEpoch,
                 StandingHome::Own(Box::default()),
+                policy.clock_quality_stamping(),
             )
         }
         #[cfg(not(feature = "time-hlc"))]
@@ -373,12 +402,25 @@ impl NodeHlc {
         enabled: TimestampingEnabled,
         registry: &'static crate::clock_registry::ClockRegistry,
     ) -> Self {
+        Self::for_node_with_registry_by(zid, whatami, enabled, registry, &build_defaults())
+    }
+
+    /// [`Self::for_node_with_registry`] for the snapshot `policy` the node's creator resolved.
+    #[cfg(feature = "clock-source")]
+    pub fn for_node_with_registry_by(
+        zid: &[u8],
+        whatami: WhatAmI,
+        enabled: TimestampingEnabled,
+        registry: &'static crate::clock_registry::ClockRegistry,
+        policy: &SessionPolicy,
+    ) -> Self {
         Self::over_source(
             zid,
             whatami,
             enabled,
             crate::clock_registry::RegisteredOrSystem(registry),
             StandingHome::Shared(registry),
+            policy.clock_quality_stamping(),
         )
     }
 
@@ -392,17 +434,30 @@ impl NodeHlc {
         enabled: TimestampingEnabled,
         source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
     ) -> Self {
+        Self::for_node_over_source_by(zid, whatami, enabled, source, &build_defaults())
+    }
+
+    /// [`Self::for_node_over_source`] for the snapshot `policy` the node's creator resolved.
+    #[cfg(feature = "time-hlc")]
+    pub fn for_node_over_source_by(
+        zid: &[u8],
+        whatami: WhatAmI,
+        enabled: TimestampingEnabled,
+        source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
+        policy: &SessionPolicy,
+    ) -> Self {
         Self::over_source(
             zid,
             whatami,
             enabled,
             source,
             StandingHome::Own(Box::default()),
+            policy.clock_quality_stamping(),
         )
     }
 
     /// The node over `source`, for the role gate `enabled` says, keeping its standing in
-    /// `standing`.
+    /// `standing` and stamping data as `stamping` says.
     #[cfg(feature = "time-hlc")]
     fn over_source(
         zid: &[u8],
@@ -410,6 +465,7 @@ impl NodeHlc {
         enabled: TimestampingEnabled,
         source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
         standing: StandingHome,
+        stamping: wz_session_core::policy::ClockQualityStamping,
     ) -> Self {
         let own = build_clock(zid, source, standing);
         let clock = enabled.get(whatami).then(|| own.clone());
@@ -421,15 +477,15 @@ impl NodeHlc {
             interception_clock: Some(own),
             drop_future_timestamp: false,
             trusted_only: matches!(
-                wz_session_core::policy::SessionPolicy::default().clock_quality_stamping(),
+                stamping,
                 wz_session_core::policy::ClockQualityStamping::TrustedOnly
             ),
         }
     }
 
-    /// Set the `clock-quality-stamping` policy (builder): `true` is `trusted-only`. `for_node`
-    /// reads the build's value; this is for a host that states it another way, and for a test
-    /// that names the value it is about.
+    /// Set the `clock-quality-stamping` policy (builder): `true` is `trusted-only`. The
+    /// constructors read the snapshot's value; this is for a host that states it another way, and
+    /// for a test that names the value it is about.
     #[cfg_attr(not(feature = "time-hlc"), allow(unused_mut, unused_variables))]
     pub fn with_trusted_only_stamping(mut self, trusted_only: bool) -> Self {
         #[cfg(feature = "time-hlc")]
