@@ -1339,6 +1339,25 @@ Not covered: byte identity with a checkout build. The version is one input of it
 build path in `.rodata` is another (`run-ci.sh`'s `footprint_remap_rustflags`), and the consumer's
 action chooses its own `--remap-path-prefix`.
 
+**The firmware builds are in the same file**, under `firmware`: one entry for each image Layer Qa
+builds of `deploy/mcu-admin-node` (the heap image, `fixed-memory`, `fixed-memory-tcp`), in the
+order the lane builds them. Each states the manifest and lockfile of the firmware's own workspace,
+the target and the rustup target, the profile, the bin, the features and whether the defaults
+stay, any further cargo arguments, the environment (`WZ_LWIP_PORT` as a repository path, which the
+builder makes absolute), the product under the cargo target directory, the system tools
+(`arm-none-eabi-gcc` and `arm-none-eabi-ar` for lwip-sys's lwIP compile, `libclang` for its
+bindgen, `cc` for the build scripts; the image itself is linked by the toolchain's `rust-lld`), the
+submodules (`vendor/lwip`, which lwip-sys's build script compiles, and `vendor/sce`), and the zenoh
+id the image announces with where it comes from (the `ZID` constant of the firmware's `main.rs`,
+rendered as zenoh prints an id). The lane does not spell any of it: it reads each build through
+`offline_build.py --firmware-cargo`, `--firmware-env`, `--firmware-commands` and
+`--firmware-field`, which read the file alone, so the lane and any other builder run one
+definition. `--check` holds the entries to the tree: the paths exist and are tracked, the features
+are the manifest's, the bin and product are the manifest's bin, the submodules are in
+`.gitmodules`, the rustup target is one `rust-toolchain.toml` installs, the environment's names are
+read by a tracked build script, the id is what the constant renders, and the lane's function names
+the entries in their order.
+
 ## 6. Open
 
 - Whether wz-ap-demo's session-node role and a consumer-built driver linking the

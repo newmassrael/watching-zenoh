@@ -27719,25 +27719,107 @@ _qa_scenario() {
         -- "$@"
 }
 
+# The firmware this lane builds is declared in deploy/offline-build.json (`firmware`), which a build
+# outside this script reads too: the lane builds each image from its entry and takes the id the
+# scenario asserts from it, so the two cannot describe different builds. `offline_build.py --check`
+# holds the entry to the tree and to this lane (the function below names the entries' ids, in the
+# entries' order).
+#
+# _qa_firmware_field <id> <field>: one field of an entry (a list field one item a line).
+_qa_firmware_field() {
+    python3 scripts/lib/offline_build.py --firmware-field "$1" "$2"
+}
+
+# _qa_firmware_prereqs <label> <id>...: the commands of the entries' tools are on PATH. Returns 0,
+# 10 when one is absent and the lane SKIPs (green), 1 when it is absent where it is required or the
+# entry cannot be read.
+_qa_firmware_prereqs() {
+    local label="$1" id out item
+    shift
+    for id in "$@"; do
+        out="$(python3 scripts/lib/offline_build.py --firmware-commands "$id")" || return 1
+        while IFS= read -r item; do
+            [[ -z "$item" ]] && continue
+            command -v "$item" >/dev/null 2>&1 \
+                || { _qa_unavailable "$label" "$item not on PATH" && return 10 || return 1; }
+        done <<< "$out"
+    done
+    return 0
+}
+
+# _qa_firmware_targets <label> <id>...: the entries' rustup targets are installed. Returns as
+# _qa_firmware_prereqs does.
+_qa_firmware_targets() {
+    local label="$1" id installed rust_target
+    shift
+    installed="$(rustup target list --installed 2>/dev/null)"
+    for id in "$@"; do
+        rust_target="$(_qa_firmware_field "$id" rust_target)" || return 1
+        grep -qxF -- "$rust_target" <<< "$installed" \
+            || { _qa_unavailable "$label" "rustup target $rust_target absent" && return 10 || return 1; }
+    done
+    return 0
+}
+
+# _qa_firmware_build <label> <id> <note>: builds the entry as it declares, its environment's
+# repository paths made absolute here. <note> follows the target in the OK line.
+_qa_firmware_build() {
+    local label="$1" id="$2" note="$3"
+    local cargo_out env_out product target line abs assignment
+    local -a argv=() vars=()
+    cargo_out="$(python3 scripts/lib/offline_build.py --firmware-cargo "$id")" || return 1
+    env_out="$(python3 scripts/lib/offline_build.py --firmware-env "$id")" || return 1
+    product="$(_qa_firmware_field "$id" product)" || return 1
+    target="$(_qa_firmware_field "$id" target)" || return 1
+    mapfile -t argv <<< "$cargo_out"
+    if [[ -n "$env_out" ]]; then
+        while IFS= read -r line; do
+            abs="$(realpath -- "${line#*=}")" || return 1
+            vars+=("${line%%=*}=$abs")
+        done <<< "$env_out"
+    fi
+    # A subshell, so the variables reach this build alone; `cargo` stays the shell's (the artifact
+    # census wraps it in a function, which `env` would step around).
+    if ! (
+        for assignment in ${vars[@]+"${vars[@]}"}; do
+            export "${assignment?}"
+        done
+        "${argv[@]}" --quiet
+    ); then
+        echo "  $label build ${product##*/} FAIL" >&2
+        return 1
+    fi
+    echo "  $label build ${product##*/} $target$note OK"
+}
+
+# _qa_firmware_path <id>: where the entry's product is, under this run's artifact root.
+_qa_firmware_path() {
+    local manifest product
+    manifest="$(_qa_firmware_field "$1" manifest)" || return 1
+    product="$(_qa_firmware_field "$1" product)" || return 1
+    echo "$WZ_ARTIFACTS/${manifest%/*}/target/$product"
+}
+
 # Layer Qa itself: the bare-metal lwIP firmware under the scenario.
 layer_qa_mcu_admin_node_vs_zenohd() {
-    local target=thumbv7m-none-eabi
-    local fw="$WZ_ARTIFACTS/deploy/mcu-admin-node/target/$target/release/mcu-admin-node"
-    local rc
-    command -v arm-none-eabi-gcc >/dev/null 2>&1 \
-        || { _qa_unavailable "Qa" "arm-none-eabi-gcc not on PATH"; return $?; }
+    local -a ids=(mcu-admin-node mcu-admin-node-fixed mcu-admin-node-fixed-tcp)
+    local rc fw node
+    command -v python3 >/dev/null 2>&1 \
+        || { _qa_unavailable "Qa" "python3 not on PATH"; return $?; }
+    _qa_firmware_prereqs Qa "${ids[@]}" && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
     _qa_zenohd_prereqs Qa && rc=0 || rc=$?
     [[ "$rc" -eq 10 ]] && return 0
     [[ "$rc" -ne 0 ]] && return 1
-    rustup target list --installed | grep -qx "$target" \
-        || { _qa_unavailable "Qa" "rustup target $target absent"; return $?; }
+    _qa_firmware_targets Qa "${ids[@]}" && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
 
-    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test)" cargo build --release \
-        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" --quiet \
-        || { echo "  Qa build mcu-admin-node FAIL" >&2; return 1; }
-    echo "  Qa build mcu-admin-node $target OK"
-
-    _qa_scenario Qa 1000055434d7a77 - \
+    _qa_firmware_build Qa "${ids[0]}" "" || return 1
+    fw="$(_qa_firmware_path "${ids[0]}")" || return 1
+    node="$(_qa_firmware_field "${ids[0]}" node_id)" || return 1
+    _qa_scenario Qa "$node" - \
         qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
         -semihosting-config enable=on,target=native \
         -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
@@ -27747,12 +27829,10 @@ layer_qa_mcu_admin_node_vs_zenohd() {
     # S8 gate holds to no allocator (Q.0n): what a stock zenohd is shown of it is what
     # it is shown of the heap image (the same zid, the same legs, the same write). It
     # is built over the heap binary's path, after the heap scenario has run.
-    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test)" cargo build --release \
-        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" \
-        --bin mcu-admin-node --no-default-features --features fixed-memory --quiet \
-        || { echo "  Qa.fixed build mcu-admin-node FAIL" >&2; return 1; }
-    echo "  Qa.fixed build mcu-admin-node $target (fixed-memory) OK"
-    _qa_scenario Qa.fixed 1000055434d7a77 - \
+    _qa_firmware_build Qa.fixed "${ids[1]}" " (fixed-memory)" || return 1
+    fw="$(_qa_firmware_path "${ids[1]}")" || return 1
+    node="$(_qa_firmware_field "${ids[1]}" node_id)" || return 1
+    _qa_scenario Qa.fixed "$node" - \
         qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
         -semihosting-config enable=on,target=native \
         -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
@@ -27764,12 +27844,10 @@ layer_qa_mcu_admin_node_vs_zenohd() {
     # the first run of that node on any machine, and what a stock zenohd is shown of it is what it is
     # shown of the datagram node: the same zid, the same legs, the same write, the links named tcp/.
     # It is built over the same binary's path, after the datagram scenario has run.
-    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test-tcp)" cargo build --release \
-        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" \
-        --bin mcu-admin-node --no-default-features --features fixed-memory-tcp --quiet \
-        || { echo "  Qa.tcp build mcu-admin-node FAIL" >&2; return 1; }
-    echo "  Qa.tcp build mcu-admin-node $target (fixed-memory, tcp/) OK"
-    _QA_TRANSPORT=tcp _QA_STREAM_STEPS=1 _qa_scenario Qa.tcp 1000055434d7a77 - \
+    _qa_firmware_build Qa.tcp "${ids[2]}" " (fixed-memory, tcp/)" || return 1
+    fw="$(_qa_firmware_path "${ids[2]}")" || return 1
+    node="$(_qa_firmware_field "${ids[2]}" node_id)" || return 1
+    _QA_TRANSPORT=tcp _QA_STREAM_STEPS=1 _qa_scenario Qa.tcp "$node" - \
         qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
         -semihosting-config enable=on,target=native \
         -nic "user,model=lan9118,hostfwd=tcp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
