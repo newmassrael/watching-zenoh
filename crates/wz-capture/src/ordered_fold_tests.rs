@@ -636,3 +636,257 @@ fn a_flow_word_that_moves_begins_a_fold_that_reads_it_and_no_other() {
         }
     }
 }
+
+/// Two captures fed the same packets on one datagram flow: one that keeps
+/// `per_flow` messages and one that keeps every message.
+#[cfg(feature = "dissect")]
+struct Twin {
+    bounded: Dissection,
+    whole: Dissection,
+    packets: usize,
+}
+
+#[cfg(feature = "dissect")]
+impl Twin {
+    fn new(per_flow: usize) -> Self {
+        Self {
+            bounded: Dissection::with_limits(DissectionLimits {
+                frames_per_flow: Some(per_flow),
+                ..DissectionLimits::default()
+            }),
+            whole: Dissection::new(),
+            packets: 0,
+        }
+    }
+
+    fn wire(&mut self, from_low: bool, wire: &[u8]) {
+        let packet = if from_low {
+            udp_packet(LOW, 40000, HIGH, 7447, wire)
+        } else {
+            udp_packet(HIGH, 7447, LOW, 40000, wire)
+        };
+        self.bounded
+            .push_packet(LINKTYPE_ETHERNET, self.packets, &packet);
+        self.whole
+            .push_packet(LINKTYPE_ETHERNET, self.packets, &packet);
+        self.packets += 1;
+    }
+
+    /// Messages the bounded capture ever decoded.
+    fn produced(&self) -> u64 {
+        self.bounded
+            .message_lists()
+            .map(|(_, frames)| frames.produced())
+            .sum()
+    }
+
+    /// Messages the bounded capture holds now.
+    fn held(&self) -> u64 {
+        self.bounded
+            .message_lists()
+            .map(|(_, frames)| frames.len() as u64)
+            .sum()
+    }
+}
+
+/// The planes of a census document: what every census of the same messages
+/// writes alike, without `observed` and `dropped_by_limits`, which say what one
+/// capture holds and lost.
+#[cfg(feature = "dissect")]
+fn planes_of(doc: &str) -> &str {
+    let from = doc.find(",\"keyexprs\":").expect("the planes");
+    let to = doc.find(",\"dropped_by_limits\":").expect("the losses");
+    &doc[from..to]
+}
+
+/// The raw value of `key` in a census document's `observed` object.
+#[cfg(feature = "dissect")]
+fn observed_value<'d>(doc: &'d str, key: &str) -> &'d str {
+    let open = "\"observed\":{";
+    let at = doc.find(open).expect("the observed object") + open.len();
+    let object = &doc[at..at + doc[at..].find('}').expect("the object closes")];
+    let marker = alloc::format!("\"{key}\":");
+    let start = object.find(&marker).expect("the key") + marker.len();
+    let rest = &object[start..];
+    &rest[..rest.find(',').unwrap_or(rest.len())]
+}
+
+/// A CENSUS OVER ITS HISTORY GOES ON ACROSS FRONT TRIMS and is the census of
+/// every message it observed: at every step its planes are the planes of a
+/// capture that kept every message, a step after a trim folds only what
+/// arrived, and the declaration a ceiling took first still names the records
+/// after it, where a census of what is held calls them unresolved.
+#[cfg(feature = "dissect")]
+#[test]
+fn a_history_census_goes_on_across_trims_and_counts_everything_observed() {
+    let mut t = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    let any = Filter::any();
+    t.wire(true, &init_wire(ZID_A));
+    t.wire(false, &init_wire(ZID_B));
+    t.wire(true, &frame_carrying(&declare_kexpr(7, "demo/temp")));
+    let first = census_json_where_resumable(&t.bounded, &any, &mut memory);
+    assert_eq!(
+        planes_of(&first),
+        planes_of(&census_json_where(&t.whole, &any))
+    );
+
+    let mut trimmed_steps = 0;
+    for round in 0..30u8 {
+        let produced = t.produced();
+        t.wire(
+            true,
+            &frame_carrying(&push(sender_space(7, None), &[round; 12])),
+        );
+        let arrived = t.produced() - produced;
+        assert!(arrived > 0, "round {round} produced no message to fold");
+        let before = memory.stats();
+        let history = census_json_where_resumable(&t.bounded, &any, &mut memory);
+        let work = delta(before, memory.stats());
+        let whole = census_json_where(&t.whole, &any);
+        assert_eq!(
+            planes_of(&history),
+            planes_of(&whole),
+            "round {round}: the census over its history is not the census of \
+             every message it observed"
+        );
+        for key in ["messages", "first_packet", "last_packet"] {
+            assert_eq!(
+                observed_value(&history, key),
+                observed_value(&whole, key),
+                "round {round}: {key}"
+            );
+        }
+        assert_eq!(observed_value(&whole, "trimmed"), "0", "{whole}");
+        let trimmed = t.produced() - t.held();
+        assert_eq!(
+            observed_value(&history, "trimmed"),
+            alloc::format!("{trimmed}"),
+            "round {round}: {history}"
+        );
+        assert_eq!(
+            (work.restarts, work.resumes, work.messages_folded),
+            (0, PLANES, PLANES * arrived),
+            "round {round}: a step folds what arrived, trimmed list or not ({work:?})"
+        );
+        if trimmed > 0 {
+            trimmed_steps += 1;
+        }
+    }
+    assert!(
+        trimmed_steps > 20,
+        "the ceiling must trim on most steps, or nothing went on across a trim: \
+         {trimmed_steps}"
+    );
+
+    let history = census_json_where_resumable(&t.bounded, &any, &mut memory);
+    let held_only = census_json_where(&t.bounded, &any);
+    assert!(
+        planes_of(&history).contains("\"demo/temp\""),
+        "the records keep the key their trimmed declaration gave: {history}"
+    );
+    assert!(
+        !planes_of(&held_only).contains("\"demo/temp\""),
+        "a census of what is held must have lost the declaration, or this \
+         fixture never trimmed it: {held_only}"
+    );
+}
+
+/// A census over its history gives up what its planes keep of the rows no list
+/// holds, and its document does not move for it: the entries kept stay near
+/// what the lists hold, where every row ever folded would be kept otherwise.
+#[cfg(feature = "dissect")]
+#[test]
+fn a_history_census_gives_up_the_rows_no_list_holds() {
+    let mut t = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    let any = Filter::any();
+    t.wire(true, &frame_carrying(&declare_kexpr(7, "demo/temp")));
+    census_json_where_resumable(&t.bounded, &any, &mut memory);
+    const PUSHES: u32 = 1_500;
+    for round in 0..PUSHES {
+        t.wire(
+            true,
+            &frame_carrying(&push(sender_space(7, None), &round.to_le_bytes())),
+        );
+        if round % 100 == 99 {
+            let history = census_json_where_resumable(&t.bounded, &any, &mut memory);
+            assert_eq!(
+                planes_of(&history),
+                planes_of(&census_json_where(&t.whole, &any)),
+                "push {round}: giving rows up moved the document"
+            );
+        }
+    }
+    assert_eq!(
+        memory.stats().restarts,
+        PLANES,
+        "the planes began once and went on: {:?}",
+        memory.stats()
+    );
+    let kept = memory.kept_entries();
+    assert!(
+        kept < 1_000,
+        "{kept} entries kept for {PUSHES} records folded and 6 held: the rows no \
+         list holds were not given up"
+    );
+}
+
+/// A census over its history whose exchanges still open alone outgrow four
+/// times what the lists hold begins its planes again over what is held, and
+/// says so: `trimmed` is 0 and the planes are a census of what is held.
+#[cfg(feature = "dissect")]
+#[test]
+fn a_history_census_whose_open_exchanges_outgrow_the_holding_begins_again() {
+    let mut t = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    let any = Filter::any();
+    t.wire(
+        true,
+        &frame_carrying(&push(sender_space(0, Some("demo/a")), &[1u8; 4])),
+    );
+    census_json_where_resumable(&t.bounded, &any, &mut memory);
+    for n in 0..1_100u32 {
+        t.wire(
+            true,
+            &frame_carrying(&request_query(n + 1, sender_space(0, Some("demo/q")))),
+        );
+    }
+    let went_on = census_json_where_resumable(&t.bounded, &any, &mut memory);
+    assert_eq!(
+        planes_of(&went_on),
+        planes_of(&census_json_where(&t.whole, &any)),
+        "before the bound is checked the census is the history's"
+    );
+    let outgrown = 4 * t.held() as usize + 1024;
+    assert!(
+        memory.kept_entries() > outgrown,
+        "the fixture must outgrow the bound: {} entries against {outgrown}",
+        memory.kept_entries()
+    );
+
+    let before = memory.stats();
+    let again = census_json_where_resumable(&t.bounded, &any, &mut memory);
+    let work = delta(before, memory.stats());
+    assert_eq!(work.restarts, PLANES, "the planes begin again: {work:?}");
+    // The planes a selector narrows, and not the node plane: the node census is
+    // the memory's own and goes on over its history, so the bytes it credits are
+    // every message's and not the held ones'.
+    let narrowed = |doc: &str| {
+        let planes = planes_of(doc);
+        let nodes = planes.find(",\"nodes\":").expect("the node plane");
+        let after = planes.find(",\"exchanges\":").expect("the exchange plane");
+        alloc::format!("{}{}", &planes[..nodes], &planes[after..])
+    };
+    assert_eq!(
+        narrowed(&again),
+        narrowed(&census_json_where(&t.bounded, &any)),
+        "begun again, the planes are a census of what is held"
+    );
+    assert_eq!(observed_value(&again, "trimmed"), "0", "{again}");
+    assert_eq!(
+        observed_value(&again, "messages"),
+        alloc::format!("{}", t.held()),
+        "{again}"
+    );
+}

@@ -666,7 +666,7 @@ impl LiveDissection {
             next_id: 0,
             next_seq: 1,
             selection_said: wz_capture::selection_json::SelectionMemories::default(),
-            census_memory: std::sync::Mutex::new(wz_capture::CensusMemory::new()),
+            census_memory: std::sync::Mutex::new(wz_capture::CensusMemory::over_history()),
             fields_memory: wz_capture::fields_json::FieldsMemory::new(),
             facts_memory: wz_capture::fields_json::FieldsMemory::with_trees(
                 wz_capture::fields_json::Trees::Left,
@@ -1074,20 +1074,32 @@ impl LiveDissection {
     /// That is [`Self::end`], and it is a separate call so that a consumer
     /// drawing a window cannot spend it by accident.
     ///
-    /// # What it costs, and what it does not claim
+    /// # What it counts: everything the planes folded, trimmed or not
     ///
-    /// The planes that are folds over the messages are kept between calls (see
-    /// [`wz_capture::CensusMemory`]), so a census drawn again after a few more
-    /// packets folds those packets. The document is the one the whole-capture
-    /// door writes for the same state, byte for byte. A state the folds cannot
-    /// continue across (a list trimmed at its front, a flow that appeared among
-    /// the stream flows, a handshake that changes who owns an earlier message, a
-    /// message that sorts before one already folded) is folded again from the
-    /// start, which costs what this door always cost. The node census is kept
-    /// the same way and begins again only when a message that arrived names a
-    /// node; the scouting lists are folded over a copy on every call, and a
-    /// capture that holds many exchanges that never close pays for each of them
-    /// on every call, because a call judges the exchanges still open.
+    /// The census goes on across a front trim
+    /// ([`wz_capture::CensusMemory::over_history`]): it counts every message its
+    /// planes have folded since they began, including the ones a ceiling has
+    /// since taken, as the field documents and the end-to-end judge of this
+    /// handle read them. A record whose declaration was trimmed keeps its key.
+    /// The document is the one the whole-capture door writes over a capture that
+    /// kept every one of those messages, and its `observed` says how many it
+    /// counts (`messages`), how many of them the lists no longer hold
+    /// (`trimmed`) and the packets the first and the last resolve to.
+    ///
+    /// # What it costs
+    ///
+    /// The planes are kept between calls, so a census drawn again folds the
+    /// messages that arrived, whether or not a ceiling trimmed a list since. They
+    /// begin again, over what is held, only where a fold cannot go on at all (a
+    /// flow that appeared among the stream flows or left the table, a handshake
+    /// that changes who owns an earlier message, a message that sorts before one
+    /// already folded, a stopped call, another selector) and where the exchanges
+    /// still open alone outgrow four times the messages held; then `trimmed` is
+    /// 0 again. The node census is kept the same way and begins again only when
+    /// a message that arrived names a node; the scouting lists are folded over a
+    /// copy on every call, and a capture that holds many exchanges that never
+    /// close pays for each of them on every call, because a call judges the
+    /// exchanges still open.
     ///
     /// `None` when the callback set by [`Self::set_progress`] stopped the census; the
     /// plane that was being folded is then dropped from the memory and the next call

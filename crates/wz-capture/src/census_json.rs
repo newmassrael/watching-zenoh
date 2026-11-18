@@ -170,6 +170,9 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
         d,
         filter,
         CensusPlanes {
+            // Every plane here is a fold over what the capture holds, so what
+            // was observed is what is held.
+            observed: crate::ordered_fold::Observed::of(&d.message_frames_in_capture_order()),
             #[cfg(feature = "network-codecs")]
             exchanges: crate::exchange::exchanges_grouped(d, filter, &grouping),
             #[cfg(feature = "network-codecs")]
@@ -201,6 +204,13 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
 /// from, so it has to be current before any of them, and it continues unless a
 /// message that arrived names a node. The scouting lists are folded over a copy
 /// on every call.
+///
+/// A memory whose census is over its HISTORY (`CensusMemory::over_history`, a
+/// live handle's) goes on across a front trim instead of beginning again, so
+/// its document is the census of every message folded since the planes began:
+/// the one the whole-capture door writes over a capture that kept all of them,
+/// with `observed.trimmed` counting the ones this capture no longer holds and
+/// `dropped_by_limits` this capture's own.
 pub fn census_json_where_resumable(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
@@ -228,11 +238,12 @@ pub fn census_json_where_resumable_progress(
     memory.for_filter(filter);
     let nodes = memory.node_census(d);
     let grouping = crate::node::SessionGrouping::of(&nodes);
-    let folded = memory.planes(d, &grouping, progress)?;
+    let (folded, observed) = memory.planes(d, &grouping, progress)?;
     let document = census_document(
         d,
         filter,
         CensusPlanes {
+            observed,
             #[cfg(feature = "network-codecs")]
             exchanges: folded.exchanges.table(),
             #[cfg(feature = "network-codecs")]
@@ -251,6 +262,8 @@ pub fn census_json_where_resumable_progress(
 
 /// The planes of a census document, however they were made.
 struct CensusPlanes {
+    /// What the planes have folded since they began.
+    observed: crate::ordered_fold::Observed,
     throughput: ThroughputTable,
     nodes: NodeCensus,
     #[cfg(feature = "network-codecs")]
@@ -275,6 +288,7 @@ fn census_document(
     // carried no revision.
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::CENSUS, &mut out);
+    observed_into(d, planes.observed, &mut out);
     out.push_str(",\"keyexprs\":");
     out.push_str(&keyexprs_json(&planes.throughput));
     let nodes = &planes.nodes;
@@ -327,6 +341,34 @@ fn census_document(
     out.push_str(&crate::report::dropped_by_limits_json(d));
     out.push('}');
     out
+}
+
+/// The `observed` key: the transport messages the planes have folded since they
+/// began, how many of those the lists no longer hold, and the capture packets the
+/// first and the last of them resolve to (`null` when none was folded).
+///
+/// Every message the lists hold has been folded once the planes are brought up
+/// to the capture, so the ones folded and no longer held are the difference.
+/// `trimmed` is 0 for a census of what the capture holds, which every census
+/// over a capture is; a census that went on across trims (a live handle's)
+/// counts there the messages it still counts and a ceiling has taken, and a
+/// reader who wants only what is held reads that as the part of the planes that
+/// is history.
+fn observed_into(d: &crate::Dissection, observed: crate::ordered_fold::Observed, out: &mut String) {
+    let held: u64 = d
+        .message_lists_with_origin()
+        .map(|(_, _, list)| list.len() as u64)
+        .sum();
+    out.push_str(",\"observed\":{\"messages\":");
+    u64_into(observed.messages, out);
+    out.push_str(",\"trimmed\":");
+    u64_into(observed.messages.saturating_sub(held), out);
+    match observed.packets {
+        Some((first, last)) => {
+            let _ = write!(out, ",\"first_packet\":{first},\"last_packet\":{last}}}");
+        }
+        None => out.push_str(",\"first_packet\":null,\"last_packet\":null}"),
+    }
 }
 
 /// The `ambiguous_zid_prefixes` key for `filter` over the capture `nodes` was

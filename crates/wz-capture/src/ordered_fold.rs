@@ -28,6 +28,12 @@
 //! message, which is what every plane always did, so the fallback is the old cost
 //! and cannot be a wrong answer.
 //!
+//! A census over its HISTORY (a live handle's, `CensusMemory::over_history`) lifts
+//! the second condition: a front trim leaves what the planes folded in them, and
+//! the document is the census of every message folded since the planes began.
+//! See [`crate::TrimPolicy`] for why that, and not the census of what is held, is
+//! what a live handle's census means.
+//!
 //! The grouping is compared because it is an INPUT of every message the fold
 //! took: which session owns a list, which zids a direction announced, and which
 //! zids a selector's prefix is read against. A handshake that arrives after the
@@ -146,6 +152,41 @@ pub struct FoldStats {
     pub resumes: u64,
 }
 
+/// What a fold has taken since it began: how many messages, and the capture
+/// packets the first and the last of them resolve to. A census states it as
+/// `observed`, so a reader can tell a census of what is held from one that went
+/// on across trims.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Observed {
+    /// Messages taken since the fold began.
+    pub(crate) messages: u64,
+    /// The packets of the first and the last message taken, in capture order;
+    /// `None` while nothing has been taken.
+    pub(crate) packets: Option<(usize, usize)>,
+}
+
+impl Observed {
+    /// What a walk over all of `order` takes.
+    pub(crate) fn of(order: &crate::OrderedFrames<'_>) -> Self {
+        Self {
+            messages: order.messages() as u64,
+            packets: order.packet_range(),
+        }
+    }
+
+    /// This, followed by what a walk over `order` takes.
+    fn then(self, order: &crate::OrderedFrames<'_>) -> Self {
+        let next = Self::of(order);
+        Self {
+            messages: self.messages + next.messages,
+            packets: match (self.packets, next.packets) {
+                (Some((first, _)), Some((_, last))) => Some((first, last)),
+                (earlier, later) => later.or(earlier),
+            },
+        }
+    }
+}
+
 /// What a fold stopped at, so the next call can tell whether it may continue.
 #[derive(Debug, Clone)]
 struct Saved<F> {
@@ -153,6 +194,7 @@ struct Saved<F> {
     grouping: SessionGrouping,
     origin_ms: Option<u64>,
     marks: OrderMarks,
+    observed: Observed,
 }
 
 /// A fold of one plane, kept between calls.
@@ -182,6 +224,14 @@ impl<F: OrderedFold> Resumable<F> {
         self.saved.as_mut().map(|saved| &mut saved.fold)
     }
 
+    /// The fold as it stands and what it has taken since it began, or `None`
+    /// before any call has made one.
+    fn folded(&self) -> Option<(&F, Observed)> {
+        self.saved
+            .as_ref()
+            .map(|saved| (&saved.fold, saved.observed))
+    }
+
     /// Bring the fold up to `dissection`, continuing when it may and starting over
     /// when it may not, and hand it back.
     ///
@@ -195,6 +245,7 @@ impl<F: OrderedFold> Resumable<F> {
     /// call begins it again; folding the messages it had already taken a second time
     /// would be a wrong table. A fold that was beginning keeps whatever it held
     /// before, which the stop did not touch.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
     pub(crate) fn advance(
         &mut self,
         dissection: &Dissection,
@@ -305,6 +356,7 @@ impl<F: OrderedFold> Resumable<F> {
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
+                saved.observed = saved.observed.then(&frames);
                 saved.marks = marks;
                 stats.resumes += F::PLANES;
             }
@@ -338,6 +390,7 @@ impl<F: OrderedFold> Resumable<F> {
                     grouping: grouping.clone(),
                     origin_ms,
                     marks,
+                    observed: Observed::of(&frames),
                 });
                 stats.restarts += F::PLANES;
             }
@@ -473,6 +526,26 @@ impl OrderedFold for CensusFold {
     }
 }
 
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+impl CensusFold {
+    /// The entries the planes keep that grow with the messages taken: the
+    /// verdict of each row the payload and exchange planes judged, and the
+    /// exchanges still open.
+    fn kept_entries(&self) -> usize {
+        self.payloads.kept_entries() + self.exchanges.kept_entries()
+    }
+
+    /// Give up the verdicts of the rows no list holds any more. No table a
+    /// census document writes is read off them, and a later message is folded
+    /// against the exchanges still open, which stay.
+    fn forget_rows_not_held(&mut self, dissection: &Dissection) {
+        let first = crate::selection_json::first_held(dissection);
+        let keep = |key: &crate::payload::RowKey| crate::selection_json::is_held(&first, key);
+        self.payloads.forget_rows(&keep);
+        self.exchanges.forget_rows(&keep);
+    }
+}
+
 /// The planes of a census document folded under ONE selector.
 ///
 /// The selector is part of every fold's state (each judged its records against
@@ -480,6 +553,39 @@ impl OrderedFold for CensusFold {
 #[derive(Debug, Default)]
 struct SelectorPlanes {
     planes: Resumable<CensusFold>,
+    /// What the planes kept after they last gave up the rows no list holds:
+    /// the mark that says when to give them up again.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    kept_after_forget: usize,
+}
+
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+impl SelectorPlanes {
+    /// Keep planes that go on across trims near what the lists hold, and say
+    /// whether they have outgrown it all the same.
+    ///
+    /// Each time the entries they keep doubled past the last time, or pass
+    /// four times the messages held and a little more, they give up the rows
+    /// no list holds, which costs one pass over what they keep per as many new
+    /// entries. What is not a row's (the exchanges still open) cannot be given
+    /// up that way; when it alone is past the bound the planes must begin again
+    /// over what is held, which is the selection door's rule too.
+    fn keep_to_what_is_held(&mut self, dissection: &Dissection) -> bool {
+        let Some(fold) = self.planes.fold_mut() else {
+            return false;
+        };
+        let held: usize = dissection
+            .message_lists_with_origin()
+            .map(|(_, _, list)| list.len())
+            .sum();
+        let outgrown = 4 * held + 1024;
+        let kept = fold.kept_entries();
+        if kept > 2 * self.kept_after_forget + 1024 || kept > outgrown {
+            fold.forget_rows_not_held(dissection);
+            self.kept_after_forget = fold.kept_entries();
+        }
+        fold.kept_entries() > outgrown
+    }
 }
 
 /// The planes of a census document, kept between calls for up to
@@ -494,6 +600,16 @@ struct SelectorPlanes {
 /// asking under another selector starts every plane again.
 ///
 /// The node census is shared by every selector, since no selector narrows it.
+///
+/// # What is held, and what a trim does
+///
+/// A memory made with [`Self::new`] is a census of the messages the capture
+/// holds: a list trimmed at its front begins every plane again over what is
+/// left, so the document is the whole-capture door's for the same state, byte
+/// for byte. A memory made with `over_history` (a live handle's) is a census of
+/// every message it has folded since its planes began: the planes and the node
+/// census go on across a front trim, and the document's `observed` says how many
+/// of the messages it counts the lists no longer hold.
 #[derive(Debug, Default)]
 pub struct CensusMemory {
     /// The node census, which no selector narrows and so outlives a change of
@@ -502,6 +618,8 @@ pub struct CensusMemory {
     /// The planes per selector, one slot unless raised.
     planes: BoundedSlots<crate::filter::Filter, SelectorPlanes>,
     stats: FoldStats,
+    /// What a front trim does to the planes and the node census.
+    trims: TrimPolicy,
 }
 
 /// What the resumable memories of the folds hold that follows the row count
@@ -534,6 +652,34 @@ impl FoldMemory {
 
 #[cfg(all(feature = "dissect", feature = "network-codecs"))]
 impl CensusMemory {
+    /// A memory that has folded nothing and whose census goes on across a front
+    /// trim: the census of every message folded since the planes began, which
+    /// is what a live handle's census means (see the type's doc).
+    ///
+    /// The planes begin again where a fold of the capture cannot go on at all
+    /// (a list that moved or was replaced, a message that sorts before one
+    /// already folded, a grouping that changed, a stopped call), and where what
+    /// they keep that is not a row's outgrows four times the messages held;
+    /// then the census is of what is held, and `observed` says so.
+    pub fn over_history() -> Self {
+        Self {
+            trims: TrimPolicy::Continue,
+            ..Self::default()
+        }
+    }
+
+    /// What the planes of every selector keep that grows with the messages
+    /// taken: what a test reads to see that a census over its history is held
+    /// near what the lists hold.
+    #[cfg(test)]
+    pub(crate) fn kept_entries(&self) -> usize {
+        self.planes
+            .values()
+            .filter_map(|slot| slot.planes.fold())
+            .map(CensusFold::kept_entries)
+            .sum()
+    }
+
     /// What the memory holds that follows the row count, summed over the
     /// selectors it keeps planes for.
     pub fn memory(&self) -> FoldMemory {
@@ -588,8 +734,13 @@ impl CensusMemory {
         self.nodes.stats()
     }
 
-    /// The node census, brought up to `dissection`.
+    /// The node census, brought up to `dissection`, across a front trim when the
+    /// memory's census is over its history.
     pub(crate) fn node_census(&mut self, dissection: &Dissection) -> crate::node::NodeCensus {
+        #[cfg(feature = "dissect")]
+        if self.trims == TrimPolicy::Continue {
+            return self.nodes.nodes_across_trims(dissection);
+        }
         self.nodes.nodes(dissection)
     }
 
@@ -615,19 +766,30 @@ impl CensusMemory {
         (filter.clone(), planes, stats)
     }
 
-    /// The selector-narrowed planes, brought up to `dissection` by one walk, or
-    /// `None` when `progress` stopped the fold.
+    /// The selector-narrowed planes, brought up to `dissection` by one walk, with
+    /// what they have taken since they began, or `None` when `progress` stopped
+    /// the fold.
     pub(crate) fn planes(
         &mut self,
         dissection: &Dissection,
         grouping: &SessionGrouping,
         progress: Option<&Progress<'_>>,
-    ) -> Option<&CensusFold> {
+    ) -> Option<(&CensusFold, Observed)> {
+        let trims = self.trims;
         let (filter, planes, stats) = self.current();
-        planes
-            .planes
-            .advance(dissection, grouping, stats, progress, || {
-                CensusFold::begin(dissection, &filter, grouping)
-            })
+        #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+        if trims == TrimPolicy::Continue && planes.keep_to_what_is_held(dissection) {
+            planes.planes = Resumable::default();
+        }
+        planes.planes.advance_with(
+            trims,
+            dissection,
+            grouping,
+            stats,
+            progress,
+            || CensusFold::begin(dissection, &filter, grouping),
+            None,
+        )?;
+        planes.planes.folded()
     }
 }
