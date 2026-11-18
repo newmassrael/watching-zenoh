@@ -4759,6 +4759,22 @@
       "carry_forward_bullets": [
         "Round 4507's carry (step 0 and the two owner decisions) continues outside the repository until a step lands code."
       ]
+    },
+    "Round 4509": {
+      "decision_summary": "The examples of a key named by a fixed id plus a suffix, in the dissect header's prose and in the capture crate's tests and comments, use an arbitrary verbatim chunk `@sidecar` instead of a deployment's convention. Nothing in the code treated the suffix specially; the tests ask the same questions with a chunk of the same length.",
+      "changes_bullets": [
+        "`crates/wz-capi-dissect/include/wz_dissect.h` (three comment lines) and seven files of `crates/wz-capture/src` (comments and test keys): the example suffix becomes `@sidecar`."
+      ],
+      "verification_bullets": [
+        "`cargo test -p wz-capture --lib` on pc2: 1365 passed, 0 failed, 6 ignored, the edited key-binding, segment-chain, segment-row and reply-segment tests among them.",
+        "The ABI pin of the dissect library reads its symbol set, which a comment does not move."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "None."
+      ]
     }
   },
   "inventory_entries": {
