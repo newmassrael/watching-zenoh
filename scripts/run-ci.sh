@@ -3823,6 +3823,11 @@ layer_c0_test_discipline() {
     # Kconfig interpreter (C11, scripts/provision-kconfiglib.sh). A job without kconfiglib
     # SKIPs out loud; the validate job provisions it and arms WZ_KCONFIG_REQUIRE.
     _runci_leg wz_config.check-presets --after wz_config.selftest -- python3 scripts/lib/wz_config.py --check-presets
+    # A machine reads a policy from the snapshot its creator hands it, never from the build: every
+    # read of the build defaults is at a site the gate's list allows, with its reason, and a listed
+    # site that stopped reading is refused too. The selftest drives each rule over a fixture tree.
+    _runci_leg policy_read_gate.selftest -- python3 scripts/lib/policy_read_gate.py --selftest
+    _runci_leg policy_read_gate --after policy_read_gate.selftest -- python3 scripts/lib/policy_read_gate.py --check
     # R3733 -- the feature model a crate's state machines are gated by (sources/features/, SCE's
     # element gate) is generated from the crate's own cargo features, and is held to them: a model
     # that drifted from the manifest lets a machine gate on a feature the crate does not have.

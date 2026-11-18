@@ -7,15 +7,17 @@
 //! # Domain and selection
 //!
 //! The build narrows each policy to its domain, the set of values a later stage may select: one
-//! `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value, `off` leaving the value out and an unset name
-//! allowing it, so a build that narrows nothing allows every value. The build's default
+//! `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value, `on` allowing the value and `off` leaving it out.
+//! A value the build does not name is allowed on a target with an operating system, and on a
+//! target with none only when it is the build's default (`WZ_POLICY_DOMAINS`, `full` or
+//! `defaults`, forces either rule; [`Domain::from_stated`]). The build's default
 //! (`WZ_POLICY_<NAME>`) is always inside the domain; a build whose domain leaves it out does not
 //! compile. The open (or, for a policy bound `live`, a running session) then selects one value
 //! inside the domain with [`Bound::select`].
 //!
 //! A policy whose domain is one value is a constant of the build: [`Bound::get`] returns it
 //! without reading the selected value, decided in a `const` block so the branch that would read it
-//! is not compiled into the build.
+//! is not compiled into the build, and a [`Bound`] of it holds no byte ([`PolicyValue::HELD`]).
 //!
 //! # What is generated
 //!
@@ -239,6 +241,36 @@ impl<T: PolicyValue> Domain<T> {
         Self::with_bits(bits)
     }
 
+    /// The domain a build states: `stated` holds each value's `WZ_POLICY_<NAME>_ALLOWS_<VALUE>`
+    /// in the order of [`PolicyValue::ALL`], `on` allowing the value and `off` leaving it out.
+    /// A value the build does not state is allowed unless `defaults_only`
+    /// ([`crate::policy::policy_defaults_only`]), and then only when it is the build's default,
+    /// at `default_index`.
+    pub const fn from_stated(
+        stated: &[Option<&str>],
+        default_index: usize,
+        defaults_only: bool,
+    ) -> Self {
+        assert!(
+            stated.len() == T::ALL.len(),
+            "a domain states one entry per value of its policy"
+        );
+        assert!(
+            stated.len() <= MAX_VALUES,
+            "a policy has more values than a domain holds"
+        );
+        let mut bits = 0u32;
+        let mut index = 0;
+        while index < stated.len() {
+            let unstated = !defaults_only || index == default_index;
+            if crate::policy::policy_allows(stated[index], unstated) {
+                bits |= 1u32 << index;
+            }
+            index += 1;
+        }
+        Self::with_bits(bits)
+    }
+
     const fn with_bits(bits: u32) -> Self {
         Self {
             bits,
@@ -270,6 +302,16 @@ impl<T: PolicyValue> Domain<T> {
     /// Whether exactly one value is allowed, which makes the policy a constant of the build.
     pub const fn is_singleton(self) -> bool {
         self.bits.count_ones() == 1
+    }
+
+    /// How many values a holder of the policy keeps: none where the domain is one value, whose
+    /// value is then the build's default, and one otherwise. The length of a [`Bound`]'s store.
+    pub const fn held(self) -> usize {
+        if self.is_singleton() {
+            0
+        } else {
+            1
+        }
     }
 
     /// The one value allowed, when the domain is a singleton.
@@ -308,6 +350,9 @@ pub trait PolicyValue: Copy + Eq + 'static {
     /// The moment a change takes effect, for a policy whose mutability is
     /// [`Mutability::Quiescent`]; `None` for every other policy.
     const BOUNDARY: Option<&'static str>;
+    /// How many values a [`Bound`] of the policy stores ([`Domain::held`]): none where the build
+    /// allows one value.
+    const HELD: usize = Self::DOMAIN.held();
 
     /// The value's position in [`Self::ALL`].
     fn index(self) -> usize;
@@ -321,38 +366,56 @@ pub const fn default_is_allowed<P: PolicyValue>(default_index: usize) -> bool {
     P::DOMAIN.contains_index(default_index)
 }
 
-/// A policy's value, selected inside the build's domain.
+/// A policy's value, selected inside the build's domain, kept in `HELD` slots: none where the
+/// domain is one value ([`PolicyValue::HELD`]), so a policy the build fixes costs its holder no
+/// byte, and one otherwise. The generated `SessionPolicy` names `HELD` per concrete policy, which
+/// is how a stable compiler lets the storage depend on the domain: a const generic argument may
+/// be any constant expression that names no generic parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Bound<P: PolicyValue> {
-    value: P,
+pub struct Bound<P: PolicyValue, const HELD: usize> {
+    value: [P; HELD],
 }
 
-impl<P: PolicyValue> Bound<P> {
+impl<P: PolicyValue, const HELD: usize> Bound<P, HELD> {
     /// `value`, when the build's domain allows it.
     pub fn select(value: P) -> Result<Self, OutsideDomain<P>> {
         if P::DOMAIN.contains(value) {
-            Ok(Self { value })
+            Ok(Self {
+                value: [value; HELD],
+            })
         } else {
             Err(OutsideDomain { value })
         }
     }
 
     /// The selected value. Where the build's domain is one value, that value is the build's
-    /// default and the selected value is not read: the `const` block decides the branch when the
-    /// build is compiled, which a plain call of a `const fn` would not.
-    pub fn get(self) -> P {
+    /// default and nothing is read: the `const` block decides the branch when the build is
+    /// compiled, which a plain call of a `const fn` would not, and a store of no slot has nothing
+    /// to read either. A `const fn` itself, so a constant can still be computed from a snapshot.
+    pub const fn get(&self) -> P {
         if const { P::DOMAIN.is_singleton() } {
             P::DEFAULT
         } else {
-            self.value
+            match self.value.first() {
+                Some(value) => *value,
+                None => P::DEFAULT,
+            }
+        }
+    }
+
+    /// The build's default, which the domain always holds. Read by the generated
+    /// `SessionPolicy::from_build`, the one place a snapshot starts from the build.
+    pub(crate) const fn build_default() -> Self {
+        Self {
+            value: [P::DEFAULT; HELD],
         }
     }
 }
 
-impl<P: PolicyValue> Default for Bound<P> {
+impl<P: PolicyValue, const HELD: usize> Default for Bound<P, HELD> {
     /// The build's default.
     fn default() -> Self {
-        Self { value: P::DEFAULT }
+        Self::build_default()
     }
 }
 
@@ -482,26 +545,26 @@ mod tests {
     #[test]
     fn select_takes_a_value_inside_the_domain_and_refuses_one_outside() {
         assert_eq!(
-            Bound::<Mode>::select(Mode::High).map(Bound::get),
+            Bound::<Mode, 1>::select(Mode::High).map(|bound| bound.get()),
             Ok(Mode::High)
         );
         assert_eq!(
-            Bound::<Mode>::select(Mode::Low).map(Bound::get),
+            Bound::<Mode, 1>::select(Mode::Low).map(|bound| bound.get()),
             Ok(Mode::Low)
         );
         assert_eq!(
-            Bound::<Mode>::select(Mode::Mid),
+            Bound::<Mode, 1>::select(Mode::Mid),
             Err(OutsideDomain { value: Mode::Mid })
         );
         assert_eq!(
-            Bound::<Pinned>::select(Pinned::Off),
+            Bound::<Pinned, 0>::select(Pinned::Off),
             Err(OutsideDomain { value: Pinned::Off })
         );
     }
 
     #[test]
     fn a_refusal_names_the_value_and_the_policy() {
-        let refused = Bound::<Mode>::select(Mode::Mid).unwrap_err();
+        let refused = Bound::<Mode, 1>::select(Mode::Mid).unwrap_err();
         assert_eq!(
             std::format!("{refused}"),
             "the build leaves `mid` out of the domain of the policy `test-mode`"
@@ -512,16 +575,65 @@ mod tests {
     fn get_of_a_singleton_domain_is_the_default_whatever_was_stored() {
         // Only a value inside the domain can be selected; the field is set here directly to
         // show that `get` does not read it.
-        let stored_off = Bound::<Pinned> { value: Pinned::Off };
+        let stored_off = Bound::<Pinned, 1> {
+            value: [Pinned::Off],
+        };
         assert_eq!(stored_off.get(), Pinned::On);
-        assert_eq!(Bound::<Pinned>::default().get(), Pinned::On);
+        assert_eq!(Bound::<Pinned, 0>::default().get(), Pinned::On);
     }
 
     #[test]
     fn get_of_a_wider_domain_is_the_stored_value() {
-        let stored_high = Bound::<Mode> { value: Mode::High };
+        let stored_high = Bound::<Mode, 1> {
+            value: [Mode::High],
+        };
         assert_eq!(stored_high.get(), Mode::High);
-        assert_eq!(Bound::<Mode>::default().get(), Mode::Low);
+        assert_eq!(Bound::<Mode, 1>::default().get(), Mode::Low);
+    }
+
+    /// A policy the build fixes to one value is held in no byte, and a wider one in the bytes of
+    /// its value: the store's length is the domain's.
+    #[test]
+    fn a_one_value_domain_is_held_in_no_byte() {
+        assert_eq!(Pinned::HELD, 0);
+        assert_eq!(Mode::HELD, 1);
+        assert_eq!(core::mem::size_of::<Bound<Pinned, { Pinned::HELD }>>(), 0);
+        assert_eq!(
+            core::mem::size_of::<Bound<Mode, { Mode::HELD }>>(),
+            core::mem::size_of::<Mode>()
+        );
+        let pinned = Bound::<Pinned, { Pinned::HELD }>::select(Pinned::On).expect("the default");
+        assert_eq!(pinned.get(), Pinned::On);
+        assert_eq!(Bound::<Pinned, 0>::build_default(), pinned);
+    }
+
+    /// An allowance the build states wins; one it does not allows its value unless the rule keeps
+    /// only the default, which then is the one value allowed.
+    #[test]
+    fn a_stated_domain_is_read_by_the_rule_for_what_it_does_not_state() {
+        let unstated = [None, None, None];
+        assert_eq!(
+            Domain::<Mode>::from_stated(&unstated, 0, false),
+            Domain::full()
+        );
+        let defaults = Domain::<Mode>::from_stated(&unstated, 0, true);
+        assert_eq!(defaults.only(), Some(Mode::Low));
+        assert_eq!(defaults.held(), 0);
+        // An `on` widens a default-only domain, and an `off` narrows a full one.
+        let widened = Domain::<Mode>::from_stated(&[None, None, Some("on")], 0, true);
+        assert_eq!(widened, Domain::from_allowed(&[true, false, true]));
+        assert_eq!(widened.held(), 1);
+        let narrowed = Domain::<Mode>::from_stated(&[None, Some("off"), None], 2, false);
+        assert_eq!(narrowed, Domain::from_allowed(&[true, false, true]));
+        // The default is the one kept, wherever it sits.
+        let at_two = Domain::<Mode>::from_stated(&unstated, 2, true);
+        assert_eq!(at_two.only(), Some(Mode::High));
+    }
+
+    #[test]
+    #[should_panic(expected = "one entry per value of its policy")]
+    fn a_stated_domain_that_does_not_state_every_value_is_refused() {
+        Domain::<Mode>::from_stated(&[None, None], 0, false);
     }
 
     #[test]

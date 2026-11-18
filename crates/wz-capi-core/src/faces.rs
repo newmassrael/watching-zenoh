@@ -308,7 +308,7 @@ struct WireCalls<P, Rv, Rd> {
 /// entry points, so the legs are there in a test build whatever the policy says.
 const WIRE_LEGS_IN_BUILD: bool = cfg!(test) || {
     let policy = wz_session_core::policy::SessionPolicy::from_build();
-    policy.publisher_admission_retry || policy.multi_route_atomic_tx
+    policy.publisher_admission_retry() || policy.multi_route_atomic_tx()
 };
 
 /// What asking one face to reserve room found, with `H` the reservation it gave.

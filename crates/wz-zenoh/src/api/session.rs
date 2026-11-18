@@ -8867,7 +8867,7 @@ mod tests {
 
     /// Whether this build's `entity-link-restriction` policy lets an entity state a set of links.
     fn links_policy_on() -> bool {
-        wz_session_core::policy::SessionPolicy::from_build().entity_link_restriction
+        wz_session_core::policy::SessionPolicy::from_build().entity_link_restriction()
     }
 
     /// A set that names two links.
@@ -9251,17 +9251,17 @@ mod tests {
 
     /// Whether this build's `targeted-query` policy lets a query name a node.
     fn target_policy_on() -> bool {
-        wz_session_core::policy::SessionPolicy::from_build().targeted_query
+        wz_session_core::policy::SessionPolicy::from_build().targeted_query()
     }
 
     /// Whether this build's `publisher-admission-retry` policy lets a publish state a retry.
     fn retry_policy_on() -> bool {
-        wz_session_core::policy::SessionPolicy::from_build().publisher_admission_retry
+        wz_session_core::policy::SessionPolicy::from_build().publisher_admission_retry()
     }
 
     /// Whether this build's `multi-route-atomic-tx` policy lets a publish state all-or-none.
     fn atomic_policy_on() -> bool {
-        wz_session_core::policy::SessionPolicy::from_build().multi_route_atomic_tx
+        wz_session_core::policy::SessionPolicy::from_build().multi_route_atomic_tx()
     }
 
     /// A node to address a query to.

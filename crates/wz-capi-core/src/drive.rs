@@ -1408,6 +1408,7 @@ pub(crate) fn init_params(
         cookie: Vec::new(),
         tx_queue: link_conf.tx.queue,
         link_rx: link_conf.rx,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }

@@ -201,7 +201,7 @@ const fn pico_group(
 /// The group profile of this build.
 #[cfg(feature = "multicast-transport")]
 const PICO_GROUP: wz_capi_core::drive::GroupProfile =
-    pico_group(wz_session_core::policy::SessionPolicy::from_build().sn_resolution);
+    pico_group(wz_session_core::policy::SessionPolicy::from_build().sn_resolution());
 
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
 ///
@@ -965,7 +965,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             keep_alive: PICO_KEEP_ALIVE,
-            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution,
+            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution(),
             link_rx: PICO_LINK_RX,
             accept: PICO_ACCEPT,
             // pico negotiates no transport capability on unicast: its InitSyn
@@ -1154,7 +1154,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             keep_alive: PICO_KEEP_ALIVE,
-            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution,
+            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution(),
             link_rx: PICO_LINK_RX,
             tx_queue: TxQueueConf::pico(),
             // How long an inbound link may take to complete its handshake is pico's

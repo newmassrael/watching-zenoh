@@ -113,7 +113,7 @@ pub(crate) fn reassembly_config() -> ReassemblyConfig {
     )
     // What a full pool does is the build's `reassembly-pool-overflow` policy.
     .with_pool_overflow(PoolOverflow::of_policy(
-        SessionPolicy::default().reassembly_pool_overflow,
+        SessionPolicy::default().reassembly_pool_overflow(),
     ))
 }
 
@@ -136,7 +136,7 @@ mod tests {
         );
         assert_eq!(
             cfg.pool_overflow,
-            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow)
+            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow())
         );
     }
 }

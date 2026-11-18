@@ -76,7 +76,7 @@ pub unsafe extern "C" fn wz_ext_get_to_peer(
         };
         // A `const` item, so the build's value is folded and a build with the policy off keeps
         // only the refusal (as `get::issue_get` reads it).
-        const ENABLED: bool = wz_session_core::policy::SessionPolicy::from_build().targeted_query;
+        const ENABLED: bool = wz_session_core::policy::SessionPolicy::from_build().targeted_query();
         let target = addressed(peer.as_ref(), ENABLED);
         get_inner(zs, keyexpr, parameters, len, callback, options, target)
     })

@@ -7512,7 +7512,7 @@ fn plain_reply_stamp_seen_by(options: QueryableOptions) -> (Option<Vec<u8>>, Vec
 ))]
 #[test]
 fn a_plain_reply_is_stamped_by_the_node_exactly_when_the_build_asks() {
-    let asked = wz_session_core::policy::SessionPolicy::from_build().reply_auto_timestamp;
+    let asked = wz_session_core::policy::SessionPolicy::from_build().reply_auto_timestamp();
     let (stamp, zid) =
         plain_reply_stamp_seen_by(QueryableOptions::new().with_stamp_timestamp(true));
     assert_eq!(stamp, asked.then_some(zid));
@@ -17455,7 +17455,7 @@ fn a_subscription_takes_the_overload_answer_of_the_build_unless_it_says_its_own(
     use wz_session_core::policy::{SessionPolicy, SubscriberOverload};
     assert_eq!(
         SubscribeOptions::default().overload(),
-        SessionPolicy::from_build().subscriber_overload
+        SessionPolicy::from_build().subscriber_overload()
     );
     for own in [
         SubscriberOverload::Block,

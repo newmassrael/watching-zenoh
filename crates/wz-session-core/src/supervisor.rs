@@ -58,9 +58,16 @@ pub use crate::policy::SupervisionAfterExpiry as AfterExpiry;
 pub type BuildSupervisor = Supervisor<{ crate::caps::SUPERVISION_CHECKPOINTS }>;
 
 impl BuildSupervisor {
-    /// A supervisor of the build's size, under the build's `supervision-after-expiry` policy.
+    /// A supervisor of the build's size, under the `supervision-after-expiry` policy of `policy`,
+    /// the snapshot of the runtime that supervises.
+    pub fn for_policy(policy: &crate::policy::SessionPolicy) -> Self {
+        Self::new(policy.supervision_after_expiry())
+    }
+
+    /// [`Self::for_policy`] under the build defaults: the supervisor of a host that does not yet
+    /// hold its runtime's snapshot.
     pub fn for_build() -> Self {
-        Self::new(crate::policy::SessionPolicy::default().supervision_after_expiry)
+        Self::for_policy(&crate::policy::SessionPolicy::defaults())
     }
 }
 
@@ -295,6 +302,32 @@ mod tests {
             .state(crate::caps::SUPERVISION_CHECKPOINTS)
             .is_none());
         assert!(!supervisor.is_healthy());
+    }
+
+    /// A supervisor takes its after-expiry rule from the snapshot it is built with: every value
+    /// the build's domain holds is carried, and the build defaults give the build's.
+    #[test]
+    fn a_supervisor_takes_the_after_expiry_rule_of_its_snapshot() {
+        use crate::policy::SessionPolicy;
+        use crate::policy_binding::PolicyValue;
+        assert_eq!(
+            BuildSupervisor::for_build().after_expiry,
+            AfterExpiry::DEFAULT
+        );
+        for &rule in <AfterExpiry as PolicyValue>::ALL {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_supervision_after_expiry(rule).is_err()
+                || AfterExpiry::DOMAIN.is_singleton()
+            {
+                continue;
+            }
+            assert_eq!(
+                BuildSupervisor::for_policy(&policy).after_expiry,
+                rule,
+                "{}",
+                rule.id()
+            );
+        }
     }
 
     #[test]

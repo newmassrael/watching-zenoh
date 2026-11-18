@@ -794,6 +794,7 @@ pub(crate) fn acceptor_params(
         // board would otherwise copy.
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: SigningKey::from_entropy(entropy)
             .expect("the entropy source produced no signing key"),
     }

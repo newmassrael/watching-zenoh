@@ -524,19 +524,19 @@ mod tests {
     use wz_session_core::policy::SessionPolicy;
 
     fn links_on() -> bool {
-        SessionPolicy::from_build().entity_link_restriction
+        SessionPolicy::from_build().entity_link_restriction()
     }
 
     fn retry_on() -> bool {
-        SessionPolicy::from_build().publisher_admission_retry
+        SessionPolicy::from_build().publisher_admission_retry()
     }
 
     fn atomic_on() -> bool {
-        SessionPolicy::from_build().multi_route_atomic_tx
+        SessionPolicy::from_build().multi_route_atomic_tx()
     }
 
     fn target_on() -> bool {
-        SessionPolicy::from_build().targeted_query
+        SessionPolicy::from_build().targeted_query()
     }
 
     fn some_id() -> z_id_t {

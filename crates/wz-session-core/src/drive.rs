@@ -1538,9 +1538,9 @@ fn refuse_by_sn<R: SessionRuntime, T: TimeSource>(
     use crate::policy::ReliableGapReconnect as Mode;
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     use crate::sn::RxAdmit;
-    // The mode is a constant of the build, so with it `off` (upstream's) the gap test below folds
-    // away and this is the bool gate alone.
-    let mode = crate::policy::SessionPolicy::from_build().reliable_gap_reconnect;
+    // The mode is the session's, from the snapshot its creator handed it. A build whose domain
+    // holds only `off` (upstream's) reads it as a constant, and the gap test below folds away.
+    let mode = actions.params.policy.reliable_gap_reconnect();
     if !reliable || matches!(mode, Mode::Off) {
         return if actions.admit_rx_frame_sn(priority, reliable, sn) {
             None

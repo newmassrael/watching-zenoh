@@ -393,7 +393,7 @@ fn reply_clock_for(
     stamps: bool,
     clock: &crate::node_clock::NodeHlc,
 ) -> Option<crate::node_clock::NodeHlc> {
-    (policy.reply_auto_timestamp && stamps).then(|| clock.clone())
+    (policy.reply_auto_timestamp() && stamps).then(|| clock.clone())
 }
 
 impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
@@ -1003,10 +1003,18 @@ mod tests {
     /// whether this queryable takes part in stamping at all.
     #[test]
     fn a_queryable_gets_the_nodes_clock_only_when_the_policy_is_on_and_it_stamps() {
-        let mut on = wz_session_core::policy::SessionPolicy::default();
-        on.reply_auto_timestamp = true;
+        use wz_session_core::policy::ReplyAutoTimestamp;
+        use wz_session_core::policy_binding::PolicyValue;
+        if ReplyAutoTimestamp::DOMAIN.is_singleton() {
+            // The build allows one value: there is no other snapshot to compare.
+            return;
+        }
+        let mut on = wz_session_core::policy::SessionPolicy::defaults();
+        on.select_reply_auto_timestamp(ReplyAutoTimestamp::On)
+            .expect("the domain holds both values");
         let mut off = on;
-        off.reply_auto_timestamp = false;
+        off.select_reply_auto_timestamp(ReplyAutoTimestamp::Off)
+            .expect("the domain holds both values");
         let clock = crate::node_clock::NodeHlc::disabled();
 
         assert!(reply_clock_for(&on, true, &clock).is_some());

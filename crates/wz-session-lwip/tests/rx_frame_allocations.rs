@@ -181,6 +181,7 @@ fn params(zid: u8) -> SessionInitParams {
         cookie: vec![],
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
             .expect("key"),
     }

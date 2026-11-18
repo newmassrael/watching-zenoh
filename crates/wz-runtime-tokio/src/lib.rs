@@ -4487,7 +4487,7 @@ impl McastSocketConfig<'_> {
             // The build's policy, read here and not carried by a caller's config: every link of
             // this runtime is opened through this conversion, so no caller can leave it out.
             link_requires_iface: wz_session_core::policy::SessionPolicy::from_build()
-                .multicast_link_requires_iface,
+                .multicast_link_requires_iface(),
         }
     }
 }
@@ -4609,7 +4609,7 @@ mod udp_multicast_config_tests {
     #[tokio::test]
     async fn a_link_with_no_interface_is_refused_or_opened_as_the_build_says() {
         let requires =
-            wz_session_core::policy::SessionPolicy::from_build().multicast_link_requires_iface;
+            wz_session_core::policy::SessionPolicy::from_build().multicast_link_requires_iface();
         let opened = UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::default()).await;
         if requires {
             let err = opened

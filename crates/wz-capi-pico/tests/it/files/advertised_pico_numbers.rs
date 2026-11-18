@@ -121,7 +121,7 @@ fn the_init_syn_advertises_the_numbers_the_build_states() {
     );
     // The sequence-number width is the build's `sn-resolution` policy: 32 bits unless it states
     // another, and the request-id width beside it is pico's fixed 32 bits whatever it states.
-    let stated = wz_session_core::policy::SessionPolicy::from_build().sn_resolution;
+    let stated = wz_session_core::policy::SessionPolicy::from_build().sn_resolution();
     // The code is looked up by the width's id and not by `wire_code`, so the table that maps a
     // width to its code is held by the wire too and not by the function that wrote it.
     let expected = match stated.id() {

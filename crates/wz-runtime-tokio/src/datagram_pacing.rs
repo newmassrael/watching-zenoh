@@ -169,7 +169,7 @@ impl Select for Policy<true> {
 
 /// The pacing of this build's writers, by its `datagram-fragment-pacing` policy.
 pub type OfBuild =
-    <Policy<{ SessionPolicy::from_build().datagram_fragment_pacing }> as Select>::Pacing;
+    <Policy<{ SessionPolicy::from_build().datagram_fragment_pacing() }> as Select>::Pacing;
 
 #[cfg(test)]
 mod tests {
@@ -194,7 +194,7 @@ mod tests {
             TypeId::of::<<Policy<true> as Select>::Pacing>(),
             TypeId::of::<Paced>()
         );
-        let on = SessionPolicy::from_build().datagram_fragment_pacing;
+        let on = SessionPolicy::from_build().datagram_fragment_pacing();
         let expected = if on {
             TypeId::of::<Paced>()
         } else {

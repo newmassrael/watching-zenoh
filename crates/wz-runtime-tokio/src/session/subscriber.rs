@@ -42,7 +42,7 @@ impl Default for SubscribeOptions {
             allowed_origin: Locality::default(),
             retraction_key: None,
             expose_timestamp: wz_session_core::timestamp_visibility::default_exposed(),
-            overload: wz_session_core::policy::SessionPolicy::from_build().subscriber_overload,
+            overload: wz_session_core::policy::SessionPolicy::from_build().subscriber_overload(),
         }
     }
 }

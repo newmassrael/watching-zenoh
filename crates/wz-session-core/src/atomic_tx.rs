@@ -93,13 +93,19 @@ pub const fn admit(stated: bool, enabled: bool) -> Result<(), AtomicTxError> {
     }
 }
 
-/// [`admit`] by this build's `multi-route-atomic-tx` policy: the call every entry point that takes
-/// the atomic form from a caller makes.
+/// [`admit`] by the `multi-route-atomic-tx` policy of `policy`, the snapshot of the session the
+/// publish is made on: the call an entry point that holds that snapshot makes.
+pub const fn admit_by(
+    stated: bool,
+    policy: &crate::policy::SessionPolicy,
+) -> Result<(), AtomicTxError> {
+    admit(stated, policy.multi_route_atomic_tx())
+}
+
+/// [`admit_by`] under the build defaults: the call of an entry point that does not yet hold its
+/// session's snapshot.
 pub const fn admit_in_build(stated: bool) -> Result<(), AtomicTxError> {
-    admit(
-        stated,
-        crate::policy::SessionPolicy::from_build().multi_route_atomic_tx,
-    )
+    admit_by(stated, &crate::policy::SessionPolicy::defaults())
 }
 
 #[cfg(test)]
@@ -152,8 +158,31 @@ mod tests {
     fn the_atomic_form_needs_the_policy_on() {
         assert_eq!(admit(true, false), Err(AtomicTxError::PolicyOff));
         assert_eq!(admit(true, true), Ok(()));
-        let in_build = crate::policy::SessionPolicy::from_build().multi_route_atomic_tx;
+        let in_build = crate::policy::SessionPolicy::defaults().multi_route_atomic_tx();
         assert_eq!(admit_in_build(true).is_ok(), in_build);
+    }
+
+    /// The snapshot the atomic form is asked with decides, not the build.
+    #[test]
+    fn the_atomic_form_is_admitted_by_the_snapshot_it_is_asked_with() {
+        use crate::policy::{MultiRouteAtomicTx, SessionPolicy};
+        use crate::policy_binding::PolicyValue;
+        assert_eq!(
+            admit_by(true, &SessionPolicy::defaults()),
+            admit_in_build(true)
+        );
+        assert_eq!(admit_by(false, &SessionPolicy::defaults()), Ok(()));
+        if MultiRouteAtomicTx::DOMAIN.is_singleton() {
+            return;
+        }
+        let mut on = SessionPolicy::defaults();
+        on.select_multi_route_atomic_tx(MultiRouteAtomicTx::On)
+            .expect("the domain holds both values");
+        let mut off = on;
+        off.select_multi_route_atomic_tx(MultiRouteAtomicTx::Off)
+            .expect("the domain holds both values");
+        assert_eq!(admit_by(true, &on), Ok(()));
+        assert_eq!(admit_by(true, &off), Err(AtomicTxError::PolicyOff));
     }
 
     #[test]

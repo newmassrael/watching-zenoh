@@ -835,6 +835,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie: Vec::new(),
             tx_queue: self.config.tx_queue,
             link_rx: self.config.link_rx,
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
