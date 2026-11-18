@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 """R3440 (no register item) -- a drop-in header carries upstream's symbols only; wz's own are wz_ext_.
 
-Decision C10 of docs/build-configuration.md: a drop-in header declares only what its upstream
+Drop-in and extension are separate namespaces: a drop-in header declares only what its upstream
 header declares, and a door wz has and upstream does not is `wz_ext_*`, declared in `wz_ext.h`.
 Then "drop-in" is a claim a compiler can check: a program that includes the drop-in header and
 not `wz_ext.h` is portable to the upstream library, and one that needs `wz_ext.h` says so.

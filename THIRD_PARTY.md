@@ -321,7 +321,7 @@ pinned revision for the generation-time policy.
   of which parse a format returns exists), and each is held to upstream's behaviour by
   `conformance/differential`, which links upstream's crates for the comparison only.
 - **Scope of use**: the crates carry upstream's package names so that a `[patch.crates-io]` entry
-  swaps them in (`docs/build-configuration.md` C13); they are not published to a registry.
+  swaps them in for every crate of the graph; they are not published to a registry.
 
 ## third-party/socket2 — socket2 0.6.3 with one QNX arm changed
 

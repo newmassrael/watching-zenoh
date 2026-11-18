@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # How a wz build answers the PICS proforma (conformance/suite/pics.toml), read from the build's
-# conformance statement (docs/build-configuration.md, decision C15), for each of the two C ABIs
-# whose libraries carry the statement's digest. docs/conformance-suite.md section 4.3 defines
-# every field; crates/wz-conformance-suite holds every row to the proforma and to the
+# conformance statement (what the build states it is, derived from the configuration it was
+# built with), for each of the two C ABIs whose libraries carry the statement's digest.
+# crates/wz-conformance-suite defines every field and holds every row to the proforma and to the
 # declaration (deploy/wz-config.toml).
 #
 # A row answers one item for one ABI in exactly one way:

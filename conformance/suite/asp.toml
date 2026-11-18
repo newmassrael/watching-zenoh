@@ -5,9 +5,8 @@
 # lower tester asks of the upper tester (a request, each answered by one confirm of the test
 # management protocol) and what the upper tester reports (an indication). They are derived from
 # zenoh's services, not from one API: an adapter maps each to its API family, and answers a request
-# its API family has no counterpart for with the result `unsupported`. docs/conformance-suite.md
-# section 8 defines every field; crates/wz-conformance-suite holds the file to it and to
-# tmp.toml.
+# its API family has no counterpart for with the result `unsupported`.
+# crates/wz-conformance-suite defines every field and holds the file to it and to tmp.toml.
 #
 # `code` is the primitive's number on the test management protocol, unique among the primitives.
 # A parameter's `key` is its key in the protocol's parameter map, unique within the primitive;

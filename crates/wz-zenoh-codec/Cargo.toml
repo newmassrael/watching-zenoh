@@ -9,7 +9,7 @@
 # zenoh-codec -- the wire format of the zenoh protocol (version 0x09): the `WCodec`, `RCodec` and
 # `LCodec` traits and the `Zenoh080` codec family that write the messages of `zenoh-protocol` to a
 # `zenoh-buffers` writer and read them back, over watching-zenoh (inventory atom `api-compat-rust`,
-# open-debt item 910, docs/build-configuration.md C13).
+# open-debt item 910: upstream's package name and public API).
 #
 # Named `zenoh-codec` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The codec traits are what

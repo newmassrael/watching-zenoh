@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# Provision the one Kconfig interpreter of the host build configuration (docs/build-configuration.md,
-# decision C11): kconfiglib at the version and hashes scripts/requirements-kconfig.txt pins, in a
-# virtual environment of this checkout (target/kconfig-venv), so a host whose Python is managed by
-# its distribution (PEP 668) needs no system install, and every host resolves with the same copy.
-# scripts/lib/wz_config.py finds it there. Idempotent: a venv that already holds the pinned version
-# is left as it is.
+# Provision the one Kconfig interpreter of the host build configuration (pinned by version and
+# hash; the Zephyr build's copy must resolve the same): kconfiglib at the version and hashes
+# scripts/requirements-kconfig.txt pins, in a virtual environment of this checkout
+# (target/kconfig-venv), so a host whose Python is managed by its distribution (PEP 668) needs no
+# system install, and every host resolves with the same copy. scripts/lib/wz_config.py finds it
+# there. Idempotent: a venv that already holds the pinned version is left as it is.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

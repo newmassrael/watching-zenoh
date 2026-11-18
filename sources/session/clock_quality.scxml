@@ -9,8 +9,8 @@
   A node stamps data with a time read from a clock (`wz_session_core::epoch::EpochSource`). The
   reading says WHAT time it is; this machine says HOW MUCH that reading is worth, so a node that
   must not stamp with a time it does not trust can say so (`clock-quality-stamping`), and a
-  consumer of the node's observations can tell a synchronised clock from a drifting one. The
-  design is `docs/observation-plane.md` M1.
+  consumer of the node's observations can tell a synchronised clock from a drifting one. It is
+  the observation plane's time: a clock with a quality.
 
   Division of labour with the host (the machine owns the states, the host owns the clock):
     - Whether the clock is synchronised, and when it stopped being, is the host's knowledge:

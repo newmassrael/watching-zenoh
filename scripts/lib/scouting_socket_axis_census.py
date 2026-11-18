@@ -107,7 +107,7 @@ VERDICTS: dict[str, tuple[str, str | None, str]] = {
         "needs no routed hop; that is only needed to observe REACH, which the "
         "key does not control. ONE-ENDED: zenohd and one wz node, not two wz nodes.",
     ),
-    # The `multicast-loopback` policy (docs/build-configuration.md, section 5): whether a
+    # The `multicast-loopback` policy (wz's first policy, defaulting to upstream): whether a
     # datagram a socket sends to its group is also delivered to a member on the SAME host.
     # It is the sender's socket option, set on the send-only socket and on the joined one.
     "loopback": (

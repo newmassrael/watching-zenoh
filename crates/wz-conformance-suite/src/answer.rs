@@ -3,11 +3,12 @@
 
 //! A wz build's PICS, read from its conformance statement.
 //!
-//! The statement (decision C15 of docs/build-configuration.md) lists every capability of the
-//! build's ABI with whether the build has it, every limit and policy with its value, and the
-//! ABI's protocol facts. The answer file says which of those answers which PICS item;
-//! [`answer()`] applies it. An item whose value the implementation reads from its configuration
-//! when a session opens is answered by the test environment's PIXIT instead ([`resolve()`]).
+//! The statement, which a build derives from the configuration it was built with, lists every
+//! capability of the build's ABI with whether the build has it, every limit and policy with its
+//! value, and the ABI's protocol facts. The answer file says which of those answers which PICS
+//! item; [`answer()`] applies it. An item whose value the implementation reads from its
+//! configuration when a session opens is answered by the test environment's PIXIT instead
+//! ([`resolve()`]).
 //! The catalogue is what the answer file is checked against: the capabilities, limits, policies
 //! and protocol facts `deploy/wz-config.toml` declares.
 

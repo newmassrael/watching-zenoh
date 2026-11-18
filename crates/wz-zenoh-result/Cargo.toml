@@ -7,7 +7,7 @@
 # THIRD_PARTY.md at the root of this repository).
 #
 # zenoh-result -- the result and error types of the zenoh family, over watching-zenoh (inventory
-# atom `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+# atom `api-compat-rust`, open-debt item 910: upstream's package name and public API).
 #
 # This package is NAMED `zenoh-result`, like upstream's, and versioned as the pinned zenoh. That is
 # the whole design of the family: Cargo's `[patch.crates-io]` swaps a crate by its package name, so a

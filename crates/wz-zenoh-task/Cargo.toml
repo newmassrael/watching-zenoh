@@ -7,7 +7,7 @@
 # THIRD_PARTY.md at the root of this repository).
 #
 # zenoh-task -- the task controller of the zenoh family, over watching-zenoh (inventory atom
-# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+# `api-compat-rust`, open-debt item 910: upstream's package name and public API).
 #
 # Named `zenoh-task` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `zenoh` re-exports its two

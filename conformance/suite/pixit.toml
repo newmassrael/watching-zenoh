@@ -5,8 +5,7 @@
 # test suite (ISO/IEC 9646-4 and -5): what the test system needs to know about one test
 # environment to run the selected tests there. A PICS answer says what the implementation is; a
 # PIXIT answer says where and how it is tested, and it changes no verdict's meaning.
-# docs/conformance-suite.md section 5 defines every field; crates/wz-conformance-suite holds the
-# proforma to it.
+# crates/wz-conformance-suite defines every field and holds the proforma to it.
 #
 # `answer` is "text", "integer" or "choice" (one of `values`). `distinct_from` names another
 # item whose answer this one's must differ from: the test system refuses a test environment

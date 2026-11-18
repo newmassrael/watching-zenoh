@@ -3,8 +3,8 @@
 #
 # Test purposes of the zenoh conformance test suite, transport part (ISO/IEC 9646-1; the
 # structure of ETSI ES 202 553, TPLan): what each test checks, never how or where it runs.
-# docs/conformance-suite.md section 7 defines every field; crates/wz-conformance-suite holds the
-# file to the requirements, the PICS, the configurations and the primitives.
+# crates/wz-conformance-suite defines every field and holds the file to the requirements, the
+# PICS, the configurations and the primitives.
 #
 # `with` is the initial condition, `when` the stimulus and `then` the observation that decides the
 # verdict. The lower tester ("LT") observes and stimulates the wire; the upper tester ("UT") is

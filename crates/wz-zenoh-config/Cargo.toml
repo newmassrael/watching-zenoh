@@ -9,7 +9,7 @@
 # zenoh-config -- the configuration of a zenoh session as Rust types: the `Config` that a user fills
 # in or reads from a JSON5 or YAML file, its validated keys, the defaults of each mode, the
 # connection retry and the quality of service rules, over watching-zenoh (inventory atom
-# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+# `api-compat-rust`, open-debt item 910: upstream's package name and public API).
 #
 # Named `zenoh-config` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `zenoh` takes its `Config`

@@ -9,7 +9,7 @@
 # zenoh-keyexpr -- key expressions of the zenoh family: their syntax, their set semantics (does one
 # include or intersect another), the owned and borrowed forms, key-expression formats and the trees that
 # store values by key expression, over watching-zenoh (inventory atom `api-compat-rust`, open-debt item
-# 910, docs/build-configuration.md C13).
+# 910: upstream's package name and public API).
 #
 # Named `zenoh-keyexpr` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The types of this crate are in

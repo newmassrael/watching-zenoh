@@ -4,8 +4,7 @@
 # The test management protocol of the zenoh conformance test suite (ISO/IEC 9646-2, the
 # coordinated method): what the lower tester and the upper tester say to each other over the TMP
 # channel, which is never the test link's interface (pixit.toml, X-TMP-CHANNEL).
-# docs/conformance-suite.md section 8 defines every field; crates/wz-conformance-suite holds the
-# file to it and to asp.toml.
+# crates/wz-conformance-suite defines every field and holds the file to it and to asp.toml.
 #
 # Every message is one CBOR data item (RFC 8949): a map with unsigned integer keys. Key 0 is the
 # message's kind; the other keys are the message's fields. A field of type `params` is a map from

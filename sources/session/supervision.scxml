@@ -10,7 +10,7 @@
   checkpoint on every pass. If a feed does not come in time, the checkpoint expires, a hook runs
   once, and the node can say that something it supervises has stopped. A node that feeds a
   hardware watchdog feeds it only while every checkpoint is armed, so a hung one stops the feed.
-  The design is `docs/observation-plane.md` M3.
+  It is the observation plane's supervision: a deadline the application feeds.
 
   Division of labour with the host (the machine owns the states, the host owns the clock):
     - Whether a deadline has passed is a comparison of three numbers over the monotonic time

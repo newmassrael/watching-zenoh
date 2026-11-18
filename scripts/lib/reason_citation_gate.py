@@ -172,7 +172,7 @@ def suffix_index(
 
 
 #: The notice a file of the zenoh compatibility family carries when it is upstream's file with a
-#: header changed (`docs/build-configuration.md` C13; the family notice gate requires it).
+#: header changed (the family carries upstream's package names; the family notice gate requires it).
 DERIVED_FROM_UPSTREAM = re.compile(r"Derived from zenoh[\w-]* \d")
 
 

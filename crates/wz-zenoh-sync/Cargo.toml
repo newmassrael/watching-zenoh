@@ -7,7 +7,7 @@
 # THIRD_PARTY.md at the root of this repository).
 #
 # zenoh-sync -- the synchronisation primitives of the zenoh family, over watching-zenoh (inventory
-# atom `api-compat-rust`, docs/build-configuration.md C13).
+# atom `api-compat-rust`: upstream's package name and public API).
 #
 # Named `zenoh-sync` and versioned as the pinned zenoh, like every crate of the family (see
 # `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `zenoh` re-exports its

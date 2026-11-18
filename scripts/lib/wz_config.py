@@ -4,12 +4,13 @@
 """R3398 (no register item) -- the build configuration of wz is declared once; this derives from it.
 
 It carries the capability declaration of R3398 and the limit declaration of R3403 (no register
-item), both now one file, as step 1 of docs/build-configuration.md.
+item), both now one file, the one declaration every derived file of the build configuration is
+generated from.
 
 ## What this is
 
-`deploy/wz-config.toml` declares every switch a build can turn (docs/build-configuration.md,
-decision C1): the capabilities of the C ABI builds (their Kconfig symbol, the ABIs that export
+`deploy/wz-config.toml` declares every switch a build can turn, once, and everything else is
+generated from it: the capabilities of the C ABI builds (their Kconfig symbol, the ABIs that export
 them, what they imply, zenoh-pico's own switch for them) and the limits an image states for
 itself (their Kconfig symbol, default and help). This tool is everything that derives from it:
 
@@ -76,7 +77,7 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --check                       hold every derived file, caps.rs and the three manifests to it
     --selftest                    drive the reader, the derivations and the check on what can be wrong
 
-## Presets (docs/build-configuration.md, decisions C9 and C14)
+## Presets (re-validated strictly; a registered profile is a versioned contract)
 
 A preset is a defconfig fragment that opens with `# wz-preset: 1`, `# catalog: <version>` and
 `# base: <original>` and then lists only what differs from the defaults. It is resolved by the
@@ -1377,8 +1378,8 @@ def validate_facts(facts: list[dict]) -> list[str]:
 
 
 def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
-    """A policy is behaviour upstream does not have (docs/build-configuration.md, C2 and
-    section 5): it is declared with the upstream behaviour it departs from, and it defaults to that
+    """A policy is behaviour upstream does not have, and enters one at a time with its own case:
+    it is declared with the upstream behaviour it departs from, and it defaults to that
     behaviour, so a bool defaults off and a choice defaults to the value that is upstream's."""
     out: list[str] = []
     ids = [p.get("id") for p in policies]
@@ -1804,8 +1805,9 @@ def emit_rust_conformance_items(decl: dict) -> str:
     them as `statement_digest` does."""
     out = generated_header("//", "rust-conformance-items") + [
         "",
-        "//! The questions a conformance statement answers (docs/build-configuration.md, decision C15),",
-        "//! in the declaration's order, and where a build script finds each answer.",
+        "//! The questions a conformance statement answers (a build states what it is, from",
+        "//! the configuration it was built with), in the declaration's order, and where a",
+        "//! build script finds each answer.",
         "",
         "/// `format` of the statement.",
         f"pub const FORMAT: &str = {rust_word(STATEMENT_FORMAT)};",
@@ -1954,7 +1956,7 @@ def emit_statement_vectors(decl: dict) -> str:
                      "statement-vectors. Do not edit: `wz_config.py --check` fails when this file "
                      "is stale.",
         "about": "Builds of the C ABI crates and the conformance digest wz_config.py states for "
-                 "each (docs/build-configuration.md, decision C15). wz-conformance-build's test "
+                 "each, from the configuration each was built with. wz-conformance-build's test "
                  "computes each from the same features and environment and must give the same.",
     }
     lines = ["{"]
@@ -2291,7 +2293,7 @@ def emit_defconfig(decl: dict, original: str) -> str:
     capability it is judged for whose value differs from the Kconfig default."""
     out = generated_header("#", f"defconfig:{original}") + [
         "#",
-        f"# {original}'s own default build in wz's switches (docs/build-configuration.md step 2):",
+        f"# {original}'s own default build in wz's switches (from upstream_on and upstream_off):",
         "# its choice on each global axis, and every capability it is judged for whose value",
         "# differs from the Kconfig default. A capability its ABIs do not reach keeps the default.",
         f"# A preset whose `# base:` is {original} is merged onto this file.",
@@ -2591,8 +2593,8 @@ def resolve(fragments: list[pathlib.Path], kconfiglib=None, original: str | None
     interpreter when not given).
 
     The merge starts from the original the presets name in their `# base:` line: its generated
-    defconfig is merged first (docs/build-configuration.md section 6), so a preset says only how
-    it differs from that original. Presets of two originals are one build of neither and are
+    defconfig is merged first, before any preset, so a preset says only how it differs from that
+    original. Presets of two originals are one build of neither and are
     refused. `original` merges that original's defconfig with no preset (`fragments` empty).
 
     Strict (C9): a symbol the tree does not have, a value outside a symbol's type or range and an
@@ -2682,7 +2684,7 @@ def resolved_policy_env(decl: dict, kconf) -> list[str]:
     return out
 
 
-# The conformance statement of one build (docs/build-configuration.md, decision C15), in the
+# The conformance statement of one build, in the
 # sense of an implementation conformance statement (ISO/IEC 9646-7): what the build exports and
 # the value of every limit and policy it was built with, in the declaration's vocabulary, so
 # that whoever tests the build reads what it is from the build's own configuration instead of

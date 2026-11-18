@@ -3,8 +3,7 @@
 #
 # The conformance requirements of the zenoh conformance test suite: the base layer, transport
 # part.
-# docs/conformance-suite.md section 3 defines every field; crates/wz-conformance-suite holds the
-# list to it.
+# crates/wz-conformance-suite defines every field and holds the list to it.
 #
 # Each requirement is a statement about what an implementation sends or accepts on the wire,
 # written so that a codec and a test purpose can be written from it alone, without reading any

@@ -5,12 +5,12 @@
 """R3406 (no register item) — the BUILD SWITCHES of zenoh-pico and zenoh-c as a
 denominator, and wz's answer to each one as the numerator.
 
-`docs/build-configuration.md` C7: an upstream original is reproduced by naming it,
-which needs every switch that original has to be judged against wz, completely and
+Upstream defconfigs come from a complete map: an upstream original is reproduced by naming
+it, which needs every switch that original has to be judged against wz, completely and
 mechanically. `upstream_feature_census.py` already does this for the `zenoh` crate's
 cargo features; this script is the same instrument for the other two originals wz
 replaces, in the same shape, so that the three tables can move into the single
-declaration of step 1 together.
+declaration (`deploy/wz-config.toml`) together.
 
 ## The population
 
@@ -54,13 +54,13 @@ wz still owes for an upstream original are found at all.
 
 ## Agreement with the capability declaration
 
-The rows live in `deploy/wz-config.toml` (`[[upstream_switch]]`, docs/build-configuration.md
-step 2), and a zenoh-pico `maps` row to a capability IS that capability's pico switch: the
-fact is written once. What is left to agree is a `pico_flags_all`, whose every switch must be
-a `maps` row.
+The rows live in `deploy/wz-config.toml` (`[[upstream_switch]]`, from which the upstream
+defconfigs are generated), and a zenoh-pico `maps` row to a capability IS that capability's
+pico switch: the fact is written once. What is left to agree is a `pico_flags_all`, whose every
+switch must be a `maps` row.
 
 The declaration also states each original's own default (`upstream_on` /
-`upstream_off`, docs/build-configuration.md step 2). Each run holds the original it
+`upstream_off`, which its generated defconfig carries). Each run holds the original it
 grades: the default run every capability zenoh-pico has a switch for against the
 first definition of that switch in the pinned pico CMake (on when every switch the
 capability names is on), `--zenoh-c` every capability a zenoh-c `maps` row reaches

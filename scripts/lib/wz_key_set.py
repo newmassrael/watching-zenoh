@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""R3685 (no register item) -- the closed key set of `docs/closed-key-set.md`, phase 1: the declaration, what it refuses, and
-the table `wz_session_core::key_catalogue::KeyCatalogue` is built over.
+"""R3685 (no register item) -- the closed key set's catalogue, generator and oracle: the
+declaration, what it refuses, and the table `wz_session_core::key_catalogue::KeyCatalogue` is
+built over.
 
     wz_key_set.py --check               the fixture declaration validates, and the two files derived
                                         from it (the table and the matcher corpus) are current

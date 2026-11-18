@@ -1125,7 +1125,7 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # Items 911 and 913 -- 1071 -> 1074, RISING by three: `pico_raweth_on_wz_capi.rs` runs
 # upstream's raweth scenario across the real pico library (its raweth arm) and wz's drop-in
 # both ways, and has the real `z_info.c` adjudicate the member wz reports. Measured by Layer A4.
-# Step 2 of docs/build-configuration.md -- 1074 -> 1075, RISING by one: LEG 1d of
+# Upstream's defconfigs on the interop lanes -- 1074 -> 1075, RISING by one: LEG 1d of
 # `pico_c_examples_on_wz_capi_dropin.rs`, upstream's `z_sub.c` compiled against pico's default
 # header arm and linked to wz's build of that arm (the build `configs/zenoh-pico_defconfig`
 # resolves to), adjudicated by the real pico `z_put`: 1 test x 1 atom (`api-compat-pico`) = 1.

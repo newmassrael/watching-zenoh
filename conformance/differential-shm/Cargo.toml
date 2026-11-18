@@ -3,7 +3,7 @@
 
 # Differential tests of the family's `shared-memory` arms: the same input to upstream's crate and to
 # wz's, and the outputs held equal, as `../differential` does for the arms every build has (inventory
-# atom `api-compat-rust`, docs/build-configuration.md C13).
+# atom `api-compat-rust`: the family carries upstream's package names and public APIs over wz).
 #
 # A second package, because the arm changes the types: with `shared-memory` a `Put` has an `ext_shm`
 # field and a `ZSlice` has a kind, so the struct literals of `../differential` do not compile

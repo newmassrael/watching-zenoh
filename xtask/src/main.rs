@@ -434,9 +434,9 @@ fn regen_statecharts_and_pools(root: &Path) {
         // Decision D5 of docs/session-lifecycle-intent.md — the per-peer
         // connection machine the lifecycle verbs drive.
         "peer_connection",
-        // docs/observation-plane.md M1 — how far the node's clock may be trusted.
+        // The observation plane's time — how far the node's clock may be trusted.
         "clock_quality",
-        // docs/observation-plane.md M3 — a deadline the application feeds.
+        // The observation plane's supervision — a deadline the application feeds.
         "supervision",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
@@ -447,9 +447,9 @@ fn regen_statecharts_and_pools(root: &Path) {
     // primitives of SCE's ADR 0063) is the generator's and not hand-written twice.
     let algorithms = repo_relative(root, &root.join("sources/algorithms"));
     for stem in [
-        // docs/observation-plane.md M3, M4 — whether a span of ticks has passed.
+        // Supervision and the resource snapshot — whether a span of ticks has passed.
         "tick_elapsed",
-        // docs/observation-plane.md M4 — how long until a period is over.
+        // The resource snapshot's sampler — how long until a period is over.
         "tick_until_due",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);

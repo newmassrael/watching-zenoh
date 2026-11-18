@@ -23,7 +23,8 @@ feature set and checks four facts about it:
   5. STATEMENT   the conformance digest the library carries (the NUL-terminated
                  `sha256:<64 hex>` its build script wrote, read out of the binary's bytes) is
                  the digest `wz_config.conformance_statement` gives the case's feature set
-                 (docs/build-configuration.md, decision C15, step 15d). Every case is a build
+                 (the end-to-end check that a library states the configuration it was built
+                 with, read from its own bytes). Every case is a build
                  whose configuration is known, so each is also the end-to-end witness that a
                  library states the build it is.
 

@@ -3,8 +3,8 @@
 #
 # The protocol implementation conformance statement proforma of the zenoh conformance test suite
 # (ISO/IEC 9646-7): the questions an implementation answers about itself, from which the test
-# system selects the test purposes that apply to it. docs/conformance-suite.md section 4 defines
-# every field; crates/wz-conformance-suite holds the proforma to it and to the requirements.
+# system selects the test purposes that apply to it. crates/wz-conformance-suite defines every
+# field and holds the proforma to it and to the requirements.
 #
 # An item is a capability (answer "support": yes or no) or a protocol parameter with a value
 # (answer "value"). Its status is written in ISO/IEC 9646-7's notation: m mandatory, o optional,

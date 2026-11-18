@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The front half of the zenoh conformance test suite, as data a test system reads
-//! (docs/conformance-suite.md).
+//! The front half of the zenoh conformance test suite, as data a test system reads.
 //!
 //! ISO/IEC 9646 builds a conformance test suite in a chain: the conformance requirements, the
 //! test purposes drawn from them, the abstract test suite that realises the purposes, and beside
