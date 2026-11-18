@@ -7782,8 +7782,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         // The aggregate option of an interest that asks for tokens is cleared before anything
         // reads it, for every kind the interest asks for
-        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option for tokens (illegal)`).
-        let aggregate = body.ag() && !body.to();
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option for tokens (illegal)`),
+        // and so is the option of any interest a peer sends
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option from peer (unsupported)`).
+        let from_peer = self
+            .tables
+            .faces
+            .get(&inbound)
+            .is_some_and(|s| peer_whatami_routing(&s.runtime.actions) == WhatAmI::Peer);
+        let aggregate = body.ag() && !body.to() && !from_peer;
         // FUTURE (`f()`) half: STORE the subscriber interest so a matching sub
         // learned LATER is pushed to this face (the pub-before-sub close). CLIENT
         // faces only — zenoh pushes future subs to `whatami==Client` faces
@@ -21179,6 +21186,56 @@ mod tests {
         assert_eq!(run(WIRE_ROUTER), 0, "a router's interest is ignored");
         assert_eq!(run(WIRE_PEER), 1, "a peer's interest is answered");
         assert_eq!(run(WIRE_CLIENT), 1, "a client's interest is answered");
+    }
+
+    /// The aggregate option of a peer's interest is cleared before it is answered
+    /// (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option from peer (unsupported)`):
+    /// a peer that asks for the subscribers of `demo/**` with the option set is told each
+    /// subscriber on its own key, and not one declaration on the interest's key. The control is
+    /// a client, whose option stands.
+    #[test]
+    fn the_aggregate_option_of_a_peers_interest_is_cleared() {
+        let run = |wire| -> (usize, Vec<String>) {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (a, _sa) = face(zid(0xAA), WIRE_CLIENT);
+            let (b, _sb) = face(zid(0xBB), WIRE_CLIENT);
+            let (asker, sink) = face(zid(0xCC), wire);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &b);
+            fwd.register(FaceId(2), &asker);
+            forward_one(&fwd, FaceId(0), declare_sub("demo/a"));
+            forward_one(&fwd, FaceId(1), declare_sub("demo/b"));
+            sink.reset();
+            forward_one(
+                &fwd,
+                FaceId(2),
+                interest_with_mode(7, "demo/**", true, true, true, false, true),
+            );
+            let mut keys: Vec<String> = (0..sink.frame_count())
+                .filter_map(|i| match forwarded_declare(&sink.frame_bytes(i)).body {
+                    DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match d.keyexpr.body {
+                        WireexprOwnedVariant::WireexprLocal(w) => w
+                            .suffix
+                            .as_ref()
+                            .map(|s| s.as_text().into_inner().to_owned()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            keys.sort();
+            (sink.frame_count(), keys)
+        };
+        assert_eq!(
+            run(WIRE_PEER),
+            (3, vec![String::from("demo/a"), String::from("demo/b")]),
+            "a peer is told each subscriber on its own key, then the DeclareFinal"
+        );
+        assert_eq!(
+            run(WIRE_CLIENT),
+            (2, vec![String::from("demo/**")]),
+            "control: a client's aggregate interest is answered on the interest's key"
+        );
     }
 
     /// R2882 — a token stamped with an interest id is an answer, and one from a
