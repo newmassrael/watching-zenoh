@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A running wz router that has joined a multicast group counts what the group delivers in its
-//! resource snapshot (`docs/observation-plane.md` M4), not only what its unicast sessions receive.
+//! resource snapshot (the sampled snapshot of the observation plane), not only what its unicast
+//! sessions receive.
 //!
 //! ## The property
 //!

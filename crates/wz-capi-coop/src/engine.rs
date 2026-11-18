@@ -1643,7 +1643,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Whether the peer of every established link has been told every declaration the session
     /// holds. A session with no link established owes nothing yet, so it is synced, as the slot
-    /// node's is before a client has come (`docs/declaration-sync-pacing.md`, rule 9).
+    /// node's is before a client has come: synced is a statement about established sessions, not
+    /// about whether a session exists.
     pub fn declarations_synced(&self) -> bool {
         self.live().map_or(true, |core| {
             core.0.faces.iter().all(|face| face.replay.finished())

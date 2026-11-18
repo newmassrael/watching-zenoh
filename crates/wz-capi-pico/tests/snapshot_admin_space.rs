@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 //! The resource snapshot a program has taken is a document of its admin space, asked by a peer
-//! (`docs/observation-plane.md` M4).
+//! (the sampled snapshot of the observation plane).
 //!
 //! One test, in a process of its own, because the sampler is the process's and a snapshot taken
 //! here would show in any admin space of the same process. The listener starts its admin space; a

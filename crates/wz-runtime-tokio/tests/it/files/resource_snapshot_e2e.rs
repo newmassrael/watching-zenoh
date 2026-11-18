@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #![cfg(all(feature = "resource-snapshot", feature = "transport-unicast"))]
 
-//! `resource-snapshot` (`docs/observation-plane.md` M4) — a real driven session spaces the
-//! transport messages it receives.
+//! `resource-snapshot` (the sampled snapshot of the observation plane) — a real driven session
+//! spaces the transport messages it receives.
 //!
 //! Two wz nodes handshake over a loopback TCP link to Established, as the `transport-stats`
 //! end-to-end test does. Every inbound unit goes through the receive path's one counting seam, so

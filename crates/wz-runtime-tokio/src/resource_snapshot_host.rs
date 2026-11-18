@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A hosted node's resource snapshot: what the operating system answers, and the task that takes
-//! a snapshot on the period (`docs/observation-plane.md` M4).
+//! a snapshot on the period (the sampled snapshot of the observation plane).
 //!
 //! The snapshot, its sampler and the message counter are `wz_session_core::resource_snapshot`'s
 //! and carry no platform. This module is the hosted platform's half: [`HostResourceSource`] asks

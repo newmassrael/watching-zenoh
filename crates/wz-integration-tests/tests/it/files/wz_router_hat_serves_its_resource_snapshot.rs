@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A running wz router serves its resource snapshot (`docs/observation-plane.md` M4) at
-//! `wz/@/<zid>/snapshot`, beside its capacity report, outside upstream's admin space and behind the
-//! same admin read permit.
+//! A running wz router serves its resource snapshot (the sampled snapshot of the observation
+//! plane) at `wz/@/<zid>/snapshot`, beside its capacity report, outside upstream's admin space and
+//! behind the same admin read permit.
 //!
 //! ## The properties
 //!

@@ -163,19 +163,19 @@ pub mod config;
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
 // The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable
-// surface (docs/observation-plane.md M1).
+// surface (the clock of the observation plane).
 #[cfg(feature = "clock-source")]
 pub mod clock_source;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
-// (docs/observation-plane.md M2).
+// (the event ring of the observation plane).
 pub mod encoding;
 pub mod entity;
 #[cfg(feature = "event-ring")]
 pub mod event_log;
 // The node's supervisor, driven from C: wz doors (`wz_ext.h`) of the unstable surface
-// (docs/observation-plane.md M3).
+// (the supervision deadline of the observation plane).
 mod ffi;
 #[cfg(feature = "query")]
 pub mod get;

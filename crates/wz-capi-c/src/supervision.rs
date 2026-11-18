@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_capi_c_supervision_*`: the node's supervisor, driven from C
-//! (`docs/observation-plane.md` M3).
+//! `wz_capi_c_supervision_*`: the node's supervisor, driven from C (the deadline the application
+//! feeds, an instrument of the observation plane).
 //!
 //! A door wz has and zenoh-c has not, so each carries the `wz_capi_c_` prefix and is declared in
 //! `wz_capi_c.h`. A program that must keep making progress starts a checkpoint with a timeout and

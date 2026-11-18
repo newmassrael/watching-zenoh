@@ -491,7 +491,8 @@ pub use buffered::{BufferedDrainStage, BufferedRegistry};
 #[cfg(feature = "transport-unicast")]
 pub(crate) use buffered::BufferedWork;
 /// A subscription whose callback runs on a task of its own, over a bounded delivery lane
-/// (`docs/rx-delivery-lane.md`, phase 3a): [`Session::declare_subscriber_offloaded`].
+/// (the receive delivery lane, one lane per offloaded subscription):
+/// [`Session::declare_subscriber_offloaded`].
 #[cfg(feature = "transport-unicast")]
 mod offload;
 #[cfg(feature = "transport-unicast")]
@@ -4949,8 +4950,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         })
     }
 
-    /// Whether this session's declarations are in step with its peer right now
-    /// (`docs/declaration-sync-pacing.md`, phase 3): no paced replay is still owed to the peer, and
+    /// Whether this session's declarations are in step with its peer right now (the synced state
+    /// of `declaration-sync-pacing`): no paced replay is still owed to the peer, and
     /// every interest this node sent that asks for what exists now has been answered by its final,
     /// or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS`. A session that sent no such interest and
     /// replays nothing is synced.

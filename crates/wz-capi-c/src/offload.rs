@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A subscriber whose callback runs off the receive path, as C doors (`rx-callback-offload`,
-//! `docs/rx-delivery-lane.md`).
+//! A subscriber whose callback runs off the receive path, as C doors (`rx-callback-offload`, the
+//! receive delivery lane).
 //!
 //! ## What the door does
 //!

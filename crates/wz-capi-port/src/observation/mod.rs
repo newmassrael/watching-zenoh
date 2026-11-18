@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! What the doors of the observation plane do, for every C ABI and every engine
-//! (`docs/observation-plane.md`).
+//! What the doors of the observation plane do, for every C ABI and every engine.
 //!
 //! The four instruments (the clock a program registers, the event log, the supervisor and the
 //! resource snapshot) are wz's own: no upstream library has a counterpart, so a C program reaches

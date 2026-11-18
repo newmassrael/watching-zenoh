@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The node's supervisor driven through the C doors (`docs/observation-plane.md` M3).
+//! The node's supervisor driven through the C doors (the deadline the application feeds, an
+//! instrument of the observation plane).
 //!
 //! One test, in a process of its own, because the supervisor is the process's: the arms run in
 //! order against it. They use real time (a deadline of 100 ms and a sleep past it), with no

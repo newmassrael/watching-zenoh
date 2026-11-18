@@ -3,11 +3,11 @@
 
 //! `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and `wz_ext_clock_report`: the
 //! clock a program registers, and what it tells the library about whether that clock is
-//! synchronised (`docs/observation-plane.md` M1).
+//! synchronised (the clock of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`
-//! (docs/build-configuration.md, decision C10), and part of the unstable surface: a build without
-//! `unstable-api` carries none of it.
+//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
+//! build without `unstable-api` carries none of it.
 //!
 //! A device often has a better clock than the system's, a disciplined hardware clock or a time
 //! master on its bus. A program registers it as a read callback, and `z_timestamp_new` then stamps

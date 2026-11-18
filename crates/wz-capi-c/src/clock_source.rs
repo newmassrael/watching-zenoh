@@ -3,7 +3,7 @@
 
 //! `wz_capi_c_clock_source_register`, `wz_capi_c_clock_source_unregister` and
 //! `wz_capi_c_clock_report`: the clock a program registers, and what it tells the library about
-//! whether that clock is synchronised (`docs/observation-plane.md` M1).
+//! whether that clock is synchronised (the clock of the observation plane).
 //!
 //! A door wz has and zenoh-c has not, so each carries the `wz_capi_c_` prefix and is declared in
 //! `wz_capi_c.h`, not in upstream's header. A zenoh-c node stamps with its own clock; a device

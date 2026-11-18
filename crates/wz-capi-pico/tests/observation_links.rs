@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The links between the instruments of the observation plane, through the C doors
-//! (`docs/observation-plane.md`, step 6).
+//! The links between the instruments of the observation plane, through the C doors.
 //!
 //! One test, in a process of its own, because the clock registry, the event log, the supervisor and
 //! the sampler are the process's: the arms run in order against them.

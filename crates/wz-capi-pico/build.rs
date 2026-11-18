@@ -9,7 +9,7 @@
 
 fn main() {
     wz_cdylib_build::emit_soname("wz_capi_pico");
-    // The conformance digest of this build (docs/build-configuration.md, decision C15), which
+    // The conformance digest of this build, read from the configuration it was built with, which
     // `wz_ext_conformance_digest` hands out (`src/conformance.rs`).
     wz_conformance_build::emit("pico");
 }

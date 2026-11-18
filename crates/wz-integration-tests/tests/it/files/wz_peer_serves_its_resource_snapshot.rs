@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A running wz peer that serves its admin space (`--config-queryable`) serves its resource
-//! snapshot (`docs/observation-plane.md` M4) at `wz/@/<zid>/snapshot`, outside upstream's admin
-//! space and behind the same admin read permit, as a router does
+//! snapshot (the sampled snapshot of the observation plane) at `wz/@/<zid>/snapshot`, outside
+//! upstream's admin space and behind the same admin read permit, as a router does
 //! (`wz_router_hat_serves_its_resource_snapshot`).
 //!
 //! - **It is served.** A wz session GETs the key and the one reply is the snapshot's JSON, taken

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The conformance digest of this build (docs/build-configuration.md, decision C15).
+//! The conformance digest of this build: a build states what it is, read from the configuration
+//! it was built with, not from a hand-kept list.
 //!
 //! `wz_config.py --conformance-statement pico CONFIG` (and its presets and original routes)
 //! prints what a build of this library is: every capability the pico ABI exports with whether the

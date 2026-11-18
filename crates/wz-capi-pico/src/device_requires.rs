@@ -4,9 +4,9 @@
 //! `wz_ext_config_device_requires`: what pico's open of a config would ask of the operating system
 //! (docs/target-build-contract.md T9), one JSON object with the manifest's keys.
 //!
-//! A door wz has and zenoh-pico does not, so it is `wz_ext_*` and declared in `wz_ext.h`
-//! (docs/build-configuration.md, decision C10), and part of the unstable surface: a build without
-//! `unstable-api` (the size-measured client builds) carries none of it.
+//! A door wz has and zenoh-pico does not, so it is `wz_ext_*` and declared in `wz_ext.h` (the
+//! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
+//! build without `unstable-api` (the size-measured client builds) carries none of it.
 //!
 //! It reads the config as [`z_open`](crate::session::z_open) does (`open_config`, the TLS
 //! material, pico's group rule) into the engine-neutral facts of `wz_session_core::facilities`, and

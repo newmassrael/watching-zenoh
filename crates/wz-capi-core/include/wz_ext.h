@@ -4,11 +4,11 @@
  *
  * wz_ext.h -- the C doors wz has and the upstream libraries do not.
  *
- * The drop-in headers declare upstream's functions only (docs/build-configuration.md,
- * decision C10): a program that includes a drop-in header and not this one is portable to
- * the upstream library. Every function of wz's own is `wz_ext_*` and declared here, so a
- * program that needs one says so by including this file, and the compiler tells it what is
- * not portable. scripts/lib/drop_in_header_gate.py holds both halves.
+ * The drop-in headers declare upstream's functions only, drop-in and extension being
+ * separate namespaces: a program that includes a drop-in header and not this one is
+ * portable to the upstream library. Every function of wz's own is `wz_ext_*` and declared
+ * here, so a program that needs one says so by including this file, and the compiler tells
+ * it what is not portable. scripts/lib/drop_in_header_gate.py holds both halves.
  *
  * Include the drop-in header of the library first; the declarations here use its types.
  */
@@ -283,8 +283,8 @@ size_t wz_ext_snapshot_size(void);
  * length. */
 z_result_t wz_ext_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
 
-/* The conformance digest of this build (docs/build-configuration.md,
- * decision C15): "sha256:" and 64 lowercase hex digits, NUL-terminated and
+/* The conformance digest of this build, read from the configuration it
+ * was built with: "sha256:" and 64 lowercase hex digits, NUL-terminated and
  * static. It is the digest wz_config.py prints in the conformance statement
  * of the configuration the library was built with (every capability of the
  * ABI and whether the build has it, every limit and policy value), so a

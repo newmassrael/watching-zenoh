@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! `wz_capi_c_event_emit`, `wz_capi_c_event_read`, `wz_capi_c_event_release` and
-//! `wz_capi_c_event_dropped`: the node's event log, written and read from C
-//! (`docs/observation-plane.md` M2).
+//! `wz_capi_c_event_dropped`: the node's event log, written and read from C (the event ring of
+//! the observation plane).
 //!
 //! A door wz has and zenoh-c has not, so each carries the `wz_capi_c_` prefix and is declared in
 //! `wz_capi_c.h`. An event is a level, a source and up to `EVENT_RECORD_ARGS` integers. It carries

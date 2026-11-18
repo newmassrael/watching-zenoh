@@ -262,7 +262,7 @@ pub use wz_runtime_core as runtime_core;
 // neither used internally nor exposed); a consumer wanting a Lua engine
 // adds `sce-rust-lua` to its own manifest directly.
 
-/// What wz has and the zenoh crate does not (decision C10 of `docs/build-configuration.md`).
+/// What wz has and the zenoh crate does not, in a namespace of its own apart from upstream's.
 ///
 /// The Rust compatibility surface carries upstream's names only, as the drop-in C headers do,
 /// so a program that reaches for something here says by its path that it is not portable to

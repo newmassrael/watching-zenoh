@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The node's resource snapshot, taken and read from C (`docs/observation-plane.md` M4).
+//! The node's resource snapshot, taken and read from C (the sampled snapshot of the observation
+//! plane).
 //!
 //! The node does not sample on its own: the program polls ([`poll`]), the sampler takes a snapshot
 //! when its period has passed, and the program reads the latest ([`read_latest`]). A snapshot is

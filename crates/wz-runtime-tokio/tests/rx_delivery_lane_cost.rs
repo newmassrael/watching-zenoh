@@ -9,7 +9,7 @@
 ))]
 
 //! What taking a subscriber's callback off the receive path costs, and what it buys
-//! (`docs/rx-delivery-lane.md`, phase 6).
+//! (the receive delivery lane, measured on one machine in one condition: a reading, not a gate).
 //!
 //! The lane is a claim about two things, and this file measures each beside the code it is
 //! compared with, in one process, one runtime and one condition:

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_supervision_*`: the node's supervisor, driven from C (`docs/observation-plane.md` M3).
+//! `wz_ext_supervision_*`: the node's supervisor, driven from C (the deadline the application
+//! feeds, an instrument of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`
-//! (docs/build-configuration.md, decision C10), and part of the unstable surface: a build without
-//! `unstable-api` carries none of it.
+//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
+//! build without `unstable-api` carries none of it.
 //!
 //! A program that must keep making progress starts a checkpoint with a timeout and feeds it on every
 //! pass. It calls `wz_ext_supervision_check` on its own cadence, which finds the checkpoints whose

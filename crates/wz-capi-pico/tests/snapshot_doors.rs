@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The node's resource snapshot taken and read through the C doors (`docs/observation-plane.md`
-//! M4).
+//! The node's resource snapshot taken and read through the C doors (the sampled snapshot of the
+//! observation plane).
 //!
 //! One test, in a process of its own, because the sampler is the process's: the arms run in order
 //! against it. Two sessions handshake over loopback, so the listening one has received the
