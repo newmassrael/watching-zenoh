@@ -78,6 +78,7 @@
   admin face 0: Admin { leg: "publisher", keyexpr: "p/**", routers: [], peers: [], clients: ["cccccccc"] }
   admin face 0: Admin { leg: "querier", keyexpr: "q/**", routers: [], peers: ["aaaaaaaa"], clients: [] }
 11: Down(0)
+  data face 1: Other("declare")
   graph face 0: Graph { nodes: 1, edges: 0 }
   admin face 0: Admin { leg: "publisher", keyexpr: "p/**", routers: [], peers: [], clients: ["cccccccc"] }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
