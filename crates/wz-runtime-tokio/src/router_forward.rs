@@ -17969,8 +17969,8 @@ mod tests {
         fwd.tick();
 
         let base = deny_put_policy("demo/**", AclFlow::Ingress);
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: vec![AclRule {
                     usernames: vec![
@@ -17979,8 +17979,7 @@ mod tests {
                     ..base.rules()[0].clone()
                 }],
             })),
-            ..Default::default()
-        });
+        );
 
         let put = || {
             NetworkMessage::Push(Box::new(
@@ -18013,10 +18012,9 @@ mod tests {
         // at the top of forward(): not counted as received data, not routed to the
         // interested child C, and witnessed.
         let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_policy("demo/**", AclFlow::Ingress)),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**", AclFlow::Ingress)),
+        );
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
@@ -18041,10 +18039,9 @@ mod tests {
         // to the subscriber C is dropped at fan_out_tier's admit_outbound gate and
         // witnessed.
         let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_policy("demo/**", AclFlow::Egress)),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**", AclFlow::Egress)),
+        );
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
@@ -18109,10 +18106,9 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
         forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_policy("demo/**", AclFlow::Egress)),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**", AclFlow::Egress)),
+        );
         sink_good.reset();
         sink_bad.reset();
 
@@ -18169,8 +18165,8 @@ mod tests {
         // Same keyexpr, same flow, same action as the deny that stopped both
         // clients above — only the SUBJECT differs, and it names a peer that is
         // neither of them.
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: vec![AclRule {
                     subject: SubjectSelector::Zid(zid(0xAA)),
@@ -18184,8 +18180,7 @@ mod tests {
                     cert_common_names: Vec::new(),
                 }],
             })),
-            ..Default::default()
-        });
+        );
         sink_good.reset();
         sink_bad.reset();
 
@@ -18265,10 +18260,9 @@ mod tests {
     #[test]
     fn the_router_ingress_interceptor_cache_is_invalidated_by_a_live_reconfigure() {
         let (fwd, sink_client) = cache_witness_topology();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_on(AclFlow::Ingress, "other/**")),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_on(AclFlow::Ingress, "other/**")),
+        );
         sink_client.reset();
 
         // Phase 1 — admitted, and (face 0, demo/data) is computed once.
@@ -18295,10 +18289,9 @@ mod tests {
         assert_eq!(fwd.interceptor_dropped(), 0, "phase 2: still admitted");
 
         // The LIVE swap: deny demo/** on ingress, on the running router.
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_on(AclFlow::Ingress, "demo/**")),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_on(AclFlow::Ingress, "demo/**")),
+        );
         sink_client.reset();
 
         // Phase 3 — the stored table is stale, recomputed, and the Put drops.
@@ -18331,10 +18324,9 @@ mod tests {
     #[test]
     fn the_router_egress_interceptor_cache_is_invalidated_by_a_live_reconfigure() {
         let (fwd, sink_client) = cache_witness_topology();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_on(AclFlow::Egress, "other/**")),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_on(AclFlow::Egress, "other/**")),
+        );
         sink_client.reset();
 
         // Phase 1 — relayed, and (face 1, demo/data) is computed once on egress.
@@ -18362,10 +18354,9 @@ mod tests {
         assert_eq!(fwd.interceptor_dropped(), 0, "phase 2: nothing dropped");
 
         // The LIVE swap: deny demo/** on EGRESS.
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_on(AclFlow::Egress, "demo/**")),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_on(AclFlow::Egress, "demo/**")),
+        );
         sink_client.reset();
 
         // Phase 3 — stale, recomputed, and the relay stops at the egress gate.
@@ -18405,10 +18396,9 @@ mod tests {
     #[test]
     fn a_departed_face_leaves_no_router_verdict_behind() {
         let (fwd, sink_client) = cache_witness_topology();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_on(AclFlow::Egress, "other/**")),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_on(AclFlow::Egress, "other/**")),
+        );
         sink_client.reset();
 
         forward_one(&fwd, FaceId(0), demo_put());
@@ -18452,10 +18442,9 @@ mod tests {
         // (admin/**), so the demo/data relay reaches C exactly as without an ACL —
         // proving the gate is a filter, not a block.
         let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_policy("admin/**", AclFlow::Egress)),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("admin/**", AclFlow::Egress)),
+        );
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
@@ -27133,13 +27122,12 @@ mod tests {
     #[test]
     fn client_token_withdraw_reaches_a_reader_under_an_access_control_that_allows_all() {
         let fwd = RouterForwarder::new(zid(0x01));
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: Vec::new(),
             })),
-            ..Default::default()
-        });
+        );
         let (a, _sa) = face(zid(0xAA), WIRE_CLIENT); // token holder
         let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT); // future reader
         fwd.register(FaceId(0), &a);
@@ -29764,10 +29752,9 @@ mod tests {
         fwd.register(FaceId(1), &queryable);
         fwd.tick();
         forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_query_on(AclFlow::Ingress)),
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(deny_query_on(AclFlow::Ingress)),
+        );
         sink_querier.reset();
         sink_queryable.reset();
 
@@ -29797,10 +29784,7 @@ mod tests {
         fwd.register(FaceId(1), &queryable);
         fwd.tick();
         forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_query_on(AclFlow::Egress)),
-            ..Default::default()
-        });
+        fwd.set_interceptors(InterceptorConfig::default().with_acl(deny_query_on(AclFlow::Egress)));
         sink_querier.reset();
         sink_queryable.reset();
 

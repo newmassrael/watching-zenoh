@@ -727,9 +727,10 @@ and one of the index, so a change that reaches more than half of the routes now 
 memo empty and puts back the routes it does not reach (`Kept::without` in `route_cache.rs`), and
 one that reaches every route, as one changed key's walk of the index or the scan counts it, puts
 nothing back. The walk itself also costs more a route found than the scan costs a route tried, so
-the walk for a changed key stops once it has found more than half of the routes
-(`KeyexprIndex::intersecting_within`), and that key is asked of every route instead, exactly as a
-memo with no index asks it; a key that meets one route or none walks as before. The mesh legs
+the walk for a changed key stops once it has found more than one route in eight
+(`KeyexprIndex::intersecting_within`, `WALK_SHARE` in `route_cache.rs`), and that key is asked of
+every route instead, exactly as a memo with no index asks it; a key that meets one route or none
+walks as before, in a memo of eight routes or more. The mesh legs
 keep no index: a move of their inputs starts their memo empty, so they never ask which routes a
 key reaches. A memo built with no index still finds the routes by the
 scan, which is the form the instrument measures the index against; in test builds a memo can be
@@ -800,8 +801,9 @@ instrument in a process of its own, `uptime` recorded per run, two or three runs
   others); the forms take turns in one process. `scan` and `index` take each route a change
   reaches out one by one, the forms the first reading below was taken of; `index_wholesale` starts
   the memo from the routes that stay, its index walked to the end, the form the second reading
-  adds; and `index_bounded`, the memo as the router builds it now, also stops the walk past half
-  of the routes. Its lines are the writer's bring of the client leg's memo, the
+  adds; and `index_bounded`, the memo as the router builds it now, also stops the walk past a
+  bound (half of the routes in the third reading, one in eight since). Its lines are the writer's
+  bring of the client leg's memo, the
   part of a publish this changes, for a key no route meets, a key one route meets and a key every
   route meets, and a reader's miss and hit with and without the index.
 - A delivery's face lookups: `cargo test -p wz-runtime-tokio --release --features
@@ -908,12 +910,29 @@ so only the forms' order within the run is read), the median microseconds of the
 - It is still 1.4 to 5.6 times the scan, and what is left is the walk of the index: each member
   found is a state visited and kept in the walk's set, about 0.26 us a route at 2,048 keys and
   1.0 us at 65,536, where the scan tries a route in 0.19 us at both.
-- So the walk for a changed key now stops once it has found more than half of the routes, and the
-  key is asked of every route instead; the instrument times that form as `index_bounded`. The bound
-  stops a walk that will find every route halfway, so its cost is the half walk and the scan: by the
-  per-route costs above, still more than the scan alone at 65,536 keys. A lower bound would cost
-  less there and would send keys that meet fewer routes to the scan too; the bound is half until
-  the reading of `index_bounded`, which is not taken yet, says otherwise.
+- So the walk for a changed key was made to stop once it had found more than half of the routes,
+  and the key is asked of every route instead; the instrument times that form as `index_bounded`.
+  A bound of half stops a walk that will find every route halfway, so its cost is the half walk and
+  the scan: by the per-route costs above, still more than the scan alone at 65,536 keys.
+
+A third reading, on pc2, one run, the walk bounded at half of the routes, the median microseconds
+of the writer's bring for a key that meets every route (the other two writes are within each
+other's spread in every form but `scan`):
+
+| Keys kept | `scan` | `index` | `index_wholesale` | `index_bounded` (half) |
+|---|---|---|---|---|
+| 256 | 47.3 | 181.8 | 70.2 | 51.2 |
+| 2,048 | 413.5 | 1,826.8 | 753.1 | 516.9 |
+| 16,384 | 4,814.5 | 23,882.3 | 9,456.4 | 8,116.9 |
+| 65,536 | 13,734.6 | 116,907.7 | 72,453.7 | 68,206.5 |
+
+- Half is not enough: the bounded form is 1.1 to 5.0 times the scan, and at 65,536 keys barely
+  under the unbounded walk, as the per-route costs said it would be.
+- The bound is now one route in eight (`WALK_SHARE`). The walk costs about 1.0 us a route it finds
+  at 65,536 keys and the scan about 0.2 us a route it tries, so a walk that finds `f` of `n` routes
+  pays while `f` is under `n / 5`; one in eight stops it inside that. A key that meets one route
+  or none still walks (in a memo of eight routes or more), and its bring stays where the readings
+  above put it. The reading of this bound is not taken yet.
 
 *A delivery's face lookups.* The median nanoseconds a delivery took to find its faces and read
 each one's tier, by id in the version's face table and from state the route held, run 1; run 2:
@@ -981,8 +1000,9 @@ lookups by id of the same run: 0.5 to 0.8 ns a face, against 4.5 to 10.
   that reaches one route or none, at 11 to 57 % more for a reader's miss. A change that reaches more
   than half of the routes now starts the new memo from the routes that stay, which took 41 to 66 %
   off a change that meets every route and left it 1.4 to 5.6 times the scan; the walk that finds
-  those routes now stops past half of them and the scan finishes the key. That bounded form's
-  reading, and where between one route and every route the break-even lies, are not taken.
+  those routes now stops past one route in eight and the scan finishes the key (bounded at half,
+  it was still 1.1 to 5.0 times the scan). The reading of the bound of one in eight, and where
+  between one route and every route the break-even lies, are not taken.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).
