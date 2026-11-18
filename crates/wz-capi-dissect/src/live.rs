@@ -1084,7 +1084,8 @@ impl LiveDissection {
     /// The document is the one the whole-capture door writes over a capture that
     /// kept every one of those messages, and its `observed` says how many it
     /// counts (`messages`), how many of them the lists no longer hold
-    /// (`trimmed`) and the packets the first and the last resolve to.
+    /// (`trimmed`) and the `interval` of capture packets the first and the last
+    /// stand at.
     ///
     /// # What it costs
     ///

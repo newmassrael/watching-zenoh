@@ -4327,9 +4327,9 @@ int main(void) {
      * 24: `fragment_chains.aborted_superseded` counts the chains a restart
      * stranded, off the router's word for the other chain a fragment ended;
      * it read 0 on every capture before. Values move under stationary keys.
-     * 25: the document gains `observed` (`messages`, `trimmed`,
-     * `first_packet`, `last_packet`), and a live handle's census goes on
-     * across a front trim, counting what its planes folded since they began. */
+     * 25: the document gains `observed` (`messages`, `trimmed`, and the
+     * packet `interval` they span), and a live handle's census goes on across
+     * a front trim, counting what its planes folded since they began. */
     revisioned[0].revision = 25;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);

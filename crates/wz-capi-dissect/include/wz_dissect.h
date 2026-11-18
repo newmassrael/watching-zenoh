@@ -7221,13 +7221,17 @@ int wz_dissect_pcap_local_options_of_link_type(
  * container door's for the same packets. Its "observed" object says what it
  * covers:
  *
- *     "observed":{"messages":M,"trimmed":T,"first_packet":P,"last_packet":Q}
+ *     "observed":{"messages":M,"trimmed":T,
+ *                 "interval":{"offset_space":"packet","first":P,"last":Q}}
  *
  * M is the transport messages folded since the planes began, T how many of
  * those the lists no longer hold (0 for every container door, and for a
- * handle until it is trimmed), and P and Q the capture packets the first and
- * the last of them resolve to (null when none was folded). A reader that
- * wants a census of what is held only reads T > 0 as "this is history".
+ * handle until it is trimmed), and the interval where the first and the last
+ * of them stand, in the shape of a keyexpr row's anchor_intervals entry
+ * (null when none was folded). Its space is the capture PACKET on every link,
+ * a stream's included, because the census folds each message at the packet
+ * that carried it; the planes' own anchors keep their own spaces. A reader
+ * that wants a census of what is held only reads T > 0 as "this is history".
  *
  * WHAT A CALL COSTS. The planes are kept between calls, for the selector of
  * the last call, so a census drawn again folds the messages that arrived,
