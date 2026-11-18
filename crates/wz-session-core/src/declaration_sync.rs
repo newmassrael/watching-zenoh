@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! What a session still waits for from its peer before its declarations are SYNCED
-//! (`docs/declaration-sync-pacing.md`, phase 3).
+//! (`declarations_synced` and `wait_declarations_stable`, which the heap session answers).
 //!
 //! # What "synced" means
 //!

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! What delivering a peer's message costs on an open table and on a closed one
-//! (`docs/closed-key-set.md`, phase 3b), measured in one process and one condition: the same
-//! subscribers, the same keys, the same samples, and only the gate differs.
+//! What delivering a peer's message costs on an open table and on a closed one (a closed one
+//! looks the key up once and reaches the subscribers by the key's number), measured in one
+//! process and one condition: the same subscribers, the same keys, the same samples, and only the
+//! gate differs.
 //!
 //! Two shapes of traffic:
 //!

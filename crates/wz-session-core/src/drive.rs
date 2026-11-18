@@ -234,8 +234,8 @@ fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
 /// (`io/zenoh-transport/src/unicast/universal/rx.rs` @ `stats.inc_transport_message(zenoh_stats::Rx, 1);`).
 ///
 /// `resource-snapshot` — the same message is spaced from the one before it on the
-/// session's own clock (`docs/observation-plane.md` M4), so the two instruments
-/// count the same messages from one seam and cannot disagree about which they are.
+/// session's own clock, so the two instruments count the same messages from one seam
+/// and cannot disagree about which they are.
 /// Either feature alone puts the seam in the build; with both off it is absent.
 #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
 fn note_rx_transport_message<R: SessionRuntime, T: TimeSource>(actions: &SessionLinkActions<R, T>) {

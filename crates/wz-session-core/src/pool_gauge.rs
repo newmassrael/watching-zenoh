@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! What a fixed pool says of itself, the same way for every pool (`pool-monitor`,
-//! `docs/pool-monitor.md`).
+//! What a fixed pool says of itself, the same way for every pool (`pool-monitor`).
 //!
 //! A fixed pool is a table or a stage of declared capacity: it holds at most `N` entries and
 //! refuses the next one. Each already counts what it refused, and each counted it in a field of

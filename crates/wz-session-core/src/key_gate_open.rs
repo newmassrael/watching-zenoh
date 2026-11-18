@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The key gate of a build that has no closed key set (`docs/closed-key-set.md`): the module a
-//! build without the `key-set-closed` feature has in the place of `key_gate`.
+//! The key gate of a build that has no closed key set: the module a build without the
+//! `key-set-closed` feature has in the place of `key_gate`.
 //!
 //! # What it is
 //!

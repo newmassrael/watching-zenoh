@@ -1,4 +1,4 @@
-# The key set the model test of the key catalogue runs on (docs/closed-key-set.md, decision D3).
+# The key set the model test of the key catalogue runs on (the glob matcher is its oracle).
 #
 # It is a declaration in the shape of a node's entities, written to exercise the matcher and not to
 # be a node: every kind, a key two kinds share, and wildcards of every sort over the concrete keys

@@ -1709,9 +1709,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// decorator. A refused reply is not counted as fired: the return value is
     /// the number of callers that actually saw it.
     ///
-    /// A closed key set also drops a reply a PEER sent on a key outside the set
-    /// (`docs/closed-key-set.md`), at the same seam, so no path skips it: an error reply names no
-    /// key and a reply of the application's own (loopback) is not a peer's, so neither is gated.
+    /// A closed key set also drops a reply a PEER sent on a key outside the set, at the same seam,
+    /// so no path skips it: an error reply names no key and a reply of the application's own
+    /// (loopback) is not a peer's, so neither is gated.
     fn fire_replies_for(&mut self, reply: &dyn ReplyView, from_peer: bool) -> usize {
         if from_peer
             && reply.kind() != crate::reply_sink::ReplyKind::Err

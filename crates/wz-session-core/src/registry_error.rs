@@ -44,7 +44,7 @@ pub enum RegisterError {
     /// produces it.
     KeyexprTooLong,
     /// The image is built with a closed key set and does not declare this entity on this key
-    /// (`docs/closed-key-set.md`). Produced only by the subscriber table of a closed build.
+    /// (`key-set-closed`). Produced only by the subscriber table of a closed build.
     KeyNotInSet,
     /// Every declaration id the session can put on the wire has been handed
     /// out. A declaration id is an `EntityId`, a `u32`

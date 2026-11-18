@@ -532,10 +532,10 @@ impl ExecutorState {
     }
 }
 
-/// The task table says its state as a pool (`pool-monitor`, `docs/pool-monitor.md`): its cells,
-/// those that hold a task or a result nobody has read, the most that held one at once where the
-/// build keeps the mark, and the spawns refused for want of a free cell. A task too large for a
-/// cell is not a want of room, so it is not counted here (`Refusals::too_large`).
+/// The task table says its state as a pool (`pool-monitor`): its cells, those that hold a task or
+/// a result nobody has read, the most that held one at once where the build keeps the mark, and
+/// the spawns refused for want of a free cell. A task too large for a cell is not a want of room,
+/// so it is not counted here (`Refusals::too_large`).
 impl wz_session_core::pool_gauge::PoolGauge for ExecutorState {
     fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
         wz_session_core::pool_gauge::PoolStat {

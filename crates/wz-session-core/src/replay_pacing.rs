@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The pace of a paced declaration replay (`docs/declaration-sync-pacing.md`): how many
-//! declarations a turn sends and how long to wait between turns, and the pace a build states.
+//! The pace of a paced declaration replay (`declaration-sync-pacing`): how many declarations a
+//! turn sends and how long to wait between turns, and the pace a build states.
 //!
 //! The pace is a value and not a clock: it holds two numbers, reads no time and does no I/O, so
 //! every host that replays in turns (the heap runtime's supervisor, the slot node) holds the same

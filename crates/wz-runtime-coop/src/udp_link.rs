@@ -13,8 +13,8 @@
 //!
 //! Zephyr's sockets (`wz-runtime-zephyr`) and the host's (`wz-runtime-posix`) are the two sockets
 //! that exist. They were one copy of this code each until the host needed it: a stack brings a
-//! socket, not a link, because a second copy of a 400-line piece that decides is the shape
-//! `docs/storage-policy-and-link-layer.md` D2 rejects.
+//! socket, not a link, because a second copy of a 400-line piece that decides is the shape the
+//! session host rejects: it is written once, over the stack's driver and pump link.
 //!
 //! The receive buffer and the buffer outbound frames are encoded into are the driver's type
 //! parameters: a `Vec<u8>` and `HeapTx` on the heap profile, claims on the image's byte tables on

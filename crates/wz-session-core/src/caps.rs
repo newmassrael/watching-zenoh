@@ -482,9 +482,9 @@ pub const CLOCK_SOURCES: usize = generated::CLOCK_SOURCES;
 pub const CLOCK_MAX_FORWARD_STEP_MS: usize = generated::CLOCK_MAX_FORWARD_STEP_MS;
 
 /// How many declarations one turn of a paced declaration replay sends, when the
-/// `declaration-sync-pacing` policy is on (`docs/declaration-sync-pacing.md`). It is read only
-/// then, by the reconnect supervisor of the heap runtime, and must be at least `1`: a turn that
-/// sends nothing never finishes. A count of messages and not a table size: it sizes no memory.
+/// `declaration-sync-pacing` policy is on. It is read only then, by the reconnect supervisor of
+/// the heap runtime, and must be at least `1`: a turn that sends nothing never finishes. A count
+/// of messages and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_BURST_MESSAGES: usize = generated::DECLARATION_SYNC_BURST_MESSAGES;
 
 /// How long, in milliseconds, a node waits for the peer's answer to an interest it sent before it

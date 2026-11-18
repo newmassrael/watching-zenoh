@@ -81,11 +81,12 @@ pub trait TimeSource: Send + Sync + 'static {
     ///
     /// For the call sites that measure the spacing of events too close for the
     /// millisecond grid (the message-interval statistic of the resource
-    /// snapshot, `docs/observation-plane.md` M4). The default is the
-    /// millisecond reading scaled, so an implementation with a finer clock
-    /// overrides it and one without gets a correct reading at millisecond
-    /// resolution: a reader of an interval from a default implementation sees
-    /// only whole milliseconds, never a wrong number.
+    /// snapshot, the observation plane's sampled record of a node's
+    /// resources). The default is the millisecond reading scaled, so an
+    /// implementation with a finer clock overrides it and one without gets a
+    /// correct reading at millisecond resolution: a reader of an interval from
+    /// a default implementation sees only whole milliseconds, never a wrong
+    /// number.
     fn now_monotonic_us(&self) -> u64 {
         self.now_monotonic_ms().saturating_mul(1000)
     }

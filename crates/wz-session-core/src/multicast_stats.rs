@@ -180,7 +180,7 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
 }
 
 /// `resource-snapshot` — a recorder that spaces the transport messages a group receives
-/// (`docs/observation-plane.md` M4) and passes every report on to the recorder it wraps.
+/// (the resource snapshot's message spacing) and passes every report on to the recorder it wraps.
 ///
 /// The counting of a transport message is one seam, [`MulticastStatsRecorder::transport_message_received`],
 /// which the stats registry already hangs its count on; the interval meter hangs on the same one,

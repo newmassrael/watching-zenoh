@@ -16,8 +16,8 @@
 //! # The storage policy
 //!
 //! The backing is a type parameter, a [`Storage`](crate::bounded::Storage) policy, not a feature
-//! that selects code (`docs/storage-policy-and-link-layer.md`, D1). There are two
-//! policies, because "an allocator is linked" and "the declared capacities are
+//! that selects code, so heap or no heap is the instantiation and the algorithm exists once.
+//! There are two policies, because "an allocator is linked" and "the declared capacities are
 //! hard" are different facts about a build:
 //!
 //! - [`Heap`](crate::bounded::Heap) (needs `alloc`) -- backed by `alloc::vec::Vec<T>` and
@@ -89,8 +89,8 @@ impl<T> fmt::Display for CapacityFull<T> {
 
 impl<T> core::error::Error for CapacityFull<T> {}
 
-/// How a container holds its elements: the storage policy of
-/// `docs/storage-policy-and-link-layer.md` D1. Implemented by [`Heap`] and
+/// How a container holds its elements: the storage policy, a type parameter of
+/// the session shell rather than a feature. Implemented by [`Heap`] and
 /// [`Static`]; a container is generic over it and the algorithm around the
 /// container is written once.
 pub trait Storage {

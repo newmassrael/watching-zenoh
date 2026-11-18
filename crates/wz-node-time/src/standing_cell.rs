@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The standing of a clock where several threads read it and the host reports it
-//! (`docs/observation-plane.md` M1).
+//! (the observation plane's clock with a quality).
 //!
 //! [`ClockStanding`] is the machine and is moved through `&mut`. This is the cell a node shares it
 //! through: the machine under a lock the host's reports take, and beside it one atomic that says

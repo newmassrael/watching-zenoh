@@ -27,8 +27,8 @@ use wz_session_core::lifecycle_wire::{
 /// It is also the strategy of decision D7: whether the node serves the in-band verbs is the type
 /// its admin queryable is made with, so a build whose peers are declared when it is built names
 /// [`NoOpening`] and its answer holds no code of the open query, which `BOUND` removes where the
-/// answer is compiled (`docs/build-configuration.md` C3: a choice that changes the shape of the
-/// code is a type parameter, not a feature).
+/// answer is compiled (cargo features only add code: a choice that changes the shape of the code
+/// is a type parameter, not a feature).
 pub trait NodeOpening {
     /// Whether the node binds the in-band verbs at all. `false` only for [`NoOpening`].
     const BOUND: bool = true;

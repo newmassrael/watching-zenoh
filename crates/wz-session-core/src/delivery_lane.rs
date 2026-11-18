@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The bookkeeping of a bounded lane between the receive path and the task that runs a
-//! subscriber's callbacks (`docs/rx-delivery-lane.md`).
+//! subscriber's callbacks.
 //!
 //! # What it is
 //!

@@ -57,8 +57,8 @@ test-support = ["wz-session-core/lifecycle-contract"]
 # docs/session-lifecycle-intent.md, step 8). Off, which every image is until it binds a verb, none of
 # it is compiled and the manager is what it was: the unbound image keeps its flash and the stack of
 # its tick (measured: +352 bytes of chain and +1,988 of flash on the Zephyr client when this code was
-# not gated). A verb is a capability of the build (docs/build-configuration.md C2): an image takes the
-# ones it needs and pays for those.
+# not gated). A verb is a capability of the build (the kind of switch that adds code, beside a policy
+# and an axis): an image takes the ones it needs and pays for those.
 #
 # lifecycle-verbs -- the machinery the verbs share, which each verb below turns on and which binds no
 # verb by itself: the store's entries for requests made outside the loop, the mirror of each node's
@@ -91,7 +91,7 @@ client-verbs = ["lifecycle-verbs", "adminspace-fixed", "client-slot"]
 # layer and no admin node, which is what every image on this profile is until then.
 session-slot = ["wz-runtime-coop/session-slot", "wz-session-core/session-slot"]
 
-# The high-water mark of the tables a host lists as pools (`docs/pool-monitor.md`).
+# The high-water mark of the tables a host lists as pools.
 pool-monitor = ["wz-runtime-coop/pool-monitor", "wz-session-core/pool-monitor"]
 
 transport-keepalive = [

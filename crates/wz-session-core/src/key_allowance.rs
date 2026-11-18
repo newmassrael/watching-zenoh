@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Which keys each declared peer may use (`docs/closed-key-set.md`, phase 4): a read-only table of
-//! bits, one row for each peer the image declares and each operation, one bit for each key of the
-//! closed key set.
+//! Which keys each declared peer may use (the per-peer allowance of the closed key set, built up
+//! to the key gate): a read-only table of bits, one row for each peer the image declares and each
+//! operation, one bit for each key of the closed key set.
 //!
 //! # What it is
 //!

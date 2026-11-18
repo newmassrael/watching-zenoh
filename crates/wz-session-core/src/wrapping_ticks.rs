@@ -4,8 +4,8 @@
 //! Whether a span of ticks has passed, over a counter that wraps at 2^32.
 //!
 //! A deadline and a sampling period are the same question: have `timeout` ticks passed since
-//! `last`? The supervisor asks it of a checkpoint and the resource sampler of its period
-//! (`docs/observation-plane.md` M3 and M4), so it is written once, here.
+//! `last`? The supervisor asks it of a checkpoint and the resource sampler of its period, so it
+//! is written once, here.
 //!
 //! The difference of two readings is taken modulo 2^32, so a wrap of the counter between the two
 //! readings is the ordinary case and not a special one. That comparison cannot tell a span of

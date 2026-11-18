@@ -359,9 +359,9 @@ impl<const LANES: usize> SessionListener<LANES> {
     }
 }
 
-/// The lanes say their state as a pool (`pool-monitor`, `docs/pool-monitor.md`): the lanes, those
-/// that belong to a session, the most that did at once where the build keeps the mark, and the
-/// `InitSyn`s dropped for want of a lane. The `InitSyn`s another table refused are those tables'.
+/// The lanes say their state as a pool (`pool-monitor`): the lanes, those that belong to a
+/// session, the most that did at once where the build keeps the mark, and the `InitSyn`s dropped
+/// for want of a lane. The `InitSyn`s another table refused are those tables'.
 impl<const LANES: usize> wz_session_core::pool_gauge::PoolGauge for SessionListener<LANES> {
     fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
         wz_session_core::pool_gauge::PoolStat {

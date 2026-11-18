@@ -187,19 +187,19 @@ pub mod fragment_pacing;
 pub mod quota;
 
 /// A position in the sequence of declarations a node owes a peer: [`replay_cursor::ReplayCursor`],
-/// the part of paced declaration sync (`docs/declaration-sync-pacing.md`) that every host shares.
+/// the part of paced declaration sync (`declaration-sync-pacing`) that every host shares.
 /// It holds no list, clock or heap and does no I/O, so a host with no allocator uses it as it is.
 /// Unconditional, no_std and no_alloc.
 pub mod replay_cursor;
 
 /// The bookkeeping of a bounded lane between the receive path and the task that runs a
-/// subscriber's callbacks: [`delivery_lane::DeliveryLane`] (`docs/rx-delivery-lane.md`). It counts
-/// events, bytes and callbacks against three bounds and says where a sample's bytes go; the bytes
-/// are the host's. It reads no clock, starts no task and allocates nothing, so every host uses the
-/// one set of rules. Unconditional, no_std and no_alloc.
+/// subscriber's callbacks: [`delivery_lane::DeliveryLane`]. It counts events, bytes and callbacks
+/// against three bounds and says where a sample's bytes go; the bytes are the host's. It reads no
+/// clock, starts no task and allocates nothing, so every host uses the one set of rules.
+/// Unconditional, no_std and no_alloc.
 pub mod delivery_lane;
 
-// The closed key set (`docs/closed-key-set.md`). These three modules are documented from inside
+// The closed key set (`key-set-closed`). These three modules are documented from inside
 // (their own `//!`), not here: a module's outer and inner docs are one text that rustdoc resolves
 // from the parent, which left the links of the inner text to the module's own items unresolved.
 //
@@ -242,11 +242,11 @@ pub mod text_out;
 /// [`bounded`], so the registries name one backing-agnostic table.
 pub mod id_map;
 
-/// What a fixed pool says of itself, the same way for every pool (`pool-monitor`,
-/// `docs/pool-monitor.md`): its capacity, the entries it holds, the most it has held and the
-/// entries it refused ([`pool_gauge::PoolStat`]), and the mark that is the only thing a pool
-/// stores for it ([`pool_gauge::HighWater`], zero-sized without the feature). Unconditional,
-/// like [`bounded`], so every pool names one type.
+/// What a fixed pool says of itself, the same way for every pool (`pool-monitor`): its capacity,
+/// the entries it holds, the most it has held and the entries it refused
+/// ([`pool_gauge::PoolStat`]), and the mark that is the only thing a pool stores for it
+/// ([`pool_gauge::HighWater`], zero-sized without the feature). Unconditional, like [`bounded`],
+/// so every pool names one type.
 pub mod pool_gauge;
 
 /// Frame boundaries over bytes that already arrived, for every length-prefixed stream link
@@ -404,8 +404,8 @@ pub mod entropy;
 /// no_std + no_alloc; unconditional.
 pub mod epoch;
 
-// A ring of fixed-size event records with one producer and any number of readers
-// (`docs/observation-plane.md` M2). Unconditional: a build that instantiates no ring carries no
+// A ring of fixed-size event records with one producer and any number of readers (the event
+// records of the observation plane). Unconditional: a build that instantiates no ring carries no
 // code of it, and it uses 32-bit atomics only, so a Cortex-M0 builds it.
 //
 // These three modules carry their documentation in their own `//!` and none here: rustdoc
@@ -424,7 +424,7 @@ pub mod hlc;
 // supervision deadline and the resource sampler's period both ask. Pure and unconditional.
 pub mod wrapping_ticks;
 
-// A sampled view of a running node (`docs/observation-plane.md` M4): a fixed-layout, versioned
+// A sampled view of a running node (the observation plane's resources): a fixed-layout, versioned
 // snapshot, a message-interval histogram, and the sampler that takes one on a period. Pure and
 // unconditional, in the way of `event_ring`: a build that instantiates no sampler carries no code of
 // it. Documented in its own `//!`; see the note at `event_ring`.
@@ -1999,7 +1999,7 @@ pub mod reconnect;
 
 /// What a session still waits for from its peer before its declarations are SYNCED:
 /// [`declaration_sync::DeclarationSync`], the interests it sent whose final has not arrived, each
-/// with a deadline (`docs/declaration-sync-pacing.md`, phase 3). Pure: it reads no clock.
+/// with a deadline (`DECLARATION_SYNC_FINAL_TIMEOUT_MS`). Pure: it reads no clock.
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub mod declaration_sync;
 
@@ -2144,7 +2144,7 @@ pub mod peer_connection {
 ))]
 pub mod duty_outbox;
 
-/// SCE-generated clock-quality statechart (`docs/observation-plane.md` M1), from
+/// SCE-generated clock-quality statechart (the observation plane's clock with a quality), from
 /// `sources/session/clock_quality.scxml`, COMMITTED at
 /// `out/wz-session-core/clock_quality_sm.rs` and `include!`-ed from there.
 /// Exposes `ClockQualityState` / `ClockQualityEvent`, the `ClockQualityActions` host
@@ -2176,9 +2176,9 @@ pub mod clock_quality {
 #[cfg(feature = "clock-quality")]
 pub mod clock_standing;
 
-/// SCE-generated supervision statechart (`docs/observation-plane.md` M3), from
-/// `sources/session/supervision.scxml`, COMMITTED at `out/wz-session-core/supervision_sm.rs` and
-/// `include!`-ed from there. Exposes `SupervisionState` / `SupervisionEvent`, the
+/// SCE-generated supervision statechart (the observation plane's deadline an application feeds),
+/// from `sources/session/supervision.scxml`, COMMITTED at `out/wz-session-core/supervision_sm.rs`
+/// and `include!`-ed from there. Exposes `SupervisionState` / `SupervisionEvent`, the
 /// `SupervisionActions` host trait and the `SupervisionPolicy<A>` policy, one machine per
 /// checkpoint, driven by the supervisor. Engine-free and allocation-free; gated on `supervision`,
 /// which brings the SCE runtime in. The lint allows are restored as outer attributes, as for the

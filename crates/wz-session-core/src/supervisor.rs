@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The checkpoints a node watches and whether every one is healthy (`docs/observation-plane.md`
-//! M3).
+//! The checkpoints a node watches and whether every one is healthy (the observation plane's
+//! deadlines an application feeds).
 //!
 //! An application that must keep making progress feeds a checkpoint on every pass. Each checkpoint
 //! is a [`supervision`](crate::supervision) machine with a deadline of its own. The supervisor is

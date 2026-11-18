@@ -116,7 +116,7 @@ where
 }
 
 /// The host lists the tables its sessions live in, as the stack-neutral host it holds does
-/// (`pool-monitor`, `docs/pool-monitor.md`).
+/// (`pool-monitor`).
 impl<C, L, E, const S: usize, const P: usize> wz_session_core::pool_gauge::PoolList
     for SessionHost<C, L, E, S, P>
 where
