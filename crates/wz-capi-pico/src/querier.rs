@@ -582,6 +582,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             value_meta,
             closure,
             token,
+            None,
         )
     })
 }

@@ -1092,6 +1092,7 @@ fn a_configured_zid_of_zero_bytes_or_seventeen_is_refused_at_open() {
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
+mod decl_watch;
 #[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
 mod face_table;
 #[cfg(feature = "connectivity")]

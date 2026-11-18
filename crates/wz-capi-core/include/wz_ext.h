@@ -413,6 +413,124 @@ void wz_ext_internal_segment_sender_null(wz_ext_owned_segment_sender_t *this_);
 bool wz_ext_internal_segment_sender_check(
     const wz_ext_owned_segment_sender_t *this_);
 
+/* wz's own result codes of the doors below, outside zenoh-pico's own codes
+ * (-128 to -65), so a later zenoh-pico code cannot take them. */
+#define WZ_EXT_ERR_POLICY_OFF (-2)  /* the build's policy does not allow what
+                                       the call states; nothing was sent */
+#define WZ_EXT_ERR_UNSUPPORTED (-3) /* the session's engine, or this build, does
+                                       not do what the call asks; nothing was
+                                       declared or sent */
+
+/* The declaration watch: what the peers of a session declare and retract,
+ * told to the program. Present only in a build with the
+ * remote-declaration-watch or the declarations-synced-event capability.
+ *
+ * A watch is of one kind of entity, and is told each one a peer declares
+ * (WZ_EXT_DECL_DECLARED, with the id the peer declared it under and its key)
+ * and each one it retracts (WZ_EXT_DECL_UNDECLARED, with the id; the wire
+ * names no key). With remote-declaration-watch every event names the peer, as
+ * the zenoh id its link's handshake gave; without it zid_len is 0. With
+ * declarations-synced-event a watch is told once for each establishment of a
+ * link that the peer has sent everything it held when the link came up
+ * (WZ_EXT_DECL_SYNCED); without it that event is never told.
+ *
+ * A watch hears the peers from the moment it is declared, on every link the
+ * session holds and every link that comes up later; what a peer declared
+ * before is not told again. A link that is lost tells no undeclaration for
+ * what its peer held, and the members of a multicast group are not watched. */
+
+/* What an event says. */
+#define WZ_EXT_DECL_DECLARED 0
+#define WZ_EXT_DECL_UNDECLARED 1
+#define WZ_EXT_DECL_SYNCED 2
+
+/* The kind of entity a watch is of. */
+#define WZ_EXT_DECL_SUBSCRIBER 0
+#define WZ_EXT_DECL_QUERYABLE 1
+#define WZ_EXT_DECL_TOKEN 2
+
+/* One event, as the callback reads it: 48 bytes on a 64-bit target, 40 on a
+ * 32-bit one. It and the key it points to are valid only for the call. */
+typedef struct wz_ext_decl_event_t {
+  uint8_t kind;      /* WZ_EXT_DECL_DECLARED, _UNDECLARED or _SYNCED */
+  uint8_t entity;    /* the kind the watch is of: WZ_EXT_DECL_SUBSCRIBER,
+                        _QUERYABLE or _TOKEN */
+  uint8_t zid_len;   /* how many bytes of zid name the peer; 0 when the peer
+                        is not known */
+  uint8_t reserved;
+  uint32_t reserved2;
+  uint64_t id;       /* the id the peer declared the entity under, which its
+                        undeclaration names again; 0 for _SYNCED */
+  const char *keyexpr; /* the key of a _DECLARED, not NUL-terminated; NULL for
+                          the other two */
+  size_t keyexpr_len;
+  uint8_t zid[16];   /* the peer's zenoh id in the layout of z_id_t, zero past
+                        zid_len */
+} wz_ext_decl_event_t;
+
+/* The program's callback. It runs where the session hands out its callbacks,
+ * with no lock of the library held, so it may call into the session. */
+typedef void wz_ext_decl_watch_fn(void *context,
+                                  const wz_ext_decl_event_t *event);
+
+/* Runs once, after the last call, when the watch lets go of context. */
+typedef void wz_ext_decl_watch_drop_fn(void *context);
+
+/* An owned watch; NULL in _val when it holds none. */
+typedef struct wz_ext_owned_decl_watch_t {
+  void *_val;
+} wz_ext_owned_decl_watch_t;
+
+/* Watch the peers of session for the entity kind named (WZ_EXT_DECL_SUBSCRIBER,
+ * _QUERYABLE or _TOKEN), telling each event to call with context, and write
+ * the watch to watch. drop may be NULL.
+ *
+ * The library takes context on every path: on a refusal drop(context) runs
+ * before this returns and watch is left NULL. Otherwise drop(context) runs once
+ * the watch is dropped, or when the session is closed if that comes first.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL watch, call or session; Z_ERR_INVALID for
+ * another entity kind; Z_ERR_SESSION_CLOSED for a closed session;
+ * WZ_EXT_ERR_UNSUPPORTED when the session's engine does not watch (the
+ * cooperative engine), or the build hears no declaration of that kind. */
+z_result_t wz_ext_decl_watch_declare(const z_loaned_session_t *session,
+                                     wz_ext_owned_decl_watch_t *watch,
+                                     uint8_t entity,
+                                     wz_ext_decl_watch_fn *call,
+                                     wz_ext_decl_watch_drop_fn *drop,
+                                     void *context);
+
+/* Stop the watch and leave it NULL: no event is told after this returns, and
+ * drop(context) has run by then, unless this is called from inside the
+ * watch's own callback, when it runs as the callback returns. A NULL watch, or
+ * one that holds none, is left as it is. */
+void wz_ext_decl_watch_drop(wz_ext_owned_decl_watch_t *watch);
+
+/* z_get, addressed to the one node peer names: it is asked on the link that
+ * reaches that node and on no other, not of the session's own queryables and
+ * not of a multicast group. A node the session has no link to is not asked,
+ * and the get completes with no reply; it is never widened to the others.
+ * Present in every build with the query plane; the build's targeted-query
+ * policy decides whether it is allowed.
+ *
+ * callback and the moved parts of options are consumed on every path, as
+ * z_get consumes them; on a refusal the callback's drop runs before this
+ * returns. WZ_EXT_ERR_POLICY_OFF when the targeted-query policy is off;
+ * Z_ERR_INVALID for an all-zero peer; Z_ERR_NULL for a NULL peer;
+ * WZ_EXT_ERR_UNSUPPORTED when the session's engine cannot address a get to
+ * one node (the cooperative engine); each sends nothing. Otherwise what z_get
+ * answers.
+ *
+ * Declared where the drop-in header declares z_get: its types are the query
+ * plane's, which a header without Z_FEATURE_QUERY does not have. */
+#if defined(Z_FEATURE_QUERY) && Z_FEATURE_QUERY == 1
+z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
+                              const z_loaned_keyexpr_t *keyexpr,
+                              const char *parameters,
+                              z_moved_closure_reply_t *callback,
+                              z_get_options_t *options, const z_id_t *peer);
+#endif
+
 /* The conformance digest of this build, read from the configuration it
  * was built with: "sha256:" and 64 lowercase hex digits, NUL-terminated and
  * static. It is the digest wz_config.py prints in the conformance statement

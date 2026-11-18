@@ -390,6 +390,13 @@ transport-link-unixpipe,transport-link-ws|"
     # half behind `peer` too). The doors have no unit tests of their own, so the file is the
     # feature's whole population.
     "wz-capi-pico|hook|segment-sender,peer|--test=segment_sender_doors"
+    # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
+    # the target that watches a peer's subscriber, queryable and token come and go over loopback
+    # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
+    # names its peer and the sync is told; and the first alone, where the sync never is, which is
+    # what the target asserts of a build without `declarations-synced-event`.
+    "wz-capi-pico|hook|remote-declaration-watch,declarations-synced-event|"
+    "wz-capi-pico|hook|remote-declaration-watch|--test=decl_watch_doors"
     # What those doors do, once, in the port both C ABIs and both engines share
     # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
     "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot|"
