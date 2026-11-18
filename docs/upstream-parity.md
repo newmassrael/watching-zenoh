@@ -20,12 +20,12 @@ cell without a same-condition measurement makes no claim.
   (`wz_config.py --emit defconfig:<original>`). Layer C0's `--check-presets` holds each to
   its original's values (23, 23 and 18 capabilities). `wz_config.py --original-features
   <original>` turns each into the cargo arguments of the ABI it is built through.
-- **No MCU preset.** `docs/build-configuration.md` section 6 lists
-  `configs/zenoh-pico-mcu_defconfig` and leaves it waiting. The MCU images are wz's own
-  nodes (`deploy/zephyr-admin-node`, the client on the heap profile and on the fixed-memory
-  profile), not the pico C API. The pico C ABI on an MCU is decision C12 and step 5 of
-  that document, which has not started. The cooperative engine the pico ABI runs on is a
-  host engine (`docs/capi-pico-on-coop-engine.md` D3).
+- **No MCU preset.** The build configuration lists
+  `configs/zenoh-pico-mcu_defconfig` among the upstream defconfigs and leaves it waiting. The
+  MCU images are wz's own nodes (`deploy/zephyr-admin-node`, the client on the heap profile
+  and on the fixed-memory profile), not the pico C API. The pico C ABI on an MCU (C12 below:
+  one `no_std` ABI definition bound to a host driver and to an MCU driver) has not started.
+  The cooperative engine the pico ABI runs on is a host engine (`docs/capi-pico-on-coop-engine.md` D3).
 - **Size, host.** `scripts/lib/capability_cost_gate.py` builds each C ABI case, holds it to
   a text budget, and builds zenoh-pico as the same build (`wz_config.pico_reference`) to
   print the ratio. It prints the ratio and does not grade it. It has no zenoh-c reference
@@ -38,8 +38,8 @@ cell without a same-condition measurement makes no claim.
   throughput, by hand. On the MCU, `scripts/kit-lane.sh` runs wz images on the T2G kit and
   holds each to its own row. The pico image (`deploy/zephyr-pico-compare`) is not in the
   lane. The alternating-boot and wire-turnaround method of the 2026-10-21 to 10-23
-  comparisons (`docs/storage-policy-and-link-layer.md` section 2 and sections 5.1 to 5.2)
-  was run with scripts that live on the bench host and not in this repository.
+  comparisons on the T2G kit was run with scripts that live on the bench host and not in
+  this repository.
 - **The figures we have** (each at its own date, none current):
 
 | cell | wz | original | source |
@@ -48,9 +48,9 @@ cell without a same-condition measurement makes no claim.
 | host `.so` text, pico client, cooperative engine | 905,204 | 2.2 times pico | the same |
 | host send, 8 B, pico ABI | 5.1-5.5 M msg/s on 2+ cores | pico 8.0 M | bench host, 10-19 |
 | host receive, pico ABI | not measured | pico to pico breaks at full rate | the same |
-| MCU text, fixed client vs tuned pico | 157,088 | 164,396 | storage doc 5, different feature sets |
-| MCU answer turnaround | fixed 0.203 ms, heap 0.210 ms | pico 0.213 ms | storage doc 5, 12 boots each |
-| MCU GET (wz node asking) | 76.0 us | pico 80.4, zenoh 99.9, zenoh-c 96.3 | storage doc 5.2, ranges overlap |
+| MCU text, fixed client vs tuned pico | 157,088 | 164,396 | kit comparison, 10-22, different feature sets |
+| MCU answer turnaround | fixed 0.203 ms, heap 0.210 ms | pico 0.213 ms | kit comparison, 12 boots each |
+| MCU GET (wz node asking) | 76.0 us | pico 80.4, zenoh 99.9, zenoh-c 96.3 | kit comparison, 10-23, wz node asking, ranges overlap |
 | host no-drop rate, pico ABI, puts batched per 1 ms slot, 8 / 64 / 1024 B | at least 5.12 M / 4.64 M / 570 k msg/s | pico 4.80 M / 4.16 M / 355 k | `pico-compare.sh nodrop`, pc3, TCP loopback peer, median of 2, 2026-11-02, with `write_bound` and the lane of 8; 2026-10-31 read at least 5.12 M / 4.48 M / 160 k against pico 4.48 M / 4.00 M / 310 k |
 | host no-drop rate, pico ABI, puts one by one, 8 / 64 / 1024 B | 4.96 M / 4.32 M / 310 k msg/s | pico 370 k / 380 k / 360 k | the same, with `write_bound` only; 1 KiB was 190 k before it, and 560 k with the lane of 8 (below) |
 | host no-drop rate, zenoh-c ABI (`wz-capi-c`), puts one by one, 64 B / 1024 B | at least 5.12 M / 3.52 M msg/s | zenoh-c 1.10.2 4.00 M and 4.32 M (two runs) / 2.24 M | `pico-compare.sh nodrop-c`, pc3 idle, TCP loopback peer, default pinning, median of 3, 2026-11-02 and 2026-11-03; the three readings of 1 KiB are 3.52 M each, from the first run |
@@ -413,7 +413,7 @@ engine for the MCU would copy that logic. So the pico C ABI on the MCU runs on t
   Zephyr opens one (`udp_zephyr.c` resolves the locator with `PF_UNSPEC` and opens the socket of
   the family it gets), and wz's datagram seam names an IPv4 address in every signature
   (`DatagramSocket::bind` and `send_to` take `[u8; 4]`), so it waits on the step that takes the
-  peer address out of the datagram signatures (docs/build-configuration.md, step 6).
+  peer address out of the datagram signatures, part of bringing stream links to the MCU.
 
 ## 5b. H1 on the host: upstream's examples, two arms, alternating boots
 

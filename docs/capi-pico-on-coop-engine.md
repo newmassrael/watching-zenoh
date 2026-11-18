@@ -467,8 +467,8 @@ it behaves as pico behaves in both of pico's threading arms.
   answered window on the cooperative build: the window's own tests answer over loopback, and a
   router that answers a real multicast group is the hosted leg's. Section 6 now stands at the
   listening role and the advanced plane, then the engine flip.
-- 2026-10-25: the cooperative engine's declarations take the replay cursor (phase 4 of
-  `docs/declaration-sync-pacing.md`). `Core::redeclare` told the six lists to a new link in one
+- 2026-10-25: the cooperative engine's declarations take the replay cursor of the
+  `declaration-sync-pacing` policy. `Core::redeclare` told the six lists to a new link in one
   call and ignored every refused send. It is now one `ReplayCursor` per link in
   `engine/replay.rs`: the lists in a fixed order are the sequence (key expressions, subscribers,
   Interests, queryables, tokens, liveliness subscribers), an entry's place is its kind's offset

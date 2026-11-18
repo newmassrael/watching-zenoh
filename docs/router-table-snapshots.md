@@ -42,8 +42,8 @@ a writer, so no writer waits for one, and a callback reached by a reader holds n
 on), and the second becomes the cost of the writers alone. What B costs instead is copying, and that is the
 measured question this note sets up.
 
-B is a policy value and not a replacement. A stays the value of every upstream preset (C2 of
-`docs/build-configuration.md`); B enters with its code and its pair of behaviour tests (C8), as section 4 of
+B is a policy value and not a replacement. A stays the value of every upstream preset (a policy defaults to
+upstream's behaviour); B enters with its code and the pair of behaviour tests every policy lands with, as section 4 of
 `docs/router-task-per-face.md` requires.
 
 ## 2. The form, and the literature it follows
@@ -344,8 +344,8 @@ stays: a read through the load's guard without a count would make a nested read'
 guard the thread must keep, which is not worth 2.6 % that the spread already covers.
 
 **The verdict.** B holds every test of E7s and costs no more per message than A, which is what section 6.2
-asked before B could be recommended. A stays the default, as C2 of `docs/build-configuration.md` requires
-of every policy, and the help text of `routing-table-sharing` now says that `snapshot` is the value to
+asked before B could be recommended. A stays the default, since every policy defaults to upstream's
+behaviour, and the help text of `routing-table-sharing` now says that `snapshot` is the value to
 choose for a router whose sessions come and go while it routes.
 
 ### 6.4 The index by keyexpr (round 4346)
@@ -1014,4 +1014,4 @@ lookups by id of the same run: 0.5 to 0.8 ns a face, against 4.5 to 10.
   the deployments whose writers are what they pay for, and the reading is recorded here as such. Phase 5
   ran (section 6.2): B's writers no longer wait. Phase 6 ran (section 6.3): B holds every test of E7s and
   costs no more per message, and is the recommended value for a router whose sessions come and go; the
-  default stays A (C2).
+  default stays A, upstream's behaviour.

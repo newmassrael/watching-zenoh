@@ -991,8 +991,8 @@ Each step lands with its own done-when; sizes are not estimated here.
        `NodeOpening` (open a peer by its zid, answered with an outcome and
        not a bool). The three transports differ only in what feeds the
        port, so no transport owns a copy of the semantics.
-     - By `docs/build-configuration.md` C2 and C3 a switch that adds code is
-       a capability, an additive cargo feature, and a choice is an axis.
+     - By the build configuration's rule that cargo features only add
+       code, a switch that adds code is a capability, an additive cargo feature, and a choice is an axis.
        Transports 1 and 2 add code, so each is a capability:
        `lifecycle-open-query` (in-band: the `session/open` leg and the
        `session/verbs` document of `admin_fixed`) and `lifecycle-control`
@@ -1018,7 +1018,7 @@ Each step lands with its own done-when; sizes are not estimated here.
        host that hosts the node.
      - What landed, and how it differs from that draft.
        - **7a is a type, not a feature.** The in-band verb is not a cargo
-         feature: `docs/build-configuration.md` C3 says a choice that changes
+         feature: cargo features only add code, so a choice that changes
          the shape of the code is a type parameter, monomorphised at no
          run-time cost, and a feature would also have been a new atom of the
          catalog (open question below). `admin_fixed`'s queryable is generic
@@ -1631,7 +1631,7 @@ serve all four verbs.
      interface); the in-band document stays the whole one, so the out-of-band
      answer is the same document and a reader may use only its machine rows.
 6. **Capabilities, not defaults.** Each verb adds code to an image that has no
-   spare flash, so by `docs/build-configuration.md` C2 and C3 each is an
+   spare flash, so by the rule that cargo features only add code each is an
    additive capability of the build (`lifecycle-close`, `lifecycle-reset`,
    `lifecycle-status`), and an image that binds none keeps today's size. The
    capability document lists what the build bound, as it lists `open`.
@@ -1854,7 +1854,7 @@ carries none of its code.
 
 ### 6.10 Step D, the capability per verb
 
-A verb is a capability of the build (`docs/build-configuration.md` C2): an image
+A verb is a capability of the build (the kind of switch that adds code): an image
 takes the ones it needs and pays for those. `lifecycle-close`,
 `lifecycle-reset` and `lifecycle-status` each turn on `lifecycle-verbs`, which
 is the machinery they share (the store's entries for requests made outside

@@ -11,8 +11,8 @@ explanations were tried and refuted with the kit before this design:
 
 - The idle pass sleeps a tick: `CONFIG_WZ_IDLE_WAIT_MS=1000` left the turnaround at 0.215 ms.
 - The polling path falls out of the instruction cache: placing it in the ITCM steadied the batching
-  client's GET median and moved the turnaround at the wire by nothing (section 5.8 of
-  `docs/storage-policy-and-link-layer.md`).
+  client's GET median and moved the turnaround at the wire by nothing (measured on the kit,
+  2026-10-27).
 - The 64-bit tick division: removed (S0), 3% of the application's time, not the gap.
 
 The cycle-counter stamps of the zeth driver (`CONFIG_WZ_ZETH_STAMPS`, the same instrument for wz

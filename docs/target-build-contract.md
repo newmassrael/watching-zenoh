@@ -4,7 +4,8 @@ Status: design note, first draft. It states what exists, what is decided and in 
 order the work goes; it is not a specification and the atomic store does not parse
 it. Every decision here was taken on the standing criterion of this tree: the
 long-term correct structure, cost not counted. It is the "Platforms and packaging"
-step (step 10) and the `target` axis of `build-configuration.md`, written down as
+step (FreeRTOS+TCP, QNX, an installable SDK) and the `target` axis of the build
+configuration, written down as
 the contract a consumer's deployment tool can rely on.
 
 ## 1. The question
@@ -46,7 +47,8 @@ Facts read from the tree and measured on one workstation, not claims:
   and `wz-ap-demo` had no number at all; they now have one each, and all three
   artifacts carry a stamp (T6).
 - The pico drop-in's struct layouts depend on capabilities (`multi-thread`,
-  `unstable-api` and the two local switches of `build-configuration.md` §2), so a
+  `unstable-api` and the two local switches `local-subscriber` and
+  `local-queryable`), so a
   program links the library of the arm it compiled its header against. Before step 1,
   nothing in the artifact said which arm it is; the stamp's layout object does.
 - `preset-ap-full` does not build for Android in the probe: `librocksdb-sys`'s bindgen
@@ -62,8 +64,9 @@ Facts read from the tree and measured on one workstation, not claims:
 
 **T1. The entry is a verb of `wz-config`, not a new tool.** `package` takes `--target`,
 `--profile` and `--out`, resolves the profile into cargo arguments exactly as `build`
-does (C1, C9, C14), runs the build and measures the result. Until `wz-config` exists
-(step 11) it is a thin script over `wz_config.py`; the command line does not change
+does (the cargo mapping generated from the one declaration, the profile re-validated
+strictly), runs the build and measures the result. Until `wz-config`, the build
+configuration's user tool, exists it is a thin script over `wz_config.py`; the command line does not change
 when it moves. Rejected: a consumer-specific build script (it would be a second copy
 of the cargo mapping), and a manifest written by hand beside each build (it drifts
 the first time a feature moves).
@@ -93,7 +96,7 @@ inventing it. `--verify` checks that a manifest's sdk kind is the row's and has 
 the keys the entry writes.
 
 **T3. A platform is a row of the declaration.** `deploy/wz-config.toml` has
-`[[platform]]` (not `[[target]]`: the `target` axis of `build-configuration.md` is the
+`[[platform]]` (not `[[target]]`: the `target` axis of the build configuration is the
 class above, a host Linux or an MCU image, and a platform is one concrete operating
 system, libc and triple within it): `id`, `triple`, `os`, `libc` (`glibc`, `bionic`,
 `nto`), `network_stack` (QNX only), `std` (`prebuilt`, or `build-std` for a tier-3
@@ -192,12 +195,13 @@ and in a gate pin (`scripts/lib/abi_stamp_gate.py`), which reads the stamp out o
 built artifacts of both profiles and of a stripped copy; `wz-capi-c` also keeps its
 header macro and its door, and the gate holds the stamp to the door's answer. A header
 macro and a door for `capi-pico` are not part of the first landing: the drop-in header
-carries upstream's symbols only (C10), so they belong in `wz_ext.h`, which is a
+carries upstream's symbols only (a wz-only door is never in a drop-in
+header), so they belong in `wz_ext.h`, which is a
 decision of its own. The layout arm is a value of the stamp, so a program is told
 when it links the wrong arm instead of crashing in a struct it laid out differently:
 for `capi-pico` it is `multi_thread`, `unstable_api`, `local_subscriber` and
 `local_queryable`; for `capi-c` it is the two switches that move zenoh-c's types,
-`unstable_api` and `shared_memory` (`build-configuration.md` §2).
+`unstable_api` and `shared_memory`.
 Rejected: reading the number by calling an exported function (it cannot be called
 for a foreign target on the build host), an exported symbol (above), and one number
 for all families (the headers move independently).
@@ -232,7 +236,8 @@ version (7.1). A floor the entry could not measure is `null`, never a pass; the 
 that turns floors into "this device may run it" is the consumer's.
 
 **T9. Device requirements are derived from the declaration, not measured.** A
-capability's `os_needs` (a key of its own: `requires` is the axis condition of C6) is
+capability's `os_needs` (a key of its own: `requires` is the axis condition under which a capability can be
+selected at all) is
 the set of operating-system facilities it MAY ask for, from a closed vocabulary
 (`OS_FACILITIES` in `scripts/lib/wz_config.py`, each with its meaning; the table below).
 It is an upper bound: a device
@@ -246,7 +251,8 @@ capability set (`os_needs_of`), and `platform_gaps` names what a platform lacks 
 which capability asks for it; a platform with no `os_provides` is unassessed, and the
 answer is "unknown", not "none". They are not measured because measuring them means
 running the artifact. Memory and stack figures are not in schema 1: they are the
-resource gates of step 13 and the manifest names the profile they belong to.
+resource gates (a committed stack peak and wire turnaround per registered
+profile) and the manifest names the profile they belong to.
 
 An executable's facilities are not a union over capabilities: the ones that matter there (a
 UDP link, multicast, a certificate file) are switched by features of the wz runtime the
@@ -453,9 +459,10 @@ to a commit that has the repair. Rejected: a fork or a patch series in wz's tree
 copies of the port knowledge, and a conflict at every pin move).
 
 **T13. A registered profile is an input of the entry, and a library is built from it.**
-`--profile NAME` takes the NAME of a profile registered under `configs/profiles/` (C14),
+`--profile NAME` takes the NAME of a profile registered under `configs/profiles/`,
 never a path, so what a consumer asks for is a versioned contract and not a file anyone
-wrote. The entry resolves it strictly with the pinned Kconfig interpreter (C9, C11):
+wrote. The entry resolves it strictly with the pinned Kconfig interpreter, an unknown symbol or an
+out-of-range value being an error:
 the capabilities that are on once the base original's defaults and the profile are merged,
 and the limits it sets off their defaults. A library is then built with no default
 features and exactly the features the capability graph gives its ABI for those

@@ -4,7 +4,8 @@ Status: design note, second draft after an independent review that found its fir
 eleven places of fact and unproven in its central choice. It states what is measured, what is
 decided, what is a hypothesis to be tried before it is decided, and what is open. It is not a
 specification and the atomic store does not parse it. It is the seam that
-`docs/build-configuration.md` C13a requires to be written and reviewed before any path of the top
+the build configuration's decision C13a (the `zenoh` crate stands on wz's engine and is not a
+second implementation of upstream) requires to be written and reviewed before any path of the top
 crate is: no file of `crates/wz-zenoh` carries an item until the acceptance test of section 5 has
 been run. Decisions follow the standing criterion of this tree (the long-term correct design, cost
 not counted); the reason for each is next to it.
@@ -43,7 +44,8 @@ and the engine begins, what each side owns, which engine, and in what order the 
   depends on.** The three committed arms name `zenoh_protocol`, `zenoh_keyexpr`, `zenoh_config`,
   `zenoh_core`, `zenoh_util`, `zenoh_result`, `zenoh_buffers`, `zenoh_macros` (the unstable arms
   only), `zenoh_shm` (the shared-memory arm) and `uhlc`, `serde_core`, `futures_core`. No further
-  family crate is owed (the plugin and `internal` surfaces are outside the arms, C13).
+  family crate is owed (the plugin and `internal` surfaces are outside the arms, which
+  carry the public API the family replaces).
 - **The behaviour gate exists upstream, and half of it needs a router.** `zenoh/tests` holds 31
   integration test files and `examples` 31 programs; `zenoh-ext` is the ecosystem crate. 24 of the
   31 tests carry a `cfg` on `unstable`, `internal`, `shared-memory` or plugins, and 15 open
@@ -119,7 +121,8 @@ and the engine begins, what each side owns, which engine, and in what order the 
   satisfy it refuses the combination at open with a named error; it is never left to hang.
 - **D5. Which engine, and how it is selected, is decided before Z1.** The Rust crate must open a
   session and the port does not open one. Decision: the `zenoh` crate depends on ONE engine per
-  build, chosen by a Cargo feature that is part of the build-configuration catalogue (C1), the
+  build, chosen by a Cargo feature declared in the build configuration's one declaration
+  (`deploy/wz-config.toml`), the
   tokio engine by default (it is the one with faces, scouting and the router data plane) and the
   cooperative engine as the selection that the pico work already measures. The port gains an
   `open` of its own only if both engines can implement the same signature without a downcast;
@@ -139,8 +142,8 @@ and the engine begins, what each side owns, which engine, and in what order the 
   none is left to fall through. **Namespace is not an API path**: upstream implements it as an
   `EPrimitives` decorator pair that rewrites every key crossing the face, local delivery included,
   with a table of pending declarations. wz has it only inside the tokio engine's transport
-  (feature `routing-namespace`). It enters as an engine policy by the rule of section 5 of
-  `build-configuration.md`, in its own slice, not as an operation of the port.
+  (feature `routing-namespace`). It enters as an engine policy, off by default and
+  landed with a pair of behaviour tests, in its own slice, not as an operation of the port.
   **Four keys are a session's and not the engine's** (`SESSION_HONOURED_KEYS` in the runtime's
   reader): `qos/publication`, `transport/shared_memory/mode` and the promotion's
   `message_size_threshold` and `messages`. Upstream applies each in its session or its runtime,
@@ -154,7 +157,7 @@ and the engine begins, what each side owns, which engine, and in what order the 
   crate reaches all four with `shared-memory` and `unstable`, and so does the zenoh-c ABI on its
   shared-memory arm with the unstable API, which copies a put, a query's value and a reply.
 - **D7. Where upstream and the engine differ, the difference is stated and held, and the default
-  is upstream's (C2).** Each is a class of the differential test with the words of both
+  is upstream's, as for every policy.** Each is a class of the differential test with the words of both
   behaviours. Known already: the engine's `interfaces` of a link is three-state where upstream's
   is not; the engine's `watch_faces` is "from now on" where upstream's link listener offers
   history.
