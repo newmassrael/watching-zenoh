@@ -1088,6 +1088,11 @@ round_fed_gates=(
     # build. --check-presets SKIPs, printing why, where kconfiglib is not provisioned.
     "wz_config.py --check"
     "wz_config.py --check-presets"
+    # A machine reads a policy from the snapshot it is handed: a read of the build defaults
+    # outside the sites its list allows is refused. Round-fed by every crate source and the
+    # generated policy module. A text read, no build.
+    "policy_read_gate.py --selftest"
+    "policy_read_gate.py --check"
     "sce_feature_model.py --check"
     # R3521 -- the package entry's selftest. Round-fed by deploy/wz-config.toml (it loads the
     # declaration and holds its artifact, role, platform and runtime-feature rows to the entry's own
