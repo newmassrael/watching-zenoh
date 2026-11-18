@@ -750,6 +750,61 @@ fn the_exit_code_separates_an_incomplete_capture_from_a_failed_run() {
     );
 }
 
+/// `--growing` over a file still being written: refused without the flag,
+/// and with it the report on the complete blocks, the line that says how far
+/// that is, and exit 1 for the bytes left unread. A file that ends on a block
+/// boundary reads whole under the flag and exits 0.
+#[test]
+fn a_growing_file_is_read_to_its_complete_blocks_only_when_asked() {
+    let scratch = Scratch::new("growing");
+    let (file, log, _) = capture_and_key_log();
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+    let cut_len = file.len() - 7;
+    let cut = scratch.write("growing.pcapng", &file[..cut_len]);
+    let whole = scratch.write("whole.pcapng", &file);
+    let run = |capture: &std::path::Path, growing: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_wz-analyze"));
+        command.arg(capture).arg("--keylog").arg(&keylog);
+        if growing {
+            command.arg("--growing");
+        }
+        command.output().expect("runs")
+    };
+
+    let refused = run(cut.as_path(), false);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "a cut file is not read as whole without the flag"
+    );
+    assert!(refused.stdout.is_empty(), "and no report is printed");
+
+    let partial = run(cut.as_path(), true);
+    let said = String::from_utf8_lossy(&partial.stderr);
+    assert_eq!(
+        partial.status.code(),
+        Some(1),
+        "bytes were left unread: {said}"
+    );
+    assert!(
+        said.contains(&format!("of {cut_len} byte(s)")) && said.contains("NOT in this report"),
+        "the line says how far the read reached: {said}"
+    );
+    assert!(
+        !partial.stdout.is_empty(),
+        "the complete blocks are reported"
+    );
+
+    let finished = run(whole.as_path(), true);
+    let said = String::from_utf8_lossy(&finished.stderr);
+    assert_eq!(
+        finished.status.code(),
+        Some(0),
+        "a file that ends on a boundary is read whole: {said}"
+    );
+    assert!(said.contains("nothing was left unread"), "{said}");
+}
+
 /// R311y664 — a key log the caller named and that cannot be read is a hard
 /// failure, not a quiet fallback.
 ///

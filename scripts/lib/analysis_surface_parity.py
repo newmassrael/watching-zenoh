@@ -258,6 +258,23 @@ BOTH = {
     # What was true is the half about SOCKETS -- see the row that kept, in
     # ONLY_CLI, with that half of the reason and nothing else.
     "incremental read of a link": ("--interface", "wz_dissect_live_push", ()),
+    # R2373 (open-debt item 661) filed this row in ONLY_CAPI with the command
+    # line's half as an OPEN DEBT (item 664): handed a capture a helper was
+    # still appending to, `wz-analyze` failed, because
+    # `Dissection::from_capture` reports a block cut in half as `Truncated`.
+    # Both surfaces now read a growing container with the one walk,
+    # `wz_capture::CaptureCursor`: the ABI feeds an open handle with it, and
+    # `--growing` reports on the complete blocks it reaches and prints
+    # `CaptureCursor::consumed` against the file's length. It is ASKED for and
+    # never taken silently: without the flag a cut file is still refused,
+    # because reading a partial file as if it were whole is the shortfall this
+    # project refuses everywhere else. The record half stays the ABI's for the
+    # reason the replay row gives -- no flag hands a person 56-byte structs.
+    "a GROWING capture container fed into an open handle": (
+        "--growing",
+        "wz_dissect_live_follow",
+        (),
+    ),
     # (ABI 57) — moved here from ONLY_CLI. The row stood there because the
     # cdylib linked no cipher, so no door could run the decryption pass; the
     # pass now lives in `wz-tls-record`'s `pass` module, the cdylib is a
@@ -871,9 +888,8 @@ ONLY_CAPI = {
         "DELIBERATE, and it rides the lent replay row above: the same answers "
         "as `wz_dissect_live_follow` over the same bytes, with the handle "
         "keeping no copy of the TCP payloads in the container. The growing-"
-        "container half a PERSON would want is the flag already filed as open "
-        "debt against `wz_dissect_live_follow`, and it is not double-counted "
-        "here.",
+        "container half a PERSON would want is `--growing`, filed in BOTH "
+        "against `wz_dissect_live_follow`, and it is not double-counted here.",
         (),
     ),
     # (ABI 51, open-debt item 924, D7) -- filed in the round that added the symbol.
@@ -885,28 +901,6 @@ ONLY_CAPI = {
         "there is no standing figure for it to report and no flag to add. The "
         "library's own memory gate reads the same document, which is the check "
         "that the figure is the heap and not a belief.",
-        (),
-    ),
-    # R2373 (open-debt item 661) — the door that CONTINUES a handle as a writer
-    # appends, which is the half the replay row above leaves open. Filed in the
-    # round that added the symbol, which is where this table's own header says
-    # the answering belongs.
-    "a GROWING capture container fed into an open handle": (
-        "wz_dissect_live_follow",
-        "OPEN DEBT on the CLI side (item 664), and the reason is measured "
-        "rather than argued. The record half of this is DELIBERATE for the "
-        "reason the replay row above gives -- a terminal renders for a person "
-        "and there is no flag that hands one 56-byte structs. But the "
-        "CONTAINER half is not: handed a capture a helper is still appending "
-        "to, `wz-analyze` today fails, because `Dissection::from_capture` "
-        "reports a block cut in half as `Truncated` and every flag it has goes "
-        "through that constructor. A person watching a capture being written "
-        "wants the document for what has been written, and the walk that "
-        "answers it now exists (`wz_capture::CaptureCursor`), so what is "
-        "missing here is a decision and a flag rather than a capability. It is "
-        "NOT taken silently: reading a partial file as if it were whole is the "
-        "shortfall this project refuses everywhere else, so the flag has to be "
-        "asked for.",
         (),
     ),
     # R2453 (open-debt item 700) — the aggregate coming back OUT of an open
