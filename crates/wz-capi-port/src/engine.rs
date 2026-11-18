@@ -33,8 +33,8 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 use crate::cancellation::CancellableFan;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
-    MatchingSink, QblId, QueryableSink, ReplyCallback, SubId, SubscriberSink, Tick, TickerId,
-    TokenId, WireKey,
+    MatchingSink, QblId, QueryableSink, ReplyCallback, StatementNotHonoured, SubId, SubscriberSink,
+    Tick, TickerId, TokenId, WireKey,
 };
 
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
@@ -506,19 +506,21 @@ pub trait SessionEngine: Send + Sync + 'static {
         Ok(self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg))
     }
 
-    /// [`Self::get_on_wire`] for a query that may state a set of links (`opts.links`). `Err` when
-    /// the engine cannot honour a set it was given, and no leg is issued. An engine that cannot
+    /// [`Self::get_on_wire`] for a query that may state what not every engine honours: a set of
+    /// links (`opts.links`) or the one node it is addressed to (`opts.target_peer`). `Err` names
+    /// the first statement the engine cannot honour, and no leg is issued. An engine that cannot
     /// honour one and is handed it through [`Self::get_on_wire`] asks no link and issues no leg,
-    /// so a limited get is never asked on every link; this is the door that says why.
-    fn get_on_link_set(
+    /// so such a get is never widened to every link; this is the door that says why. The provided
+    /// answer honours neither.
+    fn get_stated(
         &self,
         keyexpr: &str,
         wire: &WireKey,
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, LinksNotHonoured> {
-        LinksNotHonoured::unless_unrestricted(opts.links)?;
+    ) -> Result<Option<usize>, StatementNotHonoured> {
+        StatementNotHonoured::of_query(opts)?;
         Ok(self.get_on_wire(keyexpr, wire, opts, fan, leg))
     }
 

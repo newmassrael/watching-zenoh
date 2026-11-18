@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A set of links stated to this engine (policy `entity-link-restriction`): the engine numbers
-//! none of its links, so every operation that states a set is refused by name and makes nothing,
-//! and the same operation stating no set is made as before. A limited entity is never widened to
-//! every link.
+//! What a call states that this engine does not carry out: a set of links (policy
+//! `entity-link-restriction`), a retry of a publish (`publisher-admission-retry`), the
+//! all-or-none form (`multi-route-atomic-tx`) and a query's one node (`targeted-query`). The
+//! engine numbers none of its links, offers no frame without waiting, reserves none and addresses
+//! no query, so every operation that states one of these is refused by name and makes nothing,
+//! and the same operation stating none is made as before.
 
 use std::sync::Arc;
 
-use wz_capi_port::{FanoutError, LinksNotHonoured, SessionEngine, SubscriberSink, WireKey};
+use wz_capi_port::{
+    FanoutError, LinksNotHonoured, SessionEngine, StatementNotHonoured, SubscriberSink, WireKey,
+};
+use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -20,20 +25,32 @@ fn one_link() -> LinkRestriction {
     LinkRestriction::only([1]).expect("one slot")
 }
 
-/// A publish limited to a link is refused by name and sends nothing; the same publish stating no
-/// set reaches the router, and is the only one that does.
+/// A publish that states a set of links, a retry or the all-or-none form is refused by name and
+/// sends nothing; the same publish stating none of them reaches the router, and is the only one
+/// that does.
 #[test]
-fn a_limited_publish_is_refused_by_name_and_sends_nothing() {
+fn a_stated_publish_is_refused_by_name_and_sends_nothing() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
 
-    let limited = PublishOptions::put()
-        .with_locality(Locality::Remote)
-        .with_links(one_link());
-    assert_eq!(
-        engine.publish_on_wire_all("demo/links/a", &WireKey::literal(), b"limited", &limited),
-        Err(FanoutError::LinksNotHonoured)
-    );
+    let remote = || PublishOptions::put().with_locality(Locality::Remote);
+    let retry = AdmissionRetry {
+        attempts: 2,
+        delay_ms: 5,
+    };
+    for (stated, named) in [
+        (remote().with_links(one_link()), StatementNotHonoured::Links),
+        (
+            remote().with_admission_retry(retry),
+            StatementNotHonoured::AdmissionRetry,
+        ),
+        (remote().with_atomic_tx(), StatementNotHonoured::AtomicTx),
+    ] {
+        assert_eq!(
+            engine.publish_on_wire_all("demo/links/a", &WireKey::literal(), b"stated", &stated),
+            Err(FanoutError::NotHonoured(named))
+        );
+    }
     engine
         .publish_on_wire_all(
             "demo/links/a",
@@ -90,47 +107,58 @@ fn a_limited_subscriber_is_refused_by_name_and_declares_nothing() {
     });
 }
 
-/// A get limited to a link is refused by name through the door that states a set, and asked of
-/// no link through the door of no set; no leg is minted for it either way.
+/// A get limited to a link or addressed to one node is refused by name through the door that
+/// names it, and asked of no link through the door of no statement; no leg is minted for it
+/// either way.
 #[cfg(feature = "query")]
 #[test]
-fn a_limited_get_is_refused_by_name_and_asks_no_link() {
+fn a_stated_get_is_refused_by_name_and_asks_no_link() {
     use wz_capi_port::ReplyCallback;
     use wz_session_core::query_options::QueryOptions;
     use wz_session_core::reply_sink::ReplyView;
 
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    let limited = QueryOptions::default().with_links(one_link());
 
     let mut legs = 0usize;
-    assert_eq!(
-        engine.get_on_link_set(
-            "demo/links/q",
-            &WireKey::literal(),
-            &limited,
-            None,
-            &mut || -> ReplyCallback {
-                legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
-            }
+    for (stated, named) in [
+        (
+            QueryOptions::default().with_links(one_link()),
+            StatementNotHonoured::Links,
         ),
-        Err(LinksNotHonoured)
-    );
-    assert_eq!(
-        engine.get_on_wire(
-            "demo/links/q",
-            &WireKey::literal(),
-            &limited,
-            None,
-            &mut || -> ReplyCallback {
-                legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
-            }
+        (
+            QueryOptions::default().with_target_peer([0xc3]),
+            StatementNotHonoured::TargetPeer,
         ),
-        Some(0)
-    );
-    assert_eq!(legs, 0, "no leg was minted for a limited get");
+    ] {
+        assert_eq!(
+            engine.get_stated(
+                "demo/links/q",
+                &WireKey::literal(),
+                &stated,
+                None,
+                &mut || -> ReplyCallback {
+                    legs += 1;
+                    Box::new(|_: &dyn ReplyView| {})
+                }
+            ),
+            Err(named)
+        );
+        assert_eq!(
+            engine.get_on_wire(
+                "demo/links/q",
+                &WireKey::literal(),
+                &stated,
+                None,
+                &mut || -> ReplyCallback {
+                    legs += 1;
+                    Box::new(|_: &dyn ReplyView| {})
+                }
+            ),
+            Some(0)
+        );
+    }
+    assert_eq!(legs, 0, "no leg was minted for a get that states something");
 }
 
 /// A liveliness token and a liveliness get limited to a link are refused by name; the token

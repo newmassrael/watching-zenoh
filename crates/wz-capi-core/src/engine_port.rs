@@ -581,16 +581,17 @@ impl SessionEngine for SharedSession {
         )))
     }
 
-    // `get_on_wire`'s fan reads `opts.links` (`QueryReach::of`), so the get is the same call.
+    // `get_on_wire`'s fan reads `opts.links` and `opts.target_peer` (`QueryReach::of`), so the get
+    // is the same call.
     #[cfg(feature = "query")]
-    fn get_on_link_set(
+    fn get_stated(
         &self,
         keyexpr: &str,
         wire: &WireKey,
         opts: &wz_session_core::query_options::QueryOptions,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Result<Option<usize>, LinksNotHonoured> {
+    ) -> Result<Option<usize>, wz_capi_port::StatementNotHonoured> {
         Ok(SessionEngine::get_on_wire(
             self, keyexpr, wire, opts, fan, leg,
         ))

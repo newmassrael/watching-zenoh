@@ -4141,10 +4141,11 @@ mod tokio_engine {
                 publication.key
             )
             .into(),
-            FanoutError::LinksNotHonoured => zerror!(
-                "the publication on {} is limited to some links, and the engine limits no \
-                 publication to some of its links",
-                publication.key
+            FanoutError::NotHonoured(statement) => zerror!(
+                "the publication on {} states what the engine does not carry out, and nothing \
+                 was sent: {}",
+                publication.key,
+                statement
             )
             .into(),
         }
@@ -8766,7 +8767,7 @@ mod tests {
     }
 
     /// Each refusal an engine gives a publication is worded for it, naming its key: the size, and
-    /// a set of links the engine does not limit a publication to.
+    /// a statement the engine does not carry out, named.
     #[test]
     fn each_refusal_of_a_publication_names_it() {
         use wz_capi_core::faces::FanoutError;
@@ -8775,10 +8776,14 @@ mod tests {
         let too_large = too_large.to_string();
         assert!(too_large.contains("demo/stated"), "{too_large}");
         assert!(too_large.contains("larger than"), "{too_large}");
-        let limited = tokio_engine::publish_error(FanoutError::LinksNotHonoured, &publication);
-        let limited = limited.to_string();
-        assert!(limited.contains("demo/stated"), "{limited}");
-        assert!(limited.contains("limited to some links"), "{limited}");
+        let refused = tokio_engine::publish_error(
+            FanoutError::NotHonoured(wz_capi_core::faces::StatementNotHonoured::AtomicTx),
+            &publication,
+        );
+        let refused = refused.to_string();
+        assert!(refused.contains("demo/stated"), "{refused}");
+        assert!(refused.contains("nothing was sent"), "{refused}");
+        assert!(refused.contains("multi-route-atomic-tx"), "{refused}");
     }
 
     #[test]

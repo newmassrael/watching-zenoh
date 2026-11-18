@@ -853,6 +853,33 @@ pub trait BoxedLinkDriver {
         self.try_reserve_room(priority)
     }
 
+    /// [`Self::try_reserve_room_for`] for `frames` frames at once: the room of a whole fragment
+    /// chain, promised before any frame of it is sent, or `None` and nothing held. The frames are
+    /// asked one by one through [`Self::try_reserve_room_for`] and the promises held together, so
+    /// a driver (and a wrapper) that forwards that one answers this one as well; when one frame
+    /// finds no room the frames already promised are given back. A driver whose promises are all
+    /// trivial (it has no queue) grants the trivial permit.
+    #[cfg(feature = "alloc")]
+    fn try_reserve_rooms_for(
+        &self,
+        class: Reliability,
+        priority: crate::qos::Priority,
+        frames: usize,
+    ) -> Option<RoomPermit> {
+        let mut held = alloc::vec::Vec::new();
+        for _ in 0..frames.max(1) {
+            let permit = self.try_reserve_room_for(class, priority)?;
+            if permit.is_held() {
+                held.push(permit);
+            }
+        }
+        if held.is_empty() {
+            Some(RoomPermit::trivial())
+        } else {
+            Some(RoomPermit::held(held))
+        }
+    }
+
     /// R2952 (open-debt item 835) — take this link's block-first slot for
     /// `priority`, waiting up to `wait_us` for it: zenoh's per-link,
     /// per-priority `block_first_waiters`

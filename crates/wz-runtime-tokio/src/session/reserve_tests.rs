@@ -61,15 +61,22 @@ struct ReservingDriver {
     full: AtomicBool,
     sent: AtomicUsize,
     asked: AtomicUsize,
+    mtu: usize,
 }
 
 impl ReservingDriver {
     fn new(free: usize) -> Arc<Self> {
+        Self::with_mtu(free, wz_session_core::link::DEFAULT_LINK_MTU)
+    }
+
+    /// A driver whose link takes frames of at most `mtu` bytes, so a payload past it is a chain.
+    fn with_mtu(free: usize, mtu: usize) -> Arc<Self> {
         Arc::new(Self {
             lane: Lane::new(free),
             full: AtomicBool::new(false),
             sent: AtomicUsize::new(0),
             asked: AtomicUsize::new(0),
+            mtu,
         })
     }
 
@@ -111,6 +118,10 @@ impl crate::session_glue::BoxedLinkDriver for ReservingDriver {
     }
     fn try_reserve_room(&self, _priority: wz_session_core::qos::Priority) -> Option<RoomPermit> {
         self.lane.take()
+    }
+
+    fn link_mtu(&self) -> usize {
+        self.mtu
     }
 }
 
@@ -278,4 +289,83 @@ fn an_aliased_reserved_publish_needs_the_declaration_and_gives_the_room_back_whe
     assert_eq!(driver.sent(), declared + 1, "the push is on the link");
     assert_eq!(driver.asked(), asked, "and asked it for no room");
     assert_eq!(driver.lane.held(), 0);
+}
+
+/// The reservation of a whole chain `session` grants for `payload`; the test fails when the lane
+/// had no room for it.
+fn chain_reserved(session: &TokioSession, payload: &[u8]) -> WireReservation {
+    match session.reserve_wire_chain("home/chain", payload, &remote()) {
+        Ok(WireRoom::Granted(reservation)) => reservation,
+        Ok(WireRoom::NoRoom) => panic!("the lane had no room for the chain"),
+        Err(e) => panic!("the session could not reserve: {e:?}"),
+    }
+}
+
+/// A payload past the link's frame budget is a chain of frames, and its reservation takes the
+/// room of every one of them at once, or of none: a lane one frame short promises nothing, and
+/// one with exactly the chain's room takes it. Sent under it, no frame of the chain asks for
+/// room, so none waits for room the publish itself holds, and the promise is given back after.
+#[cfg(feature = "transport-fragmentation")]
+#[test]
+fn a_chain_reservation_takes_the_room_of_every_frame_or_of_none() {
+    const MTU: usize = 64;
+    let payload = vec![0x5a_u8; 400];
+
+    let roomy = ReservingDriver::with_mtu(1_000, MTU);
+    let session = session_over(&roomy);
+    let whole = chain_reserved(&session, &payload);
+    let frames = roomy.lane.held();
+    assert!(
+        frames >= 2,
+        "the payload is a chain at this budget, and every frame of it is promised: {frames}"
+    );
+    assert!(whole.is_whole_chain());
+    drop(whole);
+    assert_eq!(roomy.lane.held(), 0, "dropping gives every frame back");
+
+    let short = ReservingDriver::with_mtu(frames - 1, MTU);
+    let session = session_over(&short);
+    assert!(
+        matches!(
+            session.reserve_wire_chain("home/chain", &payload, &remote()),
+            Ok(WireRoom::NoRoom)
+        ),
+        "a lane one frame short of the chain promises nothing"
+    );
+    assert_eq!(
+        short.lane.held(),
+        0,
+        "the frames promised before the one that found no room are given back"
+    );
+    assert_eq!(short.sent(), 0, "and nothing was sent");
+
+    let exact = ReservingDriver::with_mtu(frames, MTU);
+    let session = session_over(&exact);
+    let held = chain_reserved(&session, &payload);
+    // The old question would be answered "no room" now: the reservation is the room of every
+    // frame, and no frame may ask.
+    exact.set_full(true);
+    assert_eq!(
+        session.publish_reserved("home/chain", &payload, remote(), held),
+        Ok(())
+    );
+    let sent = exact.sent();
+    assert!(
+        (2..=frames).contains(&sent),
+        "the whole chain is on the link, within what was promised: {sent} of {frames}"
+    );
+    assert_eq!(exact.asked(), 0, "no frame of the chain asked for room");
+    assert_eq!(exact.lane.held(), 0, "the promise is given back after it");
+}
+
+/// A link with no queue promises a chain trivially, as it promises a frame.
+#[test]
+fn a_link_with_no_queue_promises_a_chain_trivially() {
+    let (session, _driver) = recording_session();
+    let reservation = match session.reserve_wire_chain("home/chain", b"v", &remote()) {
+        Ok(WireRoom::Granted(reservation)) => reservation,
+        other => panic!("a link with no queue grants: {other:?}"),
+    };
+    assert!(!reservation.is_held());
+    assert!(reservation.is_whole_chain());
 }

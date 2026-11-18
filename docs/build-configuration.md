@@ -164,10 +164,13 @@ original reproduced by naming it. Three things follow from it:
   engine through (`wz_capi_port::SessionEngine`) takes the set on every operation that states
   one (the `*_on_link_set` doors, and the `links` of the publish and query options), and each
   engine decides: the tokio registry honours it; the router engine and the cooperative engine
-  number no link and refuse a set by name (`LinksNotHonoured`, `FanoutError::LinksNotHonoured`
-  for a publish), and a get handed a set through the door of no set is asked of no link, so no
-  engine widens a limited entity to every link. The pico ABI and the lwIP session have no door
-  that states a set.
+  number no link and refuse a set by name (`LinksNotHonoured` for a declaration,
+  `StatementNotHonoured` through `get_stated` for a get, `FanoutError::NotHonoured` for a
+  publish), and a get handed a set through the door of no statement is asked of no link, so no
+  engine widens a limited entity to every link. The same two engines refuse the other
+  statements of the publish and query options by name as well (a retry, the all-or-none form,
+  a target node), and a statement equal to the default is no statement. The pico ABI and the
+  lwIP session have no door that states one.
 - **Addressing a query to one node** (`targeted-query`, off by default): upstream sends a
   query to every link whose peers declared a matching queryable, and a caller cannot name the
   node it wants. `QueryOptions::target_peer` names it by the identity its link's handshake gave
@@ -190,7 +193,8 @@ original reproduced by naming it. Three things follow from it:
   the frame again to those faces only, up to the attempts, then ends with nothing delivered
   and no session close. A payload that must be fragmented cannot be probed, so it is sent the
   waiting way and is never retried. `admission_retry::admit_in_build` refuses a stated retry
-  when the policy is off; shared-memory publishes and the C plain-put lane do not retry. It is
+  when the policy is off; a shared-memory publish that states a retry is refused by name
+  (`FanoutError::NotHonoured`), and the C plain-put lane never carries one. It is
   reachable from the Rust API as `.admission_retry(..)` on the builders of a publisher and of a
   put or a delete, taking an `AdmissionRetry` (re-exported with the feature), behind the
   non-default crate feature `admission-retry`; a stated retry is refused when the policy is
@@ -199,27 +203,34 @@ original reproduced by naming it. Three things follow from it:
 - **Delivering a publish to all of its links or to none** (`multi-route-atomic-tx`, off by
   default): a publish waits for room on each face on its own terms, so one put can reach some
   faces and be dropped at another. A publish that states `PublishOptions::atomic_tx` instead
-  reserves room on every face first (`Session::reserve_wire`, which asks the link's outbound
-  queue once, without waiting and without marking it congested) and sends only when every
-  face promised it, each frame under its own reservation (`Session::publish_reserved`), which
-  the send does not ask room for again; the queue counts the promise as taken until it is
-  dropped, so no other sender is given that room in between. If a face has no room nothing is
+  reserves room on every face first (`Session::reserve_wire_chain`, which builds the Push as the
+  send will, counts the frames it leaves in at that face's frame budget,
+  `frame_encode::chain_frames`, and asks the link's outbound queue for all of them at once,
+  without waiting and without marking it congested) and sends only when every face promised
+  it, each face's chain under its own reservation (`Session::publish_reserved`), no frame of
+  which asks for room again (`DispatchStage::ReservedChain`); the queue counts the promise as
+  taken until it is dropped, so no other sender is given that room in between. No two faces
+  share a writer queue today (each face's write driver builds its own:
+  `crates/wz-runtime-tokio/src/udp_pipeline.rs` `wire_udp_socket` and `wire_udp_demuxed`,
+  `crates/wz-runtime-tokio/src/stream_link.rs` `stream_outbound_channel`), and faces that did
+  would be counted together, each taking its whole chain from the one queue. If a face has no
+  room nothing is
   sent to any face, to a multicast group or to a subscriber of the session, no sequence number
   is spent, the reservations are given back and the publish ends delivering to nobody; stated
   together with an admission retry it reserves again after the delay. A face that is down or
   was never told the key takes no part. A multicast group takes no reservation: it is sent the
-  frame only after every face promised room, and nothing on an abort. Every reservation is held
-  until its own face is sent the frame, so the later faces' promises still count while an
-  earlier face is sent. A payload that must be fragmented is atomic for its first frame only,
-  and its later frames wait for room as any send does, which can be room the publish itself
-  holds when two of its faces share a queue; a link that writes from a pool may still wait for
-  a slot, and shared-memory publishes do not reserve. `atomic_tx::admit_in_build` refuses the statement
+  frame only after every face promised room, and nothing on an abort (its writer has a queue,
+  `multicast_pipeline.rs` `attach_over`, but the group send has no door that sends under a
+  reservation yet). A payload that must be fragmented is atomic as a whole chain. A link that
+  writes from a pool may still wait for a slot, and a shared-memory publish, which reserves
+  nothing, is refused by name when it states the form. `atomic_tx::admit_in_build` refuses the statement
   when the policy is off. It is reachable from the Rust API as `.all_links_or_none()` on the
   builders of a publisher and of a put or a delete, which takes no argument so that the form
   is only ever stated, behind the non-default crate feature `atomic-publish`; the statement is
   refused when the policy is off, and by the router engine, which does not read it. Only the
   tokio registry reads it; the zenoh-c ABI states it through `switch-doors`;
-  `BoxedLinkDriver::try_reserve_room` is the seam a wrapper must forward.
+  `BoxedLinkDriver::try_reserve_room` is the seam a wrapper must forward (its chain form,
+  `try_reserve_rooms_for`, is built on it).
 - **Stating the four switches from the C ABI** (the non-default feature `switch-doors` of
   `wz-capi-c`, a capability that implies `query`, `queryable` and `liveliness`): the option
   structs of the `z_*` functions are upstream's layout and the `z_` symbols are held to the

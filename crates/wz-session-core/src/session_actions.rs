@@ -2777,6 +2777,12 @@ enum DispatchStage {
     /// which the reservation does not cover.
     #[cfg(all(feature = "alloc", feature = "codec-push"))]
     Reserved,
+    /// [`Self::Reserved`] for a sender that holds the room of EVERY frame the message leaves in
+    /// (`SessionLinkActions::try_reserve_wire_frames`): no fragment of the chain asks for room
+    /// either, so none waits for room the sender's own promise occupies, and none is a
+    /// congestion drop.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    ReservedChain,
 }
 
 /// The declaration a session with no allocator sends, as the arguments of the writer of
@@ -10062,9 +10068,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A send under room its sender already holds: only a Push is sent that way, and only a
         // build with a heap has a permit to hold.
         #[cfg(all(feature = "alloc", feature = "codec-push"))]
-        let reserved = stage == DispatchStage::Reserved;
+        let reserved = matches!(
+            stage,
+            DispatchStage::Reserved | DispatchStage::ReservedChain
+        );
         #[cfg(not(all(feature = "alloc", feature = "codec-push")))]
         let reserved = false;
+        // The sender holds the room of every frame, the chain's included.
+        #[cfg(all(feature = "alloc", feature = "codec-push"))]
+        let covered = stage == DispatchStage::ReservedChain;
+        #[cfg(not(all(feature = "alloc", feature = "codec-push")))]
+        let covered = false;
         // R2923 — zenoh's `is_droppable`: a best-effort message, or one whose
         // congestion control is `Drop`
         // (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
@@ -10306,6 +10320,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let probing = false;
         let deadline = core::cell::Cell::new(if probing {
             PushDeadline::probe(droppable)
+        } else if covered {
+            PushDeadline::covered(droppable, &self.params.tx_queue)
         } else {
             PushDeadline::new(droppable, &self.params.tx_queue)
         });
@@ -11052,8 +11068,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // a spent fragment budget abandons it just below: the stop
             // fragment, outside the queue's bound as upstream's
             // ephemeral batch is outside its pool, and the message is a
-            // congestion drop.
-            if emitted > 0 {
+            // congestion drop. A chain whose every frame's room the sender reserved asks for
+            // none: that room is the sender's, and asking would count its own promise.
+            if emitted > 0 && !deadline.is_covered() {
                 let answer = self.with_conduit_link(reliability, priority, |link| {
                     link.link_driver()
                         .wait_for_room_for(reliability, priority, deadline.ask())
@@ -11952,6 +11969,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         priority: Priority,
         room: crate::link::RoomPermit,
     ) -> Result<(), SendWireError> {
+        self.send_reserved_at(
+            DispatchStage::Reserved,
+            msg,
+            reliable,
+            express,
+            priority,
+            room,
+        )
+    }
+
+    /// The one body of the two reserved sends, at `stage`: [`DispatchStage::Reserved`] for room
+    /// that covers the first frame, [`DispatchStage::ReservedChain`] for room that covers the
+    /// whole chain.
+    #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
+    fn send_reserved_at(
+        &self,
+        stage: DispatchStage,
+        msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+        room: crate::link::RoomPermit,
+    ) -> Result<(), SendWireError> {
         if !matches!(msg, crate::network_message::NetworkMessage::Push(_)) {
             drop(room);
             return self.send_network_message_qos(msg, reliable, express, priority);
@@ -11964,7 +12005,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             unreachable!("the message was matched as a Push above");
         };
         let sent = self
-            .dispatch_push_at(DispatchStage::Reserved, priority, &push, reliable)
+            .dispatch_push_at(stage, priority, &push, reliable)
             .map(|_| ());
         #[cfg(feature = "transport-batching")]
         if sent.is_ok() && express {
@@ -11980,6 +12021,97 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // until the frame and its flush are on the link.
         drop(room);
         sent
+    }
+
+    /// How many frames of room `msg` takes on the link a message of `reliable` leaves on, never
+    /// fewer than it takes: one for a message that fits a frame, its fragment count for one that
+    /// does not ([`crate::frame_encode::chain_frames`]), measured over the body the send encodes
+    /// and the frame budget the send cuts by. Any message but a Push is counted one frame, as
+    /// only a Push is sent under a reservation. What [`Self::try_reserve_wire_frames`] is asked
+    /// for by a sender that reserves a whole chain before it sends.
+    #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
+    pub fn wire_frames_of(
+        &self,
+        msg: &crate::network_message::NetworkMessage,
+        reliable: bool,
+    ) -> usize {
+        #[cfg(feature = "transport-fragmentation")]
+        {
+            let crate::network_message::NetworkMessage::Push(push) = msg else {
+                return 1;
+            };
+            let encode_body = crate::frame_encode::push_body(push);
+            #[cfg(feature = "transport-tx-lend")]
+            let body_len = crate::frame_encode::encoded_body_len(as_encoder(&encode_body));
+            #[cfg(not(feature = "transport-tx-lend"))]
+            let body_len = {
+                let mut buf = alloc::vec::Vec::new();
+                let written = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut buf);
+                    encode_body(&mut sink)
+                };
+                written.map(|()| buf.len())
+            };
+            // A body the codec cannot write is refused by the send itself; one frame is asked.
+            let Ok(body_len) = body_len else {
+                return 1;
+            };
+            let (mtu, _) = self.negotiated_tx_limits_for(Reliability::from_reliable_bool(reliable));
+            crate::frame_encode::chain_frames(body_len, mtu)
+        }
+        #[cfg(not(feature = "transport-fragmentation"))]
+        {
+            let _ = (msg, reliable);
+            1
+        }
+    }
+
+    /// [`Self::try_reserve_wire_room`] for `frames` frames at once, on the same link
+    /// ([`BoxedLinkDriver::try_reserve_rooms_for`]): the room of a whole chain, or `Ok(None)` and
+    /// nothing held when the lane cannot take all of it.
+    #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
+    pub fn try_reserve_wire_frames(
+        &self,
+        reliable: bool,
+        priority: Priority,
+        frames: usize,
+    ) -> Result<Option<crate::link::RoomPermit>, SendWireError> {
+        if self.congestion_close_ordered() || !self.session_send_available() {
+            return Err(SendWireError::TransportUnavailable);
+        }
+        let priority = self.conduit_priority(priority);
+        let reliability = Reliability::from_reliable_bool(reliable);
+        Ok(self.with_conduit_link(reliability, priority, |link| {
+            link.link_driver()
+                .try_reserve_rooms_for(reliability, priority, frames)
+        }))
+    }
+
+    /// [`Self::send_network_message_reserved`] for a sender whose `room` covers every frame the
+    /// message leaves in ([`Self::try_reserve_wire_frames`] of [`Self::wire_frames_of`]): the
+    /// fragments after the first ask for no room either, so the chain never waits for room its
+    /// own promise holds and is never a congestion drop. The permit is held, as there, until the
+    /// last frame and its flush are on the link.
+    #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
+    pub fn send_network_message_reserved_chain(
+        &self,
+        msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+        room: crate::link::RoomPermit,
+    ) -> Result<(), SendWireError> {
+        self.send_reserved_at(
+            DispatchStage::ReservedChain,
+            msg,
+            reliable,
+            express,
+            priority,
+            room,
+        )
     }
 
     /// R3110 -- the sender's handoff transaction for `msg`, with every shared-memory slice of it

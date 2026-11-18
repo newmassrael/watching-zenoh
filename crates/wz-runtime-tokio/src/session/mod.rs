@@ -868,10 +868,25 @@ struct StagedPush {
 ///
 /// It is for the options it was reserved with: a publish sent under it states the same
 /// reliability and priority, as the registry's fan-out does by building both from one value.
+///
+/// A reservation of a whole chain (`Session::reserve_wire_chain`) holds the Push it was measured
+/// for as well, and the publish sent under it is that Push, every frame of it under the room.
 #[must_use = "a reservation that is dropped at once promises nothing: send under it, or do not ask"]
-#[derive(Debug)]
 pub struct WireReservation {
     permit: wz_session_core::link::RoomPermit,
+    /// The Push whose every frame the permit covers, for a reservation of a whole chain.
+    #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+    staged: Option<StagedPush>,
+}
+
+impl core::fmt::Debug for WireReservation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut out = f.debug_struct("WireReservation");
+        out.field("permit", &self.permit);
+        #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+        out.field("whole_chain", &self.staged.is_some());
+        out.finish()
+    }
 }
 
 impl WireReservation {
@@ -879,6 +894,13 @@ impl WireReservation {
     /// with no queue or of a publish that owes the link nothing.
     pub fn is_held(&self) -> bool {
         self.permit.is_held()
+    }
+
+    /// Whether the reservation covers every frame of the Push it was taken for, and not only the
+    /// first (`Session::reserve_wire_chain`).
+    #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+    pub fn is_whole_chain(&self) -> bool {
+        self.staged.is_some()
     }
 }
 
@@ -5441,13 +5463,94 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         if !opts.allowed_destination.allows_remote() {
             return Ok(WireRoom::Granted(WireReservation {
                 permit: wz_session_core::link::RoomPermit::trivial(),
+                #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+                staged: None,
             }));
         }
         match self
             .actions()
             .try_reserve_wire_room(opts.reliable_bool(), opts.priority_band())
         {
-            Ok(Some(permit)) => Ok(WireRoom::Granted(WireReservation { permit })),
+            Ok(Some(permit)) => Ok(WireRoom::Granted(WireReservation {
+                permit,
+                #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+                staged: None,
+            })),
+            Ok(None) => Ok(WireRoom::NoRoom),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// [`Self::reserve_wire`] for the WHOLE frame chain of the publish of `payload` on `keyexpr`
+    /// with `opts`: the Push is built as the send builds it, measured in frames at this link's
+    /// frame budget, and room for every one of them is promised at once, or none is
+    /// ([`WireRoom::NoRoom`]). A publish sent under the reservation is that Push, and no frame of
+    /// its chain asks for room, so none waits for room the publish itself holds and the chain is
+    /// delivered whole or not at all.
+    #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+    pub fn reserve_wire_chain(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<WireRoom, PublishError> {
+        self.reserve_staged(keyexpr, GroupKey::literal(keyexpr), payload, opts)
+    }
+
+    /// [`Self::reserve_wire_chain`] on a key the far side holds a declaration for, named as
+    /// [`Self::publish_aliased_reserved`] names it.
+    ///
+    /// # Panics
+    ///
+    /// When `mapping_id` is 0, which names no declaration.
+    #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+    pub fn reserve_wire_chain_aliased(
+        &self,
+        mapping_id: wz_session_core::wire_id::ExprId,
+        inline_suffix: Option<&str>,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<WireRoom, PublishError> {
+        assert!(
+            mapping_id != 0,
+            "reserve_wire_chain_aliased requires a non-zero mapping id; use reserve_wire_chain for a literal",
+        );
+        self.reserve_staged(
+            "",
+            GroupKey {
+                mapping_id,
+                suffix: inline_suffix,
+            },
+            payload,
+            opts,
+        )
+    }
+
+    /// The one body of the two chain reservations.
+    #[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+    fn reserve_staged(
+        &self,
+        keyexpr: &str,
+        wire: GroupKey<'_>,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<WireRoom, PublishError> {
+        let Some(staged) = self.stage_wire_push(keyexpr, wire, payload, opts.clone())? else {
+            // Nothing goes on the wire, so nothing is owed to the link.
+            return Ok(WireRoom::Granted(WireReservation {
+                permit: wz_session_core::link::RoomPermit::trivial(),
+                staged: None,
+            }));
+        };
+        let frames = self.actions().wire_frames_of(&staged.msg, staged.reliable);
+        match self
+            .actions()
+            .try_reserve_wire_frames(staged.reliable, staged.priority, frames)
+        {
+            Ok(Some(permit)) => Ok(WireRoom::Granted(WireReservation {
+                permit,
+                staged: Some(staged),
+            })),
             Ok(None) => Ok(WireRoom::NoRoom),
             Err(e) => Err(e.into()),
         }
@@ -5461,8 +5564,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// It waits for its conduit's lock, where a probe gives up: a promise that failed because
     /// another sender held the lock would break what the reservation was taken for. That lock is
     /// held across a wait for room only by a sender whose own wait ends at its deadline, and the
-    /// promised room is not given to it. A payload too long to be sent whole is sent with the
-    /// ordinary wait between its fragments after the first; the reservation covers one frame.
+    /// promised room is not given to it. Under a reservation of one frame
+    /// ([`Self::reserve_wire`]) a payload too long to be sent whole is sent with the ordinary wait
+    /// between its fragments after the first; under one of the whole chain
+    /// (`Self::reserve_wire_chain`) the Push it was measured for is sent and no fragment waits.
     ///
     /// The same egress policy, routing namespace, timestamp and metadata apply as to
     /// [`Self::publish`]. The reservation is given back when this returns, sent or refused.
@@ -5548,6 +5653,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         opts: PublishOptions,
         reservation: WireReservation,
     ) -> Result<(), PublishError> {
+        let WireReservation { permit, staged } = reservation;
+        // A reservation of a whole chain was measured for its own Push: that Push is the one
+        // sent, every frame of it under the room.
+        if let Some(StagedPush {
+            msg,
+            reliable,
+            express,
+            priority,
+        }) = staged
+        {
+            return Ok(self
+                .actions()
+                .send_network_message_reserved_chain(msg, reliable, express, priority, permit)?);
+        }
         let Some(StagedPush {
             msg,
             reliable,
@@ -5557,13 +5676,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         else {
             return Ok(());
         };
-        Ok(self.actions().send_network_message_reserved(
-            msg,
-            reliable,
-            express,
-            priority,
-            reservation.permit,
-        )?)
+        Ok(self
+            .actions()
+            .send_network_message_reserved(msg, reliable, express, priority, permit)?)
     }
 
     /// Send a plain Put on a key this session declared, to the peer, and nothing else: the
