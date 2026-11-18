@@ -1640,7 +1640,12 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// Under that policy an advanced publisher, every sample of which carries a time, refuses its put
 /// (`Z_EGENERIC`) and its delete until the clock is reported synchronised, and sends nothing;
 /// before it, the sample went out stamped with the system clock.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 16;
+///
+/// It moves to 17 for a subscriber whose callback runs off the receive path (`crate::offload`):
+/// `wz_capi_c_declare_subscriber_offloaded`, `wz_capi_c_offload_options_default` and
+/// `wz_capi_c_subscriber_offload_stats`, three new symbols and the two structs they take, in a
+/// build with `rx-callback-offload` (off by default).
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 17;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

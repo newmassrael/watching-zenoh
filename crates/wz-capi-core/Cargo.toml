@@ -230,6 +230,11 @@ lifecycle-doors = []
 # piece writer they use are the zenoh-c ABI's own (`wz-capi-c/segment-sender`), so this feature only
 # carries the capability's name, as `e2e-sender`'s does.
 segment-sender = []
+# A subscriber whose callback runs off the receive path. The model has nothing behind it: the lane
+# is the runtime's (`wz_runtime_tokio::session::DetachedOffload`), fed through the subscriber
+# factory every face already takes, and the doors are the zenoh-c ABI's own
+# (`wz-capi-c/rx-callback-offload`), so this feature only carries the capability's name.
+rx-callback-offload = []
 # The statements of a call that the zenoh-c ABI's `wz_capi_c_*_ext` doors make (the links an entity
 # may use, a publish's retry and all-or-none form, a query's target node). The model has them
 # unconditionally (`SharedSession`'s `*_on_links`, the options of a publish and a query), so this

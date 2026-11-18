@@ -12424,9 +12424,9 @@ layer_c1ch_capi_c_config_surface() {
     # the reference is, and the door set the gates below grade is the library's with them on: a
     # door behind a feature that no lane turned on would be graded by nothing. `identity-make` (the
     # identity a client makes, off by default for its size) is one more such door, and so are the
-    # lifecycle doors (`lifecycle-doors`), the statement doors (`switch-doors`) and the segment
-    # sender (`segment-sender`).
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender"
+    # lifecycle doors (`lifecycle-doors`), the statement doors (`switch-doors`), the segment
+    # sender (`segment-sender`) and the offloaded subscriber (`rx-callback-offload`).
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload"
     # A leg ledger (open-debt item 938): the two gates read different builds,
     # so a red debug build does not hide what the release pin says, and each
     # build is a function defined here so the lane's text stays the lane's.
@@ -25801,9 +25801,9 @@ _runci_build_capi_c_for_oracle() {
     # of the doors (`c_observation_plane_consumer.c`) links the very library the arm selected.
     # `identity-make`, `lifecycle-doors` and `switch-doors` likewise: their C consumers
     # (`c_identity_consumer.c`, `c_lifecycle_consumer.c`, `c_switch_doors_consumer.c`) link this
-    # library. `segment-sender` is in the plane for the same reason, so its doors are in the
-    # library the arm graded.
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender"
+    # library. `segment-sender` and `rx-callback-offload` are in the plane for the same reason, so
+    # their doors are in the library the arm graded.
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
@@ -25984,6 +25984,27 @@ layer_c1cc_api_compat_c() {
     grep -q '^switch_doors: ok$' <<<"$c_sw_out" || {
         echo "  C1cc FAIL: the switch doors C consumer printed no verdict"
         echo "$c_sw_out"; return 1; }
+    # The offloaded subscriber, declared from C the same way: the two structs' layout written out
+    # in the consumer, the default statement, a callback that runs on a thread other than the one
+    # that put, the lane's stats, and the refusals (NULL, block, a value naming no answer, a plain
+    # subscriber's stats). The build above carries `rx-callback-offload`
+    # (`_runci_build_capi_c_for_oracle`).
+    local c_off_bin c_off_out
+    c_off_bin="$(mktemp -d)/c_offload_consumer"
+    c_off_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pthread \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_offload_consumer.c \
+        -L "$WZ_ARTIFACTS"/crates/target/debug -lwz_capi_c -o "$c_off_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the offload C consumer did not compile or link"
+        echo "$c_off_out"; return 1; }
+    c_off_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS"/crates/target/debug "$c_off_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the offload C consumer failed"
+        echo "$c_off_out"; rm -rf "$(dirname "$c_off_bin")"; return 1; }
+    rm -rf "$(dirname "$c_off_bin")"
+    grep -q '^c_offload_consumer: ok$' <<<"$c_off_out" || {
+        echo "  C1cc FAIL: the offload C consumer printed no verdict"
+        echo "$c_off_out"; return 1; }
     # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
     # now that this lane has established an oracle is present. `--require`
     # rather than the bare form on purpose: past this point the checkout and

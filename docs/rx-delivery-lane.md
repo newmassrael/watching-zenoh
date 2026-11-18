@@ -166,10 +166,9 @@ callbacks are slow and leaves the rest inline.
        awaits while the loop is not polling.
      * The lane gained `fits` (would a sample be admitted, counting nothing, since a wait is not an
        overload) and `can_ever_fit`.
-     * Not declared: the capability `rx-callback-offload`. The API exists only on the Rust session,
-       and no door of a C ABI exports it, so a capability would name nothing a deployer could turn
-       on or off; a build that does not call it does not link it. It is declared with the first door
-       that exports it.
+     * The capability `rx-callback-offload` is declared with the first door that exports it, the
+       zenoh-c ABI's (below, "The zenoh-c door"). Before that the API existed only on the Rust
+       session and a capability would have named nothing a deployer could turn on or off.
      Tests: under `block` a full lane holds and loses nothing, the drain waits while the consumer
      is held and admits in order after it makes room, and a late sample that arrives while a slot is
      free but others are held waits behind them (the case a no-overtaking rule exists for, and the
@@ -249,7 +248,43 @@ keeps the latest from one that refuses. A refusal is still counted for a sample 
 reliably is a loss of what the sender was promised: a stream that cannot lose reliable samples
 does not use this choice.
 
+## The zenoh-c door
+
+The capability `rx-callback-offload` (off by default, `abis = core, c`) exports three doors from
+`wz-capi-c` (`crates/wz-capi-c/src/offload.rs`, ABI revision 17):
+`wz_capi_c_declare_subscriber_offloaded`, `wz_capi_c_offload_options_default` and
+`wz_capi_c_subscriber_offload_stats`.
+
+- **Which engine.** The zenoh-c ABI runs every session on the tokio engine (`wz-capi-core`), where
+  the lane is. The pico ABI runs on the tokio engine under `engine-tokio` and on the cooperative
+  engine under `engine-coop` and `os-zephyr`, which has no lane yet (phase 5), so it has no door
+  in this change.
+- **One lane per C subscription, fed by every face.** A C subscription is one wz subscriber per
+  face, plus the local plane and each joined group (`SharedSession::declare_subscriber_on_links`
+  mints a callback for each from one factory). The door hands that factory a sink of ONE lane
+  (`wz_runtime_tokio::session::DetachedOffload`, `OffloadFeed`), so the samples of every face wait
+  in one order for one consumer, a task of the application runtime that calls the C closure.
+- **`block` is refused (`Z_EUNAVAILABLE`).** It needs the drain a session's drive loop awaits,
+  and this lane is fed by several loops and by a put on the caller's thread (`LocalDeliveryDrain::
+  Caller`), so no one loop owns the wait; the zenoh-c ABI's FIFO channel declines to block its
+  drive thread for the same reason (`crates/wz-capi-c/src/handlers.rs`). `reject` and
+  `keep-latest` are taken as the Rust session takes them. A declaration that states nothing (NULL,
+  or `wz_capi_c_offload_options_default`) takes `reject`, which this lane can give in every build;
+  `WZ_CAPI_C_OVERLOAD_BUILD` asks for the build's `subscriber-overload` policy by name and is
+  refused where that policy is `block`.
+- **A C consumer** (`crates/wz-capi-c/tests/c_offload_consumer.c`, run by Layer C1cc) declares an
+  offloaded subscriber from C, receives on a thread other than the putting one, reads the stats and
+  meets the refusals.
+- **Counters** are read through `wz_capi_c_subscriber_offload_stats`, the lane's snapshot and the
+  losses by how the sample was sent.
+
 ## Open for the owner
+
+- Whether the zenoh-c door should carry `block` at all. Doing it means registering the lane's drain
+  on every face's session as the declaration is replayed onto it, and deciding what a put on the
+  caller's thread does when the lane is full (wait in the put, as zenoh-c's FIFO handler blocks its
+  sender, or refuse). Until that is decided the door refuses it, and a declaration that states
+  nothing takes `reject`.
 
 - What the transport does with a reliable sample the lane refused is not decided here. The receive
   path records the failure as local; whether it then stops reading, drops with the counter, or ends the
