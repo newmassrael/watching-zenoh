@@ -7838,7 +7838,9 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 299 -> 308 (see the first arm). PRINTED.
     # The c2 integration: 312 -> 328. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 328 -> 334, printed on pc2 (the six of `router_forward 330`).
-    _runci_guarded_test "C1AY router_forward linkstate 334" 334 \
+    # 334 -> 335, counted from the source: the `adminspace-core`-gated test of the region a
+    # partitioning node reports for each face, which only this arm's features reach.
+    _runci_guarded_test "C1AY router_forward linkstate 335" 335 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -9590,7 +9592,9 @@ layer_c1am_cargo_test_adminspace() {
     # 11 -> 13, counted from the source: `admin_session_of_peer_files_the_row_under_the_named_peer`
     # and `the_admin_queryable_is_declared_incomplete` (`session/tests.rs`), whose names carry the
     # filter and whose features this build has.
-    _runci_guarded_test "C1AM router introspection admin_ 13" 13 \
+    # 13 -> 14, counted from the source: `admin_sessions_report_the_region_the_rules_placed_each_face_in`
+    # (`router_forward.rs`), `adminspace-core`-gated, whose name carries the filter.
+    _runci_guarded_test "C1AM router introspection admin_ 14" 14 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     # Server-layer split, step 7: the admin space is the wz-admin crate's, so its every leg is
     # linted there, with every admin feature on (the MCU write surface among them).
