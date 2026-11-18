@@ -7916,6 +7916,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the peer's write-filter armed = "no subscriber yet", correct). A
         // FUTURE-only interest (no `c()`) gets neither — an ongoing subscription has
         // no current snapshot to close.
+        //
+        // A CURRENT-only interest in subscribers or queryables is answered too, where the pin
+        // drops it (`zenoh/src/net/routing/dispatcher/interests.rs` @
+        // `Current interests may only refer to tokens (illegal)`): zenoh-pico's peers send it
+        // (`vendor/zenoh-pico/src/net/filtering.c` @
+        // `uint8_t flags = interest_flag | _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT;`),
+        // and answering serves them and every zenoh sender alike.
         if interest.c() {
             let self_zid = *self.north_net().self_zid();
             if body.su() {
@@ -15752,6 +15759,12 @@ mod tests {
             "no declaration reached the wire unasked"
         );
 
+        // A CURRENT-only interest in subscribers, answered on purpose. The pin drops it
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Current interests may only refer to tokens (illegal)`),
+        // but a zenoh-pico peer with no router among its peers puts its write filter's interest in
+        // exactly this shape (`vendor/zenoh-pico/src/net/filtering.c` @
+        // `uint8_t flags = interest_flag | _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT;`),
+        // and so does wz's own C ABI multicast face; answering it keeps both working.
         let interest =
             build_interest_subscribers(1, true, false, 0, Some("demo/**")).expect("build interest");
         forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
