@@ -2129,6 +2129,12 @@ pub struct ScoutingDatagram {
     /// datagram read whole names a node or counts as evidence that the flow is
     /// zenoh.
     pub read_whole: bool,
+    /// The message names a zid no node has (a Hello's, or the asker a Scout
+    /// names, of zero bytes): a participant refuses it where it reads it, and
+    /// this reader keeps the row and says so, as
+    /// [`PassiveFrame::names_no_zid`] does for an Init or a Join. Why, in full,
+    /// is [`ScoutingFrame::names_no_zid`] of the row's frame.
+    pub names_no_zid: bool,
 }
 
 /// A flow's scouting messages, with the count EVER produced.
@@ -2422,14 +2428,17 @@ impl<'a> Scoutings<'a> {
             });
         let read = parse_scouting_observed(payload);
         let read_whole = matches!(&read, Ok((_, n)) if *n == payload.len());
+        let frame = read.map(|(frame, _)| frame);
+        let names_no_zid = frame.as_ref().is_ok_and(|f| f.names_no_zid().is_some());
         Some(ScoutingDatagram {
             direction: row.direction,
             packet_index: row.packet_index as usize,
-            frame: read.map(|(frame, _)| frame),
+            frame,
             observed_at_ms: row.observed_at_ns.map(|ns| ns / NANOS_PER_MILLI),
             observed_at_ns: row.observed_at_ns,
             unit_len: payload.len(),
             read_whole,
+            names_no_zid,
         })
     }
 
@@ -13461,6 +13470,49 @@ mod datagram_tests {
                 .packet_index,
             0
         );
+    }
+
+    /// A Scout whose asker is a zid of zero bytes is refused by a participant,
+    /// and a capture of the node that sent it still reads it: the row is kept,
+    /// named a Scout, and says it names no zid. The control asker is not zero.
+    #[test]
+    fn a_scout_naming_a_zero_zid_is_read_and_reported_on_its_row() {
+        let scout_asking_as = |zid: &[u8]| {
+            let mut scout = wz_codecs::scout::Scout::new();
+            scout.version = 0x09;
+            scout.set_what(0x03);
+            scout.set_i(true);
+            scout.set_zid_len_m1((zid.len() - 1) as u8);
+            scout.zid = Some(wz_codecs::Bounded::new(zid).unwrap());
+            let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_SCOUT];
+            wire.extend_from_slice(&scout.encode_to_vec());
+            wire
+        };
+        let row = |payload: &[u8]| {
+            let mut d = Dissection::new();
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, payload),
+            );
+            d.datagram_flows()[0]
+                .scouting()
+                .first()
+                .expect("the row is kept")
+        };
+
+        let zero = row(&scout_asking_as(&[0, 0, 0, 0]));
+        assert!(
+            matches!(zero.frame, Ok(ScoutingFrame::Scout { .. })),
+            "the observer reads it: {:?}",
+            zero.frame
+        );
+        assert!(zero.read_whole);
+        assert!(zero.names_no_zid);
+
+        let named = row(&scout_asking_as(&[0, 0, 0, 0x01]));
+        assert!(matches!(named.frame, Ok(ScoutingFrame::Scout { .. })));
+        assert!(!named.names_no_zid, "the control arm");
     }
 
     /// R311y608 — THE OTHER HALF OF THE EXCHANGE, and it does not come back on
