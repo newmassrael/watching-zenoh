@@ -334,22 +334,19 @@ mod wire_legs_tests {
             || MultiRouteAtomicTx::DOMAIN.contains(MultiRouteAtomicTx::On);
         assert_eq!(WIRE_LEGS_ALLOWED, allows);
         let mut handed = SessionPolicy::defaults();
-        if handed
+        let retry_selectable = handed
             .select_publisher_admission_retry(PublisherAdmissionRetry::On)
-            .is_ok()
-        {
-            assert!(
-                WIRE_LEGS_ALLOWED,
-                "a snapshot may turn the retry on, so the legs are linked"
-            );
-        }
+            .is_ok();
+        assert!(
+            !retry_selectable || WIRE_LEGS_ALLOWED,
+            "a snapshot may turn the retry on, so the legs are linked"
+        );
         let defaults = SessionPolicy::defaults();
-        if defaults.publisher_admission_retry() || defaults.multi_route_atomic_tx() {
-            assert!(
-                WIRE_LEGS_ALLOWED,
-                "a default that is on is inside its domain"
-            );
-        }
+        let default_on = defaults.publisher_admission_retry() || defaults.multi_route_atomic_tx();
+        assert!(
+            !default_on || WIRE_LEGS_ALLOWED,
+            "a default that is on is inside its domain"
+        );
     }
 }
 
