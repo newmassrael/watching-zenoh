@@ -12699,9 +12699,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`vendor/zenoh-pico/src/net/liveliness.c:169-198`); first call
     /// returns `0` matching the post-increment-from-zero convention.
     /// `Relaxed` ordering — uniqueness is the only invariant.
-    pub fn alloc_next_interest_id(&self) -> u64 {
-        self.next_outbound_interest_id
-            .fetch_add(1, Ordering::Relaxed)
+    ///
+    /// An interest id is a `u32` (`commons/zenoh-protocol/src/network/interest.rs`
+    /// @ `pub type InterestId = u32;`, drawn from `zenoh/src/net/runtime/mod.rs`
+    /// @ `pub fn next_id(&self) -> u32 {`): `None` once every one has been
+    /// handed out, where a wrapped id could name an Interest still standing
+    /// on the peer.
+    pub fn alloc_next_interest_id(&self) -> Option<crate::wire_id::InterestId> {
+        take_u32_id(&self.next_outbound_interest_id)
     }
 
     /// R121e — encode + dispatch a `Push` (literal keyexpr, `Put`

@@ -6761,7 +6761,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             *refs += 1;
             return;
         }
-        let interest_id = self.actions().alloc_next_interest_id();
+        // A session with no interest id left asks nothing and holds no reference: the release
+        // of the handle then finds no entry and sends no Final, as for a key never asked.
+        let Some(interest_id) = self.actions().alloc_next_interest_id() else {
+            return;
+        };
+        let interest_id = u64::from(interest_id);
         table.insert(key, (interest_id, 1));
         drop(table);
         let (aggregate, mapping_id, suffix) = match form {
@@ -8763,7 +8768,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             let keyexpr_string = keyexpr.into();
-            let interest_id = self.actions().alloc_next_interest_id();
+            let interest_id = u64::from(
+                self.actions()
+                    .alloc_next_interest_id()
+                    .ok_or(LivelinessSubscriberAliasError::IdsExhausted)?,
+            );
             // R311y1 — the CURRENT-state-replay request gate, consolidated
             // into LivelinessSubscriberOptions::effective_history (the SSOT;
             // was a 4-line `#[cfg]` block duplicated per declare path,
@@ -8965,7 +8974,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     composed
                 }
             };
-            let interest_id = self.actions().alloc_next_interest_id();
+            let interest_id = u64::from(
+                self.actions()
+                    .alloc_next_interest_id()
+                    .ok_or(LivelinessSubscriberAliasError::IdsExhausted)?,
+            );
             // R311y1 — CURRENT-state-replay request gate via the
             // effective_history SSOT (mirror of the literal path).
             let history = options.effective_history();
@@ -9320,7 +9333,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 return Err(LivelinessGetError::NotEstablished);
             }
             let keyexpr_string = keyexpr.into();
-            let interest_id = actions.alloc_next_interest_id();
+            let interest_id = u64::from(
+                actions
+                    .alloc_next_interest_id()
+                    .ok_or(LivelinessGetError::IdsExhausted)?,
+            );
             // R262 — absolute monotonic-ms deadline (same epoch contract
             // as `Session::query`: the application threads one `Arc<T>`
             // clock through both `Session::new` and

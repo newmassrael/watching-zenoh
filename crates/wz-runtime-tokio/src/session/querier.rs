@@ -128,6 +128,12 @@ pub enum LivelinessGetError {
     /// the seam a driver-run profile keeps: it reaps through
     /// [`Session::sweep_expired_liveliness_gets`] instead of an executor.
     NoRuntime,
+    /// The session has handed out every `u32` interest id
+    /// (`commons/zenoh-protocol/src/network/interest.rs` @
+    /// `pub type InterestId = u32;`), so no snapshot was registered and the
+    /// Interest was not emitted rather than carry an id a standing Interest
+    /// may still hold.
+    IdsExhausted,
 }
 
 impl std::fmt::Display for LivelinessGetError {
@@ -168,6 +174,11 @@ impl std::fmt::Display for LivelinessGetError {
                  timeout reaper and must be called from within a tokio runtime; \
                  no snapshot was registered. Use the callback `liveliness_get` \
                  and drive `sweep_expired_liveliness_gets` yourself off-runtime"
+            ),
+            LivelinessGetError::IdsExhausted => write!(
+                f,
+                "LivelinessGetError: the session has handed out every 32-bit \
+                 interest id; the Interest was not emitted"
             ),
         }
     }
@@ -788,7 +799,15 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             // `declare_querier_inner` (`api/session.rs:1428-1435`).
             #[cfg(feature = "declare-interest")]
             let interest_id = {
-                let interest_id = self.session.actions().alloc_next_interest_id();
+                // Spent interest ids are rolled back as a failed emit is below.
+                let Some(interest_id) = self.session.actions().alloc_next_interest_id() else {
+                    cell.kill();
+                    R::with_mutex_mut(&self.session.observer, |obs| {
+                        obs.remote_queryables.undeclare_matching_listener(id)
+                    });
+                    return Err(MatchingListenerError::IdsExhausted);
+                };
+                let interest_id = u64::from(interest_id);
                 // Recorded for reconnect replay and sent through the seam, as one step.
                 let emit = self.session.actions().declare_matching_interest_recorded(
                     interest_id,

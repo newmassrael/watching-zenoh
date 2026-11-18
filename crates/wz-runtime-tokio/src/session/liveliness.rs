@@ -1242,6 +1242,12 @@ pub enum LivelinessSubscriberAliasError {
     /// Unlike every variant above, wire bytes MAY have been emitted (followed
     /// by a `0x3 Drop` stop fragment); retry once the budget is refilled.
     FragmentChainAbandoned,
+    /// The session has handed out every `u32` interest id
+    /// (`commons/zenoh-protocol/src/network/interest.rs` @
+    /// `pub type InterestId = u32;`), so nothing was registered and the
+    /// Interest was not emitted rather than carry an id a standing Interest
+    /// may still hold.
+    IdsExhausted,
 }
 
 impl std::fmt::Display for LivelinessSubscriberAliasError {
@@ -1282,6 +1288,11 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                  ran out while emitting this Interest's chain, so it was abandoned \
                  (a 0x3 Drop stop fragment followed any fragments already sent); \
                  retry once the budget is refilled"
+            ),
+            LivelinessSubscriberAliasError::IdsExhausted => write!(
+                f,
+                "LivelinessSubscriberAliasError: the session has handed out every \
+                 32-bit interest id; the Interest was not emitted"
             ),
         }
     }

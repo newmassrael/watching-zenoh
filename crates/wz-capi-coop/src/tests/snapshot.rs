@@ -157,6 +157,25 @@ fn a_snapshot_nobody_answers_ends_at_its_deadline() {
     );
 }
 
+/// A session that has handed out every `u32` interest id asks no face: the snapshot is issued on
+/// no leg, rather than on one whose Interest carries an id a standing Interest may hold. The
+/// CONTROL is the same ask before the ids are spent, which issues its leg.
+#[test]
+fn a_snapshot_asks_no_face_once_the_interest_ids_are_spent() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    router.send(Command::MuteInterests);
+    until(&engine, "the router to go quiet", || {
+        router.seen(|s| s.settled)
+    });
+    let (issued, _open_leg) = ask(&engine, "demo/snap/a", 0, None, None);
+    assert_eq!(issued, Some(1), "CONTROL: one leg while ids remain");
+    engine.spend_interest_ids();
+    let (issued, leg) = ask(&engine, "demo/snap/b", 0, None, None);
+    assert_eq!(issued, Some(0), "no face is asked once the ids are spent");
+    assert!(leg.lock().unwrap().replies.is_empty());
+}
+
 /// A cancelled token ends the snapshot's leg at once, though nothing steps the session: `cancel`
 /// returns only once the leg's callback is dropped.
 #[test]

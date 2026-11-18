@@ -90,8 +90,8 @@ pub type InterestId = u32;
 
 /// The `InterestId` a session's 64-bit interest id is on the wire.
 ///
-/// A session still allocates and tables interest ids at 64 bits; upstream reads
-/// one unbounded and narrows it (`commons/zenoh-codec/src/network/interest.rs`
+/// A session allocates interest ids in the `u32` space and tables them at 64
+/// bits, so for its own ids this loses nothing; upstream reads one unbounded and narrows it (`commons/zenoh-codec/src/network/interest.rs`
 /// @ `let id = self.codec.read(&mut *reader)?;`, into an `InterestId`), so this
 /// is the id a peer answers with, and the one a reply sink is handed.
 pub const fn interest_id_as_read(id: u64) -> InterestId {
