@@ -9165,6 +9165,71 @@ mod face_up_order_tests {
         );
     }
 
+    /// Through the port, the registry decides a set of links by honouring it: the liveliness get
+    /// and the subscriber that state one are taken and limited, never refused, which is the
+    /// answer an engine that numbers its links gives where the others refuse by name.
+    #[cfg(feature = "liveliness-get")]
+    #[tokio::test]
+    async fn the_registry_as_the_ports_engine_honours_a_set_of_links() {
+        use wz_capi_port::SessionEngine;
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources::default(),
+        )
+        .expect("test host entropy");
+        assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "slot 2"
+        );
+        let engine = shared.engine_ref();
+
+        let asked = |links: LinkRestriction| {
+            let mut mint =
+                || -> wz_capi_port::ReplyCallback { Box::new(|_view: &dyn ReplyView| {}) };
+            SessionEngine::liveliness_get_on_link_set(
+                engine,
+                "wz/link/live",
+                &WireKey::literal(),
+                1000,
+                links,
+                None,
+                &mut mint,
+            )
+        };
+        assert_eq!(
+            asked(LinkRestriction::only([1]).expect("one slot")),
+            Ok(Some(1)),
+            "a set is honoured: the one link it names is asked"
+        );
+        assert_eq!(
+            asked(LinkRestriction::Any),
+            Ok(Some(2)),
+            "no set: every link is asked"
+        );
+
+        let sink: SubscriberSink = Arc::new(|| {
+            Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
+        });
+        let limited = SessionEngine::declare_subscriber_on_link_set(
+            engine,
+            "wz/link/sub".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            LinkRestriction::only([2]).expect("one slot"),
+            None,
+            sink,
+        );
+        assert!(
+            matches!(limited, Ok(Some(_))),
+            "a subscriber limited to a link is declared, not refused: {limited:?}"
+        );
+    }
+
     /// A query addressed to a node goes out on that node's link only, with no local leg and
     /// no widening: the named node's link gets one leg, an unknown node gets none, and the
     /// same query with no target asks both links and the plane.

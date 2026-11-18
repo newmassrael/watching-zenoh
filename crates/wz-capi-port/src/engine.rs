@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceSnapshot};
+use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
@@ -31,8 +32,9 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    QueryableSink, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
+    MatchingSink, QblId, QueryableSink, ReplyCallback, SubId, SubscriberSink, Tick, TickerId,
+    TokenId, WireKey,
 };
 
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
@@ -413,6 +415,111 @@ pub trait SessionEngine: Send + Sync + 'static {
         let mut opts = opts.clone();
         opts.payload = Some(value.bytes().to_vec());
         self.get_on_wire(keyexpr, wire, &opts, fan, leg)
+    }
+
+    // The operations below state a set of links (policy `entity-link-restriction`), which each
+    // engine decides: the provided answers are those of an engine that does not number its links,
+    // which refuses a set by name ([`LinksNotHonoured`]) and makes the call of its no-set twin for
+    // no set. An engine that honours a set overrides them. The policy itself is the entry point's
+    // to apply (`LinkRestriction::admit_in_build`) before a set reaches an engine.
+
+    /// [`Self::declare_subscriber_on_wire`] limited to the links of `links`: declared to the nodes
+    /// behind those links only. `Err` when the engine cannot honour a set it was given, and
+    /// nothing is declared.
+    fn declare_subscriber_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: SubscriberSink,
+    ) -> Result<Option<SubId>, LinksNotHonoured> {
+        LinksNotHonoured::unless_unrestricted(links)?;
+        Ok(self.declare_subscriber_on_wire(keyexpr, wire, allowed_origin, retraction, sink))
+    }
+
+    /// [`Self::declare_queryable_on_wire`] limited to the links of `links`, as
+    /// [`Self::declare_subscriber_on_link_set`] limits a subscriber.
+    #[allow(clippy::too_many_arguments)]
+    fn declare_queryable_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: QueryableSink,
+    ) -> Result<Option<QblId>, LinksNotHonoured> {
+        LinksNotHonoured::unless_unrestricted(links)?;
+        Ok(self.declare_queryable_on_wire(
+            keyexpr,
+            wire,
+            complete,
+            allowed_origin,
+            retraction,
+            sink,
+        ))
+    }
+
+    /// [`Self::declare_liveliness_token_on_wire`] limited to the links of `links`: announced to
+    /// the nodes behind those links only.
+    fn declare_liveliness_token_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+    ) -> Result<Option<TokenId>, LinksNotHonoured> {
+        LinksNotHonoured::unless_unrestricted(links)?;
+        Ok(self.declare_liveliness_token_on_wire(keyexpr, wire, retraction))
+    }
+
+    /// [`Self::declare_liveliness_subscriber_on_wire`] limited to the links of `links`: its
+    /// interest is declared to the nodes behind those links only.
+    fn declare_liveliness_subscriber_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        history: bool,
+        links: LinkRestriction,
+        sink: LivelinessSink,
+    ) -> Result<Option<SubId>, LinksNotHonoured> {
+        LinksNotHonoured::unless_unrestricted(links)?;
+        Ok(self.declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink))
+    }
+
+    /// [`Self::liveliness_get_on_wire`] limited to the links of `links`: asked of the nodes behind
+    /// those links only. `Err` when the engine cannot honour a set it was given, and no leg is
+    /// issued (`leg` is not called).
+    fn liveliness_get_on_link_set(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        timeout_ms: u32,
+        links: LinkRestriction,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Result<Option<usize>, LinksNotHonoured> {
+        LinksNotHonoured::unless_unrestricted(links)?;
+        Ok(self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg))
+    }
+
+    /// [`Self::get_on_wire`] for a query that may state a set of links (`opts.links`). `Err` when
+    /// the engine cannot honour a set it was given, and no leg is issued. An engine that cannot
+    /// honour one and is handed it through [`Self::get_on_wire`] asks no link and issues no leg,
+    /// so a limited get is never asked on every link; this is the door that says why.
+    fn get_on_link_set(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &QueryOptions,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Result<Option<usize>, LinksNotHonoured> {
+        LinksNotHonoured::unless_unrestricted(opts.links)?;
+        Ok(self.get_on_wire(keyexpr, wire, opts, fan, leg))
     }
 
     /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or

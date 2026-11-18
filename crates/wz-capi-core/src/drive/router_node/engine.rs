@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    QueryableSink, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId,
-    WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
+    MatchingSink, QblId, QueryableSink, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
+    TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -219,6 +219,9 @@ impl SessionEngine for RouterState {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        // The router writes to its faces by its own tables and numbers no link, so a publish
+        // limited to some of them is refused by name, before anything is sent.
+        LinksNotHonoured::unless_unrestricted(opts.links)?;
         self.forwarder
             .publish_with(keyexpr, payload, opts)
             .map(|()| payload.len())
@@ -238,6 +241,7 @@ impl SessionEngine for RouterState {
         payload: wz_session_core::extshm::ShmSendHandle,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        LinksNotHonoured::unless_unrestricted(opts.links)?;
         let size = payload.bytes().len();
         self.publish_shm(keyexpr, payload, opts)
             .map(|()| size)
@@ -485,6 +489,11 @@ impl SessionEngine for RouterState {
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Option<usize> {
+        // A get limited to some links is asked of none: the router numbers no link, and asking
+        // every one would widen it. `get_on_link_set` is the door that refuses it by name.
+        if opts.links.is_restricted() {
+            return Some(0);
+        }
         // One leg: the node's own face asks, and the router routes the query to the queryables of
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
@@ -515,6 +524,10 @@ impl SessionEngine for RouterState {
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Option<usize> {
+        // Asked of none when limited to some links, as `get_on_wire` is.
+        if opts.links.is_restricted() {
+            return Some(0);
+        }
         // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).

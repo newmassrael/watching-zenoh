@@ -55,6 +55,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
+use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
 pub mod cancellation;
@@ -206,7 +207,52 @@ pub enum FanoutError {
     /// The payload or keyexpr exceeded the bounded codec's capacity, so no face could have
     /// carried it.
     ExceedsCapacity,
+    /// The publish stated a set of links ([`PublishOptions::links`]) and the engine limits no
+    /// publish to some of its links ([`LinksNotHonoured`]): nothing was sent, to a link or to a
+    /// subscriber of the session.
+    ///
+    /// [`PublishOptions::links`]: wz_session_core::publish_options::PublishOptions::links
+    LinksNotHonoured,
 }
+
+impl From<LinksNotHonoured> for FanoutError {
+    fn from(_: LinksNotHonoured) -> Self {
+        Self::LinksNotHonoured
+    }
+}
+
+/// An engine's refusal of a set of links it cannot honour (policy `entity-link-restriction`).
+///
+/// An engine that does not number its links (one data plane, or one link per session) cannot
+/// limit an entity or a call to some of them. Taking the call on every link would make a limited
+/// entity unrestricted without saying so, so the engine refuses it by this name and declares,
+/// sends and asks nothing. No set ([`LinkRestriction::Any`]) is never refused: it is the call
+/// every engine makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinksNotHonoured;
+
+impl LinksNotHonoured {
+    /// The answer of an engine that limits nothing to some links: no set passes, and a set is
+    /// refused.
+    pub const fn unless_unrestricted(links: LinkRestriction) -> Result<(), Self> {
+        if links.is_restricted() {
+            Err(Self)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl core::fmt::Display for LinksNotHonoured {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(
+            "this engine does not limit an entity or a call to some of its links \
+             (policy entity-link-restriction)",
+        )
+    }
+}
+
+impl core::error::Error for LinksNotHonoured {}
 
 /// What a put through a write filter did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +342,23 @@ impl WireKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_engine_that_limits_nothing_refuses_a_set_and_passes_none() {
+        assert_eq!(
+            LinksNotHonoured::unless_unrestricted(LinkRestriction::Any),
+            Ok(())
+        );
+        let one = LinkRestriction::only([1]).expect("one slot");
+        assert_eq!(
+            LinksNotHonoured::unless_unrestricted(one),
+            Err(LinksNotHonoured)
+        );
+        assert_eq!(
+            FanoutError::from(LinksNotHonoured),
+            FanoutError::LinksNotHonoured
+        );
+    }
 
     #[test]
     fn a_literal_key_names_no_declaration() {

@@ -8,12 +8,10 @@
 use std::any::Any;
 
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
+    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, MatchId,
+    MatchingSink, SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
-// Named by the queryable's and the liveliness get's link-limited forms.
-#[cfg(any(feature = "queryable", feature = "liveliness-get"))]
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -485,6 +483,117 @@ impl SessionEngine for SharedSession {
             },
         );
         Some(issued)
+    }
+
+    // The registry numbers its links (`faces::link_slot_of_face`) and honours a set on every
+    // operation that states one, so none of these refuses.
+
+    fn declare_subscriber_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: SubscriberSink,
+    ) -> Result<Option<SubId>, LinksNotHonoured> {
+        Ok(SharedSession::declare_subscriber_on_links(
+            self,
+            keyexpr,
+            wire,
+            allowed_origin,
+            links,
+            retraction,
+            sink,
+        ))
+    }
+
+    #[cfg(feature = "queryable")]
+    #[allow(clippy::too_many_arguments)]
+    fn declare_queryable_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: wz_capi_port::QueryableSink,
+    ) -> Result<Option<wz_capi_port::QblId>, LinksNotHonoured> {
+        Ok(self.declare_port_queryable_on_links(
+            keyexpr,
+            wire,
+            complete,
+            allowed_origin,
+            links,
+            retraction,
+            sink,
+        ))
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn declare_liveliness_token_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+    ) -> Result<Option<wz_capi_port::TokenId>, LinksNotHonoured> {
+        Ok(SharedSession::declare_liveliness_token_on_links(
+            self,
+            keyexpr,
+            wire,
+            crate::runtime::session::LivelinessOptions::new()
+                .with_retraction_naming_the_key(retraction.is_some()),
+            links,
+        ))
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn declare_liveliness_subscriber_on_link_set(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        history: bool,
+        links: LinkRestriction,
+        sink: wz_capi_port::LivelinessSink,
+    ) -> Result<Option<SubId>, LinksNotHonoured> {
+        // `#[non_exhaustive]`: built from its default and narrowed.
+        let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
+        options.history = history;
+        Ok(SharedSession::declare_liveliness_subscriber_on_links(
+            self, keyexpr, wire, options, links, sink,
+        ))
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn liveliness_get_on_link_set(
+        &self,
+        keyexpr: &str,
+        _wire: &WireKey,
+        timeout_ms: u32,
+        links: LinkRestriction,
+        fan: Option<&crate::cancellation::CancellableFan>,
+        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+    ) -> Result<Option<usize>, LinksNotHonoured> {
+        Ok(Some(self.liveliness_get_on_links(
+            keyexpr, timeout_ms, links, fan, leg,
+        )))
+    }
+
+    // `get_on_wire`'s fan reads `opts.links` (`QueryReach::of`), so the get is the same call.
+    #[cfg(feature = "query")]
+    fn get_on_link_set(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &wz_session_core::query_options::QueryOptions,
+        fan: Option<&crate::cancellation::CancellableFan>,
+        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+    ) -> Result<Option<usize>, LinksNotHonoured> {
+        Ok(SessionEngine::get_on_wire(
+            self, keyexpr, wire, opts, fan, leg,
+        ))
     }
 }
 

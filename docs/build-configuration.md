@@ -160,8 +160,14 @@ original reproduced by naming it. Three things follow from it:
   non-default crate feature `link-restriction` (a door upstream does not have stays out of the
   default surface); a set is refused when the policy is off, and by the router engine, which
   does not read it. The zenoh-c ABI states it through the non-default feature `switch-doors` of
-  its crate (see "Stating the four switches from the C ABI" below). The cooperative engine and
-  lwIP do not read it.
+  its crate (see "Stating the four switches from the C ABI" below). The port an ABI reaches its
+  engine through (`wz_capi_port::SessionEngine`) takes the set on every operation that states
+  one (the `*_on_link_set` doors, and the `links` of the publish and query options), and each
+  engine decides: the tokio registry honours it; the router engine and the cooperative engine
+  number no link and refuse a set by name (`LinksNotHonoured`, `FanoutError::LinksNotHonoured`
+  for a publish), and a get handed a set through the door of no set is asked of no link, so no
+  engine widens a limited entity to every link. The pico ABI and the lwIP session have no door
+  that states a set.
 - **Addressing a query to one node** (`targeted-query`, off by default): upstream sends a
   query to every link whose peers declared a matching queryable, and a caller cannot name the
   node it wants. `QueryOptions::target_peer` names it by the identity its link's handshake gave

@@ -1062,6 +1062,7 @@ mod face_table;
 mod faces;
 #[cfg(feature = "query")]
 mod get;
+mod link_sets;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod listen;
 #[cfg(feature = "liveliness")]

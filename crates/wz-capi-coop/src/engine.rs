@@ -48,8 +48,8 @@ use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
+    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, MatchId,
+    MatchingSink, SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
@@ -2311,6 +2311,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        // This engine numbers none of its links, so a publish limited to some of them is refused
+        // by name before anything is sent, to a link or to a subscriber of the session.
+        LinksNotHonoured::unless_unrestricted(opts.links)?;
         // The link first, then the session's own subscribers, as zenoh-pico's `_z_write` does,
         // and nothing local when the link refused it.
         let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
@@ -2813,6 +2816,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // 0). A get that reaches nobody, because its destination admits neither or because no
         // link is up, is over at once. Each leg is issued under the session's lock and no lock is
         // held between two of them.
+        //
+        // A get limited to some links is asked of none: this engine numbers no link, and asking
+        // every one would widen it. `get_on_link_set` is the door that refuses it by name.
+        if opts.links.is_restricted() {
+            return Some(0);
+        }
         let faces = {
             let Some(guard) = self.live() else {
                 return Some(0);

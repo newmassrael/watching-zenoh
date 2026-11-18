@@ -4141,6 +4141,12 @@ mod tokio_engine {
                 publication.key
             )
             .into(),
+            FanoutError::LinksNotHonoured => zerror!(
+                "the publication on {} is limited to some links, and the engine limits no \
+                 publication to some of its links",
+                publication.key
+            )
+            .into(),
         }
     }
 
@@ -8757,6 +8763,22 @@ mod tests {
             ))]
             shm_promoter: None,
         }
+    }
+
+    /// Each refusal an engine gives a publication is worded for it, naming its key: the size, and
+    /// a set of links the engine does not limit a publication to.
+    #[test]
+    fn each_refusal_of_a_publication_names_it() {
+        use wz_capi_core::faces::FanoutError;
+        let publication = stated_publication(SampleKind::Put);
+        let too_large = tokio_engine::publish_error(FanoutError::ExceedsCapacity, &publication);
+        let too_large = too_large.to_string();
+        assert!(too_large.contains("demo/stated"), "{too_large}");
+        assert!(too_large.contains("larger than"), "{too_large}");
+        let limited = tokio_engine::publish_error(FanoutError::LinksNotHonoured, &publication);
+        let limited = limited.to_string();
+        assert!(limited.contains("demo/stated"), "{limited}");
+        assert!(limited.contains("limited to some links"), "{limited}");
     }
 
     #[test]
