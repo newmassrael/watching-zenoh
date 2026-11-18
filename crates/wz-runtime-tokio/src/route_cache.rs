@@ -45,7 +45,6 @@
 //!   input ([`RouteCache::open_draft`]); what that memo keeps at the inputs the draft is published
 //!   at becomes part of the published version's memo (section 6.9).
 
-use std::collections::HashSet;
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -83,6 +82,14 @@ type Routes<T, S> = PersistentMap<RouteKey<S>, T>;
 struct RouteKey<S> {
     keyexpr: Arc<str>,
     source: S,
+}
+
+impl<S> RouteKey<S> {
+    /// The address of the keyexpr's text: one route's alone, since every route's key is made with
+    /// a text of its own ([`Kept::insert`]) and only its copies share it.
+    fn text_address(&self) -> usize {
+        Arc::as_ptr(&self.keyexpr).cast::<u8>() as usize
+    }
 }
 
 /// A route's key as its two parts, so that a route is read by a key borrowed from the caller's
@@ -334,6 +341,14 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
     /// routes does. Measured where a change reaches every route, the removals cost the writer 2.3
     /// to 5.2 times the scan that finds the same routes with no index
     /// (`docs/router-table-snapshots.md`, section 6.9).
+    ///
+    /// A route is told reached by the address of its keyexpr's text, which each route's key owns
+    /// alone: [`Kept::insert`] makes it, the index and every copy share it, and a key put again
+    /// leaves the routes and the index holding the one they held (both persistent maps keep the
+    /// key they have and replace the value). The addresses are sorted once and searched: a sort of
+    /// addresses, and no hash set over the keys built for every type of route. Two routes that
+    /// shared a text would both go, which leaves out more than it must and never keeps a route
+    /// reached.
     fn without(mut self, reached: &[RouteKey<S>]) -> Self {
         if reached.len() * 2 <= self.routes.len() {
             for key in reached {
@@ -341,10 +356,11 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
             }
             return self;
         }
-        let gone: HashSet<&RouteKey<S>> = reached.iter().collect();
+        let mut gone: Vec<usize> = reached.iter().map(RouteKey::text_address).collect();
+        gone.sort_unstable();
         let mut kept = Self::empty(self.is_indexed());
         for (key, route) in &self.routes {
-            if !gone.contains(key) {
+            if gone.binary_search(&key.text_address()).is_err() {
                 kept.put(key.clone(), route.clone());
             }
         }
@@ -1154,6 +1170,35 @@ mod tests {
                 assert_eq!(kept_keys(&memo), keys(&["demo/b", "other/x"]));
             }
         }
+    }
+
+    /// A route kept a second time, as two readers that miss one key at one inputs keep it, is still
+    /// told reached when a change that reaches most routes starts the memo from those that stay:
+    /// its key in the routes and in the index is the one first kept. Turned red by a route kept
+    /// again under a key of its own that the index does not hold, which the change would leave in.
+    #[test]
+    fn a_route_kept_twice_is_left_out_by_a_change_that_reaches_most_routes() {
+        let mut kept: Kept<u64, ()> = Kept::empty(true);
+        for (route, keyexpr) in (0u64..).zip(["demo/a", "demo/a", "demo/b", "demo/c", "other/x"]) {
+            kept.insert(keyexpr, &(), route);
+        }
+        assert_eq!(kept.routes.len(), 4, "the second keep replaced the first");
+        let kept = kept
+            .retiring(
+                0,
+                |_, visit| {
+                    visit("demo/*");
+                    true
+                },
+                keyexpr_intersects_target,
+                true,
+            )
+            .expect("the change says what moved");
+        let keyexprs: BTreeSet<String> =
+            kept.routes.keys().map(|k| k.keyexpr.to_string()).collect();
+        assert_eq!(keyexprs, keys(&["other/x"]));
+        let index = kept.by_keyexpr.as_ref().expect("indexed");
+        assert_eq!(index.len(), 1, "the index holds the one route that stayed");
     }
 
     /// A change that reaches half of the routes or fewer takes out exactly those, and the routes
