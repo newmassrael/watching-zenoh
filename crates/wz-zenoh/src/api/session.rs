@@ -2014,7 +2014,6 @@ mod tokio_engine {
     ) -> ZResult<Box<dyn Send>> {
         use wz_capi_core::{
             runtime::zenoh_config::ZenohNodeConfig,
-            scouting::fresh_scout_zid,
             scouting_node::{ScoutStream, ScoutingPlan},
         };
         use zenoh_protocol::{
@@ -2033,7 +2032,7 @@ mod tokio_engine {
             .fold(0u8, |bits, role| bits | role as u8);
         let plan = ScoutingPlan::for_scout(&node, asked)
             .map_err(|error| zerror!("the configuration cannot be scouted with: {error:?}"))?;
-        let stream = ScoutStream::start(plan, asked, fresh_scout_zid().to_vec(), move |hello| {
+        let stream = ScoutStream::start(plan, asked, move |hello| {
             let whatami = match hello.whatami.map(|role| role.to_api()) {
                 Some(1) => WhatAmI::Router,
                 Some(2) => WhatAmI::Peer,

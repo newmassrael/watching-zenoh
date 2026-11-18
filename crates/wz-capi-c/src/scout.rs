@@ -18,10 +18,9 @@
 
 use std::ffi::{c_int, c_void};
 
-use wz_capi_core::drive::ConfiguredZid;
 use wz_capi_core::scouting::{
-    fresh_scout_zid, parse_multicast_locator, run_scout, MULTICAST_LOCATOR_DEFAULT,
-    SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT,
+    parse_multicast_locator, run_scout, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
+    SCOUTING_WHAT_DEFAULT,
 };
 use wz_session_core::session_zid::SessionZid;
 
@@ -36,20 +35,48 @@ use crate::string::view_string_over;
 use crate::string_array::StringArrayState;
 use crate::zid::z_id_t;
 
-/// The zid a scout announces: the id the config states, in the form zenoh puts
-/// on the wire, or a fresh one when it states none.
-///
-/// It reads the text the way [`ConfiguredZid`] does, which is the way `z_open`
-/// reads it, so the scouter a responder logs is the node a later open stands on.
-/// A stated id that reading refuses is `Z_EINVAL`, as `z_open` answers it
-/// (`OpenRefusal::ZenohId`): a caller that named an identity and scouted as
-/// another, or as nobody, would not know it.
-fn announced_zid(configured: Option<&str>) -> Result<SessionZid, ZResult> {
-    match configured {
-        None => Ok(fresh_scout_zid()),
-        Some(text) => ConfiguredZid::from_zenoh_text(text)
-            .map(|zid| zid.session_zid())
-            .ok_or(Z_EINVAL),
+/// What `z_scout` reads before it scouts: the roles asked for, the budget, the
+/// group, and the asker its Scout names.
+struct ScoutRequest {
+    what: u8,
+    budget_ms: u64,
+    locator: String,
+    asker: Option<SessionZid>,
+}
+
+impl ScoutRequest {
+    /// Read off the config and the options.
+    ///
+    /// A missing `options` falls back to the CONFIG, then to upstream's
+    /// defaults — not straight to the defaults. `z_scout.c` passes its own
+    /// options, but a program that configured `scouting/timeout` and passed
+    /// NULL means that timeout, and ignoring it would scout for the wrong
+    /// budget while looking like it worked.
+    ///
+    /// The Scout names no asker, whatever `id` the config states: the scout
+    /// zenoh-c wraps writes `zid: None` (`zenoh/src/net/runtime/orchestrator.rs`
+    /// @ `zid: None,`, in `pub(crate) async fn scout`). An `id` the reader
+    /// refuses never reaches here: the config's insert doors refuse it.
+    fn read(cfg: Option<&ConfigState>, options: Option<&z_scout_options_t>) -> Self {
+        let cfg_get = |key: &str| -> Option<String> {
+            cfg.and_then(|c| c.first(key)).map(|s| s.trim().to_string())
+        };
+        let (what, budget_ms) = match options {
+            Some(options) => (options.what as u8, options.timeout_ms),
+            None => (
+                SCOUTING_WHAT_DEFAULT,
+                cfg_get(crate::config::SCOUTING_TIMEOUT_KEY)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(SCOUTING_TIMEOUT_DEFAULT_MS),
+            ),
+        };
+        Self {
+            what,
+            budget_ms,
+            locator: cfg_get(crate::config::MULTICAST_LOCATOR_KEY)
+                .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into()),
+            asker: None,
+        }
     }
 }
 
@@ -489,49 +516,22 @@ pub unsafe extern "C" fn z_scout(
                 }
             }
         };
-        let cfg_get = |key: &str| -> Option<String> {
-            cfg.as_ref()
-                .and_then(|c| c.first(key))
-                .map(|s| s.trim().to_string())
-        };
-
-        // A NULL options pointer falls back to the CONFIG, then to upstream's
-        // defaults — not straight to the defaults. `z_scout.c` passes its own
-        // options, but a program that configured `scouting/timeout` and passed
-        // NULL means that timeout, and ignoring it would scout for the wrong
-        // budget while looking like it worked.
-        let (what, budget_ms) = if options.is_null() {
-            (
-                SCOUTING_WHAT_DEFAULT,
-                cfg_get(crate::config::SCOUTING_TIMEOUT_KEY)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(SCOUTING_TIMEOUT_DEFAULT_MS),
-            )
-        } else {
-            // SAFETY: the caller's contract.
-            unsafe { ((*options).what as u8, (*options).timeout_ms) }
-        };
-        let locator = cfg_get(crate::config::MULTICAST_LOCATOR_KEY)
-            .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into());
-        // The Scout announces the identity this node would open a session with,
-        // so a responder that logs the scouter names the same zid a later
-        // InitSyn would carry.
-        let zid = announced_zid(cfg_get(crate::config::SESSION_ZID_KEY).as_deref());
+        // SAFETY: the caller's contract: `options` is null or a valid struct.
+        let request = ScoutRequest::read(cfg.as_deref(), unsafe { options.as_ref() });
         drop(cfg);
-        let zid = match zid {
-            Ok(zid) => zid,
-            Err(code) => {
-                run_drop();
-                return code;
-            }
-        };
+        let ScoutRequest {
+            what,
+            budget_ms,
+            locator,
+            asker,
+        } = request;
 
         let Some((group, port)) = parse_multicast_locator(&locator) else {
             run_drop();
             return Z_EINVAL;
         };
 
-        run_scout(group, port, what, Some(zid), budget_ms, |hello| {
+        run_scout(group, port, what, asker, budget_ms, |hello| {
             let Some(call) = user_call else {
                 return;
             };
@@ -567,67 +567,49 @@ mod tests {
         z_string_array_drop, z_string_array_get, z_string_array_len, z_string_array_loan,
     };
 
-    /// A scout announces the id its config states in zenoh's reading of it.
-    ///
-    /// The expected bytes are derived here from the documented reading and not
-    /// from [`ConfiguredZid`]: the text is a `u128` in big-endian hex and the wire
-    /// carries the id's little-endian bytes with the trailing zeros trimmed, so a
-    /// renderer or a parser that read the text per byte in written order would
-    /// pass the reversed bytes and fail on the first assertion. The odd-digit id
-    /// is the second: zenoh accepts `abc`, and the per-byte reader refused it.
+    /// A scout names no asker, with an `id` in its config and without one, as
+    /// the scout zenoh-c wraps writes `zid: None` whatever its config states
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `zid: None,`, in
+    /// `pub(crate) async fn scout`). The config is built through the C doors,
+    /// so the stated `id` is one the insert accepted.
     #[test]
-    fn a_scout_announces_the_id_its_config_states_as_zenoh_reads_it() {
-        let read = |text: &str| -> Vec<u8> {
-            let id = u128::from_str_radix(text, 16).expect("hex");
-            let mut bytes = id.to_le_bytes().to_vec();
-            while bytes.last() == Some(&0) {
-                bytes.pop();
-            }
-            bytes
+    fn a_scout_names_no_asker_whatever_id_its_config_states() {
+        use crate::abi::{z_moved_config_t, z_owned_config_t};
+        use crate::config::{
+            config_state, z_config_default, z_config_drop, z_config_loan_mut,
+            zc_config_insert_json5,
         };
-        for text in [
-            "c11e47c11e49",
-            "abc",
-            "1",
-            "ffffffffffffffffffffffffffffffff",
-        ] {
-            assert_eq!(
-                announced_zid(Some(text))
-                    .expect("zenoh accepts it")
-                    .as_slice(),
-                read(text).as_slice(),
-                "the announced zid for `{text}`"
-            );
-        }
-        assert_eq!(
-            announced_zid(Some("c11e47c11e49"))
-                .expect("zenoh accepts it")
-                .as_slice()
-                .len(),
-            6
-        );
 
-        // No id stated: a fresh sixteen-byte one, and two calls differ.
-        let (a, b) = (
-            announced_zid(None).expect("none stated"),
-            announced_zid(None).expect("none stated"),
-        );
-        assert_eq!((a.as_slice().len(), b.as_slice().len()), (16, 16));
-        assert_ne!(a, b, "a scout with no configured id must not reuse one");
-    }
-
-    /// An id the config states that zenoh refuses (no digits, zero, a leading
-    /// zero, more than sixteen bytes) is refused by the scout as `z_open`
-    /// refuses it, and not scouted as a fresh id or as nobody.
-    #[test]
-    fn a_scout_refuses_a_stated_id_zenoh_refuses() {
-        for text in ["", "0", "01", "1ffffffffffffffffffffffffffffffff", "zz"] {
-            assert_eq!(
-                announced_zid(Some(text)),
-                Err(Z_EINVAL),
-                "the stated id `{text}`"
-            );
-        }
+        let asker_of = |id: Option<&str>| {
+            // SAFETY: a zeroed owned config is the gravestone this ABI defines.
+            let mut cfg: z_owned_config_t = unsafe { std::mem::zeroed() };
+            // SAFETY: a writable owned slot.
+            assert_eq!(unsafe { z_config_default(&mut cfg) }, Z_OK);
+            if let Some(id) = id {
+                let key = std::ffi::CString::new("id").expect("no NUL");
+                let value = std::ffi::CString::new(format!("\"{id}\"")).expect("no NUL");
+                // SAFETY: a live config and two NUL-terminated strings.
+                let rc = unsafe {
+                    zc_config_insert_json5(
+                        z_config_loan_mut(&mut cfg),
+                        key.as_ptr(),
+                        value.as_ptr(),
+                    )
+                };
+                assert_eq!(rc, Z_OK, "the insert takes the id `{id}`");
+            }
+            // SAFETY: a live config.
+            let state = unsafe { config_state(z_config_loan_mut(&mut cfg)) }.expect("a config");
+            let asker = ScoutRequest::read(Some(&*state), None).asker;
+            // SAFETY: the owned config is live and dropped once.
+            unsafe {
+                z_config_drop((&mut cfg as *mut z_owned_config_t).cast::<z_moved_config_t>())
+            };
+            asker
+        };
+        assert!(asker_of(None).is_none(), "no id stated");
+        assert!(asker_of(Some("c11e47c11e49")).is_none(), "an id stated");
+        assert!(ScoutRequest::read(None, None).asker.is_none(), "no config");
     }
 
     /// The whatami map is an INDEXED BITMASK: 3 is "router|peer", not a third

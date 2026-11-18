@@ -50,6 +50,7 @@ use wz_runtime_tokio::scouting_glue::{
 };
 use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
+use wz_session_core::session_zid::SessionZid;
 
 use crate::caller_span::CallerSpan;
 use crate::scouting::SCOUT_TICK_MS;
@@ -350,7 +351,11 @@ impl ScoutLink {
         // away is dialled again the next time it answers.
         let mut posted = BTreeSet::new();
         let mut current = 0;
-        self.scout_each(plan.what(), zid, |Delivery { hello, window }| {
+        // The node's own zid names it as the asker, which is what a wz responder's self-echo
+        // gate compares (`wz_session_core::scout_responder`); bytes that are no zid ask as
+        // nobody.
+        let asker = SessionZid::new(zid).ok();
+        self.scout_each(plan.what(), asker, |Delivery { hello, window }| {
             if window != current {
                 current = window;
                 posted.clear();
@@ -380,10 +385,12 @@ impl ScoutLink {
     ///
     /// Returns when `each` declines or the scouting link is lost; the caller stops a scout that
     /// has no end of its own by dropping the future.
+    ///
+    /// `asker` is the zid each Scout names, `None` for a Scout that names nobody.
     pub async fn scout_each(
         mut self,
         what: u8,
-        zid: &[u8],
+        asker: Option<SessionZid>,
         mut each: impl FnMut(Delivery) -> bool,
     ) {
         let clock = TokioTime::new();
@@ -392,8 +399,7 @@ impl ScoutLink {
         loop {
             let actions = ScoutingActions::new(ScoutParams {
                 what,
-                // The node's own zid names it as the asker; bytes that are no zid ask as nobody.
-                zid: wz_session_core::session_zid::SessionZid::new(zid).ok(),
+                zid: asker,
                 timeout_ms: window_ms,
                 // The survey arm: every responder of the window, not the first (upstream's
                 // callback returns `Loop::Continue` always).
@@ -474,13 +480,15 @@ pub struct ScoutStream {
 }
 
 impl ScoutStream {
-    /// Scout on `plan` for the roles `what` names, announcing `zid`, handing every Hello to
-    /// `each` on the scout's own thread. A plan that no socket can carry is a scout that finds
-    /// nobody, and not an error.
+    /// Scout on `plan` for the roles `what` names, handing every Hello to `each` on the scout's
+    /// own thread. A plan that no socket can carry is a scout that finds nobody, and not an error.
+    ///
+    /// Each Scout names no asker: upstream's scout a program asks for writes `zid: None`
+    /// whatever its config states (`zenoh/src/net/runtime/orchestrator.rs` @ `zid: None,`, in
+    /// `pub(crate) async fn scout`).
     pub fn start(
         plan: ScoutingPlan,
         what: u8,
-        zid: Vec<u8>,
         mut each: impl FnMut(ScoutedHello) + Send + 'static,
     ) -> io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -498,7 +506,7 @@ impl ScoutStream {
                         return;
                     };
                     tokio::select! {
-                        _ = link.scout_each(what, &zid, |delivery| {
+                        _ = link.scout_each(what, None, |delivery| {
                             each(delivery.hello);
                             true
                         }) => {}
