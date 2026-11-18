@@ -20,9 +20,14 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --emit kconfig-capabilities   print deploy/Kconfig.capabilities
     --emit kconfig-limits         print deploy/Kconfig.limits
     --emit rust-limits            print crates/wz-session-core/src/caps_generated.rs
+    --emit rust-limit-bindings    print crates/wz-session-core/src/caps_binding_generated.rs, where
+                                  each limit is bound
     --emit kconfig-policies       print deploy/Kconfig.policies (written only while the declaration
                                   has a policy)
     --emit rust-policies          print crates/wz-session-core/src/policy_generated.rs
+    --emit config-schema          print deploy/wz-config.schema.json, the JSON Schema of the
+                                  run-time document: the policies and limits a stage after the
+                                  build decides
     --emit rust-feature-bits      print crates/wz-session-core/src/feature_bits_generated.rs
     --emit rust-conformance-items print crates/wz-conformance-build/src/items_generated.rs, the
                                   questions a build script answers for its conformance digest
@@ -58,7 +63,9 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
                                   arguments of the ABI that original is built through
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
-                                  sets off its default
+                                  sets off its default, WZ_POLICY_<NAME>=<value> for each policy
+                                  it sets off upstream's, and WZ_POLICY_<NAME>_ALLOWS_<VALUE>=off
+                                  for each value it leaves out of a policy's domain
     --conformance-statement pico [--engine coop] CONFIG
     --conformance-statement c HEADER
     --resolve-conformance-statement ABI PRESET...
@@ -128,11 +135,23 @@ limit and binds the name the code uses to the generated value.
      `target_env`) gives: a platform row is declared and checked against the compiler, never
      typed twice. A platform that states what it provides states at least the base, and one that
      does not is UNASSESSED, which the entry of the contract refuses and this check reports.
+  9. The enums of crates/wz-session-core/src/policy_binding.rs that the generated policy and
+     limit rows name (`Scope`, `Binding`, `Mutability`, `Wire`, `Storage`) have one variant per
+     word of the declaration's vocabulary, in its order.
+
+## Domains
+
+A policy's domain is the set of its values a stage after the build may select. The build states
+it as one `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value (`off` leaves the value out; unset or `on`
+allows it), from Kconfig through one `default y` bool per value whose prompt hides while the value
+is the chosen default, so the default is always allowed. The generated module refuses, in a
+constant, a build whose domain leaves out its default, and so does `--resolve-env`.
 
 Usage:
     wz_config.py --check | --selftest | --write | --check-presets
     wz_config.py --emit kconfig-root | kconfig-capabilities | kconfig-limits | rust-limits
-                         | kconfig-policies | rust-policies | rust-feature-bits
+                         | rust-limit-bindings | kconfig-policies | rust-policies
+                         | config-schema | rust-feature-bits
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
     wz_config.py --conformance-statement pico [--engine coop] CONFIG
@@ -180,6 +199,12 @@ KCONFIG_LIMITS = ROOT / "deploy" / "Kconfig.limits"
 RUST_LIMITS = ROOT / "crates" / "wz-session-core" / "src" / "caps_generated.rs"
 KCONFIG_POLICIES = ROOT / "deploy" / "Kconfig.policies"
 RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.rs"
+RUST_LIMIT_BINDINGS = ROOT / "crates" / "wz-session-core" / "src" / "caps_binding_generated.rs"
+# The hand-written types the generated policy and limit rows name (`Domain`, `Bound`, the words
+# of where a value is bound); `--check` holds the variants of its enums to the declaration's words.
+POLICY_BINDING_RS = ROOT / "crates" / "wz-session-core" / "src" / "policy_binding.rs"
+# The JSON Schema of the run-time document: what a stage after the build may decide.
+CONFIG_SCHEMA = ROOT / "deploy" / "wz-config.schema.json"
 RUST_FEATURE_BITS = ROOT / "crates" / "wz-session-core" / "src" / "feature_bits_generated.rs"
 # What a build script reads to state its build (decision C15): the questions of a conformance
 # statement and where each answer is found, for `wz-conformance-build`.
@@ -202,6 +227,8 @@ SCHEMA_VERSION = 1
 RUST_MAX_WIDTH = 100
 # rustfmt's default `fn_call_width`: a call whose arguments are wider goes one argument a line.
 RUST_FN_CALL_WIDTH = 60
+# rustfmt's default `array_width`: an array literal whose items are wider goes one item a line.
+RUST_ARRAY_WIDTH = 60
 # rustfmt's default `struct_lit_width`: a struct literal whose body is longer goes one field a line.
 RUST_STRUCT_LIT_WIDTH = 18
 
@@ -1418,6 +1445,9 @@ def policy_binding_problems(pid: str, pol: dict) -> list[str]:
         if not isinstance(boundary, str) or not boundary.strip():
             out.append(f"{where}: a 'quiescent' policy states its `boundary`, the moment a change "
                        "takes effect")
+        elif not all(" " <= c <= "~" for c in boundary):
+            # The generated module carries it as a Rust string literal.
+            out.append(f"{where}: its `boundary` is one line of printable ASCII")
     elif mutability is not None and "boundary" in pol:
         out.append(f"{where}: `boundary` is stated only by a 'quiescent' policy; its `mutability` "
                    f"is {mutability!r}")
@@ -1434,11 +1464,43 @@ def camel(name: str) -> str:
 
 def policy_symbols(pol: dict) -> list[str]:
     """The Kconfig symbols a policy declares: its own for a bool, and for a choice the choice and
-    one option per value."""
+    one option per value; and for either, one allowance per value (`policy_allows_symbol`)."""
     kconfig = pol.get("kconfig")
     if pol.get("kind") == "choice":
-        return [kconfig] + [f"{kconfig}_{snake(c).upper()}" for c in pol.get("choices", [])]
-    return [kconfig]
+        choices = pol.get("choices", [])
+        own = [kconfig] + [f"{kconfig}_{snake(c).upper()}" for c in choices]
+    else:
+        choices = ["off", "on"]
+        own = [kconfig]
+    return own + [f"{kconfig}_ALLOWS_{snake(str(c)).upper()}" for c in choices]
+
+
+def policy_allows_symbol(pol: dict, value: str) -> str:
+    """The name that says whether a build allows `value` of `pol`, the same in the Kconfig and in
+    the environment of the cargo build: `WZ_POLICY_<NAME>_ALLOWS_<VALUE>`."""
+    return f"{pol['kconfig']}_ALLOWS_{snake(value).upper()}"
+
+
+def policy_domain(pol: dict, env: dict[str, str]) -> list[str]:
+    """The values of `pol` a build whose environment states `env` allows, in the declaration's
+    order: one whose `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` is `on` or unset is allowed, `off` leaves it
+    out, so a build that narrows nothing allows every value. The build's default (its
+    `WZ_POLICY_<NAME>`, else upstream's) must be one of them; a domain without it is refused here,
+    as the generated module's constant refuses it in the build."""
+    allowed: list[str] = []
+    for value in policy_values(pol):
+        name = policy_allows_symbol(pol, value)
+        text = env.get(name, "on")
+        if text not in ("on", "off"):
+            raise ValueError(f"a WZ_POLICY_*_ALLOWS_* value is neither `on` nor `off` "
+                             f"({name}={text})")
+        if text == "on":
+            allowed.append(value)
+    default = env.get(pol["kconfig"], pol["default"])
+    if default not in allowed:
+        raise ValueError(f"policy {pol['id']}: its default {default!r} is outside the domain the "
+                         f"build allows ({', '.join(allowed) or 'no value'})")
+    return allowed
 
 
 FACT_KEYS = {"id", "pico", "c", "holds", "lacks", "help"}
@@ -1863,6 +1925,112 @@ def emit_rust_limits(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def limit_scopes(lim: dict) -> list[str]:
+    """The scopes that each hold one value of `lim`, widest first: its `scope`, a word or a list."""
+    return list(lim["scope"]) if isinstance(lim["scope"], list) else [lim["scope"]]
+
+
+def rust_stage(stage: str) -> str:
+    """A storage profile's binding of a limit as an `Option<Binding>`: `none` is a profile that
+    does not read the limit."""
+    return "None" if stage == "none" else f"Some(Binding::{camel(stage)})"
+
+
+def emit_rust_limit_bindings(decl: dict) -> str:
+    """The module `caps.rs` includes as `caps::binding`: one `LimitBinding` constant per limit,
+    named as the limit is, stating what it does to storage, its scopes, the latest stage each
+    storage profile decides it at and what a peer sees of it. Metadata only: no value moves."""
+    out = generated_header("//", "rust-limit-bindings") + [
+        "",
+        "//! Where each limit is bound, as the declaration states it: what the limit does to storage, the",
+        "//! scopes that each hold one value, the latest stage each storage profile decides it at, and what",
+        "//! a peer sees of it. The limit's value is the constant of the same name in `crate::caps`.",
+    ]
+    if decl["limits"]:
+        out += ["", "use crate::policy_binding::{Binding, LimitBinding, Scope, Storage, Wire};"]
+    for lim in decl["limits"]:
+        scopes = [f"Scope::{camel(s)}" for s in limit_scopes(lim)]
+        if len(", ".join(scopes)) <= RUST_ARRAY_WIDTH:
+            scope = [f"    scope: &[{', '.join(scopes)}],"]
+        else:
+            scope = ["    scope: &["] + [f"        {s}," for s in scopes] + ["    ],"]
+        out += ["", f"/// Where [`super::{lim['id']}`] is bound.",
+                f"pub const {lim['id']}: LimitBinding = LimitBinding {{",
+                f"    storage: Storage::{camel(lim['storage'])},"] + scope + [
+                f"    binding_heap: {rust_stage(lim['binding_heap'])},",
+                f"    binding_fixed: {rust_stage(lim['binding_fixed'])},",
+                f"    wire: Wire::{camel(lim['wire'])},",
+                "};"]
+    return "\n".join(out) + "\n"
+
+
+def first_sentence(text: str) -> str:
+    """The first sentence of a help, on one line: up to the first full stop that a space or the
+    end follows, so the stops inside an address or a number do not end it."""
+    flat = " ".join(text.split())
+    match = re.search(r"\.(?=\s|$)", flat)
+    return flat[: match.end()] if match else flat
+
+
+def schema_annotations(row: dict, keys: tuple[str, ...]) -> dict:
+    """Where a policy or a limit is bound, as `x-wz-<key>` annotations of its schema."""
+    return {f"x-wz-{key.replace('_', '-')}": row[key] for key in keys if key in row}
+
+
+def emit_config_schema(decl: dict) -> str:
+    """The JSON Schema (draft 2020-12) of the run-time document: under `wz`, `policies` holds each
+    policy a stage after the build decides (its `binding` is not `build`), as the enum of its
+    values, and `limits` each limit the heap storage profile decides at the open or while running,
+    as an integer with the declared default. Each carries its help's first sentence and where it
+    is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
+    document is checked against when it is applied, not here."""
+    policies = {}
+    for pol in decl["policies"]:
+        if pol["binding"] == "build":
+            continue
+        policies[pol["id"]] = {
+            "description": first_sentence(pol["help"]),
+            "enum": policy_values(pol),
+            "default": pol["default"],
+            **schema_annotations(pol, ("scope", "binding", "mutability", "boundary", "wire")),
+        }
+    limits = {}
+    for lim in decl["limits"]:
+        if lim["binding_heap"] not in ("open", "live"):
+            continue
+        limits[lim["id"]] = {
+            "description": first_sentence(lim["help"]),
+            "type": "integer",
+            "minimum": 0,
+            "default": lim["default"],
+            **schema_annotations(lim, ("storage", "scope", "binding_heap", "binding_fixed", "wire")),
+        }
+    doc = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$comment": ("GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit "
+                     "config-schema. Do not edit: `wz_config.py --check` fails when this file is "
+                     "stale."),
+        "title": "wz run-time configuration",
+        "description": ("The policies and limits a document may state when a node opens or while "
+                        "it runs. A policy the build fixes, and a limit only the build sizes, are "
+                        "not here."),
+        "type": "object",
+        "properties": {
+            "wz": {
+                "type": "object",
+                "properties": {
+                    "policies": {"type": "object", "properties": policies,
+                                 "additionalProperties": False},
+                    "limits": {"type": "object", "properties": limits,
+                               "additionalProperties": False},
+                },
+                "additionalProperties": False,
+            },
+        },
+    }
+    return json.dumps(doc, indent=2, ensure_ascii=True) + "\n"
+
+
 def rust_word(text: str) -> str:
     """A string literal of a word the declaration names: an id, an ABI, an environment name or a
     policy value. Such a word needs no escaping, and one that would is refused here rather than
@@ -1885,6 +2053,24 @@ def _refuses_env(decl: dict, env: dict[str, str]) -> bool:
     """Whether `env_statement` refuses `env` (the selftest's probe of the refusal)."""
     try:
         env_statement(decl, "pico", [], env, {})
+    except ValueError:
+        return True
+    return False
+
+
+def _refuses_domain(pol: dict, env: dict[str, str]) -> bool:
+    """Whether `policy_domain` refuses `env` for `pol` (the selftest's probe of the refusal)."""
+    try:
+        policy_domain(pol, env)
+    except ValueError:
+        return True
+    return False
+
+
+def _refuses_text(text: str) -> bool:
+    """Whether `rust_text` refuses `text` (the selftest's probe of the refusal)."""
+    try:
+        rust_text(text)
     except ValueError:
         return True
     return False
@@ -2149,8 +2335,29 @@ def policy_kconfig(pol: dict, requires: str | None = None) -> list[str]:
     return out + ["", "endchoice", ""]
 
 
+def policy_domain_kconfig(pol: dict) -> list[str]:
+    """One bool per value of `pol`, each `default y` and followed by a blank line: turning one off
+    leaves the value out of the domain a stage after the build may select from
+    (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`). A value's prompt shows only while the value is not the
+    policy's chosen default, so the default is always allowed: the strict merge refuses an
+    assignment the symbol does not take, as it refuses any other."""
+    out: list[str] = []
+    for value in policy_values(pol):
+        if pol["kind"] == "bool":
+            other = pol["kconfig"] if value == "off" else f"!{pol['kconfig']}"
+        else:
+            other = f"!{pol['kconfig']}_{snake(value).upper()}"
+        out += [f"config {policy_allows_symbol(pol, value)}",
+                f'\tbool "{pol["id"]} allows {value}" if {other}',
+                "\tdefault y",
+                "\thelp",
+                f"\t  Whether `{value}` stays selectable after the build; the chosen default always does.",
+                ""]
+    return out
+
+
 def emit_kconfig_policies(decl: dict) -> str:
-    """Every policy of the declaration, for the host tree."""
+    """Every policy of the declaration, for the host tree, each followed by its domain."""
     out = generated_header("#", "kconfig-policies") + [
         "",
         'menu "wz policies"',
@@ -2159,7 +2366,7 @@ def emit_kconfig_policies(decl: dict) -> str:
         "",
     ]
     for pol in decl["policies"]:
-        out += policy_kconfig(pol)
+        out += policy_kconfig(pol) + policy_domain_kconfig(pol)
     out.append("endmenu")
     return "\n".join(out) + "\n"
 
@@ -2207,13 +2414,27 @@ def emit_rust_policies(decl: dict) -> str:
         "//! The policies of a build as the code reads them: each is a field of [`SessionPolicy`], whose",
         "//! `Default` is the value the build's environment states as `WZ_POLICY_<NAME>`, or upstream's",
         "//! behaviour when it states none. A test names the other value by setting the field.",
-        "",
     ]
-    helpers = (["policy_bool"] if bools else []) + (["policy_choice"] if choices else [])
+    if pols:
+        out += [
+            "//!",
+            "//! Each policy's value type, an `Off` and `On` enum of its own for a bool policy, implements",
+            "//! [`PolicyValue`]: the domain the build allows (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`, an unset name",
+            "//! allowing the value), the build's default, which the domain must hold, and where the policy is",
+            "//! bound.",
+        ]
+    out.append("")
+    helpers = ((["policy_allows"] if pols else []) + (["policy_bool"] if bools else [])
+               + (["policy_choice"] if choices else []))
     if len(helpers) == 1:
         out += [f"use super::{helpers[0]};", ""]
     elif helpers:
-        out += ["use super::{policy_bool, policy_choice};", ""]
+        out += ["use super::{" + ", ".join(helpers) + "};", ""]
+    if pols:
+        # A group of its own, so rustfmt keeps it after the `super` import as written.
+        out += ["use crate::policy_binding::{",
+                "    default_is_allowed, Binding, Domain, Mutability, PolicyValue, Scope, Wire,",
+                "};", ""]
     for pol in choices:
         name = camel(pol["id"])
         values = pol["choices"]
@@ -2269,7 +2490,120 @@ def emit_rust_policies(decl: dict) -> str:
         out += ["        Self {"] + [f"            {snake(p['id'])}," for p in pols] + ["        }"]
     out += ["    }", "}", "", "impl Default for SessionPolicy {", "    fn default() -> Self {",
             "        Self::from_build()", "    }", "}"]
+    for pol in pols:
+        out += [""] + policy_value_rust(pol)
     return "\n".join(out) + "\n"
+
+
+def rust_text(text: str) -> str:
+    """A Rust string literal of a line of declaration prose (a policy's `boundary`): printable
+    ASCII, which `policy_binding_problems` holds it to, with `\\` and `"` escaped."""
+    if not all(" " <= c <= "~" for c in text):
+        raise ValueError(f"{text!r} is not one line of printable ASCII")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def rust_const_slice(name: str, ty: str, items: list[str]) -> list[str]:
+    """`const <name>: <ty> = &[<items>];` in an impl, laid out as rustfmt lays it out: on one line
+    when the items fit its array width and the line fits, else one item a line."""
+    inner = ", ".join(items)
+    one = f"    const {name}: {ty} = &[{inner}];"
+    if len(inner) <= RUST_ARRAY_WIDTH and len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return [f"    const {name}: {ty} = &["] + [f"        {item}," for item in items] + ["    ];"]
+
+
+def rust_domain_entry(word: str) -> list[str]:
+    """One entry of a `Domain::from_allowed(&[..])`, `policy_allows(option_env!(<word>)),`, as
+    rustfmt lays it out: on one line when the argument of `policy_allows` fits its call width,
+    else the macro's argument on a line of its own (measured: rustfmt breaks inside the macro and
+    adds no comma there)."""
+    call = f"option_env!({word})"
+    if len(call) <= RUST_FN_CALL_WIDTH:
+        return [f"        policy_allows({call}),"]
+    return ["        policy_allows(option_env!(", f"            {word}", "        )),"]
+
+
+def rust_boundary(text: str) -> list[str]:
+    """`const BOUNDARY: Option<&'static str> = Some(<text>);` as rustfmt lays it out: on one line
+    when it fits; after the `=` when only the call's argument fits rustfmt's call width; else
+    the argument on a line of its own, with the comma rustfmt adds to a function's arguments."""
+    head = "    const BOUNDARY: Option<&'static str> ="
+    one = f"{head} Some({text});"
+    if len(text) > RUST_FN_CALL_WIDTH:
+        return [f"{head} Some(", f"        {text},", "    );"]
+    if len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return [head, f"        Some({text});"]
+
+
+def rust_default_assert(name: str, pid: str) -> list[str]:
+    """The constant that refuses a build whose domain of `pid` leaves out its default, laid out as
+    rustfmt lays it out (the message is short enough for any id a line holds)."""
+    arg = f"{name}::DEFAULT as usize"
+    one = f"    default_is_allowed::<{name}>({arg}),"
+    if len(arg) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
+        check = [one]
+    else:
+        check = [f"    default_is_allowed::<{name}>(", f"        {arg},", "    ),"]
+    return (["const _: () = assert!("] + check
+            + [f'    "the default of {pid} is outside its WZ_POLICY_*_ALLOWS_*"', ");"])
+
+
+def bool_value_rust(pol: dict) -> list[str]:
+    """The value type of a bool policy, `Off` (upstream's) and `On`, with the conversions to and
+    from the `bool` field of `SessionPolicy`, which stays a `bool`; followed by a blank line."""
+    name = camel(pol["id"])
+    out = rust_doc(f"`{pol['id']}` as a value; [`SessionPolicy`] holds it as a `bool`.", "")
+    out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub enum {name} {{",
+            "    /// `off`, upstream's behaviour.", "    Off,", "    /// `on`.", "    On,", "}", "",
+            f"impl {name} {{",
+            "    /// The value as the declaration, the Kconfig and the environment spell it.",
+            "    pub const fn id(self) -> &'static str {", "        match self {",
+            '            Self::Off => "off",', '            Self::On => "on",', "        }", "    }", "",
+            "    /// The value as the `bool` field of [`SessionPolicy`] holds it.",
+            "    pub const fn is_on(self) -> bool {", "        matches!(self, Self::On)", "    }", "",
+            "    const fn from_bool(on: bool) -> Self {", "        if on {", "            Self::On",
+            "        } else {", "            Self::Off", "        }", "    }", "",
+            "    const fn stated() -> Self {",
+            f'        let stated = option_env!("{pol["kconfig"]}");',
+            "        Self::from_bool(policy_bool(stated))", "    }", "}", "",
+            f"impl From<bool> for {name} {{", "    fn from(on: bool) -> Self {",
+            "        Self::from_bool(on)", "    }", "}", "",
+            f"impl From<{name}> for bool {{", f"    fn from(value: {name}) -> Self {{",
+            "        value.is_on()", "    }", "}", "",
+            f"impl Default for {name} {{", "    fn default() -> Self {", "        Self::DEFAULT",
+            "    }", "}", ""]
+    return out
+
+
+def policy_value_rust(pol: dict) -> list[str]:
+    """One policy's `PolicyValue` impl, after its value type when it is a bool policy (a choice's
+    enum is the one above): its values, the domain the build's environment allows, the build's
+    default and where it is bound; and the constant that refuses a build whose domain leaves out
+    its default."""
+    name = camel(pol["id"])
+    values = policy_values(pol)
+    out = bool_value_rust(pol) if pol["kind"] == "bool" else []
+    out += [f"impl PolicyValue for {name} {{",
+            f"    const POLICY: &'static str = {rust_word(pol['id'])};"]
+    out += rust_const_slice("ALL", "&'static [Self]", [f"Self::{camel(v)}" for v in values])
+    out += rust_const_slice("IDS", "&'static [&'static str]", [rust_word(v) for v in values])
+    out.append("    const DOMAIN: Domain<Self> = Domain::from_allowed(&[")
+    for value in values:
+        out += rust_domain_entry(rust_word(policy_allows_symbol(pol, value)))
+    out += ["    ]);",
+            "    const DEFAULT: Self = Self::stated();",
+            f"    const SCOPE: Scope = Scope::{camel(pol['scope'])};",
+            f"    const BINDING: Binding = Binding::{camel(pol['binding'])};",
+            f"    const MUTABILITY: Mutability = Mutability::{camel(pol['mutability'])};",
+            f"    const WIRE: Wire = Wire::{camel(pol['wire'])};"]
+    if "boundary" in pol:
+        out += rust_boundary(rust_text(pol["boundary"]))
+    else:
+        out.append("    const BOUNDARY: Option<&'static str> = None;")
+    out += ["", "    fn index(self) -> usize {", "        self as usize", "    }", "}", ""]
+    return out + rust_default_assert(name, pol["id"])
 
 
 def global_axes(decl: dict) -> list[dict]:
@@ -2424,7 +2758,9 @@ GENERATED = {
     "kconfig-capabilities": (KCONFIG_CAPS, emit_kconfig_capabilities),
     "kconfig-limits": (KCONFIG_LIMITS, emit_kconfig_limits),
     "rust-limits": (RUST_LIMITS, emit_rust_limits),
+    "rust-limit-bindings": (RUST_LIMIT_BINDINGS, emit_rust_limit_bindings),
     "rust-policies": (RUST_POLICIES, emit_rust_policies),
+    "config-schema": (CONFIG_SCHEMA, emit_config_schema),
     "rust-feature-bits": (RUST_FEATURE_BITS, emit_rust_feature_bits),
     "rust-conformance-items": (RUST_CONFORMANCE_ITEMS, emit_rust_conformance_items),
     "statement-vectors": (STATEMENT_VECTORS, emit_statement_vectors),
@@ -2522,6 +2858,29 @@ def check_caps_rs(decl: dict, text: str) -> list[str]:
     code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
     if STATED_RE.search(code):
         out.append("caps.rs reads a WZ_LIMIT_* itself; a limit's value comes from the generated module")
+    return out
+
+
+# The hand-written enums the generated rows name, each with the declaration's words it spells.
+BINDING_ENUMS = (("Scope", SCOPES), ("Binding", BINDINGS), ("Mutability", MUTABILITIES),
+                 ("Wire", WIRES), ("Storage", LIMIT_STORAGES))
+
+
+def check_policy_binding_rs(text: str) -> list[str]:
+    """Each enum of `policy_binding.rs` that a generated row names has one variant per word of
+    the declaration's vocabulary, in its order: a word added to the declaration and not there
+    would be a row that names a variant the crate does not have."""
+    out: list[str] = []
+    for name, words in BINDING_ENUMS:
+        match = re.search(rf"^pub enum {name} \{{\n(.*?)^\}}", text, re.S | re.M)
+        if match is None:
+            out.append(f"{POLICY_BINDING_RS.name}: no `pub enum {name}`")
+            continue
+        got = re.findall(r"^    ([A-Z][A-Za-z0-9]*),$", match.group(1), re.M)
+        want = [camel(w) for w in words]
+        if got != want:
+            out.append(f"{POLICY_BINDING_RS.name}: {name} has the variants {got}, the "
+                       f"declaration's words are {want}")
     return out
 
 
@@ -2784,13 +3143,29 @@ def resolved_policy(kconf, pol: dict) -> str:
     raise PresetError(f"policy {pol['id']} has no value chosen")
 
 
+def resolved_policy_domain(kconf, pol: dict) -> list[str]:
+    """The values of `pol` a configuration leaves selectable after the build: those whose
+    allowance (`policy_domain_kconfig`) is `y`."""
+    return [value for value in policy_values(pol)
+            if kconf.syms[policy_allows_symbol(pol, value)].tri_value == 2]
+
+
 def resolved_policy_env(decl: dict, kconf) -> list[str]:
-    """`WZ_POLICY_<NAME>=<value>` for every policy the configuration sets off upstream's."""
+    """`WZ_POLICY_<NAME>=<value>` for every policy the configuration sets off upstream's, each
+    followed by `WZ_POLICY_<NAME>_ALLOWS_<VALUE>=off` for every value the configuration leaves out
+    of its domain, so a configuration that narrows nothing states no allowance. A domain without
+    the policy's value is refused, as the build would refuse it."""
     out: list[str] = []
     for pol in decl["policies"]:
         value = resolved_policy(kconf, pol)
-        if value != pol["default"]:
-            out.append(f"{pol['kconfig']}={value}")
+        env = {} if value == pol["default"] else {pol["kconfig"]: value}
+        domain = resolved_policy_domain(kconf, pol)
+        env.update({policy_allows_symbol(pol, v): "off" for v in policy_values(pol) if v not in domain})
+        try:
+            policy_domain(pol, env)
+        except ValueError as exc:
+            raise PresetError(str(exc)) from exc
+        out += [f"{name}={text}" for name, text in env.items()]
     return out
 
 
@@ -3157,6 +3532,7 @@ def cmd_check() -> int:
             findings.append(f"{own_policies.relative_to(ROOT)} exists, but the declaration names no "
                             f"policy for image {image}: remove it")
     findings += check_caps_rs(decl, CAPS_RS.read_text(encoding="utf-8"))
+    findings += check_policy_binding_rs(POLICY_BINDING_RS.read_text(encoding="utf-8"))
     findings += check_open_facilities_rs(decl, OPEN_FACILITIES_RS.read_text(encoding="utf-8"))
     for abi, path in MANIFESTS.items():
         try:
@@ -3878,7 +4254,36 @@ def cmd_selftest() -> int:
            "impl Default for WireMode {\n    fn default() -> Self {\n        Self::stated()\n" in rpolicies)
     expect("a bool policy reads its environment and nothing else",
            'let eager_flush = policy_bool(option_env!("WZ_POLICY_EAGER_FLUSH"));' in rpolicies
-           and "use super::{policy_bool, policy_choice};" in rpolicies)
+           and "use super::{policy_allows, policy_bool, policy_choice};" in rpolicies)
+    expect("a bool policy stays a `bool` field of SessionPolicy beside a value type of its own",
+           "    pub eager_flush: bool,\n" in rpolicies
+           and "pub enum EagerFlush {\n    /// `off`, upstream's behaviour.\n    Off,\n" in rpolicies
+           and "impl From<bool> for EagerFlush {" in rpolicies
+           and "impl From<EagerFlush> for bool {" in rpolicies
+           and "pub enum WireMode {" in rpolicies and rpolicies.count("pub enum WireMode {") == 1)
+    expect("each policy's value type implements PolicyValue, its domain one allowance per value",
+           "impl PolicyValue for WireMode {" in rpolicies
+           and "impl PolicyValue for EagerFlush {" in rpolicies
+           and "    const ALL: &'static [Self] = &[Self::OsDefault, Self::On, Self::Off];\n" in rpolicies
+           and '    const IDS: &\'static [&\'static str] = &["off", "on"];\n' in rpolicies
+           and "    const DOMAIN: Domain<Self> = Domain::from_allowed(&[\n"
+               '        policy_allows(option_env!("WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF")),\n'
+               '        policy_allows(option_env!("WZ_POLICY_EAGER_FLUSH_ALLOWS_ON")),\n'
+               "    ]);\n" in rpolicies)
+    expect("each policy carries where it is bound, and only a quiescent one a boundary",
+           "    const SCOPE: Scope = Scope::Link;\n    const BINDING: Binding = Binding::Live;\n"
+           "    const MUTABILITY: Mutability = Mutability::Quiescent;\n"
+           "    const WIRE: Wire = Wire::Visible;\n"
+           '    const BOUNDARY: Option<&\'static str> = Some("the next time the link opens");\n'
+           in rpolicies
+           and "    const WIRE: Wire = Wire::Timing;\n"
+               "    const BOUNDARY: Option<&'static str> = None;\n" in rpolicies)
+    expect("a build whose domain leaves out its default is refused by a constant of each policy",
+           "const _: () = assert!(\n"
+           "    default_is_allowed::<EagerFlush>(EagerFlush::DEFAULT as usize),\n"
+           '    "the default of eager-flush is outside its WZ_POLICY_*_ALLOWS_*"\n'
+           ");\n" in rpolicies
+           and rpolicies.count("const _: () = assert!(") == len(pdecl["policies"]))
     expect("a literal past rustfmt's width goes one field a line",
            "        Self {\n            wire_mode,\n            eager_flush,\n        }\n" in rpolicies)
     long_id = "a-bool-policy-whose-name-is-long-enough-to-cross-the-line-width"
@@ -3891,13 +4296,120 @@ def cmd_selftest() -> int:
            '_TO_CROSS_THE_LINE_WIDTH"));\n' in rlong)
     expect("a binding within the width stays on one line",
            'let eager_flush = policy_bool(option_env!("WZ_POLICY_EAGER_FLUSH"));' in rpolicies)
+    expect("an allowance past rustfmt's call width breaks inside the macro, as the formatter leaves it",
+           "        policy_allows(option_env!(\n"
+           '            "WZ_POLICY_A_BOOL_POLICY_WHOSE_NAME_IS_LONG_ENOUGH_TO_CROSS_THE_LINE_WIDTH'
+           '_ALLOWS_OFF"\n        )),\n' in rlong)
+    expect("a default check past rustfmt's call width goes one argument a line",
+           "    default_is_allowed::<ABoolPolicyWhoseNameIsLongEnoughToCrossTheLineWidth>(\n"
+           "        ABoolPolicyWhoseNameIsLongEnoughToCrossTheLineWidth::DEFAULT as usize,\n"
+           "    ),\n" in rlong)
+    expect("a boundary is laid out as rustfmt lays a call out: one line, after the `=`, or split",
+           rust_boundary('"short"') == ["    const BOUNDARY: Option<&'static str> = Some(\"short\");"]
+           and rust_boundary('"' + "b" * 52 + '"')
+           == ["    const BOUNDARY: Option<&'static str> =", '        Some("' + "b" * 52 + '");']
+           and rust_boundary('"' + "c" * 61 + '"')
+           == ["    const BOUNDARY: Option<&'static str> = Some(", '        "' + "c" * 61 + '",',
+               "    );"])
+    expect("a boundary with a quote or a backslash is escaped, and one that is not ASCII refused",
+           rust_text('say "now" \\ then') == '"say \\"now\\" \\\\ then"' and _refuses_text("café"))
     nothing = emit_rust_policies({"policies": []})
     expect("no policy is an empty struct and no import",
            "pub struct SessionPolicy {}\n" in nothing and "        Self {}\n" in nothing
-           and "use super::" not in nothing)
+           and "use super::" not in nothing and "policy_binding" not in nothing
+           and "PolicyValue" not in nothing)
     one = emit_rust_policies({"policies": [p for p in pdecl["policies"] if p["kind"] == "bool"]})
     expect("a literal rustfmt would make one line is one line",
-           "        Self { eager_flush }\n" in one and "use super::policy_bool;" in one)
+           "        Self { eager_flush }\n" in one and "use super::{policy_allows, policy_bool};" in one)
+    # Where each limit is bound.
+    rbindings = emit_rust_limit_bindings(sdecl)
+    expect("each limit is a LimitBinding constant of its own name, in the declaration's words",
+           "use crate::policy_binding::{Binding, LimitBinding, Scope, Storage, Wire};\n" in rbindings
+           and "/// Where [`super::MAX_A`] is bound.\n"
+               "pub const MAX_A: LimitBinding = LimitBinding {\n    storage: Storage::Both,\n"
+               "    scope: &[Scope::Session],\n    binding_heap: Some(Binding::Open),\n"
+               "    binding_fixed: Some(Binding::Build),\n    wire: Wire::None,\n};\n" in rbindings)
+    widened = emit_rust_limit_bindings({"limits": [dict(sdecl["limits"][0], scope=["runtime", "link"],
+                                                        storage="capacity", binding_heap="none")]})
+    expect("a limit held at several scopes lists them, and a profile that does not read it is None",
+           "    scope: &[Scope::Runtime, Scope::Link],\n    binding_heap: None,\n" in widened
+           and "    storage: Storage::Capacity,\n" in widened)
+    expect("no limit is no import", "use crate" not in emit_rust_limit_bindings({"limits": []}))
+    # The run-time document's schema: the policies and limits a stage after the build decides.
+    schema = json.loads(emit_config_schema(dict(pdecl, limits=sdecl["limits"])))
+    spolicies = schema["properties"]["wz"]["properties"]["policies"]["properties"]
+    slimits = schema["properties"]["wz"]["properties"]["limits"]["properties"]
+    expect("the schema is draft 2020-12 and closed under `wz`",
+           schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+           and schema["properties"]["wz"]["additionalProperties"] is False)
+    expect("a policy the open or a running node decides is in the schema with its values and binding",
+           list(spolicies) == ["wire-mode", "eager-flush"]
+           and spolicies["wire-mode"]["enum"] == ["os-default", "on", "off"]
+           and spolicies["wire-mode"]["description"] == "How the wire is set."
+           and spolicies["wire-mode"]["x-wz-binding"] == "live"
+           and spolicies["wire-mode"]["x-wz-boundary"] == "the next time the link opens"
+           and spolicies["eager-flush"]["enum"] == ["off", "on"]
+           and "x-wz-boundary" not in spolicies["eager-flush"])
+    build_bound = decl_of(read_decl_toml(with_policy.replace(
+        'binding = "open"\nmutability = "fixed"\n', 'binding = "build"\nmutability = "fixed"\n')))
+    expect("a policy the build fixes is not in the schema",
+           list(json.loads(emit_config_schema(build_bound))["properties"]["wz"]["properties"]
+                ["policies"]["properties"]) == ["wire-mode"])
+    expect("a limit the heap profile decides at the open is an integer with its declared default",
+           slimits["MAX_A"] == {"description": "A table.", "type": "integer", "minimum": 0,
+                                "default": 4, "x-wz-storage": "both", "x-wz-scope": "session",
+                                "x-wz-binding-heap": "open", "x-wz-binding-fixed": "build",
+                                "x-wz-wire": "none"})
+    built_only = [dict(sdecl["limits"][0], binding_heap=stage) for stage in ("build", "none")]
+    expect("a limit the heap profile decides at the build, or does not read, is not in the schema",
+           json.loads(emit_config_schema({"policies": [], "limits": built_only}))["properties"]["wz"]
+           ["properties"]["limits"]["properties"] == {})
+    expect("a description is the help's first sentence, a stop inside an address not ending it",
+           first_sentence("A locator (for example udp/192.168.1.10:7447). A longer one\nis refused.")
+           == "A locator (for example udp/192.168.1.10:7447)."
+           and first_sentence("No stop at all") == "No stop at all")
+    expect("every generated file includes the limit bindings and the schema",
+           GENERATED.get("rust-limit-bindings", (None,))[0] == RUST_LIMIT_BINDINGS
+           and GENERATED.get("config-schema", (None,))[0] == CONFIG_SCHEMA)
+    # The domain a build allows each policy.
+    weager = next(p for p in pdecl["policies"] if p["id"] == "eager-flush")
+    wmode = next(p for p in pdecl["policies"] if p["id"] == "wire-mode")
+    expect("an allowance the build does not name allows its value",
+           policy_domain(weager, {}) == ["off", "on"]
+           and policy_domain(wmode, {}) == ["os-default", "on", "off"])
+    expect("an allowance `off` leaves its value out and `on` keeps it",
+           policy_domain(wmode, {"WZ_POLICY_WIRE_MODE_ALLOWS_ON": "off",
+                                 "WZ_POLICY_WIRE_MODE_ALLOWS_OFF": "on"}) == ["os-default", "off"])
+    expect("a domain that leaves out upstream's default is refused",
+           _refuses_domain(weager, {"WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF": "off"}))
+    expect("a domain is held to the build's stated default, not upstream's",
+           _refuses_domain(weager, {"WZ_POLICY_EAGER_FLUSH": "on",
+                                    "WZ_POLICY_EAGER_FLUSH_ALLOWS_ON": "off"})
+           and policy_domain(weager, {"WZ_POLICY_EAGER_FLUSH": "on",
+                                      "WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF": "off"}) == ["on"])
+    expect("an allowance that is neither on nor off is refused",
+           _refuses_domain(weager, {"WZ_POLICY_EAGER_FLUSH_ALLOWS_ON": "y"}))
+    expect("each value of a policy is an allowance: default y, its prompt hidden while it is the default",
+           "config WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF\n"
+           "\tbool \"eager-flush allows off\" if WZ_POLICY_EAGER_FLUSH\n\tdefault y\n\thelp\n" in kpolicies
+           and "config WZ_POLICY_EAGER_FLUSH_ALLOWS_ON\n"
+               "\tbool \"eager-flush allows on\" if !WZ_POLICY_EAGER_FLUSH\n\tdefault y\n" in kpolicies
+           and "config WZ_POLICY_WIRE_MODE_ALLOWS_OS_DEFAULT\n"
+               "\tbool \"wire-mode allows os-default\" if !WZ_POLICY_WIRE_MODE_OS_DEFAULT\n"
+               "\tdefault y\n" in kpolicies
+           and kpolicies.count("_ALLOWS_") == 5)
+    expect("an allowance is a declared symbol, so a value whose allowance names another's option is refused",
+           policy_refused('["os-default", "on", "off"]', '["os-default", "allows-on", "on"]',
+                          "declared twice"))
+    expect("a boundary that is not one line of printable ASCII is refused",
+           policy_refused('boundary = "the next time the link opens"',
+                          'boundary = "the next time the link opens\\u00e9"', "printable ASCII"))
+    binding_rs = POLICY_BINDING_RS.read_text(encoding="utf-8")
+    expect("the hand-written enums spell the declaration's words",
+           check_policy_binding_rs(binding_rs) == [])
+    expect("an enum missing a word of the declaration is a finding",
+           any("Mutability has the variants" in f
+               for f in check_policy_binding_rs(binding_rs.replace("    Quiescent,\n", "", 1))))
     import tempfile
 
     with tempfile.TemporaryDirectory() as reads_tmp:
@@ -4406,6 +4918,9 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
            "config WZ_POLICY_EAGER_FLUSH\n\tbool \"eager-flush\"\n\tdefault n\n\thelp\n" in ikconfig
            and "choice WZ_POLICY_WIRE_MODE\n\tprompt \"wire-mode\"\n\tdefault WZ_POLICY_WIRE_MODE_OS_DEFAULT\n"
                "\tdepends on WZ_MODE_P && !WZ_SIDE_R\n\thelp\n" in ikconfig)
+    expect("an image's policies state no allowance: an image's CMake states no domain, so every "
+           "value stays allowed there",
+           "_ALLOWS_" not in ikconfig and "_ALLOWS_" not in emit_image_cmake(ipdecl, "img"))
     expect("a policy no row names is not in the image's Kconfig",
            "WZ_POLICY_WIRE_MODE" not in emit_image_policies(
                decl_of(read_decl_toml(image_policy.replace(
@@ -4608,6 +5123,33 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
             expect("a policy set off upstream's behaviour reaches the environment",
                    resolved_policy_env(wpdecl, departed)
                    == ["WZ_POLICY_WIRE_MODE=off", "WZ_POLICY_EAGER_FLUSH=on"])
+            # The domain each policy is left with: every value until a fragment turns an
+            # allowance off, and never without the policy's chosen value.
+            peager = next(p for p in wpdecl["policies"] if p["id"] == "eager-flush")
+            pmode = next(p for p in wpdecl["policies"] if p["id"] == "wire-mode")
+            expect("a configuration that narrows nothing allows every value",
+                   resolved_policy_domain(policy_tree(), peager) == ["off", "on"]
+                   and resolved_policy_domain(policy_tree(), pmode) == ["os-default", "on", "off"])
+            narrowed = policy_tree("CONFIG_WZ_POLICY_EAGER_FLUSH_ALLOWS_ON=n",
+                                   "CONFIG_WZ_POLICY_WIRE_MODE_ALLOWS_ON=n")
+            expect("an allowance turned off leaves the value out and reaches the environment",
+                   resolved_policy_domain(narrowed, peager) == ["off"]
+                   and resolved_policy_env(wpdecl, narrowed)
+                   == ["WZ_POLICY_WIRE_MODE_ALLOWS_ON=off", "WZ_POLICY_EAGER_FLUSH_ALLOWS_ON=off"])
+            pinned = policy_tree("CONFIG_WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF=n")
+            expect("the chosen default's allowance has no prompt, so turning it off does not take",
+                   resolved_policy_domain(pinned, peager) == ["off", "on"]
+                   and pinned.syms["WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF"].user_value == 0)
+            turned = policy_tree("CONFIG_WZ_POLICY_EAGER_FLUSH=y",
+                                 "CONFIG_WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF=n",
+                                 "CONFIG_WZ_POLICY_WIRE_MODE_OFF=y",
+                                 "CONFIG_WZ_POLICY_WIRE_MODE_ALLOWS_OS_DEFAULT=n")
+            expect("a policy turned off upstream's value may leave upstream's value out of its domain",
+                   resolved_policy_domain(turned, peager) == ["on"]
+                   and resolved_policy_domain(turned, pmode) == ["on", "off"]
+                   and resolved_policy_env(wpdecl, turned)
+                   == ["WZ_POLICY_WIRE_MODE=off", "WZ_POLICY_WIRE_MODE_ALLOWS_OS_DEFAULT=off",
+                       "WZ_POLICY_EAGER_FLUSH=on", "WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF=off"])
             expect("an original's build with a policy on is not that original's",
                    any("policy eager-flush" in x for x in original_differences(wpdecl, "zenoh-c", departed)))
     print(f"  wz-config selftest: {ok}/{ok + bad} arm(s) pass")
@@ -4699,10 +5241,11 @@ def main(argv: list[str]) -> int:
         decl = load_decl()
         try:
             kconf = resolve([pathlib.Path(p) for p in argv[2:]])
+            lines = resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf)
         except PresetError as exc:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
-        for line in resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf):
+        for line in lines:
             print(line)
         return 0
     if len(argv) >= 4 and argv[1] == "--resolve-conformance-statement" and argv[2] in ABIS:

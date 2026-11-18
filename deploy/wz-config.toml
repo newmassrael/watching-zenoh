@@ -12,6 +12,13 @@
 #   * `deploy/Kconfig.limits`         the limits an image states for itself (generated);
 #   * `crates/wz-session-core/src/caps_generated.rs`
 #                                     the value of each limit as the code reads it (generated);
+#   * `crates/wz-session-core/src/caps_binding_generated.rs`
+#                                     where each limit is bound (generated);
+#   * `deploy/Kconfig.policies` and `crates/wz-session-core/src/policy_generated.rs`
+#                                     the policies, the domain a build allows each, and where
+#                                     each is bound (generated);
+#   * `deploy/wz-config.schema.json`  the JSON Schema of the run-time document: each policy and
+#                                     limit a stage after the build decides (generated);
 #   * `<image dir>/Kconfig.axes` and `<image dir>/wz_axes.cmake`
 #                                     each image's axes as Kconfig choices, and what they build
 #                                     its crate with (generated);
@@ -2782,6 +2789,11 @@ The lease is the smaller of the two the peers advertised.
 #
 # A policy states `scope`, `binding`, `mutability` and `wire`, and `boundary` when it is
 # `quiescent`, as the header defines them ("Where a value is bound").
+#
+# The build narrows each policy to its domain, the values a later stage may select: one
+# `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value (Kconfig: one `default y` bool per value), `off`
+# leaving the value out and an unset name allowing it. The build's value of the policy is always
+# inside its domain; a domain of one value makes the policy a constant of the build.
 [[policy]]
 id = "multicast-loopback"
 kind = "choice"
