@@ -467,7 +467,7 @@ mod tests {
 
     fn state() -> AcceptCookieState {
         AcceptCookieState {
-            peer_zid: crate::session_init_params::zid_bytes(&[0xAB; 4]),
+            peer_zid: session_bytes::<MAX_ZID_BYTES>(&[0xAB; 4]).expect("a 4-byte zid fits"),
             peer_whatami: 1,
             sn_res: 2,
             batch_size: 65_535,
@@ -547,7 +547,7 @@ mod tests {
     fn the_widest_cookie_fits_the_generated_field() {
         let k = key();
         let mut s = state();
-        s.peer_zid = crate::session_init_params::zid_bytes(&[0xFF; MAX_ZID_BYTES]);
+        s.peer_zid = session_bytes::<MAX_ZID_BYTES>(&[0xFF; MAX_ZID_BYTES]).expect("16 bytes fit");
         s.multilink = MultilinkAcceptState(None);
         let wire = encode_accept_cookie(&k, &s).expect("a 16-byte zid encodes");
         assert_eq!(
@@ -609,7 +609,7 @@ mod tests {
     fn a_zid_outside_the_protocol_bound_does_not_encode() {
         let k = key();
         let mut s = state();
-        s.peer_zid = crate::session_init_params::zid_bytes(&[]);
+        s.peer_zid = session_bytes::<MAX_ZID_BYTES>(&[]).expect("no bytes fit");
         assert!(encode_accept_cookie(&k, &s).is_none());
         // One byte too many is a value the fixed form cannot hold at all, which
         // is the bound enforced earlier; the growable form can and is refused.

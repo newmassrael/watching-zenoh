@@ -379,7 +379,7 @@ async fn fixture() -> Fixture {
     // `@/<zid-hex>`; no leg here exercises that path. Read it off the SAME
     // builder the session opened with, rather than restating the literal, so
     // the two can never drift apart.
-    let zid = zenohd_interop_session_init_params().zid.clone();
+    let zid = zenohd_interop_session_init_params().zid.to_vec();
     let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
         ApplicationLayerObserver::new(),
     ));

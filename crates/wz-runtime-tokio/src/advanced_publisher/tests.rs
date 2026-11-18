@@ -104,7 +104,7 @@ fn published_samples_recover_via_loopback_cache_query() {
         sample_miss_detection: MissDetectionConfig::default(),
         ..AdvancedPublisherOptions::default()
     };
-    let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+    let publisher = AdvancedPublisher::declare(&session, "demo/data", options)
         .expect("advanced publisher declares against the test link");
 
     for v in 0u8..3 {
@@ -186,7 +186,7 @@ fn an_advanced_put_of_a_chunk_goes_as_the_descriptor_to_a_face_that_negotiated()
             cache: Some(CacheConfig::default()),
             ..AdvancedPublisherOptions::default()
         };
-        let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+        let publisher = AdvancedPublisher::declare(&session, "demo/data", options)
             .expect("advanced publisher declares against the test link");
         let mut held = ShmBackedPayload::alloc(VALUE.len()).expect("alloc a sample buffer");
         held.write(VALUE);
@@ -252,7 +252,7 @@ fn a_chunk_put_is_cached_as_the_chunk_and_recovered_as_shared_memory() {
         }),
         ..AdvancedPublisherOptions::default()
     };
-    let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+    let publisher = AdvancedPublisher::declare(&session, "demo/data", options)
         .expect("advanced publisher declares against the test link");
     let mut held = ShmBackedPayload::alloc(5).expect("alloc a sample buffer");
     held.write(b"chunk");
@@ -337,7 +337,7 @@ fn deleted_sample_is_cached_and_recovers_as_a_del_reply() {
         sample_miss_detection: MissDetectionConfig::default(),
         ..AdvancedPublisherOptions::default()
     };
-    let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+    let publisher = AdvancedPublisher::declare(&session, "demo/data", options)
         .expect("advanced publisher declares against the test link");
 
     // put(sn 0), put(sn 1), delete(sn 2), put(sn 3) — one mixed stream.
@@ -456,7 +456,7 @@ fn published_encoding_and_attachment_survive_recovery() {
         sample_miss_detection: MissDetectionConfig::default(),
         ..AdvancedPublisherOptions::default()
     };
-    let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+    let publisher = AdvancedPublisher::declare(&session, "demo/data", options)
         .expect("advanced publisher declares against the test link");
 
     // sn 0 carries both metadata fields; sn 1 carries neither.
@@ -555,13 +555,9 @@ fn put_with_metadata_reaches_a_live_subscriber() {
         )
         .expect("live recorder subscribes");
 
-    let publisher = AdvancedPublisher::declare(
-        &session,
-        "demo/data",
-        AdvancedPublisherOptions::default(),
-        vec![0x09],
-    )
-    .expect("advanced publisher declares");
+    let publisher =
+        AdvancedPublisher::declare(&session, "demo/data", AdvancedPublisherOptions::default())
+            .expect("advanced publisher declares");
 
     publisher
         .put_with(
@@ -628,13 +624,9 @@ fn heartbeat_beacon_emits_last_sn_on_adv_ke() {
         )
         .expect("beacon recorder subscribes");
 
-    let publisher = AdvancedPublisher::declare(
-        &session,
-        "demo/data",
-        AdvancedPublisherOptions::default(),
-        vec![0x09],
-    )
-    .expect("advanced publisher declares");
+    let publisher =
+        AdvancedPublisher::declare(&session, "demo/data", AdvancedPublisherOptions::default())
+            .expect("advanced publisher declares");
 
     // Nothing published yet -> no beacon.
     assert!(
@@ -708,7 +700,6 @@ fn composed_producer_beacon_drives_late_joiner_recovery() {
             sample_miss_detection: MissDetectionConfig::default(),
             ..AdvancedPublisherOptions::default()
         },
-        vec![0x09],
     )
     .expect("advanced publisher declares");
     publisher.put(&[0xA0]).expect("put 0");
@@ -775,7 +766,6 @@ fn cache_max_samples_zero_does_not_hang() {
             sample_miss_detection: MissDetectionConfig::default(),
             ..AdvancedPublisherOptions::default()
         },
-        vec![0x01],
     )
     .expect("advanced publisher declares");
     for v in 0u8..3 {
@@ -837,7 +827,6 @@ fn declare_with_heartbeat_off_runtime_declares_and_beacons() {
                 .heartbeat(Duration::from_millis(50)),
             ..AdvancedPublisherOptions::default()
         },
-        vec![0x09],
     )
     .expect("a heartbeat declares off a tokio runtime: the beacon needs none");
     // The beacon states the last sequence number, and says nothing before there is one.
@@ -897,7 +886,6 @@ fn a_miss_detection_request_overrides_the_sequencing_the_caller_named() {
                 .heartbeat(Duration::from_millis(50)),
             ..AdvancedPublisherOptions::default()
         },
-        vec![0x09],
     )
     .expect("the declaration is valid whichever sequencing the caller named");
     publisher.put(b"sample").expect("the first put publishes");
@@ -973,7 +961,7 @@ async fn an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration(
     for base in ["demo/foo?bar", "demo//data", "demo/data/"] {
         assert!(
             matches!(
-                AdvancedPublisher::declare(&session, base, beacon_only(), vec![0x09u8]),
+                AdvancedPublisher::declare(&session, base, beacon_only()),
                 Err(AdvancedPublisherError::InvalidAdvKeyexpr(_))
             ),
             "a beacon-only publisher on {base:?} must be refused at declare; \
@@ -981,7 +969,7 @@ async fn an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration(
              the life of the process"
         );
         assert!(
-            AdvancedPublisher::declare(&session, base, detection_on(), vec![0x09u8]).is_err(),
+            AdvancedPublisher::declare(&session, base, detection_on()).is_err(),
             "the detection-on arm must keep refusing {base:?} — the two \
              configurations are being asked about ONE string"
         );
@@ -991,11 +979,11 @@ async fn an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration(
     // the refusal is about the expression and not about beaconing (or about
     // detection).
     assert!(
-        AdvancedPublisher::declare(&session, "demo/data", beacon_only(), vec![0x09u8]).is_ok(),
+        AdvancedPublisher::declare(&session, "demo/data", beacon_only()).is_ok(),
         "a well-formed base stays declarable on the beacon-only arm"
     );
     assert!(
-        AdvancedPublisher::declare(&session, "demo/data", detection_on(), vec![0x09u8]).is_ok(),
+        AdvancedPublisher::declare(&session, "demo/data", detection_on()).is_ok(),
         "a well-formed base stays declarable on the detection arm"
     );
 
@@ -1022,7 +1010,7 @@ async fn an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration(
     // hold is the agreement, not either arm's value.
     for opts in [beacon_only(), detection_on()] {
         assert!(
-            AdvancedPublisher::declare(&session, "demo/**/c/*", opts, vec![0x09u8]).is_err(),
+            AdvancedPublisher::declare(&session, "demo/**/c/*", opts).is_err(),
             "a base carrying the R299 bug-3 shape must be refused in EVERY \
              configuration: it is canonical, so only the seam's own \
              `check_outbound_keyexpr_pico_safe` catches it, and wz must not \
@@ -1046,7 +1034,7 @@ async fn an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration(
     // measurement instead.
     for opts in [beacon_only(), detection_on()] {
         assert!(
-            AdvancedPublisher::declare(&session, "demo/$*/data", opts, vec![0x09u8]).is_ok(),
+            AdvancedPublisher::declare(&session, "demo/$*/data", opts).is_ok(),
             "a valid-but-non-canonical base stays declarable in EVERY \
              configuration: the wire suffix is emitted verbatim, so \
              canonizing it here would rewrite a keyexpr the caller and the \
@@ -1128,19 +1116,14 @@ fn publisher_detection_metadata_rides_the_adv_keyexpr_and_a_bad_chunk_is_refused
     // ...and a well-formed chunk still DECLARES, so arm 2's refusal is
     // about the chunk rather than about the field existing.
     let (session, _d) = new_session();
-    AdvancedPublisher::declare(
-        &session,
-        "demo/data",
-        opts(Some("room/kitchen")),
-        vec![0x07],
-    )
-    .expect("a well-formed meta chunk declares");
+    AdvancedPublisher::declare(&session, "demo/data", opts(Some("room/kitchen")))
+        .expect("a well-formed meta chunk declares");
 
     // ARM 2: a chunk that cannot go on the wire is REFUSED at declare.
     let (session, _d) = new_session();
     assert!(
         matches!(
-            AdvancedPublisher::declare(&session, "demo/data", opts(Some("bad?chunk")), vec![0x07]),
+            AdvancedPublisher::declare(&session, "demo/data", opts(Some("bad?chunk"))),
             Err(AdvancedPublisherError::InvalidAdvKeyexpr(_))
         ),
         "a caller chunk that breaks the derived expression must be refused, \
@@ -1163,14 +1146,18 @@ fn publisher_detection_metadata_rides_the_adv_keyexpr_and_a_bad_chunk_is_refused
 /// `id()` is asserted against the SAME `(zid, eid)` the publisher stamps
 /// into a sample's `SourceInfo`, because a global id that disagreed with
 /// the origin its own samples carry would be a second identity rather than
-/// an accessor.
+/// an accessor. The zid is the SESSION's: the declare takes none, and the
+/// session here is given one the fixture's default is not, so a publisher
+/// that named itself by any other zid would fail.
 #[test]
 fn the_publisher_surface_reports_identity_and_asks_for_matching_declarations() {
     use crate::observer::ApplicationLayerObserver;
     use crate::runtime_impl::TokioTime;
     use crate::session::TokioSession;
 
-    let (actions, _driver) = crate::test_fixtures::recording_actions();
+    let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+    params.zid = [0x07, 0x17].into();
+    let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
     let session = TokioSession::new(actions, observer, clock);
@@ -1183,18 +1170,14 @@ fn the_publisher_surface_reports_identity_and_asks_for_matching_declarations() {
             publisher_detection: false,
             ..AdvancedPublisherOptions::default()
         },
-        vec![0x07],
     )
     .expect("advanced publisher declares against the test link");
 
     // IDENTITY: the keyexpr and the (zid, eid) pair are reachable at all.
     assert_eq!(publisher.keyexpr(), "demo/data");
     let (zid, eid) = publisher.id();
-    assert_eq!(
-        zid,
-        &[0x07u8][..],
-        "the id carries the zid it was declared with"
-    );
+    assert_eq!(zid, &[0x07u8, 0x17][..], "the id carries the session's zid");
+    assert_eq!(zid, session.zid().as_slice());
 
     // ...and the eid AGREES with what its samples stamp as their origin.
     publisher.put(b"x").expect("advanced put publishes");
@@ -1274,7 +1257,7 @@ fn timestamp_sequencing_is_refused_on_a_node_that_does_not_stamp() {
     );
     assert!(
         matches!(
-            AdvancedPublisher::declare(&peer, "demo/ts", opts(Sequencing::Timestamp), vec![1]),
+            AdvancedPublisher::declare(&peer, "demo/ts", opts(Sequencing::Timestamp)),
             Err(AdvancedPublisherError::TimestampingDisabled)
         ),
         "Timestamp sequencing on a non-stamping node is refused, not degraded"
@@ -1299,8 +1282,7 @@ fn timestamp_sequencing_is_refused_on_a_node_that_does_not_stamp() {
             "the fixture's premise: a Router resolves timestamping.enabled to true"
         );
         assert!(
-            AdvancedPublisher::declare(&router, "demo/ts", opts(Sequencing::Timestamp), vec![1])
-                .is_ok(),
+            AdvancedPublisher::declare(&router, "demo/ts", opts(Sequencing::Timestamp)).is_ok(),
             "a stamping node accepts Timestamp sequencing"
         );
     }
@@ -1309,7 +1291,7 @@ fn timestamp_sequencing_is_refused_on_a_node_that_does_not_stamp() {
     // non-stamping node, which is what keeps the C ABI's NULL-options path
     // alive.
     assert!(
-        AdvancedPublisher::declare(&peer, "demo/none", opts(Sequencing::None), vec![1]).is_ok(),
+        AdvancedPublisher::declare(&peer, "demo/none", opts(Sequencing::None)).is_ok(),
         "Sequencing::None needs no clock and must stay declarable"
     );
 }

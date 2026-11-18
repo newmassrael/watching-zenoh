@@ -354,7 +354,7 @@ where
     let seen: Arc<StdMutex<Vec<Seen>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
     let mut a_params = fixture_session_init_params();
-    a_params.zid = a_zid.to_vec();
+    a_params.zid = a_zid.into();
     let a = peer_loop(
         sources(
             vec![a_listener],
@@ -378,7 +378,7 @@ where
     // when the script says so.
     let (b_tx, b_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut b_params = fixture_session_init_params();
-    b_params.zid = b_zid.to_vec();
+    b_params.zid = b_zid.into();
     let b_dial = DialConfig::default().with_tls(TlsDialConfig {
         client_config,
         server_name: ServerName::try_from("localhost").expect("the server's name"),

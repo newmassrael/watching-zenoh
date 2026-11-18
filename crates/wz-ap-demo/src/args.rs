@@ -24,7 +24,9 @@
 // R2158 (open-debt item 230) — that union became UNCONDITIONAL when the client
 // `--reconnect` supervisor joined it, so the `cfg` went with the function's.
 use wz::runtime_tokio::retry_period::RetryPolicy;
-use wz::runtime_tokio::session_glue::{OsEntropy, SessionInitParams, SigningKey, WhatAmI};
+use wz::runtime_tokio::session_glue::{
+    OsEntropy, SessionInitParams, SessionZid, SigningKey, WhatAmI,
+};
 
 /// R121f — session role select. `--listen` lands here as
 /// `Acceptor`; `--connect` lands as `Initiator`. The two roles
@@ -9052,6 +9054,23 @@ mod stock_config_tests {
         assert_eq!(params.link_rx.buffer_size, 262_140);
     }
 
+    /// A demo session is refused a zid the INIT cannot carry where its parameters are made, and
+    /// opened on one of one or sixteen bytes.
+    #[test]
+    fn a_session_is_refused_a_zid_of_no_bytes_or_seventeen() {
+        let tuning = TransportTuning::default();
+        for refused in [vec![], vec![0x0a; 17]] {
+            let err = session_init_params_for(WhatAmI::Client, refused, &tuning)
+                .expect_err("a zid outside 1..=16 bytes opens no session");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        for accepted in [vec![0x0a], vec![0x0b; 16]] {
+            let params = session_init_params_for(WhatAmI::Client, accepted.clone(), &tuning)
+                .expect("OS entropy for the cookie signing key");
+            assert_eq!(params.zid.as_slice(), accepted.as_slice());
+        }
+    }
+
     /// The exact argv the adminspace block and the compression flag produce.
     ///
     /// The census gate is a DIFFERENCE test and would accept any change at all;
@@ -11110,6 +11129,14 @@ pub(crate) fn session_init_params_for(
     zid: Vec<u8>,
     tuning: &TransportTuning,
 ) -> std::io::Result<SessionInitParams> {
+    // The one place a demo session's zid is refused: an operator's `--zid` is read by the zenoh
+    // text rule, and a session is not opened on bytes the INIT cannot carry.
+    let zid = SessionZid::new(&zid).map_err(|refused| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("wz-ap-demo: {refused}"),
+        )
+    })?;
     Ok(SessionInitParams {
         whatami,
         zid,
@@ -11460,11 +11487,6 @@ pub(crate) struct AdvancedPublishSpec {
     /// sample can reveal a gap before — so with the beacon off, a lost last
     /// sample is unrecoverable BY CONSTRUCTION rather than by timing.
     pub(crate) heartbeat_ms: Option<u64>,
-    /// The publisher's source identity, stamped into every sample's `SourceInfo`
-    /// and rendered into the `@adv` KE. Taken from the demo's `--zid`, so a
-    /// multi-publisher fixture gets distinct `@adv` namespaces the same way it
-    /// gets distinct session zids.
-    pub(crate) zid: Vec<u8>,
 }
 
 /// R311y445 — the `--group-join` parameter bundle.

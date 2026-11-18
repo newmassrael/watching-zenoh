@@ -112,7 +112,7 @@ async fn the_bridge_reports_itself_on_the_adminspace() {
     let peer_open = async {
         let (stream, _peer) = link.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -126,7 +126,8 @@ async fn the_bridge_reports_itself_on_the_adminspace() {
     let bridge_open = async {
         let locator = parse_any_locator(&format!("tcp/{link_addr}")).expect("parse locator");
         let mut params = fixture_session_init_params();
-        params.zid = BRIDGE_ZID.to_vec();
+        params.zid = wz_runtime_tokio::session_glue::SessionZid::new(BRIDGE_ZID)
+            .expect("a test zid is 1 to 16 bytes");
         connect_and_open_session(
             locator,
             params,

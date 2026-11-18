@@ -63,10 +63,10 @@ pub fn unpack_res_cbyte(cbyte: u8) -> (u8, u8) {
 /// The seam a shell that links no `alloc` writes its parameters through: it names
 /// the value, never the type behind it, so it compiles with no `alloc` of its own.
 /// The unicast parameters have the same seam
-/// ([`zid_bytes`](crate::session_init_params::zid_bytes)) and the multicast `zid` is
-/// the same value: a `Vec` on the heap profile and an array of [`ZID_MAX`] bytes on
-/// the per-session slot profile, where it is held by value in the session's own
-/// storage. Panics when `src` is longer than [`ZID_MAX`]: a zid longer than the wire
+/// ([`zid_bytes`](crate::session_init_params::zid_bytes)), which makes a
+/// [`SessionZid`](crate::session_zid::SessionZid). The multicast `zid` is a `Vec` on
+/// the heap profile and an array of [`ZID_MAX`] bytes on the per-session slot
+/// profile, where it is held by value in the session's own storage. Panics when `src` is longer than [`ZID_MAX`]: a zid longer than the wire
 /// carries is a construction mistake, not a runtime condition.
 pub fn zid_vec(src: &[u8]) -> SessionBytes<ZID_MAX> {
     session_bytes::<ZID_MAX>(src).expect("a zid is at most 16 bytes on the wire")

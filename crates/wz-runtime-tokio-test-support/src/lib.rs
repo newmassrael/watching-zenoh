@@ -31,7 +31,7 @@ use std::sync::Mutex;
 use sce_rust_runtime::Hal;
 
 use wz_runtime_tokio::session_glue::{
-    BoxedLinkDriver, LinkSendOutcome, SessionInitParams, SigningKey, WhatAmI,
+    BoxedLinkDriver, LinkSendOutcome, SessionInitParams, SessionZid, SigningKey, WhatAmI,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
@@ -48,7 +48,7 @@ use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, T
 pub fn fixture_session_init_params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: vec![0x01; 4],
+        zid: [0x01; 4].into(),
         seq_num_res: 0,
         req_id_res: 0,
         batch_size: 0,
@@ -83,10 +83,16 @@ pub fn fixture_session_init_params() -> SessionInitParams {
 /// re-declaring the shared negotiation fields inline. (`wz-ap-demo`'s
 /// `demo_session_init_params` is `pub(crate)` to that binary, so it cannot be
 /// the shared source for an in-process or cross-crate test.)
-pub fn zenoh_interop_session_init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
+///
+/// Panics when `zid` is not one to sixteen bytes: a fixture's zid is written by
+/// the test.
+pub fn zenoh_interop_session_init_params(
+    whatami: WhatAmI,
+    zid: impl AsRef<[u8]>,
+) -> SessionInitParams {
     SessionInitParams {
         whatami,
-        zid,
+        zid: SessionZid::new(zid.as_ref()).expect("a fixture zid is 1 to 16 bytes"),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,
@@ -1434,7 +1440,7 @@ use wz_runtime_tokio::session_glue::{
 /// to the peer zid, so the two sides of a handshake must differ).
 pub fn fixture_params_with_zid(zid_byte: u8) -> SessionInitParams {
     let mut p = fixture_session_init_params();
-    p.zid = vec![zid_byte; 4];
+    p.zid = [zid_byte; 4].into();
     p
 }
 

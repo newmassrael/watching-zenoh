@@ -519,7 +519,7 @@ mod tests {
     fn params() -> SessionInitParams {
         SessionInitParams {
             whatami: WhatAmI::Peer,
-            zid: vec![0x01, 0x02, 0x03, 0x04],
+            zid: [0x01, 0x02, 0x03, 0x04].into(),
             seq_num_res: 2,
             req_id_res: 2,
             batch_size: 1024,

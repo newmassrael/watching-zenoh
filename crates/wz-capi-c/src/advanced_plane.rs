@@ -461,8 +461,8 @@ mod tests {
     use wz_runtime_tokio::runtime_impl::TokioTime;
     use wz_runtime_tokio::session_glue::WhatAmI;
 
-    fn test_zid() -> Vec<u8> {
-        vec![0x22; 16]
+    fn test_zid() -> wz_runtime_tokio::session_glue::SessionZid {
+        [0x22; 16].into()
     }
 
     /// A session of a node that holds a clock.

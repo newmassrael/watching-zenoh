@@ -49,7 +49,7 @@ async fn pubkey_production_open_seams_authenticate_over_real_tcp() {
     let acceptor_fut = async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         // Some(vec![init_pub]) = admit exactly this initiator key (membership).
         let responder = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
             generate_keypair(KEY_BITS).expect("responder keypair"),
@@ -69,7 +69,7 @@ async fn pubkey_production_open_seams_authenticate_over_real_tcp() {
     // Initiator: connect_and_open_session_with_auth proving possession of its key.
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     let cfg = DialConfig::default();
     let initiator = AuthDispatch::new(vec![Box::new(PubKeyMethod::initiator(init_priv)) as _]);
     let initiator_fut = connect_and_open_session_with_auth(
@@ -179,7 +179,7 @@ async fn usrpwd_and_pubkey_challenge_the_initiator_with_different_values() {
     let acceptor_fut = async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         let responder = AuthDispatch::new(vec![
             Box::new(UsrPwdMethod::responder(
                 vec![(USER.to_vec(), PASSWORD.to_vec())],
@@ -205,7 +205,7 @@ async fn usrpwd_and_pubkey_challenge_the_initiator_with_different_values() {
     let pubkey_seen = Arc::new(Mutex::new(None));
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     let cfg = DialConfig::default();
     let initiator = AuthDispatch::new(vec![
         Box::new(RecordsInitAck {
@@ -270,7 +270,7 @@ async fn verified_after_handshake(
     let acceptor_fut = async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         let responder = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
             generate_keypair(KEY_BITS).expect("responder keypair"),
             Some(vec![init_pub]),
@@ -287,7 +287,8 @@ async fn verified_after_handshake(
     };
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
-    params.zid = initiator_zid;
+    params.zid = wz_runtime_tokio::session_glue::SessionZid::new(&initiator_zid)
+        .expect("a test zid is 1 to 16 bytes");
     let cfg = DialConfig::default();
     let initiator = AuthDispatch::new(vec![Box::new(PubKeyMethod::initiator(init_priv)) as _]);
     let initiator_fut = connect_and_open_session_with_auth(

@@ -5649,7 +5649,7 @@ mod tests {
     /// One acceptor node identity (a distinct zid from the initiators).
     fn acceptor_params() -> SessionInitParams {
         let mut p = fixture_session_init_params();
-        p.zid = vec![0xAA; 4];
+        p.zid = [0xAA; 4].into();
         p
     }
 
@@ -5666,7 +5666,7 @@ mod tests {
     async fn the_face_loop_turns_a_heartbeat_and_rests_when_idle() {
         let (listener, _addr) = bind_loopback().await;
         let mut params = acceptor_params();
-        params.zid = vec![0xA1, 0x5E, 0x77, 0x3C];
+        params.zid = [0xA1, 0x5E, 0x77, 0x3C].into();
         let name = format!(
             "face loop {}",
             crate::zid_hex::zid_to_zenoh_hex(&params.zid)
@@ -5727,7 +5727,7 @@ mod tests {
         }
         let (listener, _addr) = bind_loopback().await;
         let mut params = acceptor_params();
-        params.zid = vec![0xB1, 0x0C, 0x7E, 0xD5];
+        params.zid = [0xB1, 0x0C, 0x7E, 0xD5].into();
         let name = format!(
             "face loop {}",
             crate::zid_hex::zid_to_zenoh_hex(&params.zid)
@@ -5941,7 +5941,7 @@ mod tests {
     async fn idle_initiator(addr: SocketAddr, zid: u8, mut go: watch::Receiver<bool>) {
         let stream = TcpStream::connect(addr).await.expect("connect");
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = initiate_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -5975,7 +5975,7 @@ mod tests {
         use wz_session_core::locator::parse_any_locator;
         let locator = parse_any_locator(&format!("udp/{listen}")).expect("parse udp locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = connect_and_open_session(
             locator,
             params,
@@ -6012,7 +6012,7 @@ mod tests {
         let locator =
             parse_any_locator(&format!("unixsock-stream/{path}")).expect("parse unixsock locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = connect_and_open_session(
             locator,
             params,
@@ -6048,7 +6048,7 @@ mod tests {
         use wz_session_core::locator::parse_any_locator;
         let locator = parse_any_locator(&format!("ws/{addr}")).expect("parse ws locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = connect_and_open_session(
             locator,
             params,
@@ -6084,7 +6084,7 @@ mod tests {
         let locator =
             parse_any_locator(&format!("unixpipe/{base}")).expect("parse unixpipe locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = connect_and_open_session(
             locator,
             params,
@@ -6183,7 +6183,7 @@ mod tests {
             server_name: "localhost".to_string(),
         });
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = connect_and_open_session(
             locator,
             params,
@@ -6238,7 +6238,7 @@ mod tests {
             server_name: "localhost".to_string(),
         });
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = connect_and_open_session(
             locator,
             params,
@@ -6359,7 +6359,7 @@ mod tests {
     ) {
         let stream = TcpStream::connect(addr).await.expect("connect");
         let mut params = fixture_session_init_params();
-        params.zid = vec![zid; 4];
+        params.zid = [zid; 4].into();
         let mut opened = initiate_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -7728,7 +7728,7 @@ mod tests {
                 .await
                 .expect("the peer's serial-link handshake reaches Connected");
             let mut params = fixture_session_init_params();
-            params.zid = vec![0x01; 4];
+            params.zid = [0x01; 4].into();
             let mut opened = initiate_and_open_session(
                 DialedLink::Serial {
                     stream: SerialPort::dialled(master),
@@ -8015,7 +8015,7 @@ mod tests {
     #[cfg(feature = "routing-peer")]
     fn peer_params() -> SessionInitParams {
         let mut p = fixture_session_init_params();
-        p.zid = vec![0xBB; 4];
+        p.zid = [0xBB; 4].into();
         p
     }
 

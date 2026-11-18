@@ -501,7 +501,7 @@ async fn usrpwd_production_open_seams_authenticate_over_real_tcp() {
     let acceptor_fut = async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         let responder = AuthDispatch::new(vec![Box::new(UsrPwdMethod::responder(
             vec![(USER.to_vec(), PASSWORD.to_vec())],
             0, // sentinel; the seam refreshes it from OS entropy per handshake
@@ -520,7 +520,7 @@ async fn usrpwd_production_open_seams_authenticate_over_real_tcp() {
     // Initiator: connect_and_open_session_with_auth with the matching credential.
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     let cfg = DialConfig::default();
     let initiator =
         AuthDispatch::new(vec![

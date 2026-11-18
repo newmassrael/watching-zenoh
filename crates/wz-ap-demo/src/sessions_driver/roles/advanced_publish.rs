@@ -76,7 +76,6 @@ async fn run(ctx: Ctx) {
         &ctx.session,
         key.clone(),
         options_of(cache, heartbeat_ms),
-        ctx.session.zid().to_vec(),
     ) {
         Ok(publisher) => publisher,
         Err(e) => {

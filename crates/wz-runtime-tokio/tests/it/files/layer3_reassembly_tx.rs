@@ -89,7 +89,7 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         params.batch_size = BATCH_SIZE;
         accept_and_open_session(
             DialedLink::Tcp(stream),
@@ -104,7 +104,7 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         params.batch_size = BATCH_SIZE;
         connect_and_open_session(
             locator,
@@ -311,7 +311,7 @@ async fn an_exhausted_fragment_budget_abandons_the_chain_and_says_so_on_the_wire
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         params.batch_size = BATCH_SIZE;
         accept_and_open_session(
             DialedLink::Tcp(stream),
@@ -326,7 +326,7 @@ async fn an_exhausted_fragment_budget_abandons_the_chain_and_says_so_on_the_wire
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         params.batch_size = BATCH_SIZE;
         connect_and_open_session(
             locator,
@@ -560,7 +560,7 @@ async fn a_publish_refused_before_it_left_gives_its_sequence_number_back() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         params.batch_size = BATCH_SIZE;
         accept_and_open_session(
             DialedLink::Tcp(stream),
@@ -575,7 +575,7 @@ async fn a_publish_refused_before_it_left_gives_its_sequence_number_back() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         params.batch_size = BATCH_SIZE;
         connect_and_open_session(
             locator,
@@ -678,7 +678,7 @@ async fn two_nodes_with_different_rx_bounds_answer_one_message_apart() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         params.batch_size = BATCH_SIZE;
         params.link_rx.max_message_size = SMALL_RX_BOUND;
         accept_and_open_session(
@@ -694,7 +694,7 @@ async fn two_nodes_with_different_rx_bounds_answer_one_message_apart() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         params.batch_size = BATCH_SIZE;
         params.link_rx.max_message_size = LARGE_RX_BOUND;
         connect_and_open_session(

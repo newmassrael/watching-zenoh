@@ -529,7 +529,7 @@ mod tests {
                 sink,
                 SessionInitParams {
                     whatami: WhatAmI::Peer,
-                    zid: vec![0xa1, 0xb2],
+                    zid: [0xa1, 0xb2].into(),
                     seq_num_res: 2,
                     req_id_res: 2,
                     batch_size: 1024,
@@ -641,7 +641,7 @@ mod tests {
                 sink,
                 SessionInitParams {
                     whatami: WhatAmI::Peer,
-                    zid: vec![0xa1, 0xb2],
+                    zid: [0xa1, 0xb2].into(),
                     seq_num_res: 2,
                     req_id_res: 2,
                     batch_size: 1024,

@@ -255,9 +255,10 @@ where
     SessionLinkActions<R, T>: Send + Sync + 'static,
     Session<R, T, Unicast>: Send + Sync + 'static,
 {
-    /// Declare an advanced publisher on `keyexpr`. `local_zid` (1..=16
-    /// bytes) is this publisher's source identity, stamped into every
-    /// sample's `SourceInfo` and rendered into the `@adv` KE. Allocates the
+    /// Declare an advanced publisher on `keyexpr`. The session's zid
+    /// ([`Session::zid`]) is this publisher's source identity, stamped into
+    /// every sample's `SourceInfo` and rendered into the `@adv` KE, as
+    /// upstream's publisher takes its id from its session. Allocates the
     /// publisher entity id from the session counter, then (per `options`)
     /// declares the cache queryable + the liveliness token on
     /// `<keyexpr>/@adv/pub/<zid>/<eid|uhlc>/_`.
@@ -265,13 +266,12 @@ where
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         options: AdvancedPublisherOptions,
-        local_zid: Vec<u8>,
     ) -> Result<Self, AdvancedPublisherError> {
         AdvancedPublisherOn::declare_on(
             Arc::new(SessionPlane::new(session)),
             keyexpr,
             options,
-            local_zid,
+            session.zid(),
         )
         .map(Self)
     }

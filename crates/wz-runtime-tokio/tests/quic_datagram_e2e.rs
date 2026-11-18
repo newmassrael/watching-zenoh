@@ -99,7 +99,7 @@ async fn wz_to_wz_over_quic_datagram_reaches_established_and_delivers_put() {
             .await
             .expect("accept quic datagram peer");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::QuicDatagram(Box::new(link)),
             params,
@@ -123,7 +123,7 @@ async fn wz_to_wz_over_quic_datagram_reaches_established_and_delivers_put() {
             server_name: "localhost".to_string(),
         });
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -271,7 +271,7 @@ async fn a_named_quic_datagram_locator_verifies_against_the_locator_name() {
             .await
             .expect("quic-datagram server-side accept completes");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -286,7 +286,7 @@ async fn a_named_quic_datagram_locator_verifies_against_the_locator_name() {
         let locator = parse_any_locator(&format!("quic-datagram/localhost:{port}"))
             .expect("parse name locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

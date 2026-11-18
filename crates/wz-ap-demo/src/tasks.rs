@@ -496,18 +496,16 @@ pub(crate) async fn advanced_publisher_task<T>(
             wz::runtime_tokio::advanced_publisher::MissDetectionConfig::default()
                 .heartbeat(core::time::Duration::from_millis(period_ms));
     }
-    let publisher =
-        match AdvancedPublisher::declare(&session, spec.keyexpr.clone(), options, spec.zid.clone())
-        {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!(
-                    "wz-ap-demo: ADVANCED PUBLISHER declare rejected for keyexpr='{}': {e:?}",
-                    spec.keyexpr
-                );
-                return;
-            }
-        };
+    let publisher = match AdvancedPublisher::declare(&session, spec.keyexpr.clone(), options) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "wz-ap-demo: ADVANCED PUBLISHER declare rejected for keyexpr='{}': {e:?}",
+                spec.keyexpr
+            );
+            return;
+        }
+    };
     log::info!(
         "wz-ap-demo: DECLARED ADVANCED PUBLISHER keyexpr='{}' cache_max={:?} count={} \
          heartbeat_ms={:?}",

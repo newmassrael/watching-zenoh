@@ -152,7 +152,8 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
     let acc_addr = acceptor_socket.local_addr().expect("acceptor local_addr");
 
     let mut acceptor_params = fixture_session_init_params();
-    acceptor_params.zid = RESPONDER_ZID.to_vec();
+    acceptor_params.zid = wz_runtime_tokio::session_glue::SessionZid::new(RESPONDER_ZID)
+        .expect("a test zid is 1 to 16 bytes");
     // PARKED after it returns, like every background arm here: the `select!`
     // below must be endable by the peer loop and by nothing else, or a leg could
     // finish with no summary to assert on. (The loops are not `Send` — they hold
@@ -227,7 +228,8 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
         .await
         .expect("bind the peer listener");
     let mut peer_params = fixture_session_init_params();
-    peer_params.zid = SCOUT_ZID.to_vec();
+    peer_params.zid = wz_runtime_tokio::session_glue::SessionZid::new(SCOUT_ZID)
+        .expect("a test zid is 1 to 16 bytes");
 
     let scouting = async {
         serve_autoconnect(

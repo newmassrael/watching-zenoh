@@ -127,7 +127,7 @@ async fn hold(
     let (shut_tx, shut_rx) = watch::channel(false);
 
     let mut far_params = fixture_session_init_params();
-    far_params.zid = FAR.to_vec();
+    far_params.zid = FAR.into();
     let far = peer_loop(
         sources(vec![far_listener], None, RetryPolicy::constant(1000), None),
         far_params,
@@ -148,7 +148,7 @@ async fn hold(
     let sink = seen.clone();
     let withdraw = tx.clone();
     let mut near_params = fixture_session_init_params();
-    near_params.zid = NEAR.to_vec();
+    near_params.zid = NEAR.into();
     let board = PeerBoard::new();
     let near = peer_loop(
         sources(

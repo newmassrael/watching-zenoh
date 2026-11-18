@@ -84,7 +84,7 @@ fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
         .map_err(|e| format!("draw the cookie signing key: {:?}", e))?;
     Ok(SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: vec![zid; 4],
+        zid: [zid; 4].into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,

@@ -815,7 +815,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             SessionHandle::Registry(state) => {
                 // The publisher's source identity is the session's own zid, the one its peers
                 // see in the handshake.
-                let zid = state.shared.local_session().actions().params.zid.clone();
+                let zid = state.shared.local_session().actions().params.zid;
                 // R3064 -- a declaration the session refuses is REFUSED, with upstream's code:
                 // its `ze_declare_advanced_publisher` answers any construction error
                 // `Z_EGENERIC` (MEASURED: `-128` for a cache with no miss detection on a node
@@ -844,7 +844,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
                     Arc::new(crate::advanced_plane::NodePlane::new(node)),
                     ke,
                     opts,
-                    node.zid().to_vec(),
+                    *node.zid(),
                 ) else {
                     return Z_EGENERIC;
                 };
@@ -2157,7 +2157,7 @@ mod tests {
         let shared = Arc::new(
             SharedSession::new(
                 wz_runtime_tokio::runtime_impl::TokioTime::new(),
-                vec![0x11; 16],
+                [0x11; 16].into(),
             )
             .expect("test host entropy"),
         );

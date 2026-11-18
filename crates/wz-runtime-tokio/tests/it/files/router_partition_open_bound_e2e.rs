@@ -59,7 +59,7 @@ const ROUTER_ZID: [u8; 4] = [0x05; 4];
 fn router_params(zid: [u8; 4]) -> SessionInitParams {
     let mut params = fixture_session_init_params();
     params.whatami = WhatAmI::Router;
-    params.zid = zid.to_vec();
+    params.zid = zid.into();
     params
 }
 

@@ -60,7 +60,7 @@ fn expected_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
 fn fixture_params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: vec![0x10, 0x20, 0x30, 0x40],
+        zid: [0x10, 0x20, 0x30, 0x40].into(),
         seq_num_res: 0x03,
         req_id_res: 0x02,
         batch_size: 0xCAFE,

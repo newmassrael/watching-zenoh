@@ -53,7 +53,7 @@ async fn connect_and_open_reaches_established_against_wz_acceptor() {
         let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
 
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct zid from the initiator
+        params.zid = [0x02; 4].into(); // distinct zid from the initiator
         let actions = new_session_actions(outbound, params, TokioTime::new());
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
@@ -89,7 +89,7 @@ async fn connect_and_open_reaches_established_against_wz_acceptor() {
     // ── Initiator side: the lib open path under test.
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     // The dial future is held across `join!`, so bind the cert-free config to
     // a `let` to outlive the `&` borrow (idiomatic borrow-across-await).
     let cfg = DialConfig::default();

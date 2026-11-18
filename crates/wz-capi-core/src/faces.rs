@@ -105,7 +105,7 @@ use wz_runtime_tokio::session::{
 use wz_runtime_tokio::session_glue::WhatAmI;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, BoxedLinkDriver, DriverLoopOutcome, IterationEvent, LinkSendOutcome,
-    SessionLinkActions,
+    SessionLinkActions, SessionZid,
 };
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
@@ -2306,7 +2306,7 @@ impl SharedSession {
     /// literal survive at four sites until R311y820 counted them.
     pub fn new(
         clock: TokioTime,
-        zid: Vec<u8>,
+        zid: SessionZid,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
         Self::new_with_resources(clock, zid, SessionResources::default())
     }
@@ -2316,7 +2316,7 @@ impl SharedSession {
     /// every session was until the C ABI read its `timestamping` config.
     pub fn new_with_node_clock(
         clock: TokioTime,
-        zid: Vec<u8>,
+        zid: SessionZid,
         node_hlc: NodeHlc,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
         Self::new_with_resources(
@@ -2334,7 +2334,7 @@ impl SharedSession {
     /// the node is ONE node, however many sessions it grows.
     pub fn new_with_resources(
         clock: TokioTime,
-        zid: Vec<u8>,
+        zid: SessionZid,
         resources: SessionResources,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
         let SessionResources {
@@ -6612,8 +6612,8 @@ mod matching_aggregate_tests {
 
     /// A dummy session identity for the registry unit tests — the shape
     /// `open_blocking` mints, without the entropy call.
-    fn test_zid() -> Vec<u8> {
-        vec![0x11; 16]
+    fn test_zid() -> SessionZid {
+        [0x11; 16].into()
     }
 
     /// R2962 — a write filter is created in the state ACTIVE, which reads as
@@ -7888,7 +7888,7 @@ mod face_up_order_tests {
         let (dials, _intents) = tokio::sync::mpsc::unbounded_channel();
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
-            vec![0x11; 16],
+            [0x11; 16].into(),
             SessionResources {
                 gossip: Some(GossipSetup {
                     whatami: WhatAmI::Peer,
@@ -7977,7 +7977,7 @@ mod face_up_order_tests {
         let (dials, _intents) = tokio::sync::mpsc::unbounded_channel();
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
-            vec![0x11; 16],
+            [0x11; 16].into(),
             SessionResources {
                 gossip: Some(GossipSetup {
                     whatami: WhatAmI::Peer,
@@ -8083,7 +8083,7 @@ mod face_up_order_tests {
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let shared =
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
         assert!(
             shared.face_up(1, &near.resp_actions, false),
             "listener 0: slot 1"
@@ -8137,7 +8137,7 @@ mod face_up_order_tests {
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let shared =
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
         assert!(
             shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
@@ -8762,7 +8762,7 @@ mod face_up_order_tests {
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let shared =
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
         assert!(
             shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
@@ -8844,7 +8844,7 @@ mod face_up_order_tests {
         let late_near = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
         let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
         let shared =
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
         let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
 
         assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
@@ -8899,7 +8899,7 @@ mod face_up_order_tests {
         let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
-            vec![0x11; 16],
+            [0x11; 16].into(),
             SessionResources {
                 liveliness_to_self: true,
                 ..SessionResources::default()
@@ -9005,7 +9005,7 @@ mod face_up_order_tests {
         let late_near = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
         let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
         let shared =
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
         let sink: LivelinessSink = Arc::new(|| Box::new(|_sample: LivelinessSample<'_>| {}));
         let sent = |pair: &wz_runtime_tokio_test_support::EstablishedPair| {
             pair.resp_driver.snapshot().sends.len()
@@ -9063,7 +9063,7 @@ mod face_up_order_tests {
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let shared =
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false));
         assert!(shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false));
 
@@ -9113,7 +9113,7 @@ mod face_up_order_tests {
         // does not, which is the default.
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
-            vec![0x11; 16],
+            [0x11; 16].into(),
             SessionResources {
                 liveliness_to_self: true,
                 ..SessionResources::default()
@@ -9174,7 +9174,7 @@ mod face_up_order_tests {
         let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let shared =
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy");
         assert!(shared.face_up(1, &near.resp_actions, false));
         assert!(shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false));
         let near_zid = near
@@ -9284,7 +9284,7 @@ mod aggregation_tests {
         let control_link =
             establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
         let control =
-            SharedSession::new(TokioTime::new(), vec![0x10; 16]).expect("test host entropy");
+            SharedSession::new(TokioTime::new(), [0x10; 16].into()).expect("test host entropy");
         assert!(control.face_up(1, &control_link.resp_actions, false));
         let before = control_link.resp_driver.snapshot().sends.len();
         control.declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op());
@@ -9300,7 +9300,7 @@ mod aggregation_tests {
         let late = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
-            vec![0x11; 16],
+            [0x11; 16].into(),
             SessionResources {
                 aggregation: aggregation.clone(),
                 ..SessionResources::default()

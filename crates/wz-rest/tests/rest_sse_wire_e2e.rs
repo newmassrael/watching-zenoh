@@ -60,7 +60,7 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
     let acc_open = async {
         let (stream, _peer) = link.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -75,7 +75,7 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
     let bridge_open = async {
         let locator = parse_any_locator(&format!("tcp/{link_addr}")).expect("parse locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         let cfg = DialConfig::default();
         connect_and_open_session(
             locator,

@@ -253,6 +253,8 @@ pub use wz_session_core::link::QueueAllocation;
 pub use wz_session_core::session_init_params::SessionInitParams;
 /// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
 pub use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
+/// The type of [`SessionInitParams::zid`], named where the bundle is.
+pub use wz_session_core::session_zid::{SessionZid, ZidLengthError};
 // Re-exported alongside `SessionInitParams` so a caller naming the param
 // bundle also names its `whatami` field type from one place.
 pub use wz_session_core::WhatAmI;

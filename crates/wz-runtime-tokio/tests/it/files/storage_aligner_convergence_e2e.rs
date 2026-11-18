@@ -107,7 +107,8 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
         async move {
             let (stream, _peer) = listener.accept().await.expect("accept");
             let mut params = fixture_session_init_params();
-            params.zid = zid_a;
+            params.zid = wz_runtime_tokio::session_glue::SessionZid::new(&zid_a)
+                .expect("a test zid is 1 to 16 bytes");
             accept_and_open_session(
                 DialedLink::Tcp(stream),
                 params,
@@ -125,7 +126,8 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
             let locator =
                 parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
             let mut params = fixture_session_init_params();
-            params.zid = zid_b;
+            params.zid = wz_runtime_tokio::session_glue::SessionZid::new(&zid_b)
+                .expect("a test zid is 1 to 16 bytes");
             let cfg = DialConfig::default();
             connect_and_open_session(
                 locator,

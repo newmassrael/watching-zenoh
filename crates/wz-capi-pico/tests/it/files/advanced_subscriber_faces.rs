@@ -90,11 +90,11 @@ type Heard = (LivelinessSampleKind, String);
 unsafe extern "C" fn on_sample(_sample: *const z_loaned_sample_t, _ctx: *mut c_void) {}
 
 fn init_params(whatami: WhatAmI) -> SessionInitParams {
-    let mut zid = vec![0u8; 16];
+    let mut zid = [0u8; 16];
     getrandom::getrandom(&mut zid).expect("OS entropy");
     SessionInitParams {
         whatami,
-        zid,
+        zid: zid.into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,

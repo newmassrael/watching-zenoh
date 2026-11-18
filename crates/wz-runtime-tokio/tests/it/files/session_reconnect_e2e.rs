@@ -168,7 +168,7 @@ async fn collect_first_declare(opened: &mut OpenedSession) -> Vec<String> {
 async fn accept_and_collect_declares(listener: &TcpListener) -> (OpenedSession, Vec<String>) {
     let (stream, _peer) = listener.accept().await.expect("accept");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4]; // distinct zid from the initiator
+    params.zid = [0x02; 4].into(); // distinct zid from the initiator
     let mut opened = accept_and_open_session(
         DialedLink::Tcp(stream),
         params,
@@ -229,7 +229,7 @@ async fn assert_declare_replays_after_link_loss(
     kind: ReplayDeclareKind,
 ) {
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
 
     // ── Connection #1: client opens (reconnect-supervised wiring), declares
     //    one entity of `kind`; the acceptor handshakes and observes the Declare.
@@ -353,7 +353,7 @@ async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
 
     let (listener, locator) = ip_loopback().await;
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x07; 4];
+    params.zid = [0x07; 4].into();
 
     let policy = ReconnectPolicy {
         retry_delay_ms: 50,
@@ -504,7 +504,7 @@ async fn a_dying_link_takes_its_tokens_out_of_the_admin_introspection_answer() {
 
     let (listener, locator) = ip_loopback().await;
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x09; 4];
+    params.zid = [0x09; 4].into();
 
     let policy = ReconnectPolicy {
         retry_delay_ms: 50,
@@ -661,7 +661,7 @@ async fn a_dying_link_flips_the_dialers_matching_listener_to_false() {
 
     let (listener, locator) = ip_loopback().await;
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x09; 4];
+    params.zid = [0x09; 4].into();
 
     let policy = ReconnectPolicy {
         retry_delay_ms: 50,
@@ -874,7 +874,7 @@ async fn assert_paced_replay_tells_the_peer_everything(
     const DECLARED: usize = 5;
     let (listener, locator) = ip_loopback().await;
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     let policy = ReconnectPolicy {
         retry_delay_ms: 50,
         max_attempts: Some(100),
@@ -904,7 +904,7 @@ async fn assert_paced_replay_tells_the_peer_everything(
         async {
             let (stream, _peer) = listener.accept().await.expect("accept");
             let mut params = fixture_session_init_params();
-            params.zid = vec![0x02; 4];
+            params.zid = [0x02; 4].into();
             let mut opened = accept_and_open_session(
                 DialedLink::Tcp(stream),
                 params,
@@ -930,7 +930,7 @@ async fn assert_paced_replay_tells_the_peer_everything(
         async {
             let (stream, _peer) = listener.accept().await.expect("accept");
             let mut params = fixture_session_init_params();
-            params.zid = vec![0x02; 4];
+            params.zid = [0x02; 4].into();
             let mut opened = accept_and_open_session(
                 DialedLink::Tcp(stream),
                 params,
@@ -1053,7 +1053,7 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
         parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator"),
     );
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
 
     // Connection #1: open + declare, acceptor observes it.
     let policy = ReconnectPolicy {
@@ -1190,7 +1190,7 @@ mod tls_reconnect {
         .await
         .expect("server tls handshake");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct zid from the initiator
+        params.zid = [0x02; 4].into(); // distinct zid from the initiator
         let mut opened = accept_and_open_session(
             // R2608 — `false`: this fixture's subject is reconnection, not
             // `close_link_on_expiration`.
@@ -1216,7 +1216,7 @@ mod tls_reconnect {
         let locator =
             ReconnectLocator::Ip(parse_locator(&format!("tls/{addr}")).expect("parse tls locator"));
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
 
         let policy = ReconnectPolicy {
             retry_delay_ms: 50, // test cadence; production default is pico's 1s
@@ -1347,7 +1347,7 @@ mod ws_reconnect {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let ws = accept_ws(stream).await.expect("server ws handshake");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct zid from the initiator
+        params.zid = [0x02; 4].into(); // distinct zid from the initiator
         let mut opened = accept_and_open_session(
             DialedLink::Ws(Box::new(ws)),
             params,
@@ -1369,7 +1369,7 @@ mod ws_reconnect {
         let locator =
             ReconnectLocator::Ip(parse_locator(&format!("ws/{addr}")).expect("parse ws locator"));
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
 
         let policy = ReconnectPolicy {
             retry_delay_ms: 50, // test cadence; production default is pico's 1s

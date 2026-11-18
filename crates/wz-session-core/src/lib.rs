@@ -512,9 +512,9 @@ pub mod scout_params;
 /// Pure owned value type; alloc-gated (Vec zid), like [`scout_params`]. The
 /// inputs the AP multicast drive loop (`wz-runtime-tokio::multicast_glue`)
 /// packs into each periodic JOIN beacon (session-fsm §3.1/§3.2). The `zid` is
-/// [`session_init_params::SessionBytes`], as the unicast parameters' is: a `Vec` on
-/// the heap profile and an array on the per-session slot profile, so the module
-/// compiles on either (fixed-memory step S9e).
+/// [`session_init_params::SessionBytes`]: a `Vec` on the heap profile and an array
+/// on the per-session slot profile, so the module compiles on either (fixed-memory
+/// step S9e).
 #[cfg(feature = "storage-profile")]
 pub mod multicast_params;
 
@@ -609,6 +609,12 @@ pub mod accept_state;
 /// [`accept_state`] is: the rule allocates nothing, the MCU profile shares it,
 /// and the `sha2` it hashes with is already a dependency of every build.
 pub mod credential_identity;
+
+/// A session's own zid as a value that is one to sixteen bytes by construction.
+/// Ungated for the reason [`credential_identity`] is: it allocates nothing, and
+/// the fixed-memory profile keeps the same value in the session's storage.
+pub mod session_zid;
+
 /// The rule an identity's two files are provisioned by (make both, keep both, refuse half), and
 /// the words a maker refuses with: shared by a declared node's `--make-identity` and the C
 /// library's identity door. Ungated for the reason [`credential_identity`] is.

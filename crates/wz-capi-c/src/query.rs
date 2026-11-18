@@ -2199,7 +2199,7 @@ mod tests {
 
         let shared = wz_capi_core::faces::SharedSession::new(
             wz_runtime_tokio::runtime_impl::TokioTime::new(),
-            vec![0x11; 16],
+            [0x11; 16].into(),
         )
         .expect("test host entropy");
         let escaped = marshal.deep_copy_deferred(HeldRoute::Face(TokioHeldQuery::Unicast(
@@ -2392,7 +2392,7 @@ mod tests {
     fn an_escaped_query_keeps_its_source_info() {
         let shared = wz_capi_core::faces::SharedSession::new(
             wz_runtime_tokio::runtime_impl::TokioTime::new(),
-            vec![0x11; 16],
+            [0x11; 16].into(),
         )
         .expect("test host entropy");
         let view = SourcedQuery {

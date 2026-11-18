@@ -557,7 +557,7 @@ fn peer_init_params() -> SessionInitParams {
         whatami: WhatAmI::Peer,
         // Distinct from the replay tool's own zid, or the handshake is a node
         // talking to itself.
-        zid: vec![0x02, 0x02, 0x02, 0x02],
+        zid: [0x02, 0x02, 0x02, 0x02].into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,

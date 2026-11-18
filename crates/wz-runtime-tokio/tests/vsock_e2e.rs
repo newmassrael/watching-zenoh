@@ -78,7 +78,7 @@ async fn wz_to_wz_over_vsock_reaches_established_and_delivers_put() {
             .await
             .expect("accept vsock peer");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::Vsock(stream),
             params,
@@ -93,7 +93,7 @@ async fn wz_to_wz_over_vsock_reaches_established_and_delivers_put() {
         let locator = parse_any_locator(&format!("vsock/VMADDR_CID_LOCAL:{port}"))
             .expect("parse vsock locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -241,7 +241,7 @@ async fn wz_accepts_a_session_over_vsock_via_the_bind_endpoint_seam() {
             .await
             .expect("vsock post-accept handshake (a direct wrap)");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -256,7 +256,7 @@ async fn wz_accepts_a_session_over_vsock_via_the_bind_endpoint_seam() {
         let locator = parse_any_locator(&format!("vsock/VMADDR_CID_LOCAL:{port}"))
             .expect("parse vsock locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

@@ -1746,7 +1746,7 @@ mod wake_budget_tests {
     fn params() -> SessionInitParams {
         SessionInitParams {
             whatami: wz_session_core::WhatAmI::Peer,
-            zid: vec![0x0A, 0x0B, 0x0C, 0x0D],
+            zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
             seq_num_res: 2,
             req_id_res: 2,
             batch_size: 1024,

@@ -74,7 +74,7 @@ const LEASE_MS: u64 = 10_000;
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: wz_session_core::WhatAmI::Peer,
-        zid: vec![zid; 4],
+        zid: [zid; 4].into(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,

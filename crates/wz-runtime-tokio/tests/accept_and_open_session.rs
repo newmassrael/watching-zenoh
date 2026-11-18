@@ -42,7 +42,7 @@ async fn accept_and_open_reaches_established_against_wz_initiator() {
     let acceptor_fut = async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct zid from the initiator
+        params.zid = [0x02; 4].into(); // distinct zid from the initiator
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -56,7 +56,7 @@ async fn accept_and_open_reaches_established_against_wz_initiator() {
     // ── Initiator side: the established dial-side helper.
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    params.zid = [0x01; 4].into();
     // The dial future is held across `join!`, so bind the cert-free config to
     // a `let` to outlive the `&` borrow (idiomatic borrow-across-await).
     let cfg = DialConfig::default();
@@ -109,7 +109,7 @@ async fn initiate_and_open_from_connected_stream_reaches_established() {
     let acceptor_fut = async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -123,7 +123,7 @@ async fn initiate_and_open_from_connected_stream_reaches_established() {
     let initiator_fut = async move {
         let stream = TcpStream::connect(addr).await.expect("connect");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         initiate_and_open_session(
             DialedLink::Tcp(stream),
             params,

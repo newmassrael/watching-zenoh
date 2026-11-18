@@ -2382,15 +2382,13 @@ fn spawn_background_tasks(
         log::warn!(
             "wz-ap-demo: --advanced-publish='{}' is INERT (built without the \
              `advanced` feature); no cache will be declared. Also ignored: \
-             value='{}' count={} cache_max={:?} interval_ms={} heartbeat_ms={:?} \
-             zid={:02x?}",
+             value='{}' count={} cache_max={:?} interval_ms={} heartbeat_ms={:?}",
             spec.keyexpr,
             spec.value,
             spec.count,
             spec.cache_max,
             spec.interval_ms,
             spec.heartbeat_ms,
-            spec.zid,
         );
     }
 
@@ -6839,7 +6837,7 @@ async fn run_router_hat_until(
             // `transport/link/tx/queue`, as the unicast sessions do, and its
             // `transport/link/rx/max_message_size`.
             wz::runtime_tokio::multicast_glue::RouterGroupProfile {
-                zid: params.zid.clone(),
+                zid: params.zid.to_vec(),
                 qos: multicast_qos,
                 compression: false,
                 tx_queue: params.tx_queue,
@@ -8769,7 +8767,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         crate::args::resolve_node_zid(None)?,
         &tuning,
     )?;
-    let node_zid = params.zid.clone();
+    let node_zid = params.zid.to_vec();
     let zid_hex = zid_to_zenoh_hex(&node_zid);
     let whatami_str = params.whatami.to_str();
 

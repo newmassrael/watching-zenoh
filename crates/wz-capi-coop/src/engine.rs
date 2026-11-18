@@ -79,7 +79,7 @@ use wz_session_core::push_build;
 use wz_session_core::sample::{Sample, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_init_params::{
-    KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+    KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidLengthError,
 };
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -226,12 +226,16 @@ pub enum OpenError {
     Unreachable(String),
     /// The platform gave no entropy for the session's zid or its cookie key.
     EntropyUnavailable,
+    /// The configured zid is not one: its wire form, the bytes up to the last non-zero one, is
+    /// not one to sixteen bytes (a zid of zero bytes names nothing).
+    InvalidZid(ZidLengthError),
 }
 
-/// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id.
-fn wire_zid(zid: &[u8]) -> Vec<u8> {
+/// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id. Refused
+/// when that is not one to sixteen bytes, here and once, so the session it opens holds a zid.
+pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
     let len = zid.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
-    zid[..len].to_vec()
+    SessionZid::new(&zid[..len]).map_err(OpenError::InvalidZid)
 }
 
 /// The session's entropy source, which every draw of the session goes through: its zid, the
@@ -255,7 +259,7 @@ impl EntropySource for SharedEntropy {
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
-fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<Vec<u8>, OpenError> {
+fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
     let mut zid = [0u8; 16];
     entropy
         .try_fill_bytes(&mut zid)
@@ -263,7 +267,7 @@ fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<Vec<u8>, OpenError> {
     if zid.iter().all(|b| *b == 0) {
         return Err(OpenError::EntropyUnavailable);
     }
-    Ok(wire_zid(&zid))
+    wire_zid(&zid)
 }
 
 /// One session the program steps; see the module doc.
@@ -437,7 +441,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     entropy: SharedEntropy,
     config: CoopConfig,
     /// The zid in its wire form, which every handshake of the session announces.
-    wire_zid: Vec<u8>,
+    wire_zid: SessionZid,
     /// The session's say on a link to a node it holds a link to, asked while the link's handshake
     /// runs (`install_link_admission`, `listen`).
     #[cfg(feature = "listen")]
@@ -824,7 +828,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // cookie key of its own per attempt.
         let params = SessionInitParams {
             whatami: self.config.whatami,
-            zid: self.wire_zid.clone(),
+            zid: self.wire_zid,
             seq_num_res: self.config.sn_resolution.wire_code(),
             req_id_res: 2,
             batch_size: self.config.batch_size,
@@ -1479,7 +1483,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ) -> Result<Arc<Self>, OpenError> {
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match &config.zid {
-            Some(zid) => wire_zid(zid),
+            Some(zid) => wire_zid(zid)?,
             None => fresh_zid(&mut entropy)?,
         };
         let mut zid = [0u8; 16];

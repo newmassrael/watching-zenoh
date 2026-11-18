@@ -94,7 +94,7 @@ fn frame_carrying_put(keyexpr: &str) -> Vec<u8> {
     // anti-vacuity test below caught, and which would otherwise have made the
     // deny assertion pass without any policy being consulted.
     let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4];
+    params.zid = [0x02; 4].into();
     let actions = new_session_actions(outbound, params, TokioTime::new());
     *actions
         .link

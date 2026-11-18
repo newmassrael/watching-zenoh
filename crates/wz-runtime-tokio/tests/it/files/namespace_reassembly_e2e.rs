@@ -58,7 +58,7 @@ async fn oversize_namespaced_put_fragments_and_reassembled_path_strips() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         params.batch_size = BATCH_SIZE;
         accept_and_open_session(
             DialedLink::Tcp(stream),
@@ -73,7 +73,7 @@ async fn oversize_namespaced_put_fragments_and_reassembled_path_strips() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         params.batch_size = BATCH_SIZE;
         connect_and_open_session(
             locator,

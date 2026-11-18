@@ -549,7 +549,7 @@ mod round2 {
 
     fn initiator_params() -> SessionInitParams {
         let mut p = fixture_session_init_params();
-        p.zid = vec![0x01; 4];
+        p.zid = [0x01; 4].into();
         p
     }
 
@@ -562,7 +562,7 @@ mod round2 {
         let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
 
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct zid from the initiator
+        params.zid = [0x02; 4].into(); // distinct zid from the initiator
         let actions = new_session_actions(outbound, params, TokioTime::new());
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
@@ -796,7 +796,7 @@ mod round3_tls {
                 .await
                 .expect("server tls handshake");
             let mut params = fixture_session_init_params();
-            params.zid = vec![0x02; 4]; // distinct from the initiator
+            params.zid = [0x02; 4].into(); // distinct from the initiator
             accept_and_open_session(
                 // R2608 — `false`: this fixture's subject is multicast
                 // scouting, not `close_link_on_expiration`.
@@ -823,7 +823,7 @@ mod round3_tls {
                 server_name,
             });
             let mut params = fixture_session_init_params();
-            params.zid = vec![0x01; 4];
+            params.zid = [0x01; 4].into();
             open_session_at(
                 &discovered,
                 params,

@@ -1331,7 +1331,7 @@ mod tests {
         Arc::new(
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
-                vec![0x5a; 16],
+                [0x5a; 16].into(),
             )
             .expect("test host entropy"),
         )

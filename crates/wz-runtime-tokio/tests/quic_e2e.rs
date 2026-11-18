@@ -89,7 +89,7 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
     let acc_open = async {
         let link = accept_quic_on(&endpoint).await.expect("accept quic peer");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::Quic(Box::new(link)),
             params,
@@ -117,7 +117,7 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
             server_name: "localhost".to_string(),
         });
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -391,7 +391,7 @@ async fn a_named_quic_locator_verifies_against_the_locator_name_not_the_configur
             .await
             .expect("quic server-side accept completes");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -406,7 +406,7 @@ async fn a_named_quic_locator_verifies_against_the_locator_name_not_the_configur
         let locator =
             parse_any_locator(&format!("quic/localhost:{port}")).expect("parse quic name locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
@@ -529,7 +529,7 @@ async fn a_locator_carrying_its_own_material_handshakes_with_no_ambient_config()
             .await
             .expect("accept the inbound quic peer");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             link,
             params,
@@ -542,7 +542,7 @@ async fn a_locator_carrying_its_own_material_handshakes_with_no_ambient_config()
     };
     let init_open = async {
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             dial,
             params,

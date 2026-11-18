@@ -195,7 +195,7 @@ mod tests {
     /// needs no peer.
     fn forms_on(key: &str) -> (Arc<SharedSession>, PicoSubscriberForms) {
         let shared = Arc::new(
-            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy"),
+            SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy"),
         );
         let session = PicoSession {
             engine: shared.as_engine(),

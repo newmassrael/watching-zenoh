@@ -78,7 +78,7 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
     let acc_open = async {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = [0x02; 4].into();
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -92,7 +92,7 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,

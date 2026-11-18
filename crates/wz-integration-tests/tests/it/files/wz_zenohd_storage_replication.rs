@@ -657,7 +657,7 @@ async fn zenohd_converges_to_wz_replica() {
     //    so no drift) — zenohd learns this zid (from wz's `Discovery` reply, or
     //    its digest keyexpr) and GETs the concrete `@zid/<that-zid>/<fp>/aligner`
     //    with `All`, which is exactly where wz declares its aligner queryable.
-    let wz_zid = zenohd_interop_session_init_params().zid;
+    let wz_zid = zenohd_interop_session_init_params().zid.to_vec();
     let mut opened = connect_to_zenohd(port).await;
     let timeouts = SessionTimeouts::spec_defaults();
 

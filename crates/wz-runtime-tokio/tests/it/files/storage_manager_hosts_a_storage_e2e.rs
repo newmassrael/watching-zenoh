@@ -69,7 +69,8 @@ async fn a_storage_the_manager_hosts_answers_a_peer_with_its_put_and_ends_by_nam
         async move {
             let (stream, _peer) = listener.accept().await.expect("accept");
             let mut params = fixture_session_init_params();
-            params.zid = zid_host;
+            params.zid = wz_runtime_tokio::session_glue::SessionZid::new(&zid_host)
+                .expect("a test zid is 1 to 16 bytes");
             accept_and_open_session(
                 DialedLink::Tcp(stream),
                 params,
@@ -84,7 +85,8 @@ async fn a_storage_the_manager_hosts_answers_a_peer_with_its_put_and_ends_by_nam
     let peer_open = async move {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
-        params.zid = zid_peer;
+        params.zid = wz_runtime_tokio::session_glue::SessionZid::new(&zid_peer)
+            .expect("a test zid is 1 to 16 bytes");
         connect_and_open_session(
             locator,
             params,

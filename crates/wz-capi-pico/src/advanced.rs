@@ -1959,7 +1959,7 @@ mod tests {
         let shared = Arc::new(
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
-                vec![0x11; 16],
+                [0x11; 16].into(),
             )
             .expect("test host entropy"),
         );
@@ -2045,7 +2045,7 @@ mod tests {
         let shared = Arc::new(
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
-                vec![0x11; 16],
+                [0x11; 16].into(),
             )
             .expect("test host entropy"),
         );

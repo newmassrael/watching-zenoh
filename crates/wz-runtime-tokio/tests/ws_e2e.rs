@@ -67,7 +67,7 @@ async fn wz_to_wz_over_ws_reaches_established_and_delivers_put() {
         let (tcp, _peer) = listener.accept().await.expect("accept tcp");
         let ws = accept_ws(tcp).await.expect("server ws handshake");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
+        params.zid = [0x02; 4].into(); // distinct from the initiator
         accept_and_open_session(
             DialedLink::Ws(Box::new(ws)),
             params,
@@ -81,7 +81,7 @@ async fn wz_to_wz_over_ws_reaches_established_and_delivers_put() {
     let init_open = async {
         let locator = parse_any_locator(&format!("ws/{addr}")).expect("parse ws locator");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = [0x01; 4].into();
         connect_and_open_session(
             locator,
             params,
