@@ -342,8 +342,8 @@ fn census_document(
 }
 
 /// The `observed` key: the transport messages the planes have folded since they
-/// began, how many of those the lists no longer hold, and the capture packets the
-/// first and the last of them resolve to (`null` when none was folded).
+/// began, how many of those the lists no longer hold, and the `interval` the
+/// first and the last of them stand at (`null` when none was folded).
 ///
 /// Every message the lists hold has been folded once the planes are brought up
 /// to the capture, so the ones folded and no longer held are the difference.
@@ -352,6 +352,18 @@ fn census_document(
 /// counts there the messages it still counts and a ceiling has taken, and a
 /// reader who wants only what is held reads that as the part of the planes that
 /// is history.
+///
+/// `unobserved` is the messages the lists produced since the planes began that a
+/// front trim took before any call folded them: a hole in a census that goes on
+/// across trims, which opens when it is asked less often than a list turns over.
+/// It is 0 for a census of what the capture holds, and for a caller that asks
+/// before a ceiling takes what arrived.
+///
+/// The interval is written in the shape of a keyexpr row's `anchor_intervals`
+/// entry, its space named beside it as every anchor's is. Its space is the
+/// capture PACKET on every link: the walk the planes fold in resolves a stream
+/// message to the packet that carried it, so the pair is never a byte offset,
+/// whatever the anchors of the planes beside it are.
 fn observed_into(d: &crate::Dissection, observed: crate::ordered_fold::Observed, out: &mut String) {
     let held: u64 = d
         .message_lists_with_origin()
@@ -361,11 +373,17 @@ fn observed_into(d: &crate::Dissection, observed: crate::ordered_fold::Observed,
     u64_into(observed.messages, out);
     out.push_str(",\"trimmed\":");
     u64_into(observed.messages.saturating_sub(held), out);
+    out.push_str(",\"unobserved\":");
+    u64_into(observed.unobserved, out);
     match observed.packets {
         Some((first, last)) => {
-            let _ = write!(out, ",\"first_packet\":{first},\"last_packet\":{last}}}");
+            let _ = write!(
+                out,
+                ",\"interval\":{{\"offset_space\":\"{}\",\"first\":{first},\"last\":{last}}}}}",
+                crate::AnchorSpace::PacketIndex.name()
+            );
         }
-        None => out.push_str(",\"first_packet\":null,\"last_packet\":null}"),
+        None => out.push_str(",\"interval\":null}"),
     }
 }
 
@@ -2807,9 +2825,19 @@ pub(crate) mod fed_tests {
             "`first_packet` was announced as retiring in census revision 2 and \
              this revision drops it; it is still in the document: {over_tcp}"
         );
+        // The planes, after `observed`: its interval is the capture packets the
+        // walk resolved every message to, on every link, and says so.
+        let planes = &over_tcp[over_tcp
+            .find(",\"keyexprs\":")
+            .expect("the document holds its planes")..];
         assert!(
-            !over_tcp.contains("\"offset_space\":\"packet\""),
-            "and over TCP none of them is a packet index: {over_tcp}"
+            !planes.contains("\"offset_space\":\"packet\""),
+            "and over TCP none of the planes' anchors is a packet index: {over_tcp}"
+        );
+        assert!(
+            over_tcp.contains("\"interval\":{\"offset_space\":\"packet\",\"first\":"),
+            "while what the census observed is named a packet interval on every \
+             link: {over_tcp}"
         );
 
         let over_udp = census_json_where(&datagram_capture(), &crate::filter::Filter::any());

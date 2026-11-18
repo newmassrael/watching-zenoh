@@ -4870,9 +4870,12 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     },
     // Revision 25 ADDS `observed`, after the envelope, and retires nothing:
     // `messages`, the transport messages the planes folded since they began;
-    // `trimmed`, how many of those the lists no longer hold; `first_packet` and
-    // `last_packet`, the capture packets the first and the last of them resolve
-    // to, `null` when none was folded. It is not a plane and never `null`.
+    // `trimmed`, how many of those the lists no longer hold; `unobserved`, the
+    // messages a trim took before any call folded them; `interval`, where
+    // the first and the last of them stand, in the shape of an
+    // `anchor_intervals` entry with its `offset_space` (always `packet`: the
+    // fold resolves every message to its capture packet), `null` when none was
+    // folded. It is not a plane and never `null`.
     //
     // A VALUE MOVES on one door: a live handle's census goes on across a front
     // trim, so its planes count every message folded since they began, the ones
@@ -33982,8 +33985,11 @@ pub const CENSUS_R21_KEYS: &[&str] = &[
 ];
 
 /// The keys the census document carries at revision 25: revision 21's PLUS
-/// `observed` and the three keys inside it that revision 21 did not carry
-/// (`trimmed`, `first_packet`, `last_packet`; `messages` was already in the set).
+/// `observed` and the three keys inside it that revision 21 did not carry,
+/// `trimmed`, `unobserved` and `interval` (`messages`, and the interval's `offset_space`,
+/// `first` and `last`, were already in the set). The range is an interval in a
+/// named space and not a `first_packet`, the node plane's key that revision 2
+/// retired for naming a byte offset a packet.
 ///
 /// Written out rather than aliased, for revision 18's reason: this set moves.
 pub const CENSUS_R25_KEYS: &[&str] = &[
@@ -34044,7 +34050,6 @@ pub const CENSUS_R25_KEYS: &[&str] = &[
     "family",
     "first",
     "first_anchor",
-    "first_packet",
     "first_reply",
     "flow",
     "flows",
@@ -34060,6 +34065,7 @@ pub const CENSUS_R25_KEYS: &[&str] = &[
     "inadmissible",
     "init",
     "interests",
+    "interval",
     "join",
     "judged",
     "keyexpr",
@@ -34068,7 +34074,6 @@ pub const CENSUS_R25_KEYS: &[&str] = &[
     "kind",
     "last",
     "last_anchor",
-    "last_packet",
     "link",
     "links",
     "liveliness_token",
@@ -34158,6 +34163,7 @@ pub const CENSUS_R25_KEYS: &[&str] = &[
     "unknown_ids",
     "unlocatable_records",
     "unmeasured_payloads",
+    "unobserved",
     "unparsed_bytes",
     "unread",
     "unresolvable_fragments",
@@ -36381,9 +36387,10 @@ mod tests {
             // undecided under a selector, as a published sample's are.
             // To 24 when `aborted_superseded` began counting restarts off the
             // router's displacement word: values only.
-            // To 25 when the document gained `observed` (four keys: what the
-            // planes folded since they began and how much of it is trimmed)
-            // and a live handle's census began to go on across front trims.
+            // To 25 when the document gained `observed` (what the planes
+            // folded since they began, how much of it is trimmed, and the
+            // packet interval it spans) and a live handle's census began to go
+            // on across front trims.
             (CENSUS, 25u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had

@@ -163,6 +163,10 @@ pub(crate) struct Observed {
     /// The packets of the first and the last message taken, in capture order;
     /// `None` while nothing has been taken.
     pub(crate) packets: Option<(usize, usize)>,
+    /// Messages the lists produced since the fold began that a front trim took
+    /// before a walk reached them: the hole a fold that goes on across trims
+    /// has when it is asked less often than its lists turn over.
+    pub(crate) unobserved: u64,
 }
 
 impl Observed {
@@ -171,11 +175,13 @@ impl Observed {
         Self {
             messages: order.messages() as u64,
             packets: order.packet_range(),
+            unobserved: 0,
         }
     }
 
-    /// This, followed by what a walk over `order` takes.
-    fn then(self, order: &crate::OrderedFrames<'_>) -> Self {
+    /// This, followed by what a walk over `order` takes, after `unobserved`
+    /// messages that left the lists before it reached them.
+    fn then(self, order: &crate::OrderedFrames<'_>, unobserved: u64) -> Self {
         let next = Self::of(order);
         Self {
             messages: self.messages + next.messages,
@@ -183,6 +189,7 @@ impl Observed {
                 (Some((first, _)), Some((_, last))) => Some((first, last)),
                 (earlier, later) => later.or(earlier),
             },
+            unobserved: self.unobserved + unobserved,
         }
     }
 }
@@ -356,7 +363,14 @@ impl<F: OrderedFold> Resumable<F> {
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
-                saved.observed = saved.observed.then(&frames);
+                // A fold that begins again at a trim never steps over a message;
+                // one that goes on across trims steps over the ones a trim took
+                // before this walk reached them.
+                let unobserved = match trims {
+                    TrimPolicy::Restart => 0,
+                    TrimPolicy::Continue => dissection.trimmed_unwalked(&saved.marks),
+                };
+                saved.observed = saved.observed.then(&frames, unobserved);
                 saved.marks = marks;
                 stats.resumes += F::PLANES;
             }

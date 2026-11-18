@@ -704,11 +704,16 @@ fn planes_of(doc: &str) -> &str {
 fn observed_value<'d>(doc: &'d str, key: &str) -> &'d str {
     let open = "\"observed\":{";
     let at = doc.find(open).expect("the observed object") + open.len();
-    let object = &doc[at..at + doc[at..].find('}').expect("the object closes")];
     let marker = alloc::format!("\"{key}\":");
-    let start = object.find(&marker).expect("the key") + marker.len();
-    let rest = &object[start..];
-    &rest[..rest.find(',').unwrap_or(rest.len())]
+    let start = at + doc[at..].find(&marker).expect("the key") + marker.len();
+    let rest = &doc[start..];
+    // The interval is an object of scalars; every other value is a scalar.
+    let end = if rest.starts_with('{') {
+        rest.find('}').expect("the interval closes") + 1
+    } else {
+        rest.find([',', '}']).expect("the value ends")
+    };
+    &rest[..end]
 }
 
 /// A CENSUS OVER ITS HISTORY GOES ON ACROSS FRONT TRIMS and is the census of
@@ -750,7 +755,7 @@ fn a_history_census_goes_on_across_trims_and_counts_everything_observed() {
             "round {round}: the census over its history is not the census of \
              every message it observed"
         );
-        for key in ["messages", "first_packet", "last_packet"] {
+        for key in ["messages", "interval"] {
             assert_eq!(
                 observed_value(&history, key),
                 observed_value(&whole, key),
@@ -792,6 +797,73 @@ fn a_history_census_goes_on_across_trims_and_counts_everything_observed() {
     );
 }
 
+/// A MESSAGE A TRIM TAKES BEFORE ANY CALL FOLDS IT is counted `unobserved`: a
+/// caller asking once per twenty pushes on a list that holds six reads the hole,
+/// exactly, and one asking at every push, or a census over the capture, reads
+/// none.
+#[cfg(feature = "dissect")]
+#[test]
+fn a_history_census_counts_what_left_before_it_was_folded() {
+    let any = Filter::any();
+    let record = |round: u8| frame_carrying(&push(sender_space(7, None), &[round; 12]));
+
+    let mut slow = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    slow.wire(true, &frame_carrying(&declare_kexpr(7, "demo/temp")));
+    let first = census_json_where_resumable(&slow.bounded, &any, &mut memory);
+    assert_eq!(observed_value(&first, "unobserved"), "0", "{first}");
+    let folded_through = slow.produced();
+    for round in 0..20u8 {
+        slow.wire(true, &record(round));
+    }
+    let first_held = slow.produced() - slow.held();
+    assert!(
+        first_held > folded_through,
+        "the fixture must trim past what the first call folded"
+    );
+    let after = census_json_where_resumable(&slow.bounded, &any, &mut memory);
+    assert_eq!(
+        observed_value(&after, "unobserved"),
+        alloc::format!("{}", first_held - folded_through),
+        "the messages trimmed between the two calls: {after}"
+    );
+    assert_eq!(
+        observed_value(&after, "messages"),
+        alloc::format!("{}", folded_through + slow.held()),
+        "{after}"
+    );
+    assert_eq!(
+        memory.stats().restarts,
+        PLANES,
+        "the planes went on across the hole: {:?}",
+        memory.stats()
+    );
+    let over_the_capture = census_json_where(&slow.bounded, &any);
+    assert_eq!(
+        observed_value(&over_the_capture, "unobserved"),
+        "0",
+        "{over_the_capture}"
+    );
+
+    let mut fast = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    fast.wire(true, &frame_carrying(&declare_kexpr(7, "demo/temp")));
+    census_json_where_resumable(&fast.bounded, &any, &mut memory);
+    for round in 0..20u8 {
+        fast.wire(true, &record(round));
+        let doc = census_json_where_resumable(&fast.bounded, &any, &mut memory);
+        assert_eq!(
+            observed_value(&doc, "unobserved"),
+            "0",
+            "push {round}: {doc}"
+        );
+    }
+    assert!(
+        fast.produced() > fast.held(),
+        "the fast caller's list was trimmed too, so its 0 is not for want of a trim"
+    );
+}
+
 /// A census over its history gives up what its planes keep of the rows no list
 /// holds, and its document does not move for it: the entries kept stay near
 /// what the lists hold, where every row ever folded would be kept otherwise.
@@ -809,8 +881,11 @@ fn a_history_census_gives_up_the_rows_no_list_holds() {
             true,
             &frame_carrying(&push(sender_space(7, None), &round.to_le_bytes())),
         );
+        // Asked at every push, as a tap asks at every beat: a message a ceiling
+        // takes before any call folds it is never observed, so a census asked
+        // less often than the list turns over is not the untrimmed twin's.
+        let history = census_json_where_resumable(&t.bounded, &any, &mut memory);
         if round % 100 == 99 {
-            let history = census_json_where_resumable(&t.bounded, &any, &mut memory);
             assert_eq!(
                 planes_of(&history),
                 planes_of(&census_json_where(&t.whole, &any)),
@@ -846,28 +921,38 @@ fn a_history_census_whose_open_exchanges_outgrow_the_holding_begins_again() {
         &frame_carrying(&push(sender_space(0, Some("demo/a")), &[1u8; 4])),
     );
     census_json_where_resumable(&t.bounded, &any, &mut memory);
-    for n in 0..1_100u32 {
+    // Asked at every query, so every message is observed (see the test above):
+    // the planes go on, and the call after the open exchanges pass the bound
+    // begins them again.
+    let mut began_again = None;
+    for n in 0..1_200u32 {
         t.wire(
             true,
             &frame_carrying(&request_query(n + 1, sender_space(0, Some("demo/q")))),
         );
+        let outgrown = 4 * t.held() as usize + 1024;
+        let kept = memory.kept_entries();
+        let before = memory.stats();
+        let doc = census_json_where_resumable(&t.bounded, &any, &mut memory);
+        let work = delta(before, memory.stats());
+        if work.restarts > 0 {
+            assert!(
+                kept > outgrown,
+                "query {n}: the planes began again with {kept} entries against a \
+                 bound of {outgrown} ({work:?})"
+            );
+            began_again = Some((doc, work));
+            break;
+        }
+        if n % 100 == 99 {
+            assert_eq!(
+                planes_of(&doc),
+                planes_of(&census_json_where(&t.whole, &any)),
+                "query {n}: before the bound is passed the census is the history's"
+            );
+        }
     }
-    let went_on = census_json_where_resumable(&t.bounded, &any, &mut memory);
-    assert_eq!(
-        planes_of(&went_on),
-        planes_of(&census_json_where(&t.whole, &any)),
-        "before the bound is checked the census is the history's"
-    );
-    let outgrown = 4 * t.held() as usize + 1024;
-    assert!(
-        memory.kept_entries() > outgrown,
-        "the fixture must outgrow the bound: {} entries against {outgrown}",
-        memory.kept_entries()
-    );
-
-    let before = memory.stats();
-    let again = census_json_where_resumable(&t.bounded, &any, &mut memory);
-    let work = delta(before, memory.stats());
+    let (again, work) = began_again.expect("the open exchanges never outgrew the holding");
     assert_eq!(work.restarts, PLANES, "the planes begin again: {work:?}");
     // Every plane, the node plane included: the node census begins again with
     // the planes, so the bytes it credits are the held messages' too.
