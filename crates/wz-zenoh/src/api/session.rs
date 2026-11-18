@@ -5259,7 +5259,7 @@ impl Session {
             #[cfg(feature = "shared-memory")]
             shm_clients,
         )?;
-        let session = Session::on(core, true);
+        let session = Session::on(core, true)?;
         // The runtime's admin space first, as upstream's runtime starts it before the session's
         // own is declared (`zenoh/src/net/runtime/mod.rs` @
         // `let start_admin_space = *config.adminspace.enabled();`).
@@ -5273,11 +5273,14 @@ impl Session {
     /// A session on the node `core` holds. One that `owns_engine` closes the node when it closes.
     /// Its entities, its callbacks and its closing are its own: what several sessions of a node
     /// share is the node, the identity, the configuration and the clocks.
-    pub(crate) fn on(core: RuntimeCore, owns_engine: bool) -> Session {
-        let id = core.engine.next_entity_id().unwrap_or(u32::MAX);
+    ///
+    /// A node that has handed out every entity id refuses the session, as it refuses any other
+    /// entity, rather than give it an id another entity of the node holds.
+    pub(crate) fn on(core: RuntimeCore, owns_engine: bool) -> ZResult<Session> {
+        let id = session_entity_id(core.engine.next_entity_id())?;
         #[cfg(feature = "internal")]
         let hlc = core.engine.node_hlc();
-        Session(Arc::new(SessionInner {
+        Ok(Session(Arc::new(SessionInner {
             strong_counter: AtomicUsize::new(1),
             engine: core.engine,
             owns_engine,
@@ -5313,8 +5316,14 @@ impl Session {
             transport_listeners: std::sync::Mutex::new(vec![]),
             #[cfg(feature = "unstable")]
             link_listeners: std::sync::Mutex::new(vec![]),
-        }))
+        })))
     }
+}
+
+/// The entity id a session on a node takes: the node's next one, or a refusal once the node has
+/// handed out every one.
+fn session_entity_id(next: Option<Id>) -> ZResult<Id> {
+    next.ok_or_else(|| zerror!("the engine has no entity id left for a session").into())
 }
 
 /// What a node and the sessions on it share: the engine, the identity, the configuration, the
@@ -7020,6 +7029,15 @@ mod tests {
         let session = open(peer("a1b2c3")).wait().expect("a peer opens alone");
         assert_eq!(session.zid(), ZenohId::from_str("a1b2c3").expect("an id"));
         assert!(!session.is_closed());
+    }
+
+    /// A session takes the node's next entity id, and a node with none left refuses the session
+    /// rather than hand it `u32::MAX`, which an entity of the node may already hold.
+    #[test]
+    fn a_session_is_refused_when_its_node_has_no_entity_id_left() {
+        assert_eq!(session_entity_id(Some(7)).ok(), Some(7));
+        assert_eq!(session_entity_id(Some(u32::MAX)).ok(), Some(u32::MAX));
+        assert!(session_entity_id(None).is_err());
     }
 
     /// Upstream built without `plugins` never reads `plugins_loading` or `plugins`

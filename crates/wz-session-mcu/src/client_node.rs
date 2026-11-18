@@ -189,7 +189,9 @@ fn declare_one<C: ClockSource + 'static>(
     index: usize,
     declaration: &Declaration,
 ) -> bool {
-    let id = index as u64 + 1;
+    let Some(id) = wz_session_core::wire_id::listed_entity_id(index) else {
+        return false;
+    };
     match declaration {
         Declaration::Queryable(key) => actions
             .send_declare_queryable(id, 0, Some(key), false)

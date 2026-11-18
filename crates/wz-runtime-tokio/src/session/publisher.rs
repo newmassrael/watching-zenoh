@@ -395,7 +395,16 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
             // seeded against what is live NOW. Two asks, two lifetimes.
             #[cfg(feature = "declare-interest")]
             let interest_id = {
-                let interest_id = self.session.actions().alloc_next_interest_id();
+                // Spent interest ids are rolled back as a failed emit is below: the peer could
+                // never be asked to feed the watch.
+                let Some(interest_id) = self.session.actions().alloc_next_interest_id() else {
+                    cell.kill();
+                    R::with_mutex_mut(&self.session.observer, |obs| {
+                        obs.remote_subscribers.undeclare_matching_listener(id)
+                    });
+                    return Err(MatchingListenerError::IdsExhausted);
+                };
+                let interest_id = u64::from(interest_id);
                 // Recorded for reconnect replay and sent through the seam, as one step.
                 let emit = self.session.actions().declare_matching_interest_recorded(
                     interest_id,

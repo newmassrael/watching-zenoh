@@ -565,10 +565,10 @@ impl SubEntry {
     /// Declare this subscriber over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
         if self.wire.is_literal() {
-            actions.send_declare_subscriber(u64::from(self.id), 0, Some(&self.keyexpr))
+            actions.send_declare_subscriber(self.id, 0, Some(&self.keyexpr))
         } else {
             actions.send_declare_subscriber(
-                u64::from(self.id),
+                self.id,
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
             )
@@ -593,15 +593,10 @@ impl QblEntry {
     /// Declare this queryable over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
         if self.wire.is_literal() {
-            actions.send_declare_queryable(
-                u64::from(self.id),
-                0,
-                Some(&self.keyexpr),
-                self.complete,
-            )
+            actions.send_declare_queryable(self.id, 0, Some(&self.keyexpr), self.complete)
         } else {
             actions.send_declare_queryable(
-                u64::from(self.id),
+                self.id,
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
                 self.complete,
@@ -2076,6 +2071,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.next_local.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Spend every interest id of the session of each face whose link is up, as a session that
+    /// has asked `u32::MAX` Interests has.
+    #[cfg(all(test, feature = "liveliness-get"))]
+    pub(crate) fn spend_interest_ids(&self) {
+        let Some(guard) = self.live() else {
+            return;
+        };
+        let core = &guard.0;
+        for face in core.up_faces() {
+            if let Some(actions) = core.up_actions(face) {
+                actions
+                    .next_outbound_interest_id
+                    .store(u64::from(u32::MAX) + 1, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Let go of one hold on the Interest for `keyexpr` on `plane`; the last one ends it.
     fn release_interest(core: &mut Core<L, C>, plane: FilterPlane, keyexpr: &str) {
         let Some(at) = core
@@ -2976,7 +2988,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let Some(actions) = core.up_actions(face).cloned() else {
                 continue;
             };
-            let interest_id = actions.alloc_next_interest_id();
+            // A face whose session has no interest id left is not asked, as one that could not
+            // hold the entry.
+            let Some(interest_id) = actions.alloc_next_interest_id() else {
+                continue;
+            };
+            let interest_id = u64::from(interest_id);
             let deadline_ms = Some(core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.

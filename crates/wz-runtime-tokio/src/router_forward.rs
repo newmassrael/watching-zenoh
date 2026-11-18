@@ -23859,6 +23859,56 @@ mod tests {
         );
     }
 
+    /// A bare Put the router stamps carries ONE timestamp on every tier net it crosses, as
+    /// upstream treats the timestamp once and hands the one stamped message to every out-face:
+    /// the routers_net leg, the peers_net leg and a client face are sent the same stamp. A stamp
+    /// taken per leg would differ between them, since each stamp of the clock sorts after the
+    /// last.
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn a_relayed_put_carries_one_timestamp_across_every_tier_net() {
+        let fwd = RouterForwarder::with_timestamping(
+            zid(0x01),
+            crate::node_clock::TimestampingEnabled::default(),
+        );
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT); // publishing client
+        let (peer_sub, sink_peer) = face(zid(0xCC), WIRE_PEER); // peers_net subscriber
+        let (router_sub, sink_router) = face(zid(0xDD), WIRE_ROUTER); // routers_net subscriber
+        let (client_sub, sink_client) = face(zid(0xBB), WIRE_CLIENT); // client subscriber
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer_sub);
+        fwd.register(FaceId(2), &router_sub);
+        fwd.register(FaceId(3), &client_sub);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(3), declare_sub("demo/data"));
+        sink_peer.reset();
+        sink_router.reset();
+        sink_client.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        let stamps: Vec<_> = [&sink_peer, &sink_router, &sink_client]
+            .into_iter()
+            .map(|sink| {
+                assert_eq!(
+                    sink.frame_count(),
+                    1,
+                    "each subscribing face is sent the Put"
+                );
+                wz_session_core::push_build::read_push_timestamp(&forwarded_push(
+                    &sink.frame_bytes(0),
+                ))
+                .expect("the router stamps a bare Put it relays")
+            })
+            .collect();
+        assert_eq!(stamps[0], stamps[1], "the two meshes carry one stamp");
+        assert_eq!(stamps[0], stamps[2], "and the client face carries it too");
+    }
+
     /// A physical clock that never moves: the only thing that can carry the router's clock past
     /// a time ahead of it is absorbing that time.
     #[cfg(all(feature = "time-hlc", feature = "pubsub-timestamp"))]

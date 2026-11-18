@@ -92,8 +92,8 @@ where
 }
 
 /// The declaration ids the node uses on each session; ids are per session.
-const ADMIN_QUERYABLE_ID: u64 = 1;
-const CONFIG_SUBSCRIBER_ID: u64 = 2;
+const ADMIN_QUERYABLE_ID: wz_session_core::wire_id::EntityId = 1;
+const CONFIG_SUBSCRIBER_ID: wz_session_core::wire_id::EntityId = 2;
 
 /// Declare upstream's two admin-space interests on `actions`: `true` once
 /// both went out.

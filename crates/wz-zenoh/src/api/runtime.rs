@@ -224,7 +224,7 @@ impl Wait for InitBuilder {
         if core.is_closed() {
             bail!("the runtime is closed")
         }
-        Ok(Session::on(core.clone(), false))
+        Session::on(core.clone(), false)
     }
 }
 

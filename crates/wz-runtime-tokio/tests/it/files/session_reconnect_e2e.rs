@@ -893,7 +893,7 @@ async fn assert_paced_replay_tells_the_peer_everything(
             )
             .await
             .expect("client reaches Established");
-            for id in 0..DECLARED as u64 {
+            for id in 0..DECLARED as u32 {
                 session
                     .actions()
                     .send_declare_subscriber(10 + id, 0, Some(&format!("paced/k{id}")))

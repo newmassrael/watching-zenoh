@@ -267,11 +267,6 @@ impl AdvancedPublisherPlane for CPlane {
     }
 }
 
-/// The entity ids of the advanced publishers of every node, one counter for all: an id need only
-/// be unique within a session, and a process-wide counter is unique within each.
-#[cfg(feature = "router-node")]
-static NEXT_NODE_ENTITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-
 /// A node, as the plane an advanced publisher lives on.
 ///
 /// The composite is the same one the registry hosts ([`AdvancedPublisherOn`]); what differs is
@@ -342,7 +337,11 @@ impl AdvancedPublisherPlane for NodePlane {
         _keyexpr: &str,
         _options: PublishOptions,
     ) -> Result<DeclaredPublisher<()>, AdvancedPublisherError> {
-        let eid = NEXT_NODE_ENTITY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The node's own entity id space, the one its program's declarations take, as upstream's
+        // publisher takes its runtime's (`zenoh/src/api/session.rs` @
+        // `let id = self.0.runtime.next_id();`); refused once spent, never wrapped.
+        let eid = SessionEngine::next_entity_id(&*self.node)
+            .ok_or(AdvancedPublisherError::EntityIdsExhausted)?;
         Ok(DeclaredPublisher { handle: (), eid })
     }
 

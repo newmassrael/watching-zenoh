@@ -78,17 +78,21 @@ use wz_runtime_tokio_test_support::{
     fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
 };
 use wz_session_core::accept_cookie::decode_accept_cookie;
-use wz_session_core::extpatch::peer_patch;
+use wz_session_core::extpatch::{patch_of_entry, peer_patch};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_wire_fixtures::{craft_initsyn_wire, craft_initsyn_wire_with_patch};
 
-/// Drive an acceptor through ONE InitSyn and return `(the patch level it wrote
-/// on the InitAck wire, the level it negotiated internally)`.
+/// Drive an acceptor through ONE InitSyn and return `(the patch entry it wrote
+/// on the InitAck wire, if any, the level it negotiated internally)`.
 ///
 /// The two are returned together on purpose: the defect this file pins is
 /// exactly the two disagreeing, so a test that read only one of them could not
-/// see it.
-async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (u8, u8) {
+/// see it. The entry is returned as written rather than as `peer_patch` folds
+/// it, because upstream answers level 0 with NO entry
+/// (`commons/zenoh-codec/src/transport/init.rs` @
+/// `if *ext_patch != ext::PatchType::NONE {`), and an entry carrying 0 would
+/// read as the same level while being other bytes.
+async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (Option<u8>, u8) {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
@@ -128,7 +132,13 @@ async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (u8, u8) {
         .patch
         .0
         .expect("an admitted InitSyn always agrees a level");
-    (peer_patch(&extensions), negotiated)
+    let entry = extensions.iter().find_map(patch_of_entry);
+    assert_eq!(
+        entry.unwrap_or(0),
+        peer_patch(&extensions),
+        "the entry written is the level a peer reads"
+    );
+    (entry, negotiated)
 }
 
 /// THE DEFECT, on the wire: a peer announcing PATCH 0 must be answered 0.
@@ -145,10 +155,10 @@ async fn a_peer_announcing_patch_zero_is_answered_zero() {
         "precondition: the min() already took the peer's level"
     );
     assert_eq!(
-        on_wire, 0,
-        "zenoh answers min(CURRENT, peer) = 0 (ext/patch.rs:180-186); an \
-         acceptor that answers 1 has announced markers the peer never agreed \
-         to, and named a level both references refuse"
+        on_wire, None,
+        "zenoh answers min(CURRENT, peer) = 0 (ext/patch.rs:180-186) and writes \
+         level 0 as no entry; an acceptor that answers 1 has announced markers \
+         the peer never agreed to, and named a level both references refuse"
     );
 }
 
@@ -164,7 +174,11 @@ async fn a_peer_announcing_patch_zero_is_answered_zero() {
 async fn a_peer_that_sends_no_patch_ext_at_all_is_answered_zero() {
     let (on_wire, negotiated) = acceptor_answers(craft_initsyn_wire()).await;
     assert_eq!(negotiated, 0, "an absent ext reads as NO_PATCH");
-    assert_eq!(on_wire, 0, "a pre-patch peer gets 0, not wz's own CURRENT");
+    assert_eq!(
+        on_wire, None,
+        "a pre-patch peer gets upstream's level-0 answer, no entry, not wz's \
+         own CURRENT"
+    );
 }
 
 /// THE CONTROL that keeps the two above from being satisfied by an acceptor
@@ -175,7 +189,8 @@ async fn a_peer_announcing_current_is_still_answered_current() {
     let (on_wire, negotiated) = acceptor_answers(craft_initsyn_wire_with_patch(1)).await;
     assert_eq!(negotiated, 1, "min(1, 1) = 1");
     assert_eq!(
-        on_wire, 1,
+        on_wire,
+        Some(1),
         "the fix lowers the answer to the peer's level; it must not lower it \
          past wz's own"
     );
@@ -193,7 +208,8 @@ async fn a_peer_announcing_a_future_level_is_answered_wz_own_current() {
     let (on_wire, negotiated) = acceptor_answers(craft_initsyn_wire_with_patch(9)).await;
     assert_eq!(negotiated, 1, "min(1, 9) = 1 — capped, not refused");
     assert_eq!(
-        on_wire, 1,
+        on_wire,
+        Some(1),
         "the acceptor answers its own CURRENT, never the peer's claim"
     );
 }

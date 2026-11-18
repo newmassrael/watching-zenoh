@@ -11719,6 +11719,127 @@ fn declare_liveliness_subscriber_rolls_back_slot_on_wire_emit_failure() {
     assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
 }
 
+/// Spend every `u32` interest id of `session`, as a session that has asked
+/// `u32::MAX` Interests has.
+#[cfg(any(
+    all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-subscriber"
+    ),
+    feature = "liveliness-get",
+    all(
+        feature = "session-matching",
+        feature = "declare-interest",
+        feature = "codec-declare"
+    )
+))]
+fn spend_interest_ids(session: &TokioSession) {
+    session
+        .actions()
+        .next_outbound_interest_id
+        .store(u64::from(u32::MAX) + 1, Ordering::Relaxed);
+}
+
+/// An interest id is a `u32` on the wire, so a session hands out `u32::MAX`
+/// and then refuses the liveliness subscriber, with no slot and nothing
+/// emitted, rather than wrap onto an id a standing Interest may hold.
+/// CONTROL: the last id is handed out.
+#[cfg(feature = "liveliness-subscriber")]
+#[test]
+fn declare_liveliness_subscriber_is_refused_once_every_interest_id_is_spent() {
+    let (session, driver) = build_session();
+    session
+        .actions()
+        .next_outbound_interest_id
+        .store(u64::from(u32::MAX), Ordering::Relaxed);
+    let last = session
+        .declare_liveliness_subscriber("live/last", LivelinessSubscriberOptions::default(), |_| {})
+        .expect("CONTROL: the last id is free");
+    assert_eq!(last.interest_id(), u64::from(u32::MAX));
+    let frames = driver.frame_count();
+    let refused = session.declare_liveliness_subscriber(
+        "live/past",
+        LivelinessSubscriberOptions::default(),
+        |_| {},
+    );
+    assert!(
+        matches!(refused, Err(LivelinessSubscriberAliasError::IdsExhausted)),
+        "the declare past the last id is refused"
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .slot_count(),
+        1,
+        "only the CONTROL's slot is held"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+}
+
+/// The aliased declare takes its interest id from the same space and refuses
+/// the same way once it is spent, after resolving the mapping.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-keyexpr",
+    feature = "liveliness-subscriber"
+))]
+#[test]
+fn declare_liveliness_subscriber_aliased_is_refused_once_every_interest_id_is_spent() {
+    let (session, driver) = build_session();
+    session
+        .actions()
+        .send_declare_keyexpr(7, "liveliness/dev7")
+        .expect("hardcoded canonical literal keyexpr");
+    mark_session_established(&session);
+    spend_interest_ids(&session);
+    let frames = driver.frame_count();
+    let refused = session.declare_liveliness_subscriber_aliased(
+        7,
+        None,
+        LivelinessSubscriberOptions::default(),
+        |_| {},
+    );
+    assert!(
+        matches!(refused, Err(LivelinessSubscriberAliasError::IdsExhausted)),
+        "the aliased declare is refused once the ids are spent"
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .slot_count(),
+        0,
+        "no slot is registered"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+}
+
+/// A liveliness get takes an interest id too: once the space is spent it is
+/// refused with no pending entry and nothing emitted.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn liveliness_get_is_refused_once_every_interest_id_is_spent() {
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    spend_interest_ids(&session);
+    let frames = driver.frame_count();
+    let refused =
+        session.liveliness_get("live/**", LivelinessGetOptions::default(), |_| {}, |_| {});
+    assert_eq!(refused, Err(LivelinessGetError::IdsExhausted));
+    assert_eq!(
+        session.observer().lock().unwrap().liveliness_gets.len(),
+        0,
+        "no pending entry is left"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+}
+
 /// R2674 — the CHANNEL form delivers every reply AND ends with the snapshot.
 ///
 /// Two claims, and the second is the one a callback form never has to make:
@@ -12872,6 +12993,106 @@ fn two_matching_listeners_take_two_interest_ids_and_retract_their_own() {
         "and must not retract the first listener's id ({a}), which is still \
          watching",
     );
+}
+
+/// A matching listener's Interest takes a `u32` interest id: once the space is
+/// spent the publisher's listener is refused, its watch rolled back and no
+/// Interest emitted. CONTROL: the same declare before the spend registers.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_publisher_matching_listener_is_refused_once_every_interest_id_is_spent() {
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let control = pubr
+        .declare_matching_listener(|_| {})
+        .expect("CONTROL: ids remain");
+    let watches = || {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .matching_listener_len()
+    };
+    assert_eq!(watches(), 1);
+    spend_interest_ids(&session);
+    let frames = driver.frame_count();
+    assert_eq!(
+        pubr.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::IdsExhausted)
+    );
+    assert_eq!(watches(), 1, "the refused listener's watch is rolled back");
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+    drop(control);
+}
+
+/// The querier's twin of the publisher's refusal above.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-queryable",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_querier_matching_listener_is_refused_once_every_interest_id_is_spent() {
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let querier = session.declare_querier("demo/**", QueryOptions::default());
+    spend_interest_ids(&session);
+    let frames = driver.frame_count();
+    assert_eq!(
+        querier.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::IdsExhausted)
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .matching_listener_len(),
+        0,
+        "the refused listener's watch is rolled back"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+}
+
+/// A publisher declared once the interest ids are spent asks the neighbour
+/// nothing and holds no reference, so its drop retracts nothing either.
+/// CONTROL: a publisher on another key, declared before the spend, holds one.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_publisher_declared_once_the_interest_ids_are_spent_asks_nothing() {
+    let (session, driver) = build_session();
+    let control = session.declare_publisher("home/before", PublishOptions::put());
+    assert!(
+        session
+            .matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/before")
+            .is_some(),
+        "CONTROL: a publisher declared while ids remain holds an interest"
+    );
+    spend_interest_ids(&session);
+    let frames = driver.frame_count();
+    let pubr = session.declare_publisher("home/after", PublishOptions::put());
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/after"),
+        None,
+        "no interest is held for the publisher past the last id"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+    drop(pubr);
+    assert_eq!(driver.frame_count(), frames, "and its drop sends no Final");
+    drop(control);
 }
 
 /// R311kz — the F-6 deferred-fire contract end-to-end: the callback

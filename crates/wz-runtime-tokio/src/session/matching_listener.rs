@@ -196,6 +196,12 @@ pub enum MatchingListenerError {
     /// own interest), so it simply never fires — indistinguishable from
     /// "nothing matched yet".
     Wire(wz_session_core::send_wire_error::SendWireError),
+    /// The session has handed out every `u32` interest id
+    /// (`commons/zenoh-protocol/src/network/interest.rs` @
+    /// `pub type InterestId = u32;`), so the Interest that would feed the
+    /// watch was not emitted and no listener was registered, for the reason
+    /// [`Self::Wire`] gives.
+    IdsExhausted,
 }
 
 impl core::fmt::Display for MatchingListenerError {
@@ -211,6 +217,10 @@ impl core::fmt::Display for MatchingListenerError {
                 f,
                 "declare_matching_listener: the backing Interest emit failed \
                  ({e}); no watch was registered",
+            ),
+            Self::IdsExhausted => f.write_str(
+                "declare_matching_listener: the session has handed out every \
+                 32-bit interest id; no watch was registered",
             ),
         }
     }

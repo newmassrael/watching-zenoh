@@ -73,10 +73,10 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
 
 /// What the test tells the router to do.
 enum Command {
-    DeclareSubscriber(u64, &'static str),
+    DeclareSubscriber(wz_session_core::wire_id::EntityId, &'static str),
     /// Declare queryable `.0` on the key, complete as `.2` says. Declared only: it answers
     /// nothing, which is all a test of what matches needs.
-    DeclareQueryable(u64, &'static str, bool),
+    DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
     /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
@@ -100,7 +100,7 @@ enum Command {
     MuteInterests,
     /// Hold token `.0` on the key and announce it.
     #[cfg(feature = "liveliness")]
-    DeclareToken(u64, &'static str),
+    DeclareToken(wz_session_core::wire_id::EntityId, &'static str),
     /// Retract token `.0`.
     #[cfg(feature = "liveliness")]
     UndeclareToken(u64),
@@ -367,7 +367,10 @@ fn run_router(
             }
             #[cfg(feature = "liveliness")]
             Ok(Command::DeclareToken(id, key)) => {
-                let _ = holding.borrow_mut().local_tokens.register(id, key);
+                let _ = holding
+                    .borrow_mut()
+                    .local_tokens
+                    .register(u64::from(id), key);
                 let _ = actions.send_declare_token(id, 0, Some(key));
             }
             #[cfg(feature = "liveliness")]
