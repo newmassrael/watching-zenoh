@@ -15332,6 +15332,17 @@ mod tests {
         (actions, sink)
     }
 
+    /// `face` for a face that holds no peer zid, so `peer_zid_routing` answers `None`: the one
+    /// unattributable face left. A peer can no longer make its face so by sending a zero or
+    /// malformed zid, which the slot's `SessionZid` cannot hold and the participant's parse
+    /// refuses (`a_malformed_zid_no_longer_escapes_the_egress_acl` asserts both).
+    #[cfg(feature = "access-acl")]
+    fn face_without_zid(wire_whatami: u8) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
+        let (actions, sink) = recording_actions();
+        TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire_whatami));
+        (actions, sink)
+    }
+
     const WIRE_ROUTER: u8 = 0b00;
     const WIRE_PEER: u8 = 0b01;
     const WIRE_CLIENT: u8 = 0b10;
@@ -17731,16 +17742,42 @@ mod tests {
     /// is the control for that, and the policy-level triple lives in
     /// `wz-access-control`
     /// (`an_unattributable_subject_is_governed_by_the_rules_that_do_not_name_a_peer`).
+    ///
+    /// The zero zid itself is now stopped earlier, and this test holds that
+    /// too: the zid slot is a `SessionZid`, which cannot hold zero bytes, and
+    /// the participant's parse refuses an InitSyn naming them, so the peer
+    /// never gets a face from it. The unattributable face that remains is one
+    /// that holds no zid, and the ACL property is asserted on that face.
     #[cfg(feature = "access-acl")]
     #[test]
     fn a_malformed_zid_no_longer_escapes_the_egress_acl() {
+        use wz_session_core::parse_error::InboundParseError;
+        use wz_session_core::session_zid::{SessionZid, ZidError};
+
+        // The boundary: an all-zero zid is no `SessionZid`, and an InitSyn
+        // naming one is refused where the participant reads it.
+        assert_eq!(
+            SessionZid::new(&[0x00; 4]),
+            Err(ZidError::AllZero { len: 4 })
+        );
+        let mut init_syn = vec![
+            wz_session_core::wire_const::T_MID_INIT,
+            0x09,
+            0x01 | (3 << 4),
+        ];
+        init_syn.extend_from_slice(&[0x00; 4]);
+        assert_eq!(
+            wz_session_core::inbound::parse_inbound(&init_syn).err(),
+            Some(InboundParseError::InvalidZid(ZidError::AllZero { len: 4 }))
+        );
+
         let fwd = RouterForwarder::new(zid(0x01));
-        // A peer publisher, a conformant client, and a client whose peer sent an
-        // ALL-ZERO zid — accepted by the session (stored verbatim from INIT) and
-        // rejected by `Zid::try_from`, so that face has no routing identity.
+        // A peer publisher, a conformant client, and a client face that holds
+        // no zid, so it has no routing identity.
         let (a, _sink_a) = face(zid(0xAA), WIRE_PEER);
         let (good, sink_good) = face(zid(0xCC), WIRE_CLIENT);
-        let (bad, sink_bad) = face(zid(0x00), WIRE_CLIENT);
+        let (bad, sink_bad) = face_without_zid(WIRE_CLIENT);
+        assert_eq!(peer_zid_routing(&bad), None, "the face is unattributable");
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &good);
         fwd.register(FaceId(2), &bad);
@@ -17767,9 +17804,9 @@ mod tests {
         assert_eq!(
             sink_bad.frame_count(),
             0,
-            "open-debt 655 (R2347): the SAME rule reaches a client whose zid the \
-             peer made unattributable — one deny rule, two clients, and the \
-             bytes the peer chose no longer decide which of them it governs"
+            "open-debt 655 (R2347): the SAME rule reaches a client with no \
+             routing identity — one deny rule, two clients, and whether a \
+             face is attributable no longer decides which of them it governs"
         );
         assert_eq!(
             fwd.interceptor_dropped(),
@@ -17797,7 +17834,8 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink_a) = face(zid(0xAA), WIRE_PEER);
         let (good, sink_good) = face(zid(0xCC), WIRE_CLIENT);
-        let (bad, sink_bad) = face(zid(0x00), WIRE_CLIENT);
+        let (bad, sink_bad) = face_without_zid(WIRE_CLIENT);
+        assert_eq!(peer_zid_routing(&bad), None, "the face is unattributable");
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &good);
         fwd.register(FaceId(2), &bad);
