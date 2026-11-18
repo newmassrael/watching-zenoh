@@ -7813,7 +7813,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Phases 3 and 4 of docs/router-table-snapshots.md: 355 -> 364 (see the first arm). PRINTED.
     # The c2 integration: 368 -> 382. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 382 -> 388, printed on pc2 (the six of `router_forward 330`).
-    _runci_guarded_test "C1AY router_forward 388" 388 \
+    # 388 -> 389, counted from the source: the late peer of a router told no token until it asks.
+    _runci_guarded_test "C1AY router_forward 389" 389 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six

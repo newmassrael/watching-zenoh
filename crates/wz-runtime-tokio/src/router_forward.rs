@@ -13301,7 +13301,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // and a face that has just come up has asked for nothing yet
         // ([`Tables::serves_asking_peers`]); upstream's peer hat does the same on a new face
         // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `New south-bound peer remote; not propagating subscribers`).
-        // The tokens below keep their own rule.
+        // The tokens below follow the same rule.
         let told_what_it_asks = self.tables.serves_asking_peers(tier);
         // Nor to a CLIENT face, in any node mode: the pin's broker hat, which
         // owns it, re-propagates nothing to a new face, "the broker hat is never
@@ -13400,8 +13400,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // for, so "what upstream's router does" does not settle what a wz
         // cross-tier advertisement should do -- and nothing was measured about
         // it. The Client arm is the one the evidence reaches.
+        //
+        // A face of a south region the peer hat serves is left out for the reason the
+        // subscriber and queryable planes leave it out: it is told the tokens it asks for, and a
+        // face that has just come up has asked for nothing
+        // (`zenoh/src/net/routing/hat/peer/token.rs` @ `New south-bound peer remote; not propagating tokens`).
         #[cfg(feature = "routing-token-tables")]
-        if !is_leaf(tier, self.tables.node_mode) {
+        if !is_leaf(tier, self.tables.node_mode) && !told_what_it_asks {
             for keyexpr in self.derived_cross_tier_tokens_into(tier) {
                 match build_declare_token(0, 0, Some(&keyexpr)) {
                     Ok(decl) => {
@@ -25787,17 +25792,22 @@ mod tests {
         // client declared the token — the face-up replay reads
         // derived_cross_tier_tokens_into (slice-3 taught it to fold client_tokens).
         // Token twin of a_late_joining_peer_is_told_the_derived_self_sub_at_face_up
-        // (R2890, 751 rule 8c: at face-up, not on a tree delta).
-        let fwd = RouterForwarder::new(zid(0x01));
+        // (R2890, 751 rule 8c: at face-up, not on a tree delta). The node is a PEER node, whose
+        // peers are north of it and told unasked; the peer of a ROUTER is south and is told what
+        // it asks for ([`a_late_peer_of_a_router_is_told_no_token_until_it_asks`]).
+        let fwd = RouterForwarder::peer(zid(0x01));
         let (client, _) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
         forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data")); // no peer yet
         let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // joins LATER
         fwd.register(FaceId(1), &p);
+        // Two declares: the token, and the `DeclareFinal` that ends the node's initial
+        // declarations to a peer that meets it north-bound.
         assert_eq!(
             declare_frame_count(&sink_p),
-            1,
-            "the derived self cross-tier token told to the late-joining peer at face-up"
+            2,
+            "the derived self cross-tier token and the end of the declarations, told to the \
+             late-joining peer at face-up"
         );
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 6);
         sink_p.reset();
@@ -25807,6 +25817,44 @@ mod tests {
             0,
             "the tick re-advertises nothing more"
         );
+    }
+
+    /// The peer of a router that comes up late has asked for nothing, so it is told no token
+    /// when its face registers, as the pin's peer hat tells a south-bound peer nothing on a new
+    /// face (`zenoh/src/net/routing/hat/peer/token.rs` @ `New south-bound peer remote; not propagating tokens`).
+    /// Its current token interest, when it comes, is answered with the token the router holds.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_late_peer_of_a_router_is_told_no_token_until_it_asks() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
+
+        let (peer, sink_p) = face(zid(0xBB), WIRE_PEER);
+        sink_p.reset();
+        fwd.register(FaceId(1), &peer);
+        assert_eq!(fwd.face_up_replays_seen(), 0, "no replay to a south peer");
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            0,
+            "no token reached the wire unasked"
+        );
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(5, "live/**", true, false, false),
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            2,
+            "the interest is answered with the token, then the DeclareFinal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+        ));
     }
 
     #[cfg(feature = "routing-token-tables")]
