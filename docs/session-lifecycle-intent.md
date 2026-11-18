@@ -1917,6 +1917,19 @@ decoder refuses it. The C ABI engines state their zid as one
 advanced subscriber's host has no zid to refuse either, and the storage
 services take their stamping zid as one.
 
-Not done: the multicast and scouting parameters' zids (`MulticastParams::zid`,
-`ScoutParams::zid`) are still bytes, and the zids a JOIN or a Hello carries
-are not yet refused where they are parsed.
+The multicast and scouting parameters' zids are typed too:
+`MulticastParams::zid` is a `SessionZid` and so is every member of the group
+peer table, and `ScoutParams::zid` is an `Option<SessionZid>` (a Scout names
+its asker optionally). A participant refuses a JOIN, Scout or Hello whose zid
+is out of range or zero where it reads it (`decode_join_named`,
+`parse_scouting`, `decode_scouted_hello`). The C ABI's scout calls turn a zid
+that is not one into a Scout that names no asker.
+
+An observer is not a participant: a capture of a peer that sends a zero zid
+must still dissect. The refusal therefore lives in the participant's entry
+points (`parse_inbound*`, `parse_scouting`), and the passive reader uses the
+lenient parse (`parse_inbound_observed`) and reports the frame on its row
+(`PassiveFrame::names_no_zid`) instead of failing the capture.
+
+Not done: `ScoutedHello::zid` is still bytes, and a passive scouting row does
+not yet report a Scout or Hello that names a zero zid.
