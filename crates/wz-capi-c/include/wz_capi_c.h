@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 16
+#define WZ_CAPI_C_ABI_REVISION 17
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -1454,6 +1454,83 @@ z_result_t wz_capi_c_liveliness_declare_subscriber_ext(
     const z_loaned_keyexpr_t *key_expr, z_moved_closure_sample_t *callback,
     z_liveliness_subscriber_options_t *options,
     const wz_capi_c_entity_ext_t *ext);
+
+/* ------------------------------------------------------------------ *
+ * Revision 17: A SUBSCRIBER WHOSE CALLBACK RUNS OFF THE RECEIVE PATH
+ * (the `rx-callback-offload` capability, off by default).
+ *
+ * wz_capi_c_declare_subscriber_offloaded is z_declare_subscriber with
+ * one more argument. Every place a sample of the subscription arrives
+ * (each link, the session's own puts, a joined group) copies it into
+ * ONE bounded lane and returns; the callback runs on a thread of the
+ * library's application runtime, one sample after another in the
+ * order they were admitted. A slow callback holds up its own lane and
+ * nothing else. The lane holds the build's DELIVERY_LANE_EVENTS
+ * samples and DELIVERY_LANE_BYTES bytes, the sample being delivered
+ * included; the sample handed to the callback is valid for the call
+ * only, as z_declare_subscriber's is.
+ *
+ * What a full lane does is `overload`:
+ *   - WZ_CAPI_C_OVERLOAD_REJECT: the new sample is refused and counted;
+ *   - WZ_CAPI_C_OVERLOAD_KEEP_LATEST: the newest samples waiting
+ *     behind the one being delivered are taken out until it fits, so
+ *     the last sample to arrive is delivered;
+ *   - WZ_CAPI_C_OVERLOAD_BLOCK: refused with Z_EUNAVAILABLE. It would
+ *     make the receive path wait for room, and this library's receive
+ *     path is several threads and the caller's own put, none of which
+ *     can wait for a lane;
+ *   - WZ_CAPI_C_OVERLOAD_BUILD (NULL, and the _default function): the
+ *     build's subscriber-overload policy, so Z_EUNAVAILABLE in a build
+ *     whose policy is block, the default. Such a build states its
+ *     answer at each declaration.
+ * Any other value is Z_EINVAL. A refused declaration leaves
+ * `subscriber` in its gravestone state and has consumed `callback`.
+ * Undeclaring the subscriber stops the lane: a sample waiting at that
+ * moment is not delivered.
+ * ------------------------------------------------------------------ */
+
+#define WZ_CAPI_C_OVERLOAD_BUILD 0
+#define WZ_CAPI_C_OVERLOAD_BLOCK 1
+#define WZ_CAPI_C_OVERLOAD_REJECT 2
+#define WZ_CAPI_C_OVERLOAD_KEEP_LATEST 3
+
+typedef struct wz_capi_c_offload_options_t {
+  uint8_t overload;
+} wz_capi_c_offload_options_t;
+
+/* A snapshot of an offloaded subscriber's lane. The dropped counts are
+ * the samples lost to the lane, refused or taken out, by how they were
+ * sent. */
+typedef struct wz_capi_c_offload_stats_t {
+  uint64_t queued_events;
+  uint64_t event_capacity;
+  uint64_t pending_bytes;
+  uint64_t byte_capacity;
+  uint64_t refused_events_full;
+  uint64_t refused_bytes_full;
+  uint64_t refused_stopping;
+  uint64_t evicted;
+  uint64_t dropped_reliable;
+  uint64_t dropped_best_effort;
+  uint8_t overload;
+} wz_capi_c_offload_stats_t;
+
+/* Write WZ_CAPI_C_OVERLOAD_BUILD. NULL is no write. */
+void wz_capi_c_offload_options_default(wz_capi_c_offload_options_t *this_);
+
+/* z_declare_subscriber with its callback behind a lane (`offload`, NULL
+ * for the build's answer). */
+z_result_t wz_capi_c_declare_subscriber_offloaded(
+    const z_loaned_session_t *session, z_owned_subscriber_t *subscriber,
+    const z_loaned_keyexpr_t *key_expr, z_moved_closure_sample_t *callback,
+    z_subscriber_options_t *options,
+    const wz_capi_c_offload_options_t *offload);
+
+/* Write a snapshot of the lane of `subscriber`. Z_ENULL for a NULL
+ * argument, Z_EINVAL for a subscriber not declared offloaded; `out` is
+ * not written on either. */
+z_result_t wz_capi_c_subscriber_offload_stats(
+    const z_loaned_subscriber_t *subscriber, wz_capi_c_offload_stats_t *out);
 
 #ifdef __cplusplus
 }

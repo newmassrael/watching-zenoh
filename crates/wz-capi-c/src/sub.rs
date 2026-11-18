@@ -118,6 +118,66 @@ struct SubscriberState {
     /// R311y568 — the keyexpr this subscription was declared under, so
     /// [`z_subscriber_keyexpr`] can answer.
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
+    /// The lane the callback runs behind, for a subscription declared offloaded. A field after the
+    /// holder, so it is dropped after `Drop` has retracted the subscription: no face feeds a lane
+    /// that is stopping.
+    #[cfg(feature = "rx-callback-offload")]
+    offload: Option<wz_runtime_tokio::session::DetachedOffload>,
+}
+
+/// Where a subscription's callback runs.
+#[derive(Clone, Copy)]
+pub(crate) enum Delivery {
+    /// On the thread that delivers the sample, as zenoh-c runs it.
+    Inline,
+    /// Behind a delivery lane of its own, on a task of the application runtime, with the answer
+    /// a full lane gives.
+    #[cfg(feature = "rx-callback-offload")]
+    Offloaded(wz_session_core::policy::SubscriberOverload),
+}
+
+/// What each face's callback hands a sample to: the C closure itself, or a sink of the lane the C
+/// closure runs behind.
+enum SampleTarget {
+    Inline(Arc<CClosure>),
+    #[cfg(feature = "rx-callback-offload")]
+    Lane(wz_runtime_tokio::session::OffloadFeed),
+}
+
+impl SampleTarget {
+    /// One face's callback.
+    fn callback(&self) -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> {
+        match self {
+            Self::Inline(closure) => Box::new(make_subscriber_callback(closure.clone())),
+            #[cfg(feature = "rx-callback-offload")]
+            Self::Lane(feed) => {
+                let feed = feed.clone();
+                Box::new(move |view: &dyn SampleView| feed.admit(view))
+            }
+        }
+    }
+}
+
+/// The lane of the subscriber behind `subscriber`, when it was declared offloaded.
+///
+/// # Safety
+/// `subscriber` must be null or a valid loaned subscriber.
+#[cfg(feature = "rx-callback-offload")]
+pub(crate) unsafe fn offload_of<'a>(
+    subscriber: *const z_loaned_subscriber_t,
+) -> Option<&'a wz_runtime_tokio::session::DetachedOffload> {
+    if subscriber.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract — the handle is null or a live `Box<SubscriberState>`.
+    let handle = unsafe { (*subscriber).handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: as above.
+    unsafe { &*(handle as *const SubscriberState) }
+        .offload
+        .as_ref()
 }
 
 /// What a subscription is declared on, and so what retracts it.
@@ -214,6 +274,8 @@ fn state_handle(holder: SubscriberHolder, keyexpr: String) -> Handle {
     let mut boxed = Box::new(SubscriberState {
         holder,
         keyexpr: crate::keyexpr::DeclaredKeyexpr::new(keyexpr),
+        #[cfg(feature = "rx-callback-offload")]
+        offload: None,
     });
     // Bind AFTER boxing — the state is at its final address only here. See
     // `DeclaredKeyexpr::bind`.
@@ -407,6 +469,36 @@ pub(crate) unsafe fn declare_subscriber_on(
     options: *mut z_subscriber_options_t,
     links: Result<LinkRestriction, ZResult>,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        declare_subscriber_delivered(
+            session,
+            subscriber,
+            key_expr,
+            callback,
+            options,
+            links,
+            Delivery::Inline,
+        )
+    }
+}
+
+/// The body of [`declare_subscriber_on`], for a subscriber whose callback runs where `delivery`
+/// says. An offloaded one whose lane cannot be started (its answer to a full lane is `block`,
+/// which no loop of this ABI's sessions drains) answers `Z_EUNAVAILABLE`, with the closure consumed
+/// and nothing declared.
+///
+/// # Safety
+/// As [`z_declare_subscriber`].
+pub(crate) unsafe fn declare_subscriber_delivered(
+    session: *const z_loaned_session_t,
+    subscriber: *mut z_owned_subscriber_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut z_subscriber_options_t,
+    links: Result<LinkRestriction, ZResult>,
+    delivery: Delivery,
+) -> ZResult {
     guarded(|| {
         if subscriber.is_null() || callback.is_null() {
             return Z_ENULL;
@@ -450,6 +542,26 @@ pub(crate) unsafe fn declare_subscriber_on(
         let allowed_origin = unsafe { subscriber_allowed_origin(options) };
         let declared = ke.clone();
         let closure = Arc::new(cclosure);
+        // An offloaded callback runs on the application runtime behind a lane of its own, which
+        // every face feeds; the lane is kept with the subscription and stopped after it.
+        #[cfg(feature = "rx-callback-offload")]
+        let mut offload = None;
+        let target = match delivery {
+            Delivery::Inline => SampleTarget::Inline(closure),
+            #[cfg(feature = "rx-callback-offload")]
+            Delivery::Offloaded(overload) => {
+                let Ok(lane) = wz_runtime_tokio::session::DetachedOffload::spawn(
+                    wz_runtime_tokio::runtime_pool::WzRuntime::Application.handle(),
+                    overload,
+                    make_subscriber_callback(closure),
+                ) else {
+                    return Z_EUNAVAILABLE;
+                };
+                let feed = lane.feed();
+                offload = Some(lane);
+                SampleTarget::Lane(feed)
+            }
+        };
         let handle = match held {
             SessionHandle::Registry(state) => {
                 // `declare_subscriber` is this call with no restriction and the literal wire key,
@@ -463,7 +575,7 @@ pub(crate) unsafe fn declare_subscriber_on(
                     allowed_origin,
                     links,
                     None,
-                    Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
+                    Arc::new(move || target.callback()),
                 ) else {
                     return Z_EUNAVAILABLE;
                 };
@@ -478,14 +590,17 @@ pub(crate) unsafe fn declare_subscriber_on(
                 if links.is_restricted() {
                     return Z_EUNAVAILABLE;
                 }
-                let id = node.forwarder().host_subscriber_from(
-                    &ke,
-                    allowed_origin,
-                    Box::new(make_subscriber_callback(closure)),
-                );
+                let id =
+                    node.forwarder()
+                        .host_subscriber_from(&ke, allowed_origin, target.callback());
                 node_subscriber_state_handle(node, id, declared)
             }
         };
+        #[cfg(feature = "rx-callback-offload")]
+        if let Some(lane) = offload {
+            // SAFETY: `handle` is the `Box<SubscriberState>` leaked just above, not yet handed out.
+            unsafe { (*(handle as *mut SubscriberState)).offload = Some(lane) };
+        }
         unsafe { *subscriber = z_owned_subscriber_t::from_handle(handle) };
         Z_OK
     })

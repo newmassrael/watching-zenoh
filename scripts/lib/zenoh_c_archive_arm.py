@@ -291,6 +291,9 @@ CAPABILITY_FEATURES = frozenset({
     # The sender of a declared segment profile (`wz_capi_c_segment_*`): wz-own doors and the
     # structs they take, no zenoh-c type; off in the default and in every arm.
     "segment-sender",
+    # A subscriber whose callback runs off the receive path (`wz_capi_c_*offload*`): wz-own doors
+    # and the structs they take, no zenoh-c type; off in the default and in every arm.
+    "rx-callback-offload",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

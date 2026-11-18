@@ -453,6 +453,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `segment-sender` the same: it gates `pub mod segment_sender`, whose public items are the
         # `wz_capi_c_segment_*` doors and the structs and constants they take, declared in
         # `wz_capi_c.h`; off by default, as upstream has no such doors.
+        # `rx-callback-offload` the same: it gates `pub mod offload`, whose public items are the
+        # three `wz_capi_c_*offload*` doors and the structs and constants they take, declared in
+        # `wz_capi_c.h`; off by default, as upstream runs a callback where the sample arrives.
         frozenset(
             {
                 "clock-source",
@@ -460,6 +463,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "identity-make",
                 "lifecycle-doors",
                 "resource-snapshot",
+                "rx-callback-offload",
                 "segment-sender",
                 "supervision",
                 "switch-doors",

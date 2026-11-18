@@ -185,6 +185,11 @@ lifecycle-doors = ["wz-capi-core/lifecycle-doors"]
 # OFF by default: zenoh-c has no such doors, and they link the piece writer of `wz-capture`; a
 # participant that sends to a deployment which splits its large messages turns it on.
 segment-sender = ["dep:wz-capture", "wz-capi-core/segment-sender"]
+# `wz_capi_c_declare_subscriber_offloaded` and `wz_capi_c_subscriber_offload_stats`
+# (`src/offload.rs`): a subscriber whose callback runs on the application runtime behind a bounded
+# delivery lane that every face feeds. OFF by default: zenoh-c has no such door, and a callback
+# runs where the sample arrives in a build made as zenoh-c is.
+rx-callback-offload = ["wz-capi-core/rx-callback-offload"]
 # The seven `wz_capi_c_*_ext` doors and the three statement structs they take
 # (`src/switch_doors.rs`): the links an entity may use, a publish's retry and all-or-none form, and
 # the node a query is addressed to, stated beside the arguments of `z_put`, `z_delete`,

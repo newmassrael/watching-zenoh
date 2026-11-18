@@ -495,7 +495,10 @@ pub(crate) use buffered::BufferedWork;
 #[cfg(feature = "transport-unicast")]
 mod offload;
 #[cfg(feature = "transport-unicast")]
-pub use offload::{OffloadError, OffloadLane, OffloadStats, OffloadedSubscriber};
+pub use offload::{
+    DetachedOffload, DetachedOffloadError, OffloadError, OffloadFeed, OffloadLane, OffloadStats,
+    OffloadedSubscriber,
+};
 #[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]

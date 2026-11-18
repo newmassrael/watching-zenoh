@@ -12424,9 +12424,9 @@ layer_c1ch_capi_c_config_surface() {
     # the reference is, and the door set the gates below grade is the library's with them on: a
     # door behind a feature that no lane turned on would be graded by nothing. `identity-make` (the
     # identity a client makes, off by default for its size) is one more such door, and so are the
-    # lifecycle doors (`lifecycle-doors`), the statement doors (`switch-doors`) and the segment
-    # sender (`segment-sender`).
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender"
+    # lifecycle doors (`lifecycle-doors`), the statement doors (`switch-doors`), the segment
+    # sender (`segment-sender`) and the offloaded subscriber (`rx-callback-offload`).
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload"
     # A leg ledger (open-debt item 938): the two gates read different builds,
     # so a red debug build does not hide what the release pin says, and each
     # build is a function defined here so the lane's text stays the lane's.
@@ -25801,9 +25801,9 @@ _runci_build_capi_c_for_oracle() {
     # of the doors (`c_observation_plane_consumer.c`) links the very library the arm selected.
     # `identity-make`, `lifecycle-doors` and `switch-doors` likewise: their C consumers
     # (`c_identity_consumer.c`, `c_lifecycle_consumer.c`, `c_switch_doors_consumer.c`) link this
-    # library. `segment-sender` is in the plane for the same reason, so its doors are in the
-    # library the arm graded.
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender"
+    # library. `segment-sender` and `rx-callback-offload` are in the plane for the same reason, so
+    # their doors are in the library the arm graded.
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }

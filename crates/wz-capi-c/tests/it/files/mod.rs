@@ -39,6 +39,7 @@ mod scouting_ttl;
 mod segment_sender_roundtrip;
 mod session_roles;
 mod source_info_roundtrip;
+mod subscriber_offload;
 mod switch_doors;
 mod timestamp_roundtrip;
 mod transport_events_roundtrip;

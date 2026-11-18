@@ -594,6 +594,97 @@ impl<R: SessionRuntime> Drop for OffloadedSubscriber<R> {
     }
 }
 
+/// Why [`DetachedOffload::spawn`] made nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachedOffloadError {
+    /// `block` was asked for. A held sample waits for a drain that a session's loop awaits, and a
+    /// detached lane is fed from sinks on several sessions (or on none, for a delivery the session
+    /// makes to itself on the caller's thread), so no loop owns that wait and the sample would be
+    /// held for ever.
+    BlockHasNoDrain,
+}
+
+/// A callback behind a lane of its own, fed by sinks the host places itself.
+///
+/// [`Session::declare_subscriber_offloaded`] places its one sink on one session and registers the
+/// lane's drain on that session's loop. A host that fans one subscription over several sessions
+/// (one for each face, the local plane, a joined group) places an [`OffloadFeed`] on each, and the
+/// samples of all of them wait in this one lane in the order they were admitted, for one consumer.
+/// It takes only the answers that never hold the receive path, `reject` and `keep-latest`
+/// ([`DetachedOffloadError::BlockHasNoDrain`]).
+///
+/// Dropping it stops the lane and drops the callback; a sink that outlives it has its samples
+/// refused as the lane's stopping refusals.
+pub struct DetachedOffload {
+    lane: Arc<OffloadLane>,
+    overload: SubscriberOverload,
+    on_drop: Box<dyn Fn() + Send + Sync>,
+}
+
+/// One sink of a [`DetachedOffload`], cloned for each place samples arrive.
+#[derive(Clone)]
+pub struct OffloadFeed {
+    lane: Arc<OffloadLane>,
+    overload: SubscriberOverload,
+}
+
+impl OffloadFeed {
+    /// Copy `view` into the lane and wake the consumer, or count why it was refused. Never waits.
+    pub fn admit(&self, view: &dyn SampleView) {
+        self.lane.admit(view, self.overload);
+    }
+}
+
+impl DetachedOffload {
+    /// Start the consumer of a new lane on `runtime`; `callback` runs there for each admitted
+    /// sample, in order, with no lock of a session held.
+    pub fn spawn(
+        runtime: &tokio::runtime::Handle,
+        overload: SubscriberOverload,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> Result<Self, DetachedOffloadError> {
+        if overload == SubscriberOverload::Block {
+            return Err(DetachedOffloadError::BlockHasNoDrain);
+        }
+        let lane = Arc::new(OffloadLane::new());
+        let cell = Arc::new(CallbackCell::new(callback));
+        runtime.spawn(crate::runtime_pool::in_caller_span(consume(
+            lane.clone(),
+            cell.clone(),
+        )));
+        Ok(Self {
+            lane,
+            overload,
+            on_drop: Box::new(move || cell.kill()),
+        })
+    }
+
+    /// A sink that feeds this lane.
+    pub fn feed(&self) -> OffloadFeed {
+        OffloadFeed {
+            lane: self.lane.clone(),
+            overload: self.overload,
+        }
+    }
+
+    /// What a full lane does: the answer it was started with.
+    pub fn overload(&self) -> SubscriberOverload {
+        self.overload
+    }
+
+    /// A snapshot of the lane: what waits, what was refused and why.
+    pub fn stats(&self) -> OffloadStats {
+        self.lane.stats()
+    }
+}
+
+impl Drop for DetachedOffload {
+    fn drop(&mut self) {
+        (self.on_drop)();
+        self.lane.stop();
+    }
+}
+
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Declare a subscriber whose callback runs OFF the drive loop (`docs/rx-delivery-lane.md`).
     ///
@@ -648,5 +739,195 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             lane,
             on_drop: Box::new(move || cell.kill()),
         })
+    }
+}
+
+#[cfg(test)]
+mod detached_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread::ThreadId;
+    use std::time::{Duration, Instant};
+
+    type Seen = Arc<Mutex<Vec<(u16, ThreadId)>>>;
+
+    /// A reliable sample on key `k` whose payload is `n`, little-endian.
+    fn sample_bytes(n: u16) -> ([u8; 3], Meta) {
+        let [lo, hi] = n.to_le_bytes();
+        let meta = Meta {
+            key: 1,
+            payload: 2,
+            attachment: None,
+            schema: None,
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+            qos: None,
+            timestamp: None,
+            encoding_id: None,
+            source_info: None,
+        };
+        ([b'k', lo, hi], meta)
+    }
+
+    fn admit_n(feed: &OffloadFeed, n: u16) {
+        let (bytes, meta) = sample_bytes(n);
+        feed.admit(&LaneSample::of(&bytes, &meta));
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    /// What the callback saw, and the gate its first call waits at.
+    struct Gate {
+        seen: Seen,
+        entered: mpsc::Receiver<()>,
+        release: mpsc::Sender<()>,
+    }
+
+    /// Start a lane whose callback records each payload and its thread, and whose FIRST call waits
+    /// until the test releases it, so the lane fills behind a head that is being delivered.
+    fn gated_lane(
+        rt: &tokio::runtime::Runtime,
+        overload: SubscriberOverload,
+    ) -> (DetachedOffload, Gate) {
+        let seen: Seen = Arc::default();
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let record = seen.clone();
+        let mut first = true;
+        let offload = DetachedOffload::spawn(rt.handle(), overload, move |view| {
+            let payload = view.payload();
+            let n = u16::from_le_bytes([payload[0], payload[1]]);
+            record
+                .lock()
+                .unwrap()
+                .push((n, std::thread::current().id()));
+            if first {
+                first = false;
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            }
+        })
+        .expect("a lane that does not block starts");
+        (
+            offload,
+            Gate {
+                seen,
+                entered,
+                release,
+            },
+        )
+    }
+
+    fn wait_for(seen: &Seen, count: usize) -> Vec<(u16, ThreadId)> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let now = seen.lock().unwrap().clone();
+            if now.len() >= count || Instant::now() > deadline {
+                return now;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// `block` is refused, and the callback it was given is dropped rather than kept.
+    #[test]
+    fn a_detached_lane_refuses_block_and_drops_the_callback() {
+        let rt = runtime();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = DropFlag(dropped.clone());
+        let refused = DetachedOffload::spawn(rt.handle(), SubscriberOverload::Block, move |_| {
+            let _ = &flag;
+        });
+        assert_eq!(refused.err(), Some(DetachedOffloadError::BlockHasNoDrain));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the refused callback is not kept"
+        );
+    }
+
+    /// Under `reject`, the lane holds `EVENTS` samples counting the one being delivered, refuses
+    /// the rest by reason and as reliable losses, and the callback runs on the runtime's thread,
+    /// in the order the samples were admitted.
+    #[test]
+    fn a_detached_lane_under_reject_refuses_past_its_events_and_delivers_off_the_caller() {
+        let rt = runtime();
+        let (offload, gate) = gated_lane(&rt, SubscriberOverload::Reject);
+        let feed = offload.feed();
+        admit_n(&feed, 0);
+        gate.entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the consumer took the first sample");
+        let extra = 3u16;
+        for n in 1..(EVENTS as u16 + extra) {
+            admit_n(&feed, n);
+        }
+        let full = offload.stats();
+        assert_eq!(full.lane.queued_events, EVENTS);
+        assert_eq!(full.lane.refused.events_full, usize::from(extra));
+        assert_eq!(full.dropped_reliable, usize::from(extra));
+        assert_eq!(full.dropped_best_effort, 0);
+        gate.release.send(()).unwrap();
+        let seen = wait_for(&gate.seen, EVENTS);
+        let order: Vec<u16> = seen.iter().map(|(n, _)| *n).collect();
+        let expected: Vec<u16> = (0..EVENTS as u16).collect();
+        assert_eq!(order, expected);
+        let here = std::thread::current().id();
+        assert!(seen.iter().all(|(_, thread)| *thread != here));
+    }
+
+    /// Under `keep-latest`, each sample past a full lane takes out the newest one queued behind
+    /// the head, so the last sample admitted is the last one delivered.
+    #[test]
+    fn a_detached_lane_under_keep_latest_delivers_the_last_sample_admitted() {
+        let rt = runtime();
+        let (offload, gate) = gated_lane(&rt, SubscriberOverload::KeepLatest);
+        let feed = offload.feed();
+        admit_n(&feed, 0);
+        gate.entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the consumer took the first sample");
+        let extra = 3u16;
+        let last = EVENTS as u16 + extra - 1;
+        for n in 1..=last {
+            admit_n(&feed, n);
+        }
+        let full = offload.stats();
+        assert_eq!(full.lane.evicted, usize::from(extra));
+        assert_eq!(full.lane.refused.total, 0);
+        assert_eq!(full.dropped_reliable, usize::from(extra));
+        gate.release.send(()).unwrap();
+        let seen = wait_for(&gate.seen, EVENTS);
+        let order: Vec<u16> = seen.iter().map(|(n, _)| *n).collect();
+        assert_eq!(order.len(), EVENTS);
+        assert_eq!(order.last(), Some(&last));
+        let kept: Vec<u16> = (0..EVENTS as u16 - 1).collect();
+        assert_eq!(&order[..EVENTS - 1], kept.as_slice());
+    }
+
+    /// Dropping the handle stops the lane: a sink that outlives it is refused as stopping.
+    #[test]
+    fn a_feed_that_outlives_its_lane_is_refused_as_stopping() {
+        let rt = runtime();
+        let offload = DetachedOffload::spawn(rt.handle(), SubscriberOverload::Reject, |_| {})
+            .expect("starts");
+        let feed = offload.feed();
+        drop(offload);
+        admit_n(&feed, 7);
+        assert_eq!(feed.lane.stats().lane.refused.stopping, 1);
     }
 }
