@@ -26125,6 +26125,9 @@ mod tests {
             "no token reached the wire unasked"
         );
 
+        // The registration may send the face frames that are not declarations (the count above
+        // read none that were), and the count of the answer below is not about them.
+        sink_p.reset();
         forward_one(
             &fwd,
             FaceId(1),
@@ -26134,6 +26137,11 @@ mod tests {
             sink_p.frame_count(),
             2,
             "the interest is answered with the token, then the DeclareFinal"
+        );
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            2,
+            "both frames of the answer are declarations"
         );
         assert!(matches!(
             forwarded_declare(&sink_p.frame_bytes(0)).body,
