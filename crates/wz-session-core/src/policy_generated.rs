@@ -522,6 +522,51 @@ impl Default for ReassemblyPoolOverflow {
     }
 }
 
+/// `link-tie-order`: How a node orders two zids when it and a peer dialled each other at
+/// the same moment and both ends must keep the same one of the two links: the link the node
+/// with the lower zid dialled is kept, and this says which zid is lower. `zid-number` reads
+/// each zid as the 128-bit number zenoh reads, its first wire byte the least significant.
+/// `zid-bytes` compares the two ids byte by byte from the first wire byte, as zenoh-pico
+/// compares ids. The two orders disagree on most pairs of zids, so both ends of a link must
+/// state the same value: a peer that keeps one link by the other order closes the link this
+/// node kept, and neither link survives.
+/// Upstream: Two nodes that dial each other at once keep one transport; zenoh orders the
+/// two zids as the 128-bit numbers they are, the wire carrying a zid's little-endian bytes.
+/// zenoh-pico keeps no such rule, and compares two ids byte by byte from the first wire
+/// byte (`_z_id_cmp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkTieOrder {
+    /// `zid-number`.
+    ZidNumber,
+    /// `zid-bytes`.
+    ZidBytes,
+}
+
+impl LinkTieOrder {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::ZidNumber => "zid-number",
+            Self::ZidBytes => "zid-bytes",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["zid-number", "zid-bytes"];
+    const ALL: [Self; 2] = [Self::ZidNumber, Self::ZidBytes];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_LINK_TIE_ORDER");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for LinkTieOrder {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -615,6 +660,11 @@ pub struct SessionPolicy {
     /// no shared pool to fill. None of the three values is upstream's, since upstream has
     /// no such moment; `reject` is what wz did before the policy existed.
     pub reassembly_pool_overflow: ReassemblyPoolOverflow,
+    /// `link-tie-order`. Upstream: Two nodes that dial each other at once keep one
+    /// transport; zenoh orders the two zids as the 128-bit numbers they are, the wire
+    /// carrying a zid's little-endian bytes. zenoh-pico keeps no such rule, and compares
+    /// two ids byte by byte from the first wire byte (`_z_id_cmp`).
+    pub link_tie_order: LinkTieOrder,
 }
 
 impl SessionPolicy {
@@ -645,6 +695,7 @@ impl SessionPolicy {
         let routing_face_drive = RoutingFaceDrive::stated();
         let routing_table_sharing = RoutingTableSharing::stated();
         let reassembly_pool_overflow = ReassemblyPoolOverflow::stated();
+        let link_tie_order = LinkTieOrder::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
@@ -668,6 +719,7 @@ impl SessionPolicy {
             routing_face_drive,
             routing_table_sharing,
             reassembly_pool_overflow,
+            link_tie_order,
         }
     }
 }

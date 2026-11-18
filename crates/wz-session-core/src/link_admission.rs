@@ -17,7 +17,9 @@
 //!   "The first up" is then decided differently at the two ends (each keeps the link that
 //!   completed first on ITS side, and each closes the link the other kept, which leaves none), so
 //!   the rule reads only what both ends read alike: the two zids. The link kept is the one the
-//!   node with the LOWER zid dialled.
+//!   node with the LOWER zid dialled, lower in the order the build's `link-tie-order` policy
+//!   states (zenoh's number by default, or zenoh-pico's byte-by-byte order), which both ends
+//!   must state alike.
 //!
 //! The function takes the zids and the directions and nothing of an engine, which is what lets the
 //! cooperative engine's face table (`wz-capi-coop`) and a registry of another engine call the one
@@ -33,6 +35,7 @@ use wz_runtime_core::Runtime;
 #[cfg(feature = "alloc")]
 use crate::credential_identity::canonical_zid;
 use crate::credential_identity::zid_from_wire;
+use crate::policy::{LinkTieOrder, SessionPolicy};
 
 /// What a session does with a link to a node it already holds a link to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,18 +46,44 @@ pub enum SecondLink {
     Replace,
 }
 
-/// A zid as the number it is, so that two nodes read the same order of two zids. An id that spells
-/// no zid reads as 0.
-fn zid_value(zid: &[u8]) -> u128 {
-    zid_from_wire(zid).map_or(0, u128::from_le_bytes)
+/// A zid as the key the build's `link-tie-order` policy orders it by, so that two nodes that state
+/// the same value read the same order of two zids. An id that spells no zid reads as 0.
+///
+/// The zid is first written in its sixteen-byte form, the wire's bytes followed by the zeros the
+/// wire trimmed ([`zid_from_wire`]). `zid-number` reads those bytes as zenoh's number, the first
+/// the least significant; `zid-bytes` reads them as a number whose first byte is the MOST
+/// significant, which is the order of a byte-by-byte comparison from the first byte.
+fn zid_order_key(order: LinkTieOrder, zid: &[u8]) -> u128 {
+    zid_from_wire(zid).map_or(0, |bytes| match order {
+        LinkTieOrder::ZidNumber => u128::from_le_bytes(bytes),
+        LinkTieOrder::ZidBytes => u128::from_be_bytes(bytes),
+    })
 }
 
 /// The fate of a NEW link to a node the session already holds a link to.
 ///
 /// `held_dialled` and `new_dialled` say whether this session dialled each link (as opposed to
 /// taking it off its port); `local_zid` is this session's own zid and `remote_zid` the node's.
-/// The caller has established that both links reach `remote_zid`.
+/// The caller has established that both links reach `remote_zid`. The zids are ordered as the
+/// build's `link-tie-order` policy states.
 pub fn judge_second_link(
+    held_dialled: bool,
+    new_dialled: bool,
+    local_zid: &[u8],
+    remote_zid: &[u8],
+) -> SecondLink {
+    judge_second_link_by(
+        SessionPolicy::from_build().link_tie_order,
+        held_dialled,
+        new_dialled,
+        local_zid,
+        remote_zid,
+    )
+}
+
+/// [`judge_second_link`] with the order of the zids named rather than read from the build.
+pub fn judge_second_link_by(
+    order: LinkTieOrder,
     held_dialled: bool,
     new_dialled: bool,
     local_zid: &[u8],
@@ -65,7 +94,7 @@ pub fn judge_second_link(
     }
     // The link the lower zid dialled wins: from here, a link this session dialled wins when this
     // session's zid is the lower one, and a link the node dialled when the node's is.
-    let dialled_wins = zid_value(local_zid) < zid_value(remote_zid);
+    let dialled_wins = zid_order_key(order, local_zid) < zid_order_key(order, remote_zid);
     if new_dialled == dialled_wins {
         SecondLink::Replace
     } else {
@@ -477,6 +506,78 @@ mod tests {
             assert!(!kept_at(first_is_x, &[0xa0], &[0x10], true));
             assert!(!kept_at(first_is_x, &[0x10], &[0xa0], false));
         }
+    }
+
+    /// Two zids the two orders rank oppositely: `[0x01, 0x02]` is the number 0x0201 and `[0x02]`
+    /// the number 0x02, so by number the second is lower, but byte by byte the first is (0x01 <
+    /// 0x02 at the first byte). The second spelling is trimmed, as the wire trims trailing zeros.
+    const BY_NUMBER_HIGHER: &[u8] = &[0x01, 0x02];
+    const BY_NUMBER_LOWER: &[u8] = &[0x02];
+
+    /// Whether the node `local` keeps the link it dialled when `remote` dialled it at the same
+    /// moment, the dialled link being the held one.
+    fn keeps_its_own_dial(order: LinkTieOrder, local: &[u8], remote: &[u8]) -> bool {
+        judge_second_link_by(order, true, false, local, remote) == SecondLink::Refuse
+    }
+
+    #[test]
+    fn zid_number_keeps_the_link_of_the_zid_that_is_the_lower_number() {
+        let order = LinkTieOrder::ZidNumber;
+        assert_eq!(order.id(), "zid-number");
+        assert!(keeps_its_own_dial(order, BY_NUMBER_LOWER, BY_NUMBER_HIGHER));
+        assert!(!keeps_its_own_dial(
+            order,
+            BY_NUMBER_HIGHER,
+            BY_NUMBER_LOWER
+        ));
+    }
+
+    #[test]
+    fn zid_bytes_keeps_the_link_of_the_zid_that_is_lower_from_the_first_byte() {
+        let order = LinkTieOrder::ZidBytes;
+        assert_eq!(order.id(), "zid-bytes");
+        assert!(keeps_its_own_dial(order, BY_NUMBER_HIGHER, BY_NUMBER_LOWER));
+        assert!(!keeps_its_own_dial(
+            order,
+            BY_NUMBER_LOWER,
+            BY_NUMBER_HIGHER
+        ));
+    }
+
+    #[test]
+    fn each_order_has_both_ends_keep_one_link_and_the_two_orders_keep_different_ones() {
+        for order in [LinkTieOrder::ZidNumber, LinkTieOrder::ZidBytes] {
+            // Exactly one of the two nodes keeps the link it dialled: one link survives.
+            let a = keeps_its_own_dial(order, BY_NUMBER_HIGHER, BY_NUMBER_LOWER);
+            let b = keeps_its_own_dial(order, BY_NUMBER_LOWER, BY_NUMBER_HIGHER);
+            assert_ne!(
+                a,
+                b,
+                "{}: both ends must name the same one link",
+                order.id()
+            );
+        }
+        // Two ends stating different orders each keep their own dial: each closes the link the
+        // other kept, and neither link survives. This is why both ends must state one value.
+        let a_by_bytes =
+            keeps_its_own_dial(LinkTieOrder::ZidBytes, BY_NUMBER_HIGHER, BY_NUMBER_LOWER);
+        let b_by_number =
+            keeps_its_own_dial(LinkTieOrder::ZidNumber, BY_NUMBER_LOWER, BY_NUMBER_HIGHER);
+        assert!(a_by_bytes && b_by_number);
+    }
+
+    #[test]
+    fn the_build_reads_the_order_its_policy_states() {
+        assert_eq!(
+            judge_second_link(true, false, BY_NUMBER_LOWER, BY_NUMBER_HIGHER),
+            judge_second_link_by(
+                SessionPolicy::from_build().link_tie_order,
+                true,
+                false,
+                BY_NUMBER_LOWER,
+                BY_NUMBER_HIGHER
+            )
+        );
     }
 }
 

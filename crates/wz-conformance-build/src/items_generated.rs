@@ -380,4 +380,10 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         &["reject", "diagnostic-event", "oldest-wins"],
         "reject",
     ),
+    (
+        "link-tie-order",
+        "WZ_POLICY_LINK_TIE_ORDER",
+        &["zid-number", "zid-bytes"],
+        "zid-number",
+    ),
 ];
