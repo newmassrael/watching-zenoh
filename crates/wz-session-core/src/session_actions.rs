@@ -179,9 +179,7 @@ use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
 use crate::session_fsm_unicast::SessionFsmUnicastActions as SessionFsmUnicastActionsTrait;
-use crate::session_init_params::{
-    SessionBytes, SessionInitParams, SessionZid, COOKIE_MAX, ZID_MAX,
-};
+use crate::session_init_params::{SessionBytes, SessionInitParams, SessionZid, COOKIE_MAX};
 // R2769 — the accept cookie replaced the bare tag at both ends, so the mint
 // reaches for the carrier's encoder here and the verify names
 // `decode_accept_cookie` at its own site.
@@ -9671,10 +9669,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// [`Self::link_admitted`] for the zid the InitSyn named, which the acceptor holds from its
     /// InitSyn: the node is asked first, and a link it does not guard is answered `true` without
-    /// the zid being read at all. A guarded link's zid is copied to the stack (a zid is at most
-    /// `ZID_MAX` bytes), so no build allocates for the question, which the heap-free tests of the
-    /// fixed-memory crates hold to: reading it with `peer_zid` is one `Vec` for every handshake.
-    /// The two mutexes are taken one after the other and never nested.
+    /// the zid being read at all. A guarded link's zid is copied out by value (a `SessionZid`
+    /// holds its bytes inline), so no build allocates for the question, which the heap-free tests
+    /// of the fixed-memory crates hold to: reading it with `peer_zid` is one `Vec` for every
+    /// handshake. The two mutexes are taken one after the other and never nested.
     #[cfg(all(
         feature = "alloc",
         target_has_atomic = "ptr",
@@ -9685,15 +9683,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !R::with_mutex_mut(&self.link.link_lease, |slot| slot.is_some()) {
             return true;
         }
-        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-            slot.as_deref().map(|bytes| {
-                let mut buffer = [0u8; ZID_MAX];
-                buffer[..bytes.len()].copy_from_slice(bytes);
-                (buffer, bytes.len())
-            })
-        });
+        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot);
         match zid {
-            Some((buffer, len)) => self.link_admitted(&buffer[..len]),
+            Some(zid) => self.link_admitted(&zid),
             // A link whose peer named no zid cannot collide with another.
             None => true,
         }

@@ -1230,7 +1230,7 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
     let unbound = encode_accept_cookie(
         &fixture_session_init_params().cookie_signing_key,
         &AcceptCookieState {
-            peer_zid: FIXTURE_PEER_ZID.to_vec(),
+            peer_zid: FIXTURE_PEER_ZID.into(),
             peer_whatami: 0,
             sn_res: 0,
             batch_size: 0,

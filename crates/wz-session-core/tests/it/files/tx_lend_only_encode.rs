@@ -45,6 +45,7 @@ use wz_session_core::handshake_encode::{
 use wz_session_core::session_init_params::{
     cookie_bytes, zid_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
 };
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::tx_buf::{SliceTxBuf, TxBuf};
 
@@ -314,7 +315,8 @@ fn key() -> SigningKey {
 
 fn cookie_state(zid_len: usize, multilink: Option<(u64, Vec<u8>)>) -> AcceptCookieState {
     AcceptCookieState {
-        peer_zid: (1..=zid_len as u8).collect(),
+        peer_zid: SessionZid::new(&(1..=zid_len as u8).collect::<Vec<u8>>())
+            .expect("a zid of 1 to 16 bytes"),
         peer_whatami: 1,
         sn_res: 0x0A,
         batch_size: 1472,
@@ -401,30 +403,23 @@ fn a_cookie_that_does_not_fit_the_array_is_refused_not_truncated() {
     assert_eq!(minted, owned.as_slice());
 }
 
-/// Nothing is minted for a zid the wire cannot carry, in either form.
+/// Nothing is minted for a zid the wire cannot carry, in either form. The owned
+/// state cannot hold one at all: its zid is a `SessionZid`, refused where it is
+/// made. The view the array form reads is bytes, and the encoder refuses them.
 #[test]
 fn no_cookie_is_minted_for_a_zid_outside_one_to_sixteen() {
     let k = key();
     let mut array = [0u8; ACCEPT_COOKIE_MAX_BYTES];
-    // A zid longer than sixteen bytes is not a value the fixed form can hold at
-    // all (`session-slot` refuses it before a cookie is in question).
-    let lens: &[usize] = if cfg!(feature = "session-slot") {
-        &[0]
-    } else {
-        &[0, 17]
-    };
-    for &zid_len in lens {
-        let state = AcceptCookieState {
-            peer_zid: wz_session_core::session_init_params::session_bytes::<16>(&vec![1; zid_len])
-                .expect("fits"),
-            ..cookie_state(1, None)
+    let state = cookie_state(1, None);
+    for zid_len in [0usize, 17] {
+        let zid = vec![1u8; zid_len];
+        assert!(SessionZid::new(&zid).is_err(), "owned, {zid_len}");
+        let view = AcceptCookieView {
+            peer_zid: &zid,
+            ..view_of(&state)
         };
         assert!(
-            encode_accept_cookie(&k, &state).is_none(),
-            "owned, {zid_len}"
-        );
-        assert!(
-            encode_accept_cookie_into(&k, &view_of(&state), &mut array).is_none(),
+            encode_accept_cookie_into(&k, &view, &mut array).is_none(),
             "array, {zid_len}"
         );
     }
