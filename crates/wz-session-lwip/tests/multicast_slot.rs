@@ -163,6 +163,7 @@ fn session(
         dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
         driver: LwipMulticastDriver::new(socket, group, port),
         params: params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
         tick_ms: 5,
         max_iters,
     }
@@ -250,6 +251,7 @@ fn the_pump_in_its_cell_admits_a_peer_over_the_loopback_as_a_task() {
         dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
         driver: LwipMulticastDriver::new(socket, group, port),
         params: params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
         tick_ms: 5,
         max_iters: Some(12),
     };

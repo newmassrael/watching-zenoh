@@ -53,6 +53,7 @@ use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{
     cookie_bytes, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
 };
@@ -693,18 +694,24 @@ impl NodeIdentity {
         text
     }
 
-    /// zenoh 1.x's handshake shape as a client, with a batch the receive slot holds whole.
-    pub fn params(&self, batch_size: u16) -> SessionInitParams {
-        self.params_as(WhatAmI::Client, batch_size)
+    /// zenoh 1.x's handshake shape as a client, with a batch the receive slot holds whole, for a
+    /// session whose machines read `policy`, the snapshot the node's creator resolved.
+    pub fn params(&self, batch_size: u16, policy: &SessionPolicy) -> SessionInitParams {
+        self.params_as(WhatAmI::Client, batch_size, policy)
     }
 
     /// The same shape presented as a peer: what a node that accepts connections says to the
     /// side that opened one, since a stock client refuses another client.
-    pub fn accepted_params(&self, batch_size: u16) -> SessionInitParams {
-        self.params_as(WhatAmI::Peer, batch_size)
+    pub fn accepted_params(&self, batch_size: u16, policy: &SessionPolicy) -> SessionInitParams {
+        self.params_as(WhatAmI::Peer, batch_size, policy)
     }
 
-    fn params_as(&self, whatami: WhatAmI, batch_size: u16) -> SessionInitParams {
+    fn params_as(
+        &self,
+        whatami: WhatAmI,
+        batch_size: u16,
+        policy: &SessionPolicy,
+    ) -> SessionInitParams {
         SessionInitParams {
             whatami,
             zid: self.zid,
@@ -715,9 +722,9 @@ impl NodeIdentity {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(policy),
             link_rx: LinkRxConf::default(),
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: *policy,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -770,6 +777,7 @@ impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SessionLay
 pub struct ClientFactory<E, L> {
     identity: NodeIdentity,
     batch_size: u16,
+    policy: SessionPolicy,
     entropy: fn() -> E,
     observer: &'static ObserverCell<DocumentSinks>,
     layer: L,
@@ -790,11 +798,11 @@ where
     }
 
     fn params(&mut self) -> SessionInitParams {
-        self.identity.params(self.batch_size)
+        self.identity.params(self.batch_size, &self.policy)
     }
 
     fn accepted_params(&mut self) -> SessionInitParams {
-        self.identity.accepted_params(self.batch_size)
+        self.identity.accepted_params(self.batch_size, &self.policy)
     }
 
     fn events(&mut self, handle: &SessionHandle<C, D>) -> Self::Events {
@@ -1031,6 +1039,11 @@ pub struct ClientNode<
     pub identity: NodeIdentity,
     /// The batch the node advertises.
     pub batch_size: u16,
+    /// The value of every policy the node's machines read: the snapshot the platform resolved for
+    /// the node, which every session the node makes (dialled, accepted, or of its plane) is made
+    /// with. On a target with no operating system every policy the image does not widen is one
+    /// value, and such a policy takes no byte here.
+    pub policy: SessionPolicy,
     /// A fresh entropy source for one session.
     pub entropy: fn() -> E,
     /// The endpoints it dials.
@@ -1143,6 +1156,7 @@ where
             plane,
             identity,
             batch_size,
+            policy,
             entropy,
             endpoints,
             peers,
@@ -1198,6 +1212,7 @@ where
             Assembly {
                 identity,
                 batch_size,
+                policy,
                 entropy,
                 observer,
                 layer,
@@ -1224,6 +1239,7 @@ where
             runtime: runtime.clone(),
             observer,
             zid: &zid[..zid_len],
+            policy: &policy,
         });
         ready(port, zid_text.prefix());
 
@@ -1367,6 +1383,7 @@ impl<A: NodeApp + ?Sized> NodeApp for &mut A {
 struct Assembly<'a, E, L, X, const ACCEPTS: usize> {
     identity: NodeIdentity,
     batch_size: u16,
+    policy: SessionPolicy,
     entropy: fn() -> E,
     observer: &'static ObserverCell<DocumentSinks>,
     layer: L,
@@ -1470,6 +1487,7 @@ where
     let Assembly {
         identity,
         batch_size,
+        policy,
         entropy,
         observer,
         layer,
@@ -1484,6 +1502,7 @@ where
         RefCell::new(ClientFactory {
             identity,
             batch_size,
+            policy,
             entropy,
             observer,
             layer,
@@ -1642,7 +1661,7 @@ mod tests {
     #[test]
     fn the_handshake_is_a_client_of_the_batch_the_platform_states() {
         let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
-        let params = identity.params(1472);
+        let params = identity.params(1472, &SessionPolicy::defaults());
         assert_eq!(params.whatami, WhatAmI::Client);
         assert_eq!(params.zid, zid_bytes(&[1, 2, 3, 4]));
         assert_eq!(params.batch_size, 1472);
@@ -1655,8 +1674,9 @@ mod tests {
     #[test]
     fn a_session_a_peer_opened_is_met_as_a_peer_and_is_otherwise_the_same() {
         let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
-        let dialled = identity.params(1472);
-        let accepted = identity.accepted_params(1472);
+        let policy = SessionPolicy::defaults();
+        let dialled = identity.params(1472, &policy);
+        let accepted = identity.accepted_params(1472, &policy);
         // A stock client refuses another client, so the mode is the one thing that differs.
         assert_eq!(accepted.whatami, WhatAmI::Peer);
         assert_eq!(dialled.whatami, WhatAmI::Client);
@@ -1666,6 +1686,37 @@ mod tests {
         assert_eq!(accepted.seq_num_res, dialled.seq_num_res);
         assert_eq!(accepted.req_id_res, dialled.req_id_res);
         assert_eq!(accepted.initial_sn, dialled.initial_sn);
+    }
+
+    /// A session the node makes reads the snapshot the node's creator handed it and not the build:
+    /// each value of `tx-expiry-keeps-session` the build's domain holds, selected and handed in,
+    /// is the value the dialled and the accepted sessions carry, in their snapshot and in the
+    /// queue made from it.
+    #[test]
+    fn the_sessions_the_node_makes_carry_the_snapshot_it_is_handed() {
+        use wz_session_core::policy::TxExpiryKeepsSession;
+        let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
+        let mut built = 0;
+        for keeps in [false, true] {
+            let mut policy = SessionPolicy::defaults();
+            if policy
+                .select_tx_expiry_keeps_session(TxExpiryKeepsSession::from(keeps))
+                .is_err()
+            {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            for params in [
+                identity.params(1472, &policy),
+                identity.accepted_params(1472, &policy),
+            ] {
+                assert_eq!(params.policy, policy);
+                assert_eq!(params.policy.tx_expiry_keeps_session(), keeps);
+                assert_eq!(params.tx_queue.expiry_keeps_session, keeps);
+            }
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
     }
 
     #[test]

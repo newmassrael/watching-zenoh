@@ -33,11 +33,13 @@ use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_tx::{multicast_tx_emit_offer, multicast_tx_offer_put_literal};
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::sn::{self, MulticastTxConduits};
 
 use crate::{
-    params, ClockSource, LwipLink, MulticastE2eReport, MulticastOutcome, MulticastStage,
-    BATCH_SIZE, KEYEXPR, MAX_ITERS, MAX_PEERS, PAYLOAD_LEN, PEER_ZID, PORT, SELF_ZID,
+    params, resolve_policy, ClockSource, LwipLink, MulticastE2eReport, MulticastOutcome,
+    MulticastStage, BATCH_SIZE, KEYEXPR, MAX_ITERS, MAX_PEERS, PAYLOAD_LEN, PEER_ZID, PORT,
+    SELF_ZID,
 };
 
 impl MulticastE2eReport {
@@ -129,8 +131,8 @@ fn tx_fragments(payload: &[u8], own: &MulticastParams) -> bool {
 /// it is admitted, not own-zid-filtered) advertising `next_sn 0` on a fresh ring, and
 /// the SAME `batch_size` as ours (a mismatch would fail `validate_join` and the echoed
 /// fragments would hit an `UnknownPeer` drop).
-fn peer_join(buf: &mut [u8; JOIN_MAX_BYTES]) -> &[u8] {
-    let mut peer = params(PEER_ZID);
+fn peer_join<'b>(buf: &'b mut [u8; JOIN_MAX_BYTES], policy: &SessionPolicy) -> &'b [u8] {
+    let mut peer = params(PEER_ZID, policy);
     peer.batch_size = BATCH_SIZE;
     let len = encode_join_into_slice(
         &peer,
@@ -141,9 +143,9 @@ fn peer_join(buf: &mut [u8; JOIN_MAX_BYTES]) -> &[u8] {
     &buf[..len]
 }
 
-/// This node's parameters: the fixture at the tiny batch budget.
-fn own_params() -> MulticastParams {
-    let mut own = params(SELF_ZID);
+/// This node's parameters: the fixture at the tiny batch budget, under `policy`.
+fn own_params(policy: &SessionPolicy) -> MulticastParams {
+    let mut own = params(SELF_ZID, policy);
     own.batch_size = BATCH_SIZE;
     own
 }
@@ -237,16 +239,18 @@ where
 
     // Pre-admit the peer at our loopback source, before the driver wraps the socket
     // (see `peer_join`).
+    let policy = resolve_policy();
     let mut join = [0u8; JOIN_MAX_BYTES];
-    let _ = socket.send_to(group, PORT, peer_join(&mut join));
+    let _ = socket.send_to(group, PORT, peer_join(&mut join, &policy));
 
-    let own = own_params();
+    let own = own_params(&policy);
     let payload = payload();
     let tx_fragmented = tx_fragments(&payload, &own);
     let session = MulticastSession {
         dispatcher: MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000)),
         driver: LwipMulticastDriver::new(socket, group, PORT),
         params: own,
+        policy,
         tick_ms: 5,
         max_iters: Some(MAX_ITERS),
     };

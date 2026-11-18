@@ -25,6 +25,7 @@ use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::MulticastTxOffer;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_mcu::group_drive as group;
 #[cfg(all(
     feature = "alloc",
@@ -177,9 +178,11 @@ impl<L: Deref<Target = LwipLink>, D: BorrowMut<LwipMulticastDriver>> GroupTransp
 ///   inbound `try_recv`).
 ///
 /// The other parameters are the shared loop's.
+#[allow(clippy::too_many_arguments)]
 pub fn run_multicast_session<'g, C, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
+    policy: &SessionPolicy,
     runtime: &CoopRuntime<C>,
     link: &LwipLink,
     driver: &mut LwipMulticastDriver,
@@ -194,6 +197,7 @@ where
     group::run_multicast_session(
         dispatcher,
         cfg,
+        policy,
         runtime,
         &mut LwipGroupTransport::new(link, driver),
         on_event,
@@ -207,6 +211,7 @@ where
 pub fn run_multicast_session_with_shutdown<'g, C, F, G, H, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
+    policy: &SessionPolicy,
     runtime: &CoopRuntime<C>,
     link: &LwipLink,
     driver: &mut LwipMulticastDriver,
@@ -223,6 +228,7 @@ where
     group::run_multicast_session_with_shutdown(
         dispatcher,
         cfg,
+        policy,
         runtime,
         &mut LwipGroupTransport::new(link, driver),
         on_event,
@@ -241,6 +247,7 @@ where
 pub fn run_multicast_session_rejoining<'g, C, F, G, H, B, D, const MAX_PEERS: usize>(
     new_dispatcher: D,
     cfg: MulticastDriveConfig<'_>,
+    policy: &SessionPolicy,
     runtime: &CoopRuntime<C>,
     link: &LwipLink,
     driver: LwipMulticastDriver,
@@ -261,6 +268,7 @@ where
     group::run_multicast_session_rejoining(
         new_dispatcher,
         cfg,
+        policy,
         runtime,
         LwipGroupTransport::new(link, driver),
         on_event,
@@ -290,6 +298,9 @@ pub struct MulticastSession<const MAX_PEERS: usize> {
     pub driver: LwipMulticastDriver,
     /// The protocol parameters this session advertises, its own zid among them.
     pub params: MulticastParams,
+    /// The value of every policy this session's machines read: the snapshot its creator
+    /// resolved for it.
+    pub policy: SessionPolicy,
     /// The sweep cadence (see [`MulticastDriveConfig::tick_ms`]).
     pub tick_ms: u64,
     /// The test budget (see [`MulticastDriveConfig::max_iters`]); `None` in
@@ -298,8 +309,8 @@ pub struct MulticastSession<const MAX_PEERS: usize> {
 }
 
 impl<const MAX_PEERS: usize> MulticastSession<MAX_PEERS> {
-    /// The shared session over `link`: the same dispatcher, parameters and
-    /// cadences, with the driver paired to the lwIP link it is pumped through.
+    /// The shared session over `link`: the same dispatcher, parameters, snapshot
+    /// and cadences, with the driver paired to the lwIP link it is pumped through.
     pub fn into_group<L: Deref<Target = LwipLink>>(
         self,
         link: L,
@@ -308,6 +319,7 @@ impl<const MAX_PEERS: usize> MulticastSession<MAX_PEERS> {
             dispatcher,
             driver,
             params,
+            policy,
             tick_ms,
             max_iters,
         } = self;
@@ -315,6 +327,7 @@ impl<const MAX_PEERS: usize> MulticastSession<MAX_PEERS> {
             dispatcher,
             transport: LwipGroupTransport::new(link, driver),
             params,
+            policy,
             tick_ms,
             max_iters,
         }
@@ -394,6 +407,7 @@ pub struct MulticastSeed<const MAX_PEERS: usize> {
     config: MulticastConfig,
     driver: LwipMulticastDriver,
     params: MulticastParams,
+    policy: SessionPolicy,
     tick_ms: u64,
     max_iters: Option<usize>,
 }
@@ -405,12 +419,14 @@ impl<const MAX_PEERS: usize> MulticastSeed<MAX_PEERS> {
         config: MulticastConfig,
         driver: LwipMulticastDriver,
         params: MulticastParams,
+        policy: SessionPolicy,
         tick_ms: u64,
     ) -> Self {
         Self {
             config,
             driver,
             params,
+            policy,
             tick_ms,
             max_iters: None,
         }
@@ -431,6 +447,7 @@ impl<const MAX_PEERS: usize> MulticastSeed<MAX_PEERS> {
             self.config,
             LwipGroupTransport::new(link, self.driver),
             self.params,
+            self.policy,
             self.tick_ms,
         )
         .with_max_iters(self.max_iters)
@@ -670,6 +687,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -741,6 +759,7 @@ mod tests {
                 dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
                 driver: LwipMulticastDriver::new(socket, group, port),
                 params: params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                policy: SessionPolicy::defaults(),
                 tick_ms: 5,
                 max_iters: Some(12),
             },
@@ -830,6 +849,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(16),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -923,6 +943,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(16),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1039,6 +1060,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(16),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1161,6 +1183,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(16),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1279,6 +1302,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(32),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1389,6 +1413,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1410,6 +1435,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1483,6 +1509,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1540,6 +1567,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(0),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1622,6 +1650,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(6),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             driver,
@@ -1701,6 +1730,7 @@ mod tests {
         let admitted = run_multicast_session(
             &mut dispatcher,
             cfg(),
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1723,6 +1753,7 @@ mod tests {
         let lost = run_multicast_session(
             &mut dispatcher,
             cfg(),
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1804,6 +1835,7 @@ mod tests {
         let over_budget = run_multicast_session(
             &mut spent_budget,
             cfg(),
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1813,6 +1845,7 @@ mod tests {
         let over_stop = run_multicast_session_with_shutdown(
             &mut also_asked_to_stop,
             cfg(),
+            &SessionPolicy::defaults(),
             &runtime,
             &link,
             &mut driver,
@@ -1869,6 +1902,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
+            &SessionPolicy::defaults(),
             &runtime,
             &mut released,
             |_event| {},

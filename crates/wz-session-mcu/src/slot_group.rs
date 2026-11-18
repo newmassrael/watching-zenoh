@@ -49,6 +49,7 @@ use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::{zid_vec, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_tx_offer_put_literal, MulticastTxOffer};
 use wz_session_core::peer_tables::PeerTables;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::WhatAmI;
@@ -167,6 +168,29 @@ impl GroupTiming {
         join_interval_ms: 2_500,
         tick_ms: 1_000,
     };
+}
+
+/// The parameters a node of zenoh id `zid` advertises on the group, with `timing`, and the
+/// queue its session is made with under `policy`, the node's snapshot.
+fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> MulticastParams {
+    MulticastParams {
+        whatami: WhatAmI::Peer,
+        zid: zid_vec(zid),
+        lease_ms: timing.lease_ms,
+        join_interval_ms: timing.join_interval_ms,
+        seq_num_res: GROUP_SN_RESOLUTION,
+        req_id_res: GROUP_SN_RESOLUTION,
+        batch_size: GROUP_BATCH_BYTES,
+        is_qos: false,
+        compression: false,
+        tx_queue: TxQueueConf::of_policy(policy),
+        link_rx: LinkRxConf::default(),
+        // The MCU session is zenoh-pico's.
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        // zenoh-pico states no cap on a group's members; the table the image declares
+        // (`MEMBERS`) is the bound.
+        max_sessions: None,
+    }
 }
 
 /// The publishers of a group, played by the same [`Publishing`] a session's are, one round per
@@ -326,6 +350,8 @@ where
     observer: &'static ObserverCell<DocumentSinks>,
     zid: [u8; ZID_MAX],
     zid_len: usize,
+    /// The node's snapshot, which each session the group joins with is made from.
+    policy: SessionPolicy,
     task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
     join_at_ms: u64,
 }
@@ -348,6 +374,7 @@ where
             observer: context.observer,
             zid,
             zid_len,
+            policy: *context.policy,
             task: None,
             // The first tick joins.
             join_at_ms: 0,
@@ -361,28 +388,6 @@ where
     T: GroupTransport + 'static,
     B: GroupBind<T>,
 {
-    /// The parameters the node advertises on the group.
-    fn params(&self) -> MulticastParams {
-        MulticastParams {
-            whatami: WhatAmI::Peer,
-            zid: zid_vec(&self.zid[..self.zid_len]),
-            lease_ms: self.plane.timing.lease_ms,
-            join_interval_ms: self.plane.timing.join_interval_ms,
-            seq_num_res: GROUP_SN_RESOLUTION,
-            req_id_res: GROUP_SN_RESOLUTION,
-            batch_size: GROUP_BATCH_BYTES,
-            is_qos: false,
-            compression: false,
-            tx_queue: TxQueueConf::default(),
-            link_rx: LinkRxConf::default(),
-            // The MCU session is zenoh-pico's.
-            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
-            // zenoh-pico states no cap on a group's members; the table the image declares
-            // (`MEMBERS`) is the bound.
-            max_sessions: None,
-        }
-    }
-
     // Not inlined into the tick that calls it, for the reason `SlotDialer::dial` is not: the
     // session (a peer table, the parameters) is built by value on the way into its cell, and that
     // frame should exist for the length of one join.
@@ -395,7 +400,8 @@ where
         let session = MulticastSession {
             dispatcher: MulticastDispatcher::new(MulticastConfig::new(self.plane.timing.lease_ms)),
             transport,
-            params: self.params(),
+            params: group_params(&self.zid[..self.zid_len], &self.plane.timing, &self.policy),
+            policy: self.policy,
             tick_ms: self.plane.timing.tick_ms,
             max_iters: None,
         };
@@ -478,6 +484,31 @@ mod tests {
     }
 
     const ITEMS: [Publication; 2] = [every("lab/a", 100), every("lab/b", 250)];
+
+    /// The group's session is made with the node's snapshot and not with the build: each value of
+    /// `tx-no-progress-deadline` the build's domain holds, selected and handed in, is the value
+    /// the session's queue carries.
+    #[test]
+    fn the_group_session_is_made_with_the_snapshot_it_is_handed() {
+        use wz_session_core::policy::TxNoProgressDeadline;
+        let mut built = 0;
+        for on in [false, true] {
+            let mut policy = SessionPolicy::defaults();
+            if policy
+                .select_tx_no_progress_deadline(TxNoProgressDeadline::from(on))
+                .is_err()
+            {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            let params = group_params(&[0x01, 0x02], &GroupTiming::ZENOH, &policy);
+            assert_eq!(params.tx_queue.no_progress_us.is_some(), on, "{on}");
+            assert_eq!(params.tx_queue, TxQueueConf::of_policy(&policy));
+            assert_eq!(params.lease_ms, GroupTiming::ZENOH.lease_ms);
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
+    }
 
     /// Everything the publisher offers at `now_ms` in one round, in the order it offers it, each
     /// taken as sent.
