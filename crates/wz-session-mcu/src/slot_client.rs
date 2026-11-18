@@ -33,6 +33,7 @@ use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locality::Locality;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
@@ -123,9 +124,10 @@ where
     acceptor: X,
     accepted: BoundedVec<SlotSession<C, T::Driver>, A>,
     over_capacity: u32,
-    /// How the declarations of a session go out: `None`, one turn for the whole list, unless the
-    /// build's `declaration-sync-pacing` policy states a pace ([`ReplayPacing::from_build`]).
-    pacing: Option<ReplayPacing>,
+    /// How the declarations of a session go out when a caller stated it for the node
+    /// ([`Self::set_replay_pacing`]). `None` leaves it to the `declaration-sync-pacing` policy of
+    /// the snapshot of each session that replays (`session_pacing`).
+    stated_pacing: Option<Option<ReplayPacing>>,
 }
 
 impl<'a, C, T, B, F, X, const S: usize, const P: usize, const A: usize>
@@ -166,17 +168,17 @@ where
             acceptor: listening.acceptor,
             accepted: BoundedVec::new(),
             over_capacity: 0,
-            pacing: ReplayPacing::BUILD,
+            stated_pacing: None,
         }
     }
 
     /// State how the declarations of a session go out, for a caller that wants a pace regardless
-    /// of the build (a test, or a node whose image is built for another policy); the build states
-    /// it by default ([`ReplayPacing::from_build`]). `Some` sends the burst's worth of
-    /// declarations a turn, and waits at least the interval before the next: the wait is the
+    /// of the policy (a test, or a node whose image is built for another policy); each session's
+    /// snapshot states it otherwise ([`ReplayPacing::of_policy`]). `Some` sends the burst's worth
+    /// of declarations a turn, and waits at least the interval before the next: the wait is the
     /// interval or the node's tick, whichever is longer, because the replay moves on a tick.
     pub fn set_replay_pacing(&mut self, pacing: Option<ReplayPacing>) {
-        self.pacing = pacing;
+        self.stated_pacing = Some(pacing);
     }
 
     /// Every session the node holds, accepted and dialled.
@@ -271,7 +273,8 @@ where
         }
         for session in self.live() {
             if session.actions().is_established() && !session.declared() {
-                replay_declarations(session, self.declarations, self.pacing, now_ms);
+                let pacing = session_pacing(self.stated_pacing, &session.actions().params.policy);
+                replay_declarations(session, self.declarations, pacing, now_ms);
             }
         }
     }
@@ -334,6 +337,15 @@ where
             refused.abort();
         }
     }
+}
+
+/// The pace of one session's replay: the one a caller stated for the node, or else the one the
+/// `declaration-sync-pacing` policy of `policy`, the session's own snapshot, states.
+fn session_pacing(
+    stated: Option<Option<ReplayPacing>>,
+    policy: &SessionPolicy,
+) -> Option<ReplayPacing> {
+    stated.unwrap_or_else(|| ReplayPacing::of_policy(policy))
 }
 
 /// How many declarations one turn of the replay sends: the pace's burst, or the whole list when the
@@ -468,6 +480,35 @@ mod tests {
         assert_eq!(replay_burst(None), usize::MAX);
         let pace = ReplayPacing::new(3, 10);
         assert_eq!(replay_burst(pace), 3);
+    }
+
+    /// A session replays at the pace its own snapshot states, and not the build's, unless a caller
+    /// stated one for the node: each value of `declaration-sync-pacing` the build's domain holds,
+    /// selected and handed in, gives the pace that value states.
+    #[test]
+    fn a_session_replays_at_the_pace_its_snapshot_states_unless_one_was_stated() {
+        use wz_session_core::policy::DeclarationSyncPacing;
+        let mut built = 0;
+        for on in [false, true] {
+            let mut policy = SessionPolicy::defaults();
+            if policy
+                .select_declaration_sync_pacing(DeclarationSyncPacing::from(on))
+                .is_err()
+            {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            assert_eq!(session_pacing(None, &policy).is_some(), on, "{on}");
+            assert_eq!(
+                session_pacing(None, &policy),
+                ReplayPacing::of_policy(&policy)
+            );
+            let stated = ReplayPacing::new(3, 10);
+            assert_eq!(session_pacing(Some(stated), &policy), stated);
+            assert_eq!(session_pacing(Some(None), &policy), None);
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
     }
 
     #[test]

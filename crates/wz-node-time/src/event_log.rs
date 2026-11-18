@@ -83,6 +83,12 @@ impl EventLog {
         }
     }
 
+    /// An empty log whose ring gives up, when it is full, what the `event-ring-full` policy of
+    /// `policy` says, `policy` being the snapshot of the scope the log belongs to.
+    pub const fn of_policy(policy: &SessionPolicy) -> Self {
+        Self::new(full_policy(policy.event_ring_full()))
+    }
+
     /// Record an event at `timestamp` (an NTP64 word from the node clock, or `0` where the node
     /// has none). `args` beyond `EVENT_RECORD_ARGS` are ignored.
     pub fn emit_at(&self, level: u8, source: u16, timestamp: u64, args: &[u64]) -> Pushed {
@@ -174,10 +180,18 @@ pub fn process_clock() -> impl wz_session_core::epoch::EpochSource + Copy {
     }
 }
 
-/// The log of this process, built with the build's policy.
+/// The log of this process. Its creator is the first call that wants it: the log is built then,
+/// once, from the snapshot `resolve_policy` resolves for the process.
 pub fn global() -> &'static EventLog {
     static GLOBAL: OnceLock<EventLog> = OnceLock::new();
-    GLOBAL.get_or_init(|| EventLog::new(full_policy(SessionPolicy::default().event_ring_full())))
+    GLOBAL.get_or_init(|| EventLog::of_policy(&resolve_policy()))
+}
+
+/// The snapshot the process's log is built from. The log belongs to the process and to no session,
+/// so no session can hand it one: this is where the process resolves it, from the build defaults
+/// until the process reads a configuration of its own.
+fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
 }
 
 #[cfg(test)]
@@ -379,6 +393,33 @@ mod tests {
             });
         });
         assert_eq!(log.observer().stored(), 8_000);
+    }
+
+    /// A log built from a snapshot gives up what that snapshot's `event-ring-full` says, whatever
+    /// the build states: each value the build's domain holds is selected, handed in, and the ring
+    /// filled one past its slots.
+    #[test]
+    fn a_log_gives_up_what_the_snapshot_it_is_handed_says() {
+        let mut built = 0;
+        for value in [EventRingFull::OverwriteOldest, EventRingFull::DropNewest] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_event_ring_full(value).is_err() {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            let log = EventLog::of_policy(&policy);
+            for _ in 0..=EVENT_RING_SLOTS {
+                log.emit_at(0, 0, 0, &[]);
+            }
+            assert_eq!(
+                log.dropped(),
+                u32::from(value == EventRingFull::DropNewest),
+                "{}",
+                value.id()
+            );
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
     }
 
     #[test]

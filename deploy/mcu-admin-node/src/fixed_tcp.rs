@@ -39,6 +39,7 @@ use wz_runtime_coop::udp_link::NoDatagram;
 use wz_runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -59,7 +60,10 @@ use wz_session_mcu::slot_admin::AcceptingAdminNode;
 use wz_session_mcu::slot_dial::{EventsOf, SessionFactory};
 use wz_session_mcu::slot_host::SessionHost;
 
-use crate::{fail, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT, ZID};
+use crate::{
+    fail, resolve_policy, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT,
+    ZID,
+};
 
 /// Sessions the node holds at most, accepted and dialled together.
 const SESSIONS: usize = 2;
@@ -263,6 +267,8 @@ fn service() {
 struct Factory {
     key: [u8; 32],
     observer: &'static ObserverCell<Sinks>,
+    /// The snapshot every session is made with.
+    policy: SessionPolicy,
 }
 
 impl SessionFactory<Clock, Driver> for Factory {
@@ -285,9 +291,9 @@ impl SessionFactory<Clock, Driver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: self.policy,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -420,7 +426,14 @@ fn start() -> Running {
         fail("the node's arena was used before");
     };
     let host: &'static Host = host;
-    let Some(factory) = STORAGE.run.put(|| RefCell::new(Factory { key, observer })) else {
+    let policy = resolve_policy();
+    let Some(factory) = STORAGE.run.put(|| {
+        RefCell::new(Factory {
+            key,
+            observer,
+            policy,
+        })
+    }) else {
         fail("the node's arena was used before");
     };
     let factory: &'static RefCell<Factory> = factory;

@@ -60,8 +60,9 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::session_open::{
     dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::CongestionControl;
-use wz_session_core::session_init_params::TxQueueConf;
+use wz_session_core::session_init_params::{TxQueueConf, WAIT_BEFORE_CLOSE_US};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::SampleView;
@@ -292,9 +293,17 @@ fn run(
     tokio::task::LocalSet::new().block_on(&runtime, serve(endpoints, commands, ready));
 }
 
+/// The snapshot a client's sessions are made with. The client opens its sessions from a
+/// configuration of its own, so it is their creator, and this is where it resolves the snapshot:
+/// the build defaults until it reads a run-time document.
+fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
+}
+
 /// The parameters a client opens a session with: the shape the watching-zenoh demo opens its client
-/// sessions with, and an identity drawn from the operating system's entropy.
-fn session_params() -> Result<SessionInitParams, ClientError> {
+/// sessions with, an identity drawn from the operating system's entropy, and `policy`, the snapshot
+/// the session's machines read and its queue is made from.
+fn session_params(policy: &SessionPolicy) -> Result<SessionInitParams, ClientError> {
     let mut zid = [0u8; 16];
     while zid.iter().all(|&b| b == 0) {
         OsEntropy
@@ -314,11 +323,11 @@ fn session_params() -> Result<SessionInitParams, ClientError> {
         batch_size: BATCH_SIZE,
         lease_ms: LEASE_MS,
         keep_alive: Default::default(),
-        tx_queue: Default::default(),
+        tx_queue: TxQueueConf::of_policy(policy),
         link_rx: Default::default(),
         initial_sn: 0,
         cookie: Vec::new(),
-        policy: wz_session_core::policy::SessionPolicy::defaults(),
+        policy: *policy,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
             ClientError::new(format!(
                 "no operating system entropy for a signing key: {e}"
@@ -330,8 +339,9 @@ fn session_params() -> Result<SessionInitParams, ClientError> {
 /// Dial each endpoint in order and open a session on the first that takes it.
 async fn open(endpoints: &[String]) -> Result<OpenedSession, ClientError> {
     let mut why = Vec::new();
+    let policy = resolve_policy();
     for endpoint in endpoints {
-        let params = session_params()?;
+        let params = session_params(&policy)?;
         let attempt = async {
             let link = dial_endpoint(endpoint, &DialConfig::default())
                 .await
@@ -529,9 +539,9 @@ fn handle(
 
 /// How long a blocking put waits for room on a link before the session gives the peer up: the
 /// default `wait_before_close`, which is what `session_params` leaves in the session's queue
-/// configuration.
+/// configuration. No policy moves it.
 fn block_wait() -> Duration {
-    Duration::from_micros(TxQueueConf::default().wait_before_close_us)
+    Duration::from_micros(WAIT_BEFORE_CLOSE_US)
 }
 
 /// What a put's answer means to the binding. A wz session mirrors upstream's: a put that waited its
@@ -619,9 +629,35 @@ mod tests {
 
     #[test]
     fn each_session_draws_an_identity_of_its_own() {
-        let first = session_params().expect("params");
-        let second = session_params().expect("params");
+        let policy = SessionPolicy::defaults();
+        let first = session_params(&policy).expect("params");
+        let second = session_params(&policy).expect("params");
         assert_ne!(first.zid, second.zid);
         assert!(!first.zid.is_empty() && first.zid.len() <= 16);
+    }
+
+    /// A client's session reads the snapshot it is handed and not the build: each value of
+    /// `tx-expiry-keeps-session` the build's domain holds, selected and handed in, is the value
+    /// the session's snapshot and its queue carry.
+    #[test]
+    fn a_session_carries_the_snapshot_it_is_handed() {
+        use wz_session_core::policy::TxExpiryKeepsSession;
+        let mut built = 0;
+        for keeps in [false, true] {
+            let mut policy = SessionPolicy::defaults();
+            if policy
+                .select_tx_expiry_keeps_session(TxExpiryKeepsSession::from(keeps))
+                .is_err()
+            {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            let params = session_params(&policy).expect("params");
+            assert_eq!(params.policy, policy);
+            assert_eq!(params.tx_queue.expiry_keeps_session, keeps, "{keeps}");
+            assert_eq!(params.tx_queue, TxQueueConf::of_policy(&policy));
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
     }
 }

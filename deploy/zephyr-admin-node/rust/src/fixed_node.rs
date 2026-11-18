@@ -58,6 +58,7 @@ use wz::session_lwip::session_host::SessionHost;
 use wz::session_lwip::slot_node::{SessionFactory, SlotAdminNode};
 use wz::session_lwip::{LwipLinks, LwipSessionLink};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -69,7 +70,7 @@ use wz_session_core::WhatAmI;
 use wz_session_mcu::slot_dial::EventsOf;
 
 use crate::net_lwip::{LwipMacNet, MAX_PORTS, SOCKETS as SOCKET_POOL};
-use crate::{BATCH_SIZE, LISTEN_PORT, STACK_CHECK_MS, TICK_HZ};
+use crate::{resolve_policy, BATCH_SIZE, LISTEN_PORT, STACK_CHECK_MS, TICK_HZ};
 
 /// Sessions the node holds at most, dialled and accepted together: the process's
 /// `max_sessions`.
@@ -242,6 +243,8 @@ struct Factory {
     zid: [u8; 6],
     key: [u8; 32],
     observer: &'static ObserverCell<Sinks>,
+    /// The snapshot every session is made with.
+    policy: SessionPolicy,
 }
 
 impl SessionFactory<Clock, LwipUdpDriver> for Factory {
@@ -264,9 +267,9 @@ impl SessionFactory<Clock, LwipUdpDriver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: self.policy,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -386,7 +389,12 @@ pub fn run(mut net: LwipMacNet) -> i32 {
         link,
     );
     let links = LwipLinks::new(link, &SOCKET_POOL);
-    let factory = RefCell::new(Factory { zid, key, observer });
+    let factory = RefCell::new(Factory {
+        zid,
+        key,
+        observer,
+        policy: resolve_policy(),
+    });
     let node = Node::new(
         &host,
         &links,

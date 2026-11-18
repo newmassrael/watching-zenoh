@@ -46,6 +46,7 @@ use wz::runtime_tokio::session_open::{
 };
 use wz::runtime_tokio::Reliability;
 use wz_session_core::locator::parse_any_locator;
+use wz_session_core::policy::SessionPolicy;
 
 use crate::{play, Plan, Sink};
 
@@ -155,7 +156,7 @@ async fn play_into_session(
         clock: _,
     } = connect_and_open_session(
         locator,
-        session_init_params().map_err(|e| {
+        session_init_params(&resolve_policy()).map_err(|e| {
             LiveError::Open(format!("no OS entropy for the cookie signing key: {e}"))
         })?,
         &cfg,
@@ -242,7 +243,11 @@ async fn play_into_session(
 /// an ordinary peer, which is what the captured publisher was.
 /// R311y820 — FALLIBLE: the cookie signing key is drawn from OS entropy rather
 /// than written as `vec![0xAB; 32]`, a literal this repository publishes.
+///
+/// `policy` is the snapshot the session's machines read and its queue is made
+/// from ([`resolve_policy`]).
 fn session_init_params(
+    policy: &SessionPolicy,
 ) -> Result<SessionInitParams, wz::runtime_tokio::session_glue::EntropyUnavailable> {
     Ok(SessionInitParams {
         whatami: WhatAmI::Peer,
@@ -254,11 +259,49 @@ fn session_init_params(
         keep_alive: wz::runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::default(),
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(policy),
         link_rx: wz::runtime_tokio::session_glue::LinkRxConf::default(),
-        policy: wz_session_core::policy::SessionPolicy::defaults(),
+        policy: *policy,
         cookie_signing_key: wz::runtime_tokio::session_glue::SigningKey::from_entropy(
             &mut wz::runtime_tokio::session_glue::OsEntropy,
         )?,
     })
+}
+
+/// The snapshot of the replay's session. The tool opens that session from a
+/// configuration of its own, so it is the session's creator, and this is where
+/// it resolves the snapshot: the build defaults until it reads a run-time
+/// document.
+fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wz_session_core::policy::TxNoProgressDeadline;
+
+    /// The replay's session reads the snapshot it is handed and not the build:
+    /// each value of `tx-no-progress-deadline` the build's domain holds,
+    /// selected and handed in, is the value the session's snapshot and its
+    /// queue carry.
+    #[test]
+    fn the_replay_session_carries_the_snapshot_it_is_handed() {
+        let mut built = 0;
+        for on in [false, true] {
+            let mut policy = SessionPolicy::defaults();
+            if policy
+                .select_tx_no_progress_deadline(TxNoProgressDeadline::from(on))
+                .is_err()
+            {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            let params = session_init_params(&policy).expect("OS entropy");
+            assert_eq!(params.policy, policy);
+            assert_eq!(params.tx_queue.no_progress_us.is_some(), on, "{on}");
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
+    }
 }

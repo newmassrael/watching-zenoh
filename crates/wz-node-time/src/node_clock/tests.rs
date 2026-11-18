@@ -202,6 +202,41 @@ fn the_data_stamp_names_why_there_is_none() {
     ));
 }
 
+/// A node stamps by the `clock-quality-stamping` policy of the snapshot its creator handed it,
+/// whatever the build states: each value the build's domain holds gives a node whose untrusted
+/// clock withholds the stamp of data exactly when that value is `trusted-only`.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_node_stamps_by_the_snapshot_it_is_handed() {
+    use wz_session_core::policy::ClockQualityStamping;
+    let mut built = 0;
+    for value in [
+        ClockQualityStamping::Always,
+        ClockQualityStamping::TrustedOnly,
+    ] {
+        let mut policy = SessionPolicy::defaults();
+        if policy.select_clock_quality_stamping(value).is_err() {
+            // The build's domain leaves this value out: no creator can hand it.
+            continue;
+        }
+        let node = NodeHlc::for_node_over_source_by(
+            &[0x01],
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            FrozenEpoch,
+            &policy,
+        );
+        assert_eq!(
+            node.data_stamp() == DataStamp::Withheld,
+            value == ClockQualityStamping::TrustedOnly,
+            "{}",
+            value.id()
+        );
+        built += 1;
+    }
+    assert!(built >= 1, "the build's domain holds at least its default");
+}
+
 #[cfg(feature = "time-hlc")]
 #[test]
 fn a_node_that_holds_no_clock_gives_no_reading_either() {

@@ -125,6 +125,8 @@ use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::network_message::NetworkMessage;
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+use wz_session_core::policy::SessionPolicy;
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::sn::{self, MulticastTxConduits};
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
@@ -310,7 +312,8 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     //    an UnknownPeer drop). Injected BEFORE wrapping the socket in the
     //    driver so the loop's first poll delivers it ahead of our own beacon
     //    echo, creating the (src_addr, src_port) entry the fragments match.
-    let mut peer = params(PEER_ZID);
+    let policy = resolve_policy();
+    let mut peer = params(PEER_ZID, &policy);
     peer.batch_size = BATCH_SIZE;
     let peer_join = encode_join(
         &peer,
@@ -321,7 +324,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     let mut driver = LwipMulticastDriver::new(socket, group, PORT);
     let mut dispatcher = MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000));
     let runtime = CoopRuntime::new(clock_source);
-    let mut self_params = params(SELF_ZID);
+    let mut self_params = params(SELF_ZID, &policy);
     self_params.batch_size = BATCH_SIZE;
 
     // The oversize payload: deterministic bytes, length 200 > batch_size 64.
@@ -357,6 +360,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
             tick_ms: 5,
             max_iters: Some(MAX_ITERS),
         },
+        &policy,
         &runtime,
         link,
         &mut driver,
@@ -398,6 +402,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
             tick_ms: 5,
             max_iters: Some(MAX_ITERS),
         },
+        &policy,
         &runtime,
         link,
         &mut driver,
@@ -430,7 +435,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
 /// caller overrides `batch_size` to the tiny value that forces fragmentation
 /// (and matches it on both sides so `validate_join` admits the peer).
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
-fn params(zid: &[u8]) -> MulticastParams {
+fn params(zid: &[u8], policy: &SessionPolicy) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::multicast_params::zid_vec(zid),
@@ -441,9 +446,17 @@ fn params(zid: &[u8]) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
     }
+}
+
+/// The snapshot of the e2e's group session. The e2e opens that session from a configuration
+/// of its own, so it is the session's creator, and this is where it resolves the snapshot: the
+/// build defaults until it reads a run-time document.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
 }

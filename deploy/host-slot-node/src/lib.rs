@@ -20,6 +20,7 @@ use core::marker::PhantomData;
 use wz_runtime_posix::glue::{log_parts, yield_us};
 use wz_runtime_posix::PosixEntropy;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::text_out::LogPart;
 use wz_session_mcu::slot_node::{NodePort, SIGNING_KEY_BYTES, ZID_MAX};
 
@@ -126,6 +127,13 @@ pub fn fresh_signing_key() -> Result<[u8; SIGNING_KEY_BYTES], &'static str> {
         .try_fill_bytes(&mut key)
         .map_err(|_| NO_ENTROPY)?;
     Ok(key)
+}
+
+/// The snapshot of every session a node of this host opens, its group's among them. A node's
+/// start is the creator of its sessions, and this is where it resolves the snapshot: the build
+/// defaults until the node reads a run-time document.
+pub fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
 }
 
 /// How a node joins its multicast group on the host.

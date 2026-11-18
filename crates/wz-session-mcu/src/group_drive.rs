@@ -164,6 +164,7 @@ use wz_session_core::multicast_dispatch::{
 };
 use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
+use wz_session_core::policy::SessionPolicy;
 // R311mf/R311mh — multicast Fragment RX reassembly. The reassembly-divergent
 // tail (FrameOutOfOrder chain abort / Fragment reassembly / pre-Close peer-chain
 // abort) + the sweep tail are the shared wz_session_core multicast_rx SSOTs
@@ -479,6 +480,8 @@ impl<const N: usize> MulticastReplyEnqueue for &'static MulticastReplyQueue<N> {
 ///   capacity.
 /// - `cfg` — the shared [`MulticastDriveConfig`] (protocol `params`, the
 ///   `tick_ms` sweep cadence, the test-only `max_iters` budget).
+/// - `policy` — the session's snapshot, which its creator resolved: what the
+///   session's reassembly does with a full pool is read from it.
 /// - `runtime` — the cooperative runtime pumped each tick
 ///   (`run_until_idle`). The loop derives its monotonic clock from `runtime`
 ///   directly: unlike the unicast `run_session` (which takes an
@@ -502,6 +505,7 @@ impl<const N: usize> MulticastReplyEnqueue for &'static MulticastReplyQueue<N> {
 pub fn run_multicast_session<'g, C, T, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
+    policy: &SessionPolicy,
     runtime: &CoopRuntime<C>,
     transport: &mut T,
     on_event: F,
@@ -513,7 +517,9 @@ where
     F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
 {
-    run_multicast_session_inner(dispatcher, cfg, runtime, transport, on_event, next_tx, None)
+    run_multicast_session_inner(
+        dispatcher, cfg, policy, runtime, transport, on_event, next_tx, None,
+    )
 }
 
 /// R2375 — [`run_multicast_session`] plus the GRACEFUL STOP signal: the §3.1
@@ -537,9 +543,11 @@ where
 ///
 /// Every other parameter is [`run_multicast_session`]'s, unchanged — that entry
 /// point is this one with a predicate that never fires, and both run ONE body.
+#[allow(clippy::too_many_arguments)]
 pub fn run_multicast_session_with_shutdown<'g, C, T, F, G, H, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
+    policy: &SessionPolicy,
     runtime: &CoopRuntime<C>,
     transport: &mut T,
     on_event: F,
@@ -556,6 +564,7 @@ where
     run_multicast_session_inner(
         dispatcher,
         cfg,
+        policy,
         runtime,
         transport,
         on_event,
@@ -647,6 +656,7 @@ where
 pub fn run_multicast_session_rejoining<'g, C, T, F, G, H, B, D, const MAX_PEERS: usize>(
     mut new_dispatcher: D,
     cfg: MulticastDriveConfig<'_>,
+    policy: &SessionPolicy,
     runtime: &CoopRuntime<C>,
     transport: T,
     mut on_event: F,
@@ -684,6 +694,7 @@ where
                 tick_ms,
                 max_iters,
             },
+            policy,
             runtime,
             &mut transport,
             &mut on_event,
@@ -727,9 +738,11 @@ where
 /// ([`multicast_session_task`]) beside other sessions. This loop drives that step
 /// with the executor pass taken INLINE, at the two points this body always took
 /// it, so its behaviour is unchanged.
+#[allow(clippy::too_many_arguments)]
 fn run_multicast_session_inner<'g, C, T, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
+    policy: &SessionPolicy,
     runtime: &CoopRuntime<C>,
     transport: &mut T,
     mut on_event: F,
@@ -742,8 +755,14 @@ where
     F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
 {
-    let mut pump =
-        MulticastPump::with_pass(dispatcher, cfg, runtime, transport, ExecutorPass::Inline);
+    let mut pump = MulticastPump::with_pass(
+        dispatcher,
+        cfg,
+        policy,
+        runtime,
+        transport,
+        ExecutorPass::Inline,
+    );
     loop {
         if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, should_stop.as_deref_mut()) {
             return outcome;
@@ -861,18 +880,31 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// iteration. A transport that cannot be opened sends nothing: the first
     /// step reports [`MulticastOutcome::LinkLost`]. The step of the pump this
     /// returns does NOT take the executor pass (see [`MulticastPump`]).
+    ///
+    /// `policy` is the session's snapshot: the pump reads what it needs of it
+    /// here, once, and keeps none of it.
     pub fn new(
         dispatcher: &'a mut MulticastDispatcher<MAX_PEERS>,
         cfg: MulticastDriveConfig<'a>,
+        policy: &SessionPolicy,
         runtime: &'a CoopRuntime<C>,
         transport: &'a mut T,
     ) -> Self {
-        Self::with_pass(dispatcher, cfg, runtime, transport, ExecutorPass::Hosted)
+        Self::with_pass(
+            dispatcher,
+            cfg,
+            policy,
+            runtime,
+            transport,
+            ExecutorPass::Hosted,
+        )
     }
 
+    #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
     fn with_pass(
         dispatcher: &'a mut MulticastDispatcher<MAX_PEERS>,
         cfg: MulticastDriveConfig<'a>,
+        policy: &SessionPolicy,
         runtime: &'a CoopRuntime<C>,
         transport: &'a mut T,
         pass: ExecutorPass,
@@ -921,7 +953,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             reasm: {
                 // The group's `transport/link/rx/max_message_size`, as the AP
                 // group loop applies it.
-                let mut reasm = mcu_reassembly();
+                let mut reasm = mcu_reassembly(policy);
                 reasm.set_max_message_bytes(params.link_rx.max_message_size);
                 reasm
             },
@@ -1185,6 +1217,9 @@ pub struct MulticastSession<T: GroupTransport, const MAX_PEERS: usize> {
     pub transport: T,
     /// The protocol parameters this session advertises, its own zid among them.
     pub params: MulticastParams,
+    /// The value of every policy this session's machines read: the snapshot its creator
+    /// resolved for it.
+    pub policy: SessionPolicy,
     /// The sweep cadence (see [`MulticastDriveConfig::tick_ms`]).
     pub tick_ms: u64,
     /// The test budget (see [`MulticastDriveConfig::max_iters`]); `None` in
@@ -1224,6 +1259,7 @@ where
         mut dispatcher,
         transport,
         params,
+        policy,
         tick_ms,
         max_iters,
     } = session;
@@ -1232,6 +1268,7 @@ where
         &mut dispatcher,
         transport,
         params,
+        &policy,
         tick_ms,
         max_iters,
         on_event,
@@ -1250,6 +1287,7 @@ async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     mut transport: T,
     params: MulticastParams,
+    policy: &SessionPolicy,
     tick_ms: u64,
     max_iters: Option<usize>,
     mut on_event: F,
@@ -1270,6 +1308,7 @@ where
             tick_ms,
             max_iters,
         },
+        policy,
         &runtime,
         &mut transport,
     );
@@ -1294,23 +1333,26 @@ pub struct MulticastSessionSeed<T: GroupTransport, const MAX_PEERS: usize> {
     config: MulticastConfig,
     transport: T,
     params: MulticastParams,
+    policy: SessionPolicy,
     tick_ms: u64,
     max_iters: Option<usize>,
 }
 
 impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEERS> {
-    /// A seed over the group `transport`, with the same parameters and cadence as the fields of
-    /// [`MulticastSession`] of those names, and no test budget.
+    /// A seed over the group `transport`, with the same parameters, snapshot and cadence as the
+    /// fields of [`MulticastSession`] of those names, and no test budget.
     pub fn new(
         config: MulticastConfig,
         transport: T,
         params: MulticastParams,
+        policy: SessionPolicy,
         tick_ms: u64,
     ) -> Self {
         Self {
             config,
             transport,
             params,
+            policy,
             tick_ms,
             max_iters: None,
         }
@@ -1371,6 +1413,7 @@ where
         config,
         transport,
         params,
+        policy,
         tick_ms,
         max_iters,
     } = seed;
@@ -1383,6 +1426,7 @@ where
         dispatcher.get(),
         transport,
         params,
+        &policy,
         tick_ms,
         max_iters,
         on_event,
@@ -1630,6 +1674,7 @@ impl<
                 dispatcher,
                 transport,
                 params,
+                policy,
                 tick_ms,
                 max_iters,
             } = session_place;
@@ -1640,6 +1685,7 @@ impl<
                     tick_ms: *tick_ms,
                     max_iters: *max_iters,
                 },
+                policy,
                 runtime_place,
                 transport,
             );

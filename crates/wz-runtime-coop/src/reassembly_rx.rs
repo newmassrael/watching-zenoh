@@ -21,7 +21,8 @@
 //! and drives it:
 //!
 //! ```ignore
-//! let mut reasm = wz_runtime_coop::reassembly_rx::mcu_reassembly();
+//! // `policy`: the session's snapshot (`SessionInitParams::policy`).
+//! let mut reasm = wz_runtime_coop::reassembly_rx::mcu_reassembly(&policy);
 //! // on each decoded inbound fragment (zid from the established session;
 //! // sn_mask = the session's negotiated SN ring, `negotiated_sn_mask()`):
 //! reasm.ingest(frag, sn_mask, now_ms, |msg| { /* re-parse + dispatch */ });
@@ -75,24 +76,24 @@ pub type CoopReassembly = ReassemblyDispatcher<MCU_REASSEMBLY_SLOTS, MCU_REASSEM
 /// Reassembly config (`per_peer_quota` / `reassembly_timeout_ms`) from
 /// the MCU buffer-pool SSOT. The emit types them as `u32`;
 /// [`ReassemblyConfig`] takes `u16` / `u64`, so the two widening casts
-/// are the only adaptation. What a full pool does is the build's
-/// `reassembly-pool-overflow` policy.
-pub fn mcu_reassembly_config() -> ReassemblyConfig {
+/// are the only adaptation. What a full pool does is the
+/// `reassembly-pool-overflow` policy of `policy`, the snapshot of the session
+/// that reassembles.
+pub fn mcu_reassembly_config(policy: &SessionPolicy) -> ReassemblyConfig {
     ReassemblyConfig::new(
         crate::reassembly_pool_mcu::PER_PEER_QUOTA as u16,
         crate::reassembly_pool_mcu::REASSEMBLY_TIMEOUT_MS as u64,
     )
-    .with_pool_overflow(PoolOverflow::of_policy(
-        SessionPolicy::default().reassembly_pool_overflow(),
-    ))
+    .with_pool_overflow(PoolOverflow::of_policy(policy.reassembly_pool_overflow()))
 }
 
 /// Construct the MCU reassembly Router with the deploy-sourced MCU pool
-/// dims + config. The MCU main loop owns the returned dispatcher and
-/// drives it via [`ReassemblyDispatcher::ingest`] /
-/// [`ReassemblyDispatcher::sweep`] (see the module docs).
-pub fn mcu_reassembly() -> CoopReassembly {
-    CoopReassembly::new(mcu_reassembly_config())
+/// dims + config, for the session whose snapshot is `policy`. The MCU main
+/// loop owns the returned dispatcher and drives it via
+/// [`ReassemblyDispatcher::ingest`] / [`ReassemblyDispatcher::sweep`] (see the
+/// module docs).
+pub fn mcu_reassembly(policy: &SessionPolicy) -> CoopReassembly {
+    CoopReassembly::new(mcu_reassembly_config(policy))
 }
 
 #[cfg(feature = "rx-in-place")]
@@ -132,6 +133,7 @@ mod in_place {
     use alloc::boxed::Box;
 
     use wz_session_core::chain_staging::{ChainStaging, StagingError};
+    use wz_session_core::policy::SessionPolicy;
     use wz_session_core::reassembly_dispatch::ReassemblyDispatcher;
 
     use super::{mcu_reassembly_config, MCU_REASSEMBLY_SLOTS, MCU_REASSEMBLY_SLOT_SIZE};
@@ -374,9 +376,13 @@ mod in_place {
     pub type InPlaceReassembly =
         ReassemblyDispatcher<MCU_REASSEMBLY_SLOTS, MCU_REASSEMBLY_SLOT_SIZE, ReassemblyArena>;
 
-    /// The Router over `arena`, with the MCU pool's config.
-    pub fn in_place_reassembly(arena: ReassemblyArena) -> InPlaceReassembly {
-        InPlaceReassembly::with_staging(mcu_reassembly_config(), arena)
+    /// The Router over `arena`, with the MCU pool's config, for the session
+    /// whose snapshot is `policy`.
+    pub fn in_place_reassembly(
+        arena: ReassemblyArena,
+        policy: &SessionPolicy,
+    ) -> InPlaceReassembly {
+        InPlaceReassembly::with_staging(mcu_reassembly_config(policy), arena)
     }
 }
 
@@ -436,8 +442,11 @@ mod in_place_tests {
 
     fn pair() -> (CoopReassembly, InPlaceReassembly) {
         (
-            mcu_reassembly(),
-            in_place_reassembly(ReassemblyArena::new(PoolStorage::owned())),
+            mcu_reassembly(&SessionPolicy::defaults()),
+            in_place_reassembly(
+                ReassemblyArena::new(PoolStorage::owned()),
+                &SessionPolicy::defaults(),
+            ),
         )
     }
 
@@ -560,7 +569,7 @@ mod in_place_tests {
         assert_eq!(a.0, IngestOutcome::Refused(RefuseReason::PoolExhausted));
         quiescent(&heap, &pooled);
 
-        let timeout = mcu_reassembly_config().reassembly_timeout_ms;
+        let timeout = mcu_reassembly_config(&SessionPolicy::defaults()).reassembly_timeout_ms;
         assert_eq!(heap.sweep(timeout), MCU_REASSEMBLY_SLOTS);
         assert_eq!(pooled.sweep(timeout), MCU_REASSEMBLY_SLOTS);
         quiescent(&heap, &pooled);
@@ -582,8 +591,10 @@ mod in_place_tests {
             PoolStorage::Static(_) => unreachable!("owned() owns"),
         };
         let placed_at = placed as *const ReassemblyPoolMcu as usize;
-        let mut first = in_place_reassembly(ReassemblyArena::new(PoolStorage::Static(placed)));
-        let mut second = in_place_reassembly(ReassemblyArena::new(PoolStorage::owned()));
+        let policy = SessionPolicy::defaults();
+        let mut first =
+            in_place_reassembly(ReassemblyArena::new(PoolStorage::Static(placed)), &policy);
+        let mut second = in_place_reassembly(ReassemblyArena::new(PoolStorage::owned()), &policy);
 
         first.ingest(frag(b"p", 1, true, b"hello "), MASK, 0, |_| {
             panic!("not final")
@@ -661,26 +672,45 @@ mod tests {
     fn mcu_dims_come_from_the_buffer_pool_ssot() {
         assert_eq!(MCU_REASSEMBLY_SLOTS, 4);
         assert_eq!(MCU_REASSEMBLY_SLOT_SIZE, 4096);
-        let cfg = mcu_reassembly_config();
+        let cfg = mcu_reassembly_config(&SessionPolicy::defaults());
         assert_eq!(cfg.per_peer_quota, 2);
         assert_eq!(cfg.reassembly_timeout_ms, 500);
     }
 
-    /// What a full pool does is the build's policy, not the constructor's
-    /// default: the config carries the value `reassembly-pool-overflow` states.
+    /// What a full pool does is the session's policy, not the constructor's
+    /// default nor the build's: the config carries the value of
+    /// `reassembly-pool-overflow` the snapshot it is handed holds, for every
+    /// value the build's domain lets a creator select.
     #[test]
-    fn the_mcu_pool_overflow_is_the_builds_policy() {
-        assert_eq!(
-            mcu_reassembly_config().pool_overflow,
-            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow())
-        );
+    fn the_mcu_pool_overflow_is_the_snapshots_policy() {
+        use wz_session_core::policy::ReassemblyPoolOverflow;
+        let mut built = 0;
+        for value in [
+            ReassemblyPoolOverflow::Reject,
+            ReassemblyPoolOverflow::DiagnosticEvent,
+            ReassemblyPoolOverflow::OldestWins,
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_reassembly_pool_overflow(value).is_err() {
+                // The build's domain leaves this value out: no creator can hand it.
+                continue;
+            }
+            assert_eq!(
+                mcu_reassembly_config(&policy).pool_overflow,
+                PoolOverflow::of_policy(value),
+                "{}",
+                value.id()
+            );
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
     }
 
     /// Driving the MCU seam exactly as the main loop will: a two-fragment
     /// chain reassembles its concatenated payload in SN order, no alloc.
     #[test]
     fn mcu_seam_reassembles_a_two_fragment_chain() {
-        let mut reasm = mcu_reassembly();
+        let mut reasm = mcu_reassembly(&SessionPolicy::defaults());
 
         let r0 = reasm.ingest(frag(7, 1, b"lwip "), MASK, 0, |_| panic!("not final"));
         assert_eq!(r0, IngestOutcome::Begun);
@@ -700,7 +730,7 @@ mod tests {
     /// a chain past the MCU pool's 500 ms window.
     #[test]
     fn mcu_seam_sweep_times_out_a_stale_chain() {
-        let mut reasm = mcu_reassembly();
+        let mut reasm = mcu_reassembly(&SessionPolicy::defaults());
         reasm.ingest(frag(1, 1, b"partial"), MASK, 0, |_| {});
         assert_eq!(reasm.active_chains(), 1);
         // Before the deadline: nothing reclaimed.

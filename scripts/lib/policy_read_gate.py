@@ -109,12 +109,12 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-capi-core/src/open_plan.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-pico/src/session.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-port/src/observation/supervision.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
-    ("crates/wz-mcu-session-acceptor/src/lib.rs", "acceptor_params", STEP_3B),
-    ("crates/wz-mesh-client/src/lib.rs", "session_params", STEP_3B),
-    ("crates/wz-node-time/src/event_log.rs", "global", STEP_3B),
-    ("crates/wz-node-time/src/node_clock.rs", "over_source", STEP_3B),
-    ("crates/wz-replay/src/live.rs", "session_init_params", STEP_3B),
-    ("crates/wz-runtime-coop/src/reassembly_rx.rs", "mcu_reassembly_config", STEP_3B),
+    ("crates/wz-mcu-multicast-e2e/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-mcu-session-acceptor/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-mesh-client/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-node-time/src/event_log.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-node-time/src/node_clock.rs", "build_defaults", WRAPPER + " (NodeHlc::for_node_by and its two siblings)"),
+    ("crates/wz-replay/src/live.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-runtime-tokio-test-support/src/lib.rs", "fixture_policy", "creator: resolves the snapshot (build defaults until a run-time document is read); a test fixture"),
     ("crates/wz-runtime-tokio/src/datagram_pacing.rs", "of_build_defaults", WRAPPER + " (Pacing::of_policy); the multicast writer's, until MulticastParams carries a snapshot"),
     ("crates/wz-runtime-tokio/src/lib.rs", "default", WRAPPER + " (McastSocketConfig::of_policy and McastGroupOptions::of_policy)"),
@@ -122,7 +122,6 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-runtime-tokio/src/router_forward.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-runtime-tokio/src/session/mod.rs", "new_multicast", WRAPPER + " (Session::with_policy); until MulticastParams carries a snapshot"),
     ("crates/wz-runtime-tokio/src/session_open.rs", "wire_dialed_link", WRAPPER + " (wire_dialed_link_with_rx)"),
-    ("crates/wz-session-mcu/src/slot_node.rs", "params_as", STEP_3B),
 )
 
 #: The items a read can be in. A `const fn` is a `fn`; `const` and `static` are named by the

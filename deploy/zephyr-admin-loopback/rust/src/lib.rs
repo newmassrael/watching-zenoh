@@ -43,6 +43,7 @@ use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Commander, Ver
 use wz_session_core::lifecycle_wire::{RefusedReason, StatusVerdict};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::DirectoryZid;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::reply_sink::{ReplyKind, ReplySink, ReplyView};
 use wz_session_core::sample::QosLevel;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
@@ -301,6 +302,16 @@ struct ServerFactory {
     zid: [u8; CREDENTIAL_ZID_BYTES],
     key: [u8; SIGNING_KEY_BYTES],
     observer: &'static ObserverCell<Sinks>,
+    /// The snapshot every session is made with.
+    policy: SessionPolicy,
+}
+
+/// The snapshot of every session this image opens, the admin node's and the client's. The image's
+/// start is the creator of both nodes' sessions, and this is where it resolves the snapshot: the
+/// build defaults until the image reads a run-time document. A policy the image does not widen is
+/// one value on this target, and takes no byte.
+pub fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
 }
 
 impl SessionFactory<Clock, Driver> for ServerFactory {
@@ -324,9 +335,9 @@ impl SessionFactory<Clock, Driver> for ServerFactory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: self.policy,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -774,9 +785,17 @@ fn start_server(
         })
         .ok_or(c"wz: FAIL - the admin node's arena is too small")?;
     let host: &'static SessionHost<Clock, Stack, ZephyrEntropy, SESSIONS, SESSIONS> = parts;
+    let policy = resolve_policy();
     let factory = SERVER
         .run
-        .put(|| RefCell::new(ServerFactory { zid, key, observer }))
+        .put(|| {
+            RefCell::new(ServerFactory {
+                zid,
+                key,
+                observer,
+                policy,
+            })
+        })
         .ok_or(c"wz: FAIL - the admin node's arena is too small")?;
     let factory: &'static RefCell<ServerFactory> = factory;
     let node = AcceptingAdminNode::new(
@@ -891,6 +910,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         plane: NoPlane,
         identity,
         batch_size: BATCH,
+        policy: resolve_policy(),
         entropy: || ZephyrEntropy,
         endpoints: &ENDPOINTS,
         peers: &[],

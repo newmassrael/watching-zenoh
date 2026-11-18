@@ -744,16 +744,22 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Self {
+        // The reassembly is the session's, so it is built from the session's own snapshot.
+        #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
+        let reasm = mcu_reassembly(&actions.params.policy);
+        #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+        let reasm = in_place_reassembly(
+            ReassemblyArena::new(PoolStorage::owned()),
+            &actions.params.policy,
+        );
         Self::build(
             runtime,
             link,
             actions,
             clock,
             config,
-            #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
-            mcu_reassembly(),
-            #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
-            in_place_reassembly(ReassemblyArena::new(PoolStorage::owned())),
+            #[cfg(feature = "reassembly")]
+            reasm,
         )
     }
 
@@ -770,14 +776,8 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         config: SessionDriveConfig,
         arena: ReassemblyArena,
     ) -> Self {
-        Self::build(
-            runtime,
-            link,
-            actions,
-            clock,
-            config,
-            in_place_reassembly(arena),
-        )
+        let reasm = in_place_reassembly(arena, &actions.params.policy);
+        Self::build(runtime, link, actions, clock, config, reasm)
     }
 
     /// `rx-in-place` with `reassembly` — the session's reassembly Router, and
@@ -1494,6 +1494,9 @@ impl<
             let place = unsafe { &mut *cell.pool.get() };
             ReassemblyArena::new(PoolStorage::zeroed_in(place))
         };
+        // The reassembly is the session's, so it is built from the session's own snapshot.
+        #[cfg(feature = "reassembly")]
+        let reasm = in_place_reassembly(arena, &actions.params.policy);
         // SAFETY: the cell is `taken` by this call alone, and its pump is
         // uninitialised: either it was never written or its last pump was dropped
         // in place by the `PumpRef` that freed the cell. The pump is built in the cell,
@@ -1507,7 +1510,7 @@ impl<
                 clock,
                 config,
                 #[cfg(feature = "reassembly")]
-                in_place_reassembly(arena),
+                reasm,
             );
         }
         Ok(PumpRef { cell })
