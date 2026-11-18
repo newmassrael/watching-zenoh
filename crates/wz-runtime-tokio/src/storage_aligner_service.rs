@@ -304,7 +304,7 @@ where
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
         config: ReplicationConfig,
-        local_zid: Vec<u8>,
+        local_zid: wz_session_core::session_zid::SessionZid,
     ) -> Result<Self, QueryableError>
     where
         B: StorageBackend + Send + 'static,
@@ -882,7 +882,7 @@ mod tests {
 
         let config = cfg();
         let state = Arc::new(Mutex::new(StorageState::new(MemoryStorage::new()).unwrap()));
-        let aligner = AlignerService::declare(&session, state, config, vec![0x01]);
+        let aligner = AlignerService::declare(&session, state, config, [0x01].into());
         assert!(
             aligner.is_ok(),
             "the aligner answer queryable declares on @zid/<zid>/<fp>/aligner"

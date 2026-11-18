@@ -156,13 +156,13 @@ async fn wz_multi_storage_host_serves_both_storages_to_a_pico_zget() {
     mgr.add_storage(
         &session,
         &StorageConfig::new("sa", "a/**", "mem"),
-        vec![0x01],
+        [0x01].into(),
     )
     .expect("host storage sa on a/**");
     mgr.add_storage(
         &session,
         &StorageConfig::new("sb", "b/**", "mem"),
-        vec![0x02],
+        [0x02].into(),
     )
     .expect("host storage sb on b/**");
     for (name, key, value) in [("sa", KEY_A, VALUE_A), ("sb", KEY_B, VALUE_B)] {

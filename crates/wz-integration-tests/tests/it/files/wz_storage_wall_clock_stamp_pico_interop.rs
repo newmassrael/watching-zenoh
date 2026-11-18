@@ -182,7 +182,8 @@ async fn wz_storage_stamps_an_untimestamped_pico_put_with_the_wall_clock() {
     let storage = StorageService::declare(
         &session,
         &StorageConfig::new("demo", STORAGE_KEYEXPR, "mem"),
-        STORAGE_STAMPER_ZID.to_vec(),
+        wz_runtime_tokio::session_glue::SessionZid::new(STORAGE_STAMPER_ZID)
+            .expect("the stamper zid is one"),
     )
     .expect("declare the wz storage on demo/**");
 

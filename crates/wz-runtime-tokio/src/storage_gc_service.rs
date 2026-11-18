@@ -221,7 +221,7 @@ mod tests {
         let storage = StorageService::declare(
             &session,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            [0x01].into(),
         )
         .expect("storage declares");
         let state = storage.shared_state();
@@ -255,7 +255,7 @@ mod tests {
         let storage = StorageService::declare(
             &session,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            [0x01].into(),
         )
         .expect("storage declares");
         let state = storage.shared_state();
@@ -291,7 +291,7 @@ mod tests {
         let storage = StorageService::declare(
             &session,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            [0x01].into(),
         )
         .expect("storage declares");
         let state = storage.shared_state();
@@ -328,7 +328,7 @@ mod tests {
         let storage = StorageService::declare(
             &session,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            [0x01].into(),
         )
         .expect("storage declares");
         let state = storage.shared_state();

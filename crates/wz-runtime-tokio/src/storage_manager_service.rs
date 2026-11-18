@@ -93,6 +93,7 @@ use std::collections::BTreeMap;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
+use wz_session_core::session_zid::SessionZid;
 use wz_storage::storage_backend::StorageBackend;
 use wz_storage::storage_config::StorageConfig;
 use wz_storage::storage_manager::{VolumeRegistry, VolumeRegistryError};
@@ -306,7 +307,7 @@ pub enum RuntimeStorageManagerError {
     /// `VolumeNotFound` / `VolumeCreate`). Nothing is hosted.
     Volume(VolumeRegistryError),
     /// The live [`StorageService`] declaration was rejected (a bad keyexpr, a
-    /// disabled queryable, an empty `local_zid`, …). Nothing is hosted.
+    /// disabled queryable, …). Nothing is hosted.
     Service(StorageServiceError),
 }
 
@@ -700,7 +701,7 @@ where
     /// `session` could not carry because its transport is gone is NOT an error:
     /// the storage is hosted unbound, per the module's lifetime contract, and
     /// [`rebind_all`](Self::rebind_all) binds it to the next live session.
-    /// `local_zid` is the storage's fallback-stamp identity (must be non-empty).
+    /// `local_zid` is the storage's fallback-stamp identity.
     /// R311y503 — the extra bounds sit on the METHOD, not on the impl block, so
     /// only the path that now spawns a task carries them: the collector is a
     /// `tokio::spawn`, which needs the session's runtime and clock to be `Send`
@@ -710,7 +711,7 @@ where
         &mut self,
         session: &Session<R, T, Unicast>,
         config: &StorageConfig,
-        local_zid: Vec<u8>,
+        local_zid: SessionZid,
     ) -> Result<(), RuntimeStorageManagerError>
     where
         R: 'static,
@@ -781,12 +782,12 @@ where
     pub fn rebind_all(
         &mut self,
         session: &Session<R, T, Unicast>,
-        local_zid: Vec<u8>,
+        local_zid: SessionZid,
     ) -> Result<(), RuntimeStorageManagerError> {
         for entry in self.services.values_mut() {
             entry
                 .service
-                .rebind(session, &entry.config, local_zid.clone())
+                .rebind(session, &entry.config, local_zid)
                 .map_err(RuntimeStorageManagerError::Service)?;
         }
         Ok(())
@@ -810,7 +811,7 @@ where
         &mut self,
         session: &Session<R, T, Unicast>,
         config: StoragePluginConfig,
-        local_zid: &[u8],
+        local_zid: SessionZid,
     ) -> Vec<PluginApplyError>
     where
         R: 'static,
@@ -858,7 +859,7 @@ where
         session: &Session<R, T, Unicast>,
         old: &StoragePluginConfig,
         new: StoragePluginConfig,
-        local_zid: &[u8],
+        local_zid: SessionZid,
     ) -> Result<(), PluginApplyError>
     where
         R: 'static,
@@ -879,7 +880,7 @@ where
         &mut self,
         session: &Session<R, T, Unicast>,
         step: &ConfigDiff,
-        local_zid: &[u8],
+        local_zid: SessionZid,
     ) -> Result<(), PluginApplyError>
     where
         R: 'static,
@@ -903,7 +904,7 @@ where
                 Ok(())
             }
             ConfigDiff::AddStorage(storage) => self
-                .add_storage(session, &storage.to_storage_config(), local_zid.to_vec())
+                .add_storage(session, &storage.to_storage_config(), local_zid)
                 .map_err(|error| PluginApplyError::Storage {
                     storage: storage.name.clone(),
                     error,
@@ -934,7 +935,7 @@ where
 pub struct StorageManagerSink<'a, R: SessionRuntime, T: TimeSource> {
     manager: core::cell::RefCell<&'a mut RuntimeStorageManager<R, T>>,
     session: &'a Session<R, T, Unicast>,
-    local_zid: &'a [u8],
+    local_zid: SessionZid,
     reports: core::cell::RefCell<Vec<String>>,
 }
 
@@ -945,7 +946,7 @@ impl<'a, R: SessionRuntime, T: TimeSource> StorageManagerSink<'a, R, T> {
     pub fn new(
         manager: &'a mut RuntimeStorageManager<R, T>,
         session: &'a Session<R, T, Unicast>,
-        local_zid: &'a [u8],
+        local_zid: SessionZid,
     ) -> Self {
         Self {
             manager: core::cell::RefCell::new(manager),
@@ -1075,7 +1076,7 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "demo/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("storage hosts");
 
@@ -1131,7 +1132,7 @@ mod tests {
         let r = mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "demo/**", "nope"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         );
         assert!(matches!(
             r,
@@ -1186,7 +1187,7 @@ mod tests {
         mgr.add_storage(
             &dead_tx,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("a received storage-add is not lost because the peer already left");
 
@@ -1211,7 +1212,7 @@ mod tests {
         // And the binding is what `rebind_all` is for: on a live session the
         // storage acquires its subscriber and queryable without losing data.
         let live = make_session();
-        mgr.rebind_all(&live, vec![0x01])
+        mgr.rebind_all(&live, SessionZid::from([0x01]))
             .expect("a hosted-but-unbound storage is exactly what rebind_all repairs");
         assert!(
             mgr.storage("demo")
@@ -1242,7 +1243,7 @@ mod tests {
             .add_storage(
                 &session,
                 &StorageConfig::new("bad", "demo/**/", "mem"),
-                vec![0x01],
+                SessionZid::from([0x01]),
             )
             .expect_err("a config the keyexpr gate refuses is not a hostable storage");
 
@@ -1305,7 +1306,7 @@ mod tests {
         mgr.add_storage(
             &carrier,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("the carrying session was alive when the request arrived");
         let fired = carrier
@@ -1338,7 +1339,7 @@ mod tests {
                 mgr.add_storage(
                     &make_session(),
                     &StorageConfig::new("demo", "other/**", "mem"),
-                    vec![0x01],
+                    SessionZid::from([0x01]),
                 ),
                 Err(RuntimeStorageManagerError::DuplicateStorage(_))
             ),
@@ -1347,7 +1348,7 @@ mod tests {
 
         // The next session picks the same storage up, data intact.
         let next = make_session();
-        mgr.rebind_all(&next, vec![0x01])
+        mgr.rebind_all(&next, SessionZid::from([0x01]))
             .expect("a live session binds what the ended one left");
         let fired = next
             .publish(
@@ -1387,7 +1388,7 @@ mod tests {
         mgr.add_storage(
             &held,
             &StorageConfig::new("demo", "demo/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("hosted on a live session");
         held.publish(
@@ -1398,7 +1399,7 @@ mod tests {
         .expect("loopback publish");
 
         let err = mgr
-            .rebind_all(&make_ended_session(), vec![0x01])
+            .rebind_all(&make_ended_session(), SessionZid::from([0x01]))
             .expect_err("a session whose link is gone cannot carry the declaration");
         assert!(
             matches!(
@@ -1449,8 +1450,12 @@ mod tests {
             ("b", "b/**", "mem"),
             ("c", "c/**", "other"),
         ] {
-            mgr.add_storage(&gone, &StorageConfig::new(name, key, volume), vec![0x01])
-                .expect("hosted although its session is gone");
+            mgr.add_storage(
+                &gone,
+                &StorageConfig::new(name, key, volume),
+                SessionZid::from([0x01]),
+            )
+            .expect("hosted although its session is gone");
             assert!(
                 !mgr.storage(name).unwrap().is_bound(),
                 "{name} is hosted unbound"
@@ -1459,8 +1464,12 @@ mod tests {
 
         assert!(mgr.remove_storage("a"), "an unbound storage is removed");
         assert!(!mgr.remove_storage("a"), "and removing it twice says so");
-        mgr.add_storage(&gone, &StorageConfig::new("a", "a/**", "mem"), vec![0x01])
-            .expect("its name was freed by the removal");
+        mgr.add_storage(
+            &gone,
+            &StorageConfig::new("a", "a/**", "mem"),
+            SessionZid::from([0x01]),
+        )
+        .expect("its name was freed by the removal");
 
         assert_eq!(
             mgr.remove_volume("mem"),
@@ -1491,7 +1500,7 @@ mod tests {
         let carrier = make_ended_session();
         let mut mgr = RuntimeStorageManager::new();
         {
-            let sink = StorageManagerSink::new(&mut mgr, &carrier, &[0x01]);
+            let sink = StorageManagerSink::new(&mut mgr, &carrier, SessionZid::from([0x01]));
             sink.plugins_changed(&section(
                 r#"{ storage_manager: { storages: {
                      s: { key_expr: "s/**", volume: "memory" },
@@ -1514,7 +1523,7 @@ mod tests {
         // The document going is the manager's say-so, and any session can carry it.
         let later = make_session();
         {
-            let sink = StorageManagerSink::new(&mut mgr, &later, &[0x01]);
+            let sink = StorageManagerSink::new(&mut mgr, &later, SessionZid::from([0x01]));
             sink.plugins_changed(&PluginsConfig::new());
         }
         assert!(!mgr.plugin_running());
@@ -1536,7 +1545,7 @@ mod tests {
             mgr.add_storage(
                 &session,
                 &StorageConfig::new(name, "demo/**", volume),
-                vec![0x01],
+                SessionZid::from([0x01]),
             )
             .expect("the fixture hosts all three");
         }
@@ -1560,7 +1569,7 @@ mod tests {
             mgr.add_storage(
                 &session,
                 &StorageConfig::new("s4", "demo/**", "mem"),
-                vec![0x01],
+                SessionZid::from([0x01]),
             ),
             Err(RuntimeStorageManagerError::Volume(
                 VolumeRegistryError::VolumeNotFound(_)
@@ -1588,7 +1597,7 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "demo/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("the fixture hosts one storage");
 
@@ -1610,7 +1619,7 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("s2", "demo/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("'mem' is still registered after a refused removal");
     }
@@ -1654,7 +1663,7 @@ mod tests {
                      storages: { a: { key_expr: "a/**", volume: "memory" },
                                  b: { key_expr: "b/**", volume: "extra" } } }"#,
             ),
-            &[0x01],
+            SessionZid::from([0x01]),
         );
         assert!(failures.is_empty(), "{failures:?}");
         assert!(mgr.plugin_running());
@@ -1680,7 +1689,7 @@ mod tests {
                      storages: { bad: { key_expr: "x/**", volume: "nope" },
                                  good: { key_expr: "g/**", volume: "memory" } } }"#,
             ),
-            &[0x01],
+            SessionZid::from([0x01]),
         );
         let said: Vec<String> = failures.iter().map(ToString::to_string).collect();
         assert_eq!(said.len(), 2, "{said:?}");
@@ -1705,10 +1714,12 @@ mod tests {
         let session = make_session();
         let mut mgr = RuntimeStorageManager::new();
         let old = plugin_doc(r#"{ storages: { a: { key_expr: "a/**", volume: "memory" } } }"#);
-        assert!(mgr.start_plugin(&session, old.clone(), &[0x01]).is_empty());
+        assert!(mgr
+            .start_plugin(&session, old.clone(), SessionZid::from([0x01]))
+            .is_empty());
 
         let moved = plugin_doc(r#"{ storages: { a: { key_expr: "a/x/**", volume: "memory" } } }"#);
-        mgr.update_plugin(&session, &old, moved.clone(), &[0x01])
+        mgr.update_plugin(&session, &old, moved.clone(), SessionZid::from([0x01]))
             .expect("a changed storage is its delete and its add");
         assert_eq!(
             hosted_body(&mgr, "a").as_deref(),
@@ -1720,7 +1731,7 @@ mod tests {
                              z: { key_expr: "z/**", volume: "nope" } } }"#,
         );
         let err = mgr
-            .update_plugin(&session, &moved, failing, &[0x01])
+            .update_plugin(&session, &moved, failing, SessionZid::from([0x01]))
             .expect_err("z names a volume nobody declared");
         assert!(
             matches!(&err, PluginApplyError::Storage { storage, .. } if storage == "z"),
@@ -1746,7 +1757,7 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("intent", "i/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("an intent storage");
         assert!(mgr
@@ -1757,7 +1768,7 @@ mod tests {
                          storages: { p: { key_expr: "p/**", volume: "v" },
                                      q: { key_expr: "q/**", volume: "memory" } } }"#,
                 ),
-                &[0x01],
+                SessionZid::from([0x01]),
             )
             .is_empty());
         mgr.stop_plugin();
@@ -1786,7 +1797,7 @@ mod tests {
         let session = make_session();
         let mut mgr = RuntimeStorageManager::new();
         {
-            let sink = StorageManagerSink::new(&mut mgr, &session, &[0x01]);
+            let sink = StorageManagerSink::new(&mut mgr, &session, SessionZid::from([0x01]));
             // Another plugin, and a storage manager that is not running: both
             // are accepted unchecked, as upstream accepts them.
             assert_eq!(
@@ -1813,7 +1824,7 @@ mod tests {
         assert!(mgr.plugin_running());
         assert_eq!(mgr.storage_names().collect::<Vec<_>>(), vec!["s"]);
         {
-            let sink = StorageManagerSink::new(&mut mgr, &session, &[0x01]);
+            let sink = StorageManagerSink::new(&mut mgr, &session, SessionZid::from([0x01]));
             let current = doc(r#"{ storages: { s: { key_expr: "s/**", volume: "memory" } } }"#);
             // Running now: a document it cannot read is refused, and so is a
             // step it cannot apply.
@@ -1926,13 +1937,13 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "a/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("first add hosts the storage");
         let r = mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "b/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         );
         assert!(matches!(
             r,
@@ -1995,7 +2006,7 @@ mod tests {
             .expect("AddStorage -> StorageConfig");
         assert_eq!(config.name, "demo");
         assert_eq!(config.key_expr, "demo/**");
-        mgr.add_storage(&session, &config, vec![0x01])
+        mgr.add_storage(&session, &config, SessionZid::from([0x01]))
             .expect("spawn a live memory storage");
 
         // After add: the storage is hosted + the registry flips storage_manager Started.
@@ -2040,7 +2051,7 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "a/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("first add hosts the storage");
         assert_eq!(mgr.len(), 1);
@@ -2057,7 +2068,7 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "b/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("the name is free to re-add after removal");
         assert_eq!(mgr.len(), 1);
@@ -2084,7 +2095,7 @@ mod tests {
         mgr.add_storage(
             &session,
             &StorageConfig::new("s1", "demo/**", "mem"),
-            vec![0x01],
+            SessionZid::from([0x01]),
         )
         .expect("storage hosts");
 
@@ -2165,9 +2176,9 @@ mod tests {
         let mut bath = StorageConfig::new("bath", "home/bath/**", "mem");
         bath.strip_prefix = Some("home/bath".into());
 
-        mgr.add_storage(&session, &kitchen, vec![0x01])
+        mgr.add_storage(&session, &kitchen, SessionZid::from([0x01]))
             .expect("kitchen storage hosts");
-        mgr.add_storage(&session, &bath, vec![0x02])
+        mgr.add_storage(&session, &bath, SessionZid::from([0x02]))
             .expect("bath storage hosts");
         assert_eq!(
             mgr.storage_names().collect::<Vec<_>>(),
@@ -2269,7 +2280,7 @@ mod tests {
             let session = make_session();
             let mut mgr = RuntimeStorageManager::new();
             mgr.register_volume("fs", Box::new(FilesystemVolume::new(dir.path())));
-            mgr.add_storage(&session, &cfg, vec![0x01])
+            mgr.add_storage(&session, &cfg, SessionZid::from([0x01]))
                 .expect("host an fs-backed storage");
             let fired = session
                 .publish(
@@ -2294,7 +2305,7 @@ mod tests {
             let session = make_session();
             let mut mgr = RuntimeStorageManager::new();
             mgr.register_volume("fs", Box::new(FilesystemVolume::new(dir.path())));
-            mgr.add_storage(&session, &cfg, vec![0x01])
+            mgr.add_storage(&session, &cfg, SessionZid::from([0x01]))
                 .expect("re-host over the same dir");
             assert_eq!(
                 loopback_get(&session, "demo/a"),
@@ -2328,7 +2339,7 @@ mod tests {
         let session = make_session();
         let mut mgr = RuntimeStorageManager::new();
         mgr.register_volume("fs", Box::new(FilesystemVolume::new(spelled)));
-        mgr.add_storage(&session, &cfg, vec![0x01])
+        mgr.add_storage(&session, &cfg, SessionZid::from([0x01]))
             .expect("host an fs-backed storage");
 
         let body = mgr
@@ -2413,7 +2424,7 @@ mod tests {
             let session = make_session();
             let mut mgr = RuntimeStorageManager::new();
             mgr.register_volume("mem", Box::new(MemoryVolume));
-            mgr.add_storage(&session, &cfg, vec![0x01])
+            mgr.add_storage(&session, &cfg, SessionZid::from([0x01]))
                 .expect("host a memory storage");
             session
                 .publish(
@@ -2432,7 +2443,7 @@ mod tests {
             let session = make_session();
             let mut mgr = RuntimeStorageManager::new();
             mgr.register_volume("mem", Box::new(MemoryVolume));
-            mgr.add_storage(&session, &cfg, vec![0x01])
+            mgr.add_storage(&session, &cfg, SessionZid::from([0x01]))
                 .expect("re-host a fresh memory storage");
             assert!(
                 loopback_get(&session, "demo/a").is_empty(),
