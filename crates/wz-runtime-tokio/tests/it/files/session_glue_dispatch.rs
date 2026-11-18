@@ -41,6 +41,34 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{fixture_session_init_params, LifecycleRecordingDriver};
 
+/// That the InitAck `init_ack` answers patch level 0 as upstream does, with no patch entry, and
+/// that its Z flag says whether any other entry follows.
+#[cfg(feature = "codec-init-body")]
+fn assert_init_ack_carries_no_patch_entry(init_ack: &[u8]) {
+    use wz_session_core::extpatch::patch_of_entry;
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+
+    let InboundFrame::Init {
+        is_ack: true,
+        has_ext,
+        extensions,
+        ..
+    } = parse_inbound(init_ack).expect("wz parses its own InitAck")
+    else {
+        panic!("the acceptor's reply is not an InitAck");
+    };
+    assert!(
+        extensions.iter().all(|e| patch_of_entry(e).is_none()),
+        "an acceptor that has been given no InitSyn negotiates 0, and level 0 \
+         is answered with no patch entry"
+    );
+    assert_eq!(
+        has_ext,
+        !extensions.is_empty(),
+        "the Z flag says whether a chain follows"
+    );
+}
+
 /// Mirror of `layer3_init_body.rs::compute_init_cbyte` so this test's
 /// expected bytes are independent of the production code under
 /// test — drift between the two implementations surfaces as a
@@ -229,24 +257,25 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // InitAck — flags=S|A|Z, includes cookie (R121f1 default ext
     // chain seeds the patch-extension entry mirroring zenoh-pico's
     // size-negotiation invariant; see `default_init_patch_ext_entry`).
-    let init_ack_flags = 0x40u8 | 0x20u8 | 0x80u8; // S | A | Z
+    // The Z flag is read below against the chain the InitAck carries.
+    let init_ack_flags = 0x40u8 | 0x20u8; // S | A
     let init_ack = &snap.sends[3].0;
-    assert_eq!(init_ack[0], init_ack_flags | 0x01 /* T_MID_INIT */);
+    assert_eq!(
+        init_ack[0] & !0x80u8,
+        init_ack_flags | 0x01 /* T_MID_INIT */
+    );
     assert!(
         init_ack
             .windows(params.cookie.len())
             .any(|w| w == params.cookie.as_slice()),
         "InitAck body must contain the cookie payload"
     );
-    // R121f1 — patch-ext entry trails the cookie field. Last two
-    // bytes of the InitAck wire = [0x27 (INIT_PATCH | ENC_ZINT),
-    //                              VLE(the NEGOTIATED level)].
-    // Last by upstream's encode order, not by staging order: zenoh writes
-    // the InitAck extensions qos, shm, auth, mlink, lowlatency, compression,
-    // patch, region (`commons/zenoh-codec/src/transport/init.rs` @
-    // `// Extensions`), and this node carries no region name.
+    // The patch entry is written at the NEGOTIATED level, and level 0 is
+    // written as NO entry, as upstream's encoder writes it only above NONE
+    // (`commons/zenoh-codec/src/transport/init.rs` @
+    // `if *ext_patch != ext::PatchType::NONE {`).
     //
-    // R311y838 — the value is 0x00 here, and the contrast with the InitSyn
+    // R311y838 — the level is 0 here, and the contrast with the InitSyn
     // assertion above (which stays `_Z_CURRENT_PATCH`) is now this pair's
     // content rather than a coincidence. The two Inits answer different
     // questions in both references: an INITIATOR announces its own current
@@ -261,13 +290,8 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // `min(CURRENT, NONE) = 0`. Asserting 0x01 here, as this test did until
     // R311y838, asserted the seeded slot rather than any answer either
     // reference gives.
-    let init_ack_tail = &init_ack[init_ack.len() - 2..];
-    assert_eq!(
-        init_ack_tail,
-        &[0x27u8, 0x00u8],
-        "InitAck must terminate with the patch-ext entry at the NEGOTIATED \
-         level, which is 0 for an acceptor that has been given no InitSyn"
-    );
+    #[cfg(feature = "codec-init-body")]
+    assert_init_ack_carries_no_patch_entry(init_ack);
 
     // OpenAck — flags=T|A, no cookie.
     let open_ack_flags = 0x40u8 | 0x20u8; // T | A

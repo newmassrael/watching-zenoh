@@ -7958,13 +7958,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// 2b-① discipline the Init encode sites follow for the same reason).
     #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
     fn stage_negotiated_patch(&self, role: ExtChainRole) {
-        let entry = crate::extpatch::encode_patch_ext_at(self.negotiated_patch());
+        // Upstream writes the entry only above NONE
+        // (`commons/zenoh-codec/src/transport/init.rs` @
+        // `if *ext_patch != ext::PatchType::NONE {`), so its answer to a patch-0
+        // or patch-less InitSyn is an InitAck with no patch entry. Both readers
+        // take an absent entry as 0, so the level is the same; these are the
+        // bytes a zenoh acceptor sends it in.
+        let level = self.negotiated_patch();
+        let entry = (level != crate::extpatch::NO_PATCH)
+            .then(|| crate::extpatch::encode_patch_ext_at(level));
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::extpatch::PATCH_EXT_ID,
-                Some(entry),
-            );
+            crate::ext_chain::stage_in_canonical_order(chain, crate::extpatch::PATCH_EXT_ID, entry);
         });
     }
 
