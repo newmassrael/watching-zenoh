@@ -414,12 +414,11 @@ impl State {
             }
             Command::Unsubscribe(id) => {
                 self.subscribers.retain(|sub| sub.id != id);
-                // The router forgets what it told the face when the face has no interest left,
-                // and numbers what it tells it again from the start: a token it told before is
-                // not one it will retract.
-                if self.subscribers.is_empty() {
-                    self.remote.clear();
-                }
+                // The bindings stay: the router keeps what it told the face past the face's last
+                // interest and retracts each token by the id it told it under, as upstream's
+                // broker does (`zenoh/src/net/routing/hat/broker/token.rs` @
+                // `fn maybe_unpropagate_token(`), so an id is not given to another key while
+                // the face holds it.
             }
             Command::Alive { pattern, answer } => {
                 let mut keys = self
@@ -1021,14 +1020,17 @@ mod tests {
     }
 
     #[test]
-    fn a_face_with_no_subscriber_left_binds_the_ids_the_router_numbers_afresh() {
+    fn a_retraction_told_to_a_face_with_no_subscriber_frees_the_id() {
         let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
         let (first, _seen_first) = recorder();
         let id = face.subscribe("**", false, first);
         up(&face, &sink, 1, "old");
         face.unsubscribe(id);
-        // The router numbers from the start again once the face has no interest: an id it used
-        // for one key is a later key's, and the face does not hold the earlier binding to it.
+        // The binding outlives the subscriber, as the router's record of what it told the face
+        // does, and the router's retraction by id is what ends it: only then may the id be a
+        // later key's. Without the `remove` in the `TokenDown` arm the first binding would win
+        // and the later key would never be told.
+        sink(down(1));
         let (second, seen_second) = recorder();
         face.subscribe("**", false, second);
         up(&face, &sink, 1, "new");
