@@ -74,6 +74,7 @@ async fn in_a_netns_a_group_link_whose_interface_is_removed_is_lost_at_its_next_
             // The datagram must loop back to the member that sent it, wherever the
             // operating system's own setting would not.
             loopback: wz_runtime_tokio::policy::MulticastLoopback::On,
+            link_requires_iface: false,
         },
     )
     .await
@@ -126,7 +127,11 @@ async fn in_a_netns_a_dial_link_whose_route_is_removed_is_lost_at_its_next_write
     let socket = dial_udp(peer, &LinkSocket::NONE)
         .await
         .expect("dial across the veth");
-    let (mut read, write, _writer) = wire_udp_socket(socket, peer);
+    let (mut read, write, _writer) = wire_udp_socket(
+        socket,
+        peer,
+        &wz_runtime_tokio::policy::SessionPolicy::defaults(),
+    );
 
     // Nothing has been sent, so nothing has been refused: the link is quiet.
     let quiet = tokio::time::timeout(SILENT_FOR, read.poll_event()).await;

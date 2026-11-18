@@ -3814,6 +3814,7 @@ impl ResolvedGroup {
                 bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
                 dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
                 loopback: Default::default(),
+                ..wz_runtime_tokio::McastGroupOptions::default()
             },
         })
     }

@@ -762,11 +762,14 @@ async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSend
 /// concurrent send/recv on clones is sound). `peer` is the unicast target
 /// every outbound datagram is addressed to. The handle is awaited during
 /// teardown so a tail frame the FSM enqueued during its final transition
-/// still reaches the peer before the socket drops.
+/// still reaches the peer before the socket drops. `policy` is the snapshot of
+/// the session the link is wired for, read by the writer task.
 pub fn wire_udp_socket(
     socket: UdpSocket,
     peer: SocketAddr,
+    policy: &wz_session_core::policy::SessionPolicy,
 ) -> (UdpReadDriver, Arc<UdpWriteDriver>, WriterHandle) {
+    let policy = *policy;
     let socket = Arc::new(socket);
     // R311y453 — the §5.16 subject, off the socket this face owns.
     let subject = ip_link_subject(LinkKind::Udp, socket.local_addr().ok());
@@ -780,8 +783,9 @@ pub fn wire_udp_socket(
     let (fault, watch) = DatagramWriteFault::channel();
     let inbound = UdpReadDriver::from_socket(socket.clone(), watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
-    let writer_handle =
-        WriterHandle::spawn(rx, |queue| udp_writer_task(socket, peer, queue, fault));
+    let writer_handle = WriterHandle::spawn(rx, |queue| {
+        udp_writer_task(socket, peer, queue, fault, policy)
+    });
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
@@ -798,7 +802,9 @@ pub fn wire_udp_socket(
 pub fn wire_udp_demuxed(
     inputs: UdpAcceptedInputs,
     peer: SocketAddr,
+    policy: &wz_session_core::policy::SessionPolicy,
 ) -> (UdpReadDriver, Arc<UdpWriteDriver>, WriterHandle) {
+    let policy = *policy;
     let UdpAcceptedInputs {
         inbound_rx,
         send_socket,
@@ -816,8 +822,9 @@ pub fn wire_udp_demuxed(
     let (fault, watch) = DatagramWriteFault::channel();
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump, watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
-    let writer_handle =
-        WriterHandle::spawn(rx, |queue| udp_writer_task(send_socket, peer, queue, fault));
+    let writer_handle = WriterHandle::spawn(rx, |queue| {
+        udp_writer_task(send_socket, peer, queue, fault, policy)
+    });
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
@@ -1345,17 +1352,21 @@ impl BoxedLinkDriver for UdpWriteDriver {
 /// Item 902 — a failed `send` trips `fault` before the task returns: the link's
 /// read driver reports it as the link's loss ([`DatagramWriteFault`]), where the
 /// task's own exit used to be heard by nobody.
+///
+/// `policy` is the snapshot of the session the link is wired for: its
+/// `datagram-fragment-pacing` decides whether the writer paces its fragments.
 pub async fn udp_writer_task(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     queue: OutboundQueue,
     fault: DatagramWriteFault,
+    policy: wz_session_core::policy::SessionPolicy,
 ) {
     use crate::datagram_pacing::{OfBuild, Pacing};
-    udp_writer_task_paced(socket, peer, queue, fault, OfBuild::of_build()).await;
+    udp_writer_task_paced(socket, peer, queue, fault, OfBuild::of_policy(&policy)).await;
 }
 
-/// [`udp_writer_task`] with the pacing of its fragments named: the build's
+/// [`udp_writer_task`] with the pacing of its fragments named: the build's type
 /// ([`crate::datagram_pacing::OfBuild`]) in production, the one a test chose otherwise. A
 /// fragment past the burst waits in [`OutboundQueue::pause`], which a seal ends, so teardown
 /// never waits on a pace.
@@ -1414,6 +1425,10 @@ pub async fn udp_writer_task_paced<P: crate::datagram_pacing::Pacing>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The snapshot the links of these tests are wired for.
+    const POLICY: wz_session_core::policy::SessionPolicy =
+        wz_session_core::policy::SessionPolicy::defaults();
 
     /// A fragment's datagram, by its header.
     const FRAGMENT: [u8; 2] = [0x46, 0];
@@ -1597,8 +1612,8 @@ mod tests {
         let a_addr = a.local_addr().expect("a addr");
         let b_addr = b.local_addr().expect("b addr");
 
-        let (_a_in, a_out, a_writer) = wire_udp_socket(a, b_addr);
-        let (mut b_in, _b_out, _b_writer) = wire_udp_socket(b, a_addr);
+        let (_a_in, a_out, a_writer) = wire_udp_socket(a, b_addr, &POLICY);
+        let (mut b_in, _b_out, _b_writer) = wire_udp_socket(b, a_addr, &POLICY);
 
         assert_eq!(
             a_out.send_blocking(b"hello-datagram", Reliability::BestEffort),
@@ -1894,7 +1909,7 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
         let peer_addr = peer.local_addr().expect("peer addr");
         let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
-        let (mut read, write, _writer) = wire_udp_socket(socket, peer_addr);
+        let (mut read, write, _writer) = wire_udp_socket(socket, peer_addr, &POLICY);
 
         an_unwritable_datagram(&write);
 
@@ -1965,7 +1980,7 @@ mod tests {
         let socket = dial_udp(closed_addr, &LinkSocket::NONE)
             .await
             .expect("dial");
-        let (mut read, write, _writer) = wire_udp_socket(socket, closed_addr);
+        let (mut read, write, _writer) = wire_udp_socket(socket, closed_addr, &POLICY);
 
         assert_eq!(
             write.send_blocking(b"first", Reliability::BestEffort),
@@ -2003,7 +2018,7 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
         let peer_addr = peer.local_addr().expect("peer addr");
         let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
-        let (mut read, write, writer) = wire_udp_socket(socket, peer_addr);
+        let (mut read, write, writer) = wire_udp_socket(socket, peer_addr, &POLICY);
 
         an_unwritable_datagram(&write);
         // The writer takes the refusal and returns; nobody is receiving yet.
@@ -2040,7 +2055,7 @@ mod tests {
         src.send_to(b"hello", addr).await.expect("first datagram");
         let face = demux.recv_new_face().await.expect("face");
         let (mut read, write, _writer) =
-            wire_udp_demuxed(demux.wire_inputs(face.inbound_rx), face.peer);
+            wire_udp_demuxed(demux.wire_inputs(face.inbound_rx), face.peer, &POLICY);
         // The datagram that opened the face is queued for it; take it so the
         // next event is the link's own.
         assert!(matches!(read.poll_event().await, LinkEvent::Rx(_)));
@@ -2077,9 +2092,9 @@ mod tests {
         s2.send_to(b"two", addr).await.expect("s2 opens its face");
         let face2 = demux.recv_new_face().await.expect("face2");
         let (mut read1, write1, _w1) =
-            wire_udp_demuxed(demux.wire_inputs(face1.inbound_rx), face1.peer);
+            wire_udp_demuxed(demux.wire_inputs(face1.inbound_rx), face1.peer, &POLICY);
         let (mut read2, _write2, _w2) =
-            wire_udp_demuxed(demux.wire_inputs(face2.inbound_rx), face2.peer);
+            wire_udp_demuxed(demux.wire_inputs(face2.inbound_rx), face2.peer, &POLICY);
         assert!(matches!(read1.poll_event().await, LinkEvent::Rx(_)));
         assert!(matches!(read2.poll_event().await, LinkEvent::Rx(_)));
 
@@ -2136,7 +2151,8 @@ mod ring_selection {
         let peer_addr = peer.local_addr().expect("peer address");
         let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
         let local = socket.local_addr().expect("local address");
-        let (read, _write, _writer) = wire_udp_socket(socket, peer_addr);
+        let policy = wz_session_core::policy::SessionPolicy::defaults();
+        let (read, _write, _writer) = wire_udp_socket(socket, peer_addr, &policy);
         let mut read = read.on_reactor(Arc::clone(&reactor));
 
         let first = [0x02u8, 0x00, b'x', b'y', b'z'];
@@ -2166,7 +2182,8 @@ mod ring_selection {
         let b = UdpSocket::bind("127.0.0.1:0").await.expect("bind b");
         let a_addr = a.local_addr().expect("a address");
         let b_addr = b.local_addr().expect("b address");
-        let (read, _write, _writer) = wire_udp_socket(a, b_addr);
+        let policy = wz_session_core::policy::SessionPolicy::defaults();
+        let (read, _write, _writer) = wire_udp_socket(a, b_addr, &policy);
         let mut read = read.on_reactor(reactor);
 
         b.send_to(b"hi", a_addr).await.expect("send");

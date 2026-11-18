@@ -105,16 +105,23 @@ pub type TokioReassembly = ReassemblyDispatcher<
 /// predates this round and no lane had selected the arm that shows it — a
 /// `reassembly`-without-transport build — until `runtime-tokio-uring` implied
 /// `reassembly` and Layer C1bq built exactly that subset.
+///
+/// What a full pool does is the `reassembly-pool-overflow` value of `policy`, the snapshot of the
+/// session whose loop owns the pool.
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
-pub(crate) fn reassembly_config() -> ReassemblyConfig {
+pub(crate) fn reassembly_config(policy: &SessionPolicy) -> ReassemblyConfig {
     ReassemblyConfig::new(
         crate::reassembly_pool_ap::PER_PEER_QUOTA as u16,
         crate::reassembly_pool_ap::REASSEMBLY_TIMEOUT_MS as u64,
     )
-    // What a full pool does is the build's `reassembly-pool-overflow` policy.
-    .with_pool_overflow(PoolOverflow::of_policy(
-        SessionPolicy::default().reassembly_pool_overflow(),
-    ))
+    .with_pool_overflow(PoolOverflow::of_policy(policy.reassembly_pool_overflow()))
+}
+
+/// [`reassembly_config`] under the build defaults, for the multicast drive loop, whose group
+/// parameters carry no snapshot yet.
+#[cfg(feature = "transport-multicast")]
+pub(crate) fn reassembly_config_of_build() -> ReassemblyConfig {
+    reassembly_config(&SessionPolicy::defaults())
 }
 
 #[cfg(all(
@@ -123,20 +130,29 @@ pub(crate) fn reassembly_config() -> ReassemblyConfig {
 ))]
 mod tests {
     use super::*;
+    use wz_session_core::policy::ReassemblyPoolOverflow;
 
     /// The AP config takes its quota from the AP buffer-pool constants and
-    /// what a full pool does from the build's `reassembly-pool-overflow`
-    /// policy, not from the constructor's default.
+    /// what a full pool does from the snapshot it is handed, not from the
+    /// build's value nor from the constructor's default: every value the
+    /// build's domain allows is selected and comes back out.
     #[test]
-    fn the_ap_pool_overflow_is_the_builds_policy() {
-        let cfg = reassembly_config();
-        assert_eq!(
-            cfg.per_peer_quota,
-            crate::reassembly_pool_ap::PER_PEER_QUOTA as u16
-        );
-        assert_eq!(
-            cfg.pool_overflow,
-            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow())
-        );
+    fn the_ap_pool_overflow_is_the_snapshots_policy() {
+        for value in [
+            ReassemblyPoolOverflow::Reject,
+            ReassemblyPoolOverflow::DiagnosticEvent,
+            ReassemblyPoolOverflow::OldestWins,
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_reassembly_pool_overflow(value).is_err() {
+                continue;
+            }
+            let cfg = reassembly_config(&policy);
+            assert_eq!(
+                cfg.per_peer_quota,
+                crate::reassembly_pool_ap::PER_PEER_QUOTA as u16
+            );
+            assert_eq!(cfg.pool_overflow, PoolOverflow::of_policy(value));
+        }
     }
 }

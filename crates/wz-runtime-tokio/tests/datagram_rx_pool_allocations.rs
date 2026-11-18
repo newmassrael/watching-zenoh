@@ -68,6 +68,10 @@ use wz_runtime_tokio::uring_reactor::UringReactor;
 use wz_runtime_tokio::writer_queue::WriterHandle;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, RxFrame, UdpDriver};
 
+/// The snapshot the measured links are wired for.
+const POLICY: wz_runtime_tokio::policy::SessionPolicy =
+    wz_runtime_tokio::policy::SessionPolicy::defaults();
+
 /// Counts the allocations of the measurement the allocating thread works for.
 struct CountingAllocator;
 
@@ -291,7 +295,7 @@ async fn link(path: Path) -> Link {
         Path::Dial => {
             let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
             let target = socket.local_addr().expect("dial addr");
-            let (read, write, writer) = wire_udp_socket(socket, peer_addr);
+            let (read, write, writer) = wire_udp_socket(socket, peer_addr, &POLICY);
             Link {
                 peer,
                 target,
@@ -316,7 +320,7 @@ async fn link(path: Path) -> Link {
                 .expect("the pump is alive");
             assert_eq!(face.peer, peer_addr);
             let inputs = listener.wire_inputs(face.inbound_rx);
-            let (read, write, writer) = wire_udp_demuxed(inputs, face.peer);
+            let (read, write, writer) = wire_udp_demuxed(inputs, face.peer, &POLICY);
             let mut reader = Reader::Accept {
                 read,
                 _write: write,

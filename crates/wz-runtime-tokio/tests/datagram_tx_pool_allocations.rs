@@ -271,7 +271,13 @@ mod udp {
         // latch is dropped: a failed write would still trip it.
         let (fault, _watch) = DatagramWriteFault::channel();
         let writer = WriterHandle::spawn_on(rt.handle().clone(), rx, move |queue| {
-            udp_writer_task(socket, addr, queue, fault)
+            udp_writer_task(
+                socket,
+                addr,
+                queue,
+                fault,
+                wz_session_core::policy::SessionPolicy::defaults(),
+            )
         });
         let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         driver.shape_tx_queue(udp_shape());

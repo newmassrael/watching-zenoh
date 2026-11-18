@@ -4424,9 +4424,9 @@ mod poll_framed_lowlatency_tests {
 /// multicast sockets applying neither key — the gap had no field to sit in, so
 /// no caller could pass one and no reader could miss it.
 ///
-/// `Default` is the pre-R311y832 behaviour byte for byte: no interface pin, no
-/// extra groups, and the OS hop limit.
-#[derive(Debug, Default, Clone, Copy)]
+/// [`Self::of_policy`] is the pre-R311y832 behaviour byte for byte: no interface pin, no
+/// extra groups, and the OS hop limit, with the two link policies as the snapshot holds them.
+#[derive(Debug, Clone, Copy)]
 #[cfg(any(
     feature = "scouting-active",
     feature = "scouting-responder",
@@ -4452,9 +4452,47 @@ pub struct McastSocketConfig<'a> {
     /// upstream keys it.
     pub dscp: Option<u32>,
     /// The `multicast-loopback` policy: whether `IP_MULTICAST_LOOP` is set on the sockets
-    /// this config opens, and to what. `Default` is the build's value, which is upstream's
-    /// (the operating system's setting, left alone) unless the build states another.
+    /// this config opens, and to what. Upstream's value is the operating system's setting,
+    /// left alone.
     pub loopback: MulticastLoopback,
+    /// The `multicast-link-requires-iface` policy: a multicast link whose locator chose no
+    /// interface is refused. Scouting sockets are not links and do not read it; `false` is
+    /// upstream's behaviour.
+    pub link_requires_iface: bool,
+}
+
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
+impl McastSocketConfig<'_> {
+    /// No socket key, and the two link policies as `policy`, the snapshot of the node that
+    /// opens the socket, holds them.
+    pub const fn of_policy(policy: &wz_session_core::policy::SessionPolicy) -> Self {
+        Self {
+            iface: None,
+            ttl: None,
+            extra_joins: &[],
+            bind: None,
+            dscp: None,
+            loopback: policy.multicast_loopback(),
+            link_requires_iface: policy.multicast_link_requires_iface(),
+        }
+    }
+}
+
+/// [`McastSocketConfig::of_policy`] under the build defaults, for a caller that does not yet hold
+/// the snapshot of its node.
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
+impl Default for McastSocketConfig<'_> {
+    fn default() -> Self {
+        Self::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+    }
 }
 
 #[cfg(any(
@@ -4484,10 +4522,7 @@ impl McastSocketConfig<'_> {
                 MulticastLoopback::On => wz_host_net::multicast::Loopback::On,
                 MulticastLoopback::Off => wz_host_net::multicast::Loopback::Off,
             },
-            // The build's policy, read here and not carried by a caller's config: every link of
-            // this runtime is opened through this conversion, so no caller can leave it out.
-            link_requires_iface: wz_session_core::policy::SessionPolicy::from_build()
-                .multicast_link_requires_iface(),
+            link_requires_iface: self.link_requires_iface,
         }
     }
 }
@@ -4507,7 +4542,7 @@ use wz_host_net::multicast::RxBind;
 /// borrowed view is taken back with [`as_socket_config`](Self::as_socket_config)
 /// at the socket. R2791 carried `bind` and `dscp` across with the rest — an
 /// owned form that dropped them would put the gap back one seam later.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 #[cfg(any(
     feature = "scouting-active",
     feature = "scouting-responder",
@@ -4526,6 +4561,9 @@ pub struct McastGroupOptions {
     pub dscp: Option<u32>,
     /// The `multicast-loopback` policy, as [`McastSocketConfig::loopback`].
     pub loopback: MulticastLoopback,
+    /// The `multicast-link-requires-iface` policy, as
+    /// [`McastSocketConfig::link_requires_iface`].
+    pub link_requires_iface: bool,
 }
 
 #[cfg(any(
@@ -4534,6 +4572,20 @@ pub struct McastGroupOptions {
     feature = "transport-multicast"
 ))]
 impl McastGroupOptions {
+    /// No socket key, and the two link policies as `policy`, the snapshot of the node that
+    /// joins the group, holds them ([`McastSocketConfig::of_policy`]).
+    pub const fn of_policy(policy: &wz_session_core::policy::SessionPolicy) -> Self {
+        Self {
+            iface: None,
+            ttl: None,
+            joins: Vec::new(),
+            bind: None,
+            dscp: None,
+            loopback: policy.multicast_loopback(),
+            link_requires_iface: policy.multicast_link_requires_iface(),
+        }
+    }
+
     /// Borrow this as the socket-facing config.
     pub fn as_socket_config(&self) -> McastSocketConfig<'_> {
         McastSocketConfig {
@@ -4543,7 +4595,21 @@ impl McastGroupOptions {
             bind: self.bind.as_deref(),
             dscp: self.dscp,
             loopback: self.loopback,
+            link_requires_iface: self.link_requires_iface,
         }
+    }
+}
+
+/// [`McastGroupOptions::of_policy`] under the build defaults, for a caller that does not yet hold
+/// the snapshot of its node.
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
+impl Default for McastGroupOptions {
+    fn default() -> Self {
+        Self::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
     }
 }
 
@@ -4602,22 +4668,62 @@ mod udp_multicast_config_tests {
         assert_eq!(peer.ip(), std::net::IpAddr::from(GROUP));
     }
 
-    /// The build's `multicast-link-requires-iface` policy reaches the link this runtime opens: a
-    /// link whose config chose no interface is refused as invalid input in the build that states
-    /// the policy and opens as it always did in the build that does not. Each build runs the arm
-    /// that is its own, and the two arms are the pair of tests the policy owes.
+    /// The snapshot's `multicast-link-requires-iface` value, or `None` where the build's domain
+    /// leaves `value` out.
+    fn requiring_iface(
+        value: crate::policy::MulticastLinkRequiresIface,
+    ) -> Option<crate::policy::SessionPolicy> {
+        let mut policy = crate::policy::SessionPolicy::defaults();
+        policy
+            .select_multicast_link_requires_iface(value)
+            .is_ok()
+            .then_some(policy)
+    }
+
+    /// The config carries the value of the snapshot it was made from to the socket builder, and
+    /// not the build's: each value the domain allows reaches `neutral` as it was selected.
+    #[test]
+    fn the_socket_builder_reads_the_snapshot_the_config_was_made_from() {
+        use crate::policy::MulticastLinkRequiresIface as Requires;
+        for (value, on) in [(Requires::On, true), (Requires::Off, false)] {
+            let Some(policy) = requiring_iface(value) else {
+                continue;
+            };
+            assert_eq!(
+                McastSocketConfig::of_policy(&policy)
+                    .neutral()
+                    .link_requires_iface,
+                on
+            );
+            assert_eq!(
+                McastGroupOptions::of_policy(&policy)
+                    .as_socket_config()
+                    .neutral()
+                    .link_requires_iface,
+                on
+            );
+        }
+    }
+
+    /// The `multicast-link-requires-iface` value a link's config carries reaches the link this
+    /// runtime opens: a link whose config chose no interface is refused as invalid input when
+    /// the snapshot states the policy, and opens as it always did when it does not. Each value
+    /// the build's domain allows is run, so a host build runs both.
     #[tokio::test]
-    async fn a_link_with_no_interface_is_refused_or_opened_as_the_build_says() {
-        let requires =
-            wz_session_core::policy::SessionPolicy::from_build().multicast_link_requires_iface();
-        let opened = UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::default()).await;
-        if requires {
+    async fn a_link_with_no_interface_is_refused_or_opened_as_the_snapshot_says() {
+        use crate::policy::MulticastLinkRequiresIface as Requires;
+        if let Some(on) = requiring_iface(Requires::On) {
+            let opened =
+                UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::of_policy(&on)).await;
             let err = opened
                 .err()
-                .expect("a link with no interface is refused when the build states the policy");
+                .expect("a link with no interface is refused when the snapshot states the policy");
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
-        } else {
-            opened.expect("a link with no interface opens when the build does not state it");
+        }
+        if let Some(off) = requiring_iface(Requires::Off) {
+            UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::of_policy(&off))
+                .await
+                .expect("a link with no interface opens when the snapshot does not state it");
         }
     }
 

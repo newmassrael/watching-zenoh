@@ -4066,8 +4066,9 @@ impl LinkDriver for InboundLink {
 /// shares the socket ([`wire_udp_socket`]).
 ///
 /// No session parameters reach this form, so its link reads with upstream's
-/// default `transport/link/rx` block; a caller that opens a session wires
-/// with that session's block instead ([`wire_dialed_link_with_rx`]).
+/// default `transport/link/rx` block and the build defaults of the link
+/// policies; a caller that opens a session wires with that session's block
+/// and snapshot instead ([`wire_dialed_link_with_rx`]).
 pub fn wire_dialed_link(
     dialed: DialedLink,
 ) -> (
@@ -4075,14 +4076,20 @@ pub fn wire_dialed_link(
     Arc<dyn BoxedLinkDriver + Send + Sync>,
     WriterHandle,
 ) {
-    wire_dialed_link_with_rx(dialed, LinkRxConf::default())
+    wire_dialed_link_with_rx(
+        dialed,
+        LinkRxConf::default(),
+        &wz_session_core::policy::SessionPolicy::defaults(),
+    )
 }
 
-/// [`wire_dialed_link`] for a link whose session reads `link_rx`: its
-/// `buffer_size` is the read storage a stream link pools.
+/// [`wire_dialed_link`] for a link whose session reads `link_rx` and whose
+/// snapshot is `policy`: `link_rx.buffer_size` is the read storage a stream
+/// link pools, and `policy` holds the policies a link's writer reads.
 pub fn wire_dialed_link_with_rx(
     dialed: DialedLink,
     link_rx: LinkRxConf,
+    policy: &wz_session_core::policy::SessionPolicy,
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
@@ -4090,7 +4097,7 @@ pub fn wire_dialed_link_with_rx(
 ) {
     // Universal framing (u16 prefix). The lowlatency open helpers call
     // `wire_dialed_link_with_lowlatency` with a flag they flip at Established.
-    wire_dialed_link_with_lowlatency(dialed, Arc::new(AtomicBool::new(false)), link_rx)
+    wire_dialed_link_with_lowlatency(dialed, Arc::new(AtomicBool::new(false)), link_rx, policy)
 }
 
 /// transport-lowlatency — [`wire_dialed_link_with_rx`] sharing a lowlatency-wire
@@ -4108,11 +4115,15 @@ pub fn wire_dialed_link_with_lowlatency(
     dialed: DialedLink,
     lowlatency: Arc<AtomicBool>,
     link_rx: LinkRxConf,
+    policy: &wz_session_core::policy::SessionPolicy,
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
     WriterHandle,
 ) {
+    // Only the udp writer reads a policy of the snapshot today.
+    #[cfg(not(feature = "transport-link-udp"))]
+    let _ = policy;
     let rx_buffer_size = link_rx.buffer_size;
     match dialed {
         DialedLink::Tcp(stream) => {
@@ -4122,7 +4133,7 @@ pub fn wire_dialed_link_with_lowlatency(
         }
         #[cfg(feature = "transport-link-udp")]
         DialedLink::Udp { socket, peer } => {
-            let (inbound, outbound, handle) = wire_udp_socket(socket, peer);
+            let (inbound, outbound, handle) = wire_udp_socket(socket, peer, policy);
             (InboundLink::Udp(inbound), outbound, handle)
         }
         // R311y382 — an accepted demux face: RX is the pump's per-src channel,
@@ -4130,7 +4141,7 @@ pub fn wire_dialed_link_with_lowlatency(
         // `InboundLink::Udp` shape as the dial side.
         #[cfg(feature = "transport-link-udp")]
         DialedLink::UdpDemuxed { inputs, peer } => {
-            let (inbound, outbound, handle) = wire_udp_demuxed(inputs, peer);
+            let (inbound, outbound, handle) = wire_udp_demuxed(inputs, peer, policy);
             (InboundLink::Udp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-serial")]
@@ -5248,7 +5259,8 @@ async fn initiate_installing<I>(
 where
     I: FnOnce(&Arc<SessionLinkActions>),
 {
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy);
     let actions = new_session_actions(outbound, params, clock);
     install(&actions);
     initiator_open(
@@ -5638,12 +5650,18 @@ where
     let lowlatency_wire = Arc::new(AtomicBool::new(false));
     #[cfg(feature = "transport-lowlatency")]
     let (inbound, outbound, writer_handle) = if offer.mode == TransportMode::LowLatency {
-        wire_dialed_link_with_lowlatency(connected, lowlatency_wire.clone(), params.link_rx)
+        wire_dialed_link_with_lowlatency(
+            connected,
+            lowlatency_wire.clone(),
+            params.link_rx,
+            &params.policy,
+        )
     } else {
-        wire_dialed_link_with_rx(connected, params.link_rx)
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy);
     let actions = new_session_actions(outbound, params, clock);
     // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
     // this build cannot honour fails here rather than opening a session whose
@@ -5851,7 +5869,8 @@ pub async fn accept_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
 
     // Accepting activation -> AwaitingInitSyn, whose onentry arms
@@ -5892,7 +5911,8 @@ pub async fn accept_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.install_auth_dispatch(auth);
 
@@ -6135,12 +6155,18 @@ where
     let lowlatency_wire = Arc::new(AtomicBool::new(false));
     #[cfg(feature = "transport-lowlatency")]
     let (inbound, outbound, writer_handle) = if offer.mode == TransportMode::LowLatency {
-        wire_dialed_link_with_lowlatency(accepted, lowlatency_wire.clone(), params.link_rx)
+        wire_dialed_link_with_lowlatency(
+            accepted,
+            lowlatency_wire.clone(),
+            params.link_rx,
+            &params.policy,
+        )
     } else {
-        wire_dialed_link_with_rx(accepted, params.link_rx)
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions
         .apply_offer(&offer)
@@ -6231,7 +6257,8 @@ pub async fn accept_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_namespace(namespace);
 
@@ -6944,13 +6971,14 @@ mod tests {
         };
         let endpoint = format!("tcp/127.0.0.1:{port}");
         let cfg = DialConfig::default();
+        let policy = wz_session_core::policy::SessionPolicy::defaults();
 
         let three = LinkRxConf {
             buffer_size: 3 * WIDEST,
             ..LinkRxConf::default()
         };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, three);
+        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, three, &policy);
         assert_eq!(pooled(&inbound), 0, "nothing is pooled before the batch");
         established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 3);
@@ -6960,12 +6988,13 @@ mod tests {
             ..LinkRxConf::default()
         };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, two);
+        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, two, &policy);
         established(&outbound, 16_000);
         assert_eq!(pooled(&inbound), 8, "the divisor is the link's batch");
 
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, LinkRxConf::default());
+        let (inbound, outbound, _writer) =
+            wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy);
         established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 1);
 

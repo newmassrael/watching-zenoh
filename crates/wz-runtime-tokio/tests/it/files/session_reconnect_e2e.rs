@@ -790,6 +790,55 @@ async fn ip_loopback() -> (TcpListener, ReconnectLocator) {
     (listener, locator)
 }
 
+/// The replay pace a supervised session starts with is the `declaration-sync-pacing` value of the
+/// snapshot in the params it was opened with, not the build's: each value the domain allows is
+/// opened over loopback and read back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_replay_pace_is_the_opening_snapshots() {
+    use wz_runtime_tokio::policy::DeclarationSyncPacing;
+    for (value, paced) in [
+        (DeclarationSyncPacing::On, true),
+        (DeclarationSyncPacing::Off, false),
+    ] {
+        let mut params = fixture_session_init_params();
+        params.zid = [0x01; 4].into();
+        if params.policy.select_declaration_sync_pacing(value).is_err() {
+            continue;
+        }
+        let (listener, locator) = ip_loopback().await;
+        let (client, _server) = tokio::join!(
+            async {
+                open_session_with_reconnect(
+                    locator,
+                    params,
+                    DialConfig::default(),
+                    TokioTime::new(),
+                    ReconnectPolicy::default(),
+                    Some(ITER_CAP),
+                    DEFAULT_OPEN_TICK_MS,
+                )
+                .await
+                .expect("client reaches Established")
+            },
+            async {
+                let (stream, _peer) = listener.accept().await.expect("accept");
+                let mut acceptor = fixture_session_init_params();
+                acceptor.zid = [0x02; 4].into();
+                accept_and_open_session(
+                    DialedLink::Tcp(stream),
+                    acceptor,
+                    TokioTime::new(),
+                    Some(ITER_CAP),
+                    DEFAULT_OPEN_TICK_MS,
+                )
+                .await
+                .expect("acceptor reaches Established")
+            },
+        );
+        assert_eq!(client.replay_pacing().is_some(), paced, "{value:?}");
+    }
+}
+
 /// Subscriber reconnect-replay — the canonical scenario. See
 /// [`assert_declare_replays_after_link_loss`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

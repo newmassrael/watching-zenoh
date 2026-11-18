@@ -10378,13 +10378,17 @@ impl ScoutSocketArgs {
     /// to, and matching it would leave this dead code in exactly that build.
     #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
     pub(crate) fn as_socket_config(&self) -> wz::runtime_tokio::McastSocketConfig<'_> {
+        // The node's snapshot: the joined scouting socket is bound as a link's joined half is,
+        // so the interface rule reaches it too.
+        let policy = resolve_policy();
         wz::runtime_tokio::McastSocketConfig {
             iface: self.interface.as_deref(),
             ttl: self.ttl,
             extra_joins: &[],
             bind: None,
             dscp: None,
-            loopback: Default::default(),
+            loopback: policy.multicast_loopback(),
+            link_requires_iface: policy.multicast_link_requires_iface(),
         }
     }
 }
@@ -10758,6 +10762,16 @@ pub(crate) struct TransportTuning {
     /// `--stats-filters <list>`: the key expressions every session of the node
     /// counts payloads under (`stats/filters`). None unless given.
     pub(crate) stats_filters: wz::runtime_tokio::stats_registry::StatsKeyFilters,
+    /// The snapshot of the node's policies ([`resolve_policy`]): every session the node opens is
+    /// handed it, and the defaults above that a policy decides are taken from it.
+    pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
+}
+
+/// The snapshot of a demo node's policies: the one place the demo resolves the values its
+/// sessions, routers and sockets read. The build defaults, until a run-time document is read
+/// here.
+pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
+    wz::runtime_tokio::policy::SessionPolicy::defaults()
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -10776,20 +10790,27 @@ pub(crate) const TX_QUEUE_SIZE_FLAGS: [&str; 8] = [
 
 impl Default for TransportTuning {
     fn default() -> Self {
-        Self {
-            batch_size: 65535,
-            lease_ms: 10_000,
-            sn_resolution: wz::runtime_tokio::policy::SessionPolicy::from_build().sn_resolution(),
-            link_defaults: Default::default(),
-            tx_queue: Default::default(),
-            link_rx: Default::default(),
-            open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
-            stats_filters: Default::default(),
-        }
+        Self::of_policy(resolve_policy())
     }
 }
 
 impl TransportTuning {
+    /// What a node that names no transport flag runs with, under `policy`, the snapshot of the
+    /// node: the width it offers and the two policies its queues carry are the snapshot's.
+    pub(crate) fn of_policy(policy: wz::runtime_tokio::policy::SessionPolicy) -> Self {
+        Self {
+            batch_size: 65535,
+            lease_ms: 10_000,
+            sn_resolution: policy.sn_resolution(),
+            link_defaults: Default::default(),
+            tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
+            link_rx: Default::default(),
+            open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
+            stats_filters: Default::default(),
+            policy,
+        }
+    }
+
     /// Read `--batch-size <n>` / `--lease-ms <n>` off the command line.
     ///
     /// Both are the argv shape a stock zenoh config expands into, and both are
@@ -11171,7 +11192,8 @@ pub(crate) fn session_init_params_for(
         // so the note named a symbol that no longer existed and nothing ever
         // supplied the entropy. The key of every acceptor this binary opened
         // was therefore a literal in a public repository.
-        policy: wz::runtime_tokio::policy::SessionPolicy::defaults(),
+        // The node's snapshot, which the queue and the width above were made from.
+        policy: tuning.policy,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
             std::io::Error::other(format!(
                 "no OS entropy for the cookie signing key ({e}); refusing to open a \

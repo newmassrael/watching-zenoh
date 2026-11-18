@@ -18,7 +18,7 @@ use super::*;
 ///
 /// Construct via [`Self::default`] / [`Self::new`] plus optional
 /// [`Self::with_allowed_origin`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct SubscribeOptions {
     /// Subscriber-side locality predicate. `Any` (default) fires on
@@ -30,21 +30,11 @@ pub struct SubscribeOptions {
     /// The key the retraction names, when it names one — see
     /// [`Self::with_retraction_naming`].
     retraction_key: Option<RetractionKey>,
-    /// Whether the callback sees the timestamp of a sample: see [`Self::with_expose_timestamp`].
-    expose_timestamp: bool,
-    /// What a full delivery lane does: see [`Self::with_overload`].
-    overload: wz_session_core::policy::SubscriberOverload,
-}
-
-impl Default for SubscribeOptions {
-    fn default() -> Self {
-        Self {
-            allowed_origin: Locality::default(),
-            retraction_key: None,
-            expose_timestamp: wz_session_core::timestamp_visibility::default_exposed(),
-            overload: wz_session_core::policy::SessionPolicy::from_build().subscriber_overload(),
-        }
-    }
+    /// Whether the callback sees the timestamp of a sample, when the declaration says: see
+    /// [`Self::with_expose_timestamp`].
+    expose_timestamp: Option<bool>,
+    /// What a full delivery lane does, when the declaration says: see [`Self::with_overload`].
+    overload: Option<wz_session_core::policy::SubscriberOverload>,
 }
 
 /// The key an entity's `Undeclare*` names beside its id, in the wire form it
@@ -88,17 +78,24 @@ impl SubscribeOptions {
     /// every sample reads as one with no timestamp (`SampleView::timestamp` and
     /// `timestamp_parts` answer `None`) and is the same in every other way.
     ///
-    /// What a declaration that does not say gets is the build's `entity-timestamp-opt-in`
-    /// policy: the callback sees the timestamp when the policy is off, which is upstream's
-    /// behaviour, and does not when the build makes taking part opt-in.
+    /// What a declaration that does not say gets is the `entity-timestamp-opt-in` policy of the
+    /// session it is declared on ([`Self::expose_timestamp_by`]): the callback sees the timestamp
+    /// when the policy is off, which is upstream's behaviour, and does not when the session makes
+    /// taking part opt-in.
     pub fn with_expose_timestamp(mut self, expose: bool) -> Self {
-        self.expose_timestamp = expose;
+        self.expose_timestamp = Some(expose);
         self
     }
 
-    /// See [`Self::with_expose_timestamp`].
-    pub fn expose_timestamp(&self) -> bool {
+    /// What the declaration says about the timestamp, or `None` when it leaves it to the session.
+    pub fn expose_timestamp(&self) -> Option<bool> {
         self.expose_timestamp
+    }
+
+    /// Whether the callback sees the timestamp, on a session whose snapshot is `policy`.
+    pub fn expose_timestamp_by(&self, policy: &wz_session_core::policy::SessionPolicy) -> bool {
+        self.expose_timestamp
+            .unwrap_or_else(|| wz_session_core::timestamp_visibility::exposed_by(policy))
     }
 
     /// What the delivery lane of an OFFLOADED subscriber does when it is full: `block` makes the
@@ -109,16 +106,26 @@ impl SubscribeOptions {
     /// [`Session::declare_subscriber_offloaded`] reads it: a plain subscriber's callback runs inline
     /// and has no lane.
     ///
-    /// What a declaration that does not say gets is the build's `subscriber-overload` policy, which
-    /// is `block`, upstream's behaviour, unless the build states `reject` or `keep-latest`.
+    /// What a declaration that does not say gets is the `subscriber-overload` policy of the
+    /// session it is declared on ([`Self::overload_by`]), which is `block`, upstream's behaviour,
+    /// unless the session's snapshot states `reject` or `keep-latest`.
     pub fn with_overload(mut self, overload: wz_session_core::policy::SubscriberOverload) -> Self {
-        self.overload = overload;
+        self.overload = Some(overload);
         self
     }
 
-    /// See [`Self::with_overload`].
-    pub fn overload(&self) -> wz_session_core::policy::SubscriberOverload {
+    /// What the declaration says a full lane does, or `None` when it leaves it to the session.
+    pub fn overload(&self) -> Option<wz_session_core::policy::SubscriberOverload> {
         self.overload
+    }
+
+    /// What a full lane does, on a session whose snapshot is `policy`.
+    pub fn overload_by(
+        &self,
+        policy: &wz_session_core::policy::SessionPolicy,
+    ) -> wz_session_core::policy::SubscriberOverload {
+        self.overload
+            .unwrap_or_else(|| policy.subscriber_overload())
     }
 }
 

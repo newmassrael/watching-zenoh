@@ -8,7 +8,7 @@
 //! A writer waits before each datagram and notes the write after it:
 //!
 //! ```ignore
-//! let mut pacing = <OfBuild as Pacing>::of_build();
+//! let mut pacing = <OfBuild as Pacing>::of_policy(&session_policy);
 //! while let Some(datagram) = queue.next_wire().await {
 //!     pacing.before(&datagram, |wait| queue.pause(wait)).await;
 //!     socket.send(&datagram).await?;
@@ -20,12 +20,13 @@
 //!
 //! The policy changes the shape of a writer, not a number in it: on, a writer holds a clock and
 //! waits between two writes; off, it does neither. So it is a strategy type and not a field that
-//! both builds carry (a policy that changes the shape of the code is a type parameter, since
+//! every build carries (a policy that changes the shape of the code is a type parameter, since
 //! cargo features only add code): a writer is generic over [`Pacing`], and the writers of a build
-//! take [`OfBuild`], which the build's policy selects. Off, upstream's behaviour, that is
-//! [`Unpaced`], whose wait is a future that is ready at once and never calls the writer's way to
-//! wait, so a build with the policy off links no pacer, no clock and no wait of a writer. A test
-//! names [`Paced`] or [`Unpaced`] itself, so one binary holds both.
+//! take [`OfBuild`], which the build's DOMAIN of the policy selects. A build that allows only off,
+//! upstream's behaviour, takes [`Unpaced`], whose wait is a future that is ready at once and never
+//! calls the writer's way to wait, so it links no pacer, no clock and no wait of a writer. A build
+//! that allows only on takes [`Paced`]. A build that allows both takes [`ByPolicy`], which holds a
+//! pacer when the snapshot of the writer's session says on. A test names the type it is about.
 
 use core::future::{Future, Ready};
 use core::pin::Pin;
@@ -33,7 +34,8 @@ use core::task::{Context, Poll};
 use std::time::Duration;
 use tokio::time::Instant;
 use wz_session_core::fragment_pacing::FragmentPacer;
-use wz_session_core::policy::SessionPolicy;
+use wz_session_core::policy::{DatagramFragmentPacing, SessionPolicy};
+use wz_session_core::policy_binding::PolicyValue;
 
 /// How a datagram writer paces what it writes.
 pub trait Pacing: Send + 'static {
@@ -42,8 +44,9 @@ pub trait Pacing: Send + 'static {
     /// stated here whatever the lifetime its way to wait borrows.
     type Wait<F: Future<Output = ()> + Send>: Future<Output = ()> + Send;
 
-    /// The pacing this build states for the type: [`Paced`] takes the build's burst and gap.
-    fn of_build() -> Self;
+    /// The pacing of a writer whose session's snapshot is `policy`: [`Paced`] takes the build's
+    /// burst and gap, and [`ByPolicy`] paces only when `policy` says on.
+    fn of_policy(policy: &SessionPolicy) -> Self;
 
     /// Wait as long as `datagram` is due, by `wait`: the writer's own way to wait, which is
     /// called only when there is a wait (a unicast writer's ends on a seal, so teardown never
@@ -65,7 +68,7 @@ pub struct Unpaced;
 impl Pacing for Unpaced {
     type Wait<F: Future<Output = ()> + Send> = Ready<()>;
 
-    fn of_build() -> Self {
+    fn of_policy(_policy: &SessionPolicy) -> Self {
         Self
     }
 
@@ -113,7 +116,7 @@ impl Paced {
 impl Pacing for Paced {
     type Wait<F: Future<Output = ()> + Send> = PacedWait<F>;
 
-    fn of_build() -> Self {
+    fn of_policy(_policy: &SessionPolicy) -> Self {
         Self::new(FragmentPacer::of_build())
     }
 
@@ -150,26 +153,88 @@ impl<F: Future<Output = ()>> Future for PacedWait<F> {
     }
 }
 
-/// The policy's value as a type, for [`Select`] to name the pacing of.
-pub struct Policy<const ON: bool>;
+/// The writer of a build whose domain allows both values: paced when the snapshot of its session
+/// says on, and written as fast as the socket takes it when it says off.
+#[derive(Debug)]
+pub struct ByPolicy(Option<Paced>);
 
-/// The pacing a value of the policy stands for.
+impl ByPolicy {
+    /// Whether this writer paces its fragments.
+    pub fn is_paced(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl Pacing for ByPolicy {
+    type Wait<F: Future<Output = ()> + Send> = PacedWait<F>;
+
+    fn of_policy(policy: &SessionPolicy) -> Self {
+        Self(
+            policy
+                .datagram_fragment_pacing()
+                .then(|| Paced::of_policy(policy)),
+        )
+    }
+
+    fn before<F: Future<Output = ()> + Send>(
+        &mut self,
+        datagram: &[u8],
+        wait: impl FnOnce(Duration) -> F,
+    ) -> PacedWait<F> {
+        match self.0.as_mut() {
+            Some(paced) => paced.before(datagram, wait),
+            None => PacedWait(None),
+        }
+    }
+
+    fn wrote(&mut self) {
+        if let Some(paced) = self.0.as_mut() {
+            paced.wrote();
+        }
+    }
+}
+
+/// The values of the policy a build's domain allows, as a type, for [`Select`] to name the pacing
+/// of: `OFF` and `ON` say whether each is allowed.
+pub struct Allowed<const OFF: bool, const ON: bool>;
+
+/// The pacing the writers of a domain need.
 pub trait Select {
     /// The writers' pacing.
     type Pacing: Pacing;
 }
 
-impl Select for Policy<false> {
+impl Select for Allowed<true, false> {
     type Pacing = Unpaced;
 }
 
-impl Select for Policy<true> {
+impl Select for Allowed<false, true> {
     type Pacing = Paced;
 }
 
-/// The pacing of this build's writers, by its `datagram-fragment-pacing` policy.
-pub type OfBuild =
-    <Policy<{ SessionPolicy::from_build().datagram_fragment_pacing() }> as Select>::Pacing;
+impl Select for Allowed<true, true> {
+    type Pacing = ByPolicy;
+}
+
+/// Whether the build's domain of `datagram-fragment-pacing` allows `off`.
+const ALLOWS_OFF: bool =
+    DatagramFragmentPacing::DOMAIN.contains_index(DatagramFragmentPacing::Off as usize);
+
+/// Whether the build's domain of `datagram-fragment-pacing` allows `on`.
+const ALLOWS_ON: bool =
+    DatagramFragmentPacing::DOMAIN.contains_index(DatagramFragmentPacing::On as usize);
+
+/// The pacing of this build's writers, by the values its domain of `datagram-fragment-pacing`
+/// allows: a build that cannot select `on` links no pacer, and one that can links the pacer its
+/// writers then hold as their session's snapshot says.
+pub type OfBuild = <Allowed<{ ALLOWS_OFF }, { ALLOWS_ON }> as Select>::Pacing;
+
+/// [`OfBuild`] under the build defaults, for the multicast writer, whose group parameters carry no
+/// snapshot yet.
+#[cfg(feature = "transport-multicast")]
+pub(crate) fn of_build_defaults() -> OfBuild {
+    OfBuild::of_policy(&SessionPolicy::defaults())
+}
 
 #[cfg(test)]
 mod tests {
@@ -183,24 +248,82 @@ mod tests {
         Paced::new(FragmentPacer::new(burst, gap_ms * 1000))
     }
 
-    /// Each value of the policy names its pacing, and the build's is the one its value names.
+    /// Each domain names its pacing, and the build's writers take the one its domain names, not
+    /// the one its default would.
     #[test]
-    fn the_policy_names_the_pacing() {
+    fn the_domain_names_the_pacing() {
         assert_eq!(
-            TypeId::of::<<Policy<false> as Select>::Pacing>(),
+            TypeId::of::<<Allowed<true, false> as Select>::Pacing>(),
             TypeId::of::<Unpaced>()
         );
         assert_eq!(
-            TypeId::of::<<Policy<true> as Select>::Pacing>(),
+            TypeId::of::<<Allowed<false, true> as Select>::Pacing>(),
             TypeId::of::<Paced>()
         );
-        let on = SessionPolicy::from_build().datagram_fragment_pacing();
-        let expected = if on {
-            TypeId::of::<Paced>()
-        } else {
-            TypeId::of::<Unpaced>()
+        assert_eq!(
+            TypeId::of::<<Allowed<true, true> as Select>::Pacing>(),
+            TypeId::of::<ByPolicy>()
+        );
+        let domain = DatagramFragmentPacing::DOMAIN;
+        let expected = match (
+            domain.contains(DatagramFragmentPacing::Off),
+            domain.contains(DatagramFragmentPacing::On),
+        ) {
+            (true, false) => TypeId::of::<Unpaced>(),
+            (false, true) => TypeId::of::<Paced>(),
+            _ => TypeId::of::<ByPolicy>(),
         };
         assert_eq!(TypeId::of::<OfBuild>(), expected);
+    }
+
+    /// A writer of a build that allows both values paces as the snapshot it is handed says, not
+    /// as the build's default does: each value the domain allows is selected and observed.
+    #[test]
+    fn a_writer_of_both_values_paces_as_its_snapshot_says() {
+        for (value, paced) in [
+            (DatagramFragmentPacing::On, true),
+            (DatagramFragmentPacing::Off, false),
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_datagram_fragment_pacing(value).is_err() {
+                continue;
+            }
+            assert_eq!(ByPolicy::of_policy(&policy).is_paced(), paced, "{value:?}");
+        }
+    }
+
+    /// Off, a writer of both values never waits and never calls the writer's way to wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_writer_of_both_values_that_is_off_never_waits() {
+        let mut pacing = ByPolicy(None);
+        let mut waited = 0;
+        for _ in 0..10 {
+            pacing
+                .before(&FRAGMENT, |_| {
+                    waited += 1;
+                    async {}
+                })
+                .await;
+            pacing.wrote();
+        }
+        assert_eq!(waited, 0);
+    }
+
+    /// On, a writer of both values waits as the pacer it holds says.
+    #[tokio::test(start_paused = true)]
+    async fn a_writer_of_both_values_that_is_on_waits_what_is_due() {
+        let mut pacing = ByPolicy(Some(paced(1, 100)));
+        let mut waits = Vec::new();
+        for _ in 0..2 {
+            pacing
+                .before(&FRAGMENT, |due| {
+                    waits.push(due);
+                    async {}
+                })
+                .await;
+            pacing.wrote();
+        }
+        assert_eq!(waits, [std::time::Duration::from_millis(100)]);
     }
 
     /// The policy off: no datagram ever waits, whatever it is, and the writer's way to wait is

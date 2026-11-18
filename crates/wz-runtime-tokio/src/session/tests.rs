@@ -2193,7 +2193,19 @@ fn a_publisher_that_says_nothing_gets_the_builds_default() {
 /// the sample's payload: the pair shows that hiding the timestamp hides nothing else.
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
 fn timestamp_seen_by(options: SubscribeOptions) -> (Option<u64>, Vec<u8>) {
-    let (session, _driver) = build_session();
+    timestamp_seen_on(fixture_session_init_params(), options)
+}
+
+/// [`timestamp_seen_by`] on a session opened with `params`, whose snapshot the declaration's
+/// default is read from.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+fn timestamp_seen_on(
+    params: wz_session_core::session_init_params::SessionInitParams,
+    options: SubscribeOptions,
+) -> (Option<u64>, Vec<u8>) {
+    let (actions, _driver) = recording_actions_with_params(params);
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
     let seen = Arc::new(std::sync::Mutex::new((None, Vec::new())));
     let writer = seen.clone();
     let _subscriber = session.declare_subscriber("home/temp", options, move |s| {
@@ -2236,7 +2248,68 @@ fn a_subscriber_that_says_nothing_gets_the_builds_default() {
     let (time, _payload) = timestamp_seen_by(SubscribeOptions::new());
     let build_exposes = wz_session_core::timestamp_visibility::default_exposed();
     assert_eq!(time.is_some(), build_exposes);
-    assert_eq!(SubscribeOptions::new().expose_timestamp(), build_exposes);
+    assert_eq!(SubscribeOptions::new().expose_timestamp(), None);
+}
+
+/// A unicast session holds the snapshot its creator put in its params, which is what its
+/// declarations (the subscriber's defaults, the queryable's reply clock) read: each value of
+/// `reply-auto-timestamp` the domain allows is selected and read back.
+#[test]
+fn a_unicast_session_holds_the_snapshot_of_its_params() {
+    use wz_session_core::policy::ReplyAutoTimestamp;
+    for value in [ReplyAutoTimestamp::On, ReplyAutoTimestamp::Off] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_reply_auto_timestamp(value).is_err() {
+            continue;
+        }
+        let expected = params.policy;
+        let (actions, _driver) = recording_actions_with_params(params);
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+        let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+        assert_eq!(*session.policy(), expected, "{value:?}");
+    }
+}
+
+/// A multicast session holds the snapshot its creator installs, in place of the build defaults
+/// it starts from.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+#[test]
+fn a_multicast_session_holds_the_snapshot_it_is_given() {
+    use wz_session_core::policy::{SessionPolicy, SubscriberOverload};
+    for value in [
+        SubscriberOverload::Block,
+        SubscriberOverload::Reject,
+        SubscriberOverload::KeepLatest,
+    ] {
+        let mut policy = SessionPolicy::defaults();
+        if policy.select_subscriber_overload(value).is_err() {
+            continue;
+        }
+        let (session, _tap) = tapped_qos_group_session();
+        let session = session.with_policy(policy);
+        assert_eq!(session.policy().subscriber_overload(), value);
+        assert_eq!(SubscribeOptions::new().overload_by(session.policy()), value);
+    }
+}
+
+/// A declaration that says nothing is given the `entity-timestamp-opt-in` value of the
+/// session's snapshot, not the build's: each value the domain allows is selected in the params
+/// the session opens with, and the callback sees the timestamp exactly when that value is off.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_subscriber_that_says_nothing_gets_the_sessions_snapshot() {
+    use wz_session_core::policy::EntityTimestampOptIn;
+    for (value, exposed) in [
+        (EntityTimestampOptIn::On, false),
+        (EntityTimestampOptIn::Off, true),
+    ] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_entity_timestamp_opt_in(value).is_err() {
+            continue;
+        }
+        let (time, _payload) = timestamp_seen_on(params, SubscribeOptions::new());
+        assert_eq!(time.is_some(), exposed, "{value:?}");
+    }
 }
 
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
@@ -17448,24 +17521,29 @@ async fn under_block_a_full_lane_holds_and_the_drain_admits_in_order_when_room_c
     assert_eq!(end.lane.refused.total, 0);
 }
 
-/// The default answer is the build's policy, and a declaration can say its own.
+/// The default answer is the `subscriber-overload` value of the session's snapshot, whatever the
+/// build's is, and a declaration can say its own.
 #[cfg(feature = "transport-unicast")]
 #[test]
-fn a_subscription_takes_the_overload_answer_of_the_build_unless_it_says_its_own() {
+fn a_subscription_takes_the_overload_answer_of_the_session_unless_it_says_its_own() {
     use wz_session_core::policy::{SessionPolicy, SubscriberOverload};
-    assert_eq!(
-        SubscribeOptions::default().overload(),
-        SessionPolicy::from_build().subscriber_overload()
-    );
-    for own in [
+    const ALL: [SubscriberOverload; 3] = [
         SubscriberOverload::Block,
         SubscriberOverload::Reject,
         SubscriberOverload::KeepLatest,
-    ] {
-        assert_eq!(
-            SubscribeOptions::default().with_overload(own).overload(),
-            own
-        );
+    ];
+    assert_eq!(SubscribeOptions::default().overload(), None);
+    for value in ALL {
+        let mut policy = SessionPolicy::defaults();
+        if policy.select_subscriber_overload(value).is_err() {
+            continue;
+        }
+        assert_eq!(SubscribeOptions::default().overload_by(&policy), value);
+        for own in ALL {
+            let options = SubscribeOptions::default().with_overload(own);
+            assert_eq!(options.overload(), Some(own));
+            assert_eq!(options.overload_by(&policy), own);
+        }
     }
 }
 

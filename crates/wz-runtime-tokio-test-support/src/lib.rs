@@ -35,6 +35,13 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
+/// The snapshot every fixture's session is handed: the build defaults. A test that is about
+/// another value selects it in the params a fixture returns, whose queue it then rebuilds with
+/// `TxQueueConf::of_policy` when the value is one the queue carries.
+pub fn fixture_policy() -> wz_runtime_tokio::policy::SessionPolicy {
+    wz_runtime_tokio::policy::SessionPolicy::defaults()
+}
+
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
 /// fixture inputs, so wire-byte assertions cross-reference cleanly
 /// against the `layer3_init_body` fixture.
@@ -46,6 +53,7 @@ use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, T
 /// test-support crate so that production builds cannot accidentally
 /// link against it.
 pub fn fixture_session_init_params() -> SessionInitParams {
+    let policy = fixture_policy();
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [0x01; 4].into(),
@@ -58,9 +66,9 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         cookie: Vec::new(),
         // Deterministic 32-byte test key. Production callers MUST
         // supply real per-process entropy via `SigningKey::new_random`.
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
-        policy: wz_runtime_tokio::policy::SessionPolicy::defaults(),
+        policy,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }
@@ -91,6 +99,7 @@ pub fn zenoh_interop_session_init_params(
     whatami: WhatAmI,
     zid: impl AsRef<[u8]>,
 ) -> SessionInitParams {
+    let policy = fixture_policy();
     SessionInitParams {
         whatami,
         zid: SessionZid::new(zid.as_ref()).expect("a fixture zid is 1 to 16 bytes"),
@@ -102,9 +111,9 @@ pub fn zenoh_interop_session_init_params(
         initial_sn: 0,
         cookie: Vec::new(),
         // Deterministic 32-byte test key (same discipline as the fixture).
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
-        policy: wz_runtime_tokio::policy::SessionPolicy::defaults(),
+        policy,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }

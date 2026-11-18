@@ -605,8 +605,8 @@ impl MulticastTxPlane {
             // R3264 — a pooled datagram is a slot of the link's transmit pool:
             // started as the send begins, home through the completion edge once
             // the send has returned.
-            use crate::datagram_pacing::{OfBuild, Pacing};
-            let mut pacing = OfBuild::of_build();
+            use crate::datagram_pacing::Pacing;
+            let mut pacing = crate::datagram_pacing::of_build_defaults();
             while let Some((priority, mut datagram)) = queued.recv_wire_tagged().await {
                 // The `datagram-fragment-pacing` policy: a fragment past the burst waits here, in
                 // the writer, so the producers that queued it are held only by the lane's room.
