@@ -8766,7 +8766,7 @@ mod face_up_order_tests {
     fn a_publish_with_no_reserving_legs_refuses_what_it_cannot_honour() {
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
-            vec![0x11; 16],
+            SessionZid::from([0x11; 16]),
             SessionResources::default(),
         )
         .expect("test host entropy");
@@ -9380,7 +9380,7 @@ mod face_up_order_tests {
         let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
         let shared = SharedSession::new_with_resources(
             TokioTime::new(),
-            vec![0x11; 16],
+            SessionZid::from([0x11; 16]),
             SessionResources::default(),
         )
         .expect("test host entropy");
