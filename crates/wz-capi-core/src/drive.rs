@@ -4801,7 +4801,7 @@ mod tests {
     fn the_parameters_a_session_is_given_carry_both_halves_of_its_link() {
         let stated = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::pico(),
+                queue: TxQueueConf::pico_of_policy(&SessionPolicy::defaults()),
                 batch_size: 2048,
                 lease_ms: 4000,
                 keep_alive: KeepAliveConf::ZENOH,
@@ -5076,7 +5076,7 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::default(),
+                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5214,7 +5214,7 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::default(),
+                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5294,7 +5294,7 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::default(),
+                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5867,7 +5867,7 @@ mod tests {
     #[cfg(feature = "peer")]
     fn peer_stance() -> OpenStance {
         OpenStance {
-            tx_queue: TxQueueConf::pico(),
+            tx_queue: TxQueueConf::pico_of_policy(&SessionPolicy::defaults()),
             batch_size: DEFAULT_BATCH_SIZE,
             lease_ms: DEFAULT_LEASE_MS,
             keep_alive: KeepAliveConf::PICO,

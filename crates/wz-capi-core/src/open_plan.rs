@@ -2001,7 +2001,7 @@ mod tests {
             .expect("a client with an endpoint opens")
         };
         let abi = |offer_shm| AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2031,7 +2031,7 @@ mod tests {
             plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
                 .expect("a client with an endpoint opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::default(),
+                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -2090,18 +2090,19 @@ mod tests {
                 .tx_queue
         };
         let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
-        assert!(!stance(off, TxQueueConf::default()).batching);
-        assert!(!stance(off, TxQueueConf::pico()).batching);
+        assert!(!stance(off, TxQueueConf::of_policy(&SessionPolicy::defaults())).batching);
+        assert!(!stance(off, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())).batching);
         let bound =
             r#"{ transport: { link: { tx: { queue: { batching: { time_limit: 4 } } } } } }"#;
         assert_eq!(
-            stance(bound, TxQueueConf::default()).batching_time_limit_us,
+            stance(bound, TxQueueConf::of_policy(&SessionPolicy::defaults()))
+                .batching_time_limit_us,
             4_000
         );
         let init =
             r#"{ transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#;
         assert_eq!(
-            stance(init, TxQueueConf::default()).allocation,
+            stance(init, TxQueueConf::of_policy(&SessionPolicy::defaults())).allocation,
             wz_session_core::link::QueueAllocation::Init
         );
         // Upstream's own value is no instruction, and silence is none either: the model keeps
@@ -2109,8 +2110,14 @@ mod tests {
         let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true,
                                                                       time_limit: 1 },
                                                           allocation: { mode: "lazy" } } } } } }"#;
-        assert_eq!(stance(on, TxQueueConf::pico()), TxQueueConf::pico());
-        assert_eq!(stance("{}", TxQueueConf::default()), TxQueueConf::default());
+        assert_eq!(
+            stance(on, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())),
+            TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+        );
+        assert_eq!(
+            stance("{}", TxQueueConf::of_policy(&SessionPolicy::defaults())),
+            TxQueueConf::of_policy(&SessionPolicy::defaults())
+        );
     }
 
     /// The width of the sequence numbers a group's Join states is the `sn-resolution` policy's,
@@ -2338,7 +2345,7 @@ mod tests {
             "the plan says what the document says: the key defaults on"
         );
         let abi = |groups_report_shm| AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2784,7 +2791,7 @@ mod tests {
 
         let expected = plan.session.clone();
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2912,7 +2919,7 @@ mod tests {
                 .expect("key expressions");
         assert_eq!(plan.session.aggregation, expected);
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2947,7 +2954,7 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::default(),
+                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
