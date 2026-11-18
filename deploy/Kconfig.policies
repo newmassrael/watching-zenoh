@@ -31,6 +31,24 @@ config WZ_POLICY_MULTICAST_LOOPBACK_OFF
 
 endchoice
 
+config WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OS_DEFAULT
+	bool "multicast-loopback allows os-default" if !WZ_POLICY_MULTICAST_LOOPBACK_OS_DEFAULT
+	default y
+	help
+	  Whether `os-default` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_ON
+	bool "multicast-loopback allows on" if !WZ_POLICY_MULTICAST_LOOPBACK_ON
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OFF
+	bool "multicast-loopback allows off" if !WZ_POLICY_MULTICAST_LOOPBACK_OFF
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
 config WZ_POLICY_TX_NO_PROGRESS_DEADLINE
 	bool "tx-no-progress-deadline"
 	default n
@@ -43,6 +61,18 @@ config WZ_POLICY_TX_NO_PROGRESS_DEADLINE
 	  Upstream: Gives a blocking message one wait_before_close for the whole of it,
 	  however many fragments go out: its deadline has no cap to extend by, so a
 	  fragment out leaves the deadline where it is.
+
+config WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_OFF
+	bool "tx-no-progress-deadline allows off" if WZ_POLICY_TX_NO_PROGRESS_DEADLINE
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_ON
+	bool "tx-no-progress-deadline allows on" if !WZ_POLICY_TX_NO_PROGRESS_DEADLINE
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
 
 config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	bool "tx-expiry-keeps-session"
@@ -58,6 +88,18 @@ config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	  Upstream: Closes the session as unresponsive when a blocking message found no
 	  room in its deadline, and tells the sender nothing.
 
+config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_OFF
+	bool "tx-expiry-keeps-session allows off" if WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_ON
+	bool "tx-expiry-keeps-session allows on" if !WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
+
 config WZ_POLICY_DECLARATION_SYNC_PACING
 	bool "declaration-sync-pacing"
 	default n
@@ -72,6 +114,18 @@ config WZ_POLICY_DECLARATION_SYNC_PACING
 	  sends nothing.
 	  Upstream: Replays every declaration it holds to a new peer in one call, as
 	  soon as the session is open again.
+
+config WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_OFF
+	bool "declaration-sync-pacing allows off" if WZ_POLICY_DECLARATION_SYNC_PACING
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON
+	bool "declaration-sync-pacing allows on" if !WZ_POLICY_DECLARATION_SYNC_PACING
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
 
 config WZ_POLICY_DATAGRAM_FRAGMENT_PACING
 	bool "datagram-fragment-pacing"
@@ -91,6 +145,18 @@ config WZ_POLICY_DATAGRAM_FRAGMENT_PACING
 	  Upstream: Writes the fragments of a large message to a datagram socket back to
 	  back, as fast as the socket takes them, however small the receiver's buffer.
 
+config WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_OFF
+	bool "datagram-fragment-pacing allows off" if WZ_POLICY_DATAGRAM_FRAGMENT_PACING
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_ON
+	bool "datagram-fragment-pacing allows on" if !WZ_POLICY_DATAGRAM_FRAGMENT_PACING
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
+
 config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
 	bool "multicast-link-requires-iface"
 	default n
@@ -105,6 +171,18 @@ config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
 	  Upstream: Opens a multicast link whose locator names no interface on the first
 	  interface that can carry multicast, or on the kernel's choice when the host
 	  has none, so the link may sit on an interface nobody chose.
+
+config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_OFF
+	bool "multicast-link-requires-iface allows off" if WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_ON
+	bool "multicast-link-requires-iface allows on" if !WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
 
 choice WZ_POLICY_RELIABLE_GAP_RECONNECT
 	prompt "reliable-gap-reconnect"
@@ -139,6 +217,24 @@ config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALWAYS
 
 endchoice
 
+config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_OFF
+	bool "reliable-gap-reconnect allows off" if !WZ_POLICY_RELIABLE_GAP_RECONNECT_OFF
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED
+	bool "reliable-gap-reconnect allows until-declarations-synced" if !WZ_POLICY_RELIABLE_GAP_RECONNECT_UNTIL_DECLARATIONS_SYNCED
+	default y
+	help
+	  Whether `until-declarations-synced` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_ALWAYS
+	bool "reliable-gap-reconnect allows always" if !WZ_POLICY_RELIABLE_GAP_RECONNECT_ALWAYS
+	default y
+	help
+	  Whether `always` stays selectable after the build; the chosen default always does.
+
 config WZ_POLICY_ENTITY_LINK_RESTRICTION
 	bool "entity-link-restriction"
 	default n
@@ -157,6 +253,18 @@ config WZ_POLICY_ENTITY_LINK_RESTRICTION
 	  link that wants it, a declaration is made to every link, a query goes to every
 	  link.
 
+config WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_OFF
+	bool "entity-link-restriction allows off" if WZ_POLICY_ENTITY_LINK_RESTRICTION
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_ON
+	bool "entity-link-restriction allows on" if !WZ_POLICY_ENTITY_LINK_RESTRICTION
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
+
 config WZ_POLICY_TARGETED_QUERY
 	bool "targeted-query"
 	default n
@@ -171,6 +279,18 @@ config WZ_POLICY_TARGETED_QUERY
 	  engine reads this policy.
 	  Upstream: Sends a query to every link whose peers declared a queryable it
 	  matches, and a caller cannot name the peer a query is for.
+
+config WZ_POLICY_TARGETED_QUERY_ALLOWS_OFF
+	bool "targeted-query allows off" if WZ_POLICY_TARGETED_QUERY
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_TARGETED_QUERY_ALLOWS_ON
+	bool "targeted-query allows on" if !WZ_POLICY_TARGETED_QUERY
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
 
 config WZ_POLICY_PUBLISHER_ADMISSION_RETRY
 	bool "publisher-admission-retry"
@@ -195,6 +315,18 @@ config WZ_POLICY_PUBLISHER_ADMISSION_RETRY
 	  its queue; a put that finds none on a link is dropped there (or closes the
 	  session) and still reports success, and a caller cannot ask for it to be tried
 	  again.
+
+config WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_OFF
+	bool "publisher-admission-retry allows off" if WZ_POLICY_PUBLISHER_ADMISSION_RETRY
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_ON
+	bool "publisher-admission-retry allows on" if !WZ_POLICY_PUBLISHER_ADMISSION_RETRY
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
 
 config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
 	bool "multi-route-atomic-tx"
@@ -223,6 +355,18 @@ config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
 	  full drops the frame or waits for room while the other links take it, so one
 	  put can reach some links and not others.
 
+config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_OFF
+	bool "multi-route-atomic-tx allows off" if WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_ON
+	bool "multi-route-atomic-tx allows on" if !WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
+
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
 	default n
@@ -239,6 +383,18 @@ config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	  reply's to the querier, and lets any publisher attach the timestamp it is
 	  given.
 
+config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_OFF
+	bool "entity-timestamp-opt-in allows off" if WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_ON
+	bool "entity-timestamp-opt-in allows on" if !WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
+
 config WZ_POLICY_REPLY_AUTO_TIMESTAMP
 	bool "reply-auto-timestamp"
 	default n
@@ -253,6 +409,18 @@ config WZ_POLICY_REPLY_AUTO_TIMESTAMP
 	  and its replies go out as they would with this off.
 	  Upstream: Sends a reply with the timestamp its handler gave it and with none
 	  when the handler gave none.
+
+config WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_OFF
+	bool "reply-auto-timestamp allows off" if WZ_POLICY_REPLY_AUTO_TIMESTAMP
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_ON
+	bool "reply-auto-timestamp allows on" if !WZ_POLICY_REPLY_AUTO_TIMESTAMP
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
 
 choice WZ_POLICY_SUBSCRIBER_OVERLOAD
 	prompt "subscriber-overload"
@@ -286,6 +454,24 @@ config WZ_POLICY_SUBSCRIBER_OVERLOAD_KEEP_LATEST
 
 endchoice
 
+config WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_BLOCK
+	bool "subscriber-overload allows block" if !WZ_POLICY_SUBSCRIBER_OVERLOAD_BLOCK
+	default y
+	help
+	  Whether `block` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_REJECT
+	bool "subscriber-overload allows reject" if !WZ_POLICY_SUBSCRIBER_OVERLOAD_REJECT
+	default y
+	help
+	  Whether `reject` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_KEEP_LATEST
+	bool "subscriber-overload allows keep-latest" if !WZ_POLICY_SUBSCRIBER_OVERLOAD_KEEP_LATEST
+	default y
+	help
+	  Whether `keep-latest` stays selectable after the build; the chosen default always does.
+
 choice WZ_POLICY_KEY_SET
 	prompt "key-set"
 	default WZ_POLICY_KEY_SET_OPEN
@@ -309,6 +495,18 @@ config WZ_POLICY_KEY_SET_CLOSED
 	bool "closed"
 
 endchoice
+
+config WZ_POLICY_KEY_SET_ALLOWS_OPEN
+	bool "key-set allows open" if !WZ_POLICY_KEY_SET_OPEN
+	default y
+	help
+	  Whether `open` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_KEY_SET_ALLOWS_CLOSED
+	bool "key-set allows closed" if !WZ_POLICY_KEY_SET_CLOSED
+	default y
+	help
+	  Whether `closed` stays selectable after the build; the chosen default always does.
 
 choice WZ_POLICY_SN_RESOLUTION
 	prompt "sn-resolution"
@@ -346,6 +544,30 @@ config WZ_POLICY_SN_RESOLUTION_BITS_64
 
 endchoice
 
+config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_32
+	bool "sn-resolution allows bits-32" if !WZ_POLICY_SN_RESOLUTION_BITS_32
+	default y
+	help
+	  Whether `bits-32` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_8
+	bool "sn-resolution allows bits-8" if !WZ_POLICY_SN_RESOLUTION_BITS_8
+	default y
+	help
+	  Whether `bits-8` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_16
+	bool "sn-resolution allows bits-16" if !WZ_POLICY_SN_RESOLUTION_BITS_16
+	default y
+	help
+	  Whether `bits-16` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_64
+	bool "sn-resolution allows bits-64" if !WZ_POLICY_SN_RESOLUTION_BITS_64
+	default y
+	help
+	  Whether `bits-64` stays selectable after the build; the chosen default always does.
+
 choice WZ_POLICY_SUPERVISION_AFTER_EXPIRY
 	prompt "supervision-after-expiry"
 	default WZ_POLICY_SUPERVISION_AFTER_EXPIRY_LATCH
@@ -368,6 +590,18 @@ config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_REARM
 
 endchoice
 
+config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_LATCH
+	bool "supervision-after-expiry allows latch" if !WZ_POLICY_SUPERVISION_AFTER_EXPIRY_LATCH
+	default y
+	help
+	  Whether `latch` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_REARM
+	bool "supervision-after-expiry allows rearm" if !WZ_POLICY_SUPERVISION_AFTER_EXPIRY_REARM
+	default y
+	help
+	  Whether `rearm` stays selectable after the build; the chosen default always does.
+
 choice WZ_POLICY_EVENT_RING_FULL
 	prompt "event-ring-full"
 	default WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST
@@ -388,6 +622,18 @@ config WZ_POLICY_EVENT_RING_FULL_DROP_NEWEST
 	bool "drop-newest"
 
 endchoice
+
+config WZ_POLICY_EVENT_RING_FULL_ALLOWS_OVERWRITE_OLDEST
+	bool "event-ring-full allows overwrite-oldest" if !WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST
+	default y
+	help
+	  Whether `overwrite-oldest` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_EVENT_RING_FULL_ALLOWS_DROP_NEWEST
+	bool "event-ring-full allows drop-newest" if !WZ_POLICY_EVENT_RING_FULL_DROP_NEWEST
+	default y
+	help
+	  Whether `drop-newest` stays selectable after the build; the chosen default always does.
 
 choice WZ_POLICY_CLOCK_QUALITY_STAMPING
 	prompt "clock-quality-stamping"
@@ -412,6 +658,18 @@ config WZ_POLICY_CLOCK_QUALITY_STAMPING_TRUSTED_ONLY
 	bool "trusted-only"
 
 endchoice
+
+config WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_ALWAYS
+	bool "clock-quality-stamping allows always" if !WZ_POLICY_CLOCK_QUALITY_STAMPING_ALWAYS
+	default y
+	help
+	  Whether `always` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_TRUSTED_ONLY
+	bool "clock-quality-stamping allows trusted-only" if !WZ_POLICY_CLOCK_QUALITY_STAMPING_TRUSTED_ONLY
+	default y
+	help
+	  Whether `trusted-only` stays selectable after the build; the chosen default always does.
 
 choice WZ_POLICY_ROUTING_FACE_DRIVE
 	prompt "routing-face-drive"
@@ -438,6 +696,18 @@ config WZ_POLICY_ROUTING_FACE_DRIVE_ONE_TASK
 	bool "one-task"
 
 endchoice
+
+config WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_TASK_PER_FACE
+	bool "routing-face-drive allows task-per-face" if !WZ_POLICY_ROUTING_FACE_DRIVE_TASK_PER_FACE
+	default y
+	help
+	  Whether `task-per-face` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_ONE_TASK
+	bool "routing-face-drive allows one-task" if !WZ_POLICY_ROUTING_FACE_DRIVE_ONE_TASK
+	default y
+	help
+	  Whether `one-task` stays selectable after the build; the chosen default always does.
 
 choice WZ_POLICY_ROUTING_TABLE_SHARING
 	prompt "routing-table-sharing"
@@ -466,6 +736,18 @@ config WZ_POLICY_ROUTING_TABLE_SHARING_SNAPSHOT
 	bool "snapshot"
 
 endchoice
+
+config WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_RWLOCK
+	bool "routing-table-sharing allows rwlock" if !WZ_POLICY_ROUTING_TABLE_SHARING_RWLOCK
+	default y
+	help
+	  Whether `rwlock` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_SNAPSHOT
+	bool "routing-table-sharing allows snapshot" if !WZ_POLICY_ROUTING_TABLE_SHARING_SNAPSHOT
+	default y
+	help
+	  Whether `snapshot` stays selectable after the build; the chosen default always does.
 
 choice WZ_POLICY_REASSEMBLY_POOL_OVERFLOW
 	prompt "reassembly-pool-overflow"
@@ -500,6 +782,24 @@ config WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_OLDEST_WINS
 
 endchoice
 
+config WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_REJECT
+	bool "reassembly-pool-overflow allows reject" if !WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_REJECT
+	default y
+	help
+	  Whether `reject` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_DIAGNOSTIC_EVENT
+	bool "reassembly-pool-overflow allows diagnostic-event" if !WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_DIAGNOSTIC_EVENT
+	default y
+	help
+	  Whether `diagnostic-event` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_OLDEST_WINS
+	bool "reassembly-pool-overflow allows oldest-wins" if !WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_OLDEST_WINS
+	default y
+	help
+	  Whether `oldest-wins` stays selectable after the build; the chosen default always does.
+
 choice WZ_POLICY_LINK_TIE_ORDER
 	prompt "link-tie-order"
 	default WZ_POLICY_LINK_TIE_ORDER_ZID_NUMBER
@@ -524,5 +824,17 @@ config WZ_POLICY_LINK_TIE_ORDER_ZID_BYTES
 	bool "zid-bytes"
 
 endchoice
+
+config WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_NUMBER
+	bool "link-tie-order allows zid-number" if !WZ_POLICY_LINK_TIE_ORDER_ZID_NUMBER
+	default y
+	help
+	  Whether `zid-number` stays selectable after the build; the chosen default always does.
+
+config WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_BYTES
+	bool "link-tie-order allows zid-bytes" if !WZ_POLICY_LINK_TIE_ORDER_ZID_BYTES
+	default y
+	help
+	  Whether `zid-bytes` stays selectable after the build; the chosen default always does.
 
 endmenu

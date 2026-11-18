@@ -1,0 +1,834 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit config-schema. Do not edit: `wz_config.py --check` fails when this file is stale.",
+  "title": "wz run-time configuration",
+  "description": "The policies and limits a document may state when a node opens or while it runs. A policy the build fixes, and a limit only the build sizes, are not here.",
+  "type": "object",
+  "properties": {
+    "wz": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "type": "object",
+          "properties": {
+            "multicast-loopback": {
+              "description": "Whether a datagram a node sends to a multicast group is also delivered to members of that group on the same host.",
+              "enum": [
+                "os-default",
+                "on",
+                "off"
+              ],
+              "default": "os-default",
+              "x-wz-scope": "link",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "none"
+            },
+            "tx-no-progress-deadline": {
+              "description": "Whether a blocking message gets a second bound beside its total wait: the wait with no progress.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "session",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "timing"
+            },
+            "tx-expiry-keeps-session": {
+              "description": "What happens when a blocking message finds no room within its deadline.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "session",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "visible"
+            },
+            "declaration-sync-pacing": {
+              "description": "How a node tells a peer its declarations again after a reconnect.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "link",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "quiescent",
+              "x-wz-boundary": "the start of the next replay of declarations",
+              "x-wz-wire": "timing"
+            },
+            "datagram-fragment-pacing": {
+              "description": "How fast the fragments of one large message leave a UDP link, unicast or multicast.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "link",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "timing"
+            },
+            "multicast-link-requires-iface": {
+              "description": "Whether a multicast link may be opened without an interface the locator chose.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "link",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "none"
+            },
+            "reliable-gap-reconnect": {
+              "description": "What a node does when a frame on the reliable channel arrives with a sequence number that jumped forward, which means frames were lost on the way.",
+              "enum": [
+                "off",
+                "until-declarations-synced",
+                "always"
+              ],
+              "default": "off",
+              "x-wz-scope": "session",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "visible"
+            },
+            "entity-link-restriction": {
+              "description": "Whether an entity may be declared with a set of links it is limited to.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "entity",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "targeted-query": {
+              "description": "Whether a query may be addressed to one peer by its node identity.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "message",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "visible"
+            },
+            "publisher-admission-retry": {
+              "description": "Whether a publish may state a bounded retry for the case where no link took it.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "message",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "visible"
+            },
+            "multi-route-atomic-tx": {
+              "description": "Whether a publish may ask to be delivered to all of the links it reaches or to none.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "message",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "visible"
+            },
+            "entity-timestamp-opt-in": {
+              "description": "What an entity does with a timestamp when its declaration says nothing.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "entity",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "reply-auto-timestamp": {
+              "description": "What a queryable's reply carries when its handler gave it no timestamp.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "entity",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "subscriber-overload": {
+              "description": "What a subscriber whose callback runs off the receive path does when its delivery lane is full and its declaration says nothing.",
+              "enum": [
+                "block",
+                "reject",
+                "keep-latest"
+              ],
+              "default": "block",
+              "x-wz-scope": "entity",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "timing"
+            },
+            "key-set": {
+              "description": "Which keys the receive path takes a message on (the closed key set).",
+              "enum": [
+                "open",
+                "closed"
+              ],
+              "default": "open",
+              "x-wz-scope": "session",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "none"
+            },
+            "sn-resolution": {
+              "description": "The width of the sequence numbers the sessions of the C interfaces advertise when their configuration states none: in the InitSyn of a unicast session, where the two sides take the smaller of the two advertised widths, and in the Join of a multicast group, where a member refuses a Join that states another width than its own, so every member of a group states the same.",
+              "enum": [
+                "bits-32",
+                "bits-8",
+                "bits-16",
+                "bits-64"
+              ],
+              "default": "bits-32",
+              "x-wz-scope": "session",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "negotiated"
+            },
+            "supervision-after-expiry": {
+              "description": "What a checkpoint does when it is fed after its deadline was missed.",
+              "enum": [
+                "latch",
+                "rearm"
+              ],
+              "default": "latch",
+              "x-wz-scope": "runtime",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "none"
+            },
+            "event-ring-full": {
+              "description": "Which event a full event ring gives up.",
+              "enum": [
+                "overwrite-oldest",
+                "drop-newest"
+              ],
+              "default": "overwrite-oldest",
+              "x-wz-scope": "runtime",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "quiescent",
+              "x-wz-boundary": "after the consumer has read every record",
+              "x-wz-wire": "none"
+            },
+            "clock-quality-stamping": {
+              "description": "Whether a node stamps data with a time it does not trust.",
+              "enum": [
+                "always",
+                "trusted-only"
+              ],
+              "default": "always",
+              "x-wz-scope": "runtime",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "visible"
+            },
+            "routing-face-drive": {
+              "description": "How a node that routes for others serves its links.",
+              "enum": [
+                "task-per-face",
+                "one-task"
+              ],
+              "default": "task-per-face",
+              "x-wz-scope": "runtime",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "timing"
+            },
+            "routing-table-sharing": {
+              "description": "How a node that routes for others shares its routing tables between the links that route by them and the changes made to them.",
+              "enum": [
+                "rwlock",
+                "snapshot"
+              ],
+              "default": "rwlock",
+              "x-wz-scope": "runtime",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "timing"
+            },
+            "reassembly-pool-overflow": {
+              "description": "What a node does with the first fragment of a new fragmented message when every slot of its reassembly pool holds a message still arriving.",
+              "enum": [
+                "reject",
+                "diagnostic-event",
+                "oldest-wins"
+              ],
+              "default": "reject",
+              "x-wz-scope": "session",
+              "x-wz-binding": "live",
+              "x-wz-mutability": "hot",
+              "x-wz-wire": "none"
+            },
+            "link-tie-order": {
+              "description": "How a node orders two zids when it and a peer dialled each other at the same moment and both ends must keep the same one of the two links: the link the node with the lower zid dialled is kept, and this says which zid is lower.",
+              "enum": [
+                "zid-number",
+                "zid-bytes"
+              ],
+              "default": "zid-number",
+              "x-wz-scope": "link",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            }
+          },
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "MAX_KEYEXPR_BYTES": {
+              "description": "The longest key expression, in bytes, a session stores: a subscription's pattern, or a key a peer declared.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 256,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_SUBSCRIPTIONS": {
+              "description": "The subscribers a session holds at once.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 16,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MATCH_MEMO_SLOTS": {
+              "description": "How many distinct keys the receive match cache remembers at once: the keys whose matching subscriptions it can answer without matching again.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "DELIVERY_LANE_EVENTS": {
+              "description": "How many samples the delivery lane of an offloaded subscriber holds at once: the samples the receive path has copied in and its callback has not yet run on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 64,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "DELIVERY_LANE_BYTES": {
+              "description": "How many bytes of copied samples a delivery lane holds at once: the key, the payload, the attachment and the encoding schema of each waiting sample, and the end of the byte area a sample skipped to stay in one piece.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 65536,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "DELIVERY_LANE_CALLBACKS": {
+              "description": "How many callback invocations a delivery lane owes at once.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 256,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "MAX_QUERYABLES": {
+              "description": "The queryables a session holds at once.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 16,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_PENDING_QUERIES": {
+              "description": "The queries (gets) a session has waiting for their replies at once.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 16,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_DECL_OBSERVERS": {
+              "description": "The observers an application installs on the declarations of its peers (subscribers, queryables and liveliness tokens appearing or leaving), per kind and per direction.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_LIVELINESS_SUBSCRIPTIONS": {
+              "description": "The liveliness subscribers a session holds at once.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_LOCAL_TOKENS": {
+              "description": "The liveliness tokens a session itself declares and holds at once.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_PENDING_LIVELINESS_GETS": {
+              "description": "The liveliness gets (snapshots of the tokens alive) a session has waiting for their answer at once.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_PENDING_DECLARES": {
+              "description": "The declarations a session can have ready to send in answer to its peers' interests between two sends: each answer is the session's matching declarations and a final.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 32,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_INBOUND_SUB_INTERESTS": {
+              "description": "The peers' interests in this session's subscribers that the session remembers, so that a subscriber declared later is announced to them: one per publisher a peer holds with a write filter.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 16,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_PEER_KEYEXPR_ALIASES": {
+              "description": "The key expressions one peer may have declared to this session at a time, to name them by a short id.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 16,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_REMOTE_DECLS": {
+              "description": "The declarations of one kind (subscribers, queryables, liveliness tokens) one peer may hold open to this session at a time.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 16,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_PENDING_REPLIES": {
+              "description": "The replies a session's queryables may have ready to send between two sends.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_PENDING_FINALS": {
+              "description": "The queries a session may owe the end of an answer between two sends.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_REPLY_PAYLOAD_BYTES": {
+              "description": "The largest payload of one reply, in bytes, and the largest attachment beside it.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 1024,
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_LOCATOR_LEN": {
+              "description": "The longest locator, in bytes, a node stores: one it is told to connect to, or one it listens on (for example udp/192.168.1.10:7447).",
+              "type": "integer",
+              "minimum": 0,
+              "default": 64,
+              "x-wz-storage": "both",
+              "x-wz-scope": [
+                "runtime",
+                "link"
+              ],
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_STATIC_CONNECT": {
+              "description": "The locators a node is told to connect to.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "QUERIER_MAX_PENDING_QUERIES": {
+              "description": "The queries one declared querier may have in flight at once; one more is refused until a pending one ends.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "TX_NO_PROGRESS_WINDOW_US": {
+              "description": "How long, in microseconds, a blocking message may wait with no progress when the tx-no-progress-deadline policy is on: no fragment of it going out.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 1000000,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "timing"
+            },
+            "TX_EXPIRY_CLOSE_AFTER": {
+              "description": "How many blocking messages in a row may find no room within their deadline before the session is closed as unresponsive, when the tx-expiry-keeps-session policy is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "timing"
+            },
+            "DATAGRAM_FRAGMENT_BURST": {
+              "description": "How many fragments of a message a UDP link's writer writes in a row when the datagram-fragment-pacing policy is on, before the next one waits for DATAGRAM_FRAGMENT_GAP_US.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "link",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "DATAGRAM_FRAGMENT_GAP_US": {
+              "description": "How long, in microseconds, must pass after the last fragment was written before a UDP link's writer writes another one past the burst, when the datagram-fragment-pacing policy is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 1000,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "link",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "QUERY_PARAMETERS_MAX_BYTES": {
+              "description": "The most bytes of selector parameters a query from a peer may carry for this node to run it.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "live",
+              "x-wz-wire": "none"
+            },
+            "QUERY_ATTACHMENT_MAX_BYTES": {
+              "description": "The most bytes of attachment a query from a peer may carry for this node to run it.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "live",
+              "x-wz-wire": "none"
+            },
+            "HANDSHAKE_COOKIE_BYTES": {
+              "description": "How many bytes of a peer's cookie a session keeps on the fixed-memory profile: the cookie in the peer's INIT acknowledgement, which the node echoes in its OPEN, and the cookie a peer echoes in its OPEN, which an accepting node checks against the one it issued.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 128,
+              "x-wz-storage": "capacity",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "PICO_TX_QUEUE_SIZE": {
+              "description": "How many batches each priority's outbound queue holds for the pico C ABI, in 1 to 16 (upstream's range for a queue size; a value outside it counts as the nearest end).",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "SNAPSHOT_PERIOD_MS": {
+              "description": "How often, in milliseconds, the node takes a snapshot of itself: what it spends and how its messages are spaced.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 1000,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "SNAPSHOT_HISTOGRAM_BUCKETS": {
+              "description": "How many buckets the snapshot's message-interval histogram has, each 8 bytes.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 24,
+              "x-wz-storage": "both",
+              "x-wz-scope": [
+                "runtime",
+                "session"
+              ],
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "visible"
+            },
+            "SUPERVISION_CHECKPOINTS": {
+              "description": "How many checkpoints the node's supervisor watches.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 4,
+              "x-wz-storage": "both",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "EVENT_RING_SLOTS": {
+              "description": "How many event records the node's event ring holds.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 64,
+              "x-wz-storage": "both",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "CLOCK_SOURCES": {
+              "description": "How many clock sources an application can register with the node at once, when the clock-source capability is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 1,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "CLOCK_MAX_FORWARD_STEP_MS": {
+              "description": "How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before the node's hybrid logical clock refuses it, as zenoh's UHLC_MAX_DELTA_MS.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 500,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "DECLARATION_SYNC_BURST_MESSAGES": {
+              "description": "How many declarations one turn of a paced declaration replay sends, when the declaration-sync-pacing policy is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "timing"
+            },
+            "DECLARATION_SYNC_FINAL_TIMEOUT_MS": {
+              "description": "How long, in milliseconds, a node waits for the peer's answer to an interest it sent before it counts the interest as unanswered and goes on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 1000,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "live",
+              "x-wz-wire": "none"
+            },
+            "DECLARATION_SYNC_INTERVAL_MS": {
+              "description": "How long, in milliseconds, a paced declaration replay waits between two of its turns, when the declaration-sync-pacing policy is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 10,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "PICO_UNICAST_BATCH_BYTES": {
+              "description": "The batch size, in bytes, a session of the zenoh-pico interface advertises when it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 2048,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "link",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "negotiated"
+            },
+            "PICO_MULTICAST_BATCH_BYTES": {
+              "description": "The batch size, in bytes, a session of the zenoh-pico interface advertises in the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 2048,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "visible"
+            },
+            "PICO_LEASE_MS": {
+              "description": "The lease, in milliseconds, a session of the zenoh-pico interface advertises, unicast and in a multicast group's Join, as zenoh-pico's Z_TRANSPORT_LEASE.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 10000,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "negotiated"
+            },
+            "PICO_SOCKET_TIMEOUT_MS": {
+              "description": "How long, in milliseconds, one read step of the cooperative zenoh-pico session waits on its link before it returns with nothing, as zenoh-pico's Z_CONFIG_SOCKET_TIMEOUT.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 100,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "PICO_CONNECT_TIMEOUT_MS": {
+              "description": "How long, in milliseconds, opening a cooperative zenoh-pico session waits for the session to be established before the open fails, as zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 10000,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "PICO_FRAG_MAX_BYTES": {
+              "description": "The largest message, in bytes, a session of the zenoh-pico interface rejoins from fragments, unicast and in a multicast group, as zenoh-pico's FRAG_MAX_SIZE.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 4096,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "link",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "PICO_ACCEPT_TIMEOUT_MS": {
+              "description": "How long, in milliseconds, a listening session of the zenoh-pico interface gives an inbound link to complete its whole handshake, link handshake included, before it drops the link without a word, as zenoh-pico's Z_TRANSPORT_ACCEPT_TIMEOUT.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 1000,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "link",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "PICO_KEEPALIVES_PER_LEASE": {
+              "description": "How many keepalives a session of the zenoh-pico interface sends in one lease, as zenoh-pico's Z_TRANSPORT_LEASE_EXPIRE_FACTOR: whenever the line has been idle for the adopted lease divided by this, the session sends one.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 3,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
