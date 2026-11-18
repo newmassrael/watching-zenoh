@@ -188,6 +188,53 @@ fn the_cursor_passes_rows_and_a_step_folds_only_the_step() {
     assert_eq!(again.matches("\"state\":").count(), 3, "{again}");
 }
 
+/// The memory counts the payloads held past the cursor and lets go of them
+/// when a cursor passes them: nothing before a walk, at least every held
+/// payload's bytes while they wait, and at least those bytes less once passed.
+#[test]
+fn the_memory_counts_the_held_payloads_and_lets_go_of_the_passed_ones() {
+    let mut d = Dissection::new();
+    let payloads = [pose(-1, 0.5), pose(-2, 0.5), pose(-3, 0.5)];
+    for (i, payload) in payloads.iter().enumerate() {
+        push(&mut d, i, "demo/pose", payload);
+    }
+    let held_bytes: usize = payloads.iter().map(Vec::len).sum();
+    let text = declarations();
+    let any = crate::filter::Filter::any();
+    let mut memory = ValuesMemory::new();
+    assert_eq!(memory.memory(), 0, "a memory that has folded nothing");
+
+    field_values_since(
+        &d,
+        &Numbered,
+        ask(&text, "", &any, "1", 0, 3),
+        &mut memory,
+        None,
+    )
+    .expect("a document");
+    assert_eq!(memory.held(), 3, "every payload is past a cursor of 0");
+    let holding = memory.memory();
+    assert!(
+        holding >= held_bytes,
+        "the held payloads' bytes are counted: {holding} < {held_bytes}"
+    );
+
+    field_values_since(
+        &d,
+        &Numbered,
+        ask(&text, "", &any, "1", 3, 3),
+        &mut memory,
+        None,
+    )
+    .expect("a document");
+    assert_eq!(memory.held(), 0, "the cursor passed every payload");
+    let passed = memory.memory();
+    assert!(
+        passed + held_bytes <= holding,
+        "the passed payloads' bytes were let go: {holding} then {passed}"
+    );
+}
+
 #[test]
 fn the_selector_and_the_rules_decide_which_records_are_written() {
     let mut d = Dissection::new();

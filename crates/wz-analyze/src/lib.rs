@@ -95,6 +95,15 @@ pub struct Options {
     /// did. The bound is stated by the operator and NAMED in the report, on the
     /// same argument `--bounded` already makes for the dissection caps.
     pub live_ms: Option<u64>,
+    /// `--growing`: the capture file is still being written, so read its
+    /// complete blocks and no further ([`analyze_growing`]).
+    ///
+    /// Asked for and never assumed: a file whose last block is cut in half is
+    /// refused as `Truncated` without it, because reading a cut file as if it
+    /// were whole would be a shortfall the report does not state. With it the
+    /// command line prints how far it read before the report, and exits 1 when
+    /// bytes were left unread.
+    pub growing: bool,
     /// NSS key logs to read alongside it, for the ordinary case where the
     /// keys were written by `SSLKEYLOGFILE` into a SEPARATE file from the
     /// capture. Keys embedded in the capture's own Decryption Secrets Blocks
@@ -349,6 +358,9 @@ pub enum UsageError {
     /// Two renderings and one stdout. Picking either silently would make the
     /// other flag's presence meaningless, which is this parser's standing rule.
     CsvAndJson,
+    /// `--growing` and `--csv` together: a growing read writes how far it read
+    /// into the report, and a CSV stream is one table with no place for it.
+    GrowingAndCsv,
 }
 
 impl core::fmt::Display for UsageError {
@@ -401,6 +413,11 @@ impl core::fmt::Display for UsageError {
                 "--csv and --json are two renderings and there is one output; \
                  give one"
             ),
+            Self::GrowingAndCsv => write!(
+                f,
+                "--growing writes how far it read into the report, and a --csv \
+                 table has no place for it; use the report or --json"
+            ),
         }
     }
 }
@@ -433,6 +450,18 @@ OPTIONS:
                       complete because the TOOL stopped rather than because the
                       traffic did -- the report NAMES this bound for the same
                       reason --bounded names the caps it bit.
+    --growing         the capture file is still being written: report on its
+                      COMPLETE blocks only, and say how far that is. Without
+                      it a file whose last block is cut in half is refused as
+                      truncated, because reading it as if it were whole would
+                      hide what is missing. With it the report says how far it
+                      read -- its first line in text, a `growing` object first
+                      in JSON: bytes read, bytes in the file, bytes left unread
+                      (a block still being written) and whether that is none --
+                      the same is said on stderr before it, and the exit code is
+                      1 when any were left. A file that is damaged, not merely
+                      unfinished, is still refused. Refused together with
+                      --interface, and with --csv, a table with no place for it.
     --keylog <file>   an NSS key log (SSLKEYLOGFILE) to decrypt TLS flows with.
                       Repeatable, and every one given is used -- a two-sided
                       capture usually has one log per endpoint. Keys carried
@@ -683,6 +712,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut health = false;
     let mut interface: Option<String> = None;
     let mut live_ms: Option<u64> = None;
+    let mut growing = false;
     let mut csv: Option<CsvPlane> = None;
     let mut at = 0usize;
     while at < args.len() {
@@ -699,6 +729,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--fields" => per_field = true,
             "--bounded" => bounded = true,
             "--health" => health = true,
+            "--growing" => growing = true,
             "--select" => {
                 at += 1;
                 let raw = args.get(at).ok_or(UsageError::MissingValue("--select"))?;
@@ -958,12 +989,19 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         if quic_cid_len.is_some() {
             return Err(UsageError::LiveCannotDo("--quic-cid-len"));
         }
+        // A tap is not a file, so there is no file still being written.
+        if growing {
+            return Err(UsageError::LiveCannotDo("--growing"));
+        }
     } else if live_ms.is_some() {
         // `--for` alone bounds nothing: a file ends by itself.
         return Err(UsageError::LiveCannotDo("--for"));
     }
     if csv.is_some() && format == Format::Json {
         return Err(UsageError::CsvAndJson);
+    }
+    if csv.is_some() && growing {
+        return Err(UsageError::GrowingAndCsv);
     }
     // The selector is compiled last, so `--node-names` may follow it. A `node`
     // term is resolved to the `zid` term its name stands for before the parser
@@ -990,6 +1028,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         csv,
         interface,
         live_ms,
+        growing,
         keylogs,
         format,
         per_flow,
@@ -1229,6 +1268,148 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         )?
     };
     analyze_dissection(dissection, request)
+}
+
+/// How far `--growing` read a capture file still being written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrowingRead {
+    /// The bytes from the start of the file that hold complete blocks, which is
+    /// what was read: [`wz_capture::CaptureCursor::consumed`] after a walk of
+    /// the whole file.
+    pub read: usize,
+    /// The bytes the file held when it was read.
+    pub held: usize,
+}
+
+impl GrowingRead {
+    /// The bytes past the complete blocks: a block still being written, and
+    /// not in the report.
+    pub fn unread(&self) -> usize {
+        self.held - self.read
+    }
+
+    /// The sentence the command line prints before the report.
+    pub fn line(&self, path: &str) -> String {
+        if self.unread() == 0 {
+            format!(
+                "wz-analyze: {path}: --growing read {} byte(s), every one in a complete \
+                 block; nothing was left unread",
+                self.read
+            )
+        } else {
+            format!(
+                "wz-analyze: {path}: --growing read the complete blocks, {} of {} byte(s); \
+                 the last {} byte(s) are a block still being written and are NOT in this \
+                 report",
+                self.read,
+                self.held,
+                self.unread()
+            )
+        }
+    }
+
+    /// Whether every byte of the file was in a complete block, so the report is
+    /// about the whole file as it stood.
+    pub fn complete(&self) -> bool {
+        self.unread() == 0
+    }
+
+    /// The extent as the JSON report carries it: the value of its `growing`
+    /// key.
+    pub fn json(&self) -> String {
+        format!(
+            "{{\"read_bytes\":{},\"file_bytes\":{},\"unread_bytes\":{},\"complete\":{}}}",
+            self.read,
+            self.held,
+            self.unread(),
+            self.complete()
+        )
+    }
+
+    /// The extent as the text report carries it: its first line.
+    pub fn text(&self) -> String {
+        format!(
+            "growing: read {} of {} byte(s) of the file, {} unread (a block still being \
+             written); complete: {}\n",
+            self.read,
+            self.held,
+            self.unread(),
+            if self.complete() { "yes" } else { "no" }
+        )
+    }
+
+    /// `rendered`, the report on the complete blocks, with the extent in it:
+    /// the first line of the text, the first key of the JSON. A CSV rendering
+    /// is one table and has no place for it, which is why the command line
+    /// refuses `--csv` with `--growing`.
+    fn into_report(self, rendered: String, request: &Request<'_>) -> String {
+        if request.csv.is_some() {
+            return rendered;
+        }
+        match request.format {
+            Format::Text => format!("{}{rendered}", self.text()),
+            Format::Json => match rendered.strip_prefix('{') {
+                Some(rest) => {
+                    let comma = if rest.starts_with('}') { "" } else { "," };
+                    format!("{{\"growing\":{}{comma}{rest}", self.json())
+                }
+                None => rendered,
+            },
+        }
+    }
+}
+
+/// The complete blocks of a capture file that may still be being written: a
+/// walk of the whole file by [`wz_capture::CaptureCursor`], the walk the C
+/// ABI's follow door reads a growing container with, which stops before a
+/// block cut off at the end and says where.
+///
+/// # Errors
+///
+/// A container that is malformed rather than unfinished, in either format.
+pub fn complete_blocks(capture: &[u8]) -> Result<GrowingRead, CaptureError> {
+    let mut cursor = wz_capture::CaptureCursor::new();
+    cursor.walk(capture, |_| core::ops::ControlFlow::Continue(()))?;
+    Ok(GrowingRead {
+        read: cursor.consumed(),
+        held: capture.len(),
+    })
+}
+
+/// [`analyze_request`] over a capture file still being written: the report on
+/// its complete blocks ([`complete_blocks`]) and how far that is, written into
+/// the report itself ([`GrowingRead::json`], [`GrowingRead::text`]) so the
+/// document says what it covers.
+///
+/// The prefix the blocks fill is itself a whole container, so it is read by
+/// the reader every other flag goes through and every option applies to it as
+/// to a finished file; the QUIC pass re-reads that prefix and not the tail. A
+/// file that has not finished its first block yet is reported as a capture
+/// with nothing in it, and [`GrowingRead::read`] says why: the report is about
+/// zero bytes of it.
+///
+/// # Errors
+///
+/// [`complete_blocks`]' error, or the prefix's own refusal.
+pub fn analyze_growing(
+    request: &Request<'_>,
+) -> Result<(String, Outcome, GrowingRead), CaptureError> {
+    let growing = complete_blocks(request.capture)?;
+    let prefix = Request {
+        capture: &request.capture[..growing.read],
+        ..*request
+    };
+    let (rendered, outcome) = if growing.read == 0 {
+        let limits = if request.bounded {
+            wz_capture::DissectionLimits::for_live_tap()
+        } else {
+            wz_capture::DissectionLimits::default()
+        };
+        analyze_dissection(Dissection::with_limits(limits), &prefix)?
+    } else {
+        analyze_request(&prefix)?
+    };
+    Ok((growing.into_report(rendered, request), outcome, growing))
 }
 
 /// Report on a dissection the CALLER built, as [`Request`] describes.
@@ -5307,6 +5488,11 @@ mod tests {
                 UsageError::LiveCannotDo("--quic-cid-len"),
             ),
             (
+                "a tap is not a file still being written",
+                vec!["--interface", "eth0", "--for", "1", "--growing"],
+                UsageError::LiveCannotDo("--growing"),
+            ),
+            (
                 "a bound that is not a number",
                 vec!["--interface", "eth0", "--for", "soon"],
                 UsageError::BadValue("--for", "soon".into()),
@@ -5360,6 +5546,156 @@ mod tests {
         );
     }
 
+    /// `--growing` is a flag a reader asks for, and a file is read without it
+    /// unless they do.
+    #[test]
+    fn growing_is_read_only_when_it_is_asked_for() {
+        let asked = parse(&args(&["cap.pcapng", "--growing"])).expect("a growing read");
+        assert!(asked.growing);
+        assert!(!parse(&args(&["cap.pcapng"])).expect("a file").growing);
+        assert_eq!(
+            parse(&args(&["cap.pcapng", "--growing", "--csv", "throughput"])),
+            Err(UsageError::GrowingAndCsv),
+            "a CSV table has no place for how far the read reached"
+        );
+    }
+
+    /// The request every growing test below reads under: no option set.
+    fn plain_request(capture: &[u8]) -> Request<'_> {
+        Request {
+            capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: false,
+            per_message: false,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: false,
+            bounded: false,
+            health: false,
+            select: None,
+            csv: None,
+        }
+    }
+
+    /// A FILE CUT INSIDE ITS LAST BLOCK is refused by the ordinary read, and the
+    /// growing read reports on the blocks before the cut and says how far.
+    ///
+    /// The report is the ordinary read's over the prefix the complete blocks
+    /// fill, byte for byte, so `--growing` adds no reading of its own; a file
+    /// that ends on a boundary leaves nothing unread; one whose header is not
+    /// finished is a report on zero bytes; and bytes that are no capture at all
+    /// are refused, not read as an unfinished one.
+    #[test]
+    fn a_growing_read_reports_the_complete_blocks_and_how_far_they_reach() {
+        let (first, second) = ([0u8; 20], [1u8; 30]);
+        let file = wz_capture::pcap::write(1, &[(0, 0, &first[..]), (1, 0, &second[..])]);
+        // The 24-byte file header, then each record's 16-byte header and bytes.
+        let after_first = 24 + 16 + first.len();
+        assert_eq!(file.len(), after_first + 16 + second.len(), "the layout");
+        let cut = &file[..file.len() - 7];
+
+        assert!(
+            analyze_request(&plain_request(cut)).is_err(),
+            "without the flag a cut file is refused, never read as whole"
+        );
+        let growing = complete_blocks(cut).expect("an unfinished file walks");
+        assert_eq!(
+            growing,
+            GrowingRead {
+                read: after_first,
+                held: cut.len()
+            }
+        );
+        assert_eq!(growing.unread(), cut.len() - after_first);
+        let line = growing.line("cap.pcap");
+        assert!(
+            line.contains(&format!("{after_first} of {} byte(s)", cut.len()))
+                && line.contains("NOT in this report"),
+            "{line}"
+        );
+
+        // The report is the prefix's, with how far it read as its first line.
+        let (rendered, _, read) =
+            analyze_growing(&plain_request(cut)).expect("the complete blocks are read");
+        assert_eq!(read, growing);
+        let (prefix, _) = analyze_request(&plain_request(&file[..after_first]))
+            .expect("the prefix is a whole file");
+        let unread = cut.len() - after_first;
+        assert_eq!(
+            rendered,
+            format!(
+                "growing: read {after_first} of {} byte(s) of the file, {unread} unread \
+                 (a block still being written); complete: no\n{prefix}",
+                cut.len()
+            ),
+            "the text report says how far it read, then is the prefix's"
+        );
+
+        // The same in JSON: a `growing` object first, then the prefix's keys.
+        let json_request = Request {
+            format: Format::Json,
+            ..plain_request(cut)
+        };
+        let (json, _, _) = analyze_growing(&json_request).expect("the JSON report");
+        let (prefix_json, _) = analyze_request(&Request {
+            capture: &file[..after_first],
+            ..json_request
+        })
+        .expect("the prefix in JSON");
+        let extent = format!(
+            "{{\"growing\":{{\"read_bytes\":{after_first},\"file_bytes\":{},\
+             \"unread_bytes\":{unread},\"complete\":false}},",
+            cut.len()
+        );
+        assert_eq!(
+            json,
+            format!("{extent}{}", &prefix_json[1..]),
+            "the JSON report carries the extent as its first key"
+        );
+        // And the ordinary report carries none: the key exists only on request.
+        assert!(!prefix_json.contains("\"growing\""), "{prefix_json}");
+
+        let (whole, _, read) =
+            analyze_growing(&plain_request(&file)).expect("a finished file reads");
+        assert_eq!(read.unread(), 0);
+        assert!(read.complete());
+        assert!(
+            read.line("cap.pcap").contains("nothing was left unread"),
+            "{}",
+            read.line("cap.pcap")
+        );
+        let (plain, _) = analyze_request(&plain_request(&file)).expect("a finished file");
+        assert_eq!(
+            whole,
+            format!(
+                "growing: read {0} of {0} byte(s) of the file, 0 unread (a block still \
+                 being written); complete: yes\n{plain}",
+                file.len()
+            ),
+            "a file that ends on a boundary reads as itself, and says so"
+        );
+        assert!(
+            !plain.starts_with("growing:"),
+            "the ordinary text report is unchanged: {plain}"
+        );
+
+        let (_, _, unstarted) =
+            analyze_growing(&plain_request(&file[..10])).expect("a header still being written");
+        assert_eq!(unstarted, GrowingRead { read: 0, held: 10 });
+
+        assert!(
+            complete_blocks(b"not a capture at all, by any magic").is_err(),
+            "a damaged file is refused, not read as an unfinished one"
+        );
+        assert!(analyze_growing(&plain_request(b"not a capture at all, by any magic")).is_err());
+    }
+
     #[test]
     fn a_capture_path_alone_is_a_complete_command_line() {
         assert_eq!(
@@ -5368,6 +5704,7 @@ mod tests {
                 capture: "cap.pcapng".into(),
                 interface: None,
                 live_ms: None,
+                growing: false,
                 keylogs: Vec::new(),
                 format: Format::Text,
                 per_flow: false,
@@ -5402,6 +5739,7 @@ mod tests {
                 capture: "cap.pcapng".into(),
                 interface: None,
                 live_ms: None,
+                growing: false,
                 keylogs: args(&["keys.txt"]),
                 format: Format::Json,
                 // `--messages` implies `--flows`: the messages are printed

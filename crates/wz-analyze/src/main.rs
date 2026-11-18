@@ -162,6 +162,8 @@ fn main() -> ExitCode {
         select: options.select.as_ref(),
         csv: options.csv,
     };
+    // Bytes of a file still being written that `--growing` did not read.
+    let mut left_unread = 0usize;
     let analysed = match live {
         Some(read) => {
             // THE BOUND IS NAMED, and so is the kernel's drop count. Printed
@@ -170,6 +172,15 @@ fn main() -> ExitCode {
             // totals as a fact about the network.
             eprintln!("{}", read.line);
             wz_analyze::analyze_dissection(read.dissection, &request)
+        }
+        // How far the read reached is printed before the report, for the
+        // reason the live bound is.
+        None if options.growing => {
+            wz_analyze::analyze_growing(&request).map(|(rendered, outcome, growing)| {
+                eprintln!("{}", growing.line(&options.capture));
+                left_unread = growing.unread();
+                (rendered, outcome)
+            })
         }
         None => analyze_request(&request),
     };
@@ -188,9 +199,10 @@ fn main() -> ExitCode {
         );
     }
     // 0 = this reader saw the whole capture. 1 = it did not, which covers an
-    // undecrypted flow, a gap, a dropped packet. Distinct from 2, which is this
-    // tool failing rather than the capture being incomplete.
-    if outcome.complete {
+    // undecrypted flow, a gap, a dropped packet, and the unfinished block a
+    // growing read left unread. Distinct from 2, which is this tool failing
+    // rather than the capture being incomplete.
+    if outcome.complete && left_unread == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

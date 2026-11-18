@@ -1758,6 +1758,36 @@ static int check_follow_door(void) {
                   0,
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
+        doc = NULL;
+
+        /* (ABI 59) -- the windowed values door refuses what the door it widens
+         * refuses, with no string, and a window of 0 is that door's document. */
+        rc = wz_dissect_live_field_values_since_window(NULL, "", "", "1", 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null handle field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "", "", NULL, 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null paths field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "", "", "1", 0, 3, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+              "null out field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "", "key ==", "1", 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && doc == NULL,
+              "bad selector field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "demo/**=nosuch", "", "1", 0, 3,
+                                                       &doc);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && doc == NULL,
+              "bad declarations field_values_since_window rc=%d", rc);
+        rc = wz_dissect_live_field_values_since_window(h, "demo/**=protobuf", "", "1", 0,
+                                                       0, &doc);
+        CHECK(rc == WZ_DISSECT_OK && doc != NULL,
+              "field_values_since_window rc=%d", rc);
+        CHECK(strncmp(doc,
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                  0,
+              "the windowed door writes the same document: %s", doc);
+        wz_dissect_string_free(doc);
     }
     /* (ABI 55) -- the row-facts door: each pointer refused when null, a refused
      * declaration text leaves `needed` at 0, a short buffer is written nothing
@@ -4580,8 +4610,12 @@ int main(void) {
      * 70: each of a flow's `halves` gains `initial_sn`, the origin its
      * `Open` announced, and `initial_sn_derivation` (`derived`,
      * `not_derived`, or null), whether it is zenoh's derivation over the two
-     * zids. Two keys and a family arrive; nothing retires. */
-    revisioned[2].revision = 70;
+     * zids. Two keys and a family arrive; nothing retires.
+     * 71: a record's `e2e` block is the payload plane's judgement, in capture
+     * order over the whole capture; a slot over two flows reads each frame
+     * against the one the tap took before it. Values move under stationary
+     * keys. */
+    revisioned[2].revision = 71;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4891,9 +4925,10 @@ int main(void) {
      * read. The document says what it counts (`scope`), in what unit, and the
      * sum, so a program that budgets by it reads three words before any group.
      * 2: `quic_packets`, the QUIC packets a handle keeps for a key that has not
-     * arrived. */
+     * arrived. 3: `values`, what the values doors keep between calls, and
+     * `e2e`, what the handle's judge of the end-to-end frames keeps. */
     revisioned[20].name = "memory";
-    revisioned[20].revision = 2;
+    revisioned[20].revision = 3;
     revisioned[20].doc = NULL;
     {
         wz_dissect_live *kept = NULL;

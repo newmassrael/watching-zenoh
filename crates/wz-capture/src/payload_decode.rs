@@ -59,21 +59,34 @@ use crate::payload::Encoding;
 pub struct Declarations<'a> {
     map: &'a FormatMap<'a>,
     used: RefCell<BTreeSet<DeclarationId>>,
-    /// The judgement state of the end-to-end profile rules: one judge per slot.
+    /// The pieces this walk joins, and how far it has joined each list.
     ///
-    /// On the run and not on the map, for the reason `used` is: what a counter
-    /// last was is a fact about the frames THIS walk has met, and a map is
-    /// configuration that two analyses may share. See [`crate::e2e_slots`].
-    e2e: RefCell<crate::e2e_slots::SlotLedger>,
-    /// The list the frames being judged now came from, which the ledger remembers as
-    /// the owner of each slot it judges them in. See [`Self::enter_list`].
+    /// On the run and not on the map, for the reason `used` is: what a stream
+    /// holds is a fact about the pieces THIS walk has met, and a map is
+    /// configuration that two analyses may share.
+    pieces: RefCell<crate::segment_chain::PieceLedger>,
+    /// The judgements of the end-to-end frames this run reads, handed in by a
+    /// caller that keeps a judge between calls ([`Self::reading`]).
+    ///
+    /// A frame is judged by the payload plane alone, in capture order over the
+    /// whole capture ([`crate::e2e_plane`]); this run writes what it judged.
+    given: Option<crate::e2e_plane::E2eTable>,
+    /// The judgements a document made for itself when none were handed in,
+    /// over the capture it writes.
+    built: RefCell<Option<crate::e2e_plane::E2eTable>>,
+    /// The list the pieces being joined now came from, which keys their
+    /// stream. See [`Self::enter_list`].
     list: core::cell::Cell<usize>,
-    /// The produced-index of the row whose frames are being judged now, and how
-    /// many of its frames have been, when the walker says which row it is; the
-    /// key the ledger keeps a frame's outcome under. See [`Self::at_row`].
-    row: core::cell::Cell<Option<(u64, u32)>>,
-    /// The same for the application-level pieces of the row: its own count,
-    /// because a piece is not a frame and the two are kept apart.
+    /// The position of the list the rows being written now are of, in the
+    /// capture's enumeration of lists: half of the key a frame's judgement is
+    /// kept under. See [`Self::enter_judged_list`].
+    judged_list: core::cell::Cell<Option<usize>>,
+    /// The produced-index of the row being written now, when the walker says
+    /// which row it is: the other half of that key. See [`Self::at_row`].
+    row: core::cell::Cell<Option<u64>>,
+    /// The produced-index of the row whose pieces are being joined now, and how
+    /// many of them have been, when the walker says which row it is: the key a
+    /// piece's verdict is kept under.
     segment_row: core::cell::Cell<Option<(u64, u32)>>,
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
@@ -163,19 +176,21 @@ type RefusalKey = (String, String, RefusedUnder);
 impl<'a> Declarations<'a> {
     /// A fresh ledger over `map`, with nothing applied yet.
     pub fn new(map: &'a FormatMap<'a>) -> Self {
-        Self::with_ledger(map, crate::e2e_slots::SlotLedger::new())
+        Self::with_ledger(map, crate::segment_chain::PieceLedger::new())
     }
 
-    /// A ledger over `map` that judges end-to-end frames against `ledger`'s counters,
-    /// the ones an earlier walk left, instead of against none. What a walk that goes
-    /// on from where the last one stopped is begun with; see
-    /// [`crate::e2e_slots::SlotLedger`].
-    pub fn with_ledger(map: &'a FormatMap<'a>, ledger: crate::e2e_slots::SlotLedger) -> Self {
+    /// A ledger over `map` that joins pieces against the streams `ledger` holds,
+    /// the ones an earlier walk left, instead of against none. What a walk that
+    /// goes on from where the last one stopped is begun with.
+    pub fn with_ledger(map: &'a FormatMap<'a>, ledger: crate::segment_chain::PieceLedger) -> Self {
         Self {
             map,
             used: RefCell::new(BTreeSet::new()),
-            e2e: RefCell::new(ledger),
+            pieces: RefCell::new(ledger),
+            given: None,
+            built: RefCell::new(None),
             list: core::cell::Cell::new(0),
+            judged_list: core::cell::Cell::new(None),
             row: core::cell::Cell::new(None),
             segment_row: core::cell::Cell::new(None),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
@@ -185,47 +200,88 @@ impl<'a> Declarations<'a> {
         }
     }
 
-    /// The frames judged from here on come from the list numbered `list`. Called by
-    /// the walker at the start of each list, since the ledger keeps a slot's counter
-    /// by what a frame says and not by where it was read.
+    /// This run writes the end-to-end verdicts `judged` holds: the judgements a
+    /// judge of the whole capture kept under the same declarations
+    /// ([`crate::E2eMemory`]), which a caller that keeps one between calls
+    /// hands in so the document reads them instead of judging again.
+    pub fn reading(mut self, judged: crate::e2e_plane::E2eTable) -> Self {
+        self.given = Some(judged);
+        self
+    }
+
+    /// Make the judgements of `dissection`'s frames, under the session
+    /// `grouping` the document reads senders by, when a profile rule binds a
+    /// key and none were handed in: one walk of the payload plane in capture
+    /// order ([`crate::e2e_plane`]). Made for each document, so a run handed
+    /// two captures reads each by its own.
+    pub(crate) fn judge_capture(
+        &self,
+        dissection: &crate::Dissection,
+        grouping: &crate::node::SessionGrouping,
+    ) {
+        if self.given.is_none() && self.map.has_e2e_rules() {
+            *self.built.borrow_mut() = Some(crate::e2e_plane::judge_capture(
+                dissection, grouping, self.map,
+            ));
+        }
+    }
+
+    /// How many samples the judgements this run reads hold a judgement for.
+    pub fn e2e_judgements(&self) -> usize {
+        match &self.given {
+            Some(given) => given.len(),
+            None => self.built.borrow().as_ref().map_or(0, |built| built.len()),
+        }
+    }
+
+    /// The pieces joined from here on come from the list numbered `list`, which
+    /// keys their stream. Called by the walker at the start of each list.
     pub fn enter_list(&self, list: usize) {
         self.list.set(list);
         self.row.set(None);
         self.segment_row.set(None);
     }
 
-    /// The frames judged from now on are those of the row at produced-index
-    /// `produced` of the list entered (open-debt item 924, D9): a row the
-    /// ledger has judged before, behind the list's frontier, is read back from
-    /// what it kept and moves no counter, and a row past it is judged and kept.
+    /// The rows written from here on are of the list at `list` in the
+    /// capture's enumeration of lists (`None` for a list it does not name):
+    /// what the judgement of a frame is looked up by, with the row and the
+    /// record's place in it.
+    pub(crate) fn enter_judged_list(&self, list: Option<usize>) {
+        self.judged_list.set(list);
+    }
+
+    /// The row being written from now on is the one at produced-index
+    /// `produced` of the list entered (open-debt item 924, D9): its frames'
+    /// judgements are looked up under it, and a row the ledger has joined the
+    /// pieces of before, behind the list's frontier, is read back from what it
+    /// kept and joins nothing a second time.
     pub(crate) fn at_row(&self, produced: u64) {
-        self.row.set(Some((produced, 0)));
+        self.row.set(Some(produced));
         self.segment_row.set(Some((produced, 0)));
     }
 
-    /// How far the list at `list` has been judged in order.
-    pub(crate) fn e2e_frontier(&self, list: usize) -> crate::e2e_slots::Frontier {
-        self.e2e.borrow().frontier(list)
+    /// How far the list at `list` has been joined in order.
+    pub(crate) fn pieces_frontier(&self, list: usize) -> crate::segment_chain::Frontier {
+        self.pieces.borrow().frontier(list)
     }
 
-    /// A walk judged the list at `list` in order up to `frontier`.
-    pub(crate) fn e2e_judged_up_to(&self, list: usize, frontier: crate::e2e_slots::Frontier) {
-        self.e2e.borrow_mut().judged_up_to(list, frontier);
+    /// A walk joined the list at `list` in order up to `frontier`.
+    pub(crate) fn pieces_walked_up_to(
+        &self,
+        list: usize,
+        frontier: crate::segment_chain::Frontier,
+    ) {
+        self.pieces.borrow_mut().walked_up_to(list, frontier);
     }
 
-    /// Let go of what was judged of the rows of `list` older than `first_held`.
-    pub(crate) fn e2e_forget_before(&self, list: usize, first_held: u64) {
-        self.e2e.borrow_mut().forget_before(list, first_held);
+    /// Let go of what was joined of the rows of `list` older than `first_held`.
+    pub(crate) fn pieces_forget_before(&self, list: usize, first_held: u64) {
+        self.pieces.borrow_mut().forget_before(list, first_held);
     }
 
-    /// Whether any end-to-end slot has been judged from two different lists.
-    pub fn e2e_crossed(&self) -> bool {
-        self.e2e.borrow().crossed()
-    }
-
-    /// The end-to-end counters this run leaves, for a walk that goes on from it.
-    pub fn into_ledger(self) -> crate::e2e_slots::SlotLedger {
-        self.e2e.into_inner()
+    /// The pieces this run leaves joined, for a walk that goes on from it.
+    pub fn into_ledger(self) -> crate::segment_chain::PieceLedger {
+        self.pieces.into_inner()
     }
 
     /// Round 2029 (item 298) — record that a listing cap held one message back,
@@ -361,7 +417,7 @@ impl<'a> Declarations<'a> {
 
     /// How many open transfers the bound on held bytes ended in this run.
     pub fn segments_evicted(&self) -> usize {
-        self.e2e.borrow().segments().evicted()
+        self.pieces.borrow().segments().evicted()
     }
 
     /// Judge ONE sample as a piece under the segment rule that covers its key,
@@ -379,9 +435,8 @@ impl<'a> Declarations<'a> {
     /// the sample: a reply is covered by a rule whose pattern covers the
     /// reply's own key, and no part of that key is stripped or read.
     ///
-    /// Joined in the order the caller hands pieces in, exactly as
-    /// [`Self::judge_e2e`] judges frames: a row behind the list's frontier is
-    /// answered from what was kept and joins nothing a second time.
+    /// Joined in the order the caller hands pieces in: a row behind the list's
+    /// frontier is answered from what was kept and joins nothing a second time.
     pub fn judge_segment(
         &self,
         key: crate::segment_chain::KeyRef,
@@ -409,7 +464,7 @@ impl<'a> Declarations<'a> {
             self.segment_row.set(Some((produced, ordinal + 1)));
             (produced, ordinal)
         });
-        let mut ledger = self.e2e.borrow_mut();
+        let mut ledger = self.pieces.borrow_mut();
         let behind = at.filter(|(produced, _)| *produced < ledger.frontier(list).produced);
         let kept = behind
             .and_then(|(produced, ordinal)| ledger.segments().recall(list, produced, ordinal));
@@ -461,7 +516,7 @@ impl<'a> Declarations<'a> {
             self.segment_row.set(Some((produced, ordinal + 1)));
             (produced, ordinal)
         });
-        let mut ledger = self.e2e.borrow_mut();
+        let mut ledger = self.pieces.borrow_mut();
         let behind = at.filter(|(produced, _)| *produced < ledger.frontier(list).produced);
         if let Some(kept) = behind
             .and_then(|(produced, ordinal)| ledger.segments().recall_close(list, produced, ordinal))
@@ -477,27 +532,50 @@ impl<'a> Declarations<'a> {
         Some(ended)
     }
 
-    /// Judge ONE sample under the profile rule that governs its key, or say
-    /// that none does.
+    /// The end-to-end verdict of the frame the record at place `record` of the
+    /// row being written carried, under the profile rule that governs `keyexpr`,
+    /// or `None` when no profile rule governs it or the payload plane judged no
+    /// frame there.
     ///
-    /// `None` is "the rule that wins for this key is not a profile rule, or no
-    /// rule covers it", and the caller emits no end-to-end block for it.
-    /// `payload` is the sample's payload when it is one run of bytes, and `None`
-    /// when it is not (a shared-memory descriptor, several slices): the rule
-    /// matched, there is no frame to read, and the outcome says so.
+    /// NOTHING IS JUDGED HERE. A frame's verdict is a fact about the frames of
+    /// its slot before it, so it is judged once, by the payload plane, in
+    /// capture order over the whole capture ([`crate::E2eMemory`] keeps that
+    /// judge for a live handle), and every document reads that judgement: this
+    /// looks it up by the record's list, its row and its place in the row's
+    /// batch, which the walker named before it asked. A frame the plane met in a
+    /// reply was read and not judged for its counter, as the block says.
     ///
-    /// The rule is marked used exactly as [`Self::rule_for_keyexpr`] marks it, so
-    /// a profile rule that judged a hundred frames is not reported as "bound
-    /// nothing". The frame is judged IN THE ORDER the caller hands them in; a
-    /// caller that wants a slot's counter walked in capture order must call in
-    /// capture order, including for the samples it does not print.
-    pub fn judge_e2e(
+    /// The rule is marked used exactly as [`Self::rule_for_keyexpr`] marks it,
+    /// so a profile rule that governed a hundred frames is not reported as
+    /// "bound nothing".
+    pub fn judge_e2e(&self, keyexpr: &str, record: u32) -> Option<E2eJudged<'a>> {
+        let matched = self.e2e_rule(keyexpr)?;
+        let outcome = self.judged_outcome(record)?;
+        Some(E2eJudged {
+            rule: matched.rule,
+            format: matched.format,
+            outcome,
+        })
+    }
+
+    /// The block of `outcome` under the profile rule that governs `keyexpr`,
+    /// for a test that renders an outcome no capture can make.
+    #[cfg(test)]
+    pub(crate) fn e2e_block(
         &self,
         keyexpr: &str,
-        payload: Option<&[u8]>,
-        sender: Option<&[u8]>,
-        observed_at_ns: Option<u64>,
+        outcome: crate::e2e_slots::Outcome,
     ) -> Option<E2eJudged<'a>> {
+        let matched = self.e2e_rule(keyexpr)?;
+        Some(E2eJudged {
+            rule: matched.rule,
+            format: matched.format,
+            outcome,
+        })
+    }
+
+    /// The profile rule that governs `keyexpr`, marked used.
+    fn e2e_rule(&self, keyexpr: &str) -> Option<crate::payload::formats::E2eRuleMatch<'a>> {
         // Copied out of `self` so the format keeps the map's lifetime, as
         // `rule_for_keyexpr` does.
         let map: &'a FormatMap<'a> = self.map;
@@ -508,101 +586,16 @@ impl<'a> Declarations<'a> {
         }
         let matched = map.e2e_for_keyexpr(keyexpr)?;
         self.record_applied(matched.id);
-        // Which frame of which row this is, when the walker said (D9).
-        let list = self.list.get();
-        let at = self.row.get().map(|(produced, ordinal)| {
-            self.row.set(Some((produced, ordinal + 1)));
-            (produced, ordinal)
-        });
-        let outcome = match payload {
-            Some(payload) => {
-                let mut ledger = self.e2e.borrow_mut();
-                let behind = at.filter(|(produced, _)| *produced < ledger.frontier(list).produced);
-                match behind.and_then(|(produced, ordinal)| ledger.recall(list, produced, ordinal))
-                {
-                    // Judged before, in order: what it was then, with no counter
-                    // moved a second time.
-                    Some(outcome) => outcome,
-                    None => {
-                        debug_assert!(
-                            behind.is_none(),
-                            "a row behind the frontier was judged with fewer frames than now"
-                        );
-                        let outcome = ledger.receive_from(
-                            list,
-                            &crate::e2e_slots::Reception {
-                                profile: matched.format.profile(),
-                                keyexpr,
-                                payload,
-                                sender,
-                                observed_at_ns,
-                            },
-                        );
-                        if let Some((produced, ordinal)) = at {
-                            ledger.remember(list, produced, ordinal, &outcome);
-                        }
-                        outcome
-                    }
-                }
-            }
-            None => crate::e2e_slots::Outcome::Unreadable {
-                why: crate::e2e_slots::UNREADABLE_PAYLOAD,
-            },
-        };
-        Some(E2eJudged {
-            rule: matched.rule,
-            format: matched.format,
-            outcome,
-        })
+        Some(matched)
     }
 
-    /// [`Self::judge_e2e`] for a frame that came in a REPLY to a query: the
-    /// same rule and the same profile, the frame read and its CRC and length
-    /// judged, and its counter and timeout not judged
-    /// ([`crate::e2e_slots::Unjudged::Reply`]). A responder answering from what
-    /// it holds sends frames of the past, which are not the live counter
-    /// stream; no slot moves, so the live frames after the answer are judged
-    /// as if it had not come.
-    ///
-    /// Asks nothing of the row the walker is at: what it answers needs no
-    /// state, so a row read again answers the same without having kept it.
-    pub fn judge_e2e_reply(
-        &self,
-        keyexpr: &str,
-        payload: Option<&[u8]>,
-        sender: Option<&[u8]>,
-    ) -> Option<E2eJudged<'a>> {
-        let map: &'a FormatMap<'a> = self.map;
-        if !map.has_e2e_rules() {
-            return None;
-        }
-        let matched = map.e2e_for_keyexpr(keyexpr)?;
-        self.record_applied(matched.id);
-        let outcome = match payload {
-            Some(payload) => crate::e2e_slots::read_unjudged(
-                &crate::e2e_slots::Reception {
-                    profile: matched.format.profile(),
-                    keyexpr,
-                    payload,
-                    sender,
-                    observed_at_ns: None,
-                },
-                crate::e2e_slots::Unjudged::Reply,
-            ),
-            None => crate::e2e_slots::Outcome::Unreadable {
-                why: crate::e2e_slots::UNREADABLE_PAYLOAD,
-            },
-        };
-        Some(E2eJudged {
-            rule: matched.rule,
-            format: matched.format,
-            outcome,
-        })
-    }
-
-    /// How many slots the end-to-end judge holds a counter for.
-    pub fn e2e_slots(&self) -> usize {
-        self.e2e.borrow().slots()
+    /// The outcome the payload plane judged for the record at place `record`
+    /// of the row being written, when it judged a frame there.
+    fn judged_outcome(&self, record: u32) -> Option<crate::e2e_slots::Outcome> {
+        let (list, produced) = (self.judged_list.get()?, self.row.get()?);
+        let built = self.built.borrow();
+        let judged = self.given.as_ref().or(built.as_ref())?;
+        judged.get(list, produced, record)?.outcome.clone()
     }
 
     /// Mark a rule used.

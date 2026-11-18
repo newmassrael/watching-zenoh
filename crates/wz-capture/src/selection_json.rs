@@ -619,11 +619,16 @@ impl SelectionFold {
     /// Every plane empty, against `filter` (numbered by the caller's list ids)
     /// and `grouping`, the payload plane reading samples by `declarations`:
     /// what [`RowJudgement`] begins its walk with.
+    ///
+    /// `judged` is the judgements a judge of the whole capture kept under the
+    /// same declarations, which the payload plane's `e2e` terms read instead of
+    /// judging again; `None` judges here, in this fold's own walk.
     fn begin(
         d: &crate::Dissection,
         filter: &crate::filter::Filter,
         grouping: &crate::node::SessionGrouping,
         declarations: Option<&crate::payload::formats::FormatMap<'_>>,
+        judged: Option<&crate::e2e_plane::E2eTable>,
     ) -> Self {
         if filter.is_any() {
             return Self {
@@ -641,8 +646,10 @@ impl SelectionFold {
             };
         }
         let mut payloads = crate::payload::PayloadFold::begin(d, filter, grouping);
-        if let Some(map) = declarations {
-            payloads.read_by(map);
+        match (declarations, judged) {
+            (Some(map), Some(judged)) => payloads.read_by_judged(map, Some(judged.clone())),
+            (Some(map), None) => payloads.read_by(map),
+            (None, _) => {}
         }
         Self {
             judged: true,
@@ -670,6 +677,14 @@ impl SelectionFold {
         self.planes.as_ref().map_or(0, |p| {
             p.payloads.memory() + p.exchanges.memory() + p.rows.memory()
         })
+    }
+
+    /// Hand the payload plane the judgements its `e2e` terms read for the call
+    /// that feeds it next, or take them back (`None`) once the call is over.
+    fn read_judged(&mut self, judged: Option<crate::e2e_plane::E2eTable>) {
+        if let Some(p) = self.planes.as_mut() {
+            p.payloads.read_judged(judged);
+        }
     }
 
     /// Give up what the planes hold of the rows no list holds any more. Nothing
@@ -901,6 +916,10 @@ pub struct SelectionMemory {
     /// `None` when it was handed none: another text can decide another word for
     /// a sample, so it begins the planes again as another selector does.
     declared: Option<String>,
+    /// Whether the planes read the judgements of a judge the caller keeps
+    /// instead of judging in their own walk: the two are two judges, so a change
+    /// of one for the other begins the planes again.
+    reads_judged: bool,
     fold: crate::ordered_fold::Resumable<SelectionFold>,
     /// The entries the planes kept when they last gave up the rows no list
     /// held, or were begun: they give them up again when they have doubled.
@@ -1058,6 +1077,11 @@ pub struct Declared<'a, 'm> {
     pub map: &'a crate::payload::formats::FormatMap<'m>,
     /// The text `map` was declared from, compared as given.
     pub text: &'a str,
+    /// The judgements of the capture's end-to-end frames a judge kept under
+    /// these declarations ([`crate::E2eMemory`]), which the `e2e` terms read
+    /// so the selection and the field documents of one handle read one
+    /// judgement. `None` judges them in the selection's own walk.
+    pub judged: Option<&'a crate::e2e_plane::E2eTable>,
 }
 
 /// What a selection memory is for: the selector's text and the declaration
@@ -1307,15 +1331,23 @@ pub fn selection_since_json_coordinated(
         filter.numbered_by(lists, &|list| coordinates.list_id(list))
     };
     let text = declarations.map(|declared| declared.text);
+    let judged = declarations.and_then(|declared| declared.judged);
     if memory.asked.as_ref() != Some(&numbered)
         || memory.declared.as_deref() != text
+        || memory.reads_judged != judged.is_some()
         || memory.keep_to_what_is_held(d)
     {
         memory.fold = crate::ordered_fold::Resumable::default();
         memory.asked = Some(numbered.clone());
         memory.declared = text.map(String::from);
+        memory.reads_judged = judged.is_some();
     }
     let map = declarations.map(|declared| declared.map);
+    // The judgements the planes read for this call: handed to a fold that goes
+    // on, and given to one that begins.
+    if let Some(fold) = memory.fold.fold_mut() {
+        fold.read_judged(judged.cloned());
+    }
     let restarts = memory.work.fold.restarts;
     let fold = memory
         .fold
@@ -1324,7 +1356,7 @@ pub fn selection_since_json_coordinated(
             &grouping,
             &mut memory.work.fold,
             None,
-            || SelectionFold::begin(d, &numbered, &grouping, map),
+            || SelectionFold::begin(d, &numbered, &grouping, map, judged),
             None,
         )
         .expect("a walk nobody can stop runs to its end");
@@ -1485,6 +1517,11 @@ pub fn selection_since_json_coordinated(
         unsettled,
     });
     memory.give_up_what_was_said(d, coordinates, open_rows);
+    // The judgements are given back: between calls the judge that keeps them
+    // is their only holder, so it adds to them in place when it next grows.
+    if let Some(fold) = memory.fold.fold_mut() {
+        fold.read_judged(None);
+    }
     // Read BEFORE it is set: whether this call found a memory an earlier call
     // had written, which is the only answer the caller cannot get anywhere else.
     let continued = core::mem::replace(&mut memory.written, true);

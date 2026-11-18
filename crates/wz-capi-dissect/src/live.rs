@@ -338,6 +338,18 @@ fn seq_in_runs(runs: &[SeqRun], produced: u64) -> Option<u64> {
     runs.get(after.checked_sub(1)?)?.seq_of(produced)
 }
 
+/// The last number a window after `after_seq` covers: at most `max_rows`
+/// numbers, never past `issued`, and `0` for no limit. One function, so the
+/// field documents' windows and the values document's cannot end at different
+/// numbers for the same arguments.
+fn window_through(issued: u64, after_seq: u64, max_rows: u64) -> u64 {
+    if max_rows == 0 {
+        issued
+    } else {
+        issued.min(after_seq.saturating_add(max_rows))
+    }
+}
+
 /// What a [`LiveDissection`] holds on the heap that follows its row count, by
 /// structure (open-debt item 924, D7). See [`LiveDissection::memory`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -359,6 +371,14 @@ pub struct LiveMemory {
     /// bounded per flow and direction, as the TLS records the dissection keeps
     /// are, and let go of once the flow opens application data.
     pub quic_packets: usize,
+    /// What the values door keeps between calls: the payloads its selector
+    /// picked past the cursor, until a cursor passes them, and the payload
+    /// plane's verdict for every record it judged.
+    pub values: usize,
+    /// What the handle's judge of the end-to-end frames keeps: what it made of
+    /// every frame a profile rule covers in the rows the lists hold, which the
+    /// field and selection documents read.
+    pub e2e: usize,
 }
 
 impl LiveMemory {
@@ -370,6 +390,8 @@ impl LiveMemory {
             + self.drain
             + self.selection
             + self.quic_packets
+            + self.values
+            + self.e2e
     }
 }
 
@@ -443,6 +465,11 @@ pub struct LiveDissection {
     /// The payloads [`Self::field_values_since`] holds for the selector it was
     /// last asked under, past the cursor it was last asked at.
     values_memory: wz_capture::field_values::ValuesMemory,
+    /// The one judge of the end-to-end frames this handle keeps, for the
+    /// declaration text it was last asked under: the field documents' blocks
+    /// and the selection documents' `e2e` terms read what it judged, in capture
+    /// order over the whole capture.
+    e2e_memory: wz_capture::E2eMemory,
     /// The callback long calls ask how they are going, if the caller set one.
     progress: Option<ProgressHook>,
     lost: u64,
@@ -646,6 +673,7 @@ impl LiveDissection {
             ),
             facts_held: Vec::new(),
             values_memory: wz_capture::field_values::ValuesMemory::new(),
+            e2e_memory: wz_capture::E2eMemory::new(),
             progress: None,
             lost: 0,
             cursor: CaptureCursor::new(),
@@ -702,8 +730,8 @@ impl LiveDissection {
 
     /// What this handle holds on the heap that follows its row count, by
     /// structure (open-debt item 924, D7): the dissection's lists and run maps,
-    /// what the census and the field walk keep for the next call, and the
-    /// drain's bookkeeping.
+    /// what the census, the field walk, the values door and the end-to-end judge
+    /// keep for the next call, and the drain's bookkeeping.
     ///
     /// A lower bound on the process's heap for this handle, and a figure in
     /// bytes allocated. A program that opens captures budgets by it; the memory
@@ -734,6 +762,8 @@ impl LiveDissection {
                 .map(|mark| mark.runs.capacity() * std::mem::size_of::<SeqRun>())
                 .sum::<usize>(),
             quic_packets: self.keys.quic_packets_memory(),
+            values: self.values_memory.memory(),
+            e2e: self.e2e_memory.memory(),
         }
     }
 
@@ -1168,7 +1198,7 @@ impl LiveDissection {
              \"packets\":{},\"selection\":{},\
              \"census\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"fields\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
-             \"drain\":{}}}",
+             \"values\":{},\"e2e\":{},\"drain\":{}}}",
             m.total(),
             l.rows,
             l.unit_log,
@@ -1193,6 +1223,8 @@ impl LiveDissection {
             m.fields.payload_rows,
             m.fields.exchange_rows,
             m.fields.row_digests,
+            m.values,
+            m.e2e,
             m.drain,
         );
         s
@@ -1467,20 +1499,27 @@ impl LiveDissection {
         // was written: a datagram row whose second read was declined has a
         // number and no row, and the cursor has to pass it. A window ends sooner
         // when `max_rows` says so.
-        let issued = self.next_seq - 1;
-        let through_seq = if max_rows == 0 {
-            issued
-        } else {
-            issued.min(after_seq.saturating_add(max_rows))
+        let through_seq = window_through(self.next_seq - 1, after_seq, max_rows);
+        // The handle's one judge of the end-to-end frames under this text, which
+        // the selection doors read too; brought up to the capture first.
+        let judged = match map {
+            Some(map) => Some(self.e2e_memory.advance(
+                &self.dissection,
+                map,
+                declarations_text,
+                progress.as_ref(),
+            )?),
+            None => None,
         };
         let memory = match trees {
             wz_capture::fields_json::Trees::Written => &mut self.fields_memory,
             wz_capture::fields_json::Trees::Left => &mut self.facts_memory,
         };
-        wz_capture::fields_json::fields_json_since_remembering_progress(
+        wz_capture::fields_json::fields_json_since_judged(
             &self.dissection,
             capture,
             map,
+            judged.as_ref(),
             declarations_text,
             &ids,
             wz_capture::fields_json::Since {
@@ -1524,13 +1563,47 @@ impl LiveDissection {
         paths: &str,
         after_seq: u64,
     ) -> Result<String, wz_capture::field_values::ValuesError> {
+        self.field_values_since_windowed(declarations, selector, filter, paths, after_seq, 0)
+    }
+
+    /// [`Self::field_values_since`] for the records of at most `max_rows`
+    /// SEQUENCE NUMBERS after the cursor, and `0` for no limit (which is
+    /// [`Self::field_values_since`]).
+    ///
+    /// The window is [`Self::fields_since_windowed`]'s: the numbers
+    /// `after_seq + 1 ..= after_seq + max_rows`, never past the highest number
+    /// issued, and `window.through_seq` is its last number, the cursor for the
+    /// next window. The records in it are read by the declarations and written;
+    /// the records past it are neither, and stay held for the window that covers
+    /// them.
+    ///
+    /// # What it bounds, and what it does not
+    ///
+    /// It bounds the document, the string that holds it, and the reading of
+    /// payloads by the declarations, which is the part of a call that grows with
+    /// the records written. It does not bound the selector's walk: that is a fold
+    /// in capture order, and the numbers a handle issues follow its lists and not
+    /// capture order, so no prefix of the walk ends at a number. The walk takes
+    /// every message that arrived, as [`Self::field_values_since`]'s does, and the
+    /// payloads it picked past the window are kept until a cursor passes them
+    /// ([`Self::memory`] counts them as `values`).
+    pub fn field_values_since_windowed(
+        &mut self,
+        declarations: &str,
+        selector: &str,
+        filter: &wz_capture::filter::Filter,
+        paths: &str,
+        after_seq: u64,
+        max_rows: u64,
+    ) -> Result<String, wz_capture::field_values::ValuesError> {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
         let hook = self.progress;
         let ask = |done: u64, total: u64| asked(hook, done, total);
         let progress = hook.map(|_| wz_capture::Progress::new(&ask));
-        // The highest number the handle has issued: the cursor to give next.
-        let through_seq = self.next_seq - 1;
+        // The highest number the handle has issued, or the window's end when
+        // `max_rows` ends it sooner: the cursor to give next.
+        let through_seq = window_through(self.next_seq - 1, after_seq, max_rows);
         wz_capture::field_values::field_values_since(
             &self.dissection,
             &ids,
@@ -1688,6 +1761,19 @@ impl LiveDissection {
         // The highest number the handle has issued: the cursor to give next, as
         // for `fields_since`.
         let through_seq = self.next_seq - 1;
+        // The handle's one judge of the end-to-end frames under this text, which
+        // the field documents read too, unless the caller handed judgements in.
+        let judged = match declarations {
+            Some(declared) if declared.judged.is_none() => {
+                self.e2e_memory
+                    .advance(&self.dissection, declared.map, declared.text, None)
+            }
+            _ => None,
+        };
+        let declarations = declarations.map(|declared| wz_capture::selection_json::Declared {
+            judged: declared.judged.or(judged.as_ref()),
+            ..declared
+        });
         let memory = self
             .selection_said
             .for_selector(selector, declarations.map(|declared| declared.text));
@@ -2143,6 +2229,18 @@ mod numbering_tests {
     fn numbers(mark: &Mark, range: core::ops::Range<u64>) -> Vec<Option<u64>> {
         let runs = runs_of(mark);
         range.map(|p| seq_in_runs(&runs, p)).collect()
+    }
+
+    /// A window covers at most `max_rows` numbers after the cursor and never
+    /// passes the highest number issued; `0` is no limit, and a cursor at or
+    /// past the end gives the end back.
+    #[test]
+    fn a_window_ends_at_its_width_or_at_the_last_number_issued() {
+        assert_eq!(window_through(10, 0, 0), 10, "no limit");
+        assert_eq!(window_through(10, 0, 3), 3, "the width ends it");
+        assert_eq!(window_through(10, 8, 3), 10, "the last number ends it");
+        assert_eq!(window_through(10, 10, 3), 10, "nothing past the end");
+        assert_eq!(window_through(10, u64::MAX - 1, 5), 10, "no overflow");
     }
 
     #[test]

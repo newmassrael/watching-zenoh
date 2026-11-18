@@ -181,6 +181,14 @@ impl Wire {
     }
 }
 
+/// The outcome of a payload that is not one run of bytes, which no capture
+/// here can make: what the payload plane judges a shared-memory sample to be.
+fn unreadable_outcome() -> crate::e2e_slots::Outcome {
+    crate::e2e_slots::Outcome::Unreadable {
+        why: crate::e2e_slots::UNREADABLE_PAYLOAD,
+    }
+}
+
 /// The documents and renderings the field document's pins read to reach every
 /// key and every arm of the `e2e` block: a named sender with timestamps, a
 /// sender the capture never named, a payload shorter than the header, and a
@@ -213,7 +221,7 @@ pub(crate) fn pin_documents() -> Vec<String> {
     map.declare_all(&declarations).expect("installs");
     let run = Declarations::new(&map);
     let unreadable = run
-        .judge_e2e("demo/e2e/a", None, None, None)
+        .e2e_block("demo/e2e/a", unreadable_outcome())
         .expect("a profile key");
     let mut block = String::new();
     crate::e2e_row::push_block(&unreadable, &mut block);
@@ -228,7 +236,7 @@ pub(crate) fn pin_documents() -> Vec<String> {
     bare_map.declare_all(&bare).expect("installs");
     let bare_run = Declarations::new(&bare_map);
     let bare_unreadable = bare_run
-        .judge_e2e("demo/e2e/a", None, None, None)
+        .e2e_block("demo/e2e/a", unreadable_outcome())
         .expect("a profile key");
     let mut bare_block = String::new();
     crate::e2e_row::push_block(&bare_unreadable, &mut bare_block);
@@ -725,7 +733,7 @@ fn a_payload_that_is_not_a_frame_carries_a_closed_word_beside_its_sentence() {
         .expect("installs");
     let run = Declarations::new(&map);
     let judged = run
-        .judge_e2e("demo/e2e/a", None, None, None)
+        .e2e_block("demo/e2e/a", unreadable_outcome())
         .expect("a profile key");
     let mut block = String::new();
     crate::e2e_row::push_block(&judged, &mut block);
@@ -953,12 +961,9 @@ fn a_row_the_cursor_passes_over_still_moves_the_counter_of_the_rows_after_it() {
 ///
 /// A counter is a fact about the frames before a row, so a walk that went on from where the
 /// last one stopped without that fact would judge the row after the cursor as the first frame
-/// its slot ever received. The memory therefore carries the judgement state of the end-to-end
-/// slots (`FieldsMemory::e2e`) from step to step: the second step is resumed, not walked whole
+/// its slot ever received. The rows read the payload plane's judgement instead, made in
+/// capture order over the whole capture, so the second step is resumed, not walked whole
 /// again, and its document is the plain since document, with the repetition judged as one.
-/// (Until R3393 the memory did not resume when a rule bound a key to a profile, and this test
-/// said so; a slot judged from two lists still begins again, which the dissect door's own test
-/// pins.)
 #[test]
 fn a_run_with_a_profile_rule_goes_on_across_steps_and_judges_the_repetition() {
     use crate::fields_json::{fields_json_since_remembering, FieldsMemory};
@@ -1031,6 +1036,211 @@ fn a_cursor_with_no_profile_rule_does_not_walk_the_rows_it_passes_over() {
             },
         );
         assert!(!doc.contains("\"e2e\""), "{link:?}: {doc}");
-        assert_eq!(run.e2e_slots(), 0, "{link:?}");
+        assert_eq!(run.e2e_judgements(), 0, "{link:?}");
+    }
+}
+
+// ------------------------------------------------- a slot over two flows
+
+/// A third sender, for a slot that pools senders.
+const ZID_OTHER: [u8; 4] = [0x99, 0xAA, 0xBB, 0xCC];
+
+/// A capture of two datagram links between the same two addresses, told apart
+/// by the low end's port, each opened by the zids it is given and then
+/// carrying the frames handed to [`TwoLinks::put`] in the order handed.
+struct TwoLinks {
+    d: Dissection,
+    packets: Vec<Vec<u8>>,
+}
+
+impl TwoLinks {
+    /// Link 0 and link 1, whose low ends announce `low[0]` and `low[1]`; the
+    /// high end announces [`ZID_HIGH`] on both.
+    fn new(low: [&[u8]; 2]) -> Self {
+        let mut links = Self {
+            d: Dissection::new(),
+            packets: Vec::new(),
+        };
+        for (link, zid) in low.iter().enumerate() {
+            links.send(link, true, &init_wire(zid));
+            links.send(link, false, &init_wire(&ZID_HIGH));
+        }
+        links
+    }
+
+    fn port(link: usize) -> u16 {
+        43210 + link as u16
+    }
+
+    fn send(&mut self, link: usize, from_low: bool, message: &[u8]) {
+        let packet = if from_low {
+            udp_packet(LOW, Self::port(link), HIGH, 7447, message)
+        } else {
+            udp_packet(HIGH, 7447, LOW, Self::port(link), message)
+        };
+        let index = self.packets.len();
+        self.d
+            .push_packet_at_nanos(LINKTYPE_ETHERNET, index, None, &packet);
+        self.packets.push(packet);
+    }
+
+    /// A Push of a frame carrying `counter` under `demo/e2e/a`, from the low
+    /// end of `link`.
+    fn put(&mut self, link: usize, counter: u64) {
+        let record = push(
+            sender_space(0, Some("demo/e2e/a")),
+            &frame(counter, b"body"),
+        );
+        self.send(link, true, &frame_carrying(&record));
+    }
+
+    fn document(&mut self, declarations: &str) -> String {
+        self.d.finish();
+        let rows: Vec<(u32, u32, &[u8])> = self
+            .packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, i as u32, p.as_slice()))
+            .collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
+        let mut map = FormatMap::new();
+        map.declare_all(declarations).expect("declarations install");
+        let run = Declarations::new(&map);
+        fields_json(&self.d, &file, None, Some(&run))
+    }
+}
+
+/// The `prof` profile with its slot pooling every sender of a message.
+fn pooled_rules() -> String {
+    let pooled = profile_text("pooled", 3).replace(
+        r#""slot": {"message": ["ident"]}"#,
+        r#""slot": {"message": ["ident"], "by_zid": false}"#,
+    );
+    assert!(pooled.contains("\"by_zid\": false"), "the slot is pooled");
+    format!("#pooled={pooled}\ndemo/e2e/**=pooled\n")
+}
+
+/// What one block says a frame was judged against: the counter, the step from
+/// it, whether it was the slot's first frame, and the counter verdict.
+type Facts = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    (String, String),
+);
+
+/// The [`Facts`] of every block of `doc`, in document order.
+fn judged_against(doc: &str) -> Vec<Facts> {
+    e2e_blocks(doc)
+        .iter()
+        .map(|b| {
+            (
+                text(b, "previous_counter"),
+                text(b, "counter_step"),
+                text(b, "first"),
+                counter_verdict(b),
+            )
+        })
+        .collect()
+}
+
+/// One block's expected facts, written out.
+fn facts(previous: &str, step: &str, first: bool, verdict: (&str, &str)) -> Facts {
+    (
+        Some(previous.to_string()),
+        Some(step.to_string()),
+        Some(first.to_string()),
+        (verdict.0.to_string(), verdict.1.to_string()),
+    )
+}
+
+/// A SLOT WHOSE FRAMES ARRIVE OVER TWO FLOWS IS JUDGED IN CAPTURE ORDER.
+///
+/// One sender and one key over two links, counters 10, 11, 12, 13 sent
+/// alternately on link 0 and link 1. The document lists link 0's rows and then
+/// link 1's, so its blocks read 10, 12, 11, 13; each was judged against the
+/// frame the tap took before it, whichever link that was: every step is 1 and
+/// every frame is in order. Judged one flow and then the other, link 1's 11
+/// would have been judged against link 0's 12, a step back.
+#[test]
+fn one_sender_and_key_over_two_links_is_judged_in_capture_order() {
+    let mut links = TwoLinks::new([&ZID_LOW, &ZID_LOW]);
+    for (link, counter) in [(0, 10u64), (1, 11), (0, 12), (1, 13)] {
+        links.put(link, counter);
+    }
+    let doc = links.document(&rules("demo/e2e/**=prof\n"));
+    assert_eq!(
+        judged_against(&doc),
+        alloc::vec![
+            facts("null", "null", true, FINE),
+            facts("11", "1", false, FINE),
+            facts("10", "1", false, FINE),
+            facts("12", "1", false, FINE),
+        ],
+        "{doc}"
+    );
+}
+
+/// A SLOT THAT POOLS ITS SENDERS IS JUDGED IN CAPTURE ORDER OVER TWO
+/// CONNECTIONS, and a slot that does not keeps one counter per sender.
+///
+/// Two senders on two links, the same frames as above. Under a profile whose
+/// slot pools senders (`by_zid` false) the two links feed one counter, in the
+/// order the tap took the frames. Under `prof`, which keeps a counter per
+/// sender, the same capture is two slots of two frames each: each link's first
+/// frame is its slot's first, and its second steps by 2.
+#[test]
+fn a_pooled_slot_over_two_connections_is_judged_in_capture_order() {
+    let build = || {
+        let mut links = TwoLinks::new([&ZID_LOW, &ZID_OTHER]);
+        for (link, counter) in [(0, 10u64), (1, 11), (0, 12), (1, 13)] {
+            links.put(link, counter);
+        }
+        links
+    };
+    let pooled = build().document(&pooled_rules());
+    assert_eq!(
+        judged_against(&pooled),
+        alloc::vec![
+            facts("null", "null", true, FINE),
+            facts("11", "1", false, FINE),
+            facts("10", "1", false, FINE),
+            facts("12", "1", false, FINE),
+        ],
+        "{pooled}"
+    );
+    let per_sender = build().document(&rules("demo/e2e/**=prof\n"));
+    assert_eq!(
+        judged_against(&per_sender),
+        alloc::vec![
+            facts("null", "null", true, FINE),
+            facts("10", "2", false, FINE),
+            facts("null", "null", true, FINE),
+            facts("11", "2", false, FINE),
+        ],
+        "{per_sender}"
+    );
+}
+
+/// THE CONTROL: a slot whose frames all arrive on one flow reads as it always
+/// did, since capture order and the flow's own order are one order there.
+#[test]
+fn a_slot_on_one_flow_is_judged_as_before() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        for counter in [10u64, 11, 11, 15] {
+            wire.put(true, None, "demo/e2e/a", &frame(counter, b"body"));
+        }
+        let doc = wire.document(&rules("demo/e2e/**=prof\n"));
+        assert_eq!(
+            judged_against(&doc),
+            alloc::vec![
+                facts("null", "null", true, FINE),
+                facts("10", "1", false, FINE),
+                facts("11", "0", false, REPEAT),
+                facts("11", "4", false, JUMP),
+            ],
+            "{link:?}: {doc}"
+        );
     }
 }

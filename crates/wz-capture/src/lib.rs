@@ -118,6 +118,10 @@ mod e2e_tests;
 // the plane that judges the records a selector walks. Each documents itself.
 #[cfg(feature = "network-codecs")]
 mod e2e_plane;
+// The judge a live handle keeps per declaration text, and the judgements it
+// hands every document that shows a verdict.
+#[cfg(feature = "dissect")]
+pub use e2e_plane::{E2eJudgements, E2eMemory, E2eTable};
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod e2e_selection_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]

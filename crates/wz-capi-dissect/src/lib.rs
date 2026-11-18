@@ -476,6 +476,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // `wz_dissect_live_selection_since_declaring`: the selection documents with
     // the samples read by declarations, so a selector's `e2e` terms are decided
     // under a profile rule. The documents and their revisions do not move.
+    // 59, for `wz_dissect_live_field_values_since_window`: the values document
+    // for the records of at most `max_rows` sequence numbers, so the document
+    // and its string are as large as a window. The document does not move.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -493,7 +496,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 58;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 59;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -5252,6 +5255,82 @@ pub unsafe extern "C" fn wz_dissect_live_field_values_since(
     after_seq: u64,
     out: *mut *mut c_char,
 ) -> c_int {
+    // SAFETY: the caller contract above is the helper's.
+    unsafe { field_values_door(handle, declarations, selector, paths, after_seq, 0, out) }
+}
+
+/// (ABI 59) — [`wz_dissect_live_field_values_since`] FOR THE RECORDS OF AT MOST
+/// `max_rows` SEQUENCE NUMBERS, so the document and the string that holds it are
+/// as large as a window and not as large as the capture.
+///
+/// # The window
+///
+/// [`wz_dissect_live_fields_since_window`]'s: the numbers
+/// `after_seq + 1 ..= after_seq + max_rows`, never past the highest number the
+/// handle has issued. The records of the rows in it are read by the declarations
+/// and written; `window.through_seq` is the last number covered, so passing it as
+/// the next `after_seq` starts the next window where this one ended. `max_rows`
+/// of `0` is no limit and is [`wz_dissect_live_field_values_since`] exactly. The
+/// windows of a finished capture, taken in order, write each record once.
+///
+/// It bounds NUMBERS and not records: a row may batch several records, and a row
+/// the selector does not pick, or no rule covers, has a number and no record, so
+/// a window may hold more records than `max_rows` or none.
+///
+/// # What it bounds, and what it does not
+///
+/// It bounds the document, its string, and the reading of payloads by the
+/// declarations. It does not bound the selector's walk, which is the values
+/// door's fold in capture order: the numbers follow the handle's lists and not
+/// capture order, so no prefix of that walk ends at a number. The walk takes
+/// every message that arrived, as [`wz_dissect_live_field_values_since`]'s does,
+/// and the payloads it picked past the window are kept until a cursor passes
+/// them, which is what the next window reads.
+///
+/// # Errors
+///
+/// Those of [`wz_dissect_live_field_values_since`].
+///
+/// # Safety
+/// The contract of [`wz_dissect_live_field_values_since`].
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_field_values_since_window(
+    handle: *mut live::LiveDissection,
+    declarations: *const c_char,
+    selector: *const c_char,
+    paths: *const c_char,
+    after_seq: u64,
+    max_rows: u64,
+    out: *mut *mut c_char,
+) -> c_int {
+    // SAFETY: the caller contract above is the helper's.
+    unsafe {
+        field_values_door(
+            handle,
+            declarations,
+            selector,
+            paths,
+            after_seq,
+            max_rows,
+            out,
+        )
+    }
+}
+
+/// The body both values doors share, so a window of `0` cannot differ from the
+/// door that has none.
+///
+/// # Safety
+/// The contract of [`wz_dissect_live_field_values_since`].
+unsafe fn field_values_door(
+    handle: *mut live::LiveDissection,
+    declarations: *const c_char,
+    selector: *const c_char,
+    paths: *const c_char,
+    after_seq: u64,
+    max_rows: u64,
+    out: *mut *mut c_char,
+) -> c_int {
     if handle.is_null()
         || declarations.is_null()
         || selector.is_null()
@@ -5273,7 +5352,14 @@ pub unsafe extern "C" fn wz_dissect_live_field_values_since(
     };
     // SAFETY: caller contract above.
     let handle = unsafe { &mut *handle };
-    match handle.field_values_since(declarations, selector, &filter, paths, after_seq) {
+    match handle.field_values_since_windowed(
+        declarations,
+        selector,
+        &filter,
+        paths,
+        after_seq,
+        max_rows,
+    ) {
         Ok(doc) => write_string(doc, out),
         Err(wz_capture::field_values::ValuesError::Declarations(_)) => WZ_DISSECT_ERR_DECLARATION,
         Err(wz_capture::field_values::ValuesError::Paths(_)) => WZ_DISSECT_ERR_INVALID_ARG,
@@ -5814,9 +5900,11 @@ pub unsafe extern "C" fn wz_dissect_live_selection_since_declaring(
         Ok(asked) => asked,
         Err(rc) => return rc,
     };
+    // No judgements handed in: the handle reads its own judge's.
     let declared = wz_capture::selection_json::Declared {
         map: &asked.map,
         text: asked.text,
+        judged: None,
     };
     // SAFETY: caller contract above.
     let doc = unsafe {
@@ -6125,13 +6213,17 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
 ///
 /// `{"document":{"name":"memory","revision":R},"unit":"bytes","scope":"rows",
 ///   "total":T,"lists":{...},"streams":{...},"plaintext":P,"scouting":S,
-///   "packets":K,"census":{...},"fields":{...},"drain":D}`
+///   "packets":K,"census":{...},"fields":{...},"values":V,"e2e":E,"drain":D}`
 ///
 /// Every value is a number of bytes ALLOCATED, which is what the process holds
 /// and not what is in use. `scope` is `rows`: only the structures whose size
 /// follows the row count are counted (the entries of a message list, the bytes it
-/// keeps, the run maps, what the census and the field walk keep for the next
-/// call). What is fixed, or follows the count of distinct things, is not, so the
+/// keeps, the run maps, what the census, the field walk and the values door keep
+/// for the next call). `values` (memory revision 3) is the values door's: the
+/// payloads its selector picked past the cursor, until a cursor passes them, and
+/// the verdict of every record its walk judged. `e2e` (the same revision) is the
+/// handle's judge of the end-to-end frames: what it made of every frame a
+/// profile rule covers, which the field and selection documents read. What is fixed, or follows the count of distinct things, is not, so the
 /// figure is the row-following part of the heap and not all of it; the library's
 /// gate holds the rest to a small bound. A buffer is counted exactly, and a
 /// B-tree map by a model that agrees with the allocator within 3%. `total` is the
@@ -10329,7 +10421,10 @@ mod tests {
         // declaration text a C string beside what the older doors take, a
         // `char*` released by `wz_dissect_string_free` out; the handle keeps a
         // selection memory per selector and declaration text; no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 58);
+        // 59, for `wz_dissect_live_field_values_since_window`: one symbol, the
+        // values door with one more integer in, a `char*` released by
+        // `wz_dissect_string_free` out; no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 59);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -12579,6 +12674,165 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         doc
+    }
+
+    /// `wz_dissect_live_field_values_since_window` on `handle`: the document, or
+    /// the code it refused with (and then no string).
+    fn call_field_values_window(
+        handle: *mut live::LiveDissection,
+        declarations: &str,
+        selector: &str,
+        paths: &str,
+        after: u64,
+        max_rows: u64,
+    ) -> Result<String, c_int> {
+        let (decls, sel, paths) = (
+            CString::new(declarations).expect("no NUL"),
+            CString::new(selector).expect("no NUL"),
+            CString::new(paths).expect("no NUL"),
+        );
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_field_values_since_window(
+                handle,
+                decls.as_ptr(),
+                sel.as_ptr(),
+                paths.as_ptr(),
+                after,
+                max_rows,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "a refusal hands back no string");
+            return Err(rc);
+        }
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf-8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// The records array of a values document, without its brackets.
+    fn values_records(doc: &str) -> &str {
+        doc.split_once("\"records\":[")
+            .and_then(|(_, rest)| rest.strip_suffix("]}"))
+            .unwrap_or_else(|| panic!("no records array closing the document: {doc}"))
+    }
+
+    /// (ABI 59) THE VALUES WINDOW WRITES EACH RECORD ONCE, A WINDOW AT A TIME,
+    /// and hands back the cursor that starts the next.
+    ///
+    /// Three samples on a covered key, read whole by the unbounded door on one
+    /// handle and one number at a time by the windowed door on another: each
+    /// window ends one number past its cursor, the windows' records joined in
+    /// order are the whole document's records byte for byte, a window of `0` is
+    /// the unbounded door's document, a window asked from the last number is
+    /// empty and ends there, and the refusals are the unbounded door's.
+    #[test]
+    fn the_values_window_writes_each_record_once_and_hands_back_the_cursor() {
+        let pcap = capture_declaring_many(&[
+            (5, br#"{"temp":1}"#.as_slice()),
+            (5, br#"{"temp":2}"#.as_slice()),
+            (5, br#"{"temp":3}"#.as_slice()),
+        ]);
+        let declarations = "demo/sensor=json";
+        let whole_handle = replayed(&pcap);
+        let whole = call_field_values(whole_handle, declarations, "", "$.temp", 0);
+        unsafe { wz_dissect_live_close(whole_handle) };
+        assert_eq!(
+            values_records(&whole).matches("{\"seq\":").count(),
+            3,
+            "one record per sample: {whole}"
+        );
+        let last = json_count(&whole, "through_seq") as u64;
+
+        let handle = replayed(&pcap);
+        let mut after = 0u64;
+        let mut joined: Vec<String> = Vec::new();
+        while after < last {
+            let doc = call_field_values_window(handle, declarations, "", "$.temp", after, 1)
+                .expect("the window answers");
+            assert!(
+                doc.contains(&format!(
+                    "\"window\":{{\"after_seq\":{after},\"through_seq\":{}}}",
+                    after + 1
+                )),
+                "a window of one number ends one past its cursor: {doc}"
+            );
+            let records = values_records(&doc);
+            if !records.is_empty() {
+                joined.push(records.to_string());
+            }
+            after += 1;
+        }
+        assert_eq!(
+            joined.join(","),
+            values_records(&whole),
+            "the windows, in order, write the whole document's records once"
+        );
+
+        let past = call_field_values_window(handle, declarations, "", "$.temp", last, 5)
+            .expect("a window past the end answers");
+        assert!(
+            past.contains(&format!(
+                "\"window\":{{\"after_seq\":{last},\"through_seq\":{last}}}"
+            )),
+            "a window never passes the last number issued: {past}"
+        );
+        assert_eq!(values_records(&past), "", "{past}");
+
+        // Asked from 0 again, below the cursor the memory was last asked at, the
+        // walk begins again and a window of 0 is the unbounded door's document.
+        let unbounded = call_field_values_window(handle, declarations, "", "$.temp", 0, 0)
+            .expect("a window of 0 answers");
+        assert_eq!(unbounded, whole, "a window of 0 is no limit");
+
+        assert_eq!(
+            call_field_values_window(handle, declarations, "key ==", "$.temp", 0, 1),
+            Err(WZ_DISSECT_ERR_SELECTOR)
+        );
+        assert_eq!(
+            call_field_values_window(handle, "demo/**=nosuch", "", "$.temp", 0, 1),
+            Err(WZ_DISSECT_ERR_DECLARATION)
+        );
+        assert_eq!(
+            call_field_values_window(handle, declarations, "", "", 0, 1),
+            Err(WZ_DISSECT_ERR_INVALID_ARG)
+        );
+        let paths = CString::new("$.temp").expect("no NUL");
+        let empty = CString::new("").expect("no NUL");
+        assert_eq!(
+            unsafe {
+                wz_dissect_live_field_values_since_window(
+                    handle,
+                    empty.as_ptr(),
+                    empty.as_ptr(),
+                    paths.as_ptr(),
+                    0,
+                    1,
+                    core::ptr::null_mut(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe {
+                wz_dissect_live_field_values_since_window(
+                    core::ptr::null_mut(),
+                    empty.as_ptr(),
+                    empty.as_ptr(),
+                    paths.as_ptr(),
+                    0,
+                    1,
+                    core::ptr::null_mut(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     /// One values document per record state that brings keys, through the ABI:
@@ -16107,6 +16361,107 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
+    /// (memory revision 3) THE MEMORY DOCUMENT NAMES WHAT THE VALUES DOOR KEEPS.
+    ///
+    /// A handle the values door has not asked holds nothing there. Asked from a
+    /// cursor of 0, the door keeps every payload its selector picked past it, and
+    /// the document's `values` counts at least their bytes, inside `total`.
+    /// Asked again from the cursor it handed back, the door lets them go, and
+    /// `values` falls by at least those bytes.
+    #[test]
+    fn the_memory_document_counts_what_the_values_door_keeps() {
+        let samples: [&[u8]; 3] = [br#"{"temp":1}"#, br#"{"temp":2}"#, br#"{"temp":3}"#];
+        let payload_bytes: usize = samples.iter().map(|s| s.len()).sum();
+        let pcap = capture_declaring_many(&samples.iter().map(|s| (5u32, *s)).collect::<Vec<_>>());
+        let handle = replayed(&pcap);
+        let before = live_memory(handle).expect("a replayed handle");
+        assert_eq!(json_count(&before, "values"), 0, "{before}");
+
+        let doc = call_field_values(handle, "demo/sensor=json", "", "$.temp", 0);
+        let holding = live_memory(handle).expect("a handle the values door asked");
+        let held = json_count(&holding, "values");
+        assert!(
+            held >= payload_bytes,
+            "the payloads past the cursor are counted: {holding}"
+        );
+        assert!(json_count(&holding, "total") >= held, "{holding}");
+
+        let through = json_count(&doc, "through_seq") as u64;
+        let _ = call_field_values(handle, "demo/sensor=json", "", "$.temp", through);
+        let passed = live_memory(handle).expect("a handle whose cursor passed them");
+        assert!(
+            json_count(&passed, "values") + payload_bytes <= held,
+            "the passed payloads were let go: {holding} then {passed}"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// THE FIELD DOCUMENT AND THE SELECTION READ ONE JUDGEMENT OF A SLOT OVER
+    /// TWO FLOWS, made in capture order.
+    ///
+    /// One sender and key over two links, counters 10, 11, 12, 13 sent
+    /// alternately on link 0 and link 1: in capture order every frame steps by
+    /// one. Judged one link and then the other, link 1's 11 would have been a
+    /// step back from link 0's 12, an error. The since-door's blocks name no
+    /// counter error, and the selection under the same text picks no row for
+    /// `e2e == error`.
+    #[test]
+    fn the_field_document_and_the_selection_read_one_judgement_of_a_shared_slot() {
+        let packets = e2e_live_packets(2, &[(0, 10), (1, 11), (0, 12), (1, 13)]);
+        let file = pcap_prefix(&packets, packets.len());
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        unsafe { (*handle).follow(&file).expect("follows") };
+        let doc = live_fields_since_declaring(handle, &file, 0, E2E_RULES);
+        assert_eq!(
+            doc.matches("\"counter_reason\":\"none\"").count(),
+            4,
+            "every frame of the slot steps by one in capture order: {doc}"
+        );
+        let picked = live_selection_since_declaring(handle, E2E_RULES, "e2e == error", 0)
+            .expect("the selection answers");
+        assert_eq!(
+            picked.matches("\"selected\":\"yes\"").count(),
+            0,
+            "the selection reads the same judgement: {picked}"
+        );
+        assert!(
+            !picked.contains("\"selected\":\"undecided\""),
+            "and decides every frame of the slot, from the judge's own table: {picked}"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// (memory revision 3) THE MEMORY DOCUMENT NAMES WHAT THE HANDLE'S
+    /// END-TO-END JUDGE KEEPS.
+    ///
+    /// Nothing before a document is asked under a profile rule; what the judge
+    /// made of the frames once one is, inside `total`; and nothing again under
+    /// a text with no profile rule, which keeps no judge.
+    #[test]
+    fn the_memory_document_counts_what_the_end_to_end_judge_keeps() {
+        let packets = e2e_live_packets(2, &[(0, 5), (1, 6), (0, 7)]);
+        let file = pcap_prefix(&packets, packets.len());
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        unsafe { (*handle).follow(&file).expect("follows") };
+        let before = live_memory(handle).expect("a fed handle");
+        assert_eq!(json_count(&before, "e2e"), 0, "{before}");
+
+        let doc = live_fields_since_declaring(handle, &file, 0, E2E_RULES);
+        assert!(
+            doc.contains("\"counter_reason\""),
+            "the frames were judged: {doc}"
+        );
+        let judged = live_memory(handle).expect("a handle that judged its frames");
+        let kept = json_count(&judged, "e2e");
+        assert!(kept > 0, "the judgements are counted: {judged}");
+        assert!(json_count(&judged, "total") >= kept, "{judged}");
+
+        let _ = live_fields_since_declaring(handle, &file, 0, "");
+        let none = live_memory(handle).expect("a handle asked under no profile rule");
+        assert_eq!(json_count(&none, "e2e"), 0, "{none}");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
     /// (ABI 43) THE BOUNDED OPEN SETS BOTH CEILINGS, REPORTS THEM, AND THEY BITE.
     ///
     /// `0` for either leaves the live-tap preset's figure (10 000 per flow, 100 000
@@ -18628,22 +18983,21 @@ mod tests {
     ///
     /// A reader that has registered a profile used to walk the whole handle at every
     /// step, because a counter is a fact about the frames before a row and a walk that
-    /// skipped the old rows would not have moved it: the cost of a step grew with the
-    /// handle (measured: every step restarted, and the step time rose in step with the
-    /// rows held). The walk now keeps the counters the last step left and judges the
-    /// frames that arrived against them.
+    /// skipped the old rows would not have moved it. A frame is now judged by the
+    /// handle's one judge, the payload plane in capture order, which goes on as the
+    /// capture grows, and the field walk reads what it judged.
     ///
     /// Two captures, each read after every packet and each step compared with the
     /// whole-document door of the same handle at the same state:
     ///
-    /// * ONE flow, counters that repeat and skip: the walk must go on (few starts, each
-    ///   message visited once) and every verdict must be the whole document's;
+    /// * ONE flow, counters that repeat and skip;
     /// * TWO flows that announce the same sender and publish the same key, so one
-    ///   slot is judged from two lists, and the LATER list publishes first. A walk that
-    ///   went on would judge the slot in the order of the calls (the later list's frames,
-    ///   then the earlier list's), which is not the order of one walk over everything
-    ///   (the earlier list's first). The walk must notice, begin again, and write the
-    ///   whole document's rows all the same.
+    ///   slot spans two lists, and the LATER list publishes first. The judge takes
+    ///   them in capture order whichever list they are in, so the walk has nothing
+    ///   to begin again for.
+    ///
+    /// In both the walk goes on (few starts, each message visited about once) and
+    /// every verdict is the whole document's.
     #[test]
     fn an_end_to_end_profile_goes_on_across_steps_and_a_shared_slot_begins_again() {
         let one_flow: Vec<(usize, u64)> =
@@ -18666,9 +19020,9 @@ mod tests {
             (1, 10),
             (0, 23),
         ];
-        for (name, flows, frames, goes_on) in [
-            ("one flow", 1usize, one_flow, true),
-            ("two flows sharing a slot", 2usize, two_flows, false),
+        for (name, flows, frames) in [
+            ("one flow", 1usize, one_flow),
+            ("two flows sharing a slot", 2usize, two_flows),
         ] {
             let packets = e2e_live_packets(flows, &frames);
             let file = pcap_prefix(&packets, packets.len());
@@ -18707,25 +19061,18 @@ mod tests {
                 "{name}: {with_verdicts} rows carry a verdict for {} frames; the profile judged nothing",
                 frames.len()
             );
-            if goes_on {
-                assert!(
-                    work.restarted <= 3,
-                    "{name}: the walk began {} times over {steps} steps: {work:?}",
-                    work.restarted
-                );
-                assert!(
-                    work.messages_walked <= 2 * cursor,
-                    "{name}: {} messages visited for {cursor} rows; a walk that began \
-                     again at every step visits about {} ({work:?})",
-                    work.messages_walked,
-                    steps * cursor / 2
-                );
-            } else {
-                assert!(
-                    work.restarted >= 2,
-                    "{name}: a slot judged from two lists must make the walk begin again: {work:?}"
-                );
-            }
+            assert!(
+                work.restarted <= 3,
+                "{name}: the walk began {} times over {steps} steps: {work:?}",
+                work.restarted
+            );
+            assert!(
+                work.messages_walked <= 2 * cursor,
+                "{name}: {} messages visited for {cursor} rows; a walk that began \
+                 again at every step visits about {} ({work:?})",
+                work.messages_walked,
+                steps * cursor / 2
+            );
         }
     }
 

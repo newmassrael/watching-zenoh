@@ -750,6 +750,101 @@ fn the_exit_code_separates_an_incomplete_capture_from_a_failed_run() {
     );
 }
 
+/// `--growing` over a file still being written: refused without the flag,
+/// and with it the report on the complete blocks, the line that says how far
+/// that is, and exit 1 for the bytes left unread. A file that ends on a block
+/// boundary reads whole under the flag and exits 0.
+#[test]
+fn a_growing_file_is_read_to_its_complete_blocks_only_when_asked() {
+    let scratch = Scratch::new("growing");
+    let (file, log, _) = capture_and_key_log();
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+    let cut_len = file.len() - 7;
+    let cut = scratch.write("growing.pcapng", &file[..cut_len]);
+    let whole = scratch.write("whole.pcapng", &file);
+    let run = |capture: &std::path::Path, growing: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_wz-analyze"));
+        command.arg(capture).arg("--keylog").arg(&keylog);
+        if growing {
+            command.arg("--growing");
+        }
+        command.output().expect("runs")
+    };
+
+    let refused = run(cut.as_path(), false);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "a cut file is not read as whole without the flag"
+    );
+    assert!(refused.stdout.is_empty(), "and no report is printed");
+
+    let partial = run(cut.as_path(), true);
+    let said = String::from_utf8_lossy(&partial.stderr);
+    assert_eq!(
+        partial.status.code(),
+        Some(1),
+        "bytes were left unread: {said}"
+    );
+    assert!(
+        said.contains(&format!("of {cut_len} byte(s)")) && said.contains("NOT in this report"),
+        "the line says how far the read reached: {said}"
+    );
+    let report = String::from_utf8_lossy(&partial.stdout);
+    assert!(
+        report.starts_with("growing: read ")
+            && report.contains(&format!(" of {cut_len} byte(s) of the file, "))
+            && report.contains("complete: no"),
+        "the report itself says how far it read: {report}"
+    );
+
+    let finished = run(whole.as_path(), true);
+    let said = String::from_utf8_lossy(&finished.stderr);
+    assert_eq!(
+        finished.status.code(),
+        Some(0),
+        "a file that ends on a boundary is read whole: {said}"
+    );
+    assert!(said.contains("nothing was left unread"), "{said}");
+    let report = String::from_utf8_lossy(&finished.stdout);
+    assert!(
+        report.starts_with(&format!(
+            "growing: read {0} of {0} byte(s) of the file, 0 unread",
+            file.len()
+        )) && report.contains("complete: yes"),
+        "{report}"
+    );
+
+    // The JSON report carries the same as its first key; the ordinary one
+    // carries none.
+    let json = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&cut)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--growing")
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("the growing report is one JSON document");
+    assert_eq!(doc["growing"]["file_bytes"], serde_json::json!(cut_len));
+    assert_eq!(
+        doc["growing"]["unread_bytes"].as_u64().map(|u| u > 0),
+        Some(true)
+    );
+    assert_eq!(doc["growing"]["complete"], serde_json::json!(false));
+    let ordinary = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&whole)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&ordinary.stdout).expect("the ordinary report is JSON");
+    assert!(doc.get("growing").is_none(), "only asked for, never added");
+}
+
 /// R311y664 — a key log the caller named and that cannot be read is a hard
 /// failure, not a quiet fallback.
 ///

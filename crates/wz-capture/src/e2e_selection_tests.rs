@@ -144,6 +144,7 @@ fn another_declaration_text_begins_the_planes_again_and_revises_the_samples() {
     let declared = Declared {
         map: &map,
         text: &text,
+        judged: None,
     };
     let errors = TABLE.iter().filter(|r| r.0 == "error").count();
     for link in LINKS {

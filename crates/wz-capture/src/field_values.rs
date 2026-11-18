@@ -569,6 +569,60 @@ impl ValuesMemory {
             fold.held.iter().filter(|h| h.closes.is_none()).count()
         })
     }
+
+    /// Bytes the memory holds that follow the row count, allocated: the
+    /// payloads the selector picked past the cursor (each one's bytes, key and
+    /// declared schema, and for a piece the verdict and the message it
+    /// completed), and the payload plane's verdict for every record it judged.
+    ///
+    /// The segment ledger is not counted. Its open transfers are bounded by its
+    /// held-bytes bound; its verdict per judged piece is a B-tree, which a report
+    /// does not model (`wz_session_core::heap_account` says why), so the figure
+    /// is a lower bound wherever pieces were joined, as every report is.
+    pub fn memory(&self) -> usize {
+        self.fold.fold().map_or(0, |fold| {
+            fold.plane.memory()
+                + wz_session_core::heap_account::vec_bytes(&fold.held)
+                + fold.held.iter().map(Held::heap_bytes).sum::<usize>()
+        })
+    }
+}
+
+impl Held {
+    /// Bytes this payload owns on the heap, allocated. A completed message is
+    /// shared with the joining state and counted here once, by its length, which
+    /// leaves out the shared allocation's own counts and so stays a lower bound.
+    fn heap_bytes(&self) -> usize {
+        use wz_session_core::heap_account::vec_bytes;
+        let schema = match &self.declared {
+            HeldEncoding::Known {
+                schema: Some(schema),
+                ..
+            } => vec_bytes(schema),
+            _ => 0,
+        };
+        let suffix = self
+            .missed
+            .as_ref()
+            .and_then(|(_, suffix)| suffix.as_ref())
+            .map_or(0, String::capacity);
+        let piece = self.piece.as_ref().map_or(0, |piece| {
+            piece.profile.capacity()
+                + vec_bytes(&piece.verdict.values)
+                + vec_bytes(&piece.verdict.missing)
+                + vec_bytes(&piece.verdict.ended)
+                + piece
+                    .verdict
+                    .joined
+                    .as_ref()
+                    .map_or(0, |joined| joined.len())
+        });
+        vec_bytes(&self.bytes)
+            + self.keyexpr.as_ref().map_or(0, String::capacity)
+            + suffix
+            + schema
+            + piece
+    }
 }
 
 /// The inputs of one call.
