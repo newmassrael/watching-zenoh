@@ -248,7 +248,7 @@ fn spawn_wz_gateway(listen: u16, dial: [u16; 2]) -> (ChildGuard, String, File) {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
 fn a_wz_peer_gateway_places_its_south_remotes_where_a_stock_gateway_does() {
     let ports = PortReservation::pick();
     let (stock_port, wz_port) = (ports.port(), ports.next_port());
