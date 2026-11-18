@@ -582,12 +582,11 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         // The publisher's source identity is the session's own zid, the one its
         // peers see in the handshake.
         let engine = session.engine.clone();
-        let zid = engine.zid().to_vec();
         let publisher = match AdvancedPublisherOn::declare_on(
             Arc::new(PicoPlane::new(session, declared)),
             ke,
             advanced_publisher_options(options),
-            zid,
+            engine.zid().into(),
         ) {
             Ok(publisher) => publisher,
             // A derived `@adv` key no peer could take is the caller's key and
