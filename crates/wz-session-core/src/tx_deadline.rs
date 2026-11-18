@@ -115,6 +115,9 @@ pub struct PushDeadline {
     /// Whether this is a sender that may not wait at all ([`Self::probe`]). A configured wait of
     /// zero is not the same: it still sends a chain, and abandons it if the lane fills.
     probing: bool,
+    /// Whether the sender holds the room of every frame of the message ([`Self::covered`]), so a
+    /// chain asks for no room after its first frame either.
+    covered: bool,
 }
 
 impl PushDeadline {
@@ -130,6 +133,7 @@ impl PushDeadline {
                 window_us: None,
                 window_left_us: 0,
                 probing: false,
+                covered: false,
             }
         } else {
             Self {
@@ -140,6 +144,7 @@ impl PushDeadline {
                 window_us: conf.no_progress_us,
                 window_left_us: conf.no_progress_us.unwrap_or(0),
                 probing: false,
+                covered: false,
             }
         }
     }
@@ -147,6 +152,22 @@ impl PushDeadline {
     /// Whether this deadline belongs to a sender that may not wait ([`Self::probe`]).
     pub fn is_probe(&self) -> bool {
         self.probing
+    }
+
+    /// The deadline of a message whose sender reserved the room of every frame it leaves in
+    /// before sending any: [`Self::new`]'s, except that a fragment chain asks for no room after
+    /// its first frame, since that room is the sender's already and asking would count the
+    /// sender's own promise against the lane.
+    pub fn covered(droppable: bool, conf: &TxQueueConf) -> Self {
+        Self {
+            covered: true,
+            ..Self::new(droppable, conf)
+        }
+    }
+
+    /// Whether every frame's room was reserved before the send ([`Self::covered`]).
+    pub fn is_covered(&self) -> bool {
+        self.covered
     }
 
     /// The deadline of a sender that may not wait at all: every ask for room is made with a
@@ -167,6 +188,7 @@ impl PushDeadline {
             window_us: None,
             window_left_us: 0,
             probing: true,
+            covered: false,
         }
     }
 
@@ -222,6 +244,22 @@ impl PushDeadline {
 mod tests {
     use super::*;
     use crate::session_init_params::WAIT_BEFORE_CLOSE_US;
+
+    /// A covered deadline is the ordinary one of the same message apart from the mark, which
+    /// neither the ordinary nor the probing deadline carries.
+    #[test]
+    fn a_covered_deadline_is_the_ordinary_one_marked() {
+        let conf = TxQueueConf::default();
+        for droppable in [true, false] {
+            let covered = PushDeadline::covered(droppable, &conf);
+            let ordinary = PushDeadline::new(droppable, &conf);
+            assert!(covered.is_covered());
+            assert!(!ordinary.is_covered());
+            assert!(!PushDeadline::probe(droppable).is_covered());
+            assert!(!covered.is_probe());
+            assert_eq!(covered.ask(), ordinary.ask(), "droppable {droppable}");
+        }
+    }
 
     /// With no count stated, a blocked link is kept however long it stays blocked: the
     /// policy as it was before the limit.

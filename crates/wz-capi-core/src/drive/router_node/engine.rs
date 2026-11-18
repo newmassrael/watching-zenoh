@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    QueryableSink, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId,
-    WireKey,
+    QueryableSink, ReplyCallback, SessionEngine, StatementNotHonoured, SubId, SubscriberSink, Tick,
+    TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -219,6 +219,10 @@ impl SessionEngine for RouterState {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        // The router writes to its faces by its own tables: it numbers no link, offers no frame
+        // without waiting and reserves none, so a publish that states a set of links, a retry or
+        // the all-or-none form is refused by name, before anything is sent.
+        StatementNotHonoured::of_publish(opts)?;
         self.forwarder
             .publish_with(keyexpr, payload, opts)
             .map(|()| payload.len())
@@ -238,6 +242,7 @@ impl SessionEngine for RouterState {
         payload: wz_session_core::extshm::ShmSendHandle,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        StatementNotHonoured::of_publish(opts)?;
         let size = payload.bytes().len();
         self.publish_shm(keyexpr, payload, opts)
             .map(|()| size)
@@ -485,6 +490,12 @@ impl SessionEngine for RouterState {
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Option<usize> {
+        // A get limited to some links or addressed to one node is asked of none: the router reads
+        // neither, and asking every link would widen it. `get_stated` is the door that refuses it
+        // by name.
+        if StatementNotHonoured::of_query(opts).is_err() {
+            return Some(0);
+        }
         // One leg: the node's own face asks, and the router routes the query to the queryables of
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
@@ -515,6 +526,10 @@ impl SessionEngine for RouterState {
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Option<usize> {
+        // Asked of none when it states what the router does not read, as `get_on_wire` is.
+        if StatementNotHonoured::of_query(opts).is_err() {
+            return Some(0);
+        }
         // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).

@@ -190,11 +190,12 @@ segment-sender = ["dep:wz-capture", "wz-capi-core/segment-sender"]
 # delivery lane that every face feeds. OFF by default: zenoh-c has no such door, and a callback
 # runs where the sample arrives in a build made as zenoh-c is.
 rx-callback-offload = ["wz-capi-core/rx-callback-offload"]
-# The seven `wz_capi_c_*_ext` doors and the three statement structs they take
-# (`src/switch_doors.rs`): the links an entity may use, a publish's retry and all-or-none form, and
-# the node a query is addressed to, stated beside the arguments of `z_put`, `z_delete`,
-# `z_declare_publisher`, `z_get`, `z_declare_querier`, `z_declare_subscriber` and
-# `z_declare_queryable`, whose option structs are upstream's layout and have no field for them. OFF
+# The `wz_capi_c_*_ext` doors and the three statement structs they take (`src/switch_doors.rs`):
+# the links an entity may use, a publish's retry and all-or-none form, and the node a query is
+# addressed to, stated beside the arguments of `z_put`, `z_delete`, `z_declare_publisher`, `z_get`,
+# `z_declare_querier`, `z_declare_subscriber`, `z_declare_queryable`, the two liveliness
+# declarations and, in a build with `liveliness-get`, `z_liveliness_get`, whose option structs are
+# upstream's layout and have no field for them. OFF
 # by default: zenoh-c has no such statements. The doors read the build's own policies
 # (`entity-link-restriction`, `publisher-admission-retry`, `multi-route-atomic-tx`,
 # `targeted-query`, each off unless the build states it) and refuse a stated value while its policy

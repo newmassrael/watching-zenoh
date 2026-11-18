@@ -23,11 +23,13 @@ pub type ZResult = i8;
 
 /// The code a publish that no face could carry returns: the size refusal has a
 /// code of its own, so a caller can tell a person "larger than this session
-/// sends"; there is no other fan-out failure today, and a future one would be
-/// `Z_EINVAL` until it earns its own.
+/// sends". A statement the engine does not honour (a set of links, a retry, the
+/// all-or-none form) is `Z_EUNAVAILABLE`, the code a node answers for a
+/// statement it does not carry.
 pub fn publish_refusal(why: wz_capi_core::faces::FanoutError) -> ZResult {
     match why {
         wz_capi_core::faces::FanoutError::ExceedsCapacity => WZ_CAPI_C_E_VALUE_TOO_LARGE,
+        wz_capi_core::faces::FanoutError::NotHonoured(_) => Z_EUNAVAILABLE,
     }
 }
 
@@ -140,6 +142,29 @@ mod tests {
             }
         }
         assert_eq!(Z_OK, 0);
+    }
+
+    /// Each refusal of a fan-out publish has its code: the size its own, and every statement the
+    /// engine does not honour the code of a statement a node does not carry.
+    #[test]
+    fn each_fanout_refusal_has_its_code() {
+        use wz_capi_core::faces::{FanoutError, StatementNotHonoured};
+        assert_eq!(
+            publish_refusal(FanoutError::ExceedsCapacity),
+            WZ_CAPI_C_E_VALUE_TOO_LARGE
+        );
+        for statement in [
+            StatementNotHonoured::Links,
+            StatementNotHonoured::AdmissionRetry,
+            StatementNotHonoured::AtomicTx,
+            StatementNotHonoured::TargetPeer,
+        ] {
+            assert_eq!(
+                publish_refusal(FanoutError::NotHonoured(statement)),
+                Z_EUNAVAILABLE,
+                "{statement:?}"
+            );
+        }
     }
 
     /// The two CHANNEL statuses are positive and distinct from `Z_OK` — the

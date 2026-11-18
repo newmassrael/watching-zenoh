@@ -731,6 +731,137 @@ fn a_node_that_dials_a_node_holds_it_as_a_face() {
     }
 }
 
+/// A node numbers none of its links, retries and reserves nothing and addresses no query to one
+/// node, so every operation that states one of those is refused by name and makes nothing, and the
+/// same operation stating none is taken: the router engine's answer to the policies, which never
+/// takes a stated call as if nothing were stated.
+#[test]
+fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
+    use wz_capi_port::LinksNotHonoured;
+    use wz_session_core::admission_retry::AdmissionRetry;
+    use wz_session_core::link_restriction::LinkRestriction;
+    use wz_session_core::sink::SampleView;
+
+    let router = open_node();
+    let engine = router.as_engine();
+    let key = "wz/port/links";
+    let one = LinkRestriction::only([1]).expect("one slot");
+    let retry = AdmissionRetry {
+        attempts: 2,
+        delay_ms: 5,
+    };
+
+    for (stated, named) in [
+        (
+            PublishOptions::put().with_links(one),
+            StatementNotHonoured::Links,
+        ),
+        (
+            PublishOptions::put().with_admission_retry(retry),
+            StatementNotHonoured::AdmissionRetry,
+        ),
+        (
+            PublishOptions::put().with_atomic_tx(),
+            StatementNotHonoured::AtomicTx,
+        ),
+    ] {
+        assert_eq!(
+            engine.publish_on_wire_all(key, &WireKey::literal(), b"v", &stated),
+            Err(FanoutError::NotHonoured(named)),
+            "a publish that states {named:?}"
+        );
+    }
+    assert!(engine
+        .publish_on_wire_all(key, &WireKey::literal(), b"v", &PublishOptions::put())
+        .is_ok());
+
+    let mut legs = 0usize;
+    for (stated, named) in [
+        (
+            QueryOptions::default().with_links(one),
+            StatementNotHonoured::Links,
+        ),
+        (
+            QueryOptions::default().with_target_peer([0xc7]),
+            StatementNotHonoured::TargetPeer,
+        ),
+    ] {
+        assert_eq!(
+            engine.get_stated(key, &WireKey::literal(), &stated, None, &mut || {
+                legs += 1;
+                Box::new(|_: &dyn ReplyView| {})
+            }),
+            Err(named),
+            "a get that states {named:?}, through the door that names the refusal"
+        );
+        assert_eq!(
+            engine.get_on_wire(key, &WireKey::literal(), &stated, None, &mut || {
+                legs += 1;
+                Box::new(|_: &dyn ReplyView| {})
+            }),
+            Some(0),
+            "a get that states {named:?}, handed to the door of no statement, asks no link"
+        );
+    }
+    assert_eq!(legs, 0, "no leg was minted for a get that states something");
+    assert_eq!(
+        engine.get_stated(
+            key,
+            &WireKey::literal(),
+            &QueryOptions::default(),
+            None,
+            &mut || Box::new(|_: &dyn ReplyView| {})
+        ),
+        Ok(Some(1)),
+        "a get that states no set is the node's one leg"
+    );
+
+    let sink: SubscriberSink =
+        Arc::new(|| Box::new(|_: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>);
+    assert_eq!(
+        engine.declare_subscriber_on_link_set(
+            key.to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            one,
+            None,
+            sink.clone()
+        ),
+        Err(LinksNotHonoured),
+        "a limited subscriber"
+    );
+    let taken = engine
+        .declare_subscriber_on_link_set(
+            key.to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            LinkRestriction::Any,
+            None,
+            sink,
+        )
+        .expect("no set is never refused")
+        .expect("a node has an id for a subscriber");
+    engine.undeclare_subscriber(taken);
+
+    assert_eq!(
+        engine.declare_liveliness_token_on_link_set(key.to_owned(), WireKey::literal(), one, None),
+        Err(LinksNotHonoured),
+        "a limited token"
+    );
+    let token = engine
+        .declare_liveliness_token_on_link_set(
+            key.to_owned(),
+            WireKey::literal(),
+            LinkRestriction::Any,
+            None,
+        )
+        .expect("no set is never refused")
+        .expect("a node has an id for a token");
+    engine.undeclare_liveliness_token(token);
+
+    router.close();
+}
+
 /// The port's shared-memory publication, over links that negotiated shared memory.
 #[cfg(feature = "session-extshm")]
 mod shared_memory {

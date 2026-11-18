@@ -2617,8 +2617,10 @@ offers the frame again to those links only, up to the stated number of passes.
 A publish that still found no room ends having delivered to no link: it does
 not close the session, and it waits no longer than the passes and delays it
 stated. A payload too long to be offered without waiting is sent as a
-publish that states no retry sends it. The number of passes and the delay are
-never zero. Only the tokio engine reads this policy.
+publish that states no retry sends it, and a publish from shared memory, which
+is never offered without waiting, is refused when it states a retry. The number
+of passes and the delay are never zero. Only the tokio engine reads this
+policy; the others refuse a publish that states a retry.
 '''
 
 [[policy]]
@@ -2639,9 +2641,15 @@ to. If any link had no room, nothing is sent to any link or to any subscriber of
 the session, no sequence number is spent, every reservation is given back and the
 publish ends having delivered to nobody; it does not close the session and it
 counts no drop. A link that is down or was never told the key takes no part and
-does not stop the others. A payload too long to be sent whole is atomic only
-for its first frame, and a link whose frames are written in slots of a pool may
-still wait for a slot. Only the tokio engine reads this policy.
+does not stop the others. A payload too long to be sent whole reserves the room
+of every frame of its chain on every link before any frame is sent, links that
+share a queue counted together, and no frame of the chain asks for room again,
+so the chain reaches every link whole or no link at all. A multicast group
+takes no reservation: it is sent the frame only once every link promised room,
+and nothing when the publish delivered to nobody. A link whose frames are
+written in slots of a pool may still wait for a slot. A publish from shared
+memory reserves nothing and is refused when it asks. Only the tokio engine
+reads this policy; the others refuse a publish that asks.
 '''
 
 [[policy]]

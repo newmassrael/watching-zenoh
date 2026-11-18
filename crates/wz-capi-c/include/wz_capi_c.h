@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 17
+#define WZ_CAPI_C_ABI_REVISION 18
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -1532,6 +1532,17 @@ z_result_t wz_capi_c_declare_subscriber_offloaded(
  * not written on either. */
 z_result_t wz_capi_c_subscriber_offload_stats(
     const z_loaned_subscriber_t *subscriber, wz_capi_c_offload_stats_t *out);
+
+/* Revision 18: z_liveliness_get limited to the links `ext` names (NULL
+ * for no limit), in a build with `liveliness-get` as well. The snapshot
+ * is asked of the nodes behind those links only, and a multicast group,
+ * which no slot names, is not asked; the session's own tokens are behind
+ * no link and answer it whatever the restriction says. */
+z_result_t wz_capi_c_liveliness_get_ext(const z_loaned_session_t *session,
+                                        const z_loaned_keyexpr_t *key_expr,
+                                        z_moved_closure_reply_t *callback,
+                                        z_liveliness_get_options_t *options,
+                                        const wz_capi_c_entity_ext_t *ext);
 
 #ifdef __cplusplus
 }

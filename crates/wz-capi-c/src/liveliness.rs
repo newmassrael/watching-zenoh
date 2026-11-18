@@ -613,10 +613,11 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(this_: *mut z_liveline
 /// same `z_owned_closure_reply_t` and the same `crate::get::fire_reply` marshal
 /// `z_get` uses, rather than a parallel one.
 ///
-/// Fanned across every connected face for the reason every declaration in this
-/// crate is, and the C thread holds its own clone across the loop so a face that
-/// finalises early cannot complete the snapshot while later faces are still
-/// being issued.
+/// The walk is the registry's own ([`SharedSession::liveliness_get_on_links`]): one leg for
+/// the tokens of the session itself, which upstream's get finds beside those of its peers and
+/// which this session answers because its ABI says so (`liveliness_to_self`), and one leg per
+/// connected face. The C thread holds its own clone of the closure across the walk, so a face
+/// that finalises early cannot complete the snapshot while later faces are still being issued.
 ///
 /// # Safety
 /// `session` must be a valid loaned session; `key_expr` must be a valid loaned
@@ -630,6 +631,33 @@ pub unsafe extern "C" fn z_liveliness_get(
     callback: *mut crate::abi::z_moved_closure_reply_t,
     options: *mut z_liveliness_get_options_t,
 ) -> crate::result::ZResult {
+    // SAFETY: the caller's contract, delegated; a get limited to no links.
+    unsafe {
+        liveliness_get_on(
+            session,
+            key_expr,
+            callback,
+            options,
+            Ok(LinkRestriction::Any),
+        )
+    }
+}
+
+/// The body of [`z_liveliness_get`], for a get that may be limited to some links. `links` is the
+/// restriction the get stated or the code its refusal answers; the closure and the options'
+/// cancellation token are taken on every path, so a refused get runs the C `drop(context)` once
+/// and asks nothing.
+///
+/// # Safety
+/// As [`z_liveliness_get`].
+#[cfg(feature = "liveliness-get")]
+pub(crate) unsafe fn liveliness_get_on(
+    session: *const crate::abi::z_loaned_session_t,
+    key_expr: *const crate::abi::z_loaned_keyexpr_t,
+    callback: *mut crate::abi::z_moved_closure_reply_t,
+    options: *mut z_liveliness_get_options_t,
+    links: Result<LinkRestriction, ZResult>,
+) -> ZResult {
     crate::ffi::guarded(|| {
         if callback.is_null() {
             return crate::result::Z_ENULL;
@@ -643,6 +671,12 @@ pub unsafe extern "C" fn z_liveliness_get(
         // as upstream's `z_liveliness_get` takes it.
         // SAFETY: the caller's contract.
         let token = unsafe { liveliness_get_token(options) };
+        // A refusal returns with the closure and the token adopted above, which drop with the
+        // frame.
+        let links = match links {
+            Ok(links) => links,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { crate::session::session_handle(session) }, unsafe {
@@ -663,6 +697,11 @@ pub unsafe extern "C" fn z_liveliness_get(
             crate::session::SessionHandle::Registry(state) => state,
             #[cfg(feature = "router-node")]
             crate::session::SessionHandle::Node(node) => {
+                // The node answers from its own tables, which read no restriction of links: it
+                // does not carry a get that states one, and asks nothing.
+                if links.is_restricted() {
+                    return Z_EUNAVAILABLE;
+                }
                 return liveliness_get_on_node(node, &ke, closure, token);
             }
         };
@@ -675,8 +714,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         };
         // SATURATE rather than wrap: a wrapped huge timeout becomes a tiny one
         // and expires the snapshot immediately.
-        let opts = wz_runtime_tokio::session::LivelinessGetOptions::default()
-            .with_timeout_ms(timeout_ms.min(u32::MAX as u64) as u32);
+        let timeout_ms = timeout_ms.min(u32::MAX as u64) as u32;
 
         // A liveliness reply's keyexpr is the TOKEN's, which intersects the
         // interest by construction; the gate is carried anyway so this plane
@@ -702,48 +740,24 @@ pub unsafe extern "C" fn z_liveliness_get(
         let registration = fan.as_ref().map(|(_, r)| std::sync::Arc::clone(r));
         let fan = fan.map(|(f, _)| f);
 
-        let guard = closure.clone();
-        for (face, revised) in state.shared.face_sessions_with_wake() {
-            let per_face = crate::get::LegReply {
+        // Each leg owns its share of the closure, the gate and the registration, and its drop is
+        // that leg's end, which covers a real final, a timeout sweep and a face death alike.
+        let mut leg = || -> Box<dyn FnMut(&dyn wz_runtime_tokio::reply_sink::ReplyView) + Send> {
+            let per_leg = crate::get::LegReply {
                 closure: closure.clone(),
                 gate: gate.clone(),
                 _registration: registration.clone(),
             };
-            let issued = face.liveliness_get(
-                ke.clone(),
-                opts,
-                move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
-                    per_face.fire(view);
-                },
-                // Completion is signalled by the pending entry's sink being
-                // DROPPED, which covers a real final, a timeout sweep and a face
-                // death alike — the same reason `z_get`'s `on_final` is empty.
-                |_id| {},
-            );
-            // R2949 — the interest id this face registered under, recorded so
-            // a later cancel can unregister it; `false` means the token
-            // cancelled mid-fan and this registration is already undone.
-            let cancelled_mid_fan = match (&fan, &issued) {
-                (Some(fan), Ok(interest_id)) => {
-                    let undo = face.clone();
-                    let interest_id = *interest_id;
-                    !fan.record(move || {
-                        undo.cancel_pending_liveliness_get(interest_id);
-                    })
-                }
-                _ => false,
-            };
-            drop(issued);
-            if cancelled_mid_fan {
-                break;
-            }
-            // Wake this face's drive loop so it re-arms on the deadline just
-            // registered; without it a silent session sweeps the snapshot only
-            // at the next keepalive wake.
-            revised.notify_one();
-        }
-        drop(guard);
-        // After `guard`, for the reason `crate::get::issue_get` gives.
+            Box::new(move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
+                per_leg.fire(view);
+            })
+        };
+        state
+            .shared
+            .liveliness_get_on_links(&ke, timeout_ms, links, fan.as_deref(), &mut leg);
+        // `closure` is the C thread's own clone, held across the walk; it goes before the
+        // registration for the reason `crate::get::issue_get` gives.
+        drop(closure);
         drop(registration);
         crate::result::Z_OK
     })

@@ -839,6 +839,17 @@ fn fragment_chunk_size(mtu: usize, qos: bool) -> usize {
     mtu.saturating_sub(budget).max(1)
 }
 
+/// How many frames a `body_len`-byte network message can take at `mtu`, never fewer than it
+/// takes: one when the body fits one fragment's chunk, which a frame's own header (no wider than
+/// a fragment's) also fits, and otherwise its fragment count. The chunk is the narrower one of a
+/// chain that carries `ext_qos`, so a message whose priority leaves it without one is counted a
+/// frame too many at most, never too few. What a sender that reserves the room of a whole chain
+/// before it sends asks for.
+#[cfg(feature = "transport-fragmentation")]
+pub fn chain_frames(body_len: usize, mtu: usize) -> usize {
+    body_len.div_ceil(fragment_chunk_size(mtu, true)).max(1)
+}
+
 /// Number of `T_MID_FRAGMENT` frames a `body_len`-byte network message splits
 /// into at this `mtu`. The caller reserves exactly this many consecutive SNs
 /// before calling [`fragment_body`].
@@ -2082,6 +2093,28 @@ mod tests {
             Err(CodecError::VleWidthOverflow),
             "0x1_0001 is delivered as OAM_LINKSTATE_ID; wz must not emit it"
         );
+    }
+}
+
+#[cfg(all(test, feature = "transport-fragmentation"))]
+mod chain_frames_tests {
+    use super::{chain_frames, fragment_chunk_size};
+
+    /// A body that fits one chunk is one frame; past it, one frame per chunk, rounded up; an
+    /// empty body is still one frame. The count is never below the plan's for either chunk.
+    #[test]
+    fn a_chain_is_counted_by_its_narrowest_chunk_and_never_short() {
+        let mtu = 100;
+        let chunk = fragment_chunk_size(mtu, true);
+        assert_eq!(chain_frames(0, mtu), 1);
+        assert_eq!(chain_frames(chunk, mtu), 1);
+        assert_eq!(chain_frames(chunk + 1, mtu), 2);
+        assert_eq!(chain_frames(3 * chunk, mtu), 3);
+        assert_eq!(chain_frames(3 * chunk + 1, mtu), 4);
+        for len in 1..1000 {
+            let plain = len.div_ceil(fragment_chunk_size(mtu, false)).max(1);
+            assert!(chain_frames(len, mtu) >= plain, "{len} bytes");
+        }
     }
 }
 

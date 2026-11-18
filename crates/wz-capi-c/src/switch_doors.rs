@@ -50,6 +50,8 @@ use crate::abi::{
     z_owned_publisher_t, z_owned_querier_t, z_owned_queryable_t, z_owned_subscriber_t,
 };
 use crate::get::z_get_options_t;
+#[cfg(feature = "liveliness-get")]
+use crate::liveliness::z_liveliness_get_options_t;
 use crate::liveliness::{z_liveliness_subscriber_options_t, z_liveliness_token_options_t};
 use crate::publisher::z_publisher_options_t;
 use crate::put::{z_delete_options_t, z_put_options_t};
@@ -490,6 +492,29 @@ pub unsafe extern "C" fn wz_capi_c_liveliness_declare_subscriber_ext(
             session, subscriber, key_expr, callback, options, links,
         )
     }
+}
+
+/// `z_liveliness_get`, limited to the links `ext` names (null for no limit): the snapshot is asked
+/// of the nodes behind those links only, and a multicast group, which no slot names, is not asked.
+/// The tokens of the session itself are behind no link and answer it whatever the restriction
+/// says. The closure and the options' cancellation token are consumed on every path; refused as
+/// [`wz_capi_c_put_ext`] is.
+///
+/// # Safety
+/// As `z_liveliness_get`; `ext` must be null or a valid statement.
+#[cfg(feature = "liveliness-get")]
+#[no_mangle]
+pub unsafe extern "C" fn wz_capi_c_liveliness_get_ext(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_reply_t,
+    options: *mut z_liveliness_get_options_t,
+    ext: *const wz_capi_c_entity_ext_t,
+) -> ZResult {
+    // SAFETY: the caller's contract for `ext`.
+    let links = entity_links(unsafe { ext.as_ref() });
+    // SAFETY: the caller's contract, delegated.
+    unsafe { crate::liveliness::liveliness_get_on(session, key_expr, callback, options, links) }
 }
 
 #[cfg(test)]
@@ -1084,6 +1109,68 @@ mod tests {
             );
         }
     }
+
+    /// The liveliness get's door on handles that are not there, as the other doors are: nothing
+    /// stated is `Z_ENULL` as `z_liveliness_get` answers, a stated mask is refused by the build's
+    /// policy before the handles are read when it is off, and a null closure is `Z_ENULL` before
+    /// the statement is read.
+    #[cfg(feature = "liveliness-get")]
+    #[test]
+    fn the_liveliness_get_door_refuses_a_statement_before_the_handles() {
+        let refused_or_null = if links_on() {
+            Z_ENULL
+        } else {
+            WZ_CAPI_C_E_POLICY_OFF
+        };
+        let mut mask = wz_capi_c_entity_ext_t::OFF;
+        mask.link_mask = 1;
+
+        // SAFETY: every handle is null, which the door answers; the moved closure is a zeroed
+        // local, which is a gravestone.
+        unsafe {
+            let session = std::ptr::null::<z_loaned_session_t>();
+            let key = std::ptr::null::<z_loaned_keyexpr_t>();
+            let mut reply: z_moved_closure_reply_t = std::mem::zeroed();
+            assert_eq!(
+                wz_capi_c_liveliness_get_ext(
+                    session,
+                    key,
+                    &mut reply,
+                    std::ptr::null_mut(),
+                    std::ptr::null()
+                ),
+                Z_ENULL,
+                "a null statement"
+            );
+            assert_eq!(
+                wz_capi_c_liveliness_get_ext(
+                    session,
+                    key,
+                    &mut reply,
+                    std::ptr::null_mut(),
+                    &wz_capi_c_entity_ext_t::OFF
+                ),
+                Z_ENULL,
+                "the default statement"
+            );
+            assert_eq!(
+                wz_capi_c_liveliness_get_ext(session, key, &mut reply, std::ptr::null_mut(), &mask),
+                refused_or_null,
+                "a stated mask"
+            );
+            assert_eq!(
+                wz_capi_c_liveliness_get_ext(
+                    session,
+                    key,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mask
+                ),
+                Z_ENULL,
+                "no closure is answered before the statement"
+            );
+        }
+    }
 }
 
 /// The bodies the doors share, on a session that is a node: the data plane behind it reads no
@@ -1382,6 +1469,33 @@ mod node_tests {
                 ),
                 Z_OK
             );
+
+            #[cfg(feature = "liveliness-get")]
+            {
+                let mut snapshot: z_moved_closure_reply_t = std::mem::zeroed();
+                assert_eq!(
+                    crate::liveliness::liveliness_get_on(
+                        loaned,
+                        key,
+                        &mut snapshot,
+                        std::ptr::null_mut(),
+                        Ok(one_link)
+                    ),
+                    Z_EUNAVAILABLE,
+                    "a liveliness get that states a link"
+                );
+                assert_eq!(
+                    crate::liveliness::liveliness_get_on(
+                        loaned,
+                        key,
+                        &mut snapshot,
+                        std::ptr::null_mut(),
+                        Ok(LinkRestriction::Any)
+                    ),
+                    Z_OK,
+                    "a liveliness get that states no link"
+                );
+            }
 
             let _ = z_close(z_session_loan_mut(&mut session), std::ptr::null_mut());
             z_session_drop((&mut session as *mut z_owned_session_t).cast::<z_moved_session_t>());

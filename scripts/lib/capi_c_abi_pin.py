@@ -159,7 +159,7 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # revision that commit introduced with the revision door. A new door is pinned at
 # the revision its own commit moves `EXPECTED_REVISION` to, which `pin_findings`
 # holds.
-EXPECTED_REVISION = 17
+EXPECTED_REVISION = 18
 EXPECTED_SYMBOLS: dict[str, int] = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version": 1,
@@ -169,6 +169,8 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     "wz_capi_c_declare_subscriber_offloaded": 17,
     "wz_capi_c_offload_options_default": 17,
     "wz_capi_c_subscriber_offload_stats": 17,
+    # Revision 18 — the links of a liveliness get (`switch-doors` with `liveliness-get`).
+    "wz_capi_c_liveliness_get_ext": 18,
     # Revision 14 — the sender of a declared segment profile (`segment-sender`, off by default and
     # on in the lane's build): the owned handle's set, the put options' default, the two doors that
     # hand the pieces on (to a publisher, to a callback), and the internal pair.

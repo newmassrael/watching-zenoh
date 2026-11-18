@@ -147,7 +147,7 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    SubId, SubscriberSink, TokenId, WireKey,
+    StatementNotHonoured, SubId, SubscriberSink, TokenId, WireKey,
 };
 
 /// Mints one queryable callback per face.
@@ -258,14 +258,15 @@ type FaceEpochs = Option<(
 /// publish, which says whether the frame was queued or the lane had no room.
 type ProbeLeg<'a> = &'a dyn Fn(&TokioSession, PublishOptions) -> Leg;
 
-/// The call that promises one face room for the frame of a publish, without waiting: the first
-/// phase of a publish that reaches all of its faces or none (see [`atomic_passes`]). A face an
-/// alias is unknown to answers [`Reserved::Absent`] here, before it is asked for room, so that
-/// the send that follows is never the one to find that out.
+/// The call that promises one face room for every frame of a publish, the whole chain of a
+/// payload that is fragmented, without waiting (`Session::reserve_wire_chain`): the first phase
+/// of a publish that reaches all of its faces or none (see [`atomic_passes`]). A face an alias is
+/// unknown to answers [`Reserved::Absent`] here, before it is asked for room, so that the send
+/// that follows is never the one to find that out.
 type ReserveLeg<'a> = &'a dyn Fn(&TokioSession, &PublishOptions) -> Reserved<WireReservation>;
 
-/// The call that sends the frame of a publish to one face under the room [`ReserveLeg`]
-/// promised it: the second phase.
+/// The call that sends the chain of a publish to one face under the room [`ReserveLeg`]
+/// promised it: the second phase, in which no frame asks for room.
 type ReservedLeg<'a> = &'a dyn Fn(&TokioSession, PublishOptions, WireReservation) -> Leg;
 
 /// The three calls a wire leg of a publish can make besides the waiting send, which the
@@ -308,12 +309,6 @@ enum Reserved<H> {
     NoRoom,
     /// The face takes no part in this publish: its link is down or it was never told the key.
     Absent,
-}
-
-/// Asks `session` to reserve room for the frame of a publish stated as `opts`: the first phase of
-/// a publish that reaches all of its faces or none, for a face every key is sent to as it is.
-fn reserve_on(session: &TokioSession, opts: &PublishOptions) -> Reserved<WireReservation> {
-    Reserved::of_reserve(session.reserve_wire(opts))
 }
 
 impl Reserved<WireReservation> {
@@ -3658,7 +3653,9 @@ impl SharedSession {
                 probe: |session: &TokioSession, leg: PublishOptions| {
                     Leg::of_probe(session.publish_probe(keyexpr, payload, leg))
                 },
-                reserve: reserve_on,
+                reserve: |session: &TokioSession, leg: &PublishOptions| {
+                    Reserved::of_reserve(session.reserve_wire_chain(keyexpr, payload, leg))
+                },
                 reserved: |session: &TokioSession,
                            leg: PublishOptions,
                            reservation: WireReservation| {
@@ -3884,6 +3881,17 @@ impl SharedSession {
                         |face| (wire.probe)(selected[face], remote.clone()),
                         pause_between_passes,
                     )?;
+                }
+                // A publish with no such legs (one from shared memory, or a build whose policies
+                // leave them out) cannot reserve or retry: it is refused by name, before anything
+                // is sent, rather than sent as if it had stated nothing.
+                (true, _, None) => {
+                    return Err(FanoutError::NotHonoured(StatementNotHonoured::AtomicTx));
+                }
+                (false, Some(_), None) => {
+                    return Err(FanoutError::NotHonoured(
+                        StatementNotHonoured::AdmissionRetry,
+                    ));
                 }
                 _ => {
                     for (session, slot) in targets.faces.iter().zip(targets.slots.iter()) {
@@ -4200,7 +4208,9 @@ impl SharedSession {
                     {
                         Reserved::Absent
                     } else {
-                        reserve_on(session, leg)
+                        Reserved::of_reserve(
+                            session.reserve_wire_chain_aliased(mapping_id, suffix, payload, leg),
+                        )
                     }
                 },
                 reserved: |session: &TokioSession,
@@ -4258,7 +4268,11 @@ impl SharedSession {
                 probe: |session: &TokioSession, leg: PublishOptions| {
                     Leg::of_probe(session.publish_aliased_probe(mapping_id, None, payload, leg))
                 },
-                reserve: reserve_on,
+                reserve: |session: &TokioSession, leg: &PublishOptions| {
+                    Reserved::of_reserve(
+                        session.reserve_wire_chain_aliased(mapping_id, None, payload, leg),
+                    )
+                },
                 reserved: |session: &TokioSession,
                            leg: PublishOptions,
                            reservation: WireReservation| {
@@ -8604,6 +8618,189 @@ mod face_up_order_tests {
         );
     }
 
+    /// Every promise of a committed publish is held until its own face is sent, so while an
+    /// earlier face is sent, a later face's promise still counts against its lane. Two faces that
+    /// write to one queue therefore find, at the earlier send, the queue holding both promises,
+    /// which is why each promise covers its face's whole chain and no frame of a chain asks for
+    /// room again. The order is pinned here so that a change to it is seen.
+    #[test]
+    fn a_later_faces_promise_is_held_while_an_earlier_face_is_sent() {
+        /// One promise of the queue both faces write to, given back when it drops.
+        struct SharedPromise<'a>(&'a std::cell::Cell<usize>);
+
+        impl Drop for SharedPromise<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        // The one queue of faces 0 and 1, with room for two frames.
+        let queue = std::cell::Cell::new(2usize);
+        let mut free_at_send = Vec::new();
+        let answer = atomic_passes(
+            None,
+            2,
+            |_face| {
+                if queue.get() == 0 {
+                    return Reserved::NoRoom;
+                }
+                queue.set(queue.get() - 1);
+                Reserved::Held(SharedPromise(&queue))
+            },
+            |face, reservation| {
+                free_at_send.push((face, queue.get()));
+                drop(reservation);
+                Leg::Delivered(0)
+            },
+            |_| {},
+        );
+        assert_eq!(answer, Ok(Some(0)));
+        assert_eq!(
+            free_at_send,
+            vec![(0, 0), (1, 1)],
+            "face 0 is sent while face 1's promise is held, so its queue has no room left \
+             beyond its own promise; face 1 is sent once face 0's promise was given back"
+        );
+        assert_eq!(queue.get(), 2, "every promise is given back once sent");
+
+        // With room for one frame only, the publish needs two and is refused before any is sent.
+        let queue = std::cell::Cell::new(1usize);
+        let mut sent = 0usize;
+        let answer = atomic_passes(
+            None,
+            2,
+            |_face| {
+                if queue.get() == 0 {
+                    return Reserved::NoRoom;
+                }
+                queue.set(queue.get() - 1);
+                Reserved::Held(SharedPromise(&queue))
+            },
+            |_, reservation| {
+                sent += 1;
+                drop(reservation);
+                Leg::Delivered(0)
+            },
+            |_| {},
+        );
+        assert_eq!(answer, Ok(None), "the shared queue has room for one of two");
+        assert_eq!(sent, 0, "nothing is sent");
+        assert_eq!(queue.get(), 1, "and the promise taken is given back");
+    }
+
+    /// A publish whose payload is a chain of `k` frames reserves the room of all `k` on every
+    /// face before it sends anything (`Session::reserve_wire_chain`), so faces that write to one
+    /// queue are counted together: two faces need `2k` frames of it. With `2k` the publish is
+    /// sent to both; with `2k - 1` it is refused before any frame is sent; a single face whose
+    /// chain is longer than its queue is refused up front as well. Every promise ends given back.
+    #[test]
+    fn an_atomic_chain_reserves_every_frame_of_every_face_before_it_sends() {
+        /// The promise of `frames` frames of one queue, given back when it drops.
+        struct Frames<'a> {
+            queue: &'a std::cell::Cell<usize>,
+            frames: usize,
+        }
+
+        impl Drop for Frames<'_> {
+            fn drop(&mut self) {
+                self.queue.set(self.queue.get() + self.frames);
+            }
+        }
+
+        // `(answer, faces sent to, room left in the queue)` for `faces` faces that write to one
+        // queue of `room` frames, each sending a chain of `k`.
+        let run = |room: usize, faces: usize, k: usize| {
+            let queue = std::cell::Cell::new(room);
+            let mut sent = 0usize;
+            let answer = atomic_passes(
+                None,
+                faces,
+                |_face| {
+                    if queue.get() < k {
+                        return Reserved::NoRoom;
+                    }
+                    queue.set(queue.get() - k);
+                    Reserved::Held(Frames {
+                        queue: &queue,
+                        frames: k,
+                    })
+                },
+                |_, reservation| {
+                    sent += 1;
+                    drop(reservation);
+                    Leg::Delivered(0)
+                },
+                |_| {},
+            );
+            (answer, sent, queue.get())
+        };
+
+        let k = 3;
+        assert_eq!(
+            run(2 * k, 2, k),
+            (Ok(Some(0)), 2, 2 * k),
+            "room for both chains: both faces are sent theirs"
+        );
+        assert_eq!(
+            run(2 * k - 1, 2, k),
+            (Ok(None), 0, 2 * k - 1),
+            "one frame short: no face is sent anything"
+        );
+        assert_eq!(
+            run(k - 1, 1, k),
+            (Ok(None), 0, k - 1),
+            "a chain longer than its queue is refused before it is begun"
+        );
+    }
+
+    /// A publish that states the all-or-none form or a retry, handed to the fan-out with no legs
+    /// that reserve or probe (a publish from shared memory), is refused by name and sends
+    /// nothing, not even to the session itself; one that states neither is sent.
+    #[test]
+    fn a_publish_with_no_reserving_legs_refuses_what_it_cannot_honour() {
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources::default(),
+        )
+        .expect("test host entropy");
+        let sent = std::cell::Cell::new(0usize);
+        let publish = |opts: PublishOptions| {
+            shared.fan_out_with(
+                &opts,
+                PutKey::Literal("wz/stated"),
+                &b"v"[..],
+                |_: &TokioSession, _: PublishOptions, _: &&[u8]| {
+                    sent.set(sent.get() + 1);
+                    Leg::Delivered(0)
+                },
+                None,
+                |_: &TokioSession, _: PublishOptions, _: &[u8]| {
+                    sent.set(sent.get() + 1);
+                    Leg::Delivered(0)
+                },
+            )
+        };
+        assert_eq!(
+            publish(PublishOptions::put().with_atomic_tx()),
+            Err(FanoutError::NotHonoured(StatementNotHonoured::AtomicTx))
+        );
+        let retry = AdmissionRetry::new(2, 7).expect("both set");
+        assert_eq!(
+            publish(PublishOptions::put().with_admission_retry(retry)),
+            Err(FanoutError::NotHonoured(
+                StatementNotHonoured::AdmissionRetry
+            ))
+        );
+        assert_eq!(sent.get(), 0, "a refused publish sent nothing");
+        assert!(publish(PublishOptions::put()).is_ok());
+        assert_eq!(
+            sent.get(),
+            1,
+            "one that states nothing reaches the session itself"
+        );
+    }
+
     /// A face that is down, or was never told the key, takes no part: the others are still
     /// reserved and sent to, and it is neither asked for room nor sent anything.
     #[test]
@@ -9162,6 +9359,71 @@ mod face_up_order_tests {
             asked(LinkRestriction::only([5]).expect("one slot")),
             (0, 1),
             "limited to a slot no link has: no link, and the session's own token still answers"
+        );
+    }
+
+    /// Through the port, the registry decides a set of links by honouring it: the liveliness get
+    /// and the subscriber that state one are taken and limited, never refused, which is the
+    /// answer an engine that numbers its links gives where the others refuse by name.
+    #[cfg(feature = "liveliness-get")]
+    #[tokio::test]
+    async fn the_registry_as_the_ports_engine_honours_a_set_of_links() {
+        use wz_capi_port::SessionEngine;
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources::default(),
+        )
+        .expect("test host entropy");
+        assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "slot 2"
+        );
+        let engine = shared.engine_ref();
+
+        let asked = |links: LinkRestriction| {
+            let mut mint =
+                || -> wz_capi_port::ReplyCallback { Box::new(|_view: &dyn ReplyView| {}) };
+            SessionEngine::liveliness_get_on_link_set(
+                engine,
+                "wz/link/live",
+                &WireKey::literal(),
+                1000,
+                links,
+                None,
+                &mut mint,
+            )
+        };
+        assert_eq!(
+            asked(LinkRestriction::only([1]).expect("one slot")),
+            Ok(Some(1)),
+            "a set is honoured: the one link it names is asked"
+        );
+        assert_eq!(
+            asked(LinkRestriction::Any),
+            Ok(Some(2)),
+            "no set: every link is asked"
+        );
+
+        let sink: SubscriberSink = Arc::new(|| {
+            Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
+        });
+        let limited = SessionEngine::declare_subscriber_on_link_set(
+            engine,
+            "wz/link/sub".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            LinkRestriction::only([2]).expect("one slot"),
+            None,
+            sink,
+        );
+        assert!(
+            matches!(limited, Ok(Some(_))),
+            "a subscriber limited to a link is declared, not refused: {limited:?}"
         );
     }
 

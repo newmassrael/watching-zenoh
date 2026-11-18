@@ -1645,7 +1645,11 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// `wz_capi_c_declare_subscriber_offloaded`, `wz_capi_c_offload_options_default` and
 /// `wz_capi_c_subscriber_offload_stats`, three new symbols and the two structs they take, in a
 /// build with `rx-callback-offload` (off by default).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 17;
+///
+/// It moves to 18 for the door that states the links of a liveliness get
+/// (`wz_capi_c_liveliness_get_ext`), one new symbol taking the revision-12 `wz_capi_c_entity_ext_t`,
+/// in a build with `switch-doors` and `liveliness-get`.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 18;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

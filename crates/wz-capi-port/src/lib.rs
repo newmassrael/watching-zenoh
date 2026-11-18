@@ -55,6 +55,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
+use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
 pub mod cancellation;
@@ -206,7 +207,132 @@ pub enum FanoutError {
     /// The payload or keyexpr exceeded the bounded codec's capacity, so no face could have
     /// carried it.
     ExceedsCapacity,
+    /// The publish stated something the engine does not honour ([`StatementNotHonoured`] names
+    /// which): nothing was sent, to a link or to a subscriber of the session.
+    NotHonoured(StatementNotHonoured),
 }
+
+impl From<StatementNotHonoured> for FanoutError {
+    fn from(statement: StatementNotHonoured) -> Self {
+        Self::NotHonoured(statement)
+    }
+}
+
+impl From<LinksNotHonoured> for FanoutError {
+    fn from(refusal: LinksNotHonoured) -> Self {
+        Self::NotHonoured(refusal.into())
+    }
+}
+
+/// A statement of a publish or a query that an engine cannot honour, by name: each is a policy of
+/// the session model, off by default, that only some engines carry out. Taking the call as if
+/// nothing were stated would make it something the caller did not ask for (a limited entity
+/// unrestricted, a retry that never retries, a partial delivery of an all-or-none publish, a query
+/// addressed to one node asked of every node), so the engine refuses it and sends or asks
+/// nothing. A statement equal to the default (no set of links, no retry, not all-or-none, no
+/// target) is no statement and is never refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementNotHonoured {
+    /// A set of links (policy `entity-link-restriction`).
+    Links,
+    /// A retry for a publish that found no room (policy `publisher-admission-retry`).
+    AdmissionRetry,
+    /// The all-or-none form of a publish (policy `multi-route-atomic-tx`).
+    AtomicTx,
+    /// The one node a query is addressed to (policy `targeted-query`).
+    TargetPeer,
+}
+
+impl StatementNotHonoured {
+    /// The answer of an engine that honours none of a publish's statements: the first one
+    /// `opts` makes is refused, and a publish that states none passes.
+    pub fn of_publish(opts: &wz_session_core::publish_options::PublishOptions) -> Result<(), Self> {
+        if opts.links.is_restricted() {
+            Err(Self::Links)
+        } else if opts.admission_retry.is_some() {
+            Err(Self::AdmissionRetry)
+        } else if opts.atomic_tx {
+            Err(Self::AtomicTx)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The answer of an engine that honours none of a query's statements: the first one `opts`
+    /// makes is refused, and a query that states none passes.
+    pub fn of_query(opts: &wz_session_core::query_options::QueryOptions) -> Result<(), Self> {
+        if opts.links.is_restricted() {
+            Err(Self::Links)
+        } else if opts.target_peer.is_some() {
+            Err(Self::TargetPeer)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl From<LinksNotHonoured> for StatementNotHonoured {
+    fn from(_: LinksNotHonoured) -> Self {
+        Self::Links
+    }
+}
+
+impl core::fmt::Display for StatementNotHonoured {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Links => {
+                "this engine does not limit a call to some of its links \
+                 (policy entity-link-restriction)"
+            }
+            Self::AdmissionRetry => {
+                "this engine does not retry a publish that found no room \
+                 (policy publisher-admission-retry)"
+            }
+            Self::AtomicTx => {
+                "this engine does not deliver a publish to all of its links or none \
+                 (policy multi-route-atomic-tx)"
+            }
+            Self::TargetPeer => {
+                "this engine does not address a query to one node (policy targeted-query)"
+            }
+        })
+    }
+}
+
+impl core::error::Error for StatementNotHonoured {}
+
+/// An engine's refusal of a set of links it cannot honour (policy `entity-link-restriction`).
+///
+/// An engine that does not number its links (one data plane, or one link per session) cannot
+/// limit an entity or a call to some of them. Taking the call on every link would make a limited
+/// entity unrestricted without saying so, so the engine refuses it by this name and declares,
+/// sends and asks nothing. No set ([`LinkRestriction::Any`]) is never refused: it is the call
+/// every engine makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinksNotHonoured;
+
+impl LinksNotHonoured {
+    /// The answer of an engine that limits nothing to some links: no set passes, and a set is
+    /// refused.
+    pub const fn unless_unrestricted(links: LinkRestriction) -> Result<(), Self> {
+        if links.is_restricted() {
+            Err(Self)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl core::fmt::Display for LinksNotHonoured {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(
+            "this engine does not limit an entity or a call to some of its links \
+             (policy entity-link-restriction)",
+        )
+    }
+}
+
+impl core::error::Error for LinksNotHonoured {}
 
 /// What a put through a write filter did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +422,70 @@ impl WireKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_engine_that_limits_nothing_refuses_a_set_and_passes_none() {
+        assert_eq!(
+            LinksNotHonoured::unless_unrestricted(LinkRestriction::Any),
+            Ok(())
+        );
+        let one = LinkRestriction::only([1]).expect("one slot");
+        assert_eq!(
+            LinksNotHonoured::unless_unrestricted(one),
+            Err(LinksNotHonoured)
+        );
+        assert_eq!(
+            FanoutError::from(LinksNotHonoured),
+            FanoutError::NotHonoured(StatementNotHonoured::Links)
+        );
+    }
+
+    /// Each statement of a publish and of a query is refused by its own name, the defaults are
+    /// no statement, and a statement is refused even when another one is not made.
+    #[test]
+    fn each_statement_is_refused_by_its_name_and_the_defaults_pass() {
+        use wz_session_core::admission_retry::AdmissionRetry;
+        use wz_session_core::publish_options::PublishOptions;
+        use wz_session_core::query_options::QueryOptions;
+
+        let one = LinkRestriction::only([1]).expect("one slot");
+        let retry = AdmissionRetry {
+            attempts: 2,
+            delay_ms: 5,
+        };
+        assert_eq!(
+            StatementNotHonoured::of_publish(&PublishOptions::put()),
+            Ok(())
+        );
+        assert_eq!(
+            StatementNotHonoured::of_publish(&PublishOptions::put().with_links(one)),
+            Err(StatementNotHonoured::Links)
+        );
+        assert_eq!(
+            StatementNotHonoured::of_publish(&PublishOptions::put().with_admission_retry(retry)),
+            Err(StatementNotHonoured::AdmissionRetry)
+        );
+        assert_eq!(
+            StatementNotHonoured::of_publish(&PublishOptions::put().with_atomic_tx()),
+            Err(StatementNotHonoured::AtomicTx)
+        );
+        assert_eq!(
+            StatementNotHonoured::of_query(&QueryOptions::default()),
+            Ok(())
+        );
+        assert_eq!(
+            StatementNotHonoured::of_query(&QueryOptions::default().with_links(one)),
+            Err(StatementNotHonoured::Links)
+        );
+        assert_eq!(
+            StatementNotHonoured::of_query(&QueryOptions::default().with_target_peer([0xc7])),
+            Err(StatementNotHonoured::TargetPeer)
+        );
+        assert_eq!(
+            FanoutError::from(StatementNotHonoured::AtomicTx),
+            FanoutError::NotHonoured(StatementNotHonoured::AtomicTx)
+        );
+    }
 
     #[test]
     fn a_literal_key_names_no_declaration() {
