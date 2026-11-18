@@ -1,4 +1,4 @@
-//! The declarations of a link told in turns (`docs/declaration-sync-pacing.md`): a paced replay
+//! The declarations of a link told in turns (`declaration-sync-pacing`): a paced replay
 //! sends a burst a turn and waits the interval between turns, a declaration made while it goes on
 //! is told once, in its turn, a retraction is sent only if the peer was told of the entry, a
 //! replay is not resumed on another link, and an unpaced one is a single turn.

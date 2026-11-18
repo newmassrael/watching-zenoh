@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The node's event log, written and read from C (`docs/observation-plane.md` M2).
+//! The node's event log, written and read from C (the event ring of the observation plane).
 //!
 //! An event is a level, a source and up to `EVENT_RECORD_ARGS` integers. It carries no text: the
 //! format it is read with is a constant the reader holds, keyed by the source, so a record costs a

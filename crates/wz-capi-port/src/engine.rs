@@ -122,7 +122,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// What the session's receive path has counted: the transport messages and how they were
-    /// spaced, over every link under it (`docs/observation-plane.md` M4). `None` from an engine
+    /// spaced, over every link under it, for the node's resource snapshot. `None` from an engine
     /// built without the `resource-snapshot` feature, which is the provided answer, and from one
     /// with no counter; a reader asks again for each snapshot and takes windows by subtraction,
     /// since every count is cumulative.

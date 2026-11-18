@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A subscription whose callback runs OFF the receive path (`docs/rx-delivery-lane.md`, phase 3a).
+//! A subscription whose callback runs OFF the receive path (the receive delivery lane, one lane
+//! per offloaded subscription).
 //!
 //! # What it is
 //!
@@ -686,7 +687,7 @@ impl Drop for DetachedOffload {
 }
 
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
-    /// Declare a subscriber whose callback runs OFF the drive loop (`docs/rx-delivery-lane.md`).
+    /// Declare a subscriber whose callback runs OFF the drive loop (the receive delivery lane).
     ///
     /// Each matching sample is copied into a lane of at most `DELIVERY_LANE_EVENTS` samples and
     /// `DELIVERY_LANE_BYTES` bytes, and the callback runs on a task of its own, in order, with no

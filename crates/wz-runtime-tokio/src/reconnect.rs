@@ -285,7 +285,7 @@ pub struct ReconnectingSession {
     replay_pacing: Option<ReplayPacing>,
 }
 
-/// The pace of a paced declaration replay (`docs/declaration-sync-pacing.md`), shared with the
+/// The pace of a paced declaration replay (`declaration-sync-pacing`), shared with the
 /// slot node and so defined in `wz-session-core`. The supervisor holds it as an `Option`, so a
 /// test, or a caller that wants it on regardless of the build, can state it
 /// ([`ReconnectingSession::set_replay_pacing`]); the build states it through

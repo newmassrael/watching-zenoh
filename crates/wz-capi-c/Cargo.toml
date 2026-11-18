@@ -320,13 +320,13 @@ e2e-sender = ["dep:wz-capture", "wz-capi-core/e2e-sender"]
 # features, a client above all, leaves them out, and with them the emitter, the validators and the
 # requirement table they alone reach. `z_open` reads its config through the plan without them.
 config-verdict = ["wz-capi-core/config-verdict"]
-# The four instruments of the observation plane (`docs/observation-plane.md`), and the
-# `wz_capi_c_*` doors that drive them. wz's own, which zenoh-c has not, so each is off as the
-# reference build is: a build without one links none of its doors. What each does is
-# `wz-capi-port`'s `observation`, which the pico ABI's `wz_ext_*` doors act on too, so the two
-# ABIs hold one behaviour. A program registers a clock `z_timestamp_new` then reads
-# (`clock-source`), writes and reads the node's event log (`event-ring`), supervises checkpoints
-# (`supervision`) and asks for a snapshot of the node's resources (`resource-snapshot`).
+# The four instruments of the observation plane, and the `wz_capi_c_*` doors that drive them.
+# wz's own, which zenoh-c has not, so each is off as the reference build is: a build without one
+# links none of its doors. What each does is `wz-capi-port`'s `observation`, which the pico ABI's
+# `wz_ext_*` doors act on too, so the two ABIs hold one behaviour. A program registers a clock
+# `z_timestamp_new` then reads (`clock-source`), writes and reads the node's event log
+# (`event-ring`), supervises checkpoints (`supervision`) and asks for a snapshot of the node's
+# resources (`resource-snapshot`).
 clock-source = ["timestamping", "wz-capi-core/clock-source", "wz-capi-port/clock-source"]
 event-ring = ["wz-capi-core/event-ring", "wz-capi-port/event-ring"]
 supervision = ["wz-capi-core/supervision", "wz-capi-port/supervision"]

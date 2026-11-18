@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_snapshot_*`: the node's resource snapshot, taken and read from C
-//! (`docs/observation-plane.md` M4).
+//! `wz_ext_snapshot_*`: the node's resource snapshot, taken and read from C (the sampled snapshot
+//! of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`
-//! (docs/build-configuration.md, decision C10), and part of the unstable surface: a build without
-//! `unstable-api` carries none of it.
+//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
+//! build without `unstable-api` carries none of it.
 //!
 //! A snapshot is a fixed-layout, versioned record (`wz_session_core::resource_snapshot`): the CPU
 //! use, the heap and the tasks the platform reports, and how the messages the session received
@@ -113,7 +113,7 @@ pub extern "C" fn wz_ext_snapshot_size() -> usize {
 
 /// Copy the latest snapshot into `out`, which has room for `capacity` bytes, and write its length
 /// to `length`. The record is little-endian and starts with its own layout version and size, so a
-/// reader of an older build can tell a newer one (`docs/observation-plane.md` M4).
+/// reader of an older build can tell a newer one.
 /// `Z_ERR_GENERIC` before the first snapshot, `Z_ERR_OVERFLOW` when `capacity` is less than
 /// `wz_ext_snapshot_size`, `Z_ERR_NULL` for a null `out` or `length`.
 ///

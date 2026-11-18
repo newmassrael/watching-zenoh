@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The clock a program registers, and what it tells the library about whether that clock is
-//! synchronised (`docs/observation-plane.md` M1).
+//! synchronised (the clock of the observation plane).
 //!
 //! A device often has a better clock than the system's, a disciplined hardware clock or a time
 //! master on its bus. A program registers it as a read callback, and a timestamp is then stamped

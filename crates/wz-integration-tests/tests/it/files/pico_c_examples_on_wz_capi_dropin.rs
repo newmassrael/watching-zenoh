@@ -468,7 +468,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
 ///
 /// That build is the one `configs/zenoh-pico_defconfig` resolves to: Layer E builds the arm
 /// from the arm's `config.h` and refuses to go on if its cargo arguments differ from the
-/// defconfig's (docs/build-configuration.md step 2, whose done-when is that each upstream
+/// defconfig's (the upstream map and the upstream defconfigs, done when each upstream
 /// defconfig's host build passes an interop lane). The arm has no unstable API, so the
 /// option structs the program allocates are upstream's default layout, which no other leg of
 /// this file links; a wz build of another arm under these headers would be the open-debt

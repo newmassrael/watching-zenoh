@@ -2401,9 +2401,9 @@ pub mod routing_region;
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod node_stats;
 
-// The hosted platform's half of the resource snapshot (`docs/observation-plane.md` M4): what the
-// operating system answers and the task that takes a snapshot on the period. Documented in its
-// own `//!`.
+// The hosted platform's half of the resource snapshot (the observation plane's sampled snapshot):
+// what the operating system answers and the task that takes a snapshot on the period. Documented
+// in its own `//!`.
 #[cfg(feature = "resource-snapshot")]
 pub mod resource_snapshot_host;
 

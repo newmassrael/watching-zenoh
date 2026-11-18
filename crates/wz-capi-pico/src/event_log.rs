@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! `wz_ext_event_emit`, `wz_ext_event_read`, `wz_ext_event_release` and `wz_ext_event_dropped`: the
-//! node's event log, written and read from C (`docs/observation-plane.md` M2).
+//! node's event log, written and read from C (the event ring of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`
-//! (docs/build-configuration.md, decision C10), and part of the unstable surface: a build without
-//! `unstable-api` carries none of it.
+//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
+//! build without `unstable-api` carries none of it.
 //!
 //! An event is a level, a source and up to `EVENT_RECORD_ARGS` integers. It carries no text: the
 //! format it is read with is a constant the reader holds, keyed by the source, so a record costs a

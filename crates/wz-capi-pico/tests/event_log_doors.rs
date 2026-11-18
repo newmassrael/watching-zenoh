@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The node's event log, written and read through the C doors (`docs/observation-plane.md` M2).
+//! The node's event log, written and read through the C doors (the event ring of the observation
+//! plane).
 //!
 //! One test, in a process of its own, because the log is the process's: the arms run in order
 //! against it, and a second test in this binary would read what the first wrote.

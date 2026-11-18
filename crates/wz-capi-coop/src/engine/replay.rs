@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The declarations a link owes its peer, told in turns: the cooperative engine's host of
-//! `wz_session_core::replay_cursor::ReplayCursor` (`docs/declaration-sync-pacing.md`).
+//! `wz_session_core::replay_cursor::ReplayCursor` (the `declaration-sync-pacing` policy).
 //!
 //! A link that has just come up has a peer that holds none of what the session declared, so the
 //! session declares it again, under the ids it was declared with. The session keeps its

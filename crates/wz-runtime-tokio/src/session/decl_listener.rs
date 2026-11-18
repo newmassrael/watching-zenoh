@@ -62,12 +62,11 @@ pub enum DeclEvent {
         /// The peer that undeclared it (`remote-declaration-watch`), as [`DeclEvent::peer`] says.
         peer: Option<Vec<u8>>,
     },
-    /// The peer ended its initial declarations (`declarations-synced-event`,
-    /// `docs/declarations-synced-event.md`): it sent the `DeclareFinal` of the initial interest,
-    /// so every `Declared` before this event is what the peer held when the session was
-    /// established, and every one after is live. One wire message ends the burst of subscribers,
-    /// queryables and tokens alike, so a listener of any of the three is told, once for each time
-    /// the session is established.
+    /// The peer ended its initial declarations (`declarations-synced-event`): it sent the
+    /// `DeclareFinal` of the initial interest, so every `Declared` before this event is what the
+    /// peer held when the session was established, and every one after is live. One wire message
+    /// ends the burst of subscribers, queryables and tokens alike, so a listener of any of the
+    /// three is told, once for each time the session is established.
     ///
     /// Never delivered in a build without the capability. A listener declared after the peer
     /// finished is not told, as it was not given the declarations that came before: it reads
@@ -82,8 +81,8 @@ pub enum DeclEvent {
 }
 
 impl DeclEvent {
-    /// The zenoh id of the peer the event came from (`remote-declaration-watch`,
-    /// `docs/remote-declaration-watch.md`), as the session learned it at the handshake.
+    /// The zenoh id of the peer the event came from (`remote-declaration-watch`), as the session
+    /// learned it at the handshake.
     ///
     /// Read when the event is staged, so it names the peer that was connected when the event
     /// arrived: a session that reconnects to another peer reports each event under its own.

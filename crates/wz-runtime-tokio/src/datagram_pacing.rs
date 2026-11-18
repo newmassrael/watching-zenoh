@@ -20,11 +20,12 @@
 //!
 //! The policy changes the shape of a writer, not a number in it: on, a writer holds a clock and
 //! waits between two writes; off, it does neither. So it is a strategy type and not a field that
-//! both builds carry (C3 of `docs/build-configuration.md`): a writer is generic over [`Pacing`],
-//! and the writers of a build take [`OfBuild`], which the build's policy selects. Off, upstream's
-//! behaviour, that is [`Unpaced`], whose wait is a future that is ready at once and never calls
-//! the writer's way to wait, so a build with the policy off links no pacer, no clock and no wait
-//! of a writer. A test names [`Paced`] or [`Unpaced`] itself, so one binary holds both.
+//! both builds carry (a policy that changes the shape of the code is a type parameter, since
+//! cargo features only add code): a writer is generic over [`Pacing`], and the writers of a build
+//! take [`OfBuild`], which the build's policy selects. Off, upstream's behaviour, that is
+//! [`Unpaced`], whose wait is a future that is ready at once and never calls the writer's way to
+//! wait, so a build with the policy off links no pacer, no clock and no wait of a writer. A test
+//! names [`Paced`] or [`Unpaced`] itself, so one binary holds both.
 
 use core::future::{Future, Ready};
 use core::pin::Pin;

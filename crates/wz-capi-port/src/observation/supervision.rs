@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The node's supervisor, driven from C (`docs/observation-plane.md` M3).
+//! The node's supervisor, driven from C (the deadline the application feeds, an instrument of the
+//! observation plane).
 //!
 //! An application that must keep making progress (a control loop, a task that polls a bus) feeds a
 //! checkpoint on every pass. If a feed does not come in time the checkpoint expires, a hook runs

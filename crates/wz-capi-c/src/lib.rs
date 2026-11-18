@@ -108,11 +108,10 @@ pub mod config_verdict;
 // the config field it is about. Gated as `config_verdict` is.
 #[cfg(feature = "config-verdict")]
 pub mod config_verdict_rows;
-// The four sets of doors of the observation plane (`docs/observation-plane.md`), under wz's own
-// `wz_capi_c_` prefix: wz has them and zenoh-c has not, so they carry no upstream gate
-// (`zenoh-c-no-unstable-api` is a question about zenoh-c), and each has a feature of its own that
-// is off, as the reference build is. What they do is `wz-capi-port`'s; these are the names and
-// the result codes of this ABI.
+// The four sets of doors of the observation plane, under wz's own `wz_capi_c_` prefix: wz has
+// them and zenoh-c has not, so they carry no upstream gate (`zenoh-c-no-unstable-api` is a
+// question about zenoh-c), and each has a feature of its own that is off, as the reference build
+// is. What they do is `wz-capi-port`'s; these are the names and the result codes of this ABI.
 #[cfg(feature = "clock-source")]
 pub mod clock_source;
 pub mod encoding;

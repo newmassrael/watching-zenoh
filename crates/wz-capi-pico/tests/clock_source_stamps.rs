@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 //! A clock a C program registers is the clock `z_timestamp_new` stamps with
-//! (`docs/observation-plane.md` M1, the `clock-source` capability).
+//! (the clock of the observation plane, the `clock-source` capability).
 //!
 //! One test, in a process of its own, because the registry is the process's: the arms run in
 //! order against it, and a second test in this binary would see what the first registered.
