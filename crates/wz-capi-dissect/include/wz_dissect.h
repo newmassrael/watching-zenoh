@@ -8471,7 +8471,7 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  * "sparse":..,"wire_ends":..,"joined":..,"chains":..,"small":..},"streams":{"kept":..,"runs":..,
  * "pending":..},"plaintext":P,"tls_records":R,"quic_packets":Q,"scouting":S,"packets":K,"selection":W,"census":{"payload_rows":
  * ..,"exchange_rows":..,"row_digests":..},"fields":{"payload_rows":..,
- * "exchange_rows":..,"row_digests":..},"drain":D} to *out.
+ * "exchange_rows":..,"row_digests":..},"values":V,"drain":D} to *out.
  *
  *   - Every value is a number of bytes ALLOCATED, which is what the process
  *     holds and not what is in use.
@@ -8508,6 +8508,15 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *   - (revision 2) quic_packets is the QUIC packets a handle keeps for a key
  *     that has not arrived (see wz_dissect_live_add_keylog): at most 4096 a
  *     direction of a flow, and none for a flow whose application data opened.
+ *   - (revision 3) values is what wz_dissect_live_field_values_since and
+ *     wz_dissect_live_field_values_since_window keep between calls: the
+ *     payloads the selector picked past the cursor (their bytes, key and
+ *     declared schema, and for a piece of a split message its verdict and the
+ *     message it completed), kept until a cursor passes them, and the verdict
+ *     of every record the walk judged. A consumer that keeps its cursor behind
+ *     on a busy capture sees it grow, and a cursor moved past the payloads
+ *     lets their bytes go. The joining state of split messages is not counted
+ *     (a B-tree), so with pieces the figure is a lower bound.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
  *     moved, a nibble a row, and the folds that decide the words (the verdict of

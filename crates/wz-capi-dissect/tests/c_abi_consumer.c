@@ -4921,9 +4921,9 @@ int main(void) {
      * read. The document says what it counts (`scope`), in what unit, and the
      * sum, so a program that budgets by it reads three words before any group.
      * 2: `quic_packets`, the QUIC packets a handle keeps for a key that has not
-     * arrived. */
+     * arrived. 3: `values`, what the values doors keep between calls. */
     revisioned[20].name = "memory";
-    revisioned[20].revision = 2;
+    revisioned[20].revision = 3;
     revisioned[20].doc = NULL;
     {
         wz_dissect_live *kept = NULL;

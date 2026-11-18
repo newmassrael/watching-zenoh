@@ -4865,6 +4865,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // Revision 3 ADDS `values`, beside `fields`, and retires nothing: what the
+    // values door (`wz_dissect_live_field_values_since` and its window) keeps
+    // between calls, read from its memory. That is the payloads its selector
+    // picked past the cursor, held until a cursor passes them, and the payload
+    // plane's verdict for every record it judged. A consumer that keeps the
+    // cursor behind on a busy capture held these bytes before this revision too;
+    // the document did not name them. No word moves. A consumer pinned to
+    // revision 2 loses nothing it read; its `total` now includes the new figure.
+    DocumentShape {
+        document: MEMORY,
+        revision: 3,
+        keys: MEMORY_R3_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -10714,6 +10731,42 @@ pub const MEMORY_R2_KEYS: &[&str] = &[
     "total",
     "unit",
     "unit_log",
+    "whole_rows",
+    "wire_ends",
+];
+
+/// The memory document's key set at revision 3: revision 2's and `values`.
+pub const MEMORY_R3_KEYS: &[&str] = &[
+    "census",
+    "chains",
+    "document",
+    "drain",
+    "exchange_rows",
+    "fields",
+    "joined",
+    "kept",
+    "lists",
+    "name",
+    "packets",
+    "payload_rows",
+    "pending",
+    "plaintext",
+    "quic_packets",
+    "revision",
+    "row_digests",
+    "rows",
+    "runs",
+    "scope",
+    "scouting",
+    "selection",
+    "small",
+    "sparse",
+    "streams",
+    "tls_records",
+    "total",
+    "unit",
+    "unit_log",
+    "values",
     "whole_rows",
     "wire_ends",
 ];
@@ -36418,7 +36471,9 @@ mod tests {
             // What a live handle holds in memory, by structure.
             // To 2 when it gained `quic_packets`: one key, no word moves and
             // nothing retires.
-            (MEMORY, 2),
+            // To 3 when it gained `values`, what the values door keeps: one
+            // key, no word moves and nothing retires.
+            (MEMORY, 3),
             // The typed values of a few payload field paths.
             // To 3 when a reply's pieces were joined per query, apart from the
             // live ones, and a request's or an error's were joined no more.

@@ -371,6 +371,10 @@ pub struct LiveMemory {
     /// bounded per flow and direction, as the TLS records the dissection keeps
     /// are, and let go of once the flow opens application data.
     pub quic_packets: usize,
+    /// What the values door keeps between calls: the payloads its selector
+    /// picked past the cursor, until a cursor passes them, and the payload
+    /// plane's verdict for every record it judged.
+    pub values: usize,
 }
 
 impl LiveMemory {
@@ -382,6 +386,7 @@ impl LiveMemory {
             + self.drain
             + self.selection
             + self.quic_packets
+            + self.values
     }
 }
 
@@ -714,8 +719,8 @@ impl LiveDissection {
 
     /// What this handle holds on the heap that follows its row count, by
     /// structure (open-debt item 924, D7): the dissection's lists and run maps,
-    /// what the census and the field walk keep for the next call, and the
-    /// drain's bookkeeping.
+    /// what the census, the field walk and the values door keep for the next
+    /// call, and the drain's bookkeeping.
     ///
     /// A lower bound on the process's heap for this handle, and a figure in
     /// bytes allocated. A program that opens captures budgets by it; the memory
@@ -746,6 +751,7 @@ impl LiveDissection {
                 .map(|mark| mark.runs.capacity() * std::mem::size_of::<SeqRun>())
                 .sum::<usize>(),
             quic_packets: self.keys.quic_packets_memory(),
+            values: self.values_memory.memory(),
         }
     }
 
@@ -1180,7 +1186,7 @@ impl LiveDissection {
              \"packets\":{},\"selection\":{},\
              \"census\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"fields\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
-             \"drain\":{}}}",
+             \"values\":{},\"drain\":{}}}",
             m.total(),
             l.rows,
             l.unit_log,
@@ -1205,6 +1211,7 @@ impl LiveDissection {
             m.fields.payload_rows,
             m.fields.exchange_rows,
             m.fields.row_digests,
+            m.values,
             m.drain,
         );
         s
@@ -1553,7 +1560,8 @@ impl LiveDissection {
     /// in capture order, and the numbers a handle issues follow its lists and not
     /// capture order, so no prefix of the walk ends at a number. The walk takes
     /// every message that arrived, as [`Self::field_values_since`]'s does, and the
-    /// payloads it picked past the window are kept until a cursor passes them.
+    /// payloads it picked past the window are kept until a cursor passes them
+    /// ([`Self::memory`] counts them as `values`).
     pub fn field_values_since_windowed(
         &mut self,
         declarations: &str,

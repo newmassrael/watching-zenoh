@@ -6211,13 +6211,15 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
 ///
 /// `{"document":{"name":"memory","revision":R},"unit":"bytes","scope":"rows",
 ///   "total":T,"lists":{...},"streams":{...},"plaintext":P,"scouting":S,
-///   "packets":K,"census":{...},"fields":{...},"drain":D}`
+///   "packets":K,"census":{...},"fields":{...},"values":V,"drain":D}`
 ///
 /// Every value is a number of bytes ALLOCATED, which is what the process holds
 /// and not what is in use. `scope` is `rows`: only the structures whose size
 /// follows the row count are counted (the entries of a message list, the bytes it
-/// keeps, the run maps, what the census and the field walk keep for the next
-/// call). What is fixed, or follows the count of distinct things, is not, so the
+/// keeps, the run maps, what the census, the field walk and the values door keep
+/// for the next call). `values` (memory revision 3) is the values door's: the
+/// payloads its selector picked past the cursor, until a cursor passes them, and
+/// the verdict of every record its walk judged. What is fixed, or follows the count of distinct things, is not, so the
 /// figure is the row-following part of the heap and not all of it; the library's
 /// gate holds the rest to a small bound. A buffer is counted exactly, and a
 /// B-tree map by a model that agrees with the allocator within 3%. `total` is the
@@ -16351,6 +16353,41 @@ mod tests {
         assert_eq!(
             unsafe { wz_dissect_live_memory(handle, core::ptr::null_mut()) },
             WZ_DISSECT_ERR_INVALID_ARG
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// (memory revision 3) THE MEMORY DOCUMENT NAMES WHAT THE VALUES DOOR KEEPS.
+    ///
+    /// A handle the values door has not asked holds nothing there. Asked from a
+    /// cursor of 0, the door keeps every payload its selector picked past it, and
+    /// the document's `values` counts at least their bytes, inside `total`.
+    /// Asked again from the cursor it handed back, the door lets them go, and
+    /// `values` falls by at least those bytes.
+    #[test]
+    fn the_memory_document_counts_what_the_values_door_keeps() {
+        let samples: [&[u8]; 3] = [br#"{"temp":1}"#, br#"{"temp":2}"#, br#"{"temp":3}"#];
+        let payload_bytes: usize = samples.iter().map(|s| s.len()).sum();
+        let pcap = capture_declaring_many(&samples.iter().map(|s| (5u32, *s)).collect::<Vec<_>>());
+        let handle = replayed(&pcap);
+        let before = live_memory(handle).expect("a replayed handle");
+        assert_eq!(json_count(&before, "values"), 0, "{before}");
+
+        let doc = call_field_values(handle, "demo/sensor=json", "", "$.temp", 0);
+        let holding = live_memory(handle).expect("a handle the values door asked");
+        let held = json_count(&holding, "values");
+        assert!(
+            held >= payload_bytes,
+            "the payloads past the cursor are counted: {holding}"
+        );
+        assert!(json_count(&holding, "total") >= held, "{holding}");
+
+        let through = json_count(&doc, "through_seq") as u64;
+        let _ = call_field_values(handle, "demo/sensor=json", "", "$.temp", through);
+        let passed = live_memory(handle).expect("a handle whose cursor passed them");
+        assert!(
+            json_count(&passed, "values") + payload_bytes <= held,
+            "the passed payloads were let go: {holding} then {passed}"
         );
         unsafe { wz_dissect_live_close(handle) };
     }
