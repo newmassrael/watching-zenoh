@@ -39,6 +39,7 @@ use wz_runtime_coop::udp_link::NoDatagram;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -64,7 +65,10 @@ use wz_session_mcu::slot_dial::{EventsOf, SessionFactory};
 use wz_session_mcu::slot_host::SessionHost;
 
 use crate::net_lwip::{service_ports, LwipMacNet, MAX_PORTS};
-use crate::{BATCH_SIZE, BUSY_PASSES_MAX, IDLE_SLEEP_US, LISTEN_PORT, STACK_CHECK_MS, TICK_HZ};
+use crate::{
+    resolve_policy, BATCH_SIZE, BUSY_PASSES_MAX, IDLE_SLEEP_US, LISTEN_PORT, STACK_CHECK_MS,
+    TICK_HZ,
+};
 
 /// Sessions the node holds at most, accepted and dialled together.
 pub const SESSIONS: usize = 2;
@@ -251,6 +255,8 @@ struct Factory {
     zid: [u8; 6],
     key: [u8; 32],
     observer: &'static ObserverCell<Sinks>,
+    /// The snapshot every session is made with.
+    policy: SessionPolicy,
 }
 
 impl SessionFactory<Clock, Driver> for Factory {
@@ -273,9 +279,9 @@ impl SessionFactory<Clock, Driver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: self.policy,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -426,9 +432,17 @@ fn start(net: &LwipMacNet) -> Result<Running, i32> {
             3
         })?;
     let host: &'static Host = host;
+    let policy = resolve_policy();
     let factory = STORAGE
         .run
-        .put(|| RefCell::new(Factory { zid, key, observer }))
+        .put(|| {
+            RefCell::new(Factory {
+                zid,
+                key,
+                observer,
+                policy,
+            })
+        })
         .ok_or(3)?;
     let factory: &'static RefCell<Factory> = factory;
     let node = AcceptingAdminNode::new(

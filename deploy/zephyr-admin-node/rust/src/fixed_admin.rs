@@ -49,6 +49,7 @@ use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::locator_directory::DirectoryZid;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -71,7 +72,7 @@ use wz_session_mcu::slot_host::SessionHost;
 use wz_tls_mbedtls::stream::{AcceptBudget, TlsDial, TlsListener};
 
 use crate::fixed_tls::{self, Stack};
-use crate::{BATCH_SIZE, IDLE_SLEEP_US, STACK_CHECK_MS, TICK_HZ};
+use crate::{resolve_policy, BATCH_SIZE, IDLE_SLEEP_US, STACK_CHECK_MS, TICK_HZ};
 
 /// The port the node accepts secure channels on.
 pub const TLS_PORT: u16 = 7448;
@@ -290,6 +291,8 @@ struct Factory {
     zid: [u8; CREDENTIAL_ZID_BYTES],
     key: [u8; SIGNING_KEY_BYTES],
     observer: &'static ObserverCell<Sinks>,
+    /// The snapshot every session is made with.
+    policy: SessionPolicy,
 }
 
 impl SessionFactory<Clock, Driver> for Factory {
@@ -313,9 +316,9 @@ impl SessionFactory<Clock, Driver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: self.policy,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -468,9 +471,17 @@ fn start() -> Result<Running, i32> {
             3
         })?;
     let host: &'static Host = host;
+    let policy = resolve_policy();
     let factory = STORAGE
         .run
-        .put(|| RefCell::new(Factory { zid, key, observer }))
+        .put(|| {
+            RefCell::new(Factory {
+                zid,
+                key,
+                observer,
+                policy,
+            })
+        })
         .ok_or(3)?;
     let factory: &'static RefCell<Factory> = factory;
     let node = AcceptingAdminNode::new(

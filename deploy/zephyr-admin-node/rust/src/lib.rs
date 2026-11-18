@@ -63,6 +63,7 @@ use wz::runtime_zephyr::ZephyrClock;
 use wz::runtime_zephyr::ZephyrEntropy;
 #[cfg(not(storage_fixed))]
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::policy::SessionPolicy;
 #[cfg(all(role_client, not(storage_fixed)))]
 use wz_session_core::query_sink::BoxedQuerySink;
 #[cfg(all(role_client, not(storage_fixed)))]
@@ -133,6 +134,14 @@ wz::runtime_zephyr::zephyr_image!();
 // link, which is what the no-allocator link gate takes as its proof.
 #[cfg(not(any(feature = "heap", feature = "client-node", feature = "heap-storage")))]
 wz::runtime_zephyr::zephyr_image_no_heap!();
+
+/// The snapshot of every session this image opens, whichever node it builds. The image's start is
+/// the creator of its sessions, and this is where it resolves the snapshot: the build defaults
+/// until the image reads a run-time document. A policy the image does not widen (Kconfig's
+/// `WZ_POLICY_*_ALLOWS_*`) is one value on this target, and takes no byte.
+pub fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
+}
 
 /// How often the node reads its stack's high-water mark. The read walks the whole
 /// stack, so it is made a few times a second and not on every pass of the loop;
@@ -265,9 +274,15 @@ pub trait NodeNet {
     }
 }
 
-/// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
+/// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole, for a session
+/// whose machines read `policy`.
 #[cfg(not(storage_fixed))]
-fn params(whatami: WhatAmI, zid: SessionZid, signing_key: &[u8]) -> SessionInitParams {
+fn params(
+    whatami: WhatAmI,
+    zid: SessionZid,
+    signing_key: &[u8],
+    policy: &SessionPolicy,
+) -> SessionInitParams {
     SessionInitParams {
         whatami,
         zid,
@@ -278,9 +293,9 @@ fn params(whatami: WhatAmI, zid: SessionZid, signing_key: &[u8]) -> SessionInitP
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-        policy: wz_session_core::policy::SessionPolicy::defaults(),
+        policy: *policy,
         cookie_signing_key: SigningKey::new(signing_key.to_vec()).expect("32-byte key"),
     }
 }
@@ -313,6 +328,7 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     let zid_hex = zid_to_zenoh_hex(&zid);
     let locators: Vec<String> = net.addresses().into_iter().map(locator).collect();
     let accept_runtime = runtime.clone();
+    let policy = resolve_policy();
     let node = AdminNode::new(
         &local,
         net.links(),
@@ -326,11 +342,11 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         },
         LISTEN_PORT,
         SessionTimeouts::from_build(),
-        move || params(WhatAmI::Peer, zid, &key),
+        move || params(WhatAmI::Peer, zid, &key, &policy),
         move |sink| {
             new_session_actions(
                 sink,
-                params(WhatAmI::Peer, zid, &key),
+                params(WhatAmI::Peer, zid, &key, &policy),
                 CoopTime::new(&accept_runtime),
                 ZephyrEntropy,
             )
@@ -465,12 +481,13 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
         return 2;
     };
     let zid_hex = zid_to_zenoh_hex(&zid);
+    let policy = resolve_policy();
     let mut node = ClientNode::new(
         &local,
         net.links(),
         &ENDPOINTS,
         SessionTimeouts::from_build(),
-        move || params(WhatAmI::Client, zid, &key),
+        move || params(WhatAmI::Client, zid, &key, &policy),
     );
     if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()
         || node.queryable(CONFIG_KEY, answer(CONFIG_BODY)).is_err()

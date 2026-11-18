@@ -408,6 +408,7 @@ fn run(args: Args) -> i32 {
         plane: NoPlane,
         identity,
         batch_size: BATCH_SIZE,
+        policy: host_slot_node_glue::resolve_policy(),
         entropy: || PosixEntropy,
         endpoints: &ROUTER,
         peers: PEERS.peers(),

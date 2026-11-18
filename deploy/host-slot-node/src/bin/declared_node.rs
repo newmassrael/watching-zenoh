@@ -920,6 +920,7 @@ fn run() -> i32 {
         plane,
         identity,
         batch_size: BATCH_SIZE,
+        policy: host_slot_node_glue::resolve_policy(),
         entropy: || PosixEntropy,
         endpoints: &ENDPOINTS,
         peers: &PEER_TABLE,

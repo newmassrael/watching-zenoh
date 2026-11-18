@@ -40,6 +40,7 @@ use wz::session_lwip::slot_node::{EventsOf, SessionFactory, SlotAdminNode};
 use wz::session_lwip::{LwipLinks, LwipSessionLink};
 use wz_eth_mac_lan9118::{Lan9118, MPS2_BASE};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -49,7 +50,10 @@ use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
 
-use crate::{fail, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT, ZID};
+use crate::{
+    fail, resolve_policy, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT,
+    ZID,
+};
 
 /// Sessions the node holds at most, dialled and accepted together: the process's
 /// `max_sessions`.
@@ -193,6 +197,8 @@ static ETH0: EthernetPool<Lan9118, 1> = EthernetPool::new();
 struct Factory {
     key: [u8; 32],
     observer: &'static ObserverCell<Sinks>,
+    /// The snapshot every session is made with.
+    policy: SessionPolicy,
 }
 
 impl SessionFactory<SystickClockRef, LwipUdpDriver> for Factory {
@@ -216,9 +222,9 @@ impl SessionFactory<SystickClockRef, LwipUdpDriver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: self.policy,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -310,7 +316,11 @@ pub fn run() -> ! {
         link,
     );
     let links = LwipLinks::new(link, &NODE.sockets);
-    let factory = RefCell::new(Factory { key, observer });
+    let factory = RefCell::new(Factory {
+        key,
+        observer,
+        policy: resolve_policy(),
+    });
     let node = Node::new(
         &host,
         &links,

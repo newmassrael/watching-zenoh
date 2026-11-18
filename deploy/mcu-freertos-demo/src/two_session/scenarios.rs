@@ -51,6 +51,7 @@ use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{GroupJoinRule, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit};
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -79,7 +80,7 @@ const GROUP_JOIN_INTERVAL_MS: u64 = 2_500;
 /// published with the repository, which `scripts/lib/literal_key_gate.py`
 /// refuses outside a test-gated item. A hook that yields nothing fails the
 /// scenario rather than running with a key it did not draw.
-fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
+fn unicast_params(zid: u8, policy: &SessionPolicy) -> Result<SessionInitParams, String> {
     let cookie_signing_key = SigningKey::from_entropy(&mut FreertosEntropy)
         .map_err(|e| format!("draw the cookie signing key: {:?}", e))?;
     Ok(SessionInitParams {
@@ -92,15 +93,22 @@ fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: vec![],
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-        policy: wz_session_core::policy::SessionPolicy::defaults(),
+        policy: *policy,
         cookie_signing_key,
     })
 }
 
+/// The snapshot of every session the scenario opens. The scenario's set-up is the creator of
+/// those sessions, and this is where it resolves the snapshot: the build defaults until the image
+/// reads a run-time document.
+fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
+}
+
 /// The group parameters: the group session's own, and the member's.
-fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
+fn group_params(zid: &[u8], lease_ms: u64, policy: &SessionPolicy) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::multicast_params::zid_vec(zid),
@@ -111,7 +119,7 @@ fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         // An MCU session judges a Join by zenoh-pico's rule, and its table's rows bound its
         // members.
@@ -152,7 +160,7 @@ struct Member {
 
 impl Member {
     fn new(link: &LwipLink, own_port: u16, group_port: u16, lease_ms: u64) -> Result<Self, String> {
-        let params = group_params(MEMBER_ZID, lease_ms);
+        let params = group_params(MEMBER_ZID, lease_ms, &resolve_policy());
         let sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
         Ok(Self {
             socket: bind_session_rx(link, own_port).map_err(|e| format!("bind member: {:?}", e))?,
@@ -230,6 +238,7 @@ impl TwoSessions {
         let runtime = CoopRuntime::new(clock);
         let local = CoopLocalSet::new(&runtime);
         let links = LwipLinks::new(link.clone());
+        let policy = resolve_policy();
 
         let before = heap_free_bytes();
         let OpenedLink { sink, pump } = links
@@ -238,7 +247,7 @@ impl TwoSessions {
         let router_cost = before.saturating_sub(heap_free_bytes());
         let router = new_session_actions(
             sink,
-            unicast_params(0xa1)?,
+            unicast_params(0xa1, &policy)?,
             CoopTime::new(&runtime),
             FreertosEntropy,
         );
@@ -268,7 +277,7 @@ impl TwoSessions {
         let client_cost = before.saturating_sub(heap_free_bytes());
         let client = SessionLinkActions::<CoopRuntime<Clock>, CoopTime<Clock>>::new_generic(
             sink,
-            unicast_params(0xb1)?,
+            unicast_params(0xb1, &policy)?,
             CoopTime::new(&runtime),
         );
         let client_task = spawn_session(
@@ -297,7 +306,8 @@ impl TwoSessions {
             MulticastSeed::<4>::new(
                 MulticastConfig::new(5_000),
                 LwipMulticastDriver::new(group_socket, SESSION_MULTICAST_GROUP_DEFAULT, group_port),
-                group_params(GROUP_ZID, 10_000),
+                group_params(GROUP_ZID, 10_000, &policy),
+                policy,
                 5,
             ),
             move |event| {
