@@ -8604,6 +8604,77 @@ mod face_up_order_tests {
         );
     }
 
+    /// Every promise of a committed publish is held until its own frame is sent, so while an
+    /// earlier face is sent, a later face's promise still counts against its lane. Two faces that
+    /// write to one queue therefore find, at the earlier send, the queue holding both promises:
+    /// anything that send needs beyond the frame it was promised (the later frames of a fragment
+    /// chain) waits for room the publish itself holds. The policy states this as a limit; the
+    /// order is pinned here so that a change to it is seen.
+    #[test]
+    fn a_later_faces_promise_is_held_while_an_earlier_face_is_sent() {
+        /// One promise of the queue both faces write to, given back when it drops.
+        struct SharedPromise<'a>(&'a std::cell::Cell<usize>);
+
+        impl Drop for SharedPromise<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        // The one queue of faces 0 and 1, with room for two frames.
+        let queue = std::cell::Cell::new(2usize);
+        let mut free_at_send = Vec::new();
+        let answer = atomic_passes(
+            None,
+            2,
+            |_face| {
+                if queue.get() == 0 {
+                    return Reserved::NoRoom;
+                }
+                queue.set(queue.get() - 1);
+                Reserved::Held(SharedPromise(&queue))
+            },
+            |face, reservation| {
+                free_at_send.push((face, queue.get()));
+                drop(reservation);
+                Leg::Delivered(0)
+            },
+            |_| {},
+        );
+        assert_eq!(answer, Ok(Some(0)));
+        assert_eq!(
+            free_at_send,
+            vec![(0, 0), (1, 1)],
+            "face 0 is sent while face 1's promise is held, so its queue has no room left \
+             beyond its own promise; face 1 is sent once face 0's promise was given back"
+        );
+        assert_eq!(queue.get(), 2, "every promise is given back once sent");
+
+        // With room for one frame only, the publish needs two and is refused before any is sent.
+        let queue = std::cell::Cell::new(1usize);
+        let mut sent = 0usize;
+        let answer = atomic_passes(
+            None,
+            2,
+            |_face| {
+                if queue.get() == 0 {
+                    return Reserved::NoRoom;
+                }
+                queue.set(queue.get() - 1);
+                Reserved::Held(SharedPromise(&queue))
+            },
+            |_, reservation| {
+                sent += 1;
+                drop(reservation);
+                Leg::Delivered(0)
+            },
+            |_| {},
+        );
+        assert_eq!(answer, Ok(None), "the shared queue has room for one of two");
+        assert_eq!(sent, 0, "nothing is sent");
+        assert_eq!(queue.get(), 1, "and the promise taken is given back");
+    }
+
     /// A face that is down, or was never told the key, takes no part: the others are still
     /// reserved and sent to, and it is neither asked for room nor sent anything.
     #[test]

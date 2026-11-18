@@ -207,9 +207,13 @@ original reproduced by naming it. Three things follow from it:
   sent to any face, to a multicast group or to a subscriber of the session, no sequence number
   is spent, the reservations are given back and the publish ends delivering to nobody; stated
   together with an admission retry it reserves again after the delay. A face that is down or
-  was never told the key takes no part. A payload that must be fragmented is atomic for its
-  first frame only, a link that writes from a pool may still wait for a slot, and
-  shared-memory publishes do not reserve. `atomic_tx::admit_in_build` refuses the statement
+  was never told the key takes no part. A multicast group takes no reservation: it is sent the
+  frame only after every face promised room, and nothing on an abort. Every reservation is held
+  until its own face is sent the frame, so the later faces' promises still count while an
+  earlier face is sent. A payload that must be fragmented is atomic for its first frame only,
+  and its later frames wait for room as any send does, which can be room the publish itself
+  holds when two of its faces share a queue; a link that writes from a pool may still wait for
+  a slot, and shared-memory publishes do not reserve. `atomic_tx::admit_in_build` refuses the statement
   when the policy is off. It is reachable from the Rust API as `.all_links_or_none()` on the
   builders of a publisher and of a put or a delete, which takes no argument so that the form
   is only ever stated, behind the non-default crate feature `atomic-publish`; the statement is

@@ -208,9 +208,15 @@ config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
 	  the session, no sequence number is spent, every reservation is given back and the
 	  publish ends having delivered to nobody; it does not close the session and it
 	  counts no drop. A link that is down or was never told the key takes no part and
-	  does not stop the others. A payload too long to be sent whole is atomic only
-	  for its first frame, and a link whose frames are written in slots of a pool may
-	  still wait for a slot. Only the tokio engine reads this policy.
+	  does not stop the others. A multicast group takes no reservation: it is sent
+	  the frame only once every link promised room, and nothing when the publish
+	  delivered to nobody. Every reservation is held until its own link is sent the
+	  frame, so while one link is sent, the reservations of the links after it still
+	  count against their queues. A payload too long to be sent whole is atomic only
+	  for its first frame, and its later frames wait for room as any send does, which
+	  can be room the publish itself still holds when two of its links share a queue;
+	  a link whose frames are written in slots of a pool may still wait for a slot.
+	  Only the tokio engine reads this policy.
 	  Upstream: Sends a put to each link on its own terms: a link whose queue is
 	  full drops the frame or waits for room while the other links take it, so one
 	  put can reach some links and not others.
