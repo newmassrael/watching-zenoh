@@ -284,6 +284,9 @@ preset-ap-full = [
     # declared and absent here, the AP-full binary would compile the snapshot in with no argv
     # that hosts it.
     "resource-snapshot",
+    # The demo key for `wz/transport-stats`, which the facade preset carries: without it the
+    # AP-full binary compiles the per-key counters in and `--stats-filters` cannot reach them.
+    "transport-stats",
     "tls",
     "quic",
     "quic-datagram",

@@ -89,7 +89,11 @@ const HANDSHAKE_BUDGET: Duration = Duration::from_secs(10);
 /// about a reading. MEASURED on the first run: every round of this family has
 /// had its first red here, because a capture carries what it carries and not
 /// what the file expected.
-const WITNESSED: &[&str] = &["patch", "qos", "shm"];
+///
+/// `shm_body` is the Open's SHM extension, named apart from the Init's since the
+/// 1.10.2 extension paths. It is carried and read as its value only: the walker keeps
+/// it opaque on purpose (`OPAQUE_ZBUF_BODIES` in `wz_session_core::dissect` says why).
+const WITNESSED: &[&str] = &["patch", "qos", "shm", "shm_body"];
 
 /// What `walk_shm_init_body` names per stage. The three-way distinctness of
 /// these sets is what lets this file state a COUNT without counting.
