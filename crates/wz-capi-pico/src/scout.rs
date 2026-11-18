@@ -66,6 +66,8 @@ use wz_session_core::scouting_host::{
     SCOUTING_WHAT_DEFAULT,
 };
 
+use wz_session_core::session_zid::SessionZid;
+
 use crate::config::{ConfigState, Z_CONFIG_SESSION_ZID_KEY};
 use crate::pubsub::z_closure_drop_callback_t;
 use crate::result::ZResult;
@@ -96,8 +98,7 @@ mod window {
     use core::net::IpAddr;
 
     use wz_session_core::scouting_host::ScoutedHello;
-
-    use crate::prelude::*;
+    use wz_session_core::session_zid::SessionZid;
 
     /// Scout `group:port` for `budget_ms`, handing each peer that answered to `on_hello` after the
     /// window, last responder first; the number delivered.
@@ -106,7 +107,7 @@ mod window {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
@@ -119,7 +120,7 @@ mod window {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
     ) -> Option<ScoutedHello> {
         wz_capi_core::scouting::scout_first(group, port, what, zid, budget_ms)
@@ -131,7 +132,7 @@ mod window {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
@@ -151,7 +152,7 @@ mod window {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout::scout_first(
@@ -171,7 +172,7 @@ mod window {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
@@ -183,7 +184,7 @@ mod window {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
     ) -> Option<ScoutedHello> {
         crate::coop_host::scout_first(group, port, what, zid, budget_ms)
@@ -595,35 +596,13 @@ pub unsafe extern "C" fn z_scout_options_default(options: *mut z_scout_options_t
     }
 }
 
-/// Parse a hex zid string (pico `_z_uuid_to_bytes`) into wire bytes. Odd-length
-/// or non-hex input is rejected outright — a half-decoded identity is worse
-/// than a random one.
-fn parse_hex_zid(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim();
-    if text.is_empty() || text.len() % 2 != 0 || text.len() > 32 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(text.len() / 2);
-    let bytes = text.as_bytes();
-    for pair in bytes.chunks(2) {
-        let hi = (pair[0] as char).to_digit(16)?;
-        let lo = (pair[1] as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
-    }
-    Some(out)
-}
-
-/// A fresh random 16-byte scouting identity, from the same OS entropy source
-/// the session plane mints its per-session zid with.
-fn fresh_scout_zid() -> Vec<u8> {
+/// A fresh random scouting identity, from the same OS entropy source the session plane mints its
+/// per-session zid with, or `None` when there is none to draw (a profile that cannot open a
+/// session either), which asks as nobody.
+fn fresh_scout_zid() -> Option<SessionZid> {
     let mut zid = [0u8; 16];
-    if getrandom::getrandom(&mut zid).is_err() {
-        // Entropy is unavailable only in a profile that cannot open a session
-        // either. Zero bytes are no zid, so the Scout then names no asker
-        // (the scout window reads them that way), which upstream's Scout allows.
-        return vec![0u8; 16];
-    }
-    zid.to_vec()
+    getrandom::getrandom(&mut zid).ok()?;
+    SessionZid::new(&zid).ok()
 }
 
 /// What a scout reads from a pico config: each key's value, or pico's default for it.
@@ -634,16 +613,19 @@ struct ScoutConfig {
     what: u8,
     budget_ms: u64,
     locator: String,
-    /// The identity the Scout announces. A responder that logs the scouter names the zid
-    /// configured for the session; an unparseable one falls back to a fresh random one
-    /// rather than scouting as all-zeros (which a peer may read as unset).
-    zid: Vec<u8>,
+    /// The id the config states for the session, read as `z_open` reads it
+    /// (`crate::session::stated_zid`), or `None` when it states none.
+    zid: Option<SessionZid>,
 }
 
 impl ScoutConfig {
-    fn read(cfg: Option<&ConfigState>) -> Self {
+    /// The config's scouting keys, or `Z_ERR_INVALID` when it states an id `z_open` refuses: a
+    /// caller that named an identity and scouted as another, or as nobody, would not know it.
+    /// pico reads whatever its fixed indexes land on there (`vendor/zenoh-pico/src/api/api.c` @
+    /// `_z_uuid_to_bytes(zid.id, zid_str);`), which is no id the caller named.
+    fn read(cfg: Option<&ConfigState>) -> Result<Self, ZResult> {
         let get = |key: u8| cfg.and_then(|c| c.get(key)).map(|s| s.trim().to_string());
-        Self {
+        Ok(Self {
             what: get(Z_CONFIG_SCOUTING_WHAT_KEY)
                 .and_then(|s| s.parse::<u8>().ok())
                 .unwrap_or(SCOUTING_WHAT_DEFAULT),
@@ -652,10 +634,8 @@ impl ScoutConfig {
                 .unwrap_or(SCOUTING_TIMEOUT_DEFAULT_MS),
             locator: get(Z_CONFIG_MULTICAST_LOCATOR_KEY)
                 .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into()),
-            zid: get(Z_CONFIG_SESSION_ZID_KEY)
-                .and_then(|s| parse_hex_zid(&s))
-                .unwrap_or_else(fresh_scout_zid),
-        }
+            zid: crate::session::stated_zid(cfg.and_then(|c| c.get(Z_CONFIG_SESSION_ZID_KEY)))?,
+        })
     }
 }
 
@@ -666,12 +646,16 @@ impl ScoutConfig {
 /// `ret = _z_locators_by_scout(config, zid, &connect_locators);`). Nobody answering, or a
 /// node that answered with no locator, is `Z_ERR_SCOUT_NO_RESULTS`, as there; a group this
 /// crate cannot scout on is `Z_ERR_INVALID`, as `z_scout` answers it.
+///
+/// pico's lookup names the session's zid, which it minted when the config stated none; the
+/// engine mints this session's later, so a config that states none asks with a fresh one.
 pub(crate) fn locators_by_scout(cfg: &ConfigState) -> Result<Vec<String>, ZResult> {
-    let read = ScoutConfig::read(Some(cfg));
+    let read = ScoutConfig::read(Some(cfg))?;
     let Some((group, port)) = parse_multicast_locator(&read.locator) else {
         return Err(crate::result::Z_ERR_INVALID);
     };
-    window::first(group, port, read.what, read.zid, read.budget_ms)
+    let zid = read.zid.or_else(fresh_scout_zid);
+    window::first(group, port, read.what, zid, read.budget_ms)
         .map(|hello| hello.locators)
         .filter(|locators| !locators.is_empty())
         .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
@@ -688,6 +672,10 @@ pub(crate) fn locators_by_scout(cfg: &ConfigState) -> Result<Vec<String>, ZResul
 /// struct when non-NULL, else the config keys, else pico's documented defaults.
 /// The group comes from `Z_CONFIG_MULTICAST_LOCATOR_KEY` either way — upstream
 /// gives it no options field.
+///
+/// The Scout names the id `Z_CONFIG_SESSION_ZID_KEY` states, and no asker when
+/// it states none, as upstream's starts from `_z_id_empty()`; an id `z_open`
+/// would refuse is refused here with the same `Z_ERR_INVALID`.
 ///
 /// # Safety
 /// `config` and `callback` must be live moved values; both are consumed.
@@ -720,6 +708,15 @@ pub unsafe extern "C" fn z_scout(
     };
     let read = ScoutConfig::read(cfg.as_deref());
     drop(cfg);
+    let read = match read {
+        Ok(read) => read,
+        Err(code) => {
+            if let Some(drop_fn) = user_drop {
+                drop_fn(user_ctx);
+            }
+            return code;
+        }
+    };
     let (what, budget_ms) = match options.as_ref() {
         Some(o) => (o.what as u8, u64::from(o.timeout_ms)),
         None => (read.what, read.budget_ms),
@@ -777,7 +774,7 @@ fn run_scout(
     group: IpAddr,
     port: u16,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> usize {
@@ -875,6 +872,80 @@ mod tests {
             std::mem::size_of::<z_loaned_string_array_t>(),
             std::mem::size_of::<z_owned_string_array_t>()
         );
+    }
+
+    /// A scout reads the id its config states as `z_open` reads it, a UUID in the order written,
+    /// asks as nobody when it states none, and refuses what the open refuses: text pico's reader
+    /// was not written for (hex without the dashes among it) and the id of sixteen zero bytes.
+    #[test]
+    fn a_scout_reads_the_stated_id_as_the_open_does() {
+        let stated = |text: Option<&str>| {
+            let mut cfg = ConfigState::default();
+            if let Some(text) = text {
+                cfg.insert(Z_CONFIG_SESSION_ZID_KEY, text);
+            }
+            ScoutConfig::read(Some(&cfg)).map(|read| read.zid)
+        };
+        assert_eq!(stated(None), Ok(None), "no id stated: no asker");
+        assert_eq!(ScoutConfig::read(None).map(|read| read.zid), Ok(None));
+        assert_eq!(
+            stated(Some("01020304-0506-0708-090a-0b0c0d0e0f10")),
+            Ok(Some(SessionZid::from([
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+            ])))
+        );
+        assert_eq!(
+            stated(Some("aabbccdd-eeff-0000-0000-000000000000")),
+            Ok(Some(SessionZid::from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]))),
+            "trimmed to the last non-zero byte, as the open's INIT carries it"
+        );
+        for refused in [
+            "",
+            "ff000000000000000000000000000001",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            assert_eq!(
+                stated(Some(refused)),
+                Err(crate::result::Z_ERR_INVALID),
+                "the stated id `{refused}`"
+            );
+        }
+    }
+
+    /// `z_scout` with a stated id the open refuses answers `Z_ERR_INVALID` before it scouts: the
+    /// closure is never called and its drop runs once, as on every other exit.
+    #[test]
+    fn a_scout_refuses_a_stated_id_the_open_refuses() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count_drop(context: *mut c_void) {
+            (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut cfg = ConfigState::default();
+        cfg.insert(
+            Z_CONFIG_SESSION_ZID_KEY,
+            "00000000-0000-0000-0000-000000000000",
+        );
+        let mut config = crate::abi::z_moved_config_t {
+            _this: crate::abi::z_owned_config_t {
+                handle: Box::into_raw(Box::new(cfg)) as *mut c_void,
+                _pad: [core::ptr::null_mut(); 3],
+            },
+        };
+        let drops = AtomicUsize::new(0);
+        let mut closure = z_moved_closure_hello_t {
+            _this: z_owned_closure_hello_t {
+                context: &drops as *const AtomicUsize as *mut c_void,
+                call: None,
+                drop: Some(count_drop),
+            },
+        };
+        // SAFETY: both values are live locals, and `z_scout` consumes them.
+        let rc = unsafe { z_scout(&mut config, &mut closure, core::ptr::null()) };
+        assert_eq!(rc, crate::result::Z_ERR_INVALID);
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "the drop ran once");
+        assert!(config._this.handle.is_null(), "the config was consumed");
     }
 
     /// A hello lends its locator array by POINTER, so the array handle must

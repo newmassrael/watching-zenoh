@@ -42,6 +42,7 @@
 use std::net::IpAddr;
 
 use wz_runtime_tokio::scouting_glue::ScoutedHello;
+use wz_session_core::session_zid::SessionZid;
 
 // The locator grammar, the defaults and the delivery order of a scouting window are the session's
 // (`wz_session_core::scouting_host`): the cooperative host reads the same ones. Re-exported here
@@ -61,14 +62,15 @@ pub const SCOUT_CYCLE_MS: u64 = 1000;
 /// Random rather than all-zeros: a peer may read an all-zero zid as "unset" and
 /// answer differently, so a scout with no configured identity announces one it
 /// could plausibly open a session with.
-pub fn fresh_scout_zid() -> Vec<u8> {
+pub fn fresh_scout_zid() -> SessionZid {
     let mut zid = [0u8; 16];
-    if getrandom::getrandom(&mut zid).is_err() {
-        // Entropy is unavailable only in a profile that cannot open a session
-        // either; a fixed non-zero pattern still scouts.
+    // Entropy is unavailable only in a profile that cannot open a session
+    // either, and sixteen zero bytes name nobody; a fixed non-zero pattern
+    // still scouts.
+    if getrandom::getrandom(&mut zid).is_err() || zid == [0u8; 16] {
         zid = [0xA5; 16];
     }
-    zid.to_vec()
+    SessionZid::from(zid)
 }
 
 /// Drive scouting for `budget_ms`, then invoke `on_hello` once per peer that
@@ -78,11 +80,15 @@ pub fn fresh_scout_zid() -> Vec<u8> {
 /// Returns how many peers were delivered. A bind failure is 0 rather than an
 /// error: both ABIs' `z_scout` reports success and simply finds nothing, which
 /// is also what a scout onto a group with no responders does.
+///
+/// `zid` is the asker the Scout names, `None` for a Scout that names none. It
+/// is already a zid: refusing a configured one that is not is the ABI's, which
+/// knows the error code its caller reads.
 pub fn run_scout(
     group: IpAddr,
     port: u16,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
     on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
@@ -101,7 +107,7 @@ pub fn scout_first(
     group: IpAddr,
     port: u16,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
 ) -> Option<ScoutedHello> {
     scout_window(group, port, what, zid, budget_ms, true)
@@ -115,7 +121,7 @@ fn scout_window(
     group: IpAddr,
     port: u16,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
     exit_on_first: bool,
 ) -> Vec<ScoutedHello> {
@@ -170,9 +176,7 @@ fn scout_window(
         };
         let actions = ScoutingActions::new(ScoutParams {
             what,
-            // A Scout names its asker optionally: no bytes, or bytes that are no zid, ask as
-            // nobody rather than put an id on the wire that no node has.
-            zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
+            zid,
             // The caller's whole budget IS the window: upstream hands its
             // `timeout` straight to `__z_scout_loop`'s `while elapsed <
             // period` (`src/session/scout.c:60-63`).
@@ -205,6 +209,6 @@ mod tests {
     /// the reverse of zenoh's and refused text zenoh accepts.
     #[test]
     fn a_fresh_scout_zid_is_sixteen_bytes() {
-        assert_eq!(fresh_scout_zid().len(), 16);
+        assert_eq!(fresh_scout_zid().as_slice().len(), 16);
     }
 }

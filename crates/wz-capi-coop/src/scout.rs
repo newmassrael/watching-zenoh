@@ -37,6 +37,7 @@ use std::time::Duration;
 use wz_host_net::multicast::{bind_joined, bind_sender, Bound, RxBind, SocketConfig};
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::scouting_host::{deliver_in_upstream_order, ScoutWindow, ScoutingActions};
+use wz_session_core::session_zid::SessionZid;
 
 pub use wz_session_core::scouting_host::{
     parse_multicast_locator, ScoutParams, ScoutedHello, MULTICAST_LOCATOR_DEFAULT,
@@ -229,12 +230,15 @@ fn run_window<C: ClockSource + Clone + 'static>(
 ///
 /// A socket that cannot be bound is a smaller window, and no window at all is a window nobody
 /// answers: `0`, not an error, as both C ABIs report success and simply find nothing.
+///
+/// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
+/// ABI's to refuse before it scouts.
 pub fn run_scout<C: ClockSource + Clone + 'static>(
     clock: &C,
     group: IpAddr,
     port: u16,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
     on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
@@ -252,7 +256,7 @@ pub fn scout_first<C: ClockSource + Clone + 'static>(
     group: IpAddr,
     port: u16,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
 ) -> Option<ScoutedHello> {
     window_hellos(clock, group, port, what, zid, budget_ms, true)
@@ -265,15 +269,14 @@ fn window_hellos<C: ClockSource + Clone + 'static>(
     group: IpAddr,
     port: u16,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
     exit_on_first: bool,
 ) -> Vec<ScoutedHello> {
     let members = Members::open(group, port, &interface_addresses());
     let params = ScoutParams {
         what,
-        // A Scout names its asker optionally: no bytes, or bytes that are no zid, ask as nobody.
-        zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
+        zid,
         // The caller's whole budget IS the window: upstream hands its `timeout` straight to
         // `__z_scout_loop`'s `while elapsed < period`.
         timeout_ms: budget_ms,

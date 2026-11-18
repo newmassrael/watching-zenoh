@@ -23,6 +23,7 @@ use wz_capi_core::scouting::{
     fresh_scout_zid, parse_multicast_locator, run_scout, MULTICAST_LOCATOR_DEFAULT,
     SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT,
 };
+use wz_session_core::session_zid::SessionZid;
 
 use crate::abi::{
     z_loaned_hello_t, z_moved_closure_hello_t, z_moved_config_t, z_moved_hello_t,
@@ -40,14 +41,16 @@ use crate::zid::z_id_t;
 ///
 /// It reads the text the way [`ConfiguredZid`] does, which is the way `z_open`
 /// reads it, so the scouter a responder logs is the node a later open stands on.
-/// This used to read it PER BYTE in the order written, which is the reverse of
-/// zenoh's reading (`c11e47c11e49` is the bytes `49 1e c1 47 1e c1`), and it
-/// refused an odd number of digits that zenoh accepts.
-fn announced_zid(configured: Option<&str>) -> Vec<u8> {
-    configured
-        .and_then(ConfiguredZid::from_zenoh_text)
-        .map(|zid| zid.wire().to_vec())
-        .unwrap_or_else(fresh_scout_zid)
+/// A stated id that reading refuses is `Z_EINVAL`, as `z_open` answers it
+/// (`OpenRefusal::ZenohId`): a caller that named an identity and scouted as
+/// another, or as nobody, would not know it.
+fn announced_zid(configured: Option<&str>) -> Result<SessionZid, ZResult> {
+    match configured {
+        None => Ok(fresh_scout_zid()),
+        Some(text) => ConfiguredZid::from_zenoh_text(text)
+            .map(|zid| zid.session_zid())
+            .ok_or(Z_EINVAL),
+    }
 }
 
 /// `Z_WHATAMI_ROUTER` = 1.
@@ -515,13 +518,20 @@ pub unsafe extern "C" fn z_scout(
         // InitSyn would carry.
         let zid = announced_zid(cfg_get(crate::config::SESSION_ZID_KEY).as_deref());
         drop(cfg);
+        let zid = match zid {
+            Ok(zid) => zid,
+            Err(code) => {
+                run_drop();
+                return code;
+            }
+        };
 
         let Some((group, port)) = parse_multicast_locator(&locator) else {
             run_drop();
             return Z_EINVAL;
         };
 
-        run_scout(group, port, what, zid, budget_ms, |hello| {
+        run_scout(group, port, what, Some(zid), budget_ms, |hello| {
             let Some(call) = user_call else {
                 return;
             };
@@ -582,17 +592,42 @@ mod tests {
             "ffffffffffffffffffffffffffffffff",
         ] {
             assert_eq!(
-                announced_zid(Some(text)),
-                read(text),
+                announced_zid(Some(text))
+                    .expect("zenoh accepts it")
+                    .as_slice(),
+                read(text).as_slice(),
                 "the announced zid for `{text}`"
             );
         }
-        assert_eq!(announced_zid(Some("c11e47c11e49")).len(), 6);
+        assert_eq!(
+            announced_zid(Some("c11e47c11e49"))
+                .expect("zenoh accepts it")
+                .as_slice()
+                .len(),
+            6
+        );
 
         // No id stated: a fresh sixteen-byte one, and two calls differ.
-        let (a, b) = (announced_zid(None), announced_zid(None));
-        assert_eq!((a.len(), b.len()), (16, 16));
+        let (a, b) = (
+            announced_zid(None).expect("none stated"),
+            announced_zid(None).expect("none stated"),
+        );
+        assert_eq!((a.as_slice().len(), b.as_slice().len()), (16, 16));
         assert_ne!(a, b, "a scout with no configured id must not reuse one");
+    }
+
+    /// An id the config states that zenoh refuses (no digits, zero, a leading
+    /// zero, more than sixteen bytes) is refused by the scout as `z_open`
+    /// refuses it, and not scouted as a fresh id or as nobody.
+    #[test]
+    fn a_scout_refuses_a_stated_id_zenoh_refuses() {
+        for text in ["", "0", "01", "1ffffffffffffffffffffffffffffffff", "zz"] {
+            assert_eq!(
+                announced_zid(Some(text)),
+                Err(Z_EINVAL),
+                "the stated id `{text}`"
+            );
+        }
     }
 
     /// The whatami map is an INDEXED BITMASK: 3 is "router|peer", not a third

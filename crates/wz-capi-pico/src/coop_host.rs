@@ -119,8 +119,9 @@ mod scouting {
 
     use wz_session_core::scouting_host::ScoutedHello;
 
+    use wz_session_core::session_zid::SessionZid;
+
     use super::{clock, Datagram};
-    use crate::prelude::*;
 
     /// What one datagram of a scout is read into: zenoh-pico's multicast batch as the build states
     /// it, which is what its scout reads into.
@@ -131,7 +132,7 @@ mod scouting {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
@@ -150,7 +151,7 @@ mod scouting {
         group: IpAddr,
         port: u16,
         what: u8,
-        zid: Vec<u8>,
+        zid: Option<SessionZid>,
         budget_ms: u64,
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout_datagram::scout_first::<Datagram, _>(
