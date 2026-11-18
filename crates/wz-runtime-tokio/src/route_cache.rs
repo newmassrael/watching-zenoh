@@ -84,6 +84,14 @@ struct RouteKey<S> {
     source: S,
 }
 
+impl<S> RouteKey<S> {
+    /// The address of the keyexpr's text: one route's alone, since every route's key is made with
+    /// a text of its own ([`Kept::insert`]) and only its copies share it.
+    fn text_address(&self) -> usize {
+        Arc::as_ptr(&self.keyexpr).cast::<u8>() as usize
+    }
+}
+
 /// A route's key as its two parts, so that a route is read by a key borrowed from the caller's
 /// keyexpr and source, with nothing allocated: [`RouteKey`] owns its parts and a pair of
 /// references borrows them, and both hash and compare by the parts alone.
@@ -175,6 +183,12 @@ pub struct RouteCache<T, S = Zid> {
     /// in test builds only, where the instruments read it, so that a reader pays nothing for it.
     #[cfg(test)]
     off_version: Arc<OffVersion>,
+    /// Whether a change takes every route it reaches out one by one however many it reaches, the
+    /// form before a change that reaches most routes started the new memo from those that stay
+    /// (`Kept::without`). Kept in test builds, and carried to every memo brought from this one,
+    /// for the instrument that measures one form against the other.
+    #[cfg(test)]
+    retires_by_route: bool,
     /// Set on the memo of a write's draft ([`open_draft`](Self::open_draft)), and never on a
     /// published version's.
     draft: Option<Box<Draft<T, S>>>,
@@ -242,18 +256,32 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
     /// An indexed memo asks its index for the routes whose keyexpr may meet each changed key and
     /// refines them with `reaches`, so its cost follows the routes the changes meet. A memo with no
     /// index tries every route against every changed key.
+    ///
+    /// With `drops_whole`, a change that reaches every route starts the memo empty, and one that
+    /// reaches more than half of them starts it empty and puts back the routes that stay
+    /// ([`without`](Self::without)); otherwise each route reached is taken out.
     fn retiring(
         mut self,
         since: u64,
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
         reaches: impl Fn(&str, &[&str]) -> bool,
+        drops_whole: bool,
     ) -> Option<Self> {
+        let held = self.routes.len();
         let mut reached: Vec<RouteKey<S>> = Vec::new();
+        // Whether one changed key reached every route. A walk of the index finds each member once
+        // and the scan each route once, so as many found as routes held is every route.
+        let mut every = false;
         // One buffer for the chunks of every kept keyexpr asked about, in turn.
         let mut chunks: Vec<&str> = Vec::new();
         let complete = match &self.by_keyexpr {
             // The index's candidates for each key that moved, each split to be asked.
             Some(index) => changes(since, &mut |changed| {
+                // Every route goes already: nothing a later key reaches can add to that.
+                if every && drops_whole {
+                    return;
+                }
+                let before = reached.len();
                 reached.extend(
                     index
                         .intersecting(changed)
@@ -267,6 +295,7 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
                         })
                         .cloned(),
                 );
+                every |= held > 0 && reached.len() - before == held;
             }),
             // Every kept keyexpr, split once and asked of every key that moved.
             None => {
@@ -285,16 +314,57 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
                             .cloned(),
                     );
                 }
+                every = held > 0 && reached.len() == held;
                 complete
             }
         };
         if !complete {
             return None;
         }
-        for key in &reached {
-            self.remove(key);
+        if !drops_whole {
+            for key in &reached {
+                self.remove(key);
+            }
+            return Some(self);
         }
-        Some(self)
+        if every {
+            return Some(Self::empty(self.is_indexed()));
+        }
+        Some(self.without(&reached))
+    }
+
+    /// These routes less `reached`, which may name a route more than once.
+    ///
+    /// A removal copies one path of the routes and one of the index, and so does a put. Taking
+    /// out more than half of the routes one by one therefore costs more than starting empty and
+    /// putting back the fewer that stay, and the second is what a change that reaches most of the
+    /// routes does. Measured where a change reaches every route, the removals cost the writer 2.3
+    /// to 5.2 times the scan that finds the same routes with no index
+    /// (`docs/router-table-snapshots.md`, section 6.9).
+    ///
+    /// A route is told reached by the address of its keyexpr's text, which each route's key owns
+    /// alone: [`Kept::insert`] makes it, the index and every copy share it, and a key put again
+    /// leaves the routes and the index holding the one they held (both persistent maps keep the
+    /// key they have and replace the value). The addresses are sorted once and searched: a sort of
+    /// addresses, and no hash set over the keys built for every type of route. Two routes that
+    /// shared a text would both go, which leaves out more than it must and never keeps a route
+    /// reached.
+    fn without(mut self, reached: &[RouteKey<S>]) -> Self {
+        if reached.len() * 2 <= self.routes.len() {
+            for key in reached {
+                self.remove(key);
+            }
+            return self;
+        }
+        let mut gone: Vec<usize> = reached.iter().map(RouteKey::text_address).collect();
+        gone.sort_unstable();
+        let mut kept = Self::empty(self.is_indexed());
+        for (key, route) in &self.routes {
+            if gone.binary_search(&key.text_address()).is_err() {
+                kept.put(key.clone(), route.clone());
+            }
+        }
+        kept
     }
 }
 
@@ -379,7 +449,22 @@ impl<T, S> RouteCache<T, S> {
             computes: Arc::new(Counter::new()),
             #[cfg(test)]
             off_version: Arc::default(),
+            #[cfg(test)]
+            retires_by_route: false,
             draft: None,
+        }
+    }
+
+    /// Whether a change that reaches most of this memo's routes starts the next memo from the
+    /// routes that stay; in a test build, unless the memo was made to retire route by route.
+    fn drops_whole(&self) -> bool {
+        #[cfg(test)]
+        {
+            !self.retires_by_route
+        }
+        #[cfg(not(test))]
+        {
+            true
         }
     }
 }
@@ -397,6 +482,15 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     /// index. The memos brought from it are indexed too.
     pub fn indexed() -> Self {
         Self::starting(Kept::empty(true))
+    }
+
+    /// This memo, made to take every route a change reaches out one by one however many it
+    /// reaches, as every memo brought from it does: the form the instrument of
+    /// `docs/router-table-snapshots.md` section 6.9 measures the default against.
+    #[cfg(test)]
+    pub(crate) fn retiring_by_route(mut self) -> Self {
+        self.retires_by_route = true;
+        self
     }
 
     /// The route from `source` for `keyexpr` at `inputs`: served when this memo holds one,
@@ -470,6 +564,8 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             computes: Arc::clone(&base.computes),
             #[cfg(test)]
             off_version: Arc::clone(&base.off_version),
+            #[cfg(test)]
+            retires_by_route: base.retires_by_route,
             draft: Some(Box::new(Draft {
                 base,
                 indexed,
@@ -515,7 +611,10 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     /// asks it only of the routes whose keyexpr the index finds may intersect `changed`, and an
     /// unindexed one splits each kept keyexpr once and asks it of every key that moved. A topology
     /// move (`net`), a memo brought to no version yet, or a table that cannot answer starts the new
-    /// memo empty; a table that answers that nothing moved keeps every route.
+    /// memo empty; a table that answers that nothing moved keeps every route. A change that reaches
+    /// every route starts the new memo empty too, and one that reaches more than half of them starts
+    /// it empty and puts back the routes it does not reach, which costs fewer writes than taking
+    /// each reached route out.
     ///
     /// Safe by construction: it only ever leaves out more than it must, never fewer, because the
     /// caller supplies the keys the table's own mutators recorded and every mutation records its
@@ -539,7 +638,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             Some(was) if was.net == inputs.net => {
                 let kept = Kept::clone(&memo.kept.read());
                 let indexed = kept.is_indexed();
-                kept.retiring(was.table, changes, reaches)
+                kept.retiring(was.table, changes, reaches, memo.drops_whole())
                     .unwrap_or_else(|| Kept::empty(indexed))
             }
             _ => Kept::empty(memo.kept.read().is_indexed()),
@@ -555,6 +654,8 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             computes: Arc::clone(&memo.computes),
             #[cfg(test)]
             off_version: Arc::clone(&memo.off_version),
+            #[cfg(test)]
+            retires_by_route: memo.retires_by_route,
             draft: None,
         });
     }
@@ -927,36 +1028,45 @@ mod tests {
     /// An indexed memo, brought across table moves whose changed keys are drawn from every kind of
     /// chunk the matcher knows, leaves out exactly the routes a memo with no index leaves out, which
     /// are the routes some changed key intersects, and its index holds exactly its routes after
-    /// every move. Turned red by an index walk that misses a route a changed key meets, or by a
-    /// route left out of the routes and not of the index.
+    /// every move; so does an indexed memo that takes each reached route out one by one, however
+    /// many a change reaches. Turned red by an index walk that misses a route a changed key meets,
+    /// by a route left out of the routes and not of the index, or by a memo started from the routes
+    /// that stay that keeps one a change reached or loses one it did not.
     #[test]
     fn an_indexed_memo_leaves_out_exactly_the_routes_a_scan_leaves_out() {
         for seed in 1..=6u64 {
             let mut draw = Draw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut scanned: Arc<RouteCache<u64, ()>> = at(AT);
             let mut indexed = indexed_at(AT);
+            let mut by_route = {
+                let mut memo = Arc::new(RouteCache::<u64, ()>::indexed().retiring_by_route());
+                RouteCache::bring_to(&mut memo, AT);
+                memo
+            };
             let mut inputs = AT;
             for step in 0..40 {
                 for _ in 0..12 {
                     let keyexpr = draw.keyexpr();
                     let route = draw.next();
-                    for memo in [&scanned, &indexed] {
+                    for memo in [&scanned, &indexed, &by_route] {
                         memo.get_or_compute(inputs, &(), &keyexpr, || true, || route);
                     }
                 }
                 let before = kept_keys(&scanned);
-                assert_eq!(
-                    kept_keys(&indexed),
-                    before,
-                    "seed {seed} step {step}: both memos keep the routes the readers added"
-                );
+                for memo in [&indexed, &by_route] {
+                    assert_eq!(
+                        kept_keys(memo),
+                        before,
+                        "seed {seed} step {step}: every memo keeps the routes the readers added"
+                    );
+                }
                 let changed: Vec<String> =
                     (0..1 + draw.next() % 3).map(|_| draw.keyexpr()).collect();
                 let moved = RouteInputs {
                     table: inputs.table + 1,
                     ..inputs
                 };
-                for memo in [&mut scanned, &mut indexed] {
+                for memo in [&mut scanned, &mut indexed, &mut by_route] {
                     RouteCache::bring_to_retiring(
                         memo,
                         moved,
@@ -987,7 +1097,150 @@ mod tests {
                     want,
                     "seed {seed} step {step}: the index finds what {changed:?} reaches"
                 );
+                assert_eq!(
+                    kept_keys(&by_route),
+                    want,
+                    "seed {seed} step {step}: taken out route by route, the same routes go"
+                );
             }
+        }
+    }
+
+    /// The routes of an indexed memo of `demo/a`, `demo/b`, `demo/c` and `other/x` (routes 0 to 3),
+    /// brought to a table move whose changed keys are `changed`, and the inputs it was brought to.
+    /// Taken out route by route, however many a change reaches, when `by_route`.
+    fn four_routes_after(
+        changed: &[&str],
+        by_route: bool,
+    ) -> (Arc<RouteCache<u64, ()>>, RouteInputs) {
+        let memo = RouteCache::<u64, ()>::indexed();
+        let mut memo = Arc::new(if by_route {
+            memo.retiring_by_route()
+        } else {
+            memo
+        });
+        RouteCache::bring_to(&mut memo, AT);
+        for (route, keyexpr) in (0u64..).zip(["demo/a", "demo/b", "demo/c", "other/x"]) {
+            memo.get_or_compute(AT, &(), keyexpr, || true, || route);
+        }
+        let moved = RouteInputs { table: 2, ..AT };
+        RouteCache::bring_to_retiring(
+            &mut memo,
+            moved,
+            |_, visit| {
+                changed.iter().for_each(|key| visit(key));
+                true
+            },
+            keyexpr_intersects_target,
+        );
+        (memo, moved)
+    }
+
+    fn keys(keyexprs: &[&str]) -> BTreeSet<String> {
+        keyexprs.iter().map(|k| k.to_string()).collect()
+    }
+
+    /// A change that reaches more than half of the routes leaves out every route it reaches and
+    /// keeps, served and indexed, every route it does not, whether the changed keys reach the same
+    /// route more than once or not, and as a memo that takes each route out does. Turned red by a
+    /// memo started from the routes that stay that puts back a route a change reached, or leaves
+    /// out one it did not.
+    #[test]
+    fn a_change_that_reaches_most_routes_leaves_out_those_and_keeps_the_rest() {
+        for changed in [
+            &["demo/*"][..],
+            &["demo/a", "demo/a", "demo/*"][..],
+            &["demo/a", "demo/b", "demo/c"][..],
+        ] {
+            for by_route in [false, true] {
+                let (memo, moved) = four_routes_after(changed, by_route);
+                assert_eq!(
+                    kept_keys(&memo),
+                    keys(&["other/x"]),
+                    "{changed:?}, route by route {by_route}"
+                );
+                let computes = memo.computes();
+                assert_eq!(
+                    memo.get_or_compute(moved, &(), "other/x", || true, || unreachable!()),
+                    3,
+                    "the route no change reached is served as it was"
+                );
+                memo.get_or_compute(moved, &(), "demo/b", || true, || 7);
+                assert_eq!(memo.computes(), computes + 1, "a reached route is computed");
+                assert_eq!(kept_keys(&memo), keys(&["demo/b", "other/x"]));
+            }
+        }
+    }
+
+    /// A route kept a second time, as two readers that miss one key at one inputs keep it, is still
+    /// told reached when a change that reaches most routes starts the memo from those that stay:
+    /// its key in the routes and in the index is the one first kept. Turned red by a route kept
+    /// again under a key of its own that the index does not hold, which the change would leave in.
+    #[test]
+    fn a_route_kept_twice_is_left_out_by_a_change_that_reaches_most_routes() {
+        let mut kept: Kept<u64, ()> = Kept::empty(true);
+        for (route, keyexpr) in (0u64..).zip(["demo/a", "demo/a", "demo/b", "demo/c", "other/x"]) {
+            kept.insert(keyexpr, &(), route);
+        }
+        assert_eq!(kept.routes.len(), 4, "the second keep replaced the first");
+        let kept = kept
+            .retiring(
+                0,
+                |_, visit| {
+                    visit("demo/*");
+                    true
+                },
+                keyexpr_intersects_target,
+                true,
+            )
+            .expect("the change says what moved");
+        let keyexprs: BTreeSet<String> =
+            kept.routes.keys().map(|k| k.keyexpr.to_string()).collect();
+        assert_eq!(keyexprs, keys(&["other/x"]));
+        let index = kept.by_keyexpr.as_ref().expect("indexed");
+        assert_eq!(index.len(), 1, "the index holds the one route that stayed");
+    }
+
+    /// A change that reaches half of the routes or fewer takes out exactly those, and the routes
+    /// it does not reach stay. Turned red by a change that reaches few routes and starts the new
+    /// memo empty.
+    #[test]
+    fn a_change_that_reaches_half_the_routes_or_fewer_keeps_every_route_it_does_not_reach() {
+        for (changed, kept) in [
+            (&["demo/a"][..], &["demo/b", "demo/c", "other/x"][..]),
+            (&["demo/a", "other/x"][..], &["demo/b", "demo/c"][..]),
+            (
+                &["nothing/here"][..],
+                &["demo/a", "demo/b", "demo/c", "other/x"][..],
+            ),
+        ] {
+            for by_route in [false, true] {
+                let (memo, _) = four_routes_after(changed, by_route);
+                assert_eq!(
+                    kept_keys(&memo),
+                    keys(kept),
+                    "{changed:?}, route by route {by_route}"
+                );
+            }
+        }
+    }
+
+    /// A change that reaches every route, by one key or by several together, leaves the new memo
+    /// empty and its index with it, and the memo serves and indexes the routes added after. Turned
+    /// red by a memo that keeps a route every change reached, or whose index keeps a key its
+    /// routes no longer hold.
+    #[test]
+    fn a_change_that_reaches_every_route_starts_the_memo_empty() {
+        for changed in [
+            &["**"][..],
+            &["demo/*", "other/x"][..],
+            &["other/x", "**", "demo/a"][..],
+        ] {
+            let (memo, moved) = four_routes_after(changed, false);
+            assert!(memo.is_empty(), "{changed:?} reached every route");
+            assert!(kept_keys(&memo).is_empty());
+            memo.get_or_compute(moved, &(), "demo/a", || true, || 9);
+            assert_eq!(kept_keys(&memo), keys(&["demo/a"]), "{changed:?}");
         }
     }
 

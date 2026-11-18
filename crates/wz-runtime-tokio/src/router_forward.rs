@@ -461,6 +461,12 @@ mod egress_tests;
 mod face_runtime;
 mod face_table;
 use face_table::FaceTable;
+mod held_route;
+use held_route::{HeldFace, HeldFaceContext, LiteralPush};
+
+/// The client leg's routes of a broker hat, each naming its faces as the router holds them while
+/// they are up.
+type HeldClientRoutes = ClientRoutes<HeldFace>;
 #[cfg(all(test, feature = "transport-multilink"))]
 mod joined_link_tests;
 mod local_publish;
@@ -960,8 +966,9 @@ struct BrokerHat {
     /// R2909 — versioned and change-logged, so the client leg cached in
     /// `client_routes` retires the routes a change reaches.
     subs: Arc<ClientSubs>,
-    /// R2909 — the client leg of the data route over `subs`, per keyexpr.
-    client_routes: Arc<ClientRoutes>,
+    /// R2909 — the client leg of the data route over `subs`, per keyexpr. Each route holds its
+    /// faces ([`HeldFace`]), so a delivery finds none of them in the face table.
+    client_routes: Arc<HeldClientRoutes>,
     /// The per-client-face QUERYABLE store (C5b), the query-plane twin of
     /// `subs`: per hosted keyexpr, the declared [`QueryableInfo`] (`complete` /
     /// `distance`) the query route reads.
@@ -1003,7 +1010,7 @@ impl BrokerHat {
     fn new(keeps_draft_routes: bool) -> Self {
         Self {
             subs: Arc::new(ClientSubStore::new()),
-            client_routes: Arc::new(ClientRoutes::indexed()),
+            client_routes: Arc::new(HeldClientRoutes::indexed()),
             qabls: Arc::new(ClientQablStore::new()),
             client_query_routes: Arc::new(ClientQueryRoutes::indexed()),
             #[cfg(feature = "routing-token-tables")]
@@ -1016,7 +1023,7 @@ impl BrokerHat {
     /// tables shares them.
     fn subs_mut(&mut self) -> &mut ClientSubs {
         if self.keeps_draft_routes {
-            ClientRoutes::open_draft(&mut self.client_routes);
+            HeldClientRoutes::open_draft(&mut self.client_routes);
         }
         Arc::make_mut(&mut self.subs)
     }
@@ -1919,6 +1926,30 @@ struct RouterFaceState {
     /// the link came up is held when the program can declare anything
     /// ([`RouterForwarder::initial_declares_pending`]). Set by the arrival, never by a timer.
     initial_final: bool,
+}
+
+impl RouterFaceState {
+    /// What a send to this face reads of it (see `face_runtime::SendFace`).
+    fn send_face(&self) -> face_runtime::SendFace<'_> {
+        face_runtime::SendFace {
+            runtime: &self.runtime,
+            peer_zid: self.peer_zid,
+        }
+    }
+}
+
+/// The carrier a Put `push` is delivered to the client faces in: its key `keyexpr` as a literal,
+/// and its routing source reset to 0, since a client is a leaf and refuses a Push that names a
+/// source (`deliver_to_client_subscribers`). A literal by its type, so that it can be sent
+/// through a route that holds its faces; `None` drops the Put for every client.
+fn client_carrier(push: &PushOwned, keyexpr: &str) -> Option<LiteralPush> {
+    let mut carrier = reliteralize_push(push, keyexpr).ok()?;
+    stamped(
+        set_push_source(&mut carrier, 0),
+        "a Push for the client faces",
+    )
+    .ok()?;
+    LiteralPush::new(carrier).ok()
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -3188,6 +3219,9 @@ pub struct RouterForwarder {
     /// Count of messages ANY interceptor dropped on either flow (a coarse
     /// per-node count, not per-interceptor). `0` in any config with no ACL wired.
     interceptor_dropped: Counter,
+    /// Count of messages a route that holds its faces did not send to a face because the face had
+    /// left the tables since the route was computed (its runtime closed).
+    held_route_closed_skips: Counter,
     /// Total spanning-tree recomputes flushed across both nets — the D2c
     /// coalescing witness (rises once per flushed net per tick window).
     recomputes: Counter,
@@ -4327,6 +4361,7 @@ router_entry_points! { on_tables:
     fn shm_relay_dropped(&self) -> usize;
     fn deferred_client_delivery_seen(&self) -> usize;
     fn fan_out_face_visits(&self) -> usize;
+    fn held_route_closed_skips(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
     fn mcast_ingress_federated(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
@@ -5088,6 +5123,7 @@ impl RouterForwarder {
             #[cfg(feature = "routing-interceptor-hotreload")]
             egress_interceptor_cache_recomputes: Counter::new(),
             interceptor_dropped: Counter::new(),
+            held_route_closed_skips: Counter::new(),
             recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
@@ -5675,6 +5711,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.fan_out_face_visits.get()
     }
 
+    /// The messages a route that holds its faces did not send to a face that had left the tables
+    /// since the route was computed (see the field).
+    pub fn held_route_closed_skips(&self) -> usize {
+        self.held_route_closed_skips.get()
+    }
+
     /// I3c — count of mcast-ingress Pushes this router FEDERATED into the mesh as
     /// the group DR (the loop-safety witness: exactly one of two group-sharing
     /// routers federates a given keyexpr).
@@ -5962,17 +6004,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         chain.admit(&ctx, msg)
     }
 
-    /// Whether the EGRESS chain admits sending `msg` to the face whose `state` the
-    /// caller already holds.
-    /// Takes the already-borrowed `state` (not a `FaceId`) because the egress seams
-    /// ([`fan_out_tier`](Self::fan_out_tier)) hold the `faces` borrow across the
-    /// per-face loop. Empty chain admits without building a context.
+    /// Whether the EGRESS chain admits sending `msg` to the face `ctx` describes, face `id`.
+    /// Takes the caller's context rather than a `FaceId` because the egress seams already hold
+    /// what the context reads: the face's routing facts in a fan-out over the table, or the face a
+    /// route holds ([`HeldFaceContext`]). Empty chain admits without asking the context anything.
     fn admit_outbound(
         &self,
         id: FaceId,
-        state: &RouterFaceState,
+        ctx: &dyn InterceptorContext,
         msg: &NetworkMessage,
-        known: Option<&str>,
     ) -> InterceptorVerdict {
         // `id` is the EGRESS cache key and has no other use, so with the cache
         // feature off it is genuinely unused. Discarded explicitly rather than
@@ -5984,21 +6024,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if chain.is_empty() {
             return InterceptorVerdict::Admit;
         }
-        let ctx = RouterFaceContext { face: state, known };
         // R2348 — the EGRESS half, and the router's most-consulted seam: this
         // runs once per message PER DESTINATION FACE across `fan_out_tier`, so an
         // uncached chain is re-evaluated fan-out-width times for one publish.
-        // `id` is a parameter rather than a lookup because both call sites
-        // already hold it (`*id` in the fan-out loop, `target` in `send_to_face`).
+        // `id` is a parameter rather than a lookup because every call site
+        // already holds it. The key is the one the context gives the chain, so a face reached
+        // through a held route is keyed without its aliases being read.
         #[cfg(feature = "routing-interceptor-hotreload")]
-        if let Some(keyexpr) =
-            resolve_governed_keyexpr(msg, &state.keyexpr_table).or_else(|| known.map(str::to_owned))
-        {
+        if let Some(keyexpr) = ctx.full_keyexpr(msg) {
             let mut cache = self.egress_keyexpr_cache.guard();
             let recomputes = &self.egress_interceptor_cache_recomputes;
             let mut compute = || {
                 recomputes.bump();
-                chain.compute_keyexpr_cache(&ctx, &keyexpr)
+                chain.compute_keyexpr_cache(ctx, &keyexpr)
             };
             let slot = cache
                 .entry((id, keyexpr.clone()))
@@ -6006,9 +6044,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if slot.version() != chain.version() {
                 *slot = compute();
             }
-            return chain.admit_cached(&ctx, msg, Some(slot));
+            return chain.admit_cached(ctx, msg, Some(slot));
         }
-        chain.admit(&ctx, msg)
+        chain.admit(ctx, msg)
     }
 
     /// The QoS overwrite of the INGRESS chain, applied to a message that arrived on face `id`:
@@ -6052,28 +6090,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// The QoS overwrite of the EGRESS chain, applied to a message about to leave toward the
-    /// face whose `state` the caller holds. The message is the caller's own, so it is rewritten
+    /// face `ctx` describes. The message is the caller's own, so it is rewritten
     /// in place; the band and the express flag it is sent with follow the QoS it now carries.
     /// `None` drops the message for the face `id`: its chain has no room for the QoS, and a
     /// Request's branch held for the face is let go ([`Self::let_go_unsent_branch`]).
     #[cfg(feature = "access-qos-overwrite")]
-    #[allow(clippy::too_many_arguments)]
     fn overwritten_egress(
         &self,
         id: FaceId,
-        state: &RouterFaceState,
+        ctx: &dyn InterceptorContext,
         mut msg: NetworkMessage,
         reliable: bool,
         express: bool,
         priority: Priority,
-        known: Option<&str>,
     ) -> Option<(NetworkMessage, bool, Priority)> {
         let chain = self.egress_interceptors.read();
         if !chain.overwrites_qos() {
             return Some((msg, express, priority));
         }
-        let ctx = RouterFaceContext { face: state, known };
-        let Some(qos) = chain.overwritten_qos(&ctx, &msg, reliable) else {
+        let Some(qos) = chain.overwritten_qos(ctx, &msg, reliable) else {
             return Some((msg, express, priority));
         };
         // The pending table is not taken with the chain held.
@@ -6293,6 +6328,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.client_hats()
     }
 
+    /// The client leg of the data route for `keyexpr` in `hat` ([`client_route`]), each face as
+    /// these tables hold it: computed from the tables the memo belongs to, so every face of the
+    /// store is a face of the table.
+    fn client_leg(&self, hat: &BrokerHat, keyexpr: &str, wire: bool) -> Arc<[HeldFace]> {
+        let names = |k: &str| self.names_a_resource(k);
+        let faces = &self.tables.faces;
+        client_route(
+            &hat.subs,
+            Cached {
+                routes: &hat.client_routes,
+                names_a_resource: &names,
+            },
+            keyexpr,
+            wire,
+            |id| faces.get(&id).map(|state| HeldFace::of(id, state)),
+        )
+    }
+
     /// Whether any client face holds a subscription at all. The node's own session is not a
     /// client here: what it hosts is delivered by its own dispatch, and a client's deferral is
     /// counted only where a client was owed a copy.
@@ -6395,44 +6448,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         Ok(sent)
     }
 
-    /// Send to each of `targets` that is a held face of `tier` the message `build`
-    /// produces for it, returning the count of faces that accepted one — the
-    /// TARGETED twin of [`fan_out_tier_qos`](Self::fan_out_tier_qos), for a caller
-    /// that already knows which faces a message goes to (a cached client route).
+    /// Send to each of `targets` that is a face of `tier` the Put `build` produces for it,
+    /// returning the count of faces that accepted one — the TARGETED twin of
+    /// [`fan_out_tier_qos`](Self::fan_out_tier_qos), for a caller that already knows which faces
+    /// a message goes to (a cached client route, which holds its faces).
     ///
-    /// Its cost is the number of targets, not the number of faces the router
-    /// holds: each target is one lookup in the face table, and nothing is asked of
-    /// the faces that are not targets. A target that is no longer held, or that
-    /// belongs to another tier, is skipped, so a route that outlived its face
-    /// costs one failed lookup rather than a wrong send. Every send goes through
-    /// [`egress_to_face`](Self::egress_to_face), the one place the egress access
-    /// control, the send and the accounting are decided.
-    fn fan_out_to_faces_qos(
+    /// Its cost is the number of targets, not the number of faces the router holds, and no target
+    /// is looked up: the route holds what a send reads of each face. A target of another tier is
+    /// skipped, and one that left the tables since the route was computed is skipped by
+    /// [`egress_held`](Self::egress_held), the send every target goes through.
+    fn fan_out_to_held_faces(
         &self,
         tier: Region,
-        targets: &[FaceId],
+        targets: &[HeldFace],
         reliable: bool,
         priority: Priority,
         express: bool,
-        mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
-    ) -> Result<usize, CodecError> {
+        mut build: impl FnMut(FaceId) -> Option<LiteralPush>,
+    ) -> usize {
         let mut sent = 0;
-        let faces = &self.tables.faces;
-        for id in targets {
+        for face in targets {
             self.fan_out_face_visits.bump();
-            let Some(state) = faces.get(id) else {
-                continue;
-            };
-            if state.tier != tier {
+            if face.tier != tier {
                 continue;
             }
-            if let Some(msg) = build(*id, state.peer_zid)? {
-                if self.egress_to_face(*id, state, msg, reliable, express, priority, None) {
+            if let Some(carrier) = build(face.id) {
+                if self.egress_held(face, carrier, reliable, express, priority) {
                     sent += 1;
                 }
             }
         }
-        Ok(sent)
+        sent
     }
 
     /// Record this node's routing on the timestamp stack of a message it is about to send on, with
@@ -6461,15 +6507,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// Send one built message to one held face, through the egress access control
-    /// and the router's accounting — the single egress SSOT that
-    /// [`fan_out_tier_qos`](Self::fan_out_tier_qos),
-    /// [`fan_out_to_faces_qos`](Self::fan_out_to_faces_qos) and
-    /// [`send_to_face`](Self::send_to_face) all send through. Whether the face
-    /// accepted the message.
+    /// Send one built message to one face of the tables, through the egress access control
+    /// and the router's accounting — what [`fan_out_tier_qos`](Self::fan_out_tier_qos) and
+    /// [`send_to_face`](Self::send_to_face) send through, and with
+    /// [`egress_held`](Self::egress_held) the two doors of the one egress
+    /// ([`egress_through`](Self::egress_through)). Whether the face accepted the message.
     ///
     /// `known` is the key the router knows `msg` to be about when `msg` names none (see
-    /// [`RouterFaceContext::known`]); `None` for a message that says its own.
+    /// [`RouterFaceContext::known`]); `None` for a message that says its own. The face's routing
+    /// facts are read as this version holds them, its aliases among them.
     #[allow(clippy::too_many_arguments)]
     fn egress_to_face(
         &self,
@@ -6481,14 +6527,69 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         priority: Priority,
         known: Option<&str>,
     ) -> bool {
+        // A declaration for a face that keeps declarations by id is numbered first: the gate then
+        // reads the message that goes out.
+        let msg = self.number_declaration(state, msg);
+        let context = RouterFaceContext { face: state, known };
+        self.egress_through(
+            id,
+            state.send_face(),
+            &context,
+            msg,
+            reliable,
+            express,
+            priority,
+        )
+    }
+
+    /// Send a literal Put to a face a route holds, through the same egress as
+    /// [`egress_to_face`](Self::egress_to_face). The face is not looked up, and none of its facts a
+    /// version holds is read: what the route holds is fixed while the face is up, and the Put's key
+    /// is a literal by its type, so no alias of the face's is needed to read it
+    /// ([`HeldFaceContext`]). A face that left the tables since the route was computed is not sent
+    /// to, and counted ([`held_route_closed_skips`](RouterForwarder::held_route_closed_skips)).
+    fn egress_held(
+        &self,
+        face: &HeldFace,
+        carrier: LiteralPush,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
+        if face.is_closed() {
+            self.held_route_closed_skips.bump();
+            return false;
+        }
+        let send = face.send_face();
+        let context = HeldFaceContext::new(send);
+        self.egress_through(
+            face.id,
+            send,
+            &context,
+            carrier.into_message(),
+            reliable,
+            express,
+            priority,
+        )
+    }
+
+    /// The egress both doors share: the egress interceptors over `context`, the QoS overwrite, the
+    /// routing record, and the send or hold to the face `face` reads.
+    #[allow(clippy::too_many_arguments)]
+    fn egress_through(
+        &self,
+        id: FaceId,
+        face: face_runtime::SendFace<'_>,
+        context: &dyn InterceptorContext,
+        msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
         // §5.16 EGRESS access control (y113): gate the built message by the
         // DESTINATION face's subject before it leaves — a denied outbound is
         // dropped for THIS face (not sent, not counted) and witnessed. The
         // outbound interceptor gate; empty chain (no ACL) is a no-op fast path.
-        //
-        // A declaration for a face that keeps declarations by id is numbered first: the gate then
-        // reads the message that goes out.
-        let msg = self.number_declaration(state, msg);
         match &msg {
             NetworkMessage::Declare(_) => route_event!(
                 "node {} sends to face {:?}: {}",
@@ -6503,18 +6604,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 "node {} sends to face {:?} (remote {:?}): {}",
                 self.own_zid,
                 id,
-                state.peer_zid,
+                face.peer_zid,
                 Crossing::Push(push)
             ),
             _ => {}
         }
-        let verdict = self.admit_outbound(id, state, &msg, known);
+        let verdict = self.admit_outbound(id, context, &msg);
         if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped.bump();
             // Charge the drop to the DESTINATION face's own
             // session on upstream's per-reason counter.
             crate::linkstate_forward::charge_interceptor_drop(
-                &state.runtime.actions,
+                &face.runtime.actions,
                 &msg,
                 kind,
                 InterceptorFlow::Egress,
@@ -6526,7 +6627,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // for THIS destination, and is sent at the band and the express flag that QoS names.
         #[cfg(feature = "access-qos-overwrite")]
         let Some((msg, express, priority)) =
-            self.overwritten_egress(id, state, msg, reliable, express, priority, known)
+            self.overwritten_egress(id, context, msg, reliable, express, priority)
         else {
             return false;
         };
@@ -6544,7 +6645,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // every other face: it leaves now, or it is held for this destination and the face that
         // fed it, when it has one, is not read until the destination has room (see [`egress`]).
         if self.held_lane(&msg, reliable).is_some() {
-            return match self.credited_send(id, state, msg, reliable, express, priority) {
+            return match self.credited_send(id, face, msg, reliable, express, priority) {
                 egress::Credited::Sent => {
                     self.note_sent(was_push);
                     true
@@ -6557,7 +6658,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // tables held: it is owed to the publisher, who sends it once they are released
         // ([`local_publish`]). Anything else is sent as it always was.
         let msg = match local_publish::send_or_owe(
-            &state.runtime.actions,
+            &face.runtime.actions,
             msg,
             reliable,
             express,
@@ -6572,7 +6673,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Err(msg) => msg,
         };
         let sent =
-            self.send_to_face_actions(&state.runtime.actions, msg, reliable, express, priority);
+            self.send_to_face_actions(&face.runtime.actions, msg, reliable, express, priority);
         if sent {
             self.note_sent(was_push);
         }
@@ -9152,7 +9253,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // wildcard client sub, re-opening the very gap C3 closes).
         // R2909 — through each broker hat's client-leg cache ([`client_route`]).
         let wire = wireexpr_names_a_declaration(&stamp.received().keyexpr.body);
-        let names = |k: &str| self.names_a_resource(k);
         // The caller decides `defer` from the crossing filter: a router that
         // does not carry a peer-source Push north does not deliver it either,
         // since the carrier's copy comes back to it as a ROUTER source.
@@ -9170,18 +9270,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // The deferred faces are destinations of the route all the same, as
                 // zenoh's client faces are in `route` before its region filter turns
                 // them away, so a Put one of them subscribes takes the stamp.
-                let routed = self.client_regions().any(|(_, hat)| {
-                    !client_route(
-                        &hat.subs,
-                        Cached {
-                            routes: &hat.client_routes,
-                            names_a_resource: &names,
-                        },
-                        keyexpr,
-                        wire,
-                    )
-                    .is_empty()
-                });
+                let routed = self
+                    .client_regions()
+                    .any(|(_, hat)| !self.client_leg(hat, keyexpr, wire).is_empty());
                 if routed {
                     let _ = stamp.for_egress();
                 }
@@ -9205,16 +9296,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // mandatory ext_nodeid id 0x03). Faithful to zenoh pubsub.rs (a client-sub
         // data-route direction node-id is NodeId::default()=0). The DATA-plane twin of
         // the R311y179 forward_request_to_client_queryables source-reset fix.
-        let carry = || -> Option<PushOwned> {
-            let mut carrier = reliteralize_push(stamp.for_egress()?, keyexpr).ok()?;
-            stamped(
-                set_push_source(&mut carrier, 0),
-                "a Push for the client faces",
-            )
-            .ok()?;
-            Some(carrier)
-        };
-        let mut carrier: Option<PushOwned> = None;
+        let carry = || client_carrier(stamp.for_egress()?, keyexpr);
+        let mut carrier: Option<LiteralPush> = None;
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
         // QoS-negotiated client observes the same band the mesh legs carry (zenoh
@@ -9227,15 +9310,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // R2873 (step 3d) — one fan-out per broker hat, each scoped to the
         // region that hat owns and reading that hat's own table.
         for (region, hat) in self.client_regions() {
-            let clients = client_route(
-                &hat.subs,
-                Cached {
-                    routes: &hat.client_routes,
-                    names_a_resource: &names,
-                },
-                keyexpr,
-                wire,
-            );
+            let clients = self.client_leg(hat, keyexpr, wire);
             if clients.is_empty() {
                 continue;
             }
@@ -9249,16 +9324,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             };
             // The route IS the target list: only those faces are asked, so the
             // cost follows the subscribers and not the faces the router holds.
-            let _ = self.fan_out_to_faces_qos(
-                region,
-                &clients,
-                reliable,
-                priority,
-                express,
-                |id, _zid| {
-                    Ok((id != inbound).then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
-                },
-            );
+            let _ =
+                self.fan_out_to_held_faces(region, &clients, reliable, priority, express, |id| {
+                    (id != inbound).then(|| carrier.clone())
+                });
         }
     }
 
@@ -13669,7 +13738,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // Client tier: held with no net (a leaf, not a transit node).
             None => None,
         };
-        self.tables.faces.insert(
+        let replaced = self.tables.faces.insert(
             id,
             Arc::new(RouterFaceState {
                 runtime: Arc::new(face_runtime::FaceRuntime::new(actions.clone())),
@@ -13685,6 +13754,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 initial_final: false,
             }),
         );
+        // A face held under the same id before is gone, as a face that left is: a route that
+        // holds it sends to it no more. The accept loop mints every id once (`FaceId::mint`).
+        if let Some(replaced) = replaced {
+            replaced.runtime.close();
+        }
         self.shed_registry.add(id, actions.clone());
         let graph_done = Instant::now();
         // Self gained a routing link in this tier's net (its link-state changed):
@@ -13928,6 +14002,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(state) = self.tables.faces.remove(&id) else {
             return false;
         };
+        // A route that holds the face, kept by a version from before this one, sends to it no more.
+        state.runtime.close();
         // What its receive path counted stays in the router's total, in the same step that
         // removes it, so a reader sees the face's count in one place and never in two or none.
         #[cfg(feature = "resource-snapshot")]
@@ -20043,53 +20119,181 @@ mod tests {
         assert_eq!(peer_zid_routing(&client), Some(zid(0xCC)));
     }
 
-    /// The targeted fan-out asks only the targets, skips one that is gone or
-    /// belongs to another tier, and counts what it looked at.
+    /// Face `id` as a route of `fwd`'s current tables holds it.
+    fn held(fwd: &RouterForwarder, id: FaceId) -> HeldFace {
+        let on = fwd.on_tables();
+        let state = on.tables.faces.get(&id).expect("the face is held");
+        HeldFace::of(id, state)
+    }
+
+    /// The carrier of a Put of `keyexpr`, as the client leg sends it.
+    fn literal_put(keyexpr: &str) -> LiteralPush {
+        let push =
+            wz_session_core::push_build::build_push_literal(keyexpr, b"x").expect("build push");
+        client_carrier(&push, keyexpr).expect("a literal carrier")
+    }
+
+    /// The targeted fan-out asks only the targets of its tier, skips one of another tier without
+    /// building for it, and one that left the tables since the route was computed without sending
+    /// to it; it counts what it looked at, and the skip of the face that left. Turned red by a
+    /// fan-out that sends through a closed runtime, or builds for a face of another tier.
     #[test]
     fn a_targeted_fan_out_skips_a_face_that_is_gone_or_in_another_tier() {
-        let (fwd, _sinks, _peer) = router_holding_clients(3);
-        let client_tier = fwd
-            .on_tables()
-            .tables
-            .faces
-            .get(&FaceId(2))
-            .map(|f| f.tier)
-            .expect("client face 2 is held");
-        let peer_tier = fwd
-            .on_tables()
-            .tables
-            .faces
-            .get(&FaceId(0))
-            .map(|f| f.tier)
-            .expect("the peer face is held");
+        let (fwd, sinks, _peer) = router_holding_clients(3);
+        let targets = [
+            held(&fwd, FaceId(2)),
+            held(&fwd, FaceId(0)),
+            held(&fwd, FaceId(3)),
+        ];
+        let (client_tier, peer_tier) = (targets[0].tier, targets[1].tier);
         assert_ne!(client_tier, peer_tier, "the fixture spans two tiers");
+        fwd.deregister(FaceId(3));
+        for sink in &sinks {
+            sink.reset();
+        }
         let asked = RefCell::new(Vec::new());
-        let before = fwd.fan_out_face_visits();
-        let sent = fwd
-            .on_tables()
-            .fan_out_to_faces_qos(
-                client_tier,
-                &[FaceId(2), FaceId(0), FaceId(99)],
-                true,
-                Priority::DEFAULT,
-                false,
-                |id, _zid| {
-                    asked.borrow_mut().push(id);
-                    Ok(None)
-                },
-            )
-            .expect("no build error");
-        assert_eq!(sent, 0, "the builder declined every face");
+        let (visits, skips) = (fwd.fan_out_face_visits(), fwd.held_route_closed_skips());
+        let sent = fwd.on_tables().fan_out_to_held_faces(
+            client_tier,
+            &targets,
+            true,
+            Priority::DEFAULT,
+            false,
+            |id| {
+                asked.borrow_mut().push(id);
+                Some(literal_put("demo/c1"))
+            },
+        );
+        assert_eq!(sent, 1, "face 2 was sent the Put");
+        assert_eq!(sinks[1].frame_count(), 1, "client face 2 received it");
         assert_eq!(
-            fwd.fan_out_face_visits() - before,
+            sinks[2].frame_count(),
+            0,
+            "the face that left received nothing"
+        );
+        assert_eq!(
+            fwd.fan_out_face_visits() - visits,
             3,
             "every target was looked at, and only the targets"
         );
         assert_eq!(
-            *asked.borrow(),
-            vec![FaceId(2)],
-            "the peer face (another tier) and the vanished face were not asked"
+            fwd.held_route_closed_skips() - skips,
+            1,
+            "the face that left"
         );
+        assert_eq!(
+            *asked.borrow(),
+            vec![FaceId(2), FaceId(3)],
+            "the peer face (another tier) was not built for"
+        );
+    }
+
+    /// A client leg's route holds a face that then leaves: a Put routed through the route a
+    /// version kept from before it left is not sent to it, under either value of the tables'
+    /// sharing, and the skip is counted. Turned red by a deregister that leaves the face's
+    /// runtime open.
+    #[test]
+    fn a_route_held_from_before_a_face_left_does_not_send_to_it() {
+        for sharing in [RoutingTableSharing::Rwlock, RoutingTableSharing::Snapshot] {
+            let fwd = RouterForwarder::new(zid(0x01)).with_table_sharing(sharing);
+            let (client, sink) = face(zid(0xAA), WIRE_CLIENT);
+            fwd.register(FaceId(1), &client);
+            forward_one(&fwd, FaceId(1), declare_sub("demo/held"));
+            let route = {
+                let on = fwd.on_tables();
+                on.client_leg(on.tables.owner_broker(CLIENTS_REGION), "demo/held", false)
+            };
+            assert_eq!(
+                route.iter().map(|face| face.id).collect::<Vec<_>>(),
+                [FaceId(1)],
+                "{}: the route holds the subscriber",
+                sharing.id()
+            );
+            fwd.deregister(FaceId(1));
+            sink.reset();
+            let skips = fwd.held_route_closed_skips();
+            let sent = fwd.on_tables().fan_out_to_held_faces(
+                route[0].tier,
+                &route,
+                true,
+                Priority::DEFAULT,
+                false,
+                |_| Some(literal_put("demo/held")),
+            );
+            assert_eq!(sent, 0, "{}", sharing.id());
+            assert_eq!(
+                sink.frame_count(),
+                0,
+                "{}: nothing reached the face",
+                sharing.id()
+            );
+            assert_eq!(fwd.held_route_closed_skips() - skips, 1, "{}", sharing.id());
+        }
+    }
+
+    /// A client face that leaves and a new one registered under the same id, with a session of its
+    /// own, that subscribes the same key: a Put from another client reaches the new face through
+    /// the route of the version after, and not the face that left, under either value of the
+    /// tables' sharing. Turned red by a route kept across the face's leaving, which would hold the
+    /// runtime of the face that left.
+    #[test]
+    fn a_face_registered_again_is_reached_through_the_next_versions_routes() {
+        for sharing in [RoutingTableSharing::Rwlock, RoutingTableSharing::Snapshot] {
+            let fwd = RouterForwarder::new(zid(0x01)).with_table_sharing(sharing);
+            let (publisher, _) = face(zid(0xAB), WIRE_CLIENT);
+            let (first, first_sink) = face(zid(0xAA), WIRE_CLIENT);
+            fwd.register(FaceId(2), &publisher);
+            fwd.register(FaceId(1), &first);
+            forward_one(&fwd, FaceId(1), declare_sub("demo/again"));
+            let put = || {
+                NetworkMessage::Push(Box::new(
+                    wz_session_core::push_build::build_push_literal("demo/again", b"x")
+                        .expect("build push"),
+                ))
+            };
+            first_sink.reset();
+            forward_one(&fwd, FaceId(2), put());
+            assert_eq!(
+                first_sink.frame_count(),
+                1,
+                "{}: the first face",
+                sharing.id()
+            );
+            fwd.deregister(FaceId(1));
+            let (second, second_sink) = face(zid(0xAC), WIRE_CLIENT);
+            fwd.register(FaceId(1), &second);
+            forward_one(&fwd, FaceId(1), declare_sub("demo/again"));
+            first_sink.reset();
+            second_sink.reset();
+            forward_one(&fwd, FaceId(2), put());
+            assert_eq!(
+                second_sink.frame_count(),
+                1,
+                "{}: the new face",
+                sharing.id()
+            );
+            assert_eq!(
+                first_sink.frame_count(),
+                0,
+                "{}: not the one that left",
+                sharing.id()
+            );
+        }
+    }
+
+    /// The client leg's carrier is a literal whatever the Put it is made from named: an aliased
+    /// Put's carrier names the key the router resolved, and a literal Put's its own. Turned red by
+    /// a client leg that hands the held egress a carrier it did not re-key.
+    #[test]
+    fn the_client_leg_carries_a_literal_whatever_the_put_named() {
+        let aliased =
+            wz_session_core::push_build::build_push_aliased(5, None, b"x").expect("aliased push");
+        let carrier = client_carrier(&aliased, "demo/resolved").expect("a carrier");
+        assert_eq!(carrier.keyexpr(), "demo/resolved");
+        let literal = wz_session_core::push_build::build_push_literal("demo/own", b"x")
+            .expect("literal push");
+        let carrier = client_carrier(&literal, "demo/own").expect("a carrier");
+        assert_eq!(carrier.keyexpr(), "demo/own");
     }
 
     /// R2879 (open-debt item 751, step 5) — a CLIENT-sourced Push leaves its one

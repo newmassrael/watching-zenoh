@@ -426,8 +426,8 @@ fn a_callback_of_the_nodes_own_subscriber_may_declare_while_the_group_ingress_ro
 /// draft memo that keeps nothing, or by a publish that drops what the draft kept.
 #[test]
 fn routing_table_sharing_a_writer_keeps_the_routes_of_its_draft_when_the_draft_memos_are_on() {
-    /// The client leg of `KEY` in `tables`, every keyexpr taken as declared.
-    fn client_leg(tables: &Tables) -> Arc<[FaceId]> {
+    /// The faces of the client leg of `KEY` in `tables`, every keyexpr taken as declared.
+    fn client_leg(tables: &Tables) -> Vec<FaceId> {
         let hat = tables.owner_broker(CLIENTS_REGION);
         let names = |_: &str| true;
         client_route(
@@ -438,7 +438,11 @@ fn routing_table_sharing_a_writer_keeps_the_routes_of_its_draft_when_the_draft_m
             },
             KEY,
             false,
+            |id| tables.faces.get(&id).map(|state| HeldFace::of(id, state)),
         )
+        .iter()
+        .map(|face| face.id)
+        .collect()
     }
     for sharing in [RoutingTableSharing::Rwlock, RoutingTableSharing::Snapshot] {
         for drafts in [false, true] {
@@ -446,24 +450,31 @@ fn routing_table_sharing_a_writer_keeps_the_routes_of_its_draft_when_the_draft_m
             let fwd = RouterForwarder::new(zid(0x01))
                 .with_table_sharing(sharing)
                 .with_draft_route_memos(drafts);
+            // The face the writer's subscription is held for: a route holds only faces the tables
+            // hold.
+            let (actions, _sink) = client(zid(0xC7));
+            fwd.register(FaceId(7), &actions);
+            let computes = fwd.client_route_computes();
+            let (asked, computed) = fwd.tables.read().routes_asked_off_version();
             let mut write = fwd.tables.write();
             write
                 .owner_broker_mut(CLIENTS_REGION)
                 .subs_mut()
                 .insert(FaceId(7), 1, KEY, ());
-            assert_eq!(&*client_leg(&write), &[FaceId(7)], "{case}");
-            assert_eq!(&*client_leg(&write), &[FaceId(7)], "{case}");
+            assert_eq!(client_leg(&write), [FaceId(7)], "{case}");
+            assert_eq!(client_leg(&write), [FaceId(7)], "{case}");
+            let (asked_now, computed_now) = write.routes_asked_off_version();
             assert_eq!(
-                write.routes_asked_off_version(),
+                (asked_now - asked, computed_now - computed),
                 (2, if drafts { 1 } else { 2 }),
                 "{case}: the writer asked twice at its draft's inputs"
             );
             write.publish();
             let read = fwd.tables.read();
-            assert_eq!(&*client_leg(&read), &[FaceId(7)], "{case}");
+            assert_eq!(client_leg(&read), [FaceId(7)], "{case}");
             drop(read);
             assert_eq!(
-                fwd.client_route_computes(),
+                fwd.client_route_computes() - computes,
                 if drafts { 1 } else { 3 },
                 "{case}: the published version computes only what its draft did not keep"
             );

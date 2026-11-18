@@ -672,8 +672,8 @@ runs of each tree taken one after the other (host load 14 to 45):
 
 Section 6.8 left three costs of the route memos unmeasured, each named in section 7. This section
 builds the instruments for all three, the change for the second, and the change for the first
-behind a switch that stays off until its reading is taken. No figure is recorded here yet: the
-readings are taken on pc2 and added below them.
+behind a switch that stays off until its reading is taken. The readings, taken on pc2, follow the
+instruments, with what each decides.
 
 **What a writer routes through its draft.** A writer that routes while it writes (a replay, an
 interest answered while it declares, a query routed by a write) asks the memo at its draft's
@@ -721,22 +721,27 @@ the routes under the memo's one lock. The writer asks the index for the routes w
 meet each changed key, and refines each with the exact intersection on the two texts
 (`keyexpr_intersects_text`, which splits nothing unless a wildcard makes the walk necessary). The
 cost follows the routes a change meets, not the routes kept. A key that meets every route
-(`mesh/**`) still leaves out every route, and now takes each out of the index as well. The mesh
-legs keep no index: a move of their inputs starts their memo empty, so they never ask which routes
-a key reaches. A memo built with no index still finds the routes by the scan, which is the form the
-instrument measures the index against.
+(`mesh/**`) still leaves out every route, and took each out of the index as well, which the
+reading below found costs more than the scan. A removal and a put each copy one path of the routes
+and one of the index, so a change that reaches more than half of the routes now starts the new
+memo empty and puts back the routes it does not reach (`Kept::without` in `route_cache.rs`), and
+one that reaches every route, as one changed key's walk of the index or the scan counts it, puts
+nothing back. The mesh legs keep no index: a move of their inputs starts their memo empty, so they
+never ask which routes a key reaches. A memo built with no index still finds the routes by the
+scan, which is the form the instrument measures the index against; in test builds a memo can be
+made to take each reached route out one by one however many a change reaches
+(`RouteCache::retiring_by_route`), the form the reading below was taken of.
 
 What the index costs is paid by a reader: a miss that keeps its route also inserts its key into the
 index, a walk of the key's chunks and a copy of the nodes on that path. A hit reads the routes
 alone, as before.
 
-**A delivery's face lookups.** A route names its faces by id and every delivery finds each in the
-version's face table (`fan_out_to_faces_qos`), the persistent map of section 6.6. A route that held
-each face's state would read it where the route holds it, as upstream's `Direction` holds its
-`Arc<FaceState>` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) dst_face: Arc<FaceState>,`).
-Nothing is changed here: the instrument measures what the lookups cost a delivery first. If the
-reading asks for the change, a route that held face state outlives the version it was computed
-from, and one of these rules has to say when it is stale:
+**A delivery's face lookups.** A route named its faces by id and every delivery found each in the
+version's face table (the targeted fan-out, `fan_out_to_faces_qos` then), the persistent map of
+section 6.6. A route that held each face's state would read it where the route holds it, as
+upstream's `Direction` holds its `Arc<FaceState>` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) dst_face: Arc<FaceState>,`).
+The instrument measured what the lookups cost a delivery first. A route that holds face state
+outlives the version it was computed from, and one of these rules has to say when it is stale:
 
 - (a) The face table's version joins the route inputs: any face that comes, goes or changes empties
   every memo whose routes name faces. Simplest, and it makes every face transition recompute every
@@ -746,9 +751,33 @@ from, and one of these rules has to say when it is stale:
   that changed. Exact, at the cost of a second index kept by every miss.
 - (c) The route holds only what does not change while the face is up (its runtime and send seam,
   which `deregister` closes), and reads the facts that can change (its tier) from that runtime at
-  delivery. No new invalidation: a face that leaves closes its runtime, which a delivery already
-  observes. It moves the tier, or whatever else a delivery reads, out of the version.
+  delivery. No new invalidation: a face that leaves closes its runtime, which a delivery observes.
+  It moves the tier, or whatever else a delivery reads, out of the version.
 - (d) Keep ids, as now, if the lookups are measured to cost a delivery nothing a run tells.
+
+The reading below rules out (d), and (c) is built, in the form the code allows
+(`router_forward/held_route.rs`):
+
+- The client leg's route holds a `HeldFace` for each face: its id, tier, routing zid and runtime,
+  each fixed from `register` to `deregister` (a face's tier is fixed when it is inserted, and a face
+  that changes tier is taken out and put in again with a runtime of its own). The route is computed
+  from the version's own face table, so it holds the runtime that version holds.
+- `deregister` closes the face's runtime (`FaceRuntime::close`), and so does a `register` that
+  replaces a face under its id. A delivery through a held route reads the mark and does not send to
+  a closed runtime, and counts it (`RouterForwarder::held_route_closed_skips`). The routes of the
+  version that took the face out do not name it: its declarations went with it, and the change of
+  their keys left out every route they reach (section 6.8).
+- The one fact of a face a send could read that changes while the face is up is its aliases
+  (`RouterFaceState::keyexpr_table`, moved by the face's own alias declarations), read only to
+  resolve the message's key for the egress interceptors and their verdict cache. The held route's
+  egress (`egress_held`) takes a `LiteralPush` and nothing else: a Put whose key expression is a
+  literal by construction, made by the client leg (`client_carrier`) and refused for an aliased
+  Put. Its interceptor context (`HeldFaceContext`) reads the key off the message and no alias table,
+  and the verdict cache is keyed by the face's id and that key.
+- A send that reads only fixed facts takes `SendFace` (the runtime and the zid) rather than the
+  face's routing facts: `credited_send`, `hold` and the chain's send. Both doors, the one by id
+  (`egress_to_face`, which still numbers a declaration from the face's aliases) and the held one,
+  go through one egress (`egress_through`), with the interceptor context each one has.
 
 **How the readings are taken.** On pc2, one build of `wz-runtime-tokio` with `--release`, each
 instrument in a process of its own, `uptime` recorded per run, two or three runs:
@@ -764,15 +793,113 @@ instrument in a process of its own, `uptime` recorded per run, two or three runs
 - The routes a change reaches: `cargo test -p wz-runtime-tokio --release --features
   routing-router-hat --lib the_routes_a_change_reaches_measured_found_by_the_index_and_by_a_scan
   -- --ignored --nocapture`. 2,048 client faces, 256 to 65,536 keys kept (`WZ_MEMO_KEYS` names
-  others); the scan and the index take turns in one process. Its lines are the writer's bring of
-  the client leg's memo, the part of a publish this changes, for a key no route meets, a key one
-  route meets and a key every route meets, and a reader's miss and hit with and without the index.
+  others); the forms take turns in one process. `scan` and `index` take each route a change
+  reaches out one by one, the forms the reading below was taken of, and `index_wholesale` is the
+  memo as the router builds it now. Its lines are the writer's bring of the client leg's memo, the
+  part of a publish this changes, for a key no route meets, a key one route meets and a key every
+  route meets, and a reader's miss and hit with and without the index.
 - A delivery's face lookups: `cargo test -p wz-runtime-tokio --release --features
   routing-router-hat --lib the_face_lookups_of_a_delivery_measured_against_the_faces_held --
   --ignored --nocapture`. 256 to 2,048 client faces, fan-outs 1 to 512; the lookups by id and the
-  held state take turns in one process. A `perf record --comm wz-publisher` of
+  held faces take turns in one process. The reading below was taken of a held form that read the
+  tier of a held `RouterFaceState` (`held_state`); the instrument's held form is now the route as
+  the client leg keeps it (`held_face`), which reads the tier and the closed mark of a `HeldFace`,
+  and its reading is not taken yet. A `perf record --comm wz-publisher` of
   `the_puts_routed_measured_against_the_faces_up` at 2,048 faces gives the share of a Put's cycles
   in `PersistentMap::get` beside it.
+
+**The readings.** On pc2, one release build of `wz-runtime-tokio` with `routing-router-hat`, two
+runs one after the other, each running the three instruments in turn. The host was loaded, a load
+average of 63 and 83 on its 32 cores when the runs began, so the nanoseconds below are noisy; what
+is read from them is the comparison of forms that took turns in one process, and the counts. Every
+line was taken under `rwlock`, the default value: the runs under `snapshot`, the `perf record` of
+the readers with the draft memos off and on, and the `perf record` of the Puts routed at 2,048
+faces were not taken.
+
+*The writer's draft.* `WZ_DRAFT_ROUTE_MEMOS=off,on` and `WZ_WRITER_WINDOWS=none,declaring`, each
+window kind three times for each value in each run:
+
+| Window | Draft memos | `routes_asked_off_version` | `routes_computed_off_version` | Writes a second, median, run 1; run 2 |
+|---|---|---|---|---|
+| none | off | 0 in every window | 0 in every window | 0; 0 |
+| none | on | 0 in every window | 0 in every window | 0; 0 |
+| declaring | off | 0 in every window | 0 in every window | 31,811; 95,527 |
+| declaring | on | 0 in every window | 0 in every window | 69,741; 103,376 |
+
+The writer did not ask one route at its draft's inputs in any window, so it computed none there,
+with the draft memos off or on. The draft memo stays off: it was to be turned on if the writer's
+computes at its draft's inputs fell, and a count of zero cannot fall. The count answers the
+question for the declaring window alone. That window's writer declares and withdraws subscribers;
+none of the instrument's windows replays declarations to a face that comes up, answers an interest
+while it declares, or routes a query from inside a write, the three ways section 6.8 named for a
+writer to route through its draft, so how often those ask at a draft's inputs is not measured.
+The switch and the counter stay, in test builds, for the instrument that has such a window.
+
+*Which routes a change reaches.* 2,048 client faces; the writer's bring of the client leg's memo,
+the median of each line in microseconds, run 1; run 2. `scan` and `index` here both take each
+reached route out one by one:
+
+| Keys kept | Write | `scan` | `index` | What the index gives |
+|---|---|---|---|---|
+| 256 | reaches no route | 15.3; 9.0 | 0.52; 0.34 | 30 and 27 times faster |
+| 256 | reaches one route | 16.2; 9.3 | 2.9; 1.6 | 5.7 and 5.7 times faster |
+| 256 | reaches every route | 90.8; 78.0 | 365.0; 307.6 | 4.0 and 3.9 times slower |
+| 2,048 | reaches no route | 131.6; 101.7 | 0.75; 0.44 | 176 and 233 times faster |
+| 2,048 | reaches one route | 130.8; 101.6 | 8.2; 3.0 | 16 and 34 times faster |
+| 2,048 | reaches every route | 4,237.5; 783.8 | 12,001.7; 3,524.3 | 2.8 and 4.5 times slower |
+| 16,384 | reaches no route | 6,304.2; 3,453.4 | 5.2; 3.4 | 1,203 and 1,030 times faster |
+| 16,384 | reaches one route | 6,152.7; 3,393.1 | 18.2; 14.5 | 339 and 233 times faster |
+| 16,384 | reaches every route | 21,786.0; 18,527.9 | 113,809.7; 62,258.6 | 5.2 and 3.4 times slower |
+| 65,536 | reaches no route | 19,874.0; 27,526.0 | 6.8; 5.3 | 2,907 and 5,221 times faster |
+| 65,536 | reaches one route | 20,460.3; 27,431.3 | 21.9; 28.9 | 936 and 950 times faster |
+| 65,536 | reaches every route | 168,962.8; 114,024.2 | 385,339.0; 364,135.2 | 2.3 and 3.2 times slower |
+
+A reader's route, in nanoseconds a route, run 1; run 2:
+
+| Keys kept | Miss, `scan` | Miss, `index` | Hit, `scan` | Hit, `index` |
+|---|---|---|---|---|
+| 256 | 1,152; 1,042 | 1,809; 1,620 | 66; 59 | 89; 64 |
+| 2,048 | 6,022; 1,824 | 6,687; 2,498 | 401; 199 | 376; 252 |
+| 16,384 | 3,847; 2,420 | 5,255; 3,230 | 568; 435 | 557; 432 |
+| 65,536 | 4,185; 3,236 | 5,044; 4,302 | 834; 622 | 791; 577 |
+
+- **The index stays.** A change that reaches no route or one costs the writer what the routes it
+  meets cost, where the scan's cost follows the routes kept: from 5.7 to 5,221 times less, more
+  the more keys are kept.
+- **A reader pays for it on a miss.** A miss that keeps its route also inserts its key into the
+  index: 11 to 57 % more than without, 0.6 to 1.4 us a miss. A hit reads as it did, within the
+  runs' spread. A miss is paid once a key and a version, a hit on every message after it.
+- **A change that reaches every route cost more with the index than the scan**, 2.3 to 5.2 times,
+  because each route reached was taken out of the routes and of the index, a path copied in each.
+  Such a change now starts the new memo empty, and one that reaches more than half of the routes
+  puts back the fewer that stay (above, "Which routes a change reaches"). Of the three writes, only
+  every route crosses the half, so the shape measured does not place the break-even between one
+  route and every route; more than half is where a put and a removal, each one path copied in the
+  routes and one in the index, cost the same in number. The instrument now times this form beside
+  the two above as `index_wholesale`; its reading is not taken yet.
+
+*A delivery's face lookups.* The median nanoseconds a delivery took to find its faces and read
+each one's tier, by id in the version's face table and from state the route held, run 1; run 2:
+
+| Faces up | Fan-out | By id | Held state | By id over held |
+|---|---|---|---|---|
+| 512 | 1 | 9; 9 | 1; 1 | 9 and 9 |
+| 512 | 4 | 38; 37 | 5; 5 | 7.6 and 7.4 |
+| 512 | 64 | 605; 583 | 76; 61 | 8.0 and 9.6 |
+| 512 | 512 | 6,310; 4,969 | 912; 598 | 6.9 and 8.3 |
+| 2,048 | 1 | 16; 15 | 2; 2 | 8 and 7.5 |
+| 2,048 | 4 | 72; 56 | 7; 5 | 10 and 11 |
+| 2,048 | 64 | 986; 1,118 | 99; 79 | 10 and 14 |
+| 2,048 | 512 | 12,662; 8,277 | 950; 556 | 13 and 15 |
+
+A lookup by id costs a face 9 to 12 ns with 512 faces up and 14 to 25 ns with 2,048, where the
+held state costs 1 to 2 ns whatever the faces up: the trie's walk deepens with the faces it holds.
+At a fan-out of 4 the held state saves a delivery 30 to 36 ns with 256 faces up and 51 to 65 ns
+with 2,048, beside the 1,900 to 2,500 ns of a core the readers spent a Put in the busy-writer
+windows of the same runs (a fan-out of 4, a few faces up); at a fan-out of 512 it saves 7.7 to
+11.7 us a delivery. The instrument times the lookups alone, not the rest of a delivery. Rule (d)
+is ruled out: the lookups cost a delivery what a run tells. Rule (c) is built (above, after the
+rules).
 
 ## 7. What is not decided, and what could make this wrong
 
@@ -784,17 +911,25 @@ instrument in a process of its own, `uptime` recorded per run, two or three runs
   instructions per Put, no time a run tells from its spread. A route names its faces by id and
   each message looks each one up; a route that held its faces' state would take the lookups off
   the message, but a route outlives the version it was computed from, so it would read a face's
-  facts as they were, and what may be read stale is not yet stated. Section 6.9 builds the
-  instrument that measures the lookups a delivery makes and lists the rules a route holding face
-  state would need; not done until its reading asks for it.
+  facts as they were. Section 6.9 measured the lookups at 7 to 15 times what reading held state
+  costs, and built rule (c) for the client leg: the route holds what is fixed while a face is up,
+  a closed mark that `deregister` sets stops a send through a route kept from before, and the face's
+  aliases, the one fact that moves while it is up, are kept out of the held route's egress by its
+  type (a literal Put, whose key needs no alias). What is not built: the mesh legs still name their
+  next hops by zid, and the query plane's client leg (`ClientQueryRoutes`) by face id; the held
+  form's own reading (`held_face`) is not taken.
 - **The memo of a route a writer reads.** A writer that routes through its own draft (a replay,
   an interest answered while it declares) reads at inputs no memo has yet, and computes its route
-  without keeping it (section 6.8). Section 6.9 counts how often, and builds the draft's own memo
-  behind a switch that stays off until that count and the A/B of the switch are read.
+  without keeping it (section 6.8). Section 6.9 counted none in the declaring window of its
+  instrument, with the draft memos off and on, so the draft's own memo stays off behind its switch.
+  A replay, an interest answered while declaring and a query routed by a write are in none of the
+  instrument's windows, and how often they route through the draft is not measured.
 - **Which routes a change reaches.** A client leg's new memo left out the routes the changed keys
   reach by trying every route kept against every changed key. Section 6.9 indexes the client legs'
-  memos and finds the reached routes by the index; the writer's cost against the scan, and the
-  reader's miss with the index kept, are the reading its instrument takes.
+  memos and finds the reached routes by the index, from 5.7 to 5,221 times cheaper for a change
+  that reaches one route or none, at 11 to 57 % more for a reader's miss. A change that reaches more
+  than half of the routes now starts the new memo from the routes that stay; that form's reading,
+  and where between one route and every route the break-even lies, are not taken.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).

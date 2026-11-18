@@ -10,10 +10,12 @@
 //! so it is shared by every version that holds the face (`docs/router-table-snapshots.md`,
 //! section 3 (b)).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::declaration_ids::DeclarationIds;
 use super::egress::Queues;
+use super::Zid;
 use crate::session_glue::SessionLinkActions;
 use crate::sync::PlainMutex;
 
@@ -39,11 +41,16 @@ pub(super) struct FaceRuntime {
     /// while it is, what is routed to the face in that lane is held behind it, so that it keeps
     /// its place in the order.
     pub(super) chain_in_flight: Arc<[core::sync::atomic::AtomicBool; 2]>,
+    /// Whether the face this runtime was made for has left the tables: set by `deregister`, and by
+    /// a `register` that replaces the face under its id, never cleared. A route that holds the
+    /// runtime outlives the version it was computed from, and reads this before it sends, so a
+    /// face that left is not sent to through a route kept from before it left.
+    closed: AtomicBool,
 }
 
 impl FaceRuntime {
     /// The runtime of a face that has just registered: nothing held, no gate, no declaration
-    /// numbered yet, no chain being sent.
+    /// numbered yet, no chain being sent, open.
     pub(super) fn new(actions: Arc<SessionLinkActions>) -> Self {
         Self {
             actions,
@@ -54,6 +61,27 @@ impl FaceRuntime {
                 core::sync::atomic::AtomicBool::new(false),
                 core::sync::atomic::AtomicBool::new(false),
             ]),
+            closed: AtomicBool::new(false),
         }
     }
+
+    /// Mark the face gone: nothing is sent to it through a route that holds this runtime after.
+    pub(super) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Whether the face has left the tables ([`close`](Self::close)).
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+}
+
+/// What a send to a face reads of it: its runtime and its peer's routing zid, both fixed for as
+/// long as the face is up. A send that reads nothing else takes this rather than the face's
+/// routing facts, so that a route that holds the face's runtime sends the way a lookup in the
+/// face table does, without the facts a version holds (the face's aliases among them).
+#[derive(Clone, Copy)]
+pub(super) struct SendFace<'a> {
+    pub(super) runtime: &'a FaceRuntime,
+    pub(super) peer_zid: Option<Zid>,
 }
