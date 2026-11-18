@@ -19,6 +19,7 @@ use std::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Instant;
 
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::supervision::SupervisionState;
 use wz_session_core::supervisor::{BuildSupervisor, StartRefused, Stop};
 
@@ -61,11 +62,17 @@ impl Doors {
     }
 }
 
+/// The policies the process's supervisor runs under: the one place its creator, the first call
+/// of a door, decides them. The build defaults, until the process is handed a run-time document.
+fn resolve_policy() -> SessionPolicy {
+    SessionPolicy::defaults()
+}
+
 fn doors() -> &'static Mutex<Doors> {
     static DOORS: OnceLock<Mutex<Doors>> = OnceLock::new();
     DOORS.get_or_init(|| {
         Mutex::new(Doors {
-            supervisor: BuildSupervisor::for_build(),
+            supervisor: BuildSupervisor::for_policy(&resolve_policy()),
             hook: None,
             origin: Instant::now(),
         })
