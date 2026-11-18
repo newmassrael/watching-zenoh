@@ -2376,8 +2376,11 @@ pub mod accept_bounds;
 /// each driven by its connection machine: a planner that performs the
 /// machine's duties against the loop's directory, the configured endpoints and
 /// the retry schedule, and hands the loop the dials, waits and drops to take.
-/// Gated as the connect reconcile that feeds it is.
-#[cfg(all(feature = "routing-accept", feature = "router-connect-reconcile"))]
+/// Gated as the configured connect list is, on the peer loop that dials it:
+/// upstream retries a configured endpoint for every mode
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn peer_connector_retry(`),
+/// so the re-dial is part of connecting and not of the router's reconcile.
+#[cfg(feature = "routing-peer")]
 pub mod loop_peers;
 /// Decision D6 of `docs/session-lifecycle-intent.md` — the board a face loop
 /// publishes its peer machines' states to, and the lifecycle status query reads.
