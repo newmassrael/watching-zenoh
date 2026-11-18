@@ -4882,6 +4882,25 @@
       "carry_forward_bullets": [
         "The generator emits nothing from the new keys yet (the domains, the bound value type, the schema of the run-time document). On the heap profile the session tables a `both` limit sizes still enforce nothing; their quotas are stated, not yet checked. `MAX_MULTICAST_REPLIES` is declared but read by no code; the multicast reply queue's size is the image's own."
       ]
+    },
+    "Round 4516": {
+      "decision_summary": "A build now states, for every policy, the set of values it allows (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`, every value allowed when nothing is stated, one Kconfig bool per value), and refuses to compile when its default is outside that set. Each policy's value type implements `PolicyValue`, carrying its values, the build's domain, the default and the declared scope, binding, mutability, boundary and wire; `Bound<P>` holds a selected value, refuses one outside the domain, and returns the default without reading the field when the domain has one value, decided in a const block so the branch folds. Each limit carries its declared binding as a `LimitBinding` constant, and `deploy/wz-config.schema.json` describes the `wz` part of a run-time configuration document. Nothing consumes the new types yet; every existing read of a policy is unchanged.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/policy_binding.rs` (new, no_std): `Domain`, `PolicyValue`, `Bound`, `OutsideDomain`, `LimitBinding` and the `Scope`/`Binding`/`Mutability`/`Wire`/`Storage` words; `policy_generated.rs` gains a two-valued type per bool policy and a `PolicyValue` impl with a const default-in-domain assertion per policy; `caps_binding_generated.rs` (new) holds each limit's binding.",
+        "`scripts/lib/wz_config.py`: the domain reader, the allowance symbols, two new outputs (`rust-limit-bindings`, `config-schema`), a check that the binding words agree with the declaration, and selftest cases; `deploy/Kconfig.policies` and `deploy/wz-config.schema.json` regenerated."
+      ],
+      "verification_bullets": [
+        "`wz_config.py --selftest` 328 of 328; `--write` reproduced the hand-written Rust outputs byte for byte; `--check` passes.",
+        "On pc2: `cargo test -p wz-session-core --lib -- policy_binding:: policy::tests::` 24 passed; with `WZ_POLICY_TARGETED_QUERY_ALLOWS_ON=off` (a one-value domain) `policy_binding::` 11 passed; with `WZ_POLICY_TARGETED_QUERY_ALLOWS_OFF=off` the build is refused with \"the default of targeted-query is outside its WZ_POLICY_*_ALLOWS_*\"; clippy -D warnings with default and no default features; `cargo check` of wz-capi-pico, wz-capi-c and wz-runtime-tokio; no documentation finding in the new files; fmt.",
+        "Locally: the upstream feature census, the no-allocator selftest, the prose name gate, the public surface census, reason review pins, store reason citations and the cross-implementation proof audit pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/4-conflict-policy",
+        "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets"
+      ],
+      "carry_forward_bullets": [
+        "The consumers still read `SessionPolicy::from_build()` and the enums' `Default`; moving them onto per-scope snapshots is the next step. A one-value `Bound` still stores its value (stable Rust cannot size a type by a const value). The Zephyr images' Kconfig does not offer the allowances yet, and the conformance digest does not carry the domains."
+      ]
     }
   },
   "inventory_entries": {
