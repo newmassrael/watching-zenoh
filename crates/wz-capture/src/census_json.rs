@@ -236,9 +236,7 @@ pub fn census_json_where_resumable_progress(
     progress: Option<&crate::Progress<'_>>,
 ) -> Option<String> {
     memory.for_filter(filter);
-    let nodes = memory.node_census(d);
-    let grouping = crate::node::SessionGrouping::of(&nodes);
-    let (folded, observed) = memory.planes(d, &grouping, progress)?;
+    let (nodes, folded, observed) = memory.census(d, progress)?;
     let document = census_document(
         d,
         filter,

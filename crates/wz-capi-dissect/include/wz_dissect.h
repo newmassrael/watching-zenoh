@@ -7237,7 +7237,9 @@ int wz_dissect_pcap_local_options_of_link_type(
  * datagram flows or left a flow table, a message decoded after a packet that
  * followed it, a session grouping that changes (a message that names a node),
  * another selector, a call the progress callback stopped, and exchanges still
- * open that alone outgrow four times the messages held. What the planes keep
+ * open that alone outgrow four times the messages held. The node plane begins
+ * again with the others and they with it, so every plane of one document
+ * covers the messages its "observed" names. What the planes keep
  * per row is given up for the rows no list holds as it doubles, so it stays
  * near what the lists hold. Two costs remain: the scouting lists are folded
  * on every call, and every exchange still open is judged on every call, so a

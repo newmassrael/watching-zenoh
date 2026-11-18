@@ -869,19 +869,12 @@ fn a_history_census_whose_open_exchanges_outgrow_the_holding_begins_again() {
     let again = census_json_where_resumable(&t.bounded, &any, &mut memory);
     let work = delta(before, memory.stats());
     assert_eq!(work.restarts, PLANES, "the planes begin again: {work:?}");
-    // The planes a selector narrows, and not the node plane: the node census is
-    // the memory's own and goes on over its history, so the bytes it credits are
-    // every message's and not the held ones'.
-    let narrowed = |doc: &str| {
-        let planes = planes_of(doc);
-        let nodes = planes.find(",\"nodes\":").expect("the node plane");
-        let after = planes.find(",\"exchanges\":").expect("the exchange plane");
-        alloc::format!("{}{}", &planes[..nodes], &planes[after..])
-    };
+    // Every plane, the node plane included: the node census begins again with
+    // the planes, so the bytes it credits are the held messages' too.
     assert_eq!(
-        narrowed(&again),
-        narrowed(&census_json_where(&t.bounded, &any)),
-        "begun again, the planes are a census of what is held"
+        planes_of(&again),
+        planes_of(&census_json_where(&t.bounded, &any)),
+        "begun again, every plane is a census of what is held"
     );
     assert_eq!(observed_value(&again, "trimmed"), "0", "{again}");
     assert_eq!(
@@ -889,4 +882,51 @@ fn a_history_census_whose_open_exchanges_outgrow_the_holding_begins_again() {
         alloc::format!("{}", t.held()),
         "{again}"
     );
+}
+
+/// A census over its history whose NODE census begins again (a message that
+/// arrived names a node) begins its planes again with it, whatever the grouping
+/// says, so the document has one scope: every plane is a census of what is
+/// held, and `trimmed` is 0.
+#[cfg(feature = "dissect")]
+#[test]
+fn a_history_census_whose_node_census_begins_again_begins_its_planes_with_it() {
+    let mut t = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    let any = Filter::any();
+    t.wire(true, &init_wire(ZID_A));
+    t.wire(false, &init_wire(ZID_B));
+    t.wire(true, &frame_carrying(&declare_kexpr(7, "demo/temp")));
+    census_json_where_resumable(&t.bounded, &any, &mut memory);
+    for round in 0..10u8 {
+        t.wire(
+            true,
+            &frame_carrying(&push(sender_space(7, None), &[round; 12])),
+        );
+        census_json_where_resumable(&t.bounded, &any, &mut memory);
+    }
+    assert!(
+        t.produced() > t.held(),
+        "the ceiling must have trimmed, or nothing is history yet"
+    );
+
+    // The same two nodes say who they are again: the node census begins again
+    // over what is held, and the grouping it finds may be the one it had.
+    t.wire(true, &init_wire(ZID_A));
+    t.wire(false, &init_wire(ZID_B));
+    let (nodes_before, before) = (memory.node_stats(), memory.stats());
+    let again = census_json_where_resumable(&t.bounded, &any, &mut memory);
+    let work = delta(before, memory.stats());
+    assert_eq!(
+        memory.node_stats().restarts - nodes_before.restarts,
+        1,
+        "a message that names a node begins the node census again"
+    );
+    assert_eq!(work.restarts, PLANES, "and the planes with it: {work:?}");
+    assert_eq!(
+        planes_of(&again),
+        planes_of(&census_json_where(&t.bounded, &any)),
+        "every plane is a census of what is held"
+    );
+    assert_eq!(observed_value(&again, "trimmed"), "0", "{again}");
 }

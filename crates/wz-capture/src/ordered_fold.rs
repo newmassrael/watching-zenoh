@@ -557,6 +557,11 @@ struct SelectorPlanes {
     /// the mark that says when to give them up again.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
     kept_after_forget: usize,
+    /// The node census's count of beginnings when these planes were last
+    /// brought up: a different count says the node census began again since,
+    /// over what is held, and so must the planes.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    nodes_epoch: u64,
 }
 
 #[cfg(all(feature = "dissect", feature = "network-codecs"))]
@@ -660,7 +665,9 @@ impl CensusMemory {
     /// (a list that moved or was replaced, a message that sorts before one
     /// already folded, a grouping that changed, a stopped call), and where what
     /// they keep that is not a row's outgrows four times the messages held;
-    /// then the census is of what is held, and `observed` says so.
+    /// then the census is of what is held, and `observed` says so. The node
+    /// census begins again with them, and they with it, so every plane of one
+    /// document covers the same messages.
     pub fn over_history() -> Self {
         Self {
             trims: TrimPolicy::Continue,
@@ -734,16 +741,6 @@ impl CensusMemory {
         self.nodes.stats()
     }
 
-    /// The node census, brought up to `dissection`, across a front trim when the
-    /// memory's census is over its history.
-    pub(crate) fn node_census(&mut self, dissection: &Dissection) -> crate::node::NodeCensus {
-        #[cfg(feature = "dissect")]
-        if self.trims == TrimPolicy::Continue {
-            return self.nodes.nodes_across_trims(dissection);
-        }
-        self.nodes.nodes(dissection)
-    }
-
     /// Make the memory the one for `filter`: the planes this selector already has
     /// are continued, and a selector with none gets empty ones, taking the place of
     /// the least recently used selector's when every memory is in use. The node
@@ -752,44 +749,125 @@ impl CensusMemory {
         self.planes.touch(filter, SelectorPlanes::default);
     }
 
-    /// The selector last asked under, its planes, and the work counter. The
-    /// identity selector's planes are made when nothing has been asked yet.
-    fn current(&mut self) -> (crate::filter::Filter, &mut SelectorPlanes, &mut FoldStats) {
+    /// The selector last asked under, its planes, the work counter and the node
+    /// census. The identity selector's planes are made when nothing has been
+    /// asked yet.
+    fn current(
+        &mut self,
+    ) -> (
+        crate::filter::Filter,
+        &mut SelectorPlanes,
+        &mut FoldStats,
+        &mut crate::node::NodeMemory,
+    ) {
         if self.planes.is_empty() {
             self.planes
                 .touch(&crate::filter::Filter::any(), SelectorPlanes::default);
         }
-        let Self { planes, stats, .. } = self;
+        let Self {
+            planes,
+            stats,
+            nodes,
+            ..
+        } = self;
         let (filter, planes) = planes
             .newest_mut()
             .expect("a plane was made above when there was none");
-        (filter.clone(), planes, stats)
+        (filter.clone(), planes, stats, nodes)
     }
 
-    /// The selector-narrowed planes, brought up to `dissection` by one walk, with
-    /// what they have taken since they began, or `None` when `progress` stopped
-    /// the fold.
-    pub(crate) fn planes(
+    /// The node census and the selector-narrowed planes, brought up to
+    /// `dissection` by one walk, with what the planes have taken since they
+    /// began, or `None` when `progress` stopped the fold.
+    pub(crate) fn census(
         &mut self,
         dissection: &Dissection,
-        grouping: &SessionGrouping,
         progress: Option<&Progress<'_>>,
-    ) -> Option<(&CensusFold, Observed)> {
+    ) -> Option<(crate::node::NodeCensus, &CensusFold, Observed)> {
         let trims = self.trims;
-        let (filter, planes, stats) = self.current();
+        let (filter, planes, stats, nodes) = self.current();
         #[cfg(all(feature = "dissect", feature = "network-codecs"))]
-        if trims == TrimPolicy::Continue && planes.keep_to_what_is_held(dissection) {
-            planes.planes = Resumable::default();
+        if trims == TrimPolicy::Continue {
+            return over_history(dissection, progress, &filter, planes, stats, nodes);
         }
+        let census = nodes.nodes(dissection);
+        let grouping = SessionGrouping::of(&census);
         planes.planes.advance_with(
             trims,
             dissection,
-            grouping,
+            &grouping,
             stats,
             progress,
-            || CensusFold::begin(dissection, &filter, grouping),
+            || CensusFold::begin(dissection, &filter, &grouping),
             None,
         )?;
-        planes.planes.folded()
+        let (fold, observed) = planes.planes.folded()?;
+        Some((census, fold, observed))
     }
+}
+
+/// [`CensusMemory::census`] for a memory over its history: the node census and
+/// the planes go on across front trims, and cover ONE scope between them.
+///
+/// The planes are begun again whenever the node census began again since they
+/// began (its own restart, a message that names a node, or another selector's
+/// call that began it), and the node census is begun again whenever the planes
+/// began over what is held (a fold that cannot go on, their open exchanges
+/// outgrowing the holding, another selector) while it holds messages the lists
+/// no longer do. A node census begun again can group the held messages
+/// differently from the one the planes were folded under, and then the planes
+/// are folded once more under its grouping.
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+fn over_history<'m>(
+    dissection: &Dissection,
+    progress: Option<&Progress<'_>>,
+    filter: &crate::filter::Filter,
+    planes: &'m mut SelectorPlanes,
+    stats: &mut FoldStats,
+    nodes: &mut crate::node::NodeMemory,
+) -> Option<(crate::node::NodeCensus, &'m CensusFold, Observed)> {
+    let nodes_before = nodes.stats().restarts;
+    let mut census = nodes.nodes_across_trims(dissection);
+    let nodes_began = nodes.stats().restarts != nodes_before;
+    let mut grouping = SessionGrouping::of(&census);
+    if planes.nodes_epoch != nodes.stats().restarts || planes.keep_to_what_is_held(dissection) {
+        planes.planes = Resumable::default();
+    }
+    let planes_before = stats.restarts;
+    planes.planes.advance_with(
+        TrimPolicy::Continue,
+        dissection,
+        &grouping,
+        stats,
+        progress,
+        || CensusFold::begin(dissection, filter, &grouping),
+        None,
+    )?;
+    // A node census that folded only what is held already covers the planes'
+    // scope, and beginning it again would fold the same census; so would every
+    // new selector's first call, which must not undo another selector's planes.
+    if stats.restarts != planes_before
+        && !nodes_began
+        && !nodes.covers_only_what_is_held(dissection)
+    {
+        nodes.begin_again();
+        census = nodes.nodes_across_trims(dissection);
+        let held = SessionGrouping::of(&census);
+        if held != grouping {
+            grouping = held;
+            planes.planes = Resumable::default();
+            planes.planes.advance_with(
+                TrimPolicy::Continue,
+                dissection,
+                &grouping,
+                stats,
+                progress,
+                || CensusFold::begin(dissection, filter, &grouping),
+                None,
+            )?;
+        }
+    }
+    planes.nodes_epoch = nodes.stats().restarts;
+    let (fold, observed) = planes.planes.folded()?;
+    Some((census, fold, observed))
 }
