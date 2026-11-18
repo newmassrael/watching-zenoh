@@ -81,6 +81,11 @@ use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
 
 #[cfg(feature = "peer")]
 use crate::gossip::GossipPolicy;
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 #[cfg(feature = "group")]
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
@@ -92,6 +97,11 @@ use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
 use wz_runtime_tokio::reply::ReplyHandle;
 use wz_runtime_tokio::reply_sink::ReplyView;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+use wz_runtime_tokio::session::{DeclEvent, DeclListener};
 use wz_runtime_tokio::session::{
     InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
     PublishAliasError, PublishError, PublishOptions, QueryAliasError, QueryOptions, Queryable,
@@ -958,6 +968,14 @@ struct FaceEntry {
     /// answering the filter's question; dropping it sends that face's
     /// `Interest(Final)`. Only filters that ask carry an entry.
     filters: BTreeMap<FilterId, MatchingInterestHold<TokioRuntime, TokioTime>>,
+    /// What each C declaration watch hears of this face's peer, keyed by the watch's id. Holding
+    /// the listener keeps its observers on the face's session; it goes with the face, as what the
+    /// peer declared goes with the link.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    decl_watches: BTreeMap<DeclWatchId, DeclListener>,
     /// R2932 — this session's copy of each C GROUP, same replay contract as
     /// `subs`. Each copy forwards what it hears into the C group's
     /// [`GroupAggregate`], which is what the C program reads.
@@ -1122,6 +1140,20 @@ impl FaceEntry {
     fn retire_groups(&mut self) {
         #[cfg(feature = "group")]
         retire_copies(std::mem::take(&mut self.groups).into_values());
+    }
+
+    /// Undeclare this face's declaration-watch listeners, so a watch's sink is let go of when the
+    /// face goes and not when the last holder of its session does. Outside the registry lock,
+    /// because an undeclare takes the session's observer and the last reference to a sink runs
+    /// the program's `drop(context)`. A build without the watch has none.
+    fn retire_watches(&mut self) {
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        for listener in std::mem::take(&mut self.decl_watches).into_values() {
+            listener.undeclare();
+        }
     }
 }
 
@@ -1382,6 +1414,89 @@ struct MatchEntry {
 /// The member a [`MatchAggregate`] files the session's own entities under, beside the
 /// ids of its faces. Face ids count up from zero and never reach it.
 const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
+
+/// A C declaration watch: what kind of the peers' declarations it hears, and the one sink every
+/// face's listener hands its events to. The registry's copy, installed on each face that comes
+/// up; the face holds the listener ([`FaceEntry::decl_watches`]).
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+struct DeclWatchEntry {
+    id: DeclWatchId,
+    plane: DeclPlane,
+    sink: DeclWatchSink,
+}
+
+/// Whether this build hears the peers' declarations of `plane`: the runtime's registry of that
+/// kind is in the build exactly when the feature named here is, which forwards it.
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+const fn hears_declarations_of(plane: DeclPlane) -> bool {
+    match plane {
+        // `declare-subscriber` is in the runtime's feature list of every build of this crate.
+        DeclPlane::Subscribers => true,
+        DeclPlane::Queryables => cfg!(any(feature = "query", feature = "queryable")),
+        DeclPlane::Tokens => cfg!(feature = "liveliness"),
+    }
+}
+
+/// Install on `session` the listener that hands every declaration event of `plane` its peer sends
+/// to `sink`. The listener only registers the observers that stage an event; the event is handed
+/// over when the face's drive drains what it staged ([`SharedSession::dispatch`]), outside every
+/// lock of the registry and of the session, so the install may be made under the registry's lock.
+/// `None` when the runtime's registry of `plane` is not in the build, which
+/// [`hears_declarations_of`] has already refused.
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+fn install_decl_watch(
+    session: &TokioSession,
+    plane: DeclPlane,
+    sink: &DeclWatchSink,
+) -> Option<DeclListener> {
+    let sink = Arc::clone(sink);
+    let callback = move |event: DeclEvent| {
+        if let Some(event) = port_decl_event(&event) {
+            sink(event);
+        }
+    };
+    let listener = match plane {
+        DeclPlane::Subscribers => session.declare_remote_subscriber_listener(callback),
+        DeclPlane::Queryables => session.declare_remote_queryable_listener(callback),
+        DeclPlane::Tokens => session.declare_remote_token_listener(callback),
+    };
+    listener.ok()
+}
+
+/// The runtime's event in the port's words, borrowed from it for the sink's call. `None` for a
+/// kind of event the runtime adds after this was written, which no watch has asked for.
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+fn port_decl_event(event: &DeclEvent) -> Option<DeclWatchEvent<'_>> {
+    match event {
+        DeclEvent::Declared {
+            id, keyexpr, peer, ..
+        } => Some(DeclWatchEvent::Declared {
+            id: *id,
+            keyexpr: keyexpr.as_str(),
+            peer: peer.as_deref(),
+        }),
+        DeclEvent::Undeclared { id, peer, .. } => Some(DeclWatchEvent::Undeclared {
+            id: *id,
+            peer: peer.as_deref(),
+        }),
+        DeclEvent::Synced { peer, .. } => Some(DeclWatchEvent::Synced {
+            peer: peer.as_deref(),
+        }),
+        _ => None,
+    }
+}
 
 /// The key a new link's barrier asks about ([`SharedSession::face_up`]): no node holds a
 /// liveliness token on it, so the answer is the final alone.
@@ -1825,6 +1940,18 @@ struct Inner {
     live_subs: Vec<LiveSubEntry>,
     matches: Vec<MatchEntry>,
     next_match_id: MatchId,
+    /// The C declaration watches, installed on every face that comes up as a matching listener
+    /// is, and the id the last one was given (the first is 1).
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    decl_watches: Vec<DeclWatchEntry>,
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    last_decl_watch_id: DeclWatchId,
     filters: Vec<FilterEntry>,
     next_filter_id: FilterId,
     #[cfg(feature = "group")]
@@ -2429,6 +2556,12 @@ impl SharedSession {
                 // The plane asks nobody: a write filter counts what PEERS
                 // declare, and the plane's link is inert.
                 filters: BTreeMap::new(),
+                // A declaration watch hears peers, and the plane is no link to one.
+                #[cfg(any(
+                    feature = "remote-declaration-watch",
+                    feature = "declarations-synced-event"
+                ))]
+                decl_watches: BTreeMap::new(),
                 #[cfg(feature = "group")]
                 groups: BTreeMap::new(),
                 // The plane's re-arm signal is `local_wake`, held beside the
@@ -2974,6 +3107,11 @@ impl SharedSession {
                 live_subs: BTreeMap::new(),
                 matches: BTreeMap::new(),
                 filters: BTreeMap::new(),
+                #[cfg(any(
+                    feature = "remote-declaration-watch",
+                    feature = "declarations-synced-event"
+                ))]
+                decl_watches: BTreeMap::new(),
                 #[cfg(feature = "group")]
                 groups: BTreeMap::new(),
                 revised: Arc::new(Notify::new()),
@@ -2990,6 +3128,7 @@ impl SharedSession {
         // are copies of a session that is gone, so their members leave the union the way
         // `face_down`'s do.
         if let Some(mut old) = replaced {
+            old.retire_watches();
             old.retire_groups();
         }
         Some(LinkAnnounced { told })
@@ -3105,6 +3244,26 @@ impl SharedSession {
                 live_subs.insert(entry.id, sub);
             }
         }
+        // The declaration watches. Both callers bring a face up before its drive dispatches what
+        // the peer sent, so a watch installed here hears the peer's first declaration and the
+        // end of its initial ones.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        let mut decl_watches = BTreeMap::new();
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        for entry in &guard.decl_watches {
+            if held.decl_watches.contains_key(&entry.id) {
+                continue;
+            }
+            if let Some(listener) = install_decl_watch(&session, entry.plane, &entry.sink) {
+                decl_watches.insert(entry.id, listener);
+            }
+        }
         // Matching-listener replay. A C listener declared before this peer
         // connected must watch it too, so each entry gets a per-face wz
         // listener whose callback folds THIS face's verdict into the entry's
@@ -3183,6 +3342,11 @@ impl SharedSession {
             face.live_subs.extend(live_subs);
             face.matches.extend(matches);
             face.filters.extend(filters);
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            face.decl_watches.extend(decl_watches);
             #[cfg(feature = "group")]
             face.groups.extend(groups);
         }
@@ -3374,6 +3538,7 @@ impl SharedSession {
         // Leave over a dead link, so the members only this face could see
         // leave the union here. Outside the registry lock, because it delivers.
         if let Some(mut entry) = removed {
+            entry.retire_watches();
             entry.retire_groups();
             drop(entry);
         }
@@ -3435,6 +3600,7 @@ impl SharedSession {
         // R2932 — a closed session sees no peer, so a C group's union loses
         // every member it heard over the wire, as `face_down` would take them.
         for mut entry in faces.into_values() {
+            entry.retire_watches();
             entry.retire_groups();
             drop(entry);
         }
@@ -3449,6 +3615,29 @@ impl SharedSession {
     /// flight on a dispatch thread; what is taken is dropped outside the lock, the standing
     /// discipline for a drop that runs C.
     pub fn clear_declarations(&self) {
+        // The declaration watches: the registry's sinks and each face's listener, which hold the
+        // C closure of each watch between them.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        {
+            let (entries, listeners) = {
+                let mut guard = self.lock();
+                let listeners: Vec<DeclListener> = guard
+                    .faces
+                    .values_mut()
+                    .flat_map(|face| std::mem::take(&mut face.decl_watches).into_values())
+                    .collect();
+                (std::mem::take(&mut guard.decl_watches), listeners)
+            };
+            // Outside the lock: an undeclare takes the face session's observer, and the last
+            // reference to a sink runs the program's `drop(context)`.
+            for listener in listeners {
+                listener.undeclare();
+            }
+            drop(entries);
+        }
         let dropped = {
             let mut guard = self.lock();
             let entries = (
@@ -6117,6 +6306,69 @@ impl SharedSession {
             .and_then(|entry| retire_matching_sink(&entry.state));
         drop(retired);
         drop(entry);
+    }
+
+    /// Start a C declaration watch of `plane`: a listener on every face the registry holds now,
+    /// and on every face that comes up later ([`Self::face_up`]), each handing what its peer
+    /// declares to `sink`. The port's [`DeclWatchRefused`] when this build hears no declaration
+    /// of `plane` or the session is closed; nothing is kept then, and `sink` is dropped outside
+    /// the lock.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    pub(crate) fn declare_decl_watch(
+        &self,
+        plane: DeclPlane,
+        sink: DeclWatchSink,
+    ) -> Result<DeclWatchId, DeclWatchRefused> {
+        if !hears_declarations_of(plane) {
+            return Err(DeclWatchRefused::PlaneNotBuilt);
+        }
+        let mut guard = self.lock();
+        // Read under the lock, so a close that has already let go of every declaration
+        // (`clear_declarations`) is not given one to hold.
+        if self.is_closed() {
+            drop(guard);
+            return Err(DeclWatchRefused::SessionClosed);
+        }
+        guard.last_decl_watch_id = guard.last_decl_watch_id.wrapping_add(1);
+        let id = guard.last_decl_watch_id;
+        for face in guard.faces.values_mut() {
+            if let Some(listener) = install_decl_watch(&face.session, plane, &sink) {
+                face.decl_watches.insert(id, listener);
+            }
+        }
+        guard.decl_watches.push(DeclWatchEntry { id, plane, sink });
+        Ok(id)
+    }
+
+    /// Stop the C declaration watch `id`: no face that comes up is given it, and each face's
+    /// listener is undeclared, so no event staged and not yet handed over reaches the sink. The
+    /// sink is let go of outside the lock. `false` when no watch was declared under `id`.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    pub(crate) fn undeclare_decl_watch(&self, id: DeclWatchId) -> bool {
+        let (entry, listeners) = {
+            let mut guard = self.lock();
+            let at = guard.decl_watches.iter().position(|entry| entry.id == id);
+            let entry = at.map(|at| guard.decl_watches.remove(at));
+            let listeners: Vec<DeclListener> = guard
+                .faces
+                .values_mut()
+                .filter_map(|face| face.decl_watches.remove(&id))
+                .collect();
+            (entry, listeners)
+        };
+        // Outside the lock: an undeclare takes the face session's observer.
+        for listener in listeners {
+            listener.undeclare();
+        }
+        let found = entry.is_some();
+        drop(entry);
+        found
     }
 
     /// Drop a C subscription: remove it from the SSOT so no future face

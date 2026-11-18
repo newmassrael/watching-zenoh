@@ -178,6 +178,28 @@ impl SessionEngine for SharedSession {
         SharedSession::unwatch_faces(self, id)
     }
 
+    // The registry watches its faces' peers in a build with either capability that reads the
+    // watch; without them the provided refusal stands, and the build carries none of the watch.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn declare_decl_watch(
+        &self,
+        plane: wz_capi_port::DeclPlane,
+        sink: wz_capi_port::DeclWatchSink,
+    ) -> Result<wz_capi_port::DeclWatchId, wz_capi_port::DeclWatchRefused> {
+        SharedSession::declare_decl_watch(self, plane, sink)
+    }
+
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn undeclare_decl_watch(&self, id: wz_capi_port::DeclWatchId) -> bool {
+        SharedSession::undeclare_decl_watch(self, id)
+    }
+
     fn linkstate_regions(&self) -> Vec<(String, String)> {
         SharedSession::linkstate_regions(self)
     }
