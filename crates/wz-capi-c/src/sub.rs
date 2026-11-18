@@ -144,9 +144,12 @@ enum SampleTarget {
     Lane(wz_runtime_tokio::session::OffloadFeed),
 }
 
+/// The callback one face of a subscription is given.
+type FaceCallback = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
+
 impl SampleTarget {
     /// One face's callback.
-    fn callback(&self) -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> {
+    fn callback(&self) -> FaceCallback {
         match self {
             Self::Inline(closure) => Box::new(make_subscriber_callback(closure.clone())),
             #[cfg(feature = "rx-callback-offload")]
