@@ -19061,8 +19061,15 @@ mod tests {
                 "{name}: {with_verdicts} rows carry a verdict for {} frames; the profile judged nothing",
                 frames.len()
             );
+            // What may still begin the walk is the session grouping moving,
+            // which the field memory holds to equality: per flow, the list
+            // appearing, the far end's Init naming it, and the flow's zenoh
+            // word latching once its first messages are read. Three per flow
+            // with the first call among them, and none of them an end-to-end
+            // reason; each costs the messages after the cursor, which the
+            // bound below holds.
             assert!(
-                work.restarted <= 3,
+                work.restarted <= 3 * flows as u64,
                 "{name}: the walk began {} times over {steps} steps: {work:?}",
                 work.restarted
             );

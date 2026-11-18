@@ -277,12 +277,14 @@ pub(crate) enum E2eReading<'j> {
 }
 
 impl<'j> E2eReading<'j> {
-    /// The same reading, for one record of a batch.
+    /// The same reading, for one record of a batch: each arm hands on a
+    /// reborrow of what `self` holds for the borrow of `self`, which the
+    /// coercion of `&mut &mut` to `&mut` makes, so `self` keeps its reference.
     pub(crate) fn reborrow(&mut self) -> E2eReading<'_> {
         match self {
-            Self::Judge(judge) => E2eReading::Judge(&mut **judge),
-            Self::JudgeOnly(judge) => E2eReading::JudgeOnly(&mut **judge),
-            Self::Read(table) => E2eReading::Read(*table),
+            Self::Judge(judge) => E2eReading::Judge(judge),
+            Self::JudgeOnly(judge) => E2eReading::JudgeOnly(judge),
+            Self::Read(table) => E2eReading::Read(table),
         }
     }
 
