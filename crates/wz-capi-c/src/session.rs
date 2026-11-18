@@ -525,8 +525,9 @@ pub(crate) unsafe fn open_session(
     // without `router-node`.
     #[cfg(feature = "router-node")]
     let node = plan.node_role(plan.role);
-    #[allow(unused_mut)]
     let choices = abi_choices(shm_clients, &plan.session_policy);
+    // Mutable only where a shared-memory client set re-takes the stance below.
+    #[allow(unused_mut)]
     let mut arguments = plan.into_arguments(choices);
     // R3065 -- a session opened over a client storage advertises the protocols of THAT
     // reader: the stance takes both from the one set, so the list a peer's sender reads is
