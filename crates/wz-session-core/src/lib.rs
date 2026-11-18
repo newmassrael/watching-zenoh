@@ -175,6 +175,11 @@ pub mod caps;
 /// build states otherwise. Unconditional, no_std and no_alloc, like [`caps`].
 pub mod policy;
 
+// Where a policy's or a limit's value is decided: the build's domain of each policy, the value
+// selected inside it, and the declaration's words for scope, stage, mutability and what a peer
+// sees. Unconditional, no_std and no_alloc, like `policy`. Documented from inside.
+pub mod policy_binding;
+
 /// How fast the fragments of one message leave a datagram link: the rule of the
 /// `datagram-fragment-pacing` policy, over a clock the engine hands it. Unconditional, no_std
 /// and no_alloc.

@@ -7,8 +7,17 @@
 //! The policies of a build as the code reads them: each is a field of [`SessionPolicy`], whose
 //! `Default` is the value the build's environment states as `WZ_POLICY_<NAME>`, or upstream's
 //! behaviour when it states none. A test names the other value by setting the field.
+//!
+//! Each policy's value type, an `Off` and `On` enum of its own for a bool policy, implements
+//! [`PolicyValue`]: the domain the build allows (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`, an unset name
+//! allowing the value), the build's default, which the domain must hold, and where the policy is
+//! bound.
 
-use super::{policy_bool, policy_choice};
+use super::{policy_allows, policy_bool, policy_choice};
+
+use crate::policy_binding::{
+    default_is_allowed, Binding, Domain, Mutability, PolicyValue, Scope, Wire,
+};
 
 /// `multicast-loopback`: Whether a datagram a node sends to a multicast group is also
 /// delivered to members of that group on the same host. `os-default` leaves the operating
@@ -729,3 +738,1223 @@ impl Default for SessionPolicy {
         Self::from_build()
     }
 }
+
+impl PolicyValue for MulticastLoopback {
+    const POLICY: &'static str = "multicast-loopback";
+    const ALL: &'static [Self] = &[Self::OsDefault, Self::On, Self::Off];
+    const IDS: &'static [&'static str] = &["os-default", "on", "off"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OS_DEFAULT"
+        )),
+        policy_allows(option_env!("WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_ON")),
+        policy_allows(option_env!("WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OFF")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Link;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<MulticastLoopback>(MulticastLoopback::DEFAULT as usize),
+    "the default of multicast-loopback is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `tx-no-progress-deadline` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxNoProgressDeadline {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl TxNoProgressDeadline {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for TxNoProgressDeadline {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<TxNoProgressDeadline> for bool {
+    fn from(value: TxNoProgressDeadline) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for TxNoProgressDeadline {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for TxNoProgressDeadline {
+    const POLICY: &'static str = "tx-no-progress-deadline";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::Timing;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<TxNoProgressDeadline>(TxNoProgressDeadline::DEFAULT as usize),
+    "the default of tx-no-progress-deadline is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `tx-expiry-keeps-session` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxExpiryKeepsSession {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl TxExpiryKeepsSession {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for TxExpiryKeepsSession {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<TxExpiryKeepsSession> for bool {
+    fn from(value: TxExpiryKeepsSession) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for TxExpiryKeepsSession {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for TxExpiryKeepsSession {
+    const POLICY: &'static str = "tx-expiry-keeps-session";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<TxExpiryKeepsSession>(TxExpiryKeepsSession::DEFAULT as usize),
+    "the default of tx-expiry-keeps-session is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `declaration-sync-pacing` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclarationSyncPacing {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl DeclarationSyncPacing {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_DECLARATION_SYNC_PACING");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for DeclarationSyncPacing {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<DeclarationSyncPacing> for bool {
+    fn from(value: DeclarationSyncPacing) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for DeclarationSyncPacing {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for DeclarationSyncPacing {
+    const POLICY: &'static str = "declaration-sync-pacing";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Link;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Quiescent;
+    const WIRE: Wire = Wire::Timing;
+    const BOUNDARY: Option<&'static str> = Some("the start of the next replay of declarations");
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<DeclarationSyncPacing>(DeclarationSyncPacing::DEFAULT as usize),
+    "the default of declaration-sync-pacing is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `datagram-fragment-pacing` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DatagramFragmentPacing {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl DatagramFragmentPacing {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for DatagramFragmentPacing {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<DatagramFragmentPacing> for bool {
+    fn from(value: DatagramFragmentPacing) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for DatagramFragmentPacing {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for DatagramFragmentPacing {
+    const POLICY: &'static str = "datagram-fragment-pacing";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Link;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Timing;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<DatagramFragmentPacing>(DatagramFragmentPacing::DEFAULT as usize),
+    "the default of datagram-fragment-pacing is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `multicast-link-requires-iface` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MulticastLinkRequiresIface {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl MulticastLinkRequiresIface {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for MulticastLinkRequiresIface {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<MulticastLinkRequiresIface> for bool {
+    fn from(value: MulticastLinkRequiresIface) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for MulticastLinkRequiresIface {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for MulticastLinkRequiresIface {
+    const POLICY: &'static str = "multicast-link-requires-iface";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_OFF"
+        )),
+        policy_allows(option_env!(
+            "WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_ON"
+        )),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Link;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<MulticastLinkRequiresIface>(MulticastLinkRequiresIface::DEFAULT as usize),
+    "the default of multicast-link-requires-iface is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for ReliableGapReconnect {
+    const POLICY: &'static str = "reliable-gap-reconnect";
+    const ALL: &'static [Self] = &[Self::Off, Self::UntilDeclarationsSynced, Self::Always];
+    const IDS: &'static [&'static str] = &["off", "until-declarations-synced", "always"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_OFF")),
+        policy_allows(option_env!(
+            "WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED"
+        )),
+        policy_allows(option_env!(
+            "WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_ALWAYS"
+        )),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ReliableGapReconnect>(ReliableGapReconnect::DEFAULT as usize),
+    "the default of reliable-gap-reconnect is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `entity-link-restriction` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityLinkRestriction {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl EntityLinkRestriction {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for EntityLinkRestriction {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<EntityLinkRestriction> for bool {
+    fn from(value: EntityLinkRestriction) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for EntityLinkRestriction {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for EntityLinkRestriction {
+    const POLICY: &'static str = "entity-link-restriction";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Entity;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<EntityLinkRestriction>(EntityLinkRestriction::DEFAULT as usize),
+    "the default of entity-link-restriction is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `targeted-query` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetedQuery {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl TargetedQuery {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_TARGETED_QUERY");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for TargetedQuery {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<TargetedQuery> for bool {
+    fn from(value: TargetedQuery) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for TargetedQuery {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for TargetedQuery {
+    const POLICY: &'static str = "targeted-query";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_TARGETED_QUERY_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_TARGETED_QUERY_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Message;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<TargetedQuery>(TargetedQuery::DEFAULT as usize),
+    "the default of targeted-query is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `publisher-admission-retry` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublisherAdmissionRetry {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl PublisherAdmissionRetry {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for PublisherAdmissionRetry {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<PublisherAdmissionRetry> for bool {
+    fn from(value: PublisherAdmissionRetry) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for PublisherAdmissionRetry {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for PublisherAdmissionRetry {
+    const POLICY: &'static str = "publisher-admission-retry";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_OFF"
+        )),
+        policy_allows(option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Message;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<PublisherAdmissionRetry>(PublisherAdmissionRetry::DEFAULT as usize),
+    "the default of publisher-admission-retry is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `multi-route-atomic-tx` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MultiRouteAtomicTx {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl MultiRouteAtomicTx {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for MultiRouteAtomicTx {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<MultiRouteAtomicTx> for bool {
+    fn from(value: MultiRouteAtomicTx) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for MultiRouteAtomicTx {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for MultiRouteAtomicTx {
+    const POLICY: &'static str = "multi-route-atomic-tx";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Message;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<MultiRouteAtomicTx>(MultiRouteAtomicTx::DEFAULT as usize),
+    "the default of multi-route-atomic-tx is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `entity-timestamp-opt-in` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityTimestampOptIn {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl EntityTimestampOptIn {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for EntityTimestampOptIn {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<EntityTimestampOptIn> for bool {
+    fn from(value: EntityTimestampOptIn) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for EntityTimestampOptIn {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for EntityTimestampOptIn {
+    const POLICY: &'static str = "entity-timestamp-opt-in";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Entity;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<EntityTimestampOptIn>(EntityTimestampOptIn::DEFAULT as usize),
+    "the default of entity-timestamp-opt-in is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+/// `reply-auto-timestamp` as a value; [`SessionPolicy`] holds it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplyAutoTimestamp {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl ReplyAutoTimestamp {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` field of [`SessionPolicy`] holds it.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for ReplyAutoTimestamp {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<ReplyAutoTimestamp> for bool {
+    fn from(value: ReplyAutoTimestamp) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for ReplyAutoTimestamp {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PolicyValue for ReplyAutoTimestamp {
+    const POLICY: &'static str = "reply-auto-timestamp";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_OFF")),
+        policy_allows(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_ON")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Entity;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ReplyAutoTimestamp>(ReplyAutoTimestamp::DEFAULT as usize),
+    "the default of reply-auto-timestamp is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for SubscriberOverload {
+    const POLICY: &'static str = "subscriber-overload";
+    const ALL: &'static [Self] = &[Self::Block, Self::Reject, Self::KeepLatest];
+    const IDS: &'static [&'static str] = &["block", "reject", "keep-latest"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_BLOCK")),
+        policy_allows(option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_REJECT")),
+        policy_allows(option_env!(
+            "WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_KEEP_LATEST"
+        )),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Entity;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Timing;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<SubscriberOverload>(SubscriberOverload::DEFAULT as usize),
+    "the default of subscriber-overload is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for KeySet {
+    const POLICY: &'static str = "key-set";
+    const ALL: &'static [Self] = &[Self::Open, Self::Closed];
+    const IDS: &'static [&'static str] = &["open", "closed"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_KEY_SET_ALLOWS_OPEN")),
+        policy_allows(option_env!("WZ_POLICY_KEY_SET_ALLOWS_CLOSED")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<KeySet>(KeySet::DEFAULT as usize),
+    "the default of key-set is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for SnResolution {
+    const POLICY: &'static str = "sn-resolution";
+    const ALL: &'static [Self] = &[Self::Bits32, Self::Bits8, Self::Bits16, Self::Bits64];
+    const IDS: &'static [&'static str] = &["bits-32", "bits-8", "bits-16", "bits-64"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_32")),
+        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_8")),
+        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_16")),
+        policy_allows(option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_64")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Negotiated;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<SnResolution>(SnResolution::DEFAULT as usize),
+    "the default of sn-resolution is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for SupervisionAfterExpiry {
+    const POLICY: &'static str = "supervision-after-expiry";
+    const ALL: &'static [Self] = &[Self::Latch, Self::Rearm];
+    const IDS: &'static [&'static str] = &["latch", "rearm"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_LATCH"
+        )),
+        policy_allows(option_env!(
+            "WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_REARM"
+        )),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<SupervisionAfterExpiry>(SupervisionAfterExpiry::DEFAULT as usize),
+    "the default of supervision-after-expiry is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for EventRingFull {
+    const POLICY: &'static str = "event-ring-full";
+    const ALL: &'static [Self] = &[Self::OverwriteOldest, Self::DropNewest];
+    const IDS: &'static [&'static str] = &["overwrite-oldest", "drop-newest"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_EVENT_RING_FULL_ALLOWS_OVERWRITE_OLDEST"
+        )),
+        policy_allows(option_env!("WZ_POLICY_EVENT_RING_FULL_ALLOWS_DROP_NEWEST")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Quiescent;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = Some("after the consumer has read every record");
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<EventRingFull>(EventRingFull::DEFAULT as usize),
+    "the default of event-ring-full is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for ClockQualityStamping {
+    const POLICY: &'static str = "clock-quality-stamping";
+    const ALL: &'static [Self] = &[Self::Always, Self::TrustedOnly];
+    const IDS: &'static [&'static str] = &["always", "trusted-only"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_ALWAYS"
+        )),
+        policy_allows(option_env!(
+            "WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_TRUSTED_ONLY"
+        )),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ClockQualityStamping>(ClockQualityStamping::DEFAULT as usize),
+    "the default of clock-quality-stamping is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for RoutingFaceDrive {
+    const POLICY: &'static str = "routing-face-drive";
+    const ALL: &'static [Self] = &[Self::TaskPerFace, Self::OneTask];
+    const IDS: &'static [&'static str] = &["task-per-face", "one-task"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_TASK_PER_FACE"
+        )),
+        policy_allows(option_env!("WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_ONE_TASK")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Timing;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<RoutingFaceDrive>(RoutingFaceDrive::DEFAULT as usize),
+    "the default of routing-face-drive is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for RoutingTableSharing {
+    const POLICY: &'static str = "routing-table-sharing";
+    const ALL: &'static [Self] = &[Self::Rwlock, Self::Snapshot];
+    const IDS: &'static [&'static str] = &["rwlock", "snapshot"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_RWLOCK")),
+        policy_allows(option_env!(
+            "WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_SNAPSHOT"
+        )),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Timing;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<RoutingTableSharing>(RoutingTableSharing::DEFAULT as usize),
+    "the default of routing-table-sharing is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for ReassemblyPoolOverflow {
+    const POLICY: &'static str = "reassembly-pool-overflow";
+    const ALL: &'static [Self] = &[Self::Reject, Self::DiagnosticEvent, Self::OldestWins];
+    const IDS: &'static [&'static str] = &["reject", "diagnostic-event", "oldest-wins"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!(
+            "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_REJECT"
+        )),
+        policy_allows(option_env!(
+            "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_DIAGNOSTIC_EVENT"
+        )),
+        policy_allows(option_env!(
+            "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_OLDEST_WINS"
+        )),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Live;
+    const MUTABILITY: Mutability = Mutability::Hot;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ReassemblyPoolOverflow>(ReassemblyPoolOverflow::DEFAULT as usize),
+    "the default of reassembly-pool-overflow is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyValue for LinkTieOrder {
+    const POLICY: &'static str = "link-tie-order";
+    const ALL: &'static [Self] = &[Self::ZidNumber, Self::ZidBytes];
+    const IDS: &'static [&'static str] = &["zid-number", "zid-bytes"];
+    const DOMAIN: Domain<Self> = Domain::from_allowed(&[
+        policy_allows(option_env!("WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_NUMBER")),
+        policy_allows(option_env!("WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_BYTES")),
+    ]);
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Link;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<LinkTieOrder>(LinkTieOrder::DEFAULT as usize),
+    "the default of link-tie-order is outside its WZ_POLICY_*_ALLOWS_*"
+);

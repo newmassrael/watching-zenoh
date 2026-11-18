@@ -72,6 +72,12 @@
 #[path = "caps_generated.rs"]
 mod generated;
 
+// Where each limit is bound, as the declaration states it: one `LimitBinding`
+// per limit, named as the limit is here. Generated; it states where a value
+// may be decided and moves no value itself. Documented from inside.
+#[path = "caps_binding_generated.rs"]
+pub mod binding;
+
 /// A limit: `stated` is the text of the build's `WZ_LIMIT_<NAME>`, if it set one.
 const fn limit(stated: Option<&str>, default: usize) -> usize {
     let Some(text) = stated else {

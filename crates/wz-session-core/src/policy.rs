@@ -91,6 +91,23 @@ pub const fn policy_bool(stated: Option<&str>) -> bool {
     }
 }
 
+/// Whether the build allows one value of a policy (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`): `on`
+/// allows it, `off` leaves it out of the policy's domain, and a build that states nothing allows
+/// it, so a build that narrows nothing leaves every value selectable.
+#[doc(hidden)]
+pub const fn policy_allows(stated: Option<&str>) -> bool {
+    let Some(text) = stated else {
+        return true;
+    };
+    if same(text, "on") {
+        true
+    } else if same(text, "off") {
+        false
+    } else {
+        panic!("a WZ_POLICY_*_ALLOWS_* value is neither `on` nor `off`")
+    }
+}
+
 /// The index in `choices` of the value the build states, or `default`, the index of upstream's
 /// behaviour, when it states none. A value that is not one of the choices stops the build.
 #[doc(hidden)]
@@ -127,6 +144,7 @@ const fn same(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy_binding::{Binding, Mutability, PolicyValue, Scope, Wire};
 
     const CHOICES: [&str; 3] = ["os-default", "on", "off"];
 
@@ -202,5 +220,75 @@ mod tests {
     #[test]
     fn the_generated_policy_of_a_build_that_states_nothing_is_the_default() {
         assert_eq!(SessionPolicy::default(), SessionPolicy::from_build());
+    }
+
+    #[test]
+    fn a_value_the_build_does_not_name_is_allowed() {
+        assert!(policy_allows(None));
+        assert!(policy_allows(Some("on")));
+        assert!(!policy_allows(Some("off")));
+    }
+
+    #[test]
+    #[should_panic(expected = "_ALLOWS_* value is neither `on` nor `off`")]
+    fn an_allowance_that_is_neither_on_nor_off_stops_the_build() {
+        policy_allows(Some("y"));
+    }
+
+    /// The value types agree with the fields of `SessionPolicy` in whatever build the test runs:
+    /// the default of each is the build's value, and the build's domain holds it.
+    #[test]
+    fn each_policy_value_type_defaults_to_the_builds_value_inside_its_domain() {
+        let build = SessionPolicy::from_build();
+        assert_eq!(
+            bool::from(TxNoProgressDeadline::DEFAULT),
+            build.tx_no_progress_deadline
+        );
+        assert_eq!(MulticastLoopback::DEFAULT, build.multicast_loopback);
+        assert_eq!(SnResolution::DEFAULT, build.sn_resolution);
+        assert!(TxNoProgressDeadline::DOMAIN.contains(TxNoProgressDeadline::DEFAULT));
+        assert!(MulticastLoopback::DOMAIN.contains(MulticastLoopback::DEFAULT));
+        assert_eq!(
+            TxNoProgressDeadline::default(),
+            TxNoProgressDeadline::DEFAULT
+        );
+        assert_eq!(MulticastLoopback::default(), MulticastLoopback::DEFAULT);
+    }
+
+    #[test]
+    fn a_bool_policy_value_converts_to_and_from_its_field() {
+        assert_eq!(TxNoProgressDeadline::from(true), TxNoProgressDeadline::On);
+        assert_eq!(TxNoProgressDeadline::from(false), TxNoProgressDeadline::Off);
+        assert!(bool::from(TxNoProgressDeadline::On));
+        assert!(!bool::from(TxNoProgressDeadline::Off));
+        assert_eq!(TxNoProgressDeadline::On.id(), "on");
+        assert_eq!(
+            <TxNoProgressDeadline as PolicyValue>::IDS,
+            &["off", "on"][..]
+        );
+    }
+
+    /// Where each policy is bound is the declaration's, carried into its value type.
+    #[test]
+    fn a_policy_value_type_carries_where_its_policy_is_bound() {
+        assert_eq!(MulticastLoopback::POLICY, "multicast-loopback");
+        assert_eq!(MulticastLoopback::SCOPE, Scope::Link);
+        assert_eq!(MulticastLoopback::BINDING, Binding::Open);
+        assert_eq!(MulticastLoopback::MUTABILITY, Mutability::Fixed);
+        assert_eq!(MulticastLoopback::WIRE, Wire::None);
+        assert_eq!(MulticastLoopback::BOUNDARY, None);
+        assert_eq!(DeclarationSyncPacing::MUTABILITY, Mutability::Quiescent);
+        assert_eq!(
+            DeclarationSyncPacing::BOUNDARY,
+            Some("the start of the next replay of declarations")
+        );
+        assert_eq!(
+            <MulticastLoopback as PolicyValue>::ALL,
+            &[
+                MulticastLoopback::OsDefault,
+                MulticastLoopback::On,
+                MulticastLoopback::Off
+            ][..]
+        );
     }
 }
