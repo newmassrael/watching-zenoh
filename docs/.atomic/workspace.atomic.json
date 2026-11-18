@@ -4935,6 +4935,21 @@
       "carry_forward_bullets": [
         "The lane now requires every command of the declared tools (`arm-none-eabi-ar`, `as`, `cc`, `ld` besides `arm-none-eabi-gcc`), stricter than the C build's own fallbacks; `scripts/lib/no_allocator_link_gate.py` keeps its own copy of the same three images and could read the entries."
       ]
+    },
+    "Round 4519": {
+      "decision_summary": "The inventory entry `api-compat-rust` named as its source a design note that left the tracked tree in Round 4510, so `reason_citation_gate.py` refused every tree since that round (`source docs/build-configuration.md is not a tracked file or directory`). The entry is re-registered with the same status, section and reason, its source now the owner decision and the surface file that holds the family (`scripts/lib/rust_api_surface.py`), the procedure the `transport-link-udp` entry took when its source moved, since an entry's source has no setter.",
+      "changes_bullets": [
+        "`docs/.atomic/workspace.atomic.json`: `remove_inventory_entry` then `add_inventory_entry` of `api-compat-rust` with its status, section, reason, modality and disposition equal to the old entry and its source re-pointed; the mutation record names why."
+      ],
+      "verification_bullets": [
+        "`reason_citation_gate.py --check` failed on origin/main and passes after the change (892 citations, 77 in-tree sources graded); the re-added entry equals the old one field by field except `source`; `store_reason_citation_gate.py --check` passes; `validate-workspace` keeps 14 T1 orphans, T3 warn 4, 331 inventory entries."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The entry's reason still names decision C13 of the same moved note in prose; no gate grades that mention, and the reason is left byte for byte so its review pins stay valid."
+      ]
     }
   },
   "inventory_entries": {
