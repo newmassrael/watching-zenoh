@@ -82,10 +82,11 @@ const _: () = {
 /// all-zero is what `new()` writes, and `slot_states` is `[SlotState; _]` whose
 /// `Free` variant carries the explicit discriminant `0` in the emit.
 ///
-/// The `debug_assert` re-establishes that against the constructed pool instead
-/// of trusting this paragraph: a regenerated emit that renumbered `SlotState`
+/// The `assert` re-establishes that against the constructed pool instead of
+/// trusting this paragraph: a regenerated emit that renumbered `SlotState`
 /// would leave every slot in a state nobody declared, and this turns that into
-/// a failing test rather than a pool that silently refuses every reserve.
+/// a panic at construction rather than a pool that silently refuses every
+/// reserve.
 pub fn heap_pool() -> Box<crate::session_rx_pool_ap::SessionRxPoolAp> {
     use crate::session_rx_pool_ap::{SessionRxPoolAp, SLOT_COUNT};
 
@@ -101,7 +102,9 @@ pub fn heap_pool() -> Box<crate::session_rx_pool_ap::SessionRxPoolAp> {
         }
         Box::from_raw(raw)
     };
-    debug_assert_eq!(
+    // In every build, not only debug: a release build is where a renumbered emit would ship
+    // unseen, and the check is one scan of the slot states, made once when the pool is built.
+    assert_eq!(
         pool.free_count(),
         SLOT_COUNT,
         "the zero pattern is no longer the pool's initial state: the emit's \

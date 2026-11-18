@@ -520,11 +520,11 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
 /// `[SlotState; _]` whose `Free` variant carries the explicit discriminant `0`
 /// in the emit — so the zero pattern IS `new()`'s result, field for field.
 ///
-/// The `debug_assert` re-establishes that against the constructed pool instead
-/// of trusting the paragraph. A regenerated emit that renumbered `SlotState`
+/// The `assert` re-establishes that against the constructed pool instead of
+/// trusting the paragraph. A regenerated emit that renumbered `SlotState`
 /// would leave every slot in a state nobody declared, and this is what turns
-/// that into a failing test rather than a pool that quietly refuses every
-/// acquire.
+/// that into a panic at construction rather than a pool that quietly refuses
+/// every acquire.
 fn heap_pool() -> Box<ReassemblyPoolAp> {
     // SAFETY: `alloc_zeroed` returns a block of `Layout::new::<T>()` — correctly
     // sized AND correctly aligned, which a `vec![0u8; size_of::<T>()]` cast
@@ -539,7 +539,9 @@ fn heap_pool() -> Box<ReassemblyPoolAp> {
         }
         Box::from_raw(raw)
     };
-    debug_assert_eq!(
+    // In every build, not only debug: a release build is where a renumbered emit would ship
+    // unseen, and the check is one scan of the slot states, made once when the pool is built.
+    assert_eq!(
         pool.free_count(),
         SLOT_COUNT,
         "the zero pattern is no longer the pool's initial state: the emit's \

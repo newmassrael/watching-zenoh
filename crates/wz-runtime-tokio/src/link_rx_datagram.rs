@@ -246,7 +246,9 @@ fn zeroed_table<T: RxTable>() -> Box<T> {
         }
         Box::from_raw(raw)
     };
-    debug_assert_eq!(
+    // In every build, as `link_rx_pool::heap_pool` checks: one scan of the slot states, made
+    // once when the table is built.
+    assert_eq!(
         table.free_slots(),
         T::SLOT_COUNT,
         "the zero pattern is no longer the pool's initial state"
