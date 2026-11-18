@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "about": "What a build of the consumer bundles reads when it runs with no network and no .git, and how to give it what it reads. Held by scripts/lib/offline_build.py (--check derives it from the crates graph, --build builds every bundle in a sandbox that has nothing else); the design is docs/target-build-contract.md section 5d.",
+  "about": "What a build of the consumer bundles reads when it runs with no network and no .git, and how to give it what it reads; and, under `firmware`, each firmware build a lane runs, as the cargo command, environment and product that lane builds from. Held by scripts/lib/offline_build.py (--check derives it from the crates graph and the tree, --build builds every bundle in a sandbox that has nothing else, --firmware-cargo / --firmware-env / --firmware-field print a firmware build as its lane reads it); the design is docs/target-build-contract.md section 5d.",
   "source": {
     "tree": "the files the repository tracks at the commit, without .git",
     "submodules": [
@@ -45,9 +45,19 @@
       "commands": ["ar"]
     },
     "libclang": {
-      "what": "the libclang shared library and its resource headers, which bindgen loads while librocksdb-sys's build script runs; a library, not a command",
+      "what": "the libclang shared library and its resource headers, which bindgen loads while a build script runs (librocksdb-sys's for the bundles; lwip-sys's for the firmware, which reads the freestanding headers for a -none-eabi target); a library, not a command",
       "variable": "LIBCLANG_PATH",
       "commands": []
+    },
+    "arm-none-eabi-gcc": {
+      "what": "the bare-metal ARM C compiler driver, with newlib's C headers, that lwip-sys's build script compiles lwIP with for a -none-eabi target (the cc crate's prefix for it); it runs its own assembler by an absolute path, and the image is linked by the toolchain's rust-lld",
+      "variable": "TARGET_CC",
+      "commands": ["arm-none-eabi-gcc"]
+    },
+    "arm-none-eabi-ar": {
+      "what": "the archiver the cc crate takes for a -none-eabi target when it answers --version, for lwip-sys's static library",
+      "variable": "TARGET_AR",
+      "commands": ["arm-none-eabi-ar"]
     }
   },
   "linker": "cc",
@@ -144,6 +154,95 @@
       "default_features": true,
       "products": ["wz-ap-demo"],
       "system_tools": ["ar", "c++", "cc", "libclang"]
+    }
+  ],
+  "firmware": [
+    {
+      "id": "mcu-admin-node",
+      "what": "the admin node image for QEMU's mps2-an385 with an allocator: the manifest's default feature `heap`, the growable node on embedded-alloc's heap",
+      "manifest": "deploy/mcu-admin-node/Cargo.toml",
+      "lockfile": "deploy/mcu-admin-node/Cargo.lock",
+      "target": "thumbv7m-none-eabi",
+      "rust_target": "thumbv7m-none-eabi",
+      "profile": "release",
+      "bin": null,
+      "features": [],
+      "default_features": true,
+      "cargo_args": [],
+      "env": {
+        "WZ_LWIP_PORT": "crates/lwip-sys/port/cross-test"
+      },
+      "product": "thumbv7m-none-eabi/release/mcu-admin-node",
+      "system_tools": ["arm-none-eabi-ar", "arm-none-eabi-gcc", "cc", "libclang"],
+      "submodules": ["vendor/lwip", "vendor/sce"],
+      "node_id": "1000055434d7a77",
+      "node_id_source": {
+        "file": "deploy/mcu-admin-node/src/main.rs",
+        "constant": "ZID",
+        "rendering": "the constant's bytes read as one little-endian integer, printed as lowercase hex with no leading zero, as zenoh prints an id (wz_session_core::zid_hex); src/fixed.rs and src/fixed_tcp.rs take the same constant from the crate root"
+      },
+      "lane": {
+        "script": "scripts/run-ci.sh",
+        "function": "layer_qa_mcu_admin_node_vs_zenohd"
+      }
+    },
+    {
+      "id": "mcu-admin-node-fixed",
+      "what": "the fixed-memory image of the same node (src/fixed.rs): no allocator, built to the same binary path as the heap image",
+      "manifest": "deploy/mcu-admin-node/Cargo.toml",
+      "lockfile": "deploy/mcu-admin-node/Cargo.lock",
+      "target": "thumbv7m-none-eabi",
+      "rust_target": "thumbv7m-none-eabi",
+      "profile": "release",
+      "bin": "mcu-admin-node",
+      "features": ["fixed-memory"],
+      "default_features": false,
+      "cargo_args": [],
+      "env": {
+        "WZ_LWIP_PORT": "crates/lwip-sys/port/cross-test"
+      },
+      "product": "thumbv7m-none-eabi/release/mcu-admin-node",
+      "system_tools": ["arm-none-eabi-ar", "arm-none-eabi-gcc", "cc", "libclang"],
+      "submodules": ["vendor/lwip", "vendor/sce"],
+      "node_id": "1000055434d7a77",
+      "node_id_source": {
+        "file": "deploy/mcu-admin-node/src/main.rs",
+        "constant": "ZID",
+        "rendering": "the constant's bytes read as one little-endian integer, printed as lowercase hex with no leading zero, as zenoh prints an id (wz_session_core::zid_hex); src/fixed.rs and src/fixed_tcp.rs take the same constant from the crate root"
+      },
+      "lane": {
+        "script": "scripts/run-ci.sh",
+        "function": "layer_qa_mcu_admin_node_vs_zenohd"
+      }
+    },
+    {
+      "id": "mcu-admin-node-fixed-tcp",
+      "what": "the fixed-memory node with its links on tcp/ (src/fixed_tcp.rs), over the lwIP port that turns TCP on and sizes it; built to the same binary path",
+      "manifest": "deploy/mcu-admin-node/Cargo.toml",
+      "lockfile": "deploy/mcu-admin-node/Cargo.lock",
+      "target": "thumbv7m-none-eabi",
+      "rust_target": "thumbv7m-none-eabi",
+      "profile": "release",
+      "bin": "mcu-admin-node",
+      "features": ["fixed-memory-tcp"],
+      "default_features": false,
+      "cargo_args": [],
+      "env": {
+        "WZ_LWIP_PORT": "crates/lwip-sys/port/cross-test-tcp"
+      },
+      "product": "thumbv7m-none-eabi/release/mcu-admin-node",
+      "system_tools": ["arm-none-eabi-ar", "arm-none-eabi-gcc", "cc", "libclang"],
+      "submodules": ["vendor/lwip", "vendor/sce"],
+      "node_id": "1000055434d7a77",
+      "node_id_source": {
+        "file": "deploy/mcu-admin-node/src/main.rs",
+        "constant": "ZID",
+        "rendering": "the constant's bytes read as one little-endian integer, printed as lowercase hex with no leading zero, as zenoh prints an id (wz_session_core::zid_hex); src/fixed.rs and src/fixed_tcp.rs take the same constant from the crate root"
+      },
+      "lane": {
+        "script": "scripts/run-ci.sh",
+        "function": "layer_qa_mcu_admin_node_vs_zenohd"
+      }
     }
   ],
   "not_inputs": [

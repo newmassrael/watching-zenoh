@@ -181,7 +181,9 @@ JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"]}
 #   G:    G.6 cross-compiles lwip-sys's real lwIP source for the ARM lineup with the cross C
 #         compiler cc picks for a thumb target, and dies in its build script without one
 #   Q:    "arm-none-eabi-gcc not on PATH; install gcc-arm-none-eabi", "qemu-system-arm not on PATH"
-#   Qa:   "arm-none-eabi-gcc not on PATH", `_qa_zenohd_prereqs` asks qemu-system-arm
+#   Qa:   "<command> not on PATH" for each command of the tools its firmware builds declare in
+#         `deploy/offline-build.json` (`offline_build.py --firmware-commands`), and
+#         `_qa_zenohd_prereqs` asks qemu-system-arm
 #   Qz, Qza: `_qz_toolchain ... qemu` -> "qemu-system-arm not on PATH" (Qzb and Qzk build images
 #         and boot none, so they ask the Zephyr SDK of `[tools.zephyr-sdk]` and no qemu)
 #   C1st: `facility_trace.py` refuses a machine without strace or bwrap (`missing_tools`)
@@ -195,7 +197,7 @@ LANE_COMMANDS: dict[str, list[str]] = {
     "C2m": ["arm-none-eabi-gcc"],
     "G": ["arm-none-eabi-gcc"],
     "Q": ["arm-none-eabi-gcc", "qemu-system-arm"],
-    "Qa": ["arm-none-eabi-gcc", "qemu-system-arm"],
+    "Qa": ["arm-none-eabi-ar", "arm-none-eabi-gcc", "as", "cc", "ld", "qemu-system-arm"],
     "Qz": ["qemu-system-arm"],
     "Qza": ["qemu-system-arm"],
     "C1st": ["bwrap", "strace"],

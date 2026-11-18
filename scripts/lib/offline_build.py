@@ -10,6 +10,16 @@ them reads when it has no network and no `.git`, and a build that proves it.
                                           build every bundle (or the named ones) in a sandbox that
                                           holds only what the entry declares
     offline_build.py --selftest
+    offline_build.py --firmware-ids       the firmware build ids, one a line, in the entry's order
+    offline_build.py --firmware-cargo ID  that build's cargo argv, one argument a line, run from the
+                                          repository root
+    offline_build.py --firmware-env ID    its environment, `NAME=path` a line, each path relative to
+                                          the repository root (the caller makes it absolute)
+    offline_build.py --firmware-commands ID
+                                          the commands its declared tools put on PATH, one a line
+    offline_build.py --firmware-field ID FIELD
+                                          one field: a string as itself, a boolean as true/false, a
+                                          list one item a line, null as nothing
 
 A consumer that builds wz as one hermetic action (no `.git`, no network, the pinned source, the
 lockfile's crates vendored and a pinned toolchain as its inputs) reads `deploy/offline-build.json`
@@ -34,6 +44,21 @@ closure. From the closures and `cargo metadata` it derives, and compares with th
 
 It reads the graph and writes nothing. What a build script runs is read by a person once, when the
 crate enters the set; the check makes sure that happens, `--build` makes sure it was read right.
+
+## firmware: the builds a lane runs, as that lane runs them
+
+`firmware` lists each firmware build of a lane (the mps2 admin node of Layer Qa, three images): the
+manifest and lockfile of its standalone workspace, the target and the rustup target, the profile,
+the bin, the features, the environment (repository paths, made absolute by whoever builds), the
+product under the cargo target directory, the tools, the submodules, and the zenoh id the image
+announces. The lane builds each one from the entry through the `--firmware-*` printers, which read
+only the file, so a caller with no `.git` and no cargo can read them too. `--check` holds each
+build to the tree: the manifest, lockfile and environment paths exist and are tracked, the lockfile
+holds the package and no git source, every feature is in the manifest's `[features]`, the bin and
+the product's name are the manifest's, the submodules are in `.gitmodules`, the rustup target is
+one `rust-toolchain.toml` installs, every environment name is read by a tracked build script, the
+id is what the firmware's constant renders to (and the constant is defined once in the crate), and
+the lane's function names the builds that name it, in the entry's order.
 
 ## --build: the entry, measured
 
@@ -82,7 +107,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 DECL = ROOT / "deploy" / "offline-build.json"
@@ -90,10 +115,23 @@ TOOLCHAIN_FILE = ROOT / "rust-toolchain.toml"
 GITMODULES = ROOT / ".gitmodules"
 
 TOP_KEYS = ["schema", "about", "source", "commit_input", "toolchain", "cargo", "system_tools", "linker",
-            "build_scripts", "output_variables", "bundles", "not_inputs"]
+            "build_scripts", "output_variables", "bundles", "firmware", "not_inputs"]
 BUNDLE_KEYS = ["id", "package", "features", "default_features", "products", "system_tools"]
 SUBMODULE_KEYS = ["path", "url", "commit"]
 NOT_INPUT_KEYS = ["id", "why", "list", "hand_in"]
+FIRMWARE_KEYS = ["id", "what", "manifest", "lockfile", "target", "rust_target", "profile", "bin", "features",
+                 "default_features", "cargo_args", "env", "product", "system_tools", "submodules", "node_id",
+                 "node_id_source", "lane"]
+NODE_ID_SOURCE_KEYS = ["constant", "file", "rendering"]
+LANE_KEYS = ["function", "script"]
+# The cargo arguments a firmware build states in fields of its own: `cargo_args` repeating one would
+# give the build two answers to one question.
+FIRMWARE_OWN_ARGS = ("--release", "--profile", "--target", "--manifest-path", "--features", "-F",
+                     "--no-default-features", "--all-features", "--bin", "--bins")
+FIRMWARE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
+ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
+# A zenoh id's text: lowercase hex of at most 16 bytes with no leading zero (`ZenohIdProto::from_str`).
+NODE_ID = re.compile(r"[1-9a-f][0-9a-f]{0,31}")
 SCHEMA = 1
 
 # The arguments the commit variable stands in for: `crates/wz-zenoh/build.rs` asks `git` the same.
@@ -208,11 +246,164 @@ def shape_findings(decl: object) -> list[str]:
         twice = sorted({n for n in names if names.count(n) > 1})
         if twice:
             out.append(f"{what} declared twice: {', '.join(twice)}")
+    firmware = decl["firmware"]
+    if not isinstance(firmware, list) or not firmware:
+        out.append("firmware is not a non-empty list")
+        firmware = []
+    fids: list[str] = []
+    for f in firmware:
+        if not isinstance(f, dict) or sorted(f) != sorted(FIRMWARE_KEYS):
+            out.append(f"a firmware build does not have exactly {FIRMWARE_KEYS}")
+            continue
+        if not isinstance(f["id"], str) or not FIRMWARE_ID.fullmatch(f["id"]):
+            out.append(f"firmware id {f['id']!r} is not lowercase letters and digits joined by `-`")
+            continue
+        fids.append(f["id"])
+        out += [f"firmware {f['id']!r}: {p}" for p in firmware_shape(f, tools)]
+    twice = sorted({n for n in fids if fids.count(n) > 1})
+    if twice:
+        out.append(f"firmware id declared twice: {', '.join(twice)}")
     nots = decl["not_inputs"]
     if not isinstance(nots, list) or any(not isinstance(n, dict) or sorted(n) != sorted(NOT_INPUT_KEYS)
                                          for n in nots):
         out.append(f"not_inputs is not a list of objects with {NOT_INPUT_KEYS}")
     return out
+
+
+def _repo_path(value: object) -> bool:
+    """A path relative to the repository root that stays inside it."""
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    path = PurePosixPath(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _no_break(value: object) -> bool:
+    """No string in `value` holds a line break or a NUL: the printers write one item a line."""
+    if isinstance(value, str):
+        return not any(c in value for c in "\n\r\0")
+    if isinstance(value, list):
+        return all(_no_break(v) for v in value)
+    if isinstance(value, dict):
+        return all(_no_break(k) and _no_break(v) for k, v in value.items())
+    return True
+
+
+def profile_dir(profile: str) -> str:
+    """The directory of the cargo target directory a profile's products land in."""
+    return {"dev": "debug", "test": "debug", "bench": "release"}.get(profile, profile)
+
+
+def firmware_shape(f: dict, tools: dict) -> list[str]:
+    """What is wrong with one firmware build's shape (it has exactly FIRMWARE_KEYS)."""
+    out: list[str] = []
+    for key in ("what", "target", "rust_target", "profile", "product", "node_id"):
+        if not isinstance(f[key], str) or not f[key]:
+            out.append(f"{key} is not a non-empty string")
+    for key in ("manifest", "lockfile"):
+        if not _repo_path(f[key]):
+            out.append(f"{key} is not a path relative to the repository root")
+    if f["bin"] is not None and (not isinstance(f["bin"], str) or not f["bin"]):
+        out.append("bin is neither null nor a name")
+    if not _strings(f["features"]) or f["features"] != sorted(set(f["features"])):
+        out.append("features are not a sorted list of unique names")
+    if not isinstance(f["default_features"], bool):
+        out.append("default_features is not a boolean")
+    if not _strings(f["cargo_args"]):
+        out.append("cargo_args is not a list of arguments")
+    else:
+        for arg in f["cargo_args"]:
+            if arg.split("=", 1)[0] in FIRMWARE_OWN_ARGS:
+                out.append(f"cargo_args holds {arg!r}, which a field of the build states")
+    if not isinstance(f["env"], dict):
+        out.append("env is not an object")
+    else:
+        for name, value in sorted(f["env"].items()):
+            if not ENV_NAME.fullmatch(name):
+                out.append(f"env name {name!r} is not a variable name")
+            if not _repo_path(value):
+                out.append(f"env {name} is not a path relative to the repository root")
+    if all(isinstance(f[k], str) for k in ("target", "profile", "product")):
+        prefix = f"{f['target']}/{profile_dir(f['profile'])}/"
+        name = f["product"][len(prefix):]
+        if not f["product"].startswith(prefix) or not name or "/" in name:
+            out.append(f"product {f['product']!r} is not a file directly under {prefix}")
+    if not _strings(f["system_tools"]) or not f["system_tools"] \
+            or f["system_tools"] != sorted(set(f["system_tools"])):
+        out.append("system_tools is not a non-empty sorted list of unique names")
+    else:
+        out += [f"names {t!r}, which is not a declared system tool" for t in f["system_tools"] if t not in tools]
+    if not _strings(f["submodules"]) or f["submodules"] != sorted(set(f["submodules"])) \
+            or not all(_repo_path(s) for s in f["submodules"]):
+        out.append("submodules is not a sorted list of unique repository paths")
+    if isinstance(f["node_id"], str) and f["node_id"] and not NODE_ID.fullmatch(f["node_id"]):
+        out.append(f"node_id {f['node_id']!r} is not a zenoh id's text (lowercase hex, no leading zero)")
+    for key, keys in (("node_id_source", NODE_ID_SOURCE_KEYS), ("lane", LANE_KEYS)):
+        value = f[key]
+        if not isinstance(value, dict) or sorted(value) != keys \
+                or not all(isinstance(v, str) and v for v in value.values()):
+            out.append(f"{key} does not have exactly {keys}, each a non-empty string")
+        elif not _repo_path(value["file" if key == "node_id_source" else "script"]):
+            out.append(f"{key} names a file that is not a path relative to the repository root")
+    if not _no_break(f):
+        out.append("a string of the build holds a line break or a NUL")
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# A firmware build, as its lane reads it
+
+
+def firmware_build(decl: dict, fid: str) -> dict:
+    for f in decl["firmware"]:
+        if f["id"] == fid:
+            return f
+    raise Unusable(f"no firmware build {fid!r} in the entry (it declares "
+                   f"{', '.join(f['id'] for f in decl['firmware'])})")
+
+
+def firmware_argv(f: dict) -> list[str]:
+    """The cargo command that builds `f`, to run from the repository root with `firmware_env`."""
+    argv = ["cargo", "build"]
+    argv += ["--release"] if f["profile"] == "release" else ["--profile", f["profile"]]
+    argv += ["--manifest-path", f["manifest"], "--target", f["target"]]
+    if f["bin"] is not None:
+        argv += ["--bin", f["bin"]]
+    if not f["default_features"]:
+        argv.append("--no-default-features")
+    if f["features"]:
+        argv += ["--features", ",".join(f["features"])]
+    return argv + f["cargo_args"]
+
+
+def firmware_env(f: dict) -> list[str]:
+    """`NAME=path` for each variable, the path relative to the repository root."""
+    return [f"{name}={value}" for name, value in sorted(f["env"].items())]
+
+
+def firmware_commands(decl: dict, f: dict) -> list[str]:
+    """The commands the build's declared tools put on PATH, each once, in the tools' order."""
+    out: list[str] = []
+    for tool in f["system_tools"]:
+        out += [c for c in decl["system_tools"][tool]["commands"] if c not in out]
+    return out
+
+
+def firmware_field(f: dict, field_name: str) -> list[str]:
+    """One field of the build as lines: a string as itself, a boolean as true/false, a list one item
+    a line, null as no line. An object is refused: `env` has its own printer."""
+    if field_name not in f:
+        raise Unusable(f"a firmware build has no field {field_name!r} (it has {', '.join(FIRMWARE_KEYS)})")
+    value = f[field_name]
+    if value is None:
+        return []
+    if isinstance(value, bool):
+        return ["true" if value else "false"]
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return list(value)
+    raise Unusable(f"field {field_name!r} is an object; read it from the file (--firmware-env prints `env`)")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -411,6 +602,182 @@ def findings(decl: dict, graph: Graph, channel: str, modules: dict[str, str], lo
     return out
 
 
+def _uncommented(text: str) -> str:
+    """TOML text without its comments. No string this script reads from TOML holds a `#`."""
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def toolchain_targets(text: str) -> list[str]:
+    """The rustup targets `rust-toolchain.toml` installs, from its `[toolchain]` table."""
+    table = re.search(r"^\[toolchain\]\s*$(.*?)(?=^\[|\Z)", _uncommented(text), re.M | re.S)
+    targets = re.search(r"^targets\s*=\s*\[(.*?)\]", table.group(1), re.M | re.S) if table else None
+    return re.findall(r'"([^"]+)"', targets.group(1)) if targets else []
+
+
+# Any table header, `[target.'cfg(..)'.dependencies]` too: a header this missed would hand its
+# table's keys to the table before it.
+TOML_TABLE = re.compile(r"^[ \t]*(\[\[?)([^\[\]\n]+)\]\]?[ \t]*$", re.M)
+
+
+def manifest_facts(text: str) -> tuple[str | None, list[str], list[str]]:
+    """The package name, the `[features]` names and the `[[bin]]` names a Cargo manifest states."""
+    text = _uncommented(text)
+    heads = list(TOML_TABLE.finditer(text))
+    package, features, bins = None, [], []
+    for i, head in enumerate(heads):
+        body = text[head.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+        table = (head.group(1), head.group(2).strip())
+        name = re.search(r'^[ \t]*name[ \t]*=[ \t]*"([^"]+)"', body, re.M)
+        if table == ("[", "package") and name:
+            package = name.group(1)
+        elif table == ("[", "features"):
+            features += re.findall(r"^[ \t]*([A-Za-z0-9_\-]+)[ \t]*=", body, re.M)
+        elif table == ("[[", "bin") and name:
+            bins.append(name.group(1))
+    return package, features, bins
+
+
+def _byte_definition(name: str) -> re.Pattern:
+    return re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+" + re.escape(name)
+                      + r"\s*:\s*\[\s*u8\s*;\s*(\d+)\s*\]\s*=\s*\[([^\]]*)\]\s*;", re.M)
+
+
+def byte_constant(text: str, name: str) -> list[int] | None:
+    """The bytes of a Rust `const`/`static NAME: [u8; N] = [..];` of integer literals, or None when
+    the text defines no such constant or one this reader cannot evaluate."""
+    m = _byte_definition(name).search(text)
+    if not m:
+        return None
+    values: list[int] = []
+    for item in (i.strip() for i in m.group(2).split(",")):
+        if not item:
+            continue
+        lit = re.fullmatch(r"(0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*)(?:_?u8)?", item)
+        if not lit:
+            return None
+        digits = lit.group(1).replace("_", "")
+        value = int(digits, 0) if digits[:2].lower() in ("0x", "0b", "0o") else int(digits, 10)
+        if value > 0xFF:
+            return None
+        values.append(value)
+    return values if len(values) == int(m.group(1)) else None
+
+
+def zenoh_id_text(zid: list[int]) -> str:
+    """The text zenoh prints for a zid: its bytes (at most 16) as one little-endian integer, in
+    lowercase hex with no leading zero (`wz_session_core::zid_hex::zid_to_zenoh_hex`)."""
+    return format(int.from_bytes(bytes(zid[:16]), "little"), "x")
+
+
+def shell_function_body(text: str, name: str) -> str | None:
+    """The body of the shell function `name() {` .. `}` (both at the start of a line), without its
+    comment lines, or None when the text defines no such function."""
+    m = re.search(r"^" + re.escape(name) + r"\(\)\s*\{[ \t]*$(.*?)^\}[ \t]*$", text, re.M | re.S)
+    if not m:
+        return None
+    return "\n".join(line for line in m.group(1).splitlines() if not line.lstrip().startswith("#"))
+
+
+def named_in_order(body: str, ids: list[str]) -> list[str]:
+    """The ids `body` names as words of their own (`a-b` is not `a`), in the order each first
+    appears."""
+    first: list[tuple[int, str]] = []
+    for fid in ids:
+        m = re.search(r"(?<![A-Za-z0-9_./-])" + re.escape(fid) + r"(?![A-Za-z0-9_./-])", body)
+        if m:
+            first.append((m.start(), fid))
+    return [fid for _, fid in sorted(first)]
+
+
+def firmware_findings(decl: dict, read_file, tracked_files: set[str], modules: dict[str, str],
+                      toolchain_text: str) -> list[str]:
+    """Where the firmware builds and the tree disagree. `read_file(rel)` is a tree file's text or
+    None; `tracked_files` the paths the repository tracks."""
+    out: list[str] = []
+
+    def is_tracked(rel: str) -> bool:
+        return rel in tracked_files or any(p.startswith(rel.rstrip("/") + "/") for p in tracked_files)
+
+    installable = toolchain_targets(toolchain_text)
+    scripts = [p for p in sorted(tracked_files) if p.endswith("build.rs")]
+    for f in decl["firmware"]:
+        say = f"firmware {f['id']!r}: "
+        for key in ("manifest", "lockfile"):
+            if read_file(f[key]) is None:
+                out.append(f"{say}{key} {f[key]} does not exist")
+            elif f[key] not in tracked_files:
+                out.append(f"{say}{key} {f[key]} is not tracked")
+        manifest = read_file(f["manifest"])
+        package, features, bins = manifest_facts(manifest) if manifest is not None else (None, [], [])
+        crate_dir = str(PurePosixPath(f["manifest"]).parent)
+        if manifest is not None:
+            if package is None:
+                out.append(f"{say}{f['manifest']} states no [package] name")
+            for feature in f["features"]:
+                if feature not in features:
+                    out.append(f"{say}feature {feature!r} is not in the [features] of {f['manifest']}")
+            if not bins and package is not None and f"{crate_dir}/src/main.rs" in tracked_files:
+                bins = [package]
+            if f["bin"] is not None and f["bin"] not in bins:
+                out.append(f"{say}bin {f['bin']!r} is not a bin of {f['manifest']} ({', '.join(bins) or 'none'})")
+            built = f["bin"] if f["bin"] is not None else (bins[0] if len(bins) == 1 else None)
+            if built is None:
+                out.append(f"{say}names no bin and {f['manifest']} has {len(bins)}, so cargo builds no one product")
+            elif PurePosixPath(f["product"]).name != built:
+                out.append(f"{say}product {f['product']} is not the bin {built!r} the build makes")
+        lock = read_file(f["lockfile"])
+        if lock is not None:
+            if package is not None and not re.search(r'^name = "' + re.escape(package) + '"$', lock, re.M):
+                out.append(f"{say}lockfile {f['lockfile']} does not hold the package {package!r}")
+            if re.search(r'^source = "git\+', lock, re.M):
+                out.append(f"{say}lockfile {f['lockfile']} holds a git source, which a build with no "
+                           f"network cannot read")
+        for name, value in sorted(f["env"].items()):
+            if not is_tracked(value):
+                out.append(f"{say}env {name}={value} is not a path the repository tracks")
+            if not any(name in (read_file(s) or "") for s in scripts):
+                out.append(f"{say}env {name} is read by no tracked build script")
+        for sub in f["submodules"]:
+            if sub not in modules:
+                out.append(f"{say}submodule {sub} is not in .gitmodules")
+        if f["rust_target"] not in installable:
+            out.append(f"{say}rust_target {f['rust_target']} is not a target rust-toolchain.toml installs "
+                       f"({', '.join(installable) or 'none'})")
+
+        source = f["node_id_source"]
+        text = read_file(source["file"])
+        if text is None or source["file"] not in tracked_files:
+            out.append(f"{say}node_id_source {source['file']} is not a tracked file")
+        else:
+            zid = byte_constant(text, source["constant"])
+            if zid is None:
+                out.append(f"{say}{source['file']} defines no byte array {source['constant']} this check reads")
+            elif zenoh_id_text(zid) != f["node_id"]:
+                out.append(f"{say}node_id is {f['node_id']}, {source['constant']} of {source['file']} "
+                           f"renders {zenoh_id_text(zid)}")
+            definers = sorted(p for p in tracked_files if p.startswith(crate_dir + "/") and p.endswith(".rs")
+                              and _byte_definition(source["constant"]).search(read_file(p) or ""))
+            if definers and definers != [source["file"]]:
+                out.append(f"{say}{source['constant']} is defined in {', '.join(definers)}, where the "
+                           f"build names {source['file']} alone")
+
+    lanes: dict[tuple[str, str], list[str]] = {}
+    for f in decl["firmware"]:
+        lanes.setdefault((f["lane"]["script"], f["lane"]["function"]), []).append(f["id"])
+    every = [f["id"] for f in decl["firmware"]]
+    for (script, function), ids in lanes.items():
+        text = read_file(script)
+        body = shell_function_body(text, function) if text is not None else None
+        if body is None:
+            out.append(f"lane {function} is not a function of {script}")
+            continue
+        named = named_in_order(body, every)
+        if named != ids:
+            out.append(f"lane {function} of {script} names the firmware builds {named}; the builds that "
+                       f"name it, in the order it builds them, are {ids}")
+    return out
+
+
 def tree_file(rel: str) -> str | None:
     path = ROOT / rel
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
@@ -436,9 +803,11 @@ def measure(decl: dict) -> tuple[Graph, dict[tuple[str, str], Package]]:
 
 def check(decl: dict) -> tuple[Graph, dict[tuple[str, str], Package]]:
     graph, meta = measure(decl)
-    found = findings(decl, graph, toolchain_channel(TOOLCHAIN_FILE.read_text(encoding="utf-8")),
-                     gitmodules(GITMODULES.read_text(encoding="utf-8")),
+    toolchain_text = TOOLCHAIN_FILE.read_text(encoding="utf-8")
+    modules = gitmodules(GITMODULES.read_text(encoding="utf-8"))
+    found = findings(decl, graph, toolchain_channel(toolchain_text), modules,
                      (ROOT / decl["cargo"]["lockfile"]).read_text(encoding="utf-8"), tree_file)
+    found += firmware_findings(decl, tree_file, set(tracked(ROOT)), modules, toolchain_text)
     if found:
         raise Finding("deploy/offline-build.json disagrees with the tree:\n  " + "\n  ".join(found))
     return graph, meta
@@ -903,6 +1272,8 @@ def selftest() -> int:
         refused = True
     expect("a staging root inside the checkout is refused", refused)
 
+    selftest_firmware(decl, expect)
+
     if fails:
         for f in fails:
             print(f"offline_build selftest FAIL: {f}", file=sys.stderr)
@@ -911,23 +1282,227 @@ def selftest() -> int:
     return 0
 
 
+def _refused(call) -> bool:
+    try:
+        call()
+    except Unusable:
+        return True
+    return False
+
+
+def selftest_firmware(decl: dict, expect) -> None:
+    """The firmware section: the shipped builds as the lane runs them, the printers, the shape, and
+    the tree check on a fixture."""
+    by_id = {f["id"]: f for f in decl["firmware"]}
+    base = ["cargo", "build", "--release", "--manifest-path", "deploy/mcu-admin-node/Cargo.toml",
+            "--target", "thumbv7m-none-eabi"]
+    expect("the shipped firmware builds are the lane's three, in its order",
+           list(by_id) == ["mcu-admin-node", "mcu-admin-node-fixed", "mcu-admin-node-fixed-tcp"])
+    expect("the heap image is built with the manifest's defaults and names no bin",
+           firmware_argv(by_id["mcu-admin-node"]) == base)
+    expect("the fixed-memory image names its bin and its feature over no defaults",
+           firmware_argv(by_id["mcu-admin-node-fixed"])
+           == base + ["--bin", "mcu-admin-node", "--no-default-features", "--features", "fixed-memory"])
+    expect("the tcp image names its bin and its feature over no defaults",
+           firmware_argv(by_id["mcu-admin-node-fixed-tcp"])
+           == base + ["--bin", "mcu-admin-node", "--no-default-features", "--features", "fixed-memory-tcp"])
+    expect("the tcp image's lwIP port is the one that turns TCP on",
+           firmware_env(by_id["mcu-admin-node-fixed-tcp"]) == ["WZ_LWIP_PORT=crates/lwip-sys/port/cross-test-tcp"])
+    expect("the datagram images' lwIP port is the cross-test one",
+           firmware_env(by_id["mcu-admin-node"]) == ["WZ_LWIP_PORT=crates/lwip-sys/port/cross-test"])
+    expect("a build's commands are its tools' commands, each once",
+           firmware_commands(decl, by_id["mcu-admin-node"])
+           == ["arm-none-eabi-ar", "arm-none-eabi-gcc", "as", "cc", "ld"])
+    source = by_id["mcu-admin-node"]["node_id_source"]
+    shipped_zid = byte_constant(tree_file(source["file"]) or "", source["constant"])
+    expect("the shipped node id is what the firmware's constant renders",
+           shipped_zid is not None and zenoh_id_text(shipped_zid) == by_id["mcu-admin-node"]["node_id"])
+    expect("a null field prints nothing", firmware_field(by_id["mcu-admin-node"], "bin") == [])
+    expect("a boolean field prints false",
+           firmware_field(by_id["mcu-admin-node-fixed"], "default_features") == ["false"])
+    expect("a list field prints one item a line",
+           firmware_field(by_id["mcu-admin-node"], "submodules") == ["vendor/lwip", "vendor/sce"])
+    expect("an object field is refused", _refused(lambda: firmware_field(by_id["mcu-admin-node"], "env")))
+    expect("an unknown field is refused", _refused(lambda: firmware_field(by_id["mcu-admin-node"], "nope")))
+    expect("an unknown build is refused", _refused(lambda: firmware_build(decl, "nope")))
+
+    expect("the zenoh text of a zid is its little-endian value in hex",
+           zenoh_id_text([0x77, 0x7A, 0x4D, 0x43, 0x55, 0x00, 0x00, 0x01]) == "1000055434d7a77")
+    expect("trailing zero bytes do not change a zid's text", zenoh_id_text([1, 0]) == zenoh_id_text([1]) == "1")
+    expect("a byte constant reads suffixes and separators",
+           byte_constant("pub const Z: [u8; 3] = [0x0_1u8, 2, 0b11];", "Z") == [1, 2, 3])
+    expect("a byte constant whose length disagrees is not read",
+           byte_constant("const Z: [u8; 4] = [1, 2];", "Z") is None)
+    expect("a byte constant of another name is not read", byte_constant("const ZZ: [u8; 1] = [1];", "Z") is None)
+    expect("a value past a byte is not read", byte_constant("const Z: [u8; 1] = [256];", "Z") is None)
+
+    toolchain = ('[toolchain]\nchannel = "1.0.0"\ntargets = [\n    "thumbv7m-none-eabi",\n'
+                 '    # a "quoted" note [with brackets]\n    "riscv32imac-unknown-none-elf",\n]\n')
+    expect("the toolchain's targets are read past a comment",
+           toolchain_targets(toolchain) == ["thumbv7m-none-eabi", "riscv32imac-unknown-none-elf"])
+    manifest = ('[workspace]\n\n[package]\nname = "node"  # the crate\n\n[[bin]]\nname = "node"\n'
+                'path = "src/main.rs"\n\n[features]\ndefault = ["heap"]\nheap = []\nsmall = [\n    "heap",\n]\n\n'
+                "[target.'cfg(unix)'.dependencies]\nnot-a-feature = \"1\"\n")
+    expect("a manifest's package, features and bins are read, and another table's keys are not features",
+           manifest_facts(manifest) == ("node", ["default", "heap", "small"], ["node"]))
+    expect("ids are named in the order they first appear, `a-b` not counting as `a`",
+           named_in_order("x node-fixed y node", ["node", "node-fixed"]) == ["node-fixed", "node"])
+    expect("an id inside a path is not named", named_in_order("deploy/node-fixed/x", ["node-fixed"]) == [])
+
+    tools = {"cc": {"commands": ["as", "cc", "ld"], "variable": "CC", "what": "w"}}
+    lane = ("# node-fixed outside the function\nbuild_lane() {\n    # node-fixed in a comment\n"
+            "    build Qa node\n    build Qa.fixed node-fixed\n}\n")
+    files = {
+        "deploy/node/Cargo.toml": manifest,
+        "deploy/node/Cargo.lock": 'version = 4\n\n[[package]]\nname = "node"\nversion = "0.1.0"\n',
+        "deploy/node/src/main.rs": "const ZID: [u8; 8] = [0x77, 0x7a, 0x4d, 0x43, 0x55, 0x00, 0x00, 0x01];\n",
+        "deploy/node/src/other.rs": "use crate::ZID;\n",
+        "crates/sys/build.rs": 'env::var("PORT_DIR")',
+        "crates/sys/port/a/opts.h": "",
+        "scripts/lane.sh": lane,
+    }
+
+    def entry(fid: str, bin_name: str | None, features: list[str], default: bool) -> dict:
+        return {"id": fid, "what": "w", "manifest": "deploy/node/Cargo.toml", "lockfile": "deploy/node/Cargo.lock",
+                "target": "thumbv7m-none-eabi", "rust_target": "thumbv7m-none-eabi", "profile": "release",
+                "bin": bin_name, "features": features, "default_features": default, "cargo_args": [],
+                "env": {"PORT_DIR": "crates/sys/port/a"}, "product": "thumbv7m-none-eabi/release/node",
+                "system_tools": ["cc"], "submodules": ["vendor/s"], "node_id": "1000055434d7a77",
+                "node_id_source": {"constant": "ZID", "file": "deploy/node/src/main.rs", "rendering": "r"},
+                "lane": {"function": "build_lane", "script": "scripts/lane.sh"}}
+
+    fixture = {"firmware": [entry("node", None, [], True), entry("node-fixed", "node", ["small"], False)]}
+
+    def found(d: dict, changed: dict | None = None, untracked: tuple[str, ...] = ()) -> list[str]:
+        table = {**files, **(changed or {})}
+        return firmware_findings(d, lambda rel: table.get(rel), set(table) - set(untracked),
+                                 {"vendor/s": "u"}, toolchain)
+
+    def mutated(index: int, key: str, value) -> dict:
+        d = json.loads(json.dumps(fixture))
+        d["firmware"][index][key] = value
+        return d
+
+    expect("the fixture's builds have no shape finding",
+           all(firmware_shape(f, tools) == [] for f in fixture["firmware"]))
+    expect("a matching firmware fixture has no finding", found(fixture) == [])
+    two_bins = manifest.replace('[features]', '[[bin]]\nname = "tool"\n\n[features]')
+    cases = [
+        ("a feature the manifest does not state", mutated(1, "features", ["tiny"]), None, (),
+         "is not in the [features]"),
+        ("a key of another table is not a feature", mutated(1, "features", ["not-a-feature"]), None, (),
+         "is not in the [features]"),
+        ("a bin the manifest does not state", mutated(1, "bin", "other"), None, (), "is not a bin of"),
+        ("a product that is not the bin", mutated(0, "product", "thumbv7m-none-eabi/release/other"), None, (),
+         "is not the bin"),
+        ("no bin named where the manifest has two", fixture, {"deploy/node/Cargo.toml": two_bins}, (),
+         "names no bin"),
+        ("an environment path the repository does not track", mutated(0, "env", {"PORT_DIR": "crates/sys/port/b"}),
+         None, (), "is not a path the repository tracks"),
+        ("an environment name no build script reads", mutated(0, "env", {"OTHER_DIR": "crates/sys/port/a"}),
+         None, (), "read by no tracked build script"),
+        ("a submodule .gitmodules does not hold", mutated(0, "submodules", ["vendor/t"]), None, (),
+         "is not in .gitmodules"),
+        ("a rustup target the toolchain does not install", mutated(0, "rust_target", "thumbv6m-none-eabi"),
+         None, (), "rust-toolchain.toml installs"),
+        ("a node id the constant does not render", mutated(0, "node_id", "1000055434d7a78"), None, (),
+         "renders 1000055434d7a77"),
+        ("a constant the source does not define",
+         mutated(0, "node_id_source", {"constant": "NOPE", "file": "deploy/node/src/main.rs", "rendering": "r"}),
+         None, (), "defines no byte array"),
+        ("the constant defined a second time in the crate", fixture,
+         {"deploy/node/src/other.rs": "pub const ZID: [u8; 1] = [1];\n"}, (), "is defined in"),
+        ("a manifest that does not exist", mutated(0, "manifest", "deploy/none/Cargo.toml"), None, (),
+         "does not exist"),
+        ("a manifest the repository does not track", fixture, None, ("deploy/node/Cargo.toml",), "is not tracked"),
+        ("a lockfile without the package", fixture, {"deploy/node/Cargo.lock": "version = 4\n"}, (),
+         "does not hold the package"),
+        ("a lockfile with a git source", fixture,
+         {"deploy/node/Cargo.lock": files["deploy/node/Cargo.lock"] + 'source = "git+https://e/x"\n'}, (),
+         "holds a git source"),
+        ("a lane that builds them in another order", fixture,
+         {"scripts/lane.sh": lane.replace("Qa node\n", "Qa.x node-fixed\n    build Qa node\n", 1)}, (),
+         "in the order it builds them"),
+        ("a lane that does not build one of them", fixture,
+         {"scripts/lane.sh": lane.replace("    build Qa.fixed node-fixed\n", "")}, (),
+         "in the order it builds them"),
+        ("a lane function the script does not define",
+         mutated(0, "lane", {"function": "nope", "script": "scripts/lane.sh"}), None, (), "is not a function of"),
+    ]
+    for label, d, changed, untracked, needle in cases:
+        expect(label, any(needle in f for f in found(d, changed, untracked)))
+
+    shapes = [
+        ("cargo_args repeating a field", "cargo_args", ["--release"], "which a field of the build states"),
+        ("cargo_args repeating a field with a value", "cargo_args", ["--features=x"],
+         "which a field of the build states"),
+        ("an absolute environment path", "env", {"PORT_DIR": "/abs/port"}, "not a path relative"),
+        ("an environment path out of the tree", "env", {"PORT_DIR": "../port"}, "not a path relative"),
+        ("an environment name that is not a variable", "env", {"port": "crates/sys/port/a"},
+         "not a variable name"),
+        ("a product under another profile", "product", "thumbv7m-none-eabi/debug/node", "is not a file directly"),
+        ("a tool nobody declared", "system_tools", ["nasm"], "not a declared system tool"),
+        ("a node id with a leading zero", "node_id", "01000055434d7a77", "zenoh id's text"),
+        ("unsorted features", "features", ["b", "a"], "sorted list"),
+        ("a line break in a string", "what", "a\nb", "line break"),
+        ("a lane without its function", "lane", {"script": "scripts/lane.sh"}, "lane does not have exactly"),
+        ("a bin that is not a name", "bin", "", "bin is neither"),
+    ]
+    for label, key, value, needle in shapes:
+        bad = json.loads(json.dumps(fixture["firmware"][0]))
+        bad[key] = value
+        expect(f"shape: {label}", any(needle in p for p in firmware_shape(bad, tools)))
+    twice = json.loads(json.dumps(decl))
+    twice["firmware"].append(twice["firmware"][0])
+    expect("a firmware id declared twice is a shape finding",
+           any("declared twice" in p for p in shape_findings(twice)))
+    empty = json.loads(json.dumps(decl))
+    empty["firmware"] = []
+    expect("an empty firmware list is a shape finding", any("non-empty list" in p for p in shape_findings(empty)))
+    upper = json.loads(json.dumps(decl))
+    upper["firmware"][0]["id"] = "Node"
+    expect("a firmware id that is not lowercase words is a shape finding",
+           any("is not lowercase" in p for p in shape_findings(upper)))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--build", action="store_true")
     mode.add_argument("--selftest", action="store_true")
+    mode.add_argument("--firmware-ids", action="store_true")
+    mode.add_argument("--firmware-cargo", metavar="ID")
+    mode.add_argument("--firmware-env", metavar="ID")
+    mode.add_argument("--firmware-commands", metavar="ID")
+    mode.add_argument("--firmware-field", nargs=2, metavar=("ID", "FIELD"))
     ap.add_argument("--bundle", action="append", default=[], help="with --build: one bundle id (repeatable)")
     args = ap.parse_args()
     try:
         if args.selftest:
             return selftest()
         decl = load()
+        # The printers read the file alone: a caller with no `.git` and no cargo reads them too.
+        lines: list[str] | None = None
+        if args.firmware_ids:
+            lines = [f["id"] for f in decl["firmware"]]
+        elif args.firmware_cargo is not None:
+            lines = firmware_argv(firmware_build(decl, args.firmware_cargo))
+        elif args.firmware_env is not None:
+            lines = firmware_env(firmware_build(decl, args.firmware_env))
+        elif args.firmware_commands is not None:
+            lines = firmware_commands(decl, firmware_build(decl, args.firmware_commands))
+        elif args.firmware_field is not None:
+            lines = firmware_field(firmware_build(decl, args.firmware_field[0]), args.firmware_field[1])
+        if lines is not None:
+            sys.stdout.write("".join(line + "\n" for line in lines))
+            return 0
         if args.check:
             graph, _ = check(decl)
             union = {n for names in graph.scripts.values() for n in names}
             print(f"offline_build: OK ({len(decl['bundles'])} bundles, {len(union)} build scripts, "
-                  f"submodules {', '.join(graph.submodules) or 'none'})")
+                  f"submodules {', '.join(graph.submodules) or 'none'}; "
+                  f"{len(decl['firmware'])} firmware builds)")
             return 0
         build(decl, args.bundle)
         return 0
