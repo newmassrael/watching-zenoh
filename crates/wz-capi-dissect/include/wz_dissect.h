@@ -8457,9 +8457,16 @@ int wz_dissect_live_set_selector_memories(wz_dissect_live *h, size_t n,
  * the oldest instant can belong to a scouting datagram, which has no row to
  * name, and a coordinate that sometimes exists would be a second shape.
  *
- * A READ, and `h` is const to say so: the lists are counted in place, no record
- * is handed out and no id is settled, so the next wz_dissect_live_drain returns
- * exactly what it would have. The limit preset is the handle's, chosen at open.
+ * WHAT A CALL COSTS. No message is read. Each list keeps its count and the
+ * earliest instant it holds as messages enter it and a ceiling or an eviction
+ * takes them out, and each TCP direction keeps the bytes it retains, so a call
+ * reads one figure per list and per flow: its cost follows the number of flows
+ * the handle holds and not the messages they hold. The figures are the ones a
+ * walk of every message held would find, to the message and the nanosecond.
+ *
+ * A READ, and `h` is const to say so: no record is handed out and no id is
+ * settled, so the next wz_dissect_live_drain returns exactly what it would
+ * have. The limit preset is the handle's, chosen at open.
  * Null `h` or `out` is WZ_DISSECT_ERR_INVALID_ARG and no string. The string is
  * released by wz_dissect_string_free. */
 int wz_dissect_live_retention(const wz_dissect_live *h, char **out);

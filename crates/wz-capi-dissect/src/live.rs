@@ -1150,9 +1150,15 @@ impl LiveDissection {
     /// # `&self`, for the reason [`Self::census`] is
     ///
     /// Counting the lists must not change what the tap decodes, and it does not:
-    /// this reads them in place. Unlike the field and selection documents it
-    /// joins no row to a record, so it needs none of the ids a drain settles and
-    /// a consumer can call it as often as it draws.
+    /// this reads the counts and the earliest instant each list keeps as its
+    /// messages come and go, and no message. Unlike the field and selection
+    /// documents it joins no row to a record, so it needs none of the ids a drain
+    /// settles and a consumer can call it as often as it draws.
+    ///
+    /// # What it costs
+    ///
+    /// One figure per list and per flow ([`wz_capture::retention_json::Retention::of`]),
+    /// whatever the lists hold.
     ///
     /// # Why a document and not a struct
     ///

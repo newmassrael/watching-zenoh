@@ -1482,6 +1482,12 @@ pub mod sorted_chunks;
 #[cfg(feature = "alloc")]
 pub mod heap_account;
 
+// The earliest instant a front-trimmed list holds, kept as its rows come and go,
+// which the message lists and a capture's scouting lists keep. Undocumented on
+// this line for the reason the module above gives.
+#[cfg(feature = "alloc")]
+pub mod oldest_instant;
+
 // Open-debt item 924 — the unit log a message list reads its datagrams' bytes
 // from, and a capture's scouting list its messages'. Gated as that list is.
 #[cfg(all(

@@ -2172,6 +2172,9 @@ pub struct ScoutingList {
     rows: wz_session_core::chunk_log::ChunkLog<ScoutingRow>,
     log: wz_session_core::byte_log::UnitLog,
     produced: u64,
+    /// The earliest instant among the messages held, kept as they are appended
+    /// and discarded, as a transport list keeps its own.
+    oldest: wz_session_core::oldest_instant::OldestInstant,
 }
 
 /// What a [`Dissection`] holds on the heap, by structure (open-debt item 924,
@@ -2226,9 +2229,10 @@ impl DissectionMemory {
 }
 
 impl ScoutingList {
-    /// Bytes the list holds allocated: its rows and its logged payloads.
+    /// Bytes the list holds allocated: its rows, its logged payloads, and the
+    /// runs that keep its earliest instant.
     fn memory(&self) -> usize {
-        self.rows.allocated_bytes() + self.log.allocated()
+        self.rows.allocated_bytes() + self.log.allocated() + self.oldest.allocated_bytes()
     }
 }
 
@@ -2330,16 +2334,25 @@ impl ScoutingList {
             len: u32::try_from(payload.len()).unwrap_or(u32::MAX),
             direction,
         });
+        let row = self.produced;
         self.produced += 1;
+        let first_produced = self.produced - self.rows.len() as u64;
+        let rows = &self.rows;
+        self.oldest.push(row, observed_at_ns, |earlier| {
+            let position = usize::try_from(earlier.checked_sub(first_produced)?).ok()?;
+            rows.get(position)?.observed_at_ns
+        });
     }
 
     /// Remove the oldest message, and the copy of its payload with it; `false`
     /// when there was none. `produced` is untouched, which is what keeps a
     /// drain's watermark meaningful.
     pub fn discard_oldest(&mut self) -> bool {
+        let first_produced = self.produced - self.rows.len() as u64;
         let Some(row) = self.rows.pop_front() else {
             return false;
         };
+        self.oldest.release_through(first_produced);
         self.log.release_through(
             wz_session_core::byte_log::LogPlace::of(row.locator),
             row.len as usize,
@@ -2375,6 +2388,16 @@ impl ScoutingList {
         self.produced
     }
 
+    /// The earliest capture instant among the messages held, in nanoseconds, or
+    /// `None` when none carries one. Kept as messages are appended and
+    /// discarded, so asking reads one row and decodes nothing.
+    pub fn oldest_observed_ns(&self) -> Option<u64> {
+        let row = self.oldest.oldest_row()?;
+        let first_produced = self.produced - self.rows.len() as u64;
+        let position = usize::try_from(row.checked_sub(first_produced)?).ok()?;
+        self.rows.get(position)?.observed_at_ns
+    }
+
     /// The list as a reader reads it, with `container` the capture container
     /// the dissection is lent, which a payload logged by its place there is
     /// read from.
@@ -2408,6 +2431,11 @@ impl<'a> Scoutings<'a> {
     /// Messages ever appended: [`ScoutingList::produced`].
     pub fn produced(&self) -> u64 {
         self.list.produced()
+    }
+
+    /// [`ScoutingList::oldest_observed_ns`].
+    pub fn oldest_observed_ns(&self) -> Option<u64> {
+        self.list.oldest_observed_ns()
     }
 
     /// The message at position `index` among those held, oldest first.

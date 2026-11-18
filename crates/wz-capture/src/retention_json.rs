@@ -123,7 +123,10 @@ pub struct Retention {
 }
 
 impl Retention {
-    /// Measure `d`. Reads the lists in place and allocates nothing.
+    /// Measure `d`. Allocates nothing and reads no message: every figure is one
+    /// a list, an assembler or a flow table keeps as messages and bytes enter
+    /// and leave it, so the cost follows the number of lists and not what they
+    /// hold.
     pub fn of(d: &Dissection) -> Self {
         // The total goes through the one enumeration a record door drains, so a
         // list added there reaches this count with no edit here.
@@ -133,14 +136,12 @@ impl Retention {
             .sum();
         let oldest_of_frames = d
             .message_lists_with_origin()
-            .flat_map(|(_, _, list)| list.iter())
-            .filter_map(|frame| frame.observed_at_ns)
+            .filter_map(|(_, _, list)| list.oldest_observed_ns())
             .min();
         let scouting_lists = || d.datagram_flows().iter().map(|flow| flow.scouting());
         let scouting: usize = scouting_lists().map(|list| list.len()).sum();
         let oldest_of_scouting = scouting_lists()
-            .flat_map(|list| list.iter())
-            .filter_map(|datagram| datagram.observed_at_ns)
+            .filter_map(|list| list.oldest_observed_ns())
             .min();
         let oldest_ns = [oldest_of_frames, oldest_of_scouting]
             .into_iter()
@@ -237,7 +238,8 @@ pub fn retention_json(d: &Dissection) -> String {
 mod tests {
     use super::*;
     use crate::datagram_tests::{
-        framed_keepalive, scout_message, tcp_packet, tcp_packet_reverse, udp_packet, SCOUT_GROUP,
+        framed_keepalive, scout_message, tcp_packet, tcp_packet_on, tcp_packet_reverse, udp_packet,
+        SCOUT_GROUP,
     };
     use crate::link::LINKTYPE_ETHERNET;
     use crate::DissectionLimits;
@@ -566,6 +568,125 @@ mod tests {
         let mut over = Dissection::new();
         push_stream_keepalives(&mut over, &[Some(9_007_199_255)]);
         assert!(retention_json(&over).contains("\"oldest_ts_ns\":\"9007199255000000\"}"));
+    }
+
+    /// What a walk of every message held finds for the figures the lists keep
+    /// as messages enter and leave: the count of each kind and the earliest
+    /// instant. The oracle [`Retention::of`] is held to; every other figure is
+    /// taken from it, since none of them was ever a walk of the messages.
+    fn walked(d: &Dissection) -> Retention {
+        let oldest_ns = d
+            .message_lists_with_origin()
+            .flat_map(|(_, _, list)| list.iter())
+            .filter_map(|frame| frame.observed_at_ns)
+            .chain(
+                d.datagram_flows()
+                    .iter()
+                    .flat_map(|flow| flow.scouting().iter())
+                    .filter_map(|datagram| datagram.observed_at_ns),
+            )
+            .min();
+        Retention {
+            frames: d
+                .message_lists_with_origin()
+                .map(|(_, _, list)| list.iter().count())
+                .sum(),
+            scouting: d
+                .datagram_flows()
+                .iter()
+                .map(|flow| flow.scouting().iter().count())
+                .sum(),
+            oldest_ms: oldest_ns.map(|ns| ns / NANOS_PER_MILLI),
+            oldest_ns,
+            ..Retention::of(d)
+        }
+    }
+
+    /// The instant of packet `k`: a clock that moves forward, is absent, steps
+    /// back past a few messages still held, and steps back past all of them.
+    fn clock(k: usize) -> Option<u64> {
+        let base = 1_000_000_000 + 1_000 * k as u64;
+        if k % 11 == 10 {
+            Some(base - 777_777)
+        } else {
+            match k % 7 {
+                3 => None,
+                5 => Some(base - 2_500),
+                _ => Some(base + 13),
+            }
+        }
+    }
+
+    /// THE KEPT FIGURES ARE WHAT A WALK FINDS, after every packet: through
+    /// appends, front trims under the per-flow and the total ceilings, flows
+    /// evicted whole and opened again, and the clock of [`clock`], over stream,
+    /// datagram and scouting lists.
+    #[test]
+    fn the_kept_figures_are_what_a_walk_of_everything_held_finds() {
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let scout = scout_message();
+        let cases = [
+            ("unbounded", DissectionLimits::default()),
+            (
+                "per flow",
+                DissectionLimits {
+                    frames_per_flow: Some(4),
+                    ..DissectionLimits::default()
+                },
+            ),
+            (
+                "total",
+                DissectionLimits {
+                    frames_total: Some(9),
+                    ..DissectionLimits::default()
+                },
+            ),
+            (
+                "evicting",
+                DissectionLimits {
+                    frames_per_flow: Some(5),
+                    max_flows_per_table: Some(2),
+                    ..DissectionLimits::default()
+                },
+            ),
+        ];
+        for (name, limits) in cases {
+            let mut d = Dissection::with_limits(limits);
+            let mut seq = [1000u32; 4];
+            for k in 0..240usize {
+                let lane = k % 4;
+                let packet = match (k / 4) % 3 {
+                    0 => {
+                        let p = tcp_packet_on(2000 + lane as u16, seq[lane], &framed_keepalive());
+                        seq[lane] += framed_keepalive().len() as u32;
+                        p
+                    }
+                    1 => udp_packet(
+                        [10, 0, 0, 1 + lane as u8],
+                        7447,
+                        [10, 0, 0, 9],
+                        7447,
+                        &keepalive,
+                    ),
+                    _ => udp_packet(
+                        [10, 0, 0, 20 + lane as u8],
+                        43210,
+                        SCOUT_GROUP,
+                        SCOUT_PORT,
+                        &scout,
+                    ),
+                };
+                d.push_packet_at_nanos(LINKTYPE_ETHERNET, k, clock(k), &packet);
+                assert_eq!(Retention::of(&d), walked(&d), "{name}, packet {k}");
+            }
+            let held = Retention::of(&d);
+            assert!(held.frames > 0 && held.scouting > 0, "{name}: {held:?}");
+            match name {
+                "unbounded" => assert_eq!(d.drops().frames, 0, "{name}"),
+                "evicting" => assert!(d.drops().flows > 0, "{name}: no flow was evicted"),
+                _ => assert!(d.drops().frames > 0, "{name}: no list was trimmed"),
+            }
+        }
     }
 
     /// The skipped-packet list is bounded by its own ceiling and counted
