@@ -375,6 +375,10 @@ pub struct LiveMemory {
     /// picked past the cursor, until a cursor passes them, and the payload
     /// plane's verdict for every record it judged.
     pub values: usize,
+    /// What the handle's judge of the end-to-end frames keeps: what it made of
+    /// every frame a profile rule covers in the rows the lists hold, which the
+    /// field and selection documents read.
+    pub e2e: usize,
 }
 
 impl LiveMemory {
@@ -387,6 +391,7 @@ impl LiveMemory {
             + self.selection
             + self.quic_packets
             + self.values
+            + self.e2e
     }
 }
 
@@ -460,6 +465,11 @@ pub struct LiveDissection {
     /// The payloads [`Self::field_values_since`] holds for the selector it was
     /// last asked under, past the cursor it was last asked at.
     values_memory: wz_capture::field_values::ValuesMemory,
+    /// The one judge of the end-to-end frames this handle keeps, for the
+    /// declaration text it was last asked under: the field documents' blocks
+    /// and the selection documents' `e2e` terms read what it judged, in capture
+    /// order over the whole capture.
+    e2e_memory: wz_capture::E2eMemory,
     /// The callback long calls ask how they are going, if the caller set one.
     progress: Option<ProgressHook>,
     lost: u64,
@@ -663,6 +673,7 @@ impl LiveDissection {
             ),
             facts_held: Vec::new(),
             values_memory: wz_capture::field_values::ValuesMemory::new(),
+            e2e_memory: wz_capture::E2eMemory::new(),
             progress: None,
             lost: 0,
             cursor: CaptureCursor::new(),
@@ -719,8 +730,8 @@ impl LiveDissection {
 
     /// What this handle holds on the heap that follows its row count, by
     /// structure (open-debt item 924, D7): the dissection's lists and run maps,
-    /// what the census, the field walk and the values door keep for the next
-    /// call, and the drain's bookkeeping.
+    /// what the census, the field walk, the values door and the end-to-end judge
+    /// keep for the next call, and the drain's bookkeeping.
     ///
     /// A lower bound on the process's heap for this handle, and a figure in
     /// bytes allocated. A program that opens captures budgets by it; the memory
@@ -752,6 +763,7 @@ impl LiveDissection {
                 .sum::<usize>(),
             quic_packets: self.keys.quic_packets_memory(),
             values: self.values_memory.memory(),
+            e2e: self.e2e_memory.memory(),
         }
     }
 
@@ -1186,7 +1198,7 @@ impl LiveDissection {
              \"packets\":{},\"selection\":{},\
              \"census\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"fields\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
-             \"values\":{},\"drain\":{}}}",
+             \"values\":{},\"e2e\":{},\"drain\":{}}}",
             m.total(),
             l.rows,
             l.unit_log,
@@ -1212,6 +1224,7 @@ impl LiveDissection {
             m.fields.exchange_rows,
             m.fields.row_digests,
             m.values,
+            m.e2e,
             m.drain,
         );
         s
@@ -1487,14 +1500,26 @@ impl LiveDissection {
         // number and no row, and the cursor has to pass it. A window ends sooner
         // when `max_rows` says so.
         let through_seq = window_through(self.next_seq - 1, after_seq, max_rows);
+        // The handle's one judge of the end-to-end frames under this text, which
+        // the selection doors read too; brought up to the capture first.
+        let judged = match map {
+            Some(map) => Some(self.e2e_memory.advance(
+                &self.dissection,
+                map,
+                declarations_text,
+                progress.as_ref(),
+            )?),
+            None => None,
+        };
         let memory = match trees {
             wz_capture::fields_json::Trees::Written => &mut self.fields_memory,
             wz_capture::fields_json::Trees::Left => &mut self.facts_memory,
         };
-        wz_capture::fields_json::fields_json_since_remembering_progress(
+        wz_capture::fields_json::fields_json_since_judged(
             &self.dissection,
             capture,
             map,
+            judged.as_ref(),
             declarations_text,
             &ids,
             wz_capture::fields_json::Since {
@@ -1736,6 +1761,19 @@ impl LiveDissection {
         // The highest number the handle has issued: the cursor to give next, as
         // for `fields_since`.
         let through_seq = self.next_seq - 1;
+        // The handle's one judge of the end-to-end frames under this text, which
+        // the field documents read too, unless the caller handed judgements in.
+        let judged = match declarations {
+            Some(declared) if declared.judged.is_none() => {
+                self.e2e_memory
+                    .advance(&self.dissection, declared.map, declared.text, None)
+            }
+            _ => None,
+        };
+        let declarations = declarations.map(|declared| wz_capture::selection_json::Declared {
+            judged: declared.judged.or(judged.as_ref()),
+            ..declared
+        });
         let memory = self
             .selection_said
             .for_selector(selector, declarations.map(|declared| declared.text));

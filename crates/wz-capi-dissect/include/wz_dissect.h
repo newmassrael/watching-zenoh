@@ -879,16 +879,23 @@
  * not. `timeout_error` and `silence_ms` are also `null` for a frame whose
  * packet carried no timestamp; `silence_ms` is `null` for the first frame a
  * slot received. `zid` is absent when the profile does not separate senders,
- * and `identity` when it names no message field. Frames are judged in the
- * order the document walks them, flow by flow and in capture order within a
- * flow, at the capture's own instants -- never the host's clock.
+ * and `identity` when it names no message field. Frames are judged in CAPTURE
+ * ORDER over the whole capture, at the capture's own instants -- never the
+ * host's clock (field-document revision 71). The judgement is the payload
+ * plane's, made once and read by this document's blocks and by a selector's
+ * `e2e` terms alike, so the two cannot disagree about a frame. A slot whose
+ * frames arrive over two flows (one sender and key over two links, or a slot
+ * that pools its senders over two connections) has each frame judged against
+ * the frame the tap took before it, whichever flow that was. Before revision 71
+ * this document judged one flow and then the next, which differs on such a
+ * slot only.
  *
  * STATE-DEPENDENT, so every cell under `e2e` is among the cells an issued row
- * may read differently later (see the list below): a front trim makes a slot's
- * oldest retained frame its first reception, and a zid learned late turns a
- * `null` verdict into one. A since-door (wz_dissect_live_fields_since) still
- * judges the rows its cursor passes over, so the first row it writes is judged
- * against the frames before it and not as a first reception.
+ * may read differently later (see the list below): a zid learned late turns a
+ * `null` verdict into one. A live handle keeps one judge per declaration text,
+ * which goes on across a front trim, so a frame a ceiling has since taken was
+ * still met. A since-door (wz_dissect_live_fields_since) writes rows judged
+ * against every frame before them, the ones its cursor passes over included.
  *
  * @values fields counter_reason
  * @values fields unopened_reason
@@ -1724,7 +1731,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":70,"key":"kind","values":[...],
+ *     {"name":"fields","revision":71,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -6142,7 +6149,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":70,"key":"state",
+ *     "value_families":[{"name":"fields","revision":71,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7531,16 +7538,13 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *   - every row has a sequence number;
  *   - no QUIC list holds a message;
  *   - the container you pass is the one the last call read: it is no shorter
- *     than what the last call consumed, and those bytes are unchanged;
- *   - when a declaration rule binds a key to an end-to-end profile, no slot has
- *     been judged from two lists and the counters have not outgrown what the
- *     lists hold (four entries per held message, and a thousand more).
+ *     than what the last call consumed, and those bytes are unchanged.
  * A window that stops before the end of a list is NOT such a state: the walk is
  * left where the window ended, and the next window, asked from the cursor this
  * one gave, goes on from there, so the windows of a capture taken in order visit
  * each message once. A rule that binds a key to an end-to-end profile is not one
- * either: the counters the last walk left are kept, and the frames that arrived
- * are judged against them.
+ * either: the handle's judge of those frames goes on in capture order as the
+ * capture grows, and the rows read what it judged.
  * These are the states that make a call walk the whole capture; a ceiling that
  * trims the front is not among them. The node census the grouping comes from is
  * kept the same way, across trims too, and begins again only when a message that
@@ -8471,7 +8475,7 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  * "sparse":..,"wire_ends":..,"joined":..,"chains":..,"small":..},"streams":{"kept":..,"runs":..,
  * "pending":..},"plaintext":P,"tls_records":R,"quic_packets":Q,"scouting":S,"packets":K,"selection":W,"census":{"payload_rows":
  * ..,"exchange_rows":..,"row_digests":..},"fields":{"payload_rows":..,
- * "exchange_rows":..,"row_digests":..},"values":V,"drain":D} to *out.
+ * "exchange_rows":..,"row_digests":..},"values":V,"e2e":E,"drain":D} to *out.
  *
  *   - Every value is a number of bytes ALLOCATED, which is what the process
  *     holds and not what is in use.
@@ -8517,6 +8521,12 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     on a busy capture sees it grow, and a cursor moved past the payloads
  *     lets their bytes go. The joining state of split messages is not counted
  *     (a B-tree), so with pieces the figure is a lower bound.
+ *   - (revision 3) e2e is what the handle's one judge of the end-to-end frames
+ *     keeps for the declaration text it was last asked under: what it made of
+ *     every frame a profile rule covers, by the record that carried it, which
+ *     the field documents' `e2e` blocks and the selection documents' `e2e`
+ *     terms read. It follows the covered frames of the rows the lists hold,
+ *     and is zero under a text with no profile rule.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
  *     moved, a nibble a row, and the folds that decide the words (the verdict of

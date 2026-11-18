@@ -393,15 +393,14 @@ pub fn fields_json_since_coordinated(
 /// request was). A window that ends inside a list leaves the walk where the window
 /// ended, and the next window goes on from there, so reading a capture window by
 /// window visits each message once. An end-to-end profile rule does not end it
-/// either: the counters it judges by are a fact about the frames BEFORE a row, so
-/// the memory keeps the ones the last walk left and judges the frames that arrived
-/// against them. Two things still begin the walk again, and each costs a pass over
-/// what is held: a slot judged from two lists (a walk that went on would judge it
-/// in the order of the calls and one over everything judges it list by list, so the
-/// memory notices and walks the whole capture, as it did for every call before it
-/// kept the counters), and any state the prefix test refuses (a flow that left or
-/// appeared in front of one, a message that sorts before one already taken, a
-/// handshake that changes who owns a list).
+/// either: a frame's verdict is the payload plane's, judged in capture order over
+/// the whole capture, and the rows read it. A segment rule does not either: the
+/// pieces of a row are a fact about the pieces BEFORE it, so the memory keeps the
+/// streams the last walk left and joins the pieces that arrived against them. What
+/// still begins the walk again, at the cost of a pass over what is held, is any
+/// state the prefix test refuses (a flow that left or appeared in front of one, a
+/// message that sorts before one already taken, a handshake that changes who owns
+/// a list).
 ///
 /// # What it does not claim
 ///
@@ -437,10 +436,12 @@ pub struct FieldsMemory {
     /// What the walker left: the keyexpr table, and for each list where it
     /// stopped and the folds it held. Meaningful only beside `saved`.
     walk: WalkState,
-    /// The end-to-end counters the last walk left, for a walk that goes on from where
-    /// it stopped to judge the frames that arrived against. Meaningful only beside
-    /// `saved` and `walk`, and `None` for a walk that judged nothing.
-    e2e: Option<crate::e2e_slots::SlotLedger>,
+    /// The pieces the last walk left joined, for a walk that goes on from where it
+    /// stopped to join the pieces that arrived against. Meaningful only beside
+    /// `saved` and `walk`, and `None` for a walk that joined nothing. The
+    /// end-to-end counters are not here: the payload plane judged every frame,
+    /// and the walk reads what it judged.
+    pieces: Option<crate::segment_chain::PieceLedger>,
     /// The digest of every row the walk has written, by sequence number
     /// ([`crate::digest_column`]): what a later call holds the rows it would
     /// write now against, to find the ones that moved.
@@ -504,33 +505,20 @@ impl FieldsMemory {
         }
     }
 
-    /// Whether the end-to-end counters this memory holds may be gone on from: it holds
-    /// them, no slot in them was judged from two lists, and there are not so many
-    /// slots that they have outgrown what the lists hold.
-    ///
-    /// The slots a ledger keeps are those of the traffic it has judged, and a handle
-    /// under a ceiling holds a bounded part of it, so a ledger past a few per held
-    /// message is dropped and the next walk judges what is held and keeps only that:
-    /// one pass per that many new slots, as for the pairing.
-    fn e2e_may_continue(&self, d: &crate::Dissection) -> bool {
-        let Some(ledger) = &self.e2e else {
-            return false;
-        };
-        let held: usize = d
-            .message_lists_with_origin()
-            .map(|(_, _, list)| list.len())
-            .sum();
-        !ledger.crossed() && ledger.slots() <= 4 * held + 1024
+    /// Whether the pieces this memory holds joined may be gone on from: it holds
+    /// them. A stream's open bytes are bounded by the ledger, and what it kept of
+    /// each row is let go with the row.
+    fn pieces_may_continue(&self) -> bool {
+        self.pieces.is_some()
     }
 
-    /// Open-debt item 924, D9 — whether the end-to-end ledger this memory holds
-    /// may be judged on from by a walk that begins again: it may be gone on from
-    /// at all ([`Self::e2e_may_continue`]), and in every stream list the rows it
-    /// has not judged sort, in capture order, after every row it has. A walk
-    /// then reads back the rows behind the frontier and judges the rest in the
-    /// order one walk over everything judges them.
-    fn e2e_ledger_holds(&self, d: &crate::Dissection) -> bool {
-        let Some(ledger) = self.e2e.as_ref().filter(|_| self.e2e_may_continue(d)) else {
+    /// Open-debt item 924, D9 — whether the pieces this memory holds joined may
+    /// be joined on from by a walk that begins again: it holds them, and in every
+    /// stream list the rows it has not joined sort, in capture order, after every
+    /// row it has. A walk then reads back the rows behind the frontier and joins
+    /// the rest in the order one walk over everything joins them.
+    fn pieces_ledger_holds(&self, d: &crate::Dissection) -> bool {
+        let Some(ledger) = self.pieces.as_ref() else {
             return false;
         };
         let lists = crate::node::stream_list_indices(d);
@@ -607,11 +595,49 @@ pub fn fields_json_since_remembering(
 /// are dropped and the next call begins the walk again. The digests of rows written
 /// by earlier calls, the node census and the pairing's folds are kept, since the
 /// stop did not touch them.
+///
+/// The end-to-end verdicts are judged for this call over the whole capture; a
+/// caller that keeps a judge between calls hands its judgements to
+/// [`fields_json_since_judged`] instead.
 #[allow(clippy::too_many_arguments)]
 pub fn fields_json_since_remembering_progress(
     d: &crate::Dissection,
     capture: &[u8],
     map: Option<&crate::payload::formats::FormatMap<'_>>,
+    key: &str,
+    coordinates: &dyn RowCoordinates,
+    since: Since,
+    memory: &mut FieldsMemory,
+    progress: Option<&crate::Progress<'_>>,
+) -> Option<String> {
+    fields_json_since_judged(
+        d,
+        capture,
+        map,
+        None,
+        key,
+        coordinates,
+        since,
+        memory,
+        progress,
+    )
+}
+
+/// [`fields_json_since_remembering_progress`], with the rows' end-to-end
+/// verdicts read from `judged`: the judgements a judge of the whole capture
+/// kept under the same declarations between calls ([`crate::E2eMemory`]), which
+/// the selection documents of the same handle read too. `None` judges the
+/// capture for this call.
+///
+/// A frame's verdict is the payload plane's, made in capture order over the
+/// whole capture, so this memory keeps no counter of its own and a row the
+/// cursor passes is not walked to move one.
+#[allow(clippy::too_many_arguments)]
+pub fn fields_json_since_judged(
+    d: &crate::Dissection,
+    capture: &[u8],
+    map: Option<&crate::payload::formats::FormatMap<'_>>,
+    judged: Option<&crate::e2e_plane::E2eTable>,
     key: &str,
     coordinates: &dyn RowCoordinates,
     since: Since,
@@ -648,10 +674,18 @@ pub fn fields_json_since_remembering_progress(
         .filter(|saved| saved.grouping == grouping && saved.origin_ms == origin_ms)
         .and_then(|saved| d.capture_order_since_across_trims(Some(&saved.marks)));
     let continues = advance.is_some();
-    // Whether a rule binds a key to an end-to-end profile or to a segment profile,
-    // which makes the counters of the frames before a row, or the pieces joined
-    // before it, part of what the walk's result depends on.
-    let judges_e2e = map.is_some_and(|m| m.has_e2e_rules() || m.has_segment_rules());
+    // Whether a rule binds a key to a segment profile, which makes the pieces
+    // joined before a row part of what the walk's result depends on.
+    let joins_pieces = map.is_some_and(|m| m.has_segment_rules());
+    // The end-to-end judgements every row of this call reads: the caller's, or
+    // made here once for the probe and the document alike.
+    let judged: Option<crate::e2e_plane::E2eTable> = match (judged, map) {
+        (Some(judged), _) => Some(judged.clone()),
+        (None, Some(m)) if m.has_e2e_rules() => {
+            Some(crate::e2e_plane::judge_capture(d, &grouping, m))
+        }
+        (None, _) => None,
+    };
 
     // WHETHER THE WALK MAY CONTINUE from where the last one stopped. Every
     // condition is one the walk's own result depends on:
@@ -663,12 +697,11 @@ pub fn fields_json_since_remembering_progress(
     //   the walk would skip is a row the cursor passes;
     // * no skipped row had no sequence number (one is written by every
     //   since-document) and none is a scouting row the list was trimmed under;
-    // * when an end-to-end rule binds a key to a profile, the counters the last walk
-    //   left are held (a counter is a fact about the frames before a row, and a row
-    //   not visited would not move it), no slot has been judged from two lists (a
-    //   continuing walk reaches the lists in the order the calls did and not list by
-    //   list, so such a slot would be judged in another order than one walk over
-    //   everything judges it), and they have not outgrown what the lists hold;
+    // * when a segment rule binds a key to a profile, the pieces the last walk
+    //   left joined are held (a piece's verdict is a fact about the pieces before
+    //   it, and a row not visited would not join it). An end-to-end rule asks
+    //   nothing here: the payload plane judged every frame of the capture in
+    //   capture order, and a row reads its own;
     // * no QUIC list holds a message, because the datagram walk folds those into
     //   the table after each flow and that fold is not repeatable;
     // * the container is the one the saved cursor was walking.
@@ -682,7 +715,7 @@ pub fn fields_json_since_remembering_progress(
         let saved = memory.saved.as_ref()?;
         let (_, _) = advance.as_ref()?;
         if since.after_seq < saved.through_seq
-            || (judges_e2e && !memory.e2e_may_continue(d))
+            || (joins_pieces && !memory.pieces_may_continue())
             || memory
                 .walk
                 .stream
@@ -740,14 +773,14 @@ pub fn fields_json_since_remembering_progress(
                         flow.frames.len(),
                         since.after_seq,
                     );
-                    // Under an end-to-end rule, no later than the first row the
-                    // ledger has not judged, as the producer has it.
-                    match memory.e2e.as_ref().filter(|_| judges_e2e) {
+                    // Under a segment rule, no later than the first row the
+                    // ledger has not joined, as the producer has it.
+                    match memory.pieces.as_ref().filter(|_| joins_pieces) {
                         None => first,
                         Some(ledger) => {
-                            let judged = ledger.frontier(list).produced.saturating_sub(first_held);
+                            let joined = ledger.frontier(list).produced.saturating_sub(first_held);
                             first
-                                .min(usize::try_from(judged).unwrap_or(usize::MAX))
+                                .min(usize::try_from(joined).unwrap_or(usize::MAX))
                                 .max(start)
                         }
                     }
@@ -867,9 +900,12 @@ pub fn fields_json_since_remembering_progress(
         } else {
             // Every row written once into a scratch, so each current digest can
             // be held against the one remembered. A SEPARATE ledger of the
-            // caller's declarations: this walk judges every row, and the
-            // document's own ledger must judge only the rows it writes.
-            let declared = map.map(Declarations::new);
+            // caller's declarations: this walk joins every row's pieces, and the
+            // document's own ledger must join only the rows it walks. The
+            // end-to-end judgements are the same ones the document reads.
+            let declared = map.map(|m| {
+                declared_run(m, crate::segment_chain::PieceLedger::new(), judged.as_ref())
+            });
             let probe = RowSink::new(alloc::collections::BTreeSet::new());
             let _ = fields_json_selected(
                 d,
@@ -919,16 +955,16 @@ pub fn fields_json_since_remembering_progress(
     }
 
     let sink = RowSink::new(revised);
-    // The counters this walk judges against: the last walk's when it goes on from
+    // The pieces this walk joins against: the last walk's when it goes on from
     // there. Open-debt item 924, D9 — and when it begins again, too, with what
-    // they judged of each row, when they are still this capture's and every row
-    // they have not judged sorts after every row they have; otherwise none.
-    let ledger_kept = judges_e2e && (resume || (continues && memory.e2e_ledger_holds(d)));
-    let ledger = match memory.e2e.take() {
+    // they joined of each row, when they are still this capture's and every row
+    // they have not joined sorts after every row they have; otherwise none.
+    let ledger_kept = joins_pieces && (resume || (continues && memory.pieces_ledger_holds(d)));
+    let ledger = match memory.pieces.take() {
         Some(ledger) if ledger_kept => ledger,
-        _ => crate::e2e_slots::SlotLedger::new(),
+        _ => crate::segment_chain::PieceLedger::new(),
     };
-    let declared = map.map(|m| Declarations::with_ledger(m, ledger));
+    let declared = map.map(|m| declared_run(m, ledger, judged.as_ref()));
     // The marks a prefix-extension handed back are the marks of the capture as it
     // stands, so the walk that follows does not make them again from the first
     // message (which is a sort of every message and would put the cost back).
@@ -969,27 +1005,8 @@ pub fn fields_json_since_remembering_progress(
     if crate::progress::cancelled(progress) {
         memory.saved = None;
         memory.walk = WalkState::default();
-        memory.e2e = None;
+        memory.pieces = None;
         return None;
-    }
-    // A continuing walk that met a slot another list had judged first has judged it in
-    // the order of the calls and not of the lists. The document is not the one a walk
-    // over everything writes, so it is thrown away and the walk begun again, which
-    // judges list by list; the counters it leaves say the slot is shared, and no later
-    // call goes on from them.
-    if ledger_kept && declared.as_ref().is_some_and(|d| d.e2e_crossed()) {
-        memory.walk = WalkState::default();
-        memory.e2e = None;
-        return fields_json_since_remembering_progress(
-            d,
-            capture,
-            map,
-            key,
-            coordinates,
-            since,
-            memory,
-            progress,
-        );
     }
     // What this call visited, which each list's producer recorded. Summed after
     // the call and not as a difference of two sums of lengths, because a front
@@ -1034,10 +1051,10 @@ pub fn fields_json_since_remembering_progress(
                 .1
         }
     };
-    // The counters the walk leaves, for the next one to judge the frames that arrive
-    // against. A walk that judged nothing leaves none.
-    memory.e2e = declared
-        .filter(|_| judges_e2e)
+    // The pieces the walk leaves joined, for the next one to join the pieces that
+    // arrive against. A walk that joined nothing leaves none.
+    memory.pieces = declared
+        .filter(|_| joins_pieces)
         .map(Declarations::into_ledger);
     memory.saved = Some(FieldsSaved {
         marks,
@@ -1049,6 +1066,20 @@ pub fn fields_json_since_remembering_progress(
         p.finish();
     }
     Some(document)
+}
+
+/// The declarations a since-document's walk reads by: `map`, joining pieces
+/// against `ledger`, and writing the end-to-end verdicts `judged` holds.
+fn declared_run<'a>(
+    map: &'a crate::payload::formats::FormatMap<'a>,
+    ledger: crate::segment_chain::PieceLedger,
+    judged: Option<&crate::e2e_plane::E2eTable>,
+) -> Declarations<'a> {
+    let run = Declarations::with_ledger(map, ledger);
+    match judged {
+        Some(judged) => run.reading(judged.clone()),
+        None => run,
+    }
 }
 
 /// A digest of the first bytes of a capture container and of the bytes just before
@@ -1715,6 +1746,12 @@ fn fields_json_selected(
     // nothing either way -- folded here so the row renderers ask one question
     // rather than two.
     let declarations = declarations.filter(|d| !d.is_empty());
+    // The end-to-end verdicts the rows write are the payload plane's, judged in
+    // capture order over the whole capture: handed in by a caller that keeps
+    // the judge, or made here for this document.
+    if let Some(declarations) = declarations {
+        declarations.judge_capture(d, grouping);
+    }
     // R2458 (open-debt item 703) — which lists this document renders, DERIVED.
     // See `RenderedLists`.
     let lists = RenderedLists::of(d);
@@ -1899,7 +1936,7 @@ fn fields_json_selected(
                 after_seq: since.map(|s| s.after_seq),
                 through_seq: since.map(|s| s.through_seq),
                 progress,
-                zids: lists.stream.get(i).and_then(|&list| grouping.zids(list)),
+                judged_list: lists.stream.get(i).copied(),
                 sink,
                 closings: RowClosings::of(closings, lists.stream.get(i).copied()),
                 requests: list_requests(
@@ -1952,7 +1989,7 @@ fn fields_json_selected(
                 after_seq: since.map(|s| s.after_seq),
                 through_seq: since.map(|s| s.through_seq),
                 progress,
-                zids: lists.datagram.get(i).and_then(|&list| grouping.zids(list)),
+                judged_list: lists.datagram.get(i).copied(),
                 sink,
                 closings: RowClosings::of(closings, lists.datagram.get(i).copied()),
                 requests: list_requests(
@@ -2423,7 +2460,7 @@ fn push_stream_flow(
         } = &folded[position - start];
         let seq = *seq;
         spaces.at_packet(*packet);
-        let e2e = tags.e2e_source(frame.direction, frame.observed_at_ns);
+        let e2e = E2eSource::of(frame.direction);
         // A row the cursor passes is skipped, unless its text has moved since the
         // consumer was handed it: then it is written again, into the document's
         // `revised` list and not into this flow's messages.
@@ -2433,9 +2470,11 @@ fn push_stream_flow(
             if let Some(d) = declarations {
                 d.note_unwalked();
             }
-            // A counter is a fact about the frames before this one, so a row
-            // the cursor passes over still moves the slots it belongs to.
-            if let Ok(bytes) = flow.message_bytes(&row) {
+            // A piece's verdict is a fact about the pieces before it, so a row
+            // the cursor passes over still joins the pieces it carries. Its
+            // frames need nothing: the payload plane judged them already.
+            let joins = declarations.is_some_and(|d| d.has_segment_rules());
+            if let Some(bytes) = joins.then(|| flow.message_bytes(&row).ok()).flatten() {
                 judge_unwritten_row(RowWalk {
                     bytes: &bytes,
                     space: MidSpace::of_frame(frame),
@@ -2559,11 +2598,11 @@ fn push_stream_flow(
         r.walk.order_packet = order_packet;
         r.walk.order_last = order_last;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
-        // Every row before `end` has now been judged in capture order, the walk
-        // having begun no later than the first row the ledger had not judged.
+        // Every row before `end` has now been joined in capture order, the walk
+        // having begun no later than the first row the ledger had not joined.
         tags.judged_up_to(
             declarations,
-            crate::e2e_slots::Frontier {
+            crate::segment_chain::Frontier {
                 produced: first_produced + end as u64,
                 last_key: order_last,
             },
@@ -2679,7 +2718,7 @@ fn push_datagram_flow(
         // from the container, which is most of what a datagram row costs.
         let seq = tags.frame_seq(produced);
         unnumbered |= seq.is_none();
-        let e2e = tags.e2e_source(frame.direction, frame.observed_at_ns);
+        let e2e = E2eSource::of(frame.direction);
         // See the stream producer: a passed row is skipped unless its text has
         // moved, and then it is written again into `revised`.
         let passed = tags.passed_by_cursor(seq);
@@ -2688,11 +2727,11 @@ fn push_datagram_flow(
             if let Some(d) = declarations {
                 d.note_unwalked();
             }
-            // The counter of a row the cursor passes over still has to move its
-            // slot, so a profile rule makes the row worth re-reading. Without
-            // one, the row stays as cheap as it was. A piece it carries has to be
-            // joined for the same reason.
-            if declarations.is_some_and(|d| d.has_stateful_rules()) {
+            // A piece a row the cursor passes over carries still has to be
+            // joined, so a segment rule makes the row worth re-reading. Without
+            // one, the row stays as cheap as it was: its frames were judged by
+            // the payload plane already.
+            if declarations.is_some_and(|d| d.has_segment_rules()) {
                 if let Some(file) = reread {
                     if let Ok(datagram) = reread_datagram(file, flow, frame.direction, index) {
                         if let Some(message) = datagram_message(frame, &datagram) {
@@ -2930,11 +2969,11 @@ fn push_datagram_flow(
         r.walk.produced = first_produced + frames_end as u64;
         r.walk.scouting_produced = scouting_first + scouting_end as u64;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
-        // A datagram list is judged in its own order, so its frontier is a
+        // A datagram list is joined in its own order, so its frontier is a
         // position and no key.
         tags.judged_up_to(
             declarations,
-            crate::e2e_slots::Frontier {
+            crate::segment_chain::Frontier {
                 produced: first_produced + frames_end as u64,
                 last_key: None,
             },
@@ -3174,8 +3213,8 @@ struct RowWalk<'a> {
     /// over these bytes structurally cannot reach. `None` for a scouting row,
     /// which has no session frame. See [`push_above_transport`].
     carried: Option<&'a wz_session_core::passive::Carried>,
-    /// Who sent the row and when, for the end-to-end judge.
-    e2e: E2eSource<'a>,
+    /// The half the row travelled, which names the sender of its pieces.
+    e2e: E2eSource,
     /// The pairing the `carried` entry of each `ResponseFinal` names its request
     /// from. `None` for a row that is not being written (it is only judged), a
     /// scouting row, and a document with no pairing for this list.
@@ -3339,15 +3378,18 @@ fn request_id(record: &wz_session_core::dissect::Field) -> Option<u64> {
 /// has no key to match a rule against, and is not judged; its `keyexpr_cause`
 /// already says why.
 ///
-/// The one place a record is handed to the judge, so the entry that prints its
-/// verdict and the pass that judges a row without printing it ask the same
-/// question of the same bytes.
+/// The one place a record is handed to the judges, so the entry that prints its
+/// verdict and the pass that joins a row's pieces without printing it ask the
+/// same question of the same bytes. A frame's verdict is not judged here: it is
+/// the payload plane's, looked up by the record's place `place` in its row
+/// ([`Declarations::judge_e2e`]).
 fn judge_record<'d>(
     record: &wz_session_core::dissect::Field,
     word: &str,
+    place: u32,
     keyexpr: Option<&Result<String, crate::payload_decode::UnresolvedRef>>,
     declarations: &Declarations<'d>,
-    source: E2eSource<'_>,
+    source: E2eSource,
 ) -> RecordJudged<'d> {
     use wz_session_core::dissect::FieldValue;
     let none = RecordJudged::default();
@@ -3391,10 +3433,10 @@ fn judge_record<'d>(
             (None, Ok(_)) => return none,
         };
         if let Some(segment) = declarations.judge_segment(key, carrier, payload, source.from_low) {
+            // The message the piece completed is the frame, and the payload
+            // plane judged it at this piece's record.
             let joined_e2e = match (&segment.verdict.joined, read_as) {
-                (Some(joined), Some(keyexpr)) => {
-                    judge_frame(declarations, carrier, keyexpr, Some(joined), source)
-                }
+                (Some(_), Some(keyexpr)) => declarations.judge_e2e(keyexpr, place),
                 _ => None,
             };
             return RecordJudged {
@@ -3411,29 +3453,9 @@ fn judge_record<'d>(
         return none;
     };
     RecordJudged {
-        e2e: judge_frame(declarations, carrier, keyexpr, payload, source),
+        e2e: declarations.judge_e2e(keyexpr, place),
         segment: None,
         closed: None,
-    }
-}
-
-/// Judge one frame under the profile rule `keyexpr` falls to, as `carrier`
-/// brought it: a published one against its slot, a reply's read and left
-/// unjudged for its counter and its timeout.
-fn judge_frame<'d>(
-    declarations: &Declarations<'d>,
-    carrier: crate::segment_chain::Carrier,
-    keyexpr: &str,
-    payload: Option<&[u8]>,
-    source: E2eSource<'_>,
-) -> Option<crate::payload_decode::E2eJudged<'d>> {
-    match carrier {
-        crate::segment_chain::Carrier::Push => {
-            declarations.judge_e2e(keyexpr, payload, source.sender, source.observed_at_ns)
-        }
-        crate::segment_chain::Carrier::Reply { .. } => {
-            declarations.judge_e2e_reply(keyexpr, payload, source.sender)
-        }
     }
 }
 
@@ -3458,17 +3480,18 @@ struct SegmentEntry<'d> {
     joined_e2e: Option<crate::payload_decode::E2eJudged<'d>>,
 }
 
-/// Judge the frames of a row that is NOT written: one a cursor passes over.
+/// Join the pieces of a row that is NOT written: one a cursor passes over.
 ///
-/// A counter is a fact about the frames BEFORE this one, so a row the since-door
-/// does not write still has to move the slots it belongs to, or the first row
-/// after the cursor would be judged as the first frame its slot ever sent. The
-/// verdicts are discarded and nothing else is touched: no tally of the payload
-/// plane moves, because that plane's rule is that a row it did not write was
-/// not walked.
+/// A piece's verdict is a fact about the pieces of its stream BEFORE it, so a
+/// row the since-door does not write still has to join the pieces it carries,
+/// or the first piece after the cursor would be joined as if its stream began
+/// there. The verdicts are discarded and nothing else is touched: no tally of
+/// the payload plane moves, because that plane's rule is that a row it did not
+/// write was not walked. A frame's counter needs nothing here: the payload
+/// plane judged every frame of the capture.
 ///
 /// Costs a walk of the row, and so is done only when a rule binds a key to a
-/// profile.
+/// segment profile.
 fn judge_unwritten_row(row: RowWalk<'_>) {
     let RowWalk {
         bytes,
@@ -3484,17 +3507,18 @@ fn judge_unwritten_row(row: RowWalk<'_>) {
         closes: _,
         trees: _,
     } = row;
-    let Some(declarations) = declarations.filter(|d| d.has_stateful_rules()) else {
+    let Some(declarations) = declarations.filter(|d| d.has_segment_rules()) else {
         return;
     };
     let at = KeyexprAt::new(direction, spaces);
     if let Ok(Some(field)) = space.walk(bytes) {
         if walk_agrees(&field.name, framed) {
-            for record in row_records(&field, space) {
+            for (place, record) in row_records(&field, space).into_iter().enumerate() {
                 let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
                 let _ = judge_record(
                     record,
                     record_word(bytes, record),
+                    record_place(place),
                     keyexpr.as_ref(),
                     declarations,
                     e2e,
@@ -3503,17 +3527,25 @@ fn judge_unwritten_row(row: RowWalk<'_>) {
         }
     }
     if let Some(wz_session_core::passive::Carried::Reassembled { joined, .. }) = carried {
-        for record in &wz_session_core::dissect::dissect_batch(joined, 0).records {
+        let walked = wz_session_core::dissect::dissect_batch(joined, 0);
+        for (place, record) in walked.records.iter().enumerate() {
             let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
             let _ = judge_record(
                 record,
                 record_word(joined, record),
+                record_place(place),
                 keyexpr.as_ref(),
                 declarations,
                 e2e,
             );
         }
     }
+}
+
+/// A record's place in its row's batch, as the key a frame's judgement is kept
+/// under writes it.
+fn record_place(place: usize) -> u32 {
+    u32::try_from(place).unwrap_or(u32::MAX)
 }
 
 fn push_declined(why: &str, out: &mut String) {
@@ -3808,14 +3840,21 @@ fn push_carried(
     for (index, record) in records.into_iter().enumerate() {
         let word = record_word(bytes, record);
         let keyexpr = crate::payload_decode::subtree_keyexpr_reference(record, at);
-        // Judged HERE, in the order the entries are written, which is the order
-        // the frames were batched in: a slot's counter is walked in the order
-        // its frames were sent.
+        // Joined HERE, in the order the entries are written, which is the order
+        // the pieces were batched in; a frame's verdict is the payload plane's,
+        // kept under the record's place in the batch, which is `index`.
         let judged = judging
             .declarations
             .map(|declarations| {
                 let outcome = keyexpr.as_ref().map(|r| &r.outcome);
-                judge_record(record, word, outcome, declarations, judging.source)
+                judge_record(
+                    record,
+                    word,
+                    record_place(index),
+                    outcome,
+                    declarations,
+                    judging.source,
+                )
             })
             .unwrap_or_default();
         // The pairing is by the record's place in its row, which is `index`: the
@@ -4641,7 +4680,14 @@ fn push_above_transport(
             let judged = judging
                 .declarations
                 .map(|declarations| {
-                    judge_record(record, word, outcome.as_ref(), declarations, judging.source)
+                    judge_record(
+                        record,
+                        word,
+                        record_place(i),
+                        outcome.as_ref(),
+                        declarations,
+                        judging.source,
+                    )
                 })
                 .unwrap_or_default();
             push_e2e(judged.e2e.as_ref(), out);
@@ -6089,10 +6135,10 @@ struct RowTags<'a> {
     /// Told after each row written how far the walk has got, and able to stop it.
     /// `None` for a document nobody is watching.
     progress: Option<&'a crate::Progress<'a>>,
-    /// The zid each direction of THIS flow's list announced, `[A, B]`, or
-    /// `None` for a list whose handshake the capture never saw. What the
-    /// end-to-end judge keys a sender by; see [`E2eSource`].
-    zids: Option<&'a [alloc::vec::Vec<u8>; 2]>,
+    /// This flow's list's position in the capture's enumeration of lists,
+    /// whatever the caller numbers: what the payload plane keeps a frame's
+    /// judgement under, with the row and the record's place in it.
+    judged_list: Option<usize>,
     /// What a since-document remembers of the rows it writes, and the earlier
     /// rows it writes again. `None` for a document that remembers nothing.
     sink: Option<&'a RowSink>,
@@ -6360,28 +6406,21 @@ impl RowSink {
     }
 }
 
-/// What a row producer hands the entries it writes so they can judge their
-/// frames: the declarations that hold the rules and the slot state, and who sent
-/// the row and when.
+/// What a row producer hands the entries it writes so they can join their
+/// pieces and read their frames' verdicts: the declarations that hold the rules,
+/// the pieces' state and the payload plane's judgements, and the half the row
+/// travelled.
 #[derive(Clone, Copy)]
 struct E2eRow<'a> {
     declarations: Option<&'a Declarations<'a>>,
-    source: E2eSource<'a>,
+    source: E2eSource,
 }
 
-/// Who sent a row and when the capture took it: the two facts the end-to-end
-/// judge needs about a frame that its bytes cannot give.
-///
-/// Both are `None` when unknown, and unknown stays unknown all the way to the
-/// document: a frame from a sender nobody named is not judged against a
-/// counter shared with every other such sender, and a frame whose packet
-/// carried no timestamp is not judged for a timeout.
+/// Which half of its list a row travelled: what names the sender of the pieces
+/// it carries. Who sent a frame and when it was taken are the payload plane's
+/// to read, where the frame is judged.
 #[derive(Clone, Copy, Default)]
-struct E2eSource<'a> {
-    /// The zid of the direction the row travelled, when the capture named it.
-    sender: Option<&'a [u8]>,
-    /// The capture's own instant for the row, in nanoseconds.
-    observed_at_ns: Option<u64>,
+struct E2eSource {
     /// The half of the list the row travelled: `true` for the half named
     /// first. With the list it names the sender of an application's pieces,
     /// which a zid the capture may never have seen cannot.
@@ -6399,12 +6438,14 @@ struct RowNumbering<'a> {
 }
 
 impl RowTags<'_> {
-    /// Tell the declarations which list the rows written from here on are of, so that
-    /// the end-to-end counters they judge them against know whose slot each is. A list
-    /// this document does not number is told as one no other is.
+    /// Tell the declarations which list the rows written from here on are of: the
+    /// caller's number for the pieces they join (a list this document does not
+    /// number is told as one no other is), and the list's position in the
+    /// capture for the end-to-end judgements they read.
     fn enter_list(&self, declarations: Option<&Declarations<'_>>) {
         if let Some(declarations) = declarations {
             declarations.enter_list(self.numbering.and_then(|n| n.list).unwrap_or(usize::MAX));
+            declarations.enter_judged_list(self.judged_list);
         }
     }
 
@@ -6463,11 +6504,13 @@ impl RowTags<'_> {
     /// row reads of the rows before it is kept by position (the chain identity on
     /// the row, a request in the capture's tables, the packet a row inherits read
     /// back from the rows before it), such rows are not visited either. Three
-    /// things still need them visited, and then the walk takes them as before: an
-    /// end-to-end rule (its counters run over every row before), a row the cursor
-    /// passes that is written again because its text moved, and a cap (it counts
-    /// the rows written before). `from` is where the walk would begin without
-    /// this, and `len` the list's length.
+    /// things still need them visited, and then the walk takes them as before: a
+    /// segment rule (its pieces are joined over every row before), a row the
+    /// cursor passes that is written again because its text moved, and a cap (it
+    /// counts the rows written before). An end-to-end rule is not among them: the
+    /// payload plane judged every frame of the capture, and a row reads its own.
+    /// `from` is where the walk would begin without this, and `len` the list's
+    /// length.
     ///
     /// A list numbers its rows in order and leaves only its newest unnumbered,
     /// so "passed by the cursor" is false from one position on and the position
@@ -6491,56 +6534,58 @@ impl RowTags<'_> {
             len,
             after_seq,
         );
-        // Under an end-to-end rule a row's verdict depends on the rows before it
-        // in its slot: the rows the ledger has judged in order are read back from
-        // it (D9), and the walk begins no later than the first row it has not
-        // judged, so every row from there is judged in order. Pieces being
-        // joined are kept under the same frontier.
-        match declarations.filter(|d| d.has_stateful_rules()) {
+        // Under a segment rule a piece's verdict depends on the pieces before it
+        // in its stream: the rows the ledger has joined in order are read back
+        // from it (D9), and the walk begins no later than the first row it has
+        // not joined, so every row from there is joined in order.
+        match declarations.filter(|d| d.has_segment_rules()) {
             None => Some(first),
             Some(d) => {
                 let list = self.numbering?.list?;
-                let judged = d.e2e_frontier(list).produced.saturating_sub(first_produced);
+                let joined = d
+                    .pieces_frontier(list)
+                    .produced
+                    .saturating_sub(first_produced);
                 Some(
                     first
-                        .min(usize::try_from(judged).unwrap_or(usize::MAX))
+                        .min(usize::try_from(joined).unwrap_or(usize::MAX))
                         .max(from),
                 )
             }
         }
     }
 
-    /// The row whose frames the declarations judge from now on, by its
-    /// produced-index (D9).
+    /// The row the declarations read the frames' judgements of and join the
+    /// pieces of from now on, by its produced-index (D9).
     fn at_row(&self, declarations: Option<&Declarations<'_>>, produced: u64) {
         if let Some(d) = declarations.filter(|d| d.has_stateful_rules()) {
             d.at_row(produced);
         }
     }
 
-    /// The walk of this list judged it in order up to `frontier` (D9); a list
+    /// The walk of this list joined it in order up to `frontier` (D9); a list
     /// with no number has no frontier to keep.
     fn judged_up_to(
         &self,
         declarations: Option<&Declarations<'_>>,
-        frontier: crate::e2e_slots::Frontier,
+        frontier: crate::segment_chain::Frontier,
     ) {
         if let (Some(d), Some(list)) = (
-            declarations.filter(|d| d.has_stateful_rules()),
+            declarations.filter(|d| d.has_segment_rules()),
             self.numbering.and_then(|n| n.list),
         ) {
-            d.e2e_judged_up_to(list, frontier);
+            d.pieces_walked_up_to(list, frontier);
         }
     }
 
-    /// Let the declarations forget what they judged of this list's rows older
+    /// Let the declarations forget what they joined of this list's rows older
     /// than `first_held` (D9).
     fn forget_judged_before(&self, declarations: Option<&Declarations<'_>>, first_held: u64) {
         if let (Some(d), Some(list)) = (
-            declarations.filter(|d| d.has_stateful_rules()),
+            declarations.filter(|d| d.has_segment_rules()),
             self.numbering.and_then(|n| n.list),
         ) {
-            d.e2e_forget_before(list, first_held);
+            d.pieces_forget_before(list, first_held);
         }
     }
 
@@ -6559,15 +6604,12 @@ impl RowTags<'_> {
             sink.kept.borrow_mut().insert(seq, text);
         }
     }
+}
 
-    /// Who sent a frame that travelled `direction`, and when its packet was
-    /// taken.
-    fn e2e_source(&self, direction: Direction, observed_at_ns: Option<u64>) -> E2eSource<'_> {
-        E2eSource {
-            sender: self
-                .zids
-                .map(|zids| zids[crate::agg::dir_index(direction)].as_slice()),
-            observed_at_ns,
+impl E2eSource {
+    /// The half a row that travelled `direction` came from.
+    fn of(direction: Direction) -> Self {
+        Self {
             from_low: Some(crate::agg::dir_index(direction) == 0),
         }
     }

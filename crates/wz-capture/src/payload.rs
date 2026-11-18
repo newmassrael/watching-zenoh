@@ -1320,10 +1320,11 @@ impl PayloadCensus {
     /// judged, the keyexpr resolved and the payload found by the very lines the
     /// census uses, so the payloads one selector picks are the census's.
     ///
-    /// `judging` is the end-to-end judge the selector's `e2e` terms read a
-    /// published sample by ([`crate::e2e_plane`]), handed every such sample in
-    /// the order this walk meets it; `None` where the plane was handed no
-    /// declarations, and then those terms are undecided over a sample.
+    /// `judging` is where the selector's `e2e` terms read a published sample's
+    /// verdict ([`crate::e2e_plane`]): the judge, handed every such sample in
+    /// the order this walk meets it, or the judgements a judge made already;
+    /// `None` where the plane was handed no declarations, and then those terms
+    /// are undecided over a sample.
     pub(crate) fn observe_frame_selecting<'f>(
         &mut self,
         frame: &crate::messages::Row<'_>,
@@ -1331,7 +1332,7 @@ impl PayloadCensus {
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
         sink: Option<PayloadSink<'_, 'f>>,
-        judging: Option<&mut crate::e2e_plane::E2eJudging>,
+        judging: Option<crate::e2e_plane::E2eReading<'_>>,
     ) {
         use wz_session_core::passive::Carried;
 
@@ -1365,7 +1366,7 @@ impl PayloadCensus {
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         mut sink: Option<PayloadSink<'_, 'f>>,
-        mut judging: Option<&mut crate::e2e_plane::E2eJudging>,
+        mut judging: Option<crate::e2e_plane::E2eReading<'_>>,
     ) {
         if batch.halt.is_some() {
             self.gaps.halted_batches += 1;
@@ -1388,7 +1389,7 @@ impl PayloadCensus {
                 seen,
                 filter,
                 ctx,
-                judging.as_deref_mut(),
+                judging.as_mut().map(|reading| reading.reborrow()),
             );
         }
     }
@@ -1403,7 +1404,7 @@ impl PayloadCensus {
         seen: Seen<'_, '_, '_>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
-        judging: Option<&mut crate::e2e_plane::E2eJudging>,
+        judging: Option<crate::e2e_plane::E2eReading<'_>>,
     ) {
         use wz_session_core::network_message::NetworkMessage;
         let Seen { at, record, sink } = seen;
@@ -1419,7 +1420,7 @@ impl PayloadCensus {
         // and a walk that takes payloads. It travels the way the replies did.
         if let NetworkMessage::ResponseFinal(f) = message {
             let from_low = crate::agg::dir_index(direction) == 0;
-            if let Some(judge) = judging {
+            if let Some(judge) = judging.and_then(crate::e2e_plane::E2eReading::judge) {
                 judge.close(ctx.list(), from_low, u64::from(f.request_id));
             }
             if let Some(sink) = sink {
@@ -1464,13 +1465,21 @@ impl PayloadCensus {
         // reads them ([`sample_carrier`]); every other record carries no frame,
         // which is decided whatever the declarations say. A sample is judged
         // here, before the selector is asked, so every sample of a slot is
-        // judged in the order this walk meets it.
+        // judged in the order this walk meets it. A walk that reads judgements
+        // a judge made already reads the ones of this record: its list, its
+        // row's produced-index and its place in the row's batch.
         let carrier = sample_carrier(message);
+        let judge_only = judging
+            .as_ref()
+            .is_some_and(crate::e2e_plane::E2eReading::judges_only);
+        let place = u32::try_from(record).unwrap_or(u32::MAX);
         let e2e = match (payload, carrier) {
-            (Some((_, _, bytes, shm)), Some(carrier)) => judging.and_then(|judge| {
+            (Some((_, _, bytes, shm)), Some(carrier)) => judging.and_then(|judging| {
                 let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(keyexpr_body);
-                judge.judge(crate::e2e_plane::Sample {
+                judging.read(crate::e2e_plane::Sample {
                     list: ctx.list(),
+                    produced: frame.produced(),
+                    record: place,
                     keyexpr: keyexpr.as_deref(),
                     missed: keyexpr
                         .is_none()
@@ -1485,6 +1494,11 @@ impl PayloadCensus {
             }),
             _ => Some(crate::e2e_words::E2eWords::NONE),
         };
+        // The judge of a capture's frames counts nothing and keeps no verdict:
+        // what it was walked for is the judgement above.
+        if judge_only {
+            return;
+        }
         // R311y618 — asked after resolution and before the bytes are inspected.
         let truth = filter.matches(&crate::filter::RecordView {
             e2e,
@@ -1924,6 +1938,15 @@ pub(crate) struct PayloadFold {
     /// with the fold so the two begin again together; `None` until a walk
     /// hands the fold declarations ([`Self::read_by`]).
     e2e: Option<crate::e2e_plane::E2eJudging>,
+    /// The judgements a judge kept for the whole capture, which the `e2e` terms
+    /// read instead of judging here ([`Self::read_judged`]): the walk shares
+    /// one judge with every other reader of the same declarations. Set only
+    /// for the call that feeds the fold, so the judge's table is not shared
+    /// while it grows.
+    judged: Option<crate::e2e_plane::E2eTable>,
+    /// Whether this fold is the judge of a capture's frames and nothing else
+    /// ([`Self::judging_everything`]).
+    judge_only: bool,
 }
 
 #[cfg(feature = "network-codecs")]
@@ -1944,6 +1967,8 @@ impl PayloadFold {
             spaces: crate::agg::KeyexprSpaces::new(),
             filter: resolved.filter().clone(),
             e2e: None,
+            judged: None,
+            judge_only: false,
         }
     }
 
@@ -1957,6 +1982,65 @@ impl PayloadFold {
         self.spaces.fix_key_ids(map.key_bindings());
         if self.filter.reads_e2e() {
             self.e2e = Some(crate::e2e_plane::E2eJudging::new(map.judging_rules()));
+        }
+    }
+
+    /// [`Self::read_by`] for a walk whose `e2e` terms read the judgements a
+    /// judge of the whole capture kept under the same declarations
+    /// ([`crate::e2e_plane::E2eMemory`]) instead of judging a second time.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn read_by_judged(
+        &mut self,
+        map: &formats::FormatMap<'_>,
+        judged: Option<crate::e2e_plane::E2eTable>,
+    ) {
+        self.spaces.fix_key_ids(map.key_bindings());
+        if self.filter.reads_e2e() {
+            self.judged = judged;
+        }
+    }
+
+    /// Hand the fold the judgements its `e2e` terms read for the call that
+    /// feeds it next, or take them back (`None`) once the call is over, so the
+    /// judge that keeps them is the only holder while they grow.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn read_judged(&mut self, judged: Option<crate::e2e_plane::E2eTable>) {
+        if self.filter.reads_e2e() {
+            self.judged = judged;
+        }
+    }
+
+    /// The payload plane as the judge of a capture's frames and nothing else:
+    /// every published sample a profile rule of `map` covers judged in capture
+    /// order and kept by the record that carried it, with no census counted
+    /// and no verdict kept. Keys a declaration fixes are read as every walk by
+    /// `map` reads them.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn judging_everything(
+        dissection: &crate::Dissection,
+        grouping: &crate::node::SessionGrouping,
+        map: &formats::FormatMap<'_>,
+    ) -> Self {
+        let mut fold = Self::begin(dissection, &crate::filter::Filter::any(), grouping);
+        fold.spaces.fix_key_ids(map.key_bindings());
+        fold.e2e = Some(crate::e2e_plane::E2eJudging::new(map.judging_rules()));
+        fold.judge_only = true;
+        fold
+    }
+
+    /// The judgements this fold's judge kept, when it has one.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn judgements(&self) -> Option<&crate::e2e_plane::E2eTable> {
+        self.e2e
+            .as_ref()
+            .map(crate::e2e_plane::E2eJudging::judgements)
+    }
+
+    /// Let the judge forget the judgements of the rows no list holds any more.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn forget_judged_not_held(&mut self, dissection: &crate::Dissection) {
+        if let Some(judge) = self.e2e.as_mut() {
+            judge.forget_not_held(dissection);
         }
     }
 
@@ -2049,6 +2133,16 @@ impl PayloadFold {
         self.spaces.enter_flow(grouping.owners(list));
         // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
         self.spaces.at_packet(packet);
+        let judge_only = self.judge_only;
+        let judging = match (&mut self.e2e, &self.judged) {
+            (Some(judge), _) => Some(if judge_only {
+                crate::e2e_plane::E2eReading::JudgeOnly(judge)
+            } else {
+                crate::e2e_plane::E2eReading::Judge(judge)
+            }),
+            (None, Some(table)) => Some(crate::e2e_plane::E2eReading::Read(table)),
+            (None, None) => None,
+        };
         self.census.observe_frame_selecting(
             frame,
             &self.filter,
@@ -2062,7 +2156,7 @@ impl PayloadFold {
                 .holding(message),
             &mut self.spaces,
             sink,
-            self.e2e.as_mut(),
+            judging,
         );
     }
 }

@@ -5900,9 +5900,11 @@ pub unsafe extern "C" fn wz_dissect_live_selection_since_declaring(
         Ok(asked) => asked,
         Err(rc) => return rc,
     };
+    // No judgements handed in: the handle reads its own judge's.
     let declared = wz_capture::selection_json::Declared {
         map: &asked.map,
         text: asked.text,
+        judged: None,
     };
     // SAFETY: caller contract above.
     let doc = unsafe {
@@ -6211,7 +6213,7 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
 ///
 /// `{"document":{"name":"memory","revision":R},"unit":"bytes","scope":"rows",
 ///   "total":T,"lists":{...},"streams":{...},"plaintext":P,"scouting":S,
-///   "packets":K,"census":{...},"fields":{...},"values":V,"drain":D}`
+///   "packets":K,"census":{...},"fields":{...},"values":V,"e2e":E,"drain":D}`
 ///
 /// Every value is a number of bytes ALLOCATED, which is what the process holds
 /// and not what is in use. `scope` is `rows`: only the structures whose size
@@ -6219,7 +6221,9 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
 /// keeps, the run maps, what the census, the field walk and the values door keep
 /// for the next call). `values` (memory revision 3) is the values door's: the
 /// payloads its selector picked past the cursor, until a cursor passes them, and
-/// the verdict of every record its walk judged. What is fixed, or follows the count of distinct things, is not, so the
+/// the verdict of every record its walk judged. `e2e` (the same revision) is the
+/// handle's judge of the end-to-end frames: what it made of every frame a
+/// profile rule covers, which the field and selection documents read. What is fixed, or follows the count of distinct things, is not, so the
 /// figure is the row-following part of the heap and not all of it; the library's
 /// gate holds the rest to a small bound. A buffer is counted exactly, and a
 /// B-tree map by a model that agrees with the allocator within 3%. `total` is the
@@ -16392,6 +16396,72 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
+    /// THE FIELD DOCUMENT AND THE SELECTION READ ONE JUDGEMENT OF A SLOT OVER
+    /// TWO FLOWS, made in capture order.
+    ///
+    /// One sender and key over two links, counters 10, 11, 12, 13 sent
+    /// alternately on link 0 and link 1: in capture order every frame steps by
+    /// one. Judged one link and then the other, link 1's 11 would have been a
+    /// step back from link 0's 12, an error. The since-door's blocks name no
+    /// counter error, and the selection under the same text picks no row for
+    /// `e2e == error`.
+    #[test]
+    fn the_field_document_and_the_selection_read_one_judgement_of_a_shared_slot() {
+        let packets = e2e_live_packets(2, &[(0, 10), (1, 11), (0, 12), (1, 13)]);
+        let file = pcap_prefix(&packets, packets.len());
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        unsafe { (*handle).follow(&file).expect("follows") };
+        let doc = live_fields_since_declaring(handle, &file, 0, E2E_RULES);
+        assert_eq!(
+            doc.matches("\"counter_reason\":\"none\"").count(),
+            4,
+            "every frame of the slot steps by one in capture order: {doc}"
+        );
+        let picked = live_selection_since_declaring(handle, E2E_RULES, "e2e == error", 0)
+            .expect("the selection answers");
+        assert_eq!(
+            picked.matches("\"selected\":\"yes\"").count(),
+            0,
+            "the selection reads the same judgement: {picked}"
+        );
+        assert!(
+            !picked.contains("\"selected\":\"undecided\""),
+            "and decides every frame of the slot, from the judge's own table: {picked}"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// (memory revision 3) THE MEMORY DOCUMENT NAMES WHAT THE HANDLE'S
+    /// END-TO-END JUDGE KEEPS.
+    ///
+    /// Nothing before a document is asked under a profile rule; what the judge
+    /// made of the frames once one is, inside `total`; and nothing again under
+    /// a text with no profile rule, which keeps no judge.
+    #[test]
+    fn the_memory_document_counts_what_the_end_to_end_judge_keeps() {
+        let packets = e2e_live_packets(2, &[(0, 5), (1, 6), (0, 7)]);
+        let file = pcap_prefix(&packets, packets.len());
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        unsafe { (*handle).follow(&file).expect("follows") };
+        let before = live_memory(handle).expect("a fed handle");
+        assert_eq!(json_count(&before, "e2e"), 0, "{before}");
+
+        let doc = live_fields_since_declaring(handle, &file, 0, E2E_RULES);
+        assert!(
+            doc.contains("\"counter_reason\""),
+            "the frames were judged: {doc}"
+        );
+        let judged = live_memory(handle).expect("a handle that judged its frames");
+        let kept = json_count(&judged, "e2e");
+        assert!(kept > 0, "the judgements are counted: {judged}");
+        assert!(json_count(&judged, "total") >= kept, "{judged}");
+
+        let _ = live_fields_since_declaring(handle, &file, 0, "");
+        let none = live_memory(handle).expect("a handle asked under no profile rule");
+        assert_eq!(json_count(&none, "e2e"), 0, "{none}");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
     /// (ABI 43) THE BOUNDED OPEN SETS BOTH CEILINGS, REPORTS THEM, AND THEY BITE.
     ///
     /// `0` for either leaves the live-tap preset's figure (10 000 per flow, 100 000
@@ -18913,22 +18983,21 @@ mod tests {
     ///
     /// A reader that has registered a profile used to walk the whole handle at every
     /// step, because a counter is a fact about the frames before a row and a walk that
-    /// skipped the old rows would not have moved it: the cost of a step grew with the
-    /// handle (measured: every step restarted, and the step time rose in step with the
-    /// rows held). The walk now keeps the counters the last step left and judges the
-    /// frames that arrived against them.
+    /// skipped the old rows would not have moved it. A frame is now judged by the
+    /// handle's one judge, the payload plane in capture order, which goes on as the
+    /// capture grows, and the field walk reads what it judged.
     ///
     /// Two captures, each read after every packet and each step compared with the
     /// whole-document door of the same handle at the same state:
     ///
-    /// * ONE flow, counters that repeat and skip: the walk must go on (few starts, each
-    ///   message visited once) and every verdict must be the whole document's;
+    /// * ONE flow, counters that repeat and skip;
     /// * TWO flows that announce the same sender and publish the same key, so one
-    ///   slot is judged from two lists, and the LATER list publishes first. A walk that
-    ///   went on would judge the slot in the order of the calls (the later list's frames,
-    ///   then the earlier list's), which is not the order of one walk over everything
-    ///   (the earlier list's first). The walk must notice, begin again, and write the
-    ///   whole document's rows all the same.
+    ///   slot spans two lists, and the LATER list publishes first. The judge takes
+    ///   them in capture order whichever list they are in, so the walk has nothing
+    ///   to begin again for.
+    ///
+    /// In both the walk goes on (few starts, each message visited about once) and
+    /// every verdict is the whole document's.
     #[test]
     fn an_end_to_end_profile_goes_on_across_steps_and_a_shared_slot_begins_again() {
         let one_flow: Vec<(usize, u64)> =
@@ -18951,9 +19020,9 @@ mod tests {
             (1, 10),
             (0, 23),
         ];
-        for (name, flows, frames, goes_on) in [
-            ("one flow", 1usize, one_flow, true),
-            ("two flows sharing a slot", 2usize, two_flows, false),
+        for (name, flows, frames) in [
+            ("one flow", 1usize, one_flow),
+            ("two flows sharing a slot", 2usize, two_flows),
         ] {
             let packets = e2e_live_packets(flows, &frames);
             let file = pcap_prefix(&packets, packets.len());
@@ -18992,25 +19061,18 @@ mod tests {
                 "{name}: {with_verdicts} rows carry a verdict for {} frames; the profile judged nothing",
                 frames.len()
             );
-            if goes_on {
-                assert!(
-                    work.restarted <= 3,
-                    "{name}: the walk began {} times over {steps} steps: {work:?}",
-                    work.restarted
-                );
-                assert!(
-                    work.messages_walked <= 2 * cursor,
-                    "{name}: {} messages visited for {cursor} rows; a walk that began \
-                     again at every step visits about {} ({work:?})",
-                    work.messages_walked,
-                    steps * cursor / 2
-                );
-            } else {
-                assert!(
-                    work.restarted >= 2,
-                    "{name}: a slot judged from two lists must make the walk begin again: {work:?}"
-                );
-            }
+            assert!(
+                work.restarted <= 3,
+                "{name}: the walk began {} times over {steps} steps: {work:?}",
+                work.restarted
+            );
+            assert!(
+                work.messages_walked <= 2 * cursor,
+                "{name}: {} messages visited for {cursor} rows; a walk that began \
+                 again at every step visits about {} ({work:?})",
+                work.messages_walked,
+                steps * cursor / 2
+            );
         }
     }
 

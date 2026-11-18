@@ -61,10 +61,9 @@
 //! Pieces are joined in the order they are handed in, which is the order the
 //! document walks the rows: one list at a time, in capture order within it.
 //! The sender is per list, so one stream never spans two lists. A verdict is
-//! kept by the row it came in and its place among that row's pieces, the way
-//! [`crate::e2e_slots::SlotLedger`] keeps a frame's, and under that ledger's
-//! frontier: a row read again behind it is answered from what was kept and
-//! joins nothing a second time.
+//! kept by the row it came in and its place among that row's pieces, under the
+//! frontier of a `PieceLedger`: a row read again behind it is answered from
+//! what was kept and joins nothing a second time.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -389,7 +388,7 @@ pub struct SegmentLedger {
     clock: u64,
     /// The verdict of each piece joined, by its list, its row's produced-index
     /// and its place among the pieces of that row. Kept for the field walker,
-    /// so built with it, as [`crate::e2e_slots::SlotLedger`]'s is.
+    /// so built with it.
     #[cfg(feature = "dissect")]
     judged: BTreeMap<(usize, u64, u32), Verdict>,
     /// What each `ResponseFinal` [`Self::close`]d, kept by the same key as a
@@ -665,5 +664,71 @@ impl SegmentLedger {
                 ended.push(gone.ended(Ending::Evicted));
             }
         }
+    }
+}
+
+/// How far one list has been walked in the order a walk over the whole capture
+/// walks it: every row before `produced` was walked, and the largest
+/// capture-order key among them is `last_key` (`None` for a list walked in its
+/// own order, a datagram list).
+#[cfg(feature = "dissect")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Frontier {
+    /// The produced-index of the first row not walked.
+    pub produced: u64,
+    /// The largest key walked, for a list walked in capture order.
+    pub last_key: Option<(usize, u64)>,
+}
+
+/// The pieces the field walker joins, and how far it has joined each list.
+///
+/// A piece's verdict is a fact about the pieces of its stream before it, so a
+/// walk that reads a row again behind the frontier answers from what was kept
+/// and joins nothing a second time, and a walk that goes on from where the last
+/// one stopped joins against the streams it left. The end-to-end counters are
+/// not here: the payload plane judges them (`crate::e2e_plane`) and the walker
+/// reads what it judged.
+#[cfg(feature = "dissect")]
+#[derive(Debug, Default, Clone)]
+pub struct PieceLedger {
+    segments: SegmentLedger,
+    frontiers: BTreeMap<usize, Frontier>,
+}
+
+#[cfg(feature = "dissect")]
+impl PieceLedger {
+    /// A ledger that has joined nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How far the list at `list` has been walked in order.
+    pub(crate) fn frontier(&self, list: usize) -> Frontier {
+        self.frontiers.get(&list).copied().unwrap_or_default()
+    }
+
+    /// The list at `list` has been walked in order up to `frontier`; a frontier
+    /// behind the one held moves nothing.
+    pub(crate) fn walked_up_to(&mut self, list: usize, frontier: Frontier) {
+        let held = self.frontiers.entry(list).or_default();
+        if frontier.produced > held.produced {
+            *held = frontier;
+        }
+    }
+
+    /// Let go of what was kept of the rows of `list` older than `first_held`,
+    /// the produced-index of the oldest row it holds.
+    pub(crate) fn forget_before(&mut self, list: usize, first_held: u64) {
+        self.segments.forget_before(list, first_held);
+    }
+
+    /// The joining state.
+    pub(crate) fn segments(&self) -> &SegmentLedger {
+        &self.segments
+    }
+
+    /// The joining state, to join one piece.
+    pub(crate) fn segments_mut(&mut self) -> &mut SegmentLedger {
+        &mut self.segments
     }
 }

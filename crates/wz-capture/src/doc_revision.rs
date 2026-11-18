@@ -2826,6 +2826,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R70_CARRIES,
     },
+    // Revision 71 moves no key and no word. A record's `e2e` block is the
+    // payload plane's judgement, made once in capture order over the whole
+    // capture and read by this document and the selection documents alike; it
+    // was the field walk's own, made one list at a time. Within one flow the
+    // two are one order. A slot whose frames arrive over two flows (one sender
+    // and key over two links, or a slot that pools its senders over two
+    // connections) now has each frame judged against the frame the tap took
+    // before it, whichever flow that was.
+    //
+    // ⚠ A VALUE MOVES on such a slot: `previous_counter`, `counter_step`,
+    // `first`, `counter_error`, `counter_reason`, `silence_ms` and
+    // `timeout_error` of its frames after the first change of flow.
+    DocumentShape {
+        document: FIELDS,
+        revision: 71,
+        keys: FIELDS_R70_KEYS,
+        retiring: &[],
+        families: FIELDS_R70_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R70_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -4709,6 +4730,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: ROW_FACTS_R10_CARRIES,
     },
+    // Revision 11 is the field document's revision 71 on these rows: a record's
+    // `e2e` block is the payload plane's judgement in capture order. No key or
+    // word moves; values do on a slot over two flows. See that row.
+    DocumentShape {
+        document: ROW_FACTS,
+        revision: 11,
+        keys: ROW_FACTS_R10_KEYS,
+        retiring: &[],
+        families: ROW_FACTS_R10_FAMILIES,
+        planes: &[],
+        carries: ROW_FACTS_R10_CARRIES,
+    },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
     //
@@ -4865,14 +4898,17 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
-    // Revision 3 ADDS `values`, beside `fields`, and retires nothing: what the
-    // values door (`wz_dissect_live_field_values_since` and its window) keeps
-    // between calls, read from its memory. That is the payloads its selector
-    // picked past the cursor, held until a cursor passes them, and the payload
-    // plane's verdict for every record it judged. A consumer that keeps the
-    // cursor behind on a busy capture held these bytes before this revision too;
-    // the document did not name them. No word moves. A consumer pinned to
-    // revision 2 loses nothing it read; its `total` now includes the new figure.
+    // Revision 3 ADDS `values` and `e2e`, after `fields`, and retires nothing.
+    // `values` is what the values door (`wz_dissect_live_field_values_since` and
+    // its window) keeps between calls, read from its memory: the payloads its
+    // selector picked past the cursor, held until a cursor passes them, and the
+    // payload plane's verdict for every record it judged. A consumer that keeps
+    // the cursor behind on a busy capture held these bytes before this revision
+    // too; the document did not name them. `e2e` is what the handle's one judge
+    // of the end-to-end frames keeps: what it made of every frame a profile rule
+    // covers in the rows the lists hold, which the field and selection
+    // documents read. No word moves. A consumer pinned to revision 2 loses
+    // nothing it read; its `total` now includes the new figures.
     DocumentShape {
         document: MEMORY,
         revision: 3,
@@ -10735,12 +10771,14 @@ pub const MEMORY_R2_KEYS: &[&str] = &[
     "wire_ends",
 ];
 
-/// The memory document's key set at revision 3: revision 2's and `values`.
+/// The memory document's key set at revision 3: revision 2's, `values` and
+/// `e2e`.
 pub const MEMORY_R3_KEYS: &[&str] = &[
     "census",
     "chains",
     "document",
     "drain",
+    "e2e",
     "exchange_rows",
     "fields",
     "joined",
@@ -36301,7 +36339,9 @@ mod tests {
             // for the other chain the fragment ended.
             // To 70 when each half gained `initial_sn` and whether it is
             // zenoh's derivation.
-            (FIELDS, 70),
+            // To 71 when a record's `e2e` block became the payload plane's
+            // judgement in capture order: values move.
+            (FIELDS, 71),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -36471,8 +36511,9 @@ mod tests {
             // What a live handle holds in memory, by structure.
             // To 2 when it gained `quic_packets`: one key, no word moves and
             // nothing retires.
-            // To 3 when it gained `values`, what the values door keeps: one
-            // key, no word moves and nothing retires.
+            // To 3 when it gained `values`, what the values door keeps, and
+            // `e2e`, what the end-to-end judge keeps: two keys, no word moves
+            // and nothing retires.
             (MEMORY, 3),
             // The typed values of a few payload field paths.
             // To 3 when a reply's pieces were joined per query, apart from the
@@ -36480,8 +36521,9 @@ mod tests {
             (FIELD_VALUES, 3),
             // The field document's rows without their trees; to 5 with the
             // field document's 64, to 6 with its 65, to 7 with its 66, to 8
-            // with its 67, to 9 with its 69, to 10 with its 70.
-            (ROW_FACTS, 10),
+            // with its 67, to 9 with its 69, to 10 with its 70, to 11 with its
+            // 71.
+            (ROW_FACTS, 11),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

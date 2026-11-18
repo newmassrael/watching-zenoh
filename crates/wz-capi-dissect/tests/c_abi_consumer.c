@@ -4610,8 +4610,12 @@ int main(void) {
      * 70: each of a flow's `halves` gains `initial_sn`, the origin its
      * `Open` announced, and `initial_sn_derivation` (`derived`,
      * `not_derived`, or null), whether it is zenoh's derivation over the two
-     * zids. Two keys and a family arrive; nothing retires. */
-    revisioned[2].revision = 70;
+     * zids. Two keys and a family arrive; nothing retires.
+     * 71: a record's `e2e` block is the payload plane's judgement, in capture
+     * order over the whole capture; a slot over two flows reads each frame
+     * against the one the tap took before it. Values move under stationary
+     * keys. */
+    revisioned[2].revision = 71;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4921,7 +4925,8 @@ int main(void) {
      * read. The document says what it counts (`scope`), in what unit, and the
      * sum, so a program that budgets by it reads three words before any group.
      * 2: `quic_packets`, the QUIC packets a handle keeps for a key that has not
-     * arrived. 3: `values`, what the values doors keep between calls. */
+     * arrived. 3: `values`, what the values doors keep between calls, and
+     * `e2e`, what the handle's judge of the end-to-end frames keeps. */
     revisioned[20].name = "memory";
     revisioned[20].revision = 3;
     revisioned[20].doc = NULL;
