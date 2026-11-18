@@ -1155,7 +1155,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
-    let opened = wz_capi_coop::CoopEngine::open(
+    let opened = wz_capi_coop::CoopEngine::open_with_policy(
         links.waited_by_owner(),
         crate::coop_host::clock(),
         crate::coop_host::entropy(),
@@ -1199,6 +1199,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
             max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
         },
+        policy,
     );
     let engine = match opened {
         Ok(engine) => engine,
