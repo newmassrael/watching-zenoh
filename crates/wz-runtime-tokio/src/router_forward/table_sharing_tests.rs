@@ -802,7 +802,7 @@ fn bring_timed(memo: &mut Arc<ClientRoutes>, store: &ClientSubStore) -> Duration
 /// indexed and taking each reached route out one by one, as section 6.9 built them;
 /// `index_wholesale`, which starts the new memo from the routes that stay when a change reaches
 /// more than half of them, its index walked to the end; and `index_bounded`, the memo as the router
-/// builds it now, whose walk for a changed key stops past half of the routes and asks the key of
+/// builds it now, whose walk for a changed key stops past one route in eight and asks the key of
 /// every route instead. Every write moves the store once
 /// and brings each memo to it, timed alone: a key no route meets (declared, then withdrawn), a key
 /// one route meets (a second face declaring it, then withdrawing it), and `mesh/**`, which meets

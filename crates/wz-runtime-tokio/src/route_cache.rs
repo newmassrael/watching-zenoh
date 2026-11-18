@@ -199,10 +199,23 @@ struct RetireForm {
     /// A change that reaches more than half of the routes starts the memo from those that stay,
     /// rather than taking each route it reaches out.
     drops_whole: bool,
-    /// The index's walk for a changed key stops past half of the routes, and the key is asked of
-    /// every route instead.
+    /// The index's walk for a changed key stops past one route in [`WALK_SHARE`] of the memo's,
+    /// and the key is asked of every route instead.
     bounds_walk: bool,
 }
+
+/// The share of a memo's routes past which the index's walk for a changed key stops and the key
+/// is asked of every route instead: one in this many.
+///
+/// From the writer's bring measured on pc2 (`docs/router-table-snapshots.md`, section 6.9): the
+/// walk costs about 1.0 us a route it finds at 65,536 routes kept (0.26 us at 2,048), since each
+/// route found is a state visited and kept in the walk's set, where the scan costs about 0.2 us a
+/// route it tries at either size. A walk that finds `f` routes of `n` pays while `f` times 1.0 is
+/// under `n` times 0.2, so while `f` is under a fifth of `n`; one in eight stops it inside that,
+/// with the margin a walk that goes on finding after the bound needs. A key that meets no route
+/// or one walks as before whatever the bound, unless the memo holds fewer than eight routes, where
+/// the scan is a few routes long.
+const WALK_SHARE: usize = 8;
 
 impl RetireForm {
     /// The form the router's memos take.
@@ -278,10 +291,10 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
     /// With `form.drops_whole`, a change that reaches every route starts the memo empty, and one
     /// that reaches more than half of them starts it empty and puts back the routes that stay
     /// ([`without`](Self::without)); otherwise each route reached is taken out. With
-    /// `form.bounds_walk`, the index's walk for a changed key stops once it has found more than half
-    /// of the routes, and that key is asked of every route instead, as a memo with no index asks:
-    /// past that many, the walk costs more than the scan (`docs/router-table-snapshots.md`, section
-    /// 6.9), and the change goes the way of `drops_whole` whichever found its routes.
+    /// `form.bounds_walk`, the index's walk for a changed key stops once it has found more than one
+    /// route in [`WALK_SHARE`], and that key is asked of every route instead, as a memo with no
+    /// index asks: past that many, the walk costs more than the scan, and the change goes the way of
+    /// `drops_whole` whichever found its routes.
     fn retiring(
         mut self,
         since: u64,
@@ -306,7 +319,7 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
                 }
                 let before = reached.len();
                 let candidates = if form.bounds_walk {
-                    index.intersecting_within(changed, held / 2)
+                    index.intersecting_within(changed, held / WALK_SHARE)
                 } else {
                     Some(index.intersecting(changed))
                 };
@@ -1240,6 +1253,8 @@ mod tests {
     /// told reached when a change that reaches most routes starts the memo from those that stay:
     /// its key in the routes and in the index is the one first kept. Turned red by a route kept
     /// again under a key of its own that the index does not hold, which the change would leave in.
+    /// The walk is unbounded here so that the index finds the routes: the bound of the router's form
+    /// would send a memo this small to the scan, which reads the routes' own keys.
     #[test]
     fn a_route_kept_twice_is_left_out_by_a_change_that_reaches_most_routes() {
         let mut kept: Kept<u64, ()> = Kept::empty(true);
@@ -1255,7 +1270,10 @@ mod tests {
                     true
                 },
                 keyexpr_intersects_target,
-                RetireForm::ROUTER,
+                RetireForm {
+                    drops_whole: true,
+                    bounds_walk: false,
+                },
             )
             .expect("the change says what moved");
         let keyexprs: BTreeSet<String> =
