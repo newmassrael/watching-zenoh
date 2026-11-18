@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime", "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"]
+decision = '''
+The pure application-frame code (the CRC models, the receiver's judge, the end-to-end profile, the frame builder and opener, and the segment profile) leaves the capture crate for a runtime crate of its own, `wz-app-frame`, so a session runtime and the C ABIs can use it without depending on the analyzer. The CRC models and the judge need no allocator and build with default features off; the profile, frame and segment profile sit behind a default `alloc` feature. `wz-capture` re-exports the five modules at their old paths, so no caller changes. The crate inherits the workspace MSRV, and the one call that needed 1.82 is written for 1.81.
+'''
+changes = '''
+`crates/wz-app-frame` (new): `e2e_crc`, `e2e_judge`, `e2e_profile`, `e2e_frame`, `segment_profile` moved with `git mv`, their 34 in-file tests with them; helpers the capture crate calls across the boundary are `pub`; `segment_profile::synthetic` behind `fixtures`.
+`crates/wz-capture`: re-exports the five modules; `fixtures` forwards to `wz-app-frame/fixtures`.
+Workspace members and both lock files; `layer_direction_gate.py` places the crate above the core (four selftest rows); `feature_gate_diagnostic.py` puts it on the feature axis; Platform trigger paths include it.
+'''
+verification = '''
+On pc2: `cargo test -p wz-app-frame` 34 passed with default features and 34 with them off; `cargo test -p wz-capture --lib` 1331 passed (34 fewer, the moved ones); clippy `-D warnings` on wz-app-frame (both feature sets) and wz-capture; `cargo doc -p wz-app-frame --all-features` with `-D warnings`; `cargo build -p wz-capi-dissect`; `feature_gate_diagnostic.py`, `feature_public_surface_census.py --check`, `reduced-features-gate.sh wz-app-frame`, `cargo fmt --all --check`.
+Locally: `layer_direction_gate.py --selftest` and `--check`, `platform_trigger_paths_gate.py --check`, `wz_config.py --check`.
+'''
+carry = '''
+The sending side (`e2e_sender`, `segment_sender`) still reads the capture crate's JSON shapes and stays there; a runtime door for it is later work.
+'''
