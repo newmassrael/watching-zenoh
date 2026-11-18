@@ -88,8 +88,8 @@ session-slot = [
     "wz-session-core/session-slot",
     "wz-session-mcu/session-slot",
 ]
-# The high-water mark of the tables a host lists as pools (`docs/pool-monitor.md`). Off by default:
-# a library crate never turns a capability on.
+# The high-water mark of the tables a host lists as pools. Off by default: a library crate never
+# turns a capability on.
 pool-monitor = [
     "wz-runtime-coop/pool-monitor",
     "wz-session-core/pool-monitor",

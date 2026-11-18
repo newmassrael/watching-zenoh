@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A sampled view of a running node: what it spends and how its messages are spaced
-//! (`docs/observation-plane.md` M4).
+//! A sampled view of a running node: what it spends and how its messages are spaced (the
+//! observation plane's resources).
 //!
 //! A node has counters per lane and per reason and nothing that says, in one place, how loaded it
 //! is. The [`Sampler`] takes a [`Snapshot`] on a period and keeps the latest, and the snapshot is a
@@ -85,9 +85,9 @@ pub const HAS_TASKS: u8 = 1 << 2;
 pub const HAS_EVENTS: u8 = 1 << 3;
 
 /// The bits of [`Snapshot::features`], one for each instrument of the observation plane an image
-/// can have (`docs/observation-plane.md`). A bit is assigned once and never moved or reused, and a
-/// reader ignores the bits it does not know, which is how an image with a later instrument is read
-/// by an older reader. The host sets the bits of the instruments it was built with.
+/// can have. A bit is assigned once and never moved or reused, and a reader ignores the bits it
+/// does not know, which is how an image with a later instrument is read by an older reader. The
+/// host sets the bits of the instruments it was built with.
 ///
 /// The bits are the declaration's (`observation_bit` of each capability in `deploy/wz-config.toml`),
 /// generated into `feature_bits_generated.rs` and bound to names here, so the layout's promise and

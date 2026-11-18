@@ -384,7 +384,7 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     }
 }
 
-/// The runtime's task table as a pool (`pool-monitor`, `docs/pool-monitor.md`): see
+/// The runtime's task table as a pool (`pool-monitor`): see
 /// [`crate::executor::ExecutorState`].
 #[cfg(feature = "session-slot")]
 impl<C: ClockSource, D: ?Sized> wz_session_core::pool_gauge::PoolGauge for CoopRuntime<C, D> {

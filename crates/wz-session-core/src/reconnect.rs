@@ -376,11 +376,11 @@ pub struct ReplayTurn {
 /// The declaration cache of a session and the replay that is walking it, if one is.
 ///
 /// This is the heap runtime's host of [`crate::replay_cursor::ReplayCursor`]
-/// (`docs/declaration-sync-pacing.md`): the
-/// cache is the ordered sequence the cursor is a place in, and every change to it that a live
-/// caller makes goes through [`Self::record`] or [`Self::retract`], which ask the cursor what to do
-/// about the peer. They are kept together in one value so that the entry and the cursor change
-/// under one lock and a declaration made between two turns of a replay cannot be missed.
+/// (`declaration-sync-pacing`): the cache is the ordered sequence the cursor is a place in, and
+/// every change to it that a live caller makes goes through [`Self::record`] or [`Self::retract`],
+/// which ask the cursor what to do about the peer. They are kept together in one value so that the
+/// entry and the cursor change under one lock and a declaration made between two turns of a replay
+/// cannot be missed.
 ///
 /// With no replay running (`replay` is `None`, which is always so when pacing is off) it is the
 /// plain ordered list it was: [`Self::record`] answers

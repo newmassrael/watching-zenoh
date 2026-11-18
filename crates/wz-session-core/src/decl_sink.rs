@@ -335,10 +335,9 @@ impl UndeclSink for BoxedUndeclSink {
     }
 }
 
-/// The observers told that the peer ended its initial declarations (`declarations-synced-event`,
-/// `docs/declarations-synced-event.md`): the `DeclareFinal` of the initial interest has arrived,
-/// so the declarations observed so far are all the peer held when this session was established
-/// and the ones after are live.
+/// The observers told that the peer ended its initial declarations (`declarations-synced-event`):
+/// the `DeclareFinal` of the initial interest has arrived, so the declarations observed so far are
+/// all the peer held when this session was established and the ones after are live.
 ///
 /// It is not a [`DeclSink`] or an [`UndeclSink`]: those say what one entity did, and this says a
 /// fact of the peer as a whole, which holds for subscribers, queryables and tokens alike (one

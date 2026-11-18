@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The node's event log: one [`EventRing`] that the code of the node writes events into, stamped
-//! with the node clock (`docs/observation-plane.md` M2).
+//! with the node clock (the observation plane's ring of fixed-size records).
 //!
 //! The ring is written by one producer at a time. A node has many threads that may have something
 //! to say, so the producers take a lock between them; nothing waits on a reader, and the lock is

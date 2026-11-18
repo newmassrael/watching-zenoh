@@ -1376,9 +1376,9 @@ impl TxLimitsCache {
 /// a known MCU zero-cost debt, faithfulness-over-cost).
 pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `resource-snapshot` — the spacing of the transport messages this session
-    /// receives (`docs/observation-plane.md` M4). Per session, not per process:
-    /// every reading is taken on this session's own clock, so the readings share
-    /// one epoch, which readings of two sessions' clocks do not. Fed at the
+    /// receives. Per session, not per process: every reading is taken on this
+    /// session's own clock, so the readings share one epoch, which readings of
+    /// two sessions' clocks do not. Fed at the
     /// receive path's one counting seam, [`crate::drive`]'s
     /// `note_rx_transport_message`, whether or not `transport-stats` is on.
     #[cfg(feature = "resource-snapshot")]
@@ -2025,17 +2025,17 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// feature-elided prunes nothing.
     ///
     /// The cache also holds the replay that is walking it, when a paced one runs
-    /// ([`DeclarationCache`], `docs/declaration-sync-pacing.md`), so a live declaration or
+    /// ([`DeclarationCache`], `declaration-sync-pacing`), so a live declaration or
     /// retraction made between two turns changes the list and the cursor under one lock. Every
     /// live change goes through a per-kind method ([`Self::declare_subscriber_recorded`],
     /// [`Self::retract_subscriber_recorded`] and their siblings).
     #[cfg(feature = "session-reconnect")]
     declaration_cache: R::Mutex<DeclarationCache>,
     /// The interests this session sent whose final has not arrived, each with the time it was sent
-    /// ([`DeclarationSync`], `docs/declaration-sync-pacing.md` phase 3): what
-    /// [`Self::declarations_synced`] waits for beside the replay in the cache. Noted where an
-    /// interest is sent (live, or by the replay), answered by [`Self::note_declare_final`], cleared
-    /// when the session is reset for a new peer. Locked on its own and never while the cache is.
+    /// ([`DeclarationSync`]): what [`Self::declarations_synced`] waits for beside the replay in the
+    /// cache. Noted where an interest is sent (live, or by the replay), answered by
+    /// [`Self::note_declare_final`], cleared when the session is reset for a new peer. Locked on its
+    /// own and never while the cache is.
     #[cfg(feature = "session-reconnect")]
     declaration_sync: R::Mutex<DeclarationSync>,
     /// §5.21 routing-namespace — the per-participant EGRESS prefix (the wz
@@ -15370,9 +15370,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// A4 — record one declaration for replay and send it, as ONE step: `entry` goes at the end of
     /// the declaration cache, the cache says whether the peer is to be told now, and `emit` runs
     /// only if so. Every live declaration goes through here, so the rule for a declaration made
-    /// while a paced replay is walking the cache is stated in one place
-    /// (`docs/declaration-sync-pacing.md`, rule 2): the replay will reach the entry, in order, after
-    /// everything it depends on, so `emit` does NOT run and the call returns `Ok(())`.
+    /// while a paced replay is walking the cache is stated in one place: the replay will reach the
+    /// entry, in order, after everything it depends on, so `emit` does NOT run and the call returns
+    /// `Ok(())`.
     ///
     /// pico's `_z_cache_declaration` runs only on `_Z_RES_OK` from `_z_send_n_msg`
     /// (`src/net/primitives.c:56-60`), and so does this: when `emit` fails the entry is removed
@@ -15442,7 +15442,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// A4 — remove the first cache entry `pred` matches and send its retraction, as ONE step:
     /// `emit` runs only if the cache says the peer holds the entry. A retraction of an entry a paced
     /// replay has not yet reached sends nothing, and returns `None`, because the peer never learned
-    /// of it (rule 3 of `docs/declaration-sync-pacing.md`); otherwise it returns what `emit` did.
+    /// of it; otherwise it returns what `emit` did.
     ///
     /// First-match (not retain-all) mirrors pico's `_z_network_message_slist_drop_first_filter` in
     /// `_z_prune_declaration`: one undeclare retracts one declare, so re-declared ids keep their
@@ -15863,9 +15863,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Whether this session's declarations are SYNCED with its peer: no paced replay owes the peer
     /// a declaration, and every interest the node sent that asks for what exists now has been
-    /// answered with a final, or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS` and is given up on
-    /// (`docs/declaration-sync-pacing.md`, phase 3). A session that sent no interest and runs no
-    /// replay is synced.
+    /// answered with a final, or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS` and is given up on.
+    /// A session that sent no interest and runs no replay is synced.
     ///
     /// The peer's own initial final is not required: a router sends none to a client.
     /// R311g1 — signature-stability: always `true` without `session-reconnect`, which has no
@@ -15928,9 +15927,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// A4 — begin a PACED replay of the declaration cache onto the (replacement) link: the peer
     /// holds none of it, so the replay starts at the beginning, and any replay already running is
-    /// discarded (`docs/declaration-sync-pacing.md`, rule 5). Nothing is sent by this call; the
-    /// turns of [`Self::replay_turn`] send it, and the declarations a caller makes while it runs
-    /// are recorded and replayed in their turn, not sent ahead of what they depend on.
+    /// discarded and never resumed. Nothing is sent by this call; the turns of
+    /// [`Self::replay_turn`] send it, and the declarations a caller makes while it runs are recorded
+    /// and replayed in their turn, not sent ahead of what they depend on.
     ///
     /// R311g1 — signature-stability: a no-op without `session-reconnect`.
     #[cfg(feature = "alloc")]

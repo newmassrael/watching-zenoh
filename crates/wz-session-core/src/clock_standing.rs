@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! How far a node may trust its clock: the [`clock_quality`](crate::clock_quality) machine and
-//! the host that drives it (`docs/observation-plane.md` M1).
+//! the host that drives it (the observation plane's clock with a quality).
 //!
 //! A clock port ([`EpochSource`](crate::epoch::EpochSource)) says what time it is. This says how
 //! much that is worth, and it is told by the host, which is the only party that knows: a time

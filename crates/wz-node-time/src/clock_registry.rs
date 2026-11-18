@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The clock sources an application registers (`docs/observation-plane.md` M1, `clock-source`).
+//! The clock sources an application registers (`clock-source`, the observation plane's clock
+//! with a quality).
 //!
 //! A node reads the time from the system clock. A device that has a better one, a disciplined
 //! hardware clock or a time master on its bus, registers it here as an

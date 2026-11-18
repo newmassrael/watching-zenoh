@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A ring of fixed-size event records with one producer and any number of readers
-//! (`docs/observation-plane.md` M2).
+//! A ring of fixed-size event records with one producer and any number of readers (the event
+//! records of the observation plane).
 //!
 //! # What it is
 //!

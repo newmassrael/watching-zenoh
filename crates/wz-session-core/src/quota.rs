@@ -24,8 +24,8 @@
 //! # `0` is no bound
 //!
 //! A limit of `0` means unlimited. That is upstream's behaviour, which has no such bound, so it
-//! is the default of every quota-limited resource (decision C2 of `docs/build-configuration.md`
-//! reads the same for a policy), and it is why a limit that is a quota is not read like the
+//! is the default of every quota-limited resource (as a policy defaults to upstream's behaviour,
+//! always), and it is why a limit that is a quota is not read like the
 //! capacity limits of `caps`, where `0` would mean a table of no rows.
 
 /// The bound is reached: the holder asked for one more place than the quota allows.

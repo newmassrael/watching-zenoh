@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The read-only table of a closed key set (`docs/closed-key-set.md`): every key an image handles,
-//! numbered, and for each key the entities a message on it reaches.
+//! The read-only table of a closed key set: every key an image handles, numbered, and for each key
+//! the entities a message on it reaches.
 //!
 //! # What it is
 //!

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The model test of the closed key set's table (`docs/closed-key-set.md`, decision D3): what the
+//! The model test of the closed key set's table (the glob matcher is its oracle): what the
 //! generator precomputed is what the matcher the receive path runs answers.
 //!
 //! Three things are compared, because each is the other's only check:

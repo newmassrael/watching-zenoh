@@ -16,8 +16,8 @@
 //! Growth changes the shape of the table, not a number in it: a table that grows holds a vector
 //! of rows past its fixed ones and an index of its members by address, and one that does not
 //! holds neither. So it is a strategy type the table is built with ([`TableGrowth`]), chosen
-//! where the table is built, and not a flag both kinds carry (C3 of
-//! `docs/build-configuration.md`): a flag is read at run time, so an image whose table never grows
+//! where the table is built, and not a flag both kinds carry (a choice that changes the shape of
+//! the code is a type parameter): a flag is read at run time, so an image whose table never grows
 //! would still link the vector, the hash index and its hasher's seed. [`FixedTable`]'s grown rows
 //! and index are empty types whose every operation is a constant, so an image that names it links
 //! none of that.

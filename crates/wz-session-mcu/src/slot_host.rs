@@ -29,8 +29,8 @@
 //! None of that is the host's business: a stack supplies a [`SlotStack`], which says what the
 //! driver in the slot is, what the drive loop pumps for it, and how the pump is built from the
 //! handle to the slot that holds the driver. The lwIP crate and the Zephyr socket tier each
-//! implement it in a few lines and keep their own socket pools, listeners and names
-//! (`docs/storage-policy-and-link-layer.md`, D2).
+//! implement it in a few lines and keep their own socket pools, listeners and names: the session
+//! host is written once, over the stack's driver and pump link.
 
 use wz_runtime_coop::executor::SpawnRefusal;
 pub use wz_runtime_coop::session_drive::SlotStack;
@@ -112,8 +112,8 @@ where
     stack: T,
 }
 
-/// The host lists the tables its sessions live in (`pool-monitor`, `docs/pool-monitor.md`): the
-/// session slots, then the pump cells, then the cells of the runtime's task table, in that order.
+/// The host lists the tables its sessions live in (`pool-monitor`): the session slots, then the
+/// pump cells, then the cells of the runtime's task table, in that order.
 impl<C, T, E, const S: usize, const P: usize> wz_session_core::pool_gauge::PoolList
     for SessionHost<C, T, E, S, P>
 where

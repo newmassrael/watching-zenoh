@@ -1527,8 +1527,8 @@ impl<
     }
 }
 
-/// The table says its state as a pool (`pool-monitor`, `docs/pool-monitor.md`): its cells, those
-/// taken, the most taken at once where the build keeps the mark, and the claims it refused.
+/// The table says its state as a pool (`pool-monitor`): its cells, those taken, the most taken at
+/// once where the build keeps the mark, and the claims it refused.
 #[cfg(feature = "session-slot")]
 impl<
         C: ClockSource,

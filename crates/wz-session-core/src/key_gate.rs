@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! What a closed key set refuses, and counts (`docs/closed-key-set.md`, phase 2).
+//! What a closed key set refuses, and counts.
 //!
 //! # What it is
 //!

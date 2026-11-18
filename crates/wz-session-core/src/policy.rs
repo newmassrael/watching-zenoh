@@ -8,7 +8,8 @@
 //! A capability is a surface upstream also has; turning it on adds code. A policy is a
 //! decision upstream does not make: what to do where upstream leaves the matter to the
 //! operating system, or to nobody. Its default is always upstream's behaviour, so a build that
-//! states nothing behaves as the original does (`docs/build-configuration.md`, C2).
+//! states nothing behaves as the original does, and the generator refuses an upstream defconfig
+//! in which any policy is on.
 //!
 //! # Where the values come from
 //!

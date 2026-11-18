@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A position in the sequence of declarations a node owes a peer: the shared part of paced
-//! declaration sync (`docs/declaration-sync-pacing.md`).
+//! declaration sync (`declaration-sync-pacing`).
 //!
 //! # What it is
 //!
