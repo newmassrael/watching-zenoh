@@ -60,6 +60,7 @@ use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
 pub mod cancellation;
+pub mod decl_watch;
 mod drive;
 mod engine;
 pub mod listeners;
@@ -76,6 +77,7 @@ pub mod os;
 mod query;
 pub mod sync;
 pub mod tls_material;
+pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};
 pub use engine::SessionEngine;
 pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};

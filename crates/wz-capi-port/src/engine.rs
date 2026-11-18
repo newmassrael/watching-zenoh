@@ -32,6 +32,7 @@ use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
+use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
     MatchingSink, QblId, QueryableSink, ReplyCallback, StatementNotHonoured, SubId, SubscriberSink,
@@ -97,6 +98,27 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// Stop the face watch `id`: `true` when one was registered under it.
     fn unwatch_faces(&self, id: u64) -> bool {
+        let _ = id;
+        false
+    }
+
+    /// Tell `sink` what the peers of the session declare and retract of the kind `plane` names,
+    /// on every link the session holds and every link that comes up later, until
+    /// [`Self::undeclare_decl_watch`] is called with the id answered ([`crate::decl_watch`]).
+    /// An engine that does not watch refuses by name, which is the provided answer: a watch that
+    /// was taken and never told anything would read as peers that declare nothing.
+    fn declare_decl_watch(
+        &self,
+        plane: DeclPlane,
+        sink: DeclWatchSink,
+    ) -> Result<DeclWatchId, DeclWatchRefused> {
+        let _ = (plane, sink);
+        Err(DeclWatchRefused::NotProvided)
+    }
+
+    /// Stop the declaration watch `id` and let go of its sink: `true` when one was declared under
+    /// it. A call in flight finishes; none starts after this returns.
+    fn undeclare_decl_watch(&self, id: DeclWatchId) -> bool {
         let _ = id;
         false
     }
