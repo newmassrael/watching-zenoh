@@ -60,12 +60,10 @@ fn zid_order_key(order: LinkTieOrder, zid: &[u8]) -> u128 {
     })
 }
 
-/// The fate of a NEW link to a node the session already holds a link to.
-///
-/// `held_dialled` and `new_dialled` say whether this session dialled each link (as opposed to
-/// taking it off its port); `local_zid` is this session's own zid and `remote_zid` the node's.
-/// The caller has established that both links reach `remote_zid`. The zids are ordered as the
-/// build's `link-tie-order` policy states.
+/// [`judge_second_link_by`] under the build default of the `link-tie-order` policy: the rule for
+/// a caller that does not yet hold the snapshot of its node. A node's own tables order the zids
+/// by the snapshot they were built with (`LinkBook::with_order`, the heap profile's), and a
+/// caller that holds one passes its order to [`judge_second_link_by`].
 pub fn judge_second_link(
     held_dialled: bool,
     new_dialled: bool,
@@ -73,7 +71,7 @@ pub fn judge_second_link(
     remote_zid: &[u8],
 ) -> SecondLink {
     judge_second_link_by(
-        SessionPolicy::from_build().link_tie_order,
+        SessionPolicy::defaults().link_tie_order(),
         held_dialled,
         new_dialled,
         local_zid,
@@ -81,7 +79,12 @@ pub fn judge_second_link(
     )
 }
 
-/// [`judge_second_link`] with the order of the zids named rather than read from the build.
+/// The fate of a NEW link to a node the session already holds a link to, the zids ordered by
+/// `order`, the `link-tie-order` policy of the node's snapshot.
+///
+/// `held_dialled` and `new_dialled` say whether this session dialled each link (as opposed to
+/// taking it off its port); `local_zid` is this session's own zid and `remote_zid` the node's.
+/// The caller has established that both links reach `remote_zid`.
 pub fn judge_second_link_by(
     order: LinkTieOrder,
     held_dialled: bool,
@@ -264,16 +267,28 @@ struct LinkRow {
 #[derive(Debug)]
 pub struct LinkBook {
     local_zid: Vec<u8>,
+    /// How two zids are ordered when two links in their handshakes cross: the node's
+    /// `link-tie-order`, fixed when the table is made.
+    order: LinkTieOrder,
     next_token: u64,
     links: alloc::collections::BTreeMap<u64, LinkRow>,
 }
 
 #[cfg(feature = "alloc")]
 impl LinkBook {
-    /// The table of the node `local_zid`.
+    /// The table of the node `local_zid`, under the build default of `link-tie-order`: the table
+    /// of a creator that does not yet hold the node's snapshot. A creator that does builds it with
+    /// [`Self::with_order`].
     pub fn new(local_zid: &[u8]) -> Self {
+        Self::with_order(local_zid, SessionPolicy::defaults().link_tie_order())
+    }
+
+    /// The table of the node `local_zid`, whose two crossing links are judged by `order`, the
+    /// `link-tie-order` of the node's snapshot.
+    pub fn with_order(local_zid: &[u8], order: LinkTieOrder) -> Self {
         Self {
             local_zid: local_zid.to_vec(),
+            order,
             next_token: 1,
             links: alloc::collections::BTreeMap::new(),
         }
@@ -319,7 +334,13 @@ impl LinkBook {
                 LinkState::Established => return false,
                 LinkState::Handshaking if rival.dialled == dialled => return false,
                 LinkState::Handshaking => {
-                    match judge_second_link(rival.dialled, dialled, &self.local_zid, remote_zid) {
+                    match judge_second_link_by(
+                        self.order,
+                        rival.dialled,
+                        dialled,
+                        &self.local_zid,
+                        remote_zid,
+                    ) {
                         SecondLink::Refuse => return false,
                         SecondLink::Replace => superseded.push(*rival_token),
                     }
@@ -387,10 +408,17 @@ pub struct LinkRegistry<R: Runtime> {
 
 #[cfg(feature = "alloc")]
 impl<R: Runtime> LinkRegistry<R> {
-    /// The admission of the node `local_zid`.
+    /// The admission of the node `local_zid`, under the build default of `link-tie-order`
+    /// ([`LinkBook::new`]). A creator that holds the node's snapshot uses [`Self::with_order`].
     pub fn new(local_zid: &[u8]) -> Self {
+        Self::with_order(local_zid, SessionPolicy::defaults().link_tie_order())
+    }
+
+    /// The admission of the node `local_zid`, judging crossing links by `order`, the
+    /// `link-tie-order` of the node's snapshot.
+    pub fn with_order(local_zid: &[u8], order: LinkTieOrder) -> Self {
         Self {
-            book: R::new_mutex(LinkBook::new(local_zid)),
+            book: R::new_mutex(LinkBook::with_order(local_zid, order)),
         }
     }
 
@@ -571,7 +599,7 @@ mod tests {
         assert_eq!(
             judge_second_link(true, false, BY_NUMBER_LOWER, BY_NUMBER_HIGHER),
             judge_second_link_by(
-                SessionPolicy::from_build().link_tie_order,
+                SessionPolicy::defaults().link_tie_order(),
                 true,
                 false,
                 BY_NUMBER_LOWER,
@@ -633,6 +661,48 @@ mod book_tests {
             assert!(!node.reserve(second, &HIGH));
             assert!(node.confirm(first), "the first is not disturbed");
         }
+    }
+
+    /// A table judges two crossing links by the order it was built with, not the build's: the
+    /// two zids below are ranked oppositely by the two orders, so the same crossing keeps this
+    /// node's own dial under one and the inbound link under the other.
+    #[test]
+    fn a_table_judges_crossing_links_by_the_order_it_was_built_with() {
+        // By number `[0x01, 0x02]` is 0x0201 and `[0x02]` is 0x02; byte by byte the first is
+        // lower.
+        const LOCAL: &[u8] = &[0x01, 0x02];
+        const REMOTE: &[u8] = &[0x02];
+        let crossing = |order: LinkTieOrder| {
+            let mut node = LinkBook::with_order(LOCAL, order);
+            let own_dial = node.open(true);
+            assert!(node.reserve(own_dial, REMOTE));
+            let inbound = node.open(false);
+            let inbound_admitted = node.reserve(inbound, REMOTE);
+            let own_dial_confirmed = node.confirm(own_dial);
+            assert_ne!(
+                inbound_admitted,
+                own_dial_confirmed,
+                "{}: exactly one of the two links survives",
+                order.id()
+            );
+            own_dial_confirmed
+        };
+        assert!(
+            crossing(LinkTieOrder::ZidBytes),
+            "byte by byte this node is the lower: its own dial is kept"
+        );
+        assert!(
+            !crossing(LinkTieOrder::ZidNumber),
+            "by number this node is the higher: the inbound link is kept"
+        );
+        // The table of the build default is the table of the default order.
+        let defaults = SessionPolicy::defaults().link_tie_order();
+        let mut node = LinkBook::new(LOCAL);
+        assert_eq!(node.order, defaults);
+        let own_dial = node.open(true);
+        assert!(node.reserve(own_dial, REMOTE));
+        let inbound = node.open(false);
+        assert_eq!(node.reserve(inbound, REMOTE), !crossing(defaults));
     }
 
     #[test]

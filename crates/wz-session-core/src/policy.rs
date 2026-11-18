@@ -14,18 +14,27 @@
 //! # Where the values come from
 //!
 //! Every policy is declared in `deploy/wz-config.toml` (`[[policy]]`: its kind, its values, the
-//! upstream behaviour it departs from, its help). The generated [`crate::policy::SessionPolicy`] holds one typed
-//! field for each, and its `Default` reads `WZ_POLICY_<NAME>` from the build's environment, or
-//! takes upstream's behaviour when the build states none. For a Zephyr image the environment is
+//! upstream behaviour it departs from, its help). The generated [`crate::policy::SessionPolicy`]
+//! holds one field for each, bound inside the build's domain of the policy, and its build
+//! defaults ([`SessionPolicy::defaults`]) read `WZ_POLICY_<NAME>` from the build's environment, or
+//! take upstream's behaviour when the build states none. For a Zephyr image the environment is
 //! made from Kconfig; for a host build it is the resolved preset (`wz_config.py --resolve-env`).
 //!
+//! # Who reads a value
+//!
+//! A `SessionPolicy` is a snapshot. A creator (a runtime, a session, a link, an entity) resolves
+//! the snapshot of its scope once, starting from the build defaults, and hands it to the machines
+//! it creates; a machine reads its policies through the snapshot's accessors and never from the
+//! build. `scripts/lib/policy_read_gate.py` refuses a read of the build defaults anywhere but at a
+//! creator it lists.
+//!
 //! A policy is a value and not a cargo feature (C3): features unify across a dependency graph and
-//! can only add code, and a policy changes behaviour. So one binary can hold both values, and a
-//! test names the one it is about by setting the field:
+//! can only add code, and a policy changes behaviour. So one binary can hold every value its
+//! domain allows, and a test names the one it is about by selecting it:
 //!
 //! ```ignore
-//! let mut policy = SessionPolicy::default();
-//! policy.multicast_loopback = MulticastLoopback::Off;
+//! let mut policy = SessionPolicy::defaults();
+//! policy.select_multicast_loopback(MulticastLoopback::Off)?;
 //! ```
 //!
 //! `scripts/lib/wz_config.py --check` fails when a crate reads a `WZ_POLICY_*` itself, so the
@@ -220,6 +229,91 @@ mod tests {
     #[test]
     fn the_generated_policy_of_a_build_that_states_nothing_is_the_default() {
         assert_eq!(SessionPolicy::default(), SessionPolicy::from_build());
+        assert_eq!(SessionPolicy::defaults(), SessionPolicy::from_build());
+    }
+
+    /// Each accessor of the build defaults reads the build's value of its policy: the value type's
+    /// `DEFAULT`, a bool policy as the `bool` it converts to.
+    #[test]
+    fn each_accessor_of_the_build_defaults_reads_the_builds_value() {
+        let defaults = SessionPolicy::defaults();
+        assert_eq!(defaults.multicast_loopback(), MulticastLoopback::DEFAULT);
+        assert_eq!(defaults.sn_resolution(), SnResolution::DEFAULT);
+        assert_eq!(defaults.link_tie_order(), LinkTieOrder::DEFAULT);
+        assert_eq!(defaults.key_set(), KeySet::DEFAULT);
+        assert_eq!(
+            defaults.targeted_query(),
+            TargetedQuery::DEFAULT.is_on(),
+            "a bool policy reads as its value's `bool`"
+        );
+        assert_eq!(
+            defaults.tx_expiry_keeps_session(),
+            bool::from(TxExpiryKeepsSession::DEFAULT)
+        );
+    }
+
+    /// The accessors are `const`, so a constant can still be computed from a snapshot.
+    #[test]
+    fn an_accessor_is_read_in_a_constant() {
+        const ORDER: LinkTieOrder = SessionPolicy::defaults().link_tie_order();
+        const TARGETED: bool = SessionPolicy::defaults().targeted_query();
+        assert_eq!(ORDER, LinkTieOrder::DEFAULT);
+        assert_eq!(TARGETED, TargetedQuery::DEFAULT.is_on());
+    }
+
+    /// A value the build's domain holds is selected and read back; one it leaves out is refused
+    /// with the value, and the snapshot keeps what it held. Every value is tried, so whichever
+    /// `WZ_POLICY_*_ALLOWS_*` the test build states, each answer is the domain's.
+    #[test]
+    fn select_takes_a_value_inside_the_domain_and_refuses_one_outside() {
+        for &order in <LinkTieOrder as PolicyValue>::ALL {
+            let mut policy = SessionPolicy::defaults();
+            let selected = policy.select_link_tie_order(order);
+            if LinkTieOrder::DOMAIN.contains(order) {
+                assert_eq!(selected, Ok(()), "{}", order.id());
+                if !LinkTieOrder::DOMAIN.is_singleton() {
+                    assert_eq!(policy.link_tie_order(), order, "{}", order.id());
+                }
+            } else {
+                assert_eq!(
+                    selected,
+                    Err(crate::policy_binding::OutsideDomain { value: order })
+                );
+                assert_eq!(
+                    policy,
+                    SessionPolicy::defaults(),
+                    "a refusal changes nothing"
+                );
+            }
+        }
+        for &value in <TargetedQuery as PolicyValue>::ALL {
+            let mut policy = SessionPolicy::defaults();
+            let selected = policy.select_targeted_query(value);
+            assert_eq!(selected.is_ok(), TargetedQuery::DOMAIN.contains(value));
+            if selected.is_ok() && !TargetedQuery::DOMAIN.is_singleton() {
+                assert_eq!(policy.targeted_query(), value.is_on());
+            }
+        }
+    }
+
+    /// Two snapshots differ only in what was selected into them: selecting one policy leaves
+    /// every other at its build default.
+    #[test]
+    fn selecting_one_policy_leaves_the_others_at_their_build_default() {
+        let mut policy = SessionPolicy::defaults();
+        let other = if LinkTieOrder::DEFAULT == LinkTieOrder::ZidNumber {
+            LinkTieOrder::ZidBytes
+        } else {
+            LinkTieOrder::ZidNumber
+        };
+        if policy.select_link_tie_order(other).is_err() || LinkTieOrder::DOMAIN.is_singleton() {
+            // The build allows one order: there is no other to select.
+            return;
+        }
+        assert_eq!(policy.link_tie_order(), other);
+        assert_ne!(policy, SessionPolicy::defaults());
+        assert_eq!(policy.sn_resolution(), SnResolution::DEFAULT);
+        assert_eq!(policy.multicast_loopback(), MulticastLoopback::DEFAULT);
     }
 
     #[test]
@@ -242,10 +336,10 @@ mod tests {
         let build = SessionPolicy::from_build();
         assert_eq!(
             bool::from(TxNoProgressDeadline::DEFAULT),
-            build.tx_no_progress_deadline
+            build.tx_no_progress_deadline()
         );
-        assert_eq!(MulticastLoopback::DEFAULT, build.multicast_loopback);
-        assert_eq!(SnResolution::DEFAULT, build.sn_resolution);
+        assert_eq!(MulticastLoopback::DEFAULT, build.multicast_loopback());
+        assert_eq!(SnResolution::DEFAULT, build.sn_resolution());
         assert!(TxNoProgressDeadline::DOMAIN.contains(TxNoProgressDeadline::DEFAULT));
         assert!(MulticastLoopback::DOMAIN.contains(MulticastLoopback::DEFAULT));
         assert_eq!(

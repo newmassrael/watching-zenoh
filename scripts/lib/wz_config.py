@@ -2401,19 +2401,22 @@ def rust_doc(text: str, indent: str) -> list[str]:
 
 
 def emit_rust_policies(decl: dict) -> str:
-    """The module `policy.rs` includes: one enum per choice policy, and `SessionPolicy`, whose
-    fields are the policies of the build and whose `Default` is what the build's environment
+    """The module `policy.rs` includes: one enum per choice policy, and `SessionPolicy`, the
+    snapshot of every policy's value a creator hands a machine. Each field is the policy's value
+    bound inside the build's domain, read through an accessor and set through a `select_*` that
+    refuses a value outside it; `SessionPolicy::defaults` is what the build's environment
     (`WZ_POLICY_<NAME>`) states, or upstream's behaviour when it states nothing. Laid out so
-    rustfmt leaves it alone: every call fits on a line, and a struct literal is one line only
-    when rustfmt would make it one."""
+    rustfmt leaves it alone: every call fits on a line, a struct literal is one line only when
+    rustfmt would make it one, and a signature is one line only when it fits the width."""
     pols = decl["policies"]
     choices = [p for p in pols if p["kind"] == "choice"]
     bools = [p for p in pols if p["kind"] == "bool"]
     out = generated_header("//", "rust-policies") + [
         "",
-        "//! The policies of a build as the code reads them: each is a field of [`SessionPolicy`], whose",
-        "//! `Default` is the value the build's environment states as `WZ_POLICY_<NAME>`, or upstream's",
-        "//! behaviour when it states none. A test names the other value by setting the field.",
+        "//! The policies of a build as the code reads them: each is a field of [`SessionPolicy`], the",
+        "//! snapshot a creator hands each machine. Its build defaults ([`SessionPolicy::defaults`]) are",
+        "//! the values the build's environment states as `WZ_POLICY_<NAME>`, or upstream's behaviour where",
+        "//! it states none, and a test names another value with the field's `select_*`.",
     ]
     if pols:
         out += [
@@ -2433,7 +2436,7 @@ def emit_rust_policies(decl: dict) -> str:
     if pols:
         # A group of its own, so rustfmt keeps it after the `super` import as written.
         out += ["use crate::policy_binding::{",
-                "    default_is_allowed, Binding, Domain, Mutability, PolicyValue, Scope, Wire,",
+                "    default_is_allowed, Binding, Bound, Domain, Mutability, OutsideDomain, PolicyValue, Scope, Wire,",
                 "};", ""]
     for pol in choices:
         name = camel(pol["id"])
@@ -2456,43 +2459,73 @@ def emit_rust_policies(decl: dict) -> str:
                 f'        let stated = option_env!("{pol["kconfig"]}");',
                 f"        let index = policy_choice(stated, &Self::CHOICES, {values.index(pol['default'])});",
                 "        Self::ALL[index]", "    }", "}", "",
-                f"impl Default for {name} {{", "    fn default() -> Self {", "        Self::stated()", "    }", "}", ""]
-    out += ["/// What this build decided beyond upstream's behaviour.",
-            "#[derive(Clone, Copy, Debug, PartialEq, Eq)]", "#[non_exhaustive]"]
+                f"impl Default for {name} {{", BUILD_DEFAULT_DOC, "    fn default() -> Self {",
+                "        Self::stated()", "    }", "}", ""]
+    out += ["/// The value of every policy, as one snapshot: what a creator resolved and handed the machines of"]
+    if pols:
+        out += ["/// its scope. A machine reads a policy only through the accessor of its field, never from the",
+                "/// build. Each value lies inside the build's domain of its policy ([`PolicyValue::DOMAIN`]), and a",
+                "/// policy whose domain is one value reads as that value whatever was selected ([`Bound::get`])."]
+    else:
+        out.append("/// its scope. This build declares no policy.")
+    out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", "#[non_exhaustive]"]
     if pols:
         out.append("pub struct SessionPolicy {")
         for pol in pols:
             out += rust_doc(f"`{pol['id']}`. Upstream: {pol['upstream'].strip()}", "    ")
-            out.append(f"    pub {snake(pol['id'])}: {camel(pol['id']) if pol['kind'] == 'choice' else 'bool'},")
+            out.append(f"    {snake(pol['id'])}: Bound<{camel(pol['id'])}>,")
         out.append("}")
     else:
         out.append("pub struct SessionPolicy {}")
     out += ["", "impl SessionPolicy {",
-            "    /// The policy this build states: its environment's values, else upstream's.",
+            "    /// The build defaults: each policy's value as the build's environment states it",
+            "    /// (`WZ_POLICY_<NAME>`), else upstream's behaviour.",
             "    pub const fn from_build() -> Self {"]
-    for pol in pols:
-        field = snake(pol["id"])
-        if pol["kind"] == "choice":
-            out.append(f"        let {field} = {camel(pol['id'])}::stated();")
-        else:
-            one = f'        let {field} = policy_bool(option_env!("{pol["kconfig"]}"));'
-            if len(one) <= RUST_MAX_WIDTH:
-                out.append(one)
-            else:
-                # rustfmt breaks after the `=` of a binding that is past the width, so a name long
-                # enough to cross it is written in the shape the formatter leaves it in.
-                out += [f"        let {field} =",
-                        f'            policy_bool(option_env!("{pol["kconfig"]}"));']
-    fields = ", ".join(snake(p["id"]) for p in pols)
-    if len(fields) <= RUST_STRUCT_LIT_WIDTH:
-        out.append(f"        Self {{ {fields} }}" if fields else "        Self {}")
+    inits = [f"{snake(p['id'])}: Bound::build_default()" for p in pols]
+    if len(", ".join(inits)) <= RUST_STRUCT_LIT_WIDTH:
+        out.append(f"        Self {{ {', '.join(inits)} }}" if inits else "        Self {}")
     else:
-        out += ["        Self {"] + [f"            {snake(p['id'])}," for p in pols] + ["        }"]
-    out += ["    }", "}", "", "impl Default for SessionPolicy {", "    fn default() -> Self {",
+        out += ["        Self {"] + [f"            {init}," for init in inits] + ["        }"]
+    out += ["    }", "",
+            "    /// The build defaults ([`Self::from_build`]): the snapshot a creator starts from. A machine",
+            "    /// does not call it; it reads the snapshot its creator handed it.",
+            "    pub const fn defaults() -> Self {",
+            "        Self::from_build()",
+            "    }"]
+    for pol in pols:
+        out += policy_accessors_rust(pol)
+    out += ["}", "", "impl Default for SessionPolicy {", "    fn default() -> Self {",
             "        Self::from_build()", "    }", "}"]
     for pol in pols:
         out += [""] + policy_value_rust(pol)
     return "\n".join(out) + "\n"
+
+
+# The doc of a policy value type's `Default`: the value of the build, which only the build
+# defaults of `SessionPolicy` stand for.
+BUILD_DEFAULT_DOC = "    /// The build default; a machine reads the value of the snapshot it is handed instead."
+
+
+def policy_accessors_rust(pol: dict) -> list[str]:
+    """The accessor of one policy's field of `SessionPolicy`, which reads it through `Bound::get`
+    (a `bool` for a bool policy), and its `select_*`, which refuses a value outside the build's
+    domain; each preceded by a blank line. The `select_*` signature is on one line when it fits
+    rustfmt's width, and one parameter a line otherwise, as the formatter lays it out."""
+    field, name, pid = snake(pol["id"]), camel(pol["id"]), pol["id"]
+    if pol["kind"] == "bool":
+        out = ["", f"    /// `{pid}` as this snapshot holds it: `true` for `on`.",
+               f"    pub const fn {field}(&self) -> bool {{", f"        self.{field}.get().is_on()", "    }"]
+    else:
+        out = ["", f"    /// `{pid}` as this snapshot holds it.",
+               f"    pub const fn {field}(&self) -> {name} {{", f"        self.{field}.get()", "    }"]
+    out += ["", f"    /// Selects `{pid}`, when the build's domain holds `value`."]
+    one = f"    pub fn select_{field}(&mut self, value: {name}) -> Result<(), OutsideDomain<{name}>> {{"
+    if len(one) <= RUST_MAX_WIDTH:
+        out.append(one)
+    else:
+        out += [f"    pub fn select_{field}(", "        &mut self,", f"        value: {name},",
+                f"    ) -> Result<(), OutsideDomain<{name}>> {{"]
+    return out + [f"        self.{field} = Bound::select(value)?;", "        Ok(())", "    }"]
 
 
 def rust_text(text: str) -> str:
@@ -2552,16 +2585,16 @@ def rust_default_assert(name: str, pid: str) -> list[str]:
 
 def bool_value_rust(pol: dict) -> list[str]:
     """The value type of a bool policy, `Off` (upstream's) and `On`, with the conversions to and
-    from the `bool` field of `SessionPolicy`, which stays a `bool`; followed by a blank line."""
+    from the `bool` the accessor of `SessionPolicy` reads; followed by a blank line."""
     name = camel(pol["id"])
-    out = rust_doc(f"`{pol['id']}` as a value; [`SessionPolicy`] holds it as a `bool`.", "")
+    out = rust_doc(f"`{pol['id']}` as a value; [`SessionPolicy`] reads it as a `bool`.", "")
     out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub enum {name} {{",
             "    /// `off`, upstream's behaviour.", "    Off,", "    /// `on`.", "    On,", "}", "",
             f"impl {name} {{",
             "    /// The value as the declaration, the Kconfig and the environment spell it.",
             "    pub const fn id(self) -> &'static str {", "        match self {",
             '            Self::Off => "off",', '            Self::On => "on",', "        }", "    }", "",
-            "    /// The value as the `bool` field of [`SessionPolicy`] holds it.",
+            "    /// The value as the `bool` the accessor of [`SessionPolicy`] reads.",
             "    pub const fn is_on(self) -> bool {", "        matches!(self, Self::On)", "    }", "",
             "    const fn from_bool(on: bool) -> Self {", "        if on {", "            Self::On",
             "        } else {", "            Self::Off", "        }", "    }", "",
@@ -2572,8 +2605,8 @@ def bool_value_rust(pol: dict) -> list[str]:
             "        Self::from_bool(on)", "    }", "}", "",
             f"impl From<{name}> for bool {{", f"    fn from(value: {name}) -> Self {{",
             "        value.is_on()", "    }", "}", "",
-            f"impl Default for {name} {{", "    fn default() -> Self {", "        Self::DEFAULT",
-            "    }", "}", ""]
+            f"impl Default for {name} {{", BUILD_DEFAULT_DOC, "    fn default() -> Self {",
+            "        Self::DEFAULT", "    }", "}", ""]
     return out
 
 
@@ -4251,12 +4284,20 @@ def cmd_selftest() -> int:
     expect("a choice policy is an enum whose default index is upstream's",
            "pub enum WireMode {" in rpolicies and "policy_choice(stated, &Self::CHOICES, 0)" in rpolicies)
     expect("a choice enum's Default is the build's value, so a config struct can derive Default",
-           "impl Default for WireMode {\n    fn default() -> Self {\n        Self::stated()\n" in rpolicies)
+           "impl Default for WireMode {\n" + BUILD_DEFAULT_DOC + "\n    fn default() -> Self {\n"
+           "        Self::stated()\n" in rpolicies)
     expect("a bool policy reads its environment and nothing else",
-           'let eager_flush = policy_bool(option_env!("WZ_POLICY_EAGER_FLUSH"));' in rpolicies
+           '        let stated = option_env!("WZ_POLICY_EAGER_FLUSH");\n'
+           "        Self::from_bool(policy_bool(stated))\n" in rpolicies
            and "use super::{policy_allows, policy_bool, policy_choice};" in rpolicies)
-    expect("a bool policy stays a `bool` field of SessionPolicy beside a value type of its own",
-           "    pub eager_flush: bool,\n" in rpolicies
+    expect("each field of SessionPolicy is private and bound inside the build's domain",
+           "    wire_mode: Bound<WireMode>,\n" in rpolicies
+           and "    eager_flush: Bound<EagerFlush>,\n" in rpolicies
+           and "    pub eager_flush" not in rpolicies and "    pub wire_mode" not in rpolicies)
+    expect("a bool policy is read as a `bool` beside a value type of its own",
+           "    pub const fn eager_flush(&self) -> bool {\n        self.eager_flush.get().is_on()\n"
+           in rpolicies
+           and "    pub const fn wire_mode(&self) -> WireMode {\n        self.wire_mode.get()\n" in rpolicies
            and "pub enum EagerFlush {\n    /// `off`, upstream's behaviour.\n    Off,\n" in rpolicies
            and "impl From<bool> for EagerFlush {" in rpolicies
            and "impl From<EagerFlush> for bool {" in rpolicies
@@ -4285,17 +4326,21 @@ def cmd_selftest() -> int:
            ");\n" in rpolicies
            and rpolicies.count("const _: () = assert!(") == len(pdecl["policies"]))
     expect("a literal past rustfmt's width goes one field a line",
-           "        Self {\n            wire_mode,\n            eager_flush,\n        }\n" in rpolicies)
+           "        Self {\n            wire_mode: Bound::build_default(),\n"
+           "            eager_flush: Bound::build_default(),\n        }\n" in rpolicies)
+    expect("the build defaults are the snapshot a creator starts from",
+           "    pub const fn defaults() -> Self {\n        Self::from_build()\n    }\n" in rpolicies)
     long_id = "a-bool-policy-whose-name-is-long-enough-to-cross-the-line-width"
     long_decl = {"policies": [dict(p, id=long_id, kconfig="WZ_POLICY_" + long_id.upper().replace("-", "_"))
                               for p in pdecl["policies"] if p["kind"] == "bool"][:1]}
     rlong = emit_rust_policies(long_decl)
-    expect("a binding past rustfmt's width breaks after the `=`, as the formatter leaves it",
-           "        let a_bool_policy_whose_name_is_long_enough_to_cross_the_line_width =\n"
-           '            policy_bool(option_env!("WZ_POLICY_A_BOOL_POLICY_WHOSE_NAME_IS_LONG_ENOUGH'
-           '_TO_CROSS_THE_LINE_WIDTH"));\n' in rlong)
-    expect("a binding within the width stays on one line",
-           'let eager_flush = policy_bool(option_env!("WZ_POLICY_EAGER_FLUSH"));' in rpolicies)
+    expect("a select past rustfmt's width goes one parameter a line, as the formatter leaves it",
+           "    pub fn select_eager_flush(\n        &mut self,\n        value: EagerFlush,\n"
+           "    ) -> Result<(), OutsideDomain<EagerFlush>> {\n"
+           "        self.eager_flush = Bound::select(value)?;\n        Ok(())\n" in rpolicies)
+    expect("a select within the width stays on one line",
+           "    pub fn select_wire_mode(&mut self, value: WireMode) -> Result<(), OutsideDomain<WireMode>> {\n"
+           in rpolicies)
     expect("an allowance past rustfmt's call width breaks inside the macro, as the formatter leaves it",
            "        policy_allows(option_env!(\n"
            '            "WZ_POLICY_A_BOOL_POLICY_WHOSE_NAME_IS_LONG_ENOUGH_TO_CROSS_THE_LINE_WIDTH'
@@ -4319,8 +4364,9 @@ def cmd_selftest() -> int:
            and "use super::" not in nothing and "policy_binding" not in nothing
            and "PolicyValue" not in nothing)
     one = emit_rust_policies({"policies": [p for p in pdecl["policies"] if p["kind"] == "bool"]})
-    expect("a literal rustfmt would make one line is one line",
-           "        Self { eager_flush }\n" in one and "use super::{policy_allows, policy_bool};" in one)
+    expect("one policy's literal is past rustfmt's struct width and goes one field a line",
+           "        Self {\n            eager_flush: Bound::build_default(),\n        }\n" in one
+           and "use super::{policy_allows, policy_bool};" in one)
     # Where each limit is bound.
     rbindings = emit_rust_limit_bindings(sdecl)
     expect("each limit is a LimitBinding constant of its own name, in the declaration's words",

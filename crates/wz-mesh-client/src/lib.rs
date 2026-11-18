@@ -318,6 +318,7 @@ fn session_params() -> Result<SessionInitParams, ClientError> {
         link_rx: Default::default(),
         initial_sn: 0,
         cookie: Vec::new(),
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
             ClientError::new(format!(
                 "no operating system entropy for a signing key: {e}"

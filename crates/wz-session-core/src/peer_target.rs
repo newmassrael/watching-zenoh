@@ -85,13 +85,19 @@ pub const fn admit(target: Option<&[u8]>, enabled: bool) -> Result<(), PeerTarge
     }
 }
 
-/// [`admit`] by this build's `targeted-query` policy: the call every entry point that takes a
-/// target from a caller makes.
+/// [`admit`] by the `targeted-query` policy of `policy`, the snapshot of the session the query
+/// is made on: the call an entry point that holds that snapshot makes.
+pub const fn admit_by(
+    target: Option<&[u8]>,
+    policy: &crate::policy::SessionPolicy,
+) -> Result<(), PeerTargetError> {
+    admit(target, policy.targeted_query())
+}
+
+/// [`admit_by`] under the build defaults: the call of an entry point that does not yet hold its
+/// session's snapshot.
 pub const fn admit_in_build(target: Option<&[u8]>) -> Result<(), PeerTargetError> {
-    admit(
-        target,
-        crate::policy::SessionPolicy::from_build().targeted_query,
-    )
+    admit_by(target, &crate::policy::SessionPolicy::defaults())
 }
 
 #[cfg(test)]
@@ -110,8 +116,34 @@ mod tests {
         let zid = [7u8; 16];
         assert_eq!(admit(Some(&zid), false), Err(PeerTargetError::PolicyOff));
         assert_eq!(admit(Some(&zid), true), Ok(()));
-        let in_build = crate::policy::SessionPolicy::from_build().targeted_query;
+        let in_build = crate::policy::SessionPolicy::defaults().targeted_query();
         assert_eq!(admit_in_build(Some(&zid)).is_ok(), in_build);
+    }
+
+    /// The snapshot a target is asked with decides, not the build.
+    #[test]
+    fn a_target_is_admitted_by_the_snapshot_it_is_asked_with() {
+        use crate::policy::{SessionPolicy, TargetedQuery};
+        use crate::policy_binding::PolicyValue;
+        let zid = [7u8; 16];
+        assert_eq!(
+            admit_by(Some(&zid), &SessionPolicy::defaults()),
+            admit_in_build(Some(&zid))
+        );
+        assert_eq!(admit_by(None, &SessionPolicy::defaults()), Ok(()));
+        if TargetedQuery::DOMAIN.is_singleton() {
+            return;
+        }
+        let mut on = SessionPolicy::defaults();
+        on.select_targeted_query(TargetedQuery::On)
+            .expect("the domain holds both values");
+        let mut off = on;
+        off.select_targeted_query(TargetedQuery::Off)
+            .expect("the domain holds both values");
+        assert_eq!(admit_by(Some(&zid), &on), Ok(()));
+        let no_zid: [u8; 0] = [];
+        assert_eq!(admit_by(Some(&no_zid), &on), Err(PeerTargetError::Empty));
+        assert_eq!(admit_by(Some(&zid), &off), Err(PeerTargetError::PolicyOff));
     }
 
     #[test]

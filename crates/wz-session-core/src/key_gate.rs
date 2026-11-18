@@ -166,7 +166,7 @@ impl<'a> KeyGate<'a> {
     /// gives it its table with [`Self::closed`]. Every host starts from this and a host that knows
     /// better (a test, an image that has a table) sets its own.
     pub const fn of_build() -> KeyGate<'static> {
-        match crate::policy::SessionPolicy::from_build().key_set {
+        match crate::policy::SessionPolicy::defaults().key_set() {
             crate::policy::KeySet::Open => KeyGate::open(),
             crate::policy::KeySet::Closed => KeyGate::closed(&NO_KEYS),
         }
@@ -448,7 +448,7 @@ mod tests {
     fn the_gate_of_a_build_is_the_policy_it_states() {
         let gate = KeyGate::of_build();
         let closed =
-            crate::policy::SessionPolicy::from_build().key_set == crate::policy::KeySet::Closed;
+            crate::policy::SessionPolicy::defaults().key_set() == crate::policy::KeySet::Closed;
         assert_eq!(gate.is_closed(), closed);
         // A closed build that was given no table refuses every key.
         let mut over_nothing = KeyGate::closed(&NO_KEYS);

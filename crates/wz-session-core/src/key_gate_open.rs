@@ -102,7 +102,7 @@ impl<'a> KeyGate<'a> {
     pub const fn of_build() -> KeyGate<'static> {
         const {
             assert!(
-                !matches!(SessionPolicy::from_build().key_set, KeySet::Closed),
+                !matches!(SessionPolicy::defaults().key_set(), KeySet::Closed),
                 "the `key-set` policy is `closed` and this build lacks the `key-set-closed` feature \
                  of wz-session-core: the closed key set is not compiled in"
             );

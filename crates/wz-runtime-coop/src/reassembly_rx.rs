@@ -83,7 +83,7 @@ pub fn mcu_reassembly_config() -> ReassemblyConfig {
         crate::reassembly_pool_mcu::REASSEMBLY_TIMEOUT_MS as u64,
     )
     .with_pool_overflow(PoolOverflow::of_policy(
-        SessionPolicy::default().reassembly_pool_overflow,
+        SessionPolicy::default().reassembly_pool_overflow(),
     ))
 }
 
@@ -672,7 +672,7 @@ mod tests {
     fn the_mcu_pool_overflow_is_the_builds_policy() {
         assert_eq!(
             mcu_reassembly_config().pool_overflow,
-            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow)
+            PoolOverflow::of_policy(SessionPolicy::default().reassembly_pool_overflow())
         );
     }
 

@@ -339,20 +339,27 @@ impl<P: PolicyValue> Bound<P> {
 
     /// The selected value. Where the build's domain is one value, that value is the build's
     /// default and the selected value is not read: the `const` block decides the branch when the
-    /// build is compiled, which a plain call of a `const fn` would not.
-    pub fn get(self) -> P {
+    /// build is compiled, which a plain call of a `const fn` would not. A `const fn` itself, so a
+    /// constant can still be computed from a snapshot.
+    pub const fn get(&self) -> P {
         if const { P::DOMAIN.is_singleton() } {
             P::DEFAULT
         } else {
             self.value
         }
     }
+
+    /// The build's default, which the domain always holds. Read by the generated
+    /// `SessionPolicy::from_build`, the one place a snapshot starts from the build.
+    pub(crate) const fn build_default() -> Self {
+        Self { value: P::DEFAULT }
+    }
 }
 
 impl<P: PolicyValue> Default for Bound<P> {
     /// The build's default.
     fn default() -> Self {
-        Self { value: P::DEFAULT }
+        Self::build_default()
     }
 }
 
@@ -482,11 +489,11 @@ mod tests {
     #[test]
     fn select_takes_a_value_inside_the_domain_and_refuses_one_outside() {
         assert_eq!(
-            Bound::<Mode>::select(Mode::High).map(Bound::get),
+            Bound::<Mode>::select(Mode::High).map(|bound| bound.get()),
             Ok(Mode::High)
         );
         assert_eq!(
-            Bound::<Mode>::select(Mode::Low).map(Bound::get),
+            Bound::<Mode>::select(Mode::Low).map(|bound| bound.get()),
             Ok(Mode::Low)
         );
         assert_eq!(

@@ -421,7 +421,7 @@ impl NodeHlc {
             interception_clock: Some(own),
             drop_future_timestamp: false,
             trusted_only: matches!(
-                wz_session_core::policy::SessionPolicy::default().clock_quality_stamping,
+                wz_session_core::policy::SessionPolicy::default().clock_quality_stamping(),
                 wz_session_core::policy::ClockQualityStamping::TrustedOnly
             ),
         }

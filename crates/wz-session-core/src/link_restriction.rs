@@ -145,10 +145,19 @@ impl LinkRestriction {
         }
     }
 
-    /// [`Self::admit`] by this build's `entity-link-restriction` policy: the call every entry
-    /// point that takes a restriction from a caller makes.
+    /// [`Self::admit`] by the `entity-link-restriction` policy of `policy`, the snapshot of the
+    /// session the entity is declared on: the call an entry point that holds that snapshot makes.
+    pub const fn admit_by(
+        self,
+        policy: &crate::policy::SessionPolicy,
+    ) -> Result<Self, LinkRestrictionError> {
+        self.admit(policy.entity_link_restriction())
+    }
+
+    /// [`Self::admit_by`] under the build defaults: the call of an entry point that does not yet
+    /// hold its session's snapshot.
     pub const fn admit_in_build(self) -> Result<Self, LinkRestrictionError> {
-        self.admit(crate::policy::SessionPolicy::from_build().entity_link_restriction)
+        self.admit_by(&crate::policy::SessionPolicy::defaults())
     }
 }
 
@@ -201,9 +210,46 @@ mod tests {
         assert_eq!(LinkRestriction::Any.admit(true), Ok(LinkRestriction::Any));
         assert_eq!(only.admit(true), Ok(only));
         // The build's own answer is the policy's: off unless the build stated it.
-        let in_build = crate::policy::SessionPolicy::from_build().entity_link_restriction;
-        assert_eq!(only.admit_in_build().is_ok(), in_build);
+        let defaults = crate::policy::SessionPolicy::defaults();
+        assert_eq!(
+            only.admit_in_build().is_ok(),
+            defaults.entity_link_restriction()
+        );
         assert!(LinkRestriction::Any.admit_in_build().is_ok());
+    }
+
+    /// A snapshot's answer is the snapshot's policy, whatever the build's default is: a session
+    /// whose snapshot selected the policy admits a restriction, one that left it off refuses it.
+    #[test]
+    fn a_restriction_is_admitted_by_the_snapshot_it_is_asked_with() {
+        use crate::policy::{EntityLinkRestriction, SessionPolicy};
+        use crate::policy_binding::PolicyValue;
+        let only = LinkRestriction::only([4]).expect("one slot");
+        assert_eq!(
+            only.admit_by(&SessionPolicy::defaults()),
+            only.admit_in_build()
+        );
+        for value in [EntityLinkRestriction::Off, EntityLinkRestriction::On] {
+            let mut policy = SessionPolicy::defaults();
+            if !EntityLinkRestriction::DOMAIN.contains(value)
+                || EntityLinkRestriction::DOMAIN.is_singleton()
+            {
+                continue;
+            }
+            policy
+                .select_entity_link_restriction(value)
+                .expect("the domain holds it");
+            let expected = if value.is_on() {
+                Ok(only)
+            } else {
+                Err(LinkRestrictionError::PolicyOff)
+            };
+            assert_eq!(only.admit_by(&policy), expected, "{}", value.id());
+            assert_eq!(
+                LinkRestriction::Any.admit_by(&policy),
+                Ok(LinkRestriction::Any)
+            );
+        }
     }
 
     #[test]

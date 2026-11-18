@@ -345,7 +345,7 @@ async fn a_forward_gap_on_the_reliable_channel_ends_the_link_only_when_the_polic
         "the next frame is no gap in any mode; got {:?}",
         outcomes[0]
     );
-    match SessionPolicy::from_build().reliable_gap_reconnect {
+    match SessionPolicy::from_build().reliable_gap_reconnect() {
         Mode::Off => {
             assert!(
                 matches!(outcomes[1], DriverLoopOutcome::FramePayload { sn: 105, .. }),
@@ -402,7 +402,7 @@ async fn a_forward_gap_after_the_peers_declarations_are_final_follows_the_mode()
     assert!(actions.admit_rx_frame_sn(Priority::DEFAULT, true, 100));
     actions.note_peer_declarations_final();
     let outcomes = deliver_frames(&actions, &mut engine, vec![craft_frame_wire(105, true)]).await;
-    match SessionPolicy::from_build().reliable_gap_reconnect {
+    match SessionPolicy::from_build().reliable_gap_reconnect() {
         Mode::Off | Mode::UntilDeclarationsSynced => {
             assert!(
                 matches!(outcomes[0], DriverLoopOutcome::FramePayload { sn: 105, .. }),

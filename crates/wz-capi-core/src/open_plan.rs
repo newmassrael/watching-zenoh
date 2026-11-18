@@ -1060,7 +1060,7 @@ impl OpenPlan {
         let upstream_width = ZenohNodeConfig::default().sn_resolution;
         let sn_resolution = match node.as_ref().map(|node| node.sn_resolution) {
             Some(stated) if stated != upstream_width => stated,
-            _ => SessionPolicy::from_build().sn_resolution,
+            _ => SessionPolicy::from_build().sn_resolution(),
         };
         let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
         // How the node keeps its south apart (`gateway/south`): the preset unless the document
@@ -2117,7 +2117,7 @@ mod tests {
         assert_eq!(stated.sn_resolution, SnResolution::Bits16);
         // Control: silence is the build's policy, so the width above is the document's; and so
         // is upstream's own width, which a rendered configuration states for every open.
-        let build = SessionPolicy::from_build().sn_resolution;
+        let build = SessionPolicy::from_build().sn_resolution();
         assert_eq!(plan("{}").sn_resolution, build);
         assert_eq!(
             plan(r#"{ transport: { link: { tx: { sequence_number_resolution: "32bit" } } } }"#)

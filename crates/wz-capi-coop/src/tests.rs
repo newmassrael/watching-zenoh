@@ -67,6 +67,7 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
         cookie: vec![],
         tx_queue: TxQueueConf::default(),
         link_rx: LinkRxConf::default(),
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
     }
 }

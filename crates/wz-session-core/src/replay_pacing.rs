@@ -29,17 +29,17 @@ impl ReplayPacing {
         }
     }
 
-    /// The pace the build states: `None`, upstream's one call, unless the `declaration-sync-pacing`
-    /// policy is on, in which case the pace is the burst and interval limits. The limits are
-    /// checked where they are used, at compile time, so a build that sets one to zero does not
-    /// build.
-    pub const fn from_build() -> Option<Self> {
+    /// The pace `policy` states, the snapshot of the session that replays: `None`, upstream's one
+    /// call, unless its `declaration-sync-pacing` policy is on, in which case the pace is the
+    /// burst and interval limits. The limits are checked where they are used, at compile time,
+    /// so a build that sets one to zero does not build.
+    pub const fn of_policy(policy: &crate::policy::SessionPolicy) -> Option<Self> {
         const _: () = assert!(
             crate::caps::DECLARATION_SYNC_BURST_MESSAGES >= 1
                 && crate::caps::DECLARATION_SYNC_INTERVAL_MS >= 1,
             "DECLARATION_SYNC_BURST_MESSAGES and DECLARATION_SYNC_INTERVAL_MS must be at least 1"
         );
-        if crate::policy::SessionPolicy::from_build().declaration_sync_pacing {
+        if policy.declaration_sync_pacing() {
             Self::new(
                 crate::caps::DECLARATION_SYNC_BURST_MESSAGES,
                 crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
@@ -49,8 +49,14 @@ impl ReplayPacing {
         }
     }
 
-    /// The pace the build states ([`Self::from_build`]), evaluated when the crate is built: a
-    /// `WZ_POLICY_*` value that is neither `on` nor `off` stops the build here, where a call to
+    /// [`Self::of_policy`] under the build defaults: the pace of a host that does not yet hold
+    /// its session's snapshot.
+    pub const fn from_build() -> Option<Self> {
+        Self::of_policy(&crate::policy::SessionPolicy::defaults())
+    }
+
+    /// The pace of the build defaults ([`Self::from_build`]), evaluated when the crate is built:
+    /// a `WZ_POLICY_*` value that is neither `on` nor `off` stops the build here, where a call to
     /// `from_build` at run time would take the node down when it started.
     pub const BUILD: Option<Self> = Self::from_build();
 
@@ -83,7 +89,7 @@ mod tests {
     /// limits. The test build states nothing, so this asserts the default and that the two agree.
     #[test]
     fn the_build_states_a_pace_exactly_when_the_policy_is_on() {
-        let on = crate::policy::SessionPolicy::from_build().declaration_sync_pacing;
+        let on = crate::policy::SessionPolicy::defaults().declaration_sync_pacing();
         assert_eq!(ReplayPacing::from_build().is_some(), on);
         assert_eq!(ReplayPacing::BUILD, ReplayPacing::from_build());
         if let Some(pace) = ReplayPacing::from_build() {
@@ -93,5 +99,34 @@ mod tests {
                 crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64
             );
         }
+    }
+
+    /// The snapshot a session replays under decides its pace, not the build: on is the two
+    /// limits, off is upstream's one call.
+    #[test]
+    fn a_session_is_paced_by_the_snapshot_it_holds() {
+        use crate::policy::{DeclarationSyncPacing, SessionPolicy};
+        use crate::policy_binding::PolicyValue;
+        assert_eq!(
+            ReplayPacing::of_policy(&SessionPolicy::defaults()),
+            ReplayPacing::from_build()
+        );
+        if DeclarationSyncPacing::DOMAIN.is_singleton() {
+            return;
+        }
+        let mut on = SessionPolicy::defaults();
+        on.select_declaration_sync_pacing(DeclarationSyncPacing::On)
+            .expect("the domain holds both values");
+        let mut off = on;
+        off.select_declaration_sync_pacing(DeclarationSyncPacing::Off)
+            .expect("the domain holds both values");
+        assert_eq!(
+            ReplayPacing::of_policy(&on),
+            ReplayPacing::new(
+                crate::caps::DECLARATION_SYNC_BURST_MESSAGES,
+                crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64
+            )
+        );
+        assert_eq!(ReplayPacing::of_policy(&off), None);
     }
 }

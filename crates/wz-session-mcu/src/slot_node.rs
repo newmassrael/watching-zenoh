@@ -717,6 +717,7 @@ impl NodeIdentity {
             cookie: cookie_bytes(&[]),
             tx_queue: TxQueueConf::default(),
             link_rx: LinkRxConf::default(),
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }

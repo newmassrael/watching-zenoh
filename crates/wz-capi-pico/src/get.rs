@@ -1382,7 +1382,7 @@ pub(crate) fn issue_get(
     // crate is compiled, so a build with the policy off has no addressed path below: off costs
     // nothing. (A plain call of the `const fn` is not folded; measured +1,824 bytes of
     // `issue_get` that way in the default pico build.)
-    const TARGETED: bool = wz_session_core::policy::SessionPolicy::from_build().targeted_query;
+    const TARGETED: bool = wz_session_core::policy::SessionPolicy::from_build().targeted_query();
     let target_peer = if TARGETED { target_peer } else { None };
     let Some(target_peer) = target_peer else {
         return fan_get(closure, gate, token, |fan, leg| {

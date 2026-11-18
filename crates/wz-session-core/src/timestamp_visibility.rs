@@ -28,11 +28,17 @@
 
 use crate::sink::SampleView;
 
-/// What an entity that states no choice about timestamps gets, by this build's policy: `true`
-/// (it takes part) when the policy is off, which is upstream's behaviour, and `false` when the
-/// build makes taking part opt-in.
+/// What an entity that states no choice about timestamps gets, by the `entity-timestamp-opt-in`
+/// policy of `policy`, the snapshot of the session it is declared on: `true` (it takes part)
+/// when the policy is off, which is upstream's behaviour, and `false` when taking part is opt-in.
+pub const fn exposed_by(policy: &crate::policy::SessionPolicy) -> bool {
+    !policy.entity_timestamp_opt_in()
+}
+
+/// [`exposed_by`] under the build defaults: what an entity gets whose declaration path does not
+/// yet hold its session's snapshot, and what an options struct's `Default` holds.
 pub const fn default_exposed() -> bool {
-    !crate::policy::SessionPolicy::from_build().entity_timestamp_opt_in
+    exposed_by(&crate::policy::SessionPolicy::defaults())
 }
 
 /// An entity's choice about the timestamps it is handed, as a value whose `Default` is the
@@ -230,8 +236,30 @@ mod tests {
     fn the_default_follows_the_build_policy() {
         assert_eq!(
             default_exposed(),
-            !crate::policy::SessionPolicy::from_build().entity_timestamp_opt_in
+            !crate::policy::SessionPolicy::defaults().entity_timestamp_opt_in()
         );
+    }
+
+    /// The snapshot an entity is declared under decides, not the build: opt-in hides the
+    /// timestamp from an entity that states nothing, and off shows it.
+    #[test]
+    fn an_entity_is_exposed_by_the_snapshot_it_is_declared_under() {
+        use crate::policy::{EntityTimestampOptIn, SessionPolicy};
+        use crate::policy_binding::PolicyValue;
+        assert_eq!(exposed_by(&SessionPolicy::defaults()), default_exposed());
+        if EntityTimestampOptIn::DOMAIN.is_singleton() {
+            return;
+        }
+        let mut opt_in = SessionPolicy::defaults();
+        opt_in
+            .select_entity_timestamp_opt_in(EntityTimestampOptIn::On)
+            .expect("the domain holds both values");
+        let mut upstream = opt_in;
+        upstream
+            .select_entity_timestamp_opt_in(EntityTimestampOptIn::Off)
+            .expect("the domain holds both values");
+        assert!(!exposed_by(&opt_in));
+        assert!(exposed_by(&upstream));
     }
 
     #[cfg(feature = "alloc")]

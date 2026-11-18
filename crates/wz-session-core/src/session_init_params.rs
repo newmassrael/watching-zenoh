@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 
 use wz_codecs::whatami::WhatAmI;
 
+use crate::policy::SessionPolicy;
 use crate::signing_key::SigningKey;
 
 pub use crate::session_zid::{SessionZid, ZidError, ZID_MAX};
@@ -180,6 +181,12 @@ pub struct SessionInitParams {
     /// `transport/link/rx` block as far as a session acts on it. It rides here
     /// for the reason [`Self::tx_queue`] does.
     pub link_rx: LinkRxConf,
+    /// The value of every policy this session's machines read: the snapshot its creator resolved
+    /// for it, starting from [`SessionPolicy::defaults`]. A machine of the session reads a policy
+    /// here and never from the build. It rides here for the reason [`Self::tx_queue`] does; the
+    /// queue's own policy values ([`TxQueueConf::of_policy`]) are derived from the same snapshot
+    /// by the creator.
+    pub policy: SessionPolicy,
 }
 
 /// Upstream's default `transport/link/rx/max_message_size`, 1 GiB
@@ -401,11 +408,11 @@ pub struct TxQueueConf {
 /// (`commons/zenoh-config/src/defaults.rs` @ `max_wait_before_drop_fragments: 50000,`).
 pub const MAX_WAIT_BEFORE_DROP_FRAGMENTS_US: u64 = 50_000;
 
-/// The `tx-no-progress-deadline` policy as this build states it, in the form
-/// [`TxQueueConf::no_progress_us`] carries it: the window of `TX_NO_PROGRESS_WINDOW_US` when the
-/// build turned the policy on, and none (upstream's behaviour) when it did not.
-const fn build_no_progress_us() -> Option<u64> {
-    if crate::policy::SessionPolicy::from_build().tx_no_progress_deadline {
+/// The `tx-no-progress-deadline` policy of `policy`, in the form [`TxQueueConf::no_progress_us`]
+/// carries it: the window of `TX_NO_PROGRESS_WINDOW_US` when the policy is on, and none
+/// (upstream's behaviour) when it is off.
+const fn no_progress_us(policy: &SessionPolicy) -> Option<u64> {
+    if policy.tx_no_progress_deadline() {
         Some(crate::caps::TX_NO_PROGRESS_WINDOW_US as u64)
     } else {
         None
@@ -440,20 +447,11 @@ const fn build_pico_queue_size() -> usize {
 }
 
 impl Default for TxQueueConf {
+    /// Upstream's queue under the build defaults of the policies
+    /// ([`TxQueueConf::of_policy`] of [`SessionPolicy::defaults`]): the shape a creator that
+    /// holds no snapshot of its own still has.
     fn default() -> Self {
-        Self {
-            sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
-            wait_before_drop_us: WAIT_BEFORE_DROP_US,
-            max_wait_before_drop_fragments_us: MAX_WAIT_BEFORE_DROP_FRAGMENTS_US,
-            wait_before_close_us: WAIT_BEFORE_CLOSE_US,
-            no_progress_us: build_no_progress_us(),
-            expiry_keeps_session: crate::policy::SessionPolicy::from_build()
-                .tx_expiry_keeps_session,
-            expiry_close_after: build_expiry_close_after(),
-            batching: true,
-            batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
-            allocation: crate::link::QueueAllocation::Lazy,
-        }
+        Self::of_policy(&SessionPolicy::defaults())
     }
 }
 
@@ -489,6 +487,25 @@ pub struct TxQueueSizeOutOfRange {
 }
 
 impl TxQueueConf {
+    /// Upstream's queue sizes and waits, with the two policies the queue carries
+    /// (`tx-no-progress-deadline`, `tx-expiry-keeps-session`) as `policy` holds them: the queue a
+    /// creator builds beside the snapshot it hands the session in
+    /// [`SessionInitParams::policy`].
+    pub const fn of_policy(policy: &SessionPolicy) -> Self {
+        Self {
+            sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
+            wait_before_drop_us: WAIT_BEFORE_DROP_US,
+            max_wait_before_drop_fragments_us: MAX_WAIT_BEFORE_DROP_FRAGMENTS_US,
+            wait_before_close_us: WAIT_BEFORE_CLOSE_US,
+            no_progress_us: no_progress_us(policy),
+            expiry_keeps_session: policy.tx_expiry_keeps_session(),
+            expiry_close_after: build_expiry_close_after(),
+            batching: true,
+            batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
+            allocation: crate::link::QueueAllocation::Lazy,
+        }
+    }
+
     /// zenoh-pico's transmit model: a DROP message waits for room as long as a
     /// BLOCK one does.
     ///
@@ -506,15 +523,22 @@ impl TxQueueConf {
     /// The queue holds `PICO_TX_QUEUE_SIZE` batches per priority and not upstream's two: a put of
     /// pico writes on its own thread, where here a second thread writes, and a lane of four
     /// frames of 1 KiB made the two wait for each other after every four.
+    ///
+    /// The two policies the queue carries are the build defaults; a creator that holds a snapshot
+    /// builds the queue with [`Self::pico_of_policy`].
     pub const fn pico() -> Self {
+        Self::pico_of_policy(&SessionPolicy::defaults())
+    }
+
+    /// [`Self::pico`] with the two policies the queue carries as `policy` holds them.
+    pub const fn pico_of_policy(policy: &SessionPolicy) -> Self {
         Self {
             sizes: [build_pico_queue_size(); crate::qos::Priority::NUM],
             wait_before_drop_us: WAIT_BEFORE_CLOSE_US,
             max_wait_before_drop_fragments_us: 0,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
-            no_progress_us: build_no_progress_us(),
-            expiry_keeps_session: crate::policy::SessionPolicy::from_build()
-                .tx_expiry_keeps_session,
+            no_progress_us: no_progress_us(policy),
+            expiry_keeps_session: policy.tx_expiry_keeps_session(),
             expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
@@ -750,6 +774,60 @@ mod no_progress_tests {
         assert!(!TxQueueConf::pico().expiry_keeps_session);
         assert_eq!(TxQueueConf::default().expiry_close_after, 0);
         assert_eq!(TxQueueConf::pico().expiry_close_after, 0);
+    }
+
+    /// The queue a creator holds no snapshot for is the queue of the build defaults, so the
+    /// wrappers and the snapshot path agree in every build.
+    #[test]
+    fn the_default_queue_is_the_queue_of_the_build_defaults() {
+        let defaults = crate::policy::SessionPolicy::defaults();
+        assert_eq!(TxQueueConf::default(), TxQueueConf::of_policy(&defaults));
+        assert_eq!(TxQueueConf::pico(), TxQueueConf::pico_of_policy(&defaults));
+    }
+
+    /// The two policies the queue carries are read from the snapshot it is built from, not from
+    /// the build: a snapshot with both on gives the window and keeps the session, and one with
+    /// both off gives neither. A build whose domain leaves a value out has nothing to select, and
+    /// the case is skipped there.
+    #[test]
+    fn the_queue_carries_the_policies_of_the_snapshot_it_is_built_from() {
+        use crate::policy::{SessionPolicy, TxExpiryKeepsSession, TxNoProgressDeadline};
+        use crate::policy_binding::PolicyValue;
+        let wide = !TxNoProgressDeadline::DOMAIN.is_singleton()
+            && !TxExpiryKeepsSession::DOMAIN.is_singleton();
+        if !wide {
+            return;
+        }
+        let mut on = SessionPolicy::defaults();
+        on.select_tx_no_progress_deadline(TxNoProgressDeadline::On)
+            .expect("the domain holds both values");
+        on.select_tx_expiry_keeps_session(TxExpiryKeepsSession::On)
+            .expect("the domain holds both values");
+        let mut off = on;
+        off.select_tx_no_progress_deadline(TxNoProgressDeadline::Off)
+            .expect("the domain holds both values");
+        off.select_tx_expiry_keeps_session(TxExpiryKeepsSession::Off)
+            .expect("the domain holds both values");
+        let window = Some(crate::caps::TX_NO_PROGRESS_WINDOW_US as u64);
+        for queue in [
+            TxQueueConf::of_policy(&on),
+            TxQueueConf::pico_of_policy(&on),
+        ] {
+            assert_eq!(queue.no_progress_us, window);
+            assert!(queue.expiry_keeps_session);
+        }
+        for queue in [
+            TxQueueConf::of_policy(&off),
+            TxQueueConf::pico_of_policy(&off),
+        ] {
+            assert_eq!(queue.no_progress_us, None);
+            assert!(!queue.expiry_keeps_session);
+        }
+        // Everything else is the queue's own, whatever the snapshot says.
+        assert_eq!(
+            TxQueueConf::of_policy(&on).sizes,
+            TxQueueConf::of_policy(&off).sizes
+        );
     }
 
     /// The pico ABI's queue is the declared `PICO_TX_QUEUE_SIZE` for every priority, upstream's

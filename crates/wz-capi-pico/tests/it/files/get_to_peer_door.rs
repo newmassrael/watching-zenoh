@@ -185,7 +185,7 @@ fn finished(get: &Get) {
 
 #[test]
 fn a_get_addressed_to_one_peer_asks_that_peer_alone_or_is_refused_while_the_policy_is_off() {
-    let policy_on = SessionPolicy::from_build().targeted_query;
+    let policy_on = SessionPolicy::from_build().targeted_query();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     // SAFETY: fresh configs, sessions and handles, each closed before the test ends; every

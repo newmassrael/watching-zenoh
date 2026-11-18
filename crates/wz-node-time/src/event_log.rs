@@ -177,7 +177,7 @@ pub fn process_clock() -> impl wz_session_core::epoch::EpochSource + Copy {
 /// The log of this process, built with the build's policy.
 pub fn global() -> &'static EventLog {
     static GLOBAL: OnceLock<EventLog> = OnceLock::new();
-    GLOBAL.get_or_init(|| EventLog::new(full_policy(SessionPolicy::default().event_ring_full)))
+    GLOBAL.get_or_init(|| EventLog::new(full_policy(SessionPolicy::default().event_ring_full())))
 }
 
 #[cfg(test)]

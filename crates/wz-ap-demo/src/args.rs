@@ -9020,7 +9020,7 @@ mod stock_config_tests {
         let bare = TransportTuning::from_argv(&argv(&["--connect", "tcp/r:7447"])).unwrap();
         assert_eq!(
             bare.sn_resolution,
-            SessionPolicy::from_build().sn_resolution
+            SessionPolicy::from_build().sn_resolution()
         );
 
         // A width zenoh has no name for is refused by the flag, not offered as some other one.
@@ -10779,7 +10779,7 @@ impl Default for TransportTuning {
         Self {
             batch_size: 65535,
             lease_ms: 10_000,
-            sn_resolution: wz::runtime_tokio::policy::SessionPolicy::from_build().sn_resolution,
+            sn_resolution: wz::runtime_tokio::policy::SessionPolicy::from_build().sn_resolution(),
             link_defaults: Default::default(),
             tx_queue: Default::default(),
             link_rx: Default::default(),
@@ -11171,6 +11171,7 @@ pub(crate) fn session_init_params_for(
         // so the note named a symbol that no longer existed and nothing ever
         // supplied the entropy. The key of every acceptor this binary opened
         // was therefore a literal in a public repository.
+        policy: wz::runtime_tokio::policy::SessionPolicy::defaults(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
             std::io::Error::other(format!(
                 "no OS entropy for the cookie signing key ({e}); refusing to open a \

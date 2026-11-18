@@ -118,13 +118,19 @@ pub const fn admit(
     }
 }
 
-/// [`admit`] by this build's `publisher-admission-retry` policy: the call every entry point that
-/// takes a retry from a caller makes.
+/// [`admit`] by the `publisher-admission-retry` policy of `policy`, the snapshot of the session
+/// the publish is made on: the call an entry point that holds that snapshot makes.
+pub const fn admit_by(
+    retry: Option<AdmissionRetry>,
+    policy: &crate::policy::SessionPolicy,
+) -> Result<(), AdmissionRetryError> {
+    admit(retry, policy.publisher_admission_retry())
+}
+
+/// [`admit_by`] under the build defaults: the call of an entry point that does not yet hold its
+/// session's snapshot.
 pub const fn admit_in_build(retry: Option<AdmissionRetry>) -> Result<(), AdmissionRetryError> {
-    admit(
-        retry,
-        crate::policy::SessionPolicy::from_build().publisher_admission_retry,
-    )
+    admit_by(retry, &crate::policy::SessionPolicy::defaults())
 }
 
 #[cfg(test)]
@@ -178,8 +184,33 @@ mod tests {
         let stated = Some(retry(2, 5));
         assert_eq!(admit(stated, false), Err(AdmissionRetryError::PolicyOff));
         assert_eq!(admit(stated, true), Ok(()));
-        let in_build = crate::policy::SessionPolicy::from_build().publisher_admission_retry;
+        let in_build = crate::policy::SessionPolicy::defaults().publisher_admission_retry();
         assert_eq!(admit_in_build(stated).is_ok(), in_build);
+    }
+
+    /// The snapshot a retry is asked with decides, not the build: a snapshot that selected the
+    /// policy admits it and one that left it off refuses it.
+    #[test]
+    fn a_retry_is_admitted_by_the_snapshot_it_is_asked_with() {
+        use crate::policy::{PublisherAdmissionRetry, SessionPolicy};
+        use crate::policy_binding::PolicyValue;
+        let stated = Some(retry(2, 5));
+        assert_eq!(
+            admit_by(stated, &SessionPolicy::defaults()),
+            admit_in_build(stated)
+        );
+        assert_eq!(admit_by(None, &SessionPolicy::defaults()), Ok(()));
+        if PublisherAdmissionRetry::DOMAIN.is_singleton() {
+            return;
+        }
+        let mut on = SessionPolicy::defaults();
+        on.select_publisher_admission_retry(PublisherAdmissionRetry::On)
+            .expect("the domain holds both values");
+        let mut off = on;
+        off.select_publisher_admission_retry(PublisherAdmissionRetry::Off)
+            .expect("the domain holds both values");
+        assert_eq!(admit_by(stated, &on), Ok(()));
+        assert_eq!(admit_by(stated, &off), Err(AdmissionRetryError::PolicyOff));
     }
 
     #[test]
