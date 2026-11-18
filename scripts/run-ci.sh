@@ -22173,14 +22173,17 @@ layer_z_zenohd_interop() {
     # would fail the leg rather than skip it. Additive like the rest: the flag is
     # absent from every other leg's argv, so they all dial through the unchanged
     # binary.
-    # R311y851 adds `router-connect-reconcile`. LEG 5 of
+    # R311y851 added `router-connect-reconcile`. LEG 5 of
     # `wz_reads_a_stock_zenohd_config` measures a re-dial CADENCE, and the loop
-    # that re-dials a desired peer is behind that feature
-    # (`accept_loop.rs:1645-1659`); `transport-multilink`, which this set already
-    # had, paces link RE-ADDS and does not reconcile a peer that never connected.
-    # Measured at this exact set on 2026-08-18: the control arm dialled ONCE in
-    # six seconds while the admin config rendered zenoh's 1s/4s/2.0, which is how
-    # that leg reded on hosted. Both restatements of this line carry it.
+    # that re-dialled a desired peer was then behind that feature;
+    # `transport-multilink`, which this set already had, paces link RE-ADDS and
+    # does not reconcile a peer that never connected. Measured at this exact set
+    # on 2026-08-18: the control arm dialled ONCE in six seconds while the admin
+    # config rendered zenoh's 1s/4s/2.0, which is how that leg reded on hosted.
+    # The re-dial of a configured endpoint now belongs to `routing-peer` (the
+    # loop's peer machines, `loop_peers`), which this set carries, so LEG 5 no
+    # longer needs `router-connect-reconcile`; whether the set keeps it for any
+    # other reason is not decided here. Both restatements of this line carry it.
     # R2087 adds `transport-qos` (open-debt item 506). The wire sweep in
     # `wz_reads_a_stock_zenohd_config` now asks `transport/unicast/qos/enabled`
     # the same question it asks lowlatency and compression -- does the InitSyn
@@ -22467,14 +22470,17 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # hosted CI with its own "rebuild with --features zenoh-config" hint. A
     # prediction in a comment is not a gate; Layer C0f now compares the two sets
     # mechanically, which is what the prediction was asking for.
-    # R311y851 adds `router-connect-reconcile`. LEG 5 of
+    # R311y851 added `router-connect-reconcile`. LEG 5 of
     # `wz_reads_a_stock_zenohd_config` measures a re-dial CADENCE, and the loop
-    # that re-dials a desired peer is behind that feature
-    # (`accept_loop.rs:1645-1659`); `transport-multilink`, which this set already
-    # had, paces link RE-ADDS and does not reconcile a peer that never connected.
-    # Measured at this exact set on 2026-08-18: the control arm dialled ONCE in
-    # six seconds while the admin config rendered zenoh's 1s/4s/2.0, which is how
-    # that leg reded on hosted. Both restatements of this line carry it.
+    # that re-dialled a desired peer was then behind that feature;
+    # `transport-multilink`, which this set already had, paces link RE-ADDS and
+    # does not reconcile a peer that never connected. Measured at this exact set
+    # on 2026-08-18: the control arm dialled ONCE in six seconds while the admin
+    # config rendered zenoh's 1s/4s/2.0, which is how that leg reded on hosted.
+    # The re-dial of a configured endpoint now belongs to `routing-peer` (the
+    # loop's peer machines, `loop_peers`), which this set carries, so LEG 5 no
+    # longer needs `router-connect-reconcile`; whether the set keeps it for any
+    # other reason is not decided here. Both restatements of this line carry it.
     # R2087 adds `transport-qos` (open-debt item 506): the wire sweep asks
     # `transport/unicast/qos/enabled` whether the InitSyn carries the QoS ext,
     # and the offer is compiled out without this feature -- both runs would
