@@ -1922,14 +1922,16 @@ The multicast and scouting parameters' zids are typed too:
 peer table, and `ScoutParams::zid` is an `Option<SessionZid>` (a Scout names
 its asker optionally). A participant refuses a JOIN, Scout or Hello whose zid
 is out of range or zero where it reads it (`decode_join_named`,
-`parse_scouting`, `decode_scouted_hello`). The C ABI's scout calls turn a zid
-that is not one into a Scout that names no asker.
+`parse_scouting`, `decode_scouted_hello`), and a scouted Hello holds the zid
+it checked (`ScoutedHello::zid`). The C ABIs' scout calls refuse a stated zid
+that their open refuses, with the open's code (`Z_EINVAL` for zenoh-c,
+`Z_ERR_INVALID` for zenoh-pico, whose scout reads the key as its open does);
+a config that states none asks with a fresh zid on zenoh-c and as nobody on
+zenoh-pico, as pico's `z_scout` does.
 
 An observer is not a participant: a capture of a peer that sends a zero zid
 must still dissect. The refusal therefore lives in the participant's entry
 points (`parse_inbound*`, `parse_scouting`), and the passive reader uses the
 lenient parse (`parse_inbound_observed`) and reports the frame on its row
-(`PassiveFrame::names_no_zid`) instead of failing the capture.
-
-Not done: `ScoutedHello::zid` is still bytes, and a passive scouting row does
-not yet report a Scout or Hello that names a zero zid.
+(`PassiveFrame::names_no_zid`) instead of failing the capture. A scouting row
+does the same (`ScoutingDatagram::names_no_zid` in `wz-capture`).

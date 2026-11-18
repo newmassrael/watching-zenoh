@@ -121,9 +121,9 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
 /// byte, and the byte-for-byte pins against zenoh-pico (`layer3_join`,
 /// `layer3_join_qos`) hold for both. `MulticastTxConduits` and the params are read
 /// exactly as the owned form reads them. `CodecError::BufferOverflow` is the
-/// refusal of a sink too small for the datagram, and
-/// `CodecError::LengthOutOfRange` that of an empty zid, which no cbyte states;
-/// nothing is truncated and nothing falls back to a heap. [`JOIN_MAX_BYTES`] is a
+/// refusal of a sink too small for the datagram; an empty zid, which no cbyte
+/// states, never reaches it, as [`MulticastParams::zid`] is a `SessionZid`.
+/// Nothing is truncated and nothing falls back to a heap. [`JOIN_MAX_BYTES`] is a
 /// bound that fits every datagram this function writes whatever the zid, QoS and
 /// patch settings.
 ///
@@ -752,17 +752,18 @@ mod tests {
         assert_eq!(encode_join(&p, &tx), expected);
     }
 
-    /// A zid the cbyte cannot state is refused, not written: the cbyte holds the
-    /// zid's length less one, so an empty zid has none, and nothing reaches the
-    /// sink. A one-byte zid, the shortest there is, is written.
+    /// A zid the cbyte cannot state never reaches the encoder: the cbyte holds
+    /// the zid's length less one, so an empty zid has none, and
+    /// `MulticastParams::zid` is a `SessionZid`, which refuses one where the
+    /// parameters are made. A one-byte zid, the shortest there is, is written.
     #[test]
-    fn a_join_of_no_zid_is_refused() {
+    fn a_join_of_no_zid_is_refused_where_its_params_are_made() {
+        assert_eq!(
+            crate::session_zid::SessionZid::new(&[]),
+            Err(crate::session_zid::ZidError::LengthOutOfRange { len: 0 })
+        );
         let tx = MulticastTxConduits::new(sn::mask_from_res(0x02));
         let mut slot = [0u8; JOIN_MAX_BYTES];
-        assert_eq!(
-            encode_join_into_slice(&params(&[]), &tx, &mut slot),
-            Err(CodecError::LengthOutOfRange)
-        );
         let written = encode_join_into_slice(&params(&[0x01]), &tx, &mut slot).expect("written");
         assert_eq!(decode_join_zid(&slot[..written]), Some(&[0x01u8][..]));
     }

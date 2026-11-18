@@ -1321,6 +1321,11 @@ impl ConfiguredZid {
         self.wire.as_slice()
     }
 
+    /// The same form, as the type a Scout or a session names its zid with.
+    pub fn session_zid(&self) -> SessionZid {
+        self.wire
+    }
+
     /// The form `z_info_zid` reports: sixteen bytes, zero-padded.
     fn padded(&self) -> [u8; ZID_LENGTH] {
         let mut zid = [0u8; ZID_LENGTH];

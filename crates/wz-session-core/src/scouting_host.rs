@@ -66,6 +66,7 @@ pub use crate::scout_initiator::{
 };
 pub use crate::scout_params::ScoutParams;
 use crate::scout_trace::ScoutTrace;
+use crate::session_zid::SessionZid;
 // The generated action trait, aliased so its name does not shadow the host-side state struct
 // below (the struct holds the staging slots the caller reads; the trait is what the generated
 // policy dispatches through).
@@ -150,8 +151,9 @@ pub struct ScoutedHello {
     /// peer said something we do not understand" cannot read as "the peer said peer".
     pub whatami: Option<WhatAmI>,
     /// The peer's zid, verbatim. Its length rides the `cbyte` high nibble; the codec has already
-    /// applied that, so this is the id bytes alone.
-    pub zid: Vec<u8>,
+    /// applied that, so this is the id bytes alone, and a Hello naming no zid a node can have is
+    /// not decoded into one ([`decode_scouted_hello`]).
+    pub zid: SessionZid,
     /// EVERY locator the Hello advertised, in wire order. Empty for a locator-less Hello, which
     /// is a real peer that advertised no address and not an absence of discovery.
     pub locators: Vec<String>,
@@ -173,11 +175,11 @@ pub fn decode_scouted_hello(bytes: &[u8]) -> Option<ScoutedHello> {
     let hello = view.body;
     // A Hello naming a zid no node has is no Hello, as for zenoh's decoder
     // (`crate::scouting_message::parse_scouting` cites it).
-    crate::session_zid::SessionZid::new(hello.zid.into_inner()).ok()?;
+    let zid = SessionZid::new(hello.zid.into_inner()).ok()?;
     Some(ScoutedHello {
         version: hello.version,
         whatami: WhatAmI::from_wire(hello.cbyte),
-        zid: hello.zid.to_vec(),
+        zid,
         locators: hello
             .locators
             .as_ref()

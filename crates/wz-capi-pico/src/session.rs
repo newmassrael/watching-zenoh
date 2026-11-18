@@ -45,6 +45,8 @@
 
 use core::ffi::c_void;
 
+use wz_session_core::session_zid::SessionZid;
+
 use crate::abi::{z_moved_config_t, z_owned_config_t};
 use crate::config::{
     ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY,
@@ -659,9 +661,18 @@ pub(crate) struct OpenConfig {
 /// named, and a caller that stated an id and silently got another is worse off than one whose
 /// open failed, as with the TLS keys.
 pub(crate) fn session_zid(open: &OpenConfig) -> Result<Option<Vec<u8>>, ZResult> {
-    match open.zid.as_deref() {
+    stated_zid(open.zid.as_deref()).map(|zid| zid.map(|zid| zid.to_vec()))
+}
+
+/// The id the text of `Z_CONFIG_SESSION_ZID_KEY` names, `None` when the config states none, and
+/// `Z_ERR_INVALID` for text pico's reader cannot take, as [`session_zid`] reads it. `z_scout`
+/// reads the key through this too, so a Scout names the node a later open stands on and is
+/// refused the id the open is refused.
+pub(crate) fn stated_zid(text: Option<&str>) -> Result<Option<SessionZid>, ZResult> {
+    match text {
         None => Ok(None),
         Some(text) => pico_uuid_wire(text)
+            .and_then(|wire| SessionZid::new(&wire).ok())
             .map(Some)
             .ok_or(crate::result::Z_ERR_INVALID),
     }

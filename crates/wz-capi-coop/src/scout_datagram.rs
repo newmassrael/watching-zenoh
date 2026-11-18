@@ -27,6 +27,7 @@ use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::scouting_host::{
     deliver_in_upstream_order, ScoutParams, ScoutWindow, ScoutedHello,
 };
+use wz_session_core::session_zid::SessionZid;
 
 use crate::prelude::*;
 
@@ -40,11 +41,14 @@ const READ_WAIT_MS: c_int = 2;
 /// each peer that answered to `on_hello` in the order upstream delivers them (after the window,
 /// last responder first). The number delivered; a socket that cannot be opened is a window nobody
 /// answers, `0`.
+///
+/// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
+/// ABI's to refuse before it scouts.
 pub fn run_scout<U, C>(
     clock: &C,
     group: SocketAddr,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
     rx_capacity: usize,
     on_hello: impl FnMut(&ScoutedHello),
@@ -55,8 +59,7 @@ where
 {
     let params = ScoutParams {
         what,
-        // A Scout names its asker optionally: no bytes, or bytes that are no zid, ask as nobody.
-        zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
+        zid,
         timeout_ms: budget_ms,
         exit_on_first: false,
     };
@@ -71,7 +74,7 @@ pub fn scout_first<U, C>(
     clock: &C,
     group: SocketAddr,
     what: u8,
-    zid: Vec<u8>,
+    zid: Option<SessionZid>,
     budget_ms: u64,
     rx_capacity: usize,
 ) -> Option<ScoutedHello>
@@ -81,8 +84,7 @@ where
 {
     let params = ScoutParams {
         what,
-        // As `run_scout`'s: an asker named only by a zid.
-        zid: wz_session_core::session_zid::SessionZid::new(&zid).ok(),
+        zid,
         timeout_ms: budget_ms,
         exit_on_first: true,
     };

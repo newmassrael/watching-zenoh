@@ -196,7 +196,7 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
         &PosixClock,
         responder.at,
         WHAT,
-        vec![0xAA, 0xBB],
+        Some([0xAA, 0xBB].into()),
         5_000,
         2048,
     )
@@ -209,7 +209,7 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
         &PosixClock,
         responder.at,
         WHAT,
-        vec![0xAA, 0xBB],
+        Some([0xAA, 0xBB].into()),
         300,
         2048,
         |hello| seen.push(hello.zid[0]),
@@ -235,7 +235,7 @@ fn the_window_over_one_datagram_socket_asks_an_ipv6_responder() {
         &PosixClock,
         responder.at,
         WHAT,
-        vec![0xAA, 0xBB],
+        Some([0xAA, 0xBB].into()),
         5_000,
         2048,
     )
@@ -253,7 +253,7 @@ fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
         // The discard port: nothing listens there on a test host.
         SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
         WHAT,
-        Vec::new(),
+        None,
         100,
         2048,
     );
@@ -375,7 +375,7 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
         IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77)),
         47_477,
         WHAT,
-        vec![0x77; 16],
+        Some([0x77; 16].into()),
         150,
         |_| seen += 1,
     );
@@ -386,7 +386,7 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
         IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77)),
         47_477,
         WHAT,
-        vec![0x77; 16],
+        Some([0x77; 16].into()),
         100,
     )
     .is_none());

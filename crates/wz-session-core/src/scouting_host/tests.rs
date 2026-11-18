@@ -27,7 +27,7 @@ fn hello(zid: u8) -> ScoutedHello {
     ScoutedHello {
         version: 0x09,
         whatami: None,
-        zid: vec![zid],
+        zid: [zid].into(),
         locators: Vec::new(),
     }
 }
