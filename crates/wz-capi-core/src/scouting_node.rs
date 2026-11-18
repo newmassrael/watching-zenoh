@@ -356,7 +356,7 @@ impl ScoutLink {
                 posted.clear();
             }
             // A node does not dial itself: its own Scout may come back through the group.
-            if hello.zid == zid || !posted.insert(hello.zid.clone()) {
+            if hello.zid == zid || !posted.insert(hello.zid.to_vec()) {
                 return true;
             }
             match autoconnect_verdict(&policy, &hello) {
@@ -724,7 +724,7 @@ mod tests {
         let hello = |zid: u8, role: Option<WhatAmI>| ScoutedHello {
             version: 9,
             whatami: role,
-            zid: vec![zid],
+            zid: [zid].into(),
             locators: vec![],
         };
         let mut handed = 0;

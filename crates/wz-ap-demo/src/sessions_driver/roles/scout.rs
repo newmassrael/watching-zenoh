@@ -435,7 +435,7 @@ mod tests {
         let hello = ScoutedHello {
             version: 9,
             whatami: None,
-            zid: vec![0x01, 0xdd],
+            zid: [0x01, 0xdd].into(),
             locators: vec!["tcp/192.0.2.1:7447".into(), "udp/192.0.2.1:7447".into()],
         };
         assert_eq!(

@@ -129,7 +129,7 @@ pub fn autoconnect_verdict(policy: &AutoConnect, hello: &ScoutedHello) -> Autoco
         return AutoconnectVerdict::PolicyDeclined { whatami };
     }
     AutoconnectVerdict::Dial(DialIntent {
-        zid: hello.zid.clone(),
+        zid: hello.zid.to_vec(),
         locators: hello.locators.clone(),
         origin: DialIntentOrigin::MulticastScout,
     })
@@ -242,7 +242,7 @@ pub async fn serve_autoconnect<D, T, F>(
         // clear for this loop's params (see the module doc), so this is the whole
         // window rather than its first entry.
         for hello in actions.scouted_hellos() {
-            if !seen.insert(hello.zid.clone()) {
+            if !seen.insert(hello.zid.to_vec()) {
                 continue;
             }
             match autoconnect_verdict(plan.policy, &hello) {
@@ -256,7 +256,7 @@ pub async fn serve_autoconnect<D, T, F>(
                     }
                 }
                 why => on_step(AutoconnectStep::Skipped {
-                    zid: hello.zid.clone(),
+                    zid: hello.zid.to_vec(),
                     why,
                 }),
             }
@@ -284,7 +284,7 @@ mod tests {
         ScoutedHello {
             version: 0x09,
             whatami,
-            zid: zid.to_vec(),
+            zid: wz_session_core::session_zid::SessionZid::new(zid).expect("a test zid"),
             locators: locators.iter().map(|l| String::from(*l)).collect(),
         }
     }

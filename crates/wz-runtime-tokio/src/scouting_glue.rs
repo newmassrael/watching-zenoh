@@ -570,7 +570,7 @@ mod tests {
         let hellos = actions.scouted_hellos();
         assert_eq!(hellos.len(), 3, "every responder in the window is recorded");
         assert_eq!(
-            hellos.iter().map(|h| h.zid.clone()).collect::<Vec<_>>(),
+            hellos.iter().map(|h| h.zid.to_vec()).collect::<Vec<_>>(),
             vec![vec![0xA1], vec![0xB2], vec![0xC3]],
             "in ARRIVAL order — pico's slist is newest-first, so a consumer \
              that must match its delivery order reverses on the way out"
@@ -942,7 +942,7 @@ mod tests {
             actions
                 .scouted_hellos()
                 .iter()
-                .map(|h| h.zid.clone())
+                .map(|h| h.zid.to_vec())
                 .collect::<Vec<_>>(),
             vec![vec![0xA1], vec![0xB2]],
             "both responders are in the record when the window closes"
