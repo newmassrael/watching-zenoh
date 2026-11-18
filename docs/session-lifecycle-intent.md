@@ -1884,3 +1884,31 @@ the status of a fixed image, which is still the image owner's. The cost of
 binding one verb alone, against all three, is not measured, since no image
 binds any: the next image that does should record its chain and flash for the
 verbs it takes.
+
+## 7. The session's own zid as a type (2026-11-18)
+
+Step 1 was already landed when this note was written: the derivation and the
+check of a peer's key (1a), the guard that keeps the verbs out of a build with
+no secure channel (1b), and the channel on the fixed-memory profile (1b).
+What follows is the session's side of D1, the zid a node presents for itself.
+
+`SessionInitParams::zid` is a `SessionZid` (`wz_session_core::session_zid`):
+one to sixteen bytes held by value, with no allocator, so every profile keeps
+the same type. A length outside that range is refused once, where the
+parameters are made, and the session never meets one: the C ABI's and the
+cooperative engine's openers refuse a configured zid whose wire form is not
+one to sixteen bytes, the demo refuses an operator's `--zid` before it opens a
+session, and a board whose zid does not fit stops before it builds a node.
+The checks further in that this made unreachable are gone: the advanced
+publisher takes its zid from its session (`Session::zid`) and refuses none,
+and the advanced subscriber's identity is `EntityGlobalId::of_session`, which
+cannot fail. A zid derived from a credential (sixteen bytes) is a
+`SessionZid` through `From<[u8; 16]>`.
+
+The D2 guard's message now names the fixed-memory profile's channel
+(`wz-tls-mbedtls`) instead of saying that profile has none.
+
+Not done: the peer's zid a session records (`inbound_peer_zid`,
+`remote_peer_zid`) and the multicast and scouting parameters' zids are still
+bytes, and the C ABI hosts of the advanced subscriber still refuse a zid of
+their engine (`HostError::SessionZid`), which the type could also retire.

@@ -25,8 +25,8 @@ compile_error!(
     "wz-session-core: `session-close-ingress` (the session lifecycle verbs) needs \
      `secure-channel`, a link that proves its peer's key inside a protected channel \
      (decision D2 of docs/session-lifecycle-intent.md). On AP enable \
-     `transport-link-tls` or `transport-link-quic`; the fixed-memory profile has no \
-     such channel yet."
+     `transport-link-tls` or `transport-link-quic`; on the fixed-memory profile the \
+     channel is `wz-tls-mbedtls`, which states `secure-channel` itself."
 );
 
 // `resource-snapshot` spaces the received messages with `interval_meter`, whose counts are 64-bit
