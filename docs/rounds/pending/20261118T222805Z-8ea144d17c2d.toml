@@ -1,0 +1,15 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"]
+decision = '''
+A router now keeps what it declared to a face past the face's last interest, as upstream's broker keeps a face's local subscribers, queryables and tokens after an `Interest(Final)` and retracts each by the id it was declared under. The store dropped a face's record and its id counter with the face's last interest, so a client that kept the row of a subscriber it had been told was never told the subscriber went: its publisher's matching status stayed true for ever. Hosted macOS `C ABI` failed on this four runs in a row, where the undeclare reached the router before the next publisher's interest; on Linux the next interest usually came first and re-used id 1 by chance. A face's entry now goes only when it holds neither an interest nor a declaration, ids are not reused while a face may hold them, a reply declared for an aggregate interest stays one after the interest ends, and a C ABI router node's local face keeps its token bindings past its last subscriber.
+'''
+changes = '''
+`crates/wz-runtime-tokio/src/future_interest.rs`: `remove_interest` keeps a face entry that holds declarations; `forget_at` drops an idle entry; `pushed` holds `Declared { id, value, aggregate }`; `settled_as`; docs cite upstream's broker `unregister_interest` and `maybe_unpropagate_subscriber`; unit tests for the retraction after the interest, ids not reused, the idle drop and the aggregate flag. `router_forward.rs`: one doc.
+`crates/wz-capi-core/src/drive/router_node/local_face.rs`: an unsubscribe no longer clears the router's token bindings; its test now pins that a retraction to a face with no subscriber frees the id.
+`crates/wz-capi-c/tests/it/files/session_roles.rs`: `a_subscriber_that_goes_after_the_publisher_that_asked_is_retracted_from_the_client`, the ordering macOS hit, fixed in sequence.
+'''
+verification = '''
+On pc2: `cargo test -p wz-runtime-tokio --lib` 734 passed and every test target of the crate; `wz-capi-c --test it` 133 passed, the new test and the macOS one 5 of 5; with the store file reverted to before the fix the new test fails at its matching assertion (rc 101), the control; `wz-capi-core --lib --features router-node` 209 passed; `session_roles` 18 passed 3 of 3; clippy of wz-runtime-tokio, wz-capi-c and wz-capi-core (with and without router-node); `cargo fmt --all --check`. Locally: upstream citation anchors, reason review pins, store reason citations, reason citations and the prose name gate pass.
+'''
+carry = '''
+The fix is judged on Linux by the sequenced test; the macOS leg is read on the next hosted Platform run. The older test's step that a publisher sees a subscriber declared before it can still pass on a row an earlier interest left, so it does not witness the second interest's answer on its own.
+'''
