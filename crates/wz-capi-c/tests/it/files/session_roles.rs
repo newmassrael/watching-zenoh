@@ -1709,6 +1709,94 @@ fn a_client_publisher_with_no_listener_polls_the_subscribers_the_router_holds() 
     }
 }
 
+// wz-proves: none -- a wz router and wz clients only; no foreign implementation runs.
+//
+/// A subscriber that goes AFTER the only publisher that asked for it is still retracted from the
+/// publishing client, so a publisher declared later on the key does not match it.
+///
+/// The router declared the subscriber to the client for the first publisher's interest, and the
+/// client keeps that declaration once the publisher ends its interest, as upstream's client
+/// does. The router must keep its record of what it declared to the client past the end of that
+/// interest, as upstream's broker hat does, or the subscriber's withdrawal finds nothing to
+/// retract and the client matches the gone subscriber for ever. The pauses pin the order in
+/// which that shows: the end of the first publisher's interest reaches the router, then the
+/// withdrawal, and only then does the second publisher ask. Asked earlier, its answer would
+/// re-declare the subscriber under the same id and hide the fault.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_subscriber_that_goes_after_the_publisher_that_asked_is_retracted_from_the_client() {
+    let port_router = free_port();
+    // SAFETY: fresh configs and sessions.
+    let (rc, router) = unsafe { open_with(&stated("router", Some(port_router), None)) };
+    assert_eq!(rc, Z_OK, "the router opens");
+    let (rc, publishing) = unsafe { open_with(&stated("client", None, Some(port_router))) };
+    assert_eq!(rc, Z_OK, "the publishing client dials the router");
+    let (rc, subscribing) = unsafe { open_with(&stated("client", None, Some(port_router))) };
+    assert_eq!(rc, Z_OK, "the subscribing client dials the router");
+    // SAFETY: the sessions are live; the context is freed after them.
+    unsafe {
+        let key = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+        let declare = |publisher: &mut z_owned_publisher_t| {
+            assert_eq!(
+                z_declare_publisher(
+                    z_session_loan(&publishing),
+                    publisher,
+                    z_view_keyexpr_loan(&view),
+                    std::ptr::null_mut()
+                ),
+                Z_OK
+            );
+        };
+        let matching = |publisher: &z_owned_publisher_t| {
+            let mut status: z_matching_status_t = std::mem::zeroed();
+            assert_eq!(
+                z_publisher_get_matching_status(z_publisher_loan(publisher), &mut status),
+                Z_OK
+            );
+            status.matching
+        };
+
+        let mut first: z_owned_publisher_t = std::mem::zeroed();
+        declare(&mut first);
+        let (mut subscriber, ctx) = declare_counting_subscriber(&subscribing);
+        assert!(
+            eventually(|| matching(&first)),
+            "the first publisher never saw the subscriber declared after it"
+        );
+        // The first publisher ends its interest, and the router reads the end.
+        assert_eq!(
+            z_undeclare_publisher((&mut first as *mut z_owned_publisher_t).cast()),
+            Z_OK
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        // The subscriber goes while no publisher of the client asks, and its retraction reaches
+        // the client.
+        assert_eq!(
+            z_undeclare_subscriber((&mut subscriber as *mut z_owned_subscriber_t).cast()),
+            Z_OK
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        // A publisher declared now asks a router that holds no subscriber on the key.
+        let mut second: z_owned_publisher_t = std::mem::zeroed();
+        declare(&mut second);
+        assert!(
+            eventually(|| !matching(&second)),
+            "a publisher declared after the subscriber went still matched it: the router never \
+             retracted the subscriber it declared for an interest that had ended"
+        );
+        assert_eq!(
+            z_undeclare_publisher((&mut second as *mut z_owned_publisher_t).cast()),
+            Z_OK
+        );
+        close_session(subscribing);
+        close_session(publishing);
+        close_session(router);
+        drop(Box::from_raw(ctx));
+    }
+}
+
 /// A querier declared on a node asks as the node does: the queryable of a registry peer that dials
 /// the node answers its gets, and the querier answers its key and an id of the node's session.
 #[cfg(feature = "router-node")]
