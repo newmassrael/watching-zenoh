@@ -7780,7 +7780,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 None
             }
         };
-        let aggregate = body.ag();
+        // The aggregate option of an interest that asks for tokens is cleared before anything
+        // reads it, for every kind the interest asks for
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option for tokens (illegal)`).
+        let aggregate = body.ag() && !body.to();
         // FUTURE (`f()`) half: STORE the subscriber interest so a matching sub
         // learned LATER is pushed to this face (the pub-before-sub close). CLIENT
         // faces only — zenoh pushes future subs to `whatami==Client` faces
@@ -7956,6 +7959,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 inbound,
                 interest_id,
                 body,
+                aggregate,
                 interest.f(),
                 target.as_deref(),
             ) > 0
@@ -26524,10 +26528,11 @@ mod tests {
 
     #[cfg(feature = "routing-token-tables")]
     #[test]
-    fn aggregate_token_interest_replies_once_keyed_on_the_interest_ke() {
-        // An AGGREGATE token interest for a wildcard gets ONE reply keyed on the INTEREST
-        // keyexpr (pico matches aggregate replies by keyexpr EQUALITY), not one per
-        // matched token — parity with the aggregate sub dump.
+    fn an_aggregate_token_interest_is_answered_per_token() {
+        // The pin clears the aggregate option of a token interest before any hat reads it
+        // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `Ignoring aggregate interest option for tokens (illegal)`),
+        // so an aggregate token interest for a wildcard is answered with one DeclareToken per
+        // matching token, each on its own key, and not with one reply on the interest's key.
         let fwd = RouterForwarder::new(zid(0x01));
         let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
         let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
@@ -26543,20 +26548,28 @@ mod tests {
         );
         assert_eq!(
             sink_c.frame_count(),
-            2,
-            "ONE aggregate DeclareToken reply + DeclareFinal"
+            3,
+            "one DeclareToken per matching token, then the DeclareFinal"
         );
-        match &forwarded_declare(&sink_c.frame_bytes(0)).body {
-            DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
-                WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
-                    w.suffix.as_ref().map(|s| s.as_text().into_inner()),
-                    Some("demo/**"),
-                    "aggregate reply is keyed on the interest keyexpr, not demo/a|demo/b"
-                ),
-                _ => panic!("reply keyexpr must be literal"),
-            },
-            other => panic!("expected a DeclToken reply, got {other:?}"),
-        }
+        let mut keys: Vec<String> = (0..2)
+            .map(|i| match &forwarded_declare(&sink_c.frame_bytes(i)).body {
+                DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => w
+                        .suffix
+                        .as_ref()
+                        .map(|s| s.as_text().into_inner().to_owned())
+                        .expect("a literal reply key"),
+                    _ => panic!("reply keyexpr must be literal"),
+                },
+                other => panic!("expected a DeclToken reply, got {other:?}"),
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["demo/a", "demo/b"],
+            "each reply is keyed on its token, not on the interest's demo/**"
+        );
     }
 
     #[cfg(feature = "routing-token-tables")]
