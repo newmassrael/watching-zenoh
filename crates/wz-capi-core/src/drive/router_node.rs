@@ -89,6 +89,9 @@ pub struct RouterState {
     /// What the node's own session applies itself above its faces, as the open was told
     /// ([`OpenStance::session_defaults`]).
     session_defaults: crate::session_defaults::SessionDefaults,
+    /// The policies the node runs under, as the open resolved them
+    /// ([`OpenStance::session_policy`]).
+    session_policy: SessionPolicy,
 }
 
 impl RouterState {
@@ -96,6 +99,13 @@ impl RouterState {
     /// publishes through the node reads here, as it does on a [`SessionState`](super::SessionState).
     pub fn session_defaults(&self) -> &crate::session_defaults::SessionDefaults {
         &self.session_defaults
+    }
+
+    /// The policies the node runs under, which an ABI admits what a program states on the node
+    /// by, as it does on a registry by
+    /// [`SharedSession::session_policy`](crate::faces::SharedSession::session_policy).
+    pub fn session_policy(&self) -> &SessionPolicy {
+        &self.session_policy
     }
 
     /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
@@ -565,6 +575,7 @@ pub(crate) fn open_router_blocking(
         gateway_south,
         groups,
         session_defaults,
+        session_policy,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -591,6 +602,7 @@ pub(crate) fn open_router_blocking(
         },
         rx: link_rx,
         accept,
+        policy: session_policy,
     };
     let (_, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
     // Built here and shared, so that the program holding the node can reach the forwarder's
@@ -691,7 +703,7 @@ pub(crate) fn open_router_blocking(
     // connected and told it what it holds (upstream's `start_conditions` counts one connector
     // for each).
     let dials = connect.len();
-    let face_drive = RoutingFaceDrive::default();
+    let face_drive = session_policy.routing_face_drive();
     // Taken on the opener's thread: the node's thread runs the whole node inside it.
     let opener = CallerSpan::current();
     let handle = std::thread::Builder::new()
@@ -811,6 +823,7 @@ pub(crate) fn open_router_blocking(
                 driver: StdMutex::new(Some(handle)),
                 abi_extension: std::sync::OnceLock::new(),
                 session_defaults,
+                session_policy,
             })
         }
         Ok(Err(cause)) => {

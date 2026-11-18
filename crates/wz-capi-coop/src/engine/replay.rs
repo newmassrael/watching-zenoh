@@ -79,18 +79,15 @@ pub(super) struct Replay {
     /// How far the peer has been told. Idle while no link is established: a cursor is never
     /// resumed on another link, whose peer holds nothing.
     cursor: ReplayCursor,
-    /// `None` is one turn for the whole sequence; the build's policy states a pace otherwise.
+    /// `None` is one turn for the whole sequence; the session's policy states a pace otherwise.
     pacing: Option<ReplayPacing>,
     /// Not before this time, in milliseconds on the session's clock, does the next turn send.
     next_turn_ms: u64,
 }
 
 impl Replay {
-    pub(super) fn new() -> Self {
-        Self::with_pacing(ReplayPacing::BUILD)
-    }
-
-    /// A replay that tells at the pace `pacing` states, as the face before it was set to.
+    /// A replay that tells at the pace `pacing` states: the session's policies' for the dial
+    /// role's face, and the pace the face before it was set to for any other.
     pub(super) fn with_pacing(pacing: Option<ReplayPacing>) -> Self {
         Self {
             cursor: ReplayCursor::idle(),
@@ -105,7 +102,7 @@ impl Replay {
     }
 
     /// State how a link's declarations go out, for a caller that wants a pace regardless of the
-    /// build; the build states it by default.
+    /// session's policies, which state it otherwise.
     pub(super) fn set_pacing(&mut self, pacing: Option<ReplayPacing>) {
         self.pacing = pacing;
     }

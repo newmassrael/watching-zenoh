@@ -1939,7 +1939,12 @@ mod tests {
     }
 
     fn shared() -> SharedSession {
-        SharedSession::new(TokioTime::new(), [0x11; 16].into()).expect("test host entropy")
+        SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            wz_session_core::policy::SessionPolicy::defaults(),
+        )
+        .expect("test host entropy")
     }
 
     /// A group endpoint is written as pico writes one. MEASURED first: the real

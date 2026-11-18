@@ -30,6 +30,7 @@ use alloc::sync::Arc;
 use wz_capi_port::SessionEngine;
 #[cfg(any(feature = "advanced", feature = "clock-source"))]
 use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::WhatAmI;
 
 #[cfg(feature = "connectivity")]
@@ -56,11 +57,15 @@ pub(crate) struct PicoSessionExt {
     /// Whether the admin space runs, and what it reports as the transport's link.
     #[cfg(feature = "admin-space")]
     pub(crate) admin_space: crate::admin_space::AdminSpaceSlot,
+    /// The policies the session runs under, as its open resolved them: what a door that takes a
+    /// statement a policy governs admits it by (`wz_ext_get_to_peer`, the one such door today).
+    #[cfg(feature = "query")]
+    pub(crate) policy: SessionPolicy,
 }
 
 impl PicoSessionExt {
-    /// A session of role `mode` and identity `zid`; with the connectivity plane, over the faces
-    /// of `engine`, the engine that runs it.
+    /// A session of role `mode` and identity `zid`, under `policy`, the snapshot its open
+    /// resolved; with the connectivity plane, over the faces of `engine`, the engine that runs it.
     ///
     /// The clock STAMPS whatever the role, which is pico's: its timestamps come
     /// from the session's own clock and zid unconditionally
@@ -77,8 +82,12 @@ impl PicoSessionExt {
     pub(crate) fn new(
         mode: WhatAmI,
         zid: &[u8],
+        policy: SessionPolicy,
         #[cfg(feature = "connectivity")] engine: &Arc<dyn SessionEngine>,
     ) -> Self {
+        // Only a door a policy governs reads the snapshot, and a build without `query` has none.
+        #[cfg(not(feature = "query"))]
+        let _ = policy;
         #[cfg(feature = "connectivity")]
         let connectivity = Connectivity::new();
         #[cfg(feature = "connectivity")]
@@ -109,6 +118,8 @@ impl PicoSessionExt {
             watch: (Arc::clone(engine), watch_id),
             #[cfg(feature = "admin-space")]
             admin_space: crate::admin_space::AdminSpaceSlot::new(None),
+            #[cfg(feature = "query")]
+            policy,
         }
     }
 

@@ -897,6 +897,17 @@ pub struct OpenPlan {
     /// What the session applies itself above its links ([`session_defaults_of`]), which the open
     /// carries into the session for every ABI that publishes through it to read.
     pub session: SessionDefaults,
+    /// The snapshot of the policies the open resolved ([`resolve_policy`]), handed to every
+    /// machine the open makes: the sessions of the registry or the node, their links and their
+    /// faces. A machine reads a policy here and never from the build.
+    pub session_policy: SessionPolicy,
+}
+
+/// The policies an open from `node` (the document the open read, or `None` when it read none)
+/// runs under: the one place the open of an [`OpenPlan`] decides them. The build defaults, until
+/// the document's own keys for a policy are read here.
+pub fn resolve_policy(_node: Option<&ZenohNodeConfig>) -> SessionPolicy {
+    SessionPolicy::defaults()
 }
 
 impl OpenPlan {
@@ -1019,10 +1030,24 @@ impl OpenPlan {
     /// `document` is the document as nested json5 with the role's `mode` stated, or `None` when
     /// the caller could not render one; a document the reader refuses is the same as none, and is
     /// reported as [`OpenRefusal::DocumentUnreadable`] after every refusal that needs no document.
+    ///
+    /// The policies the plan runs under are [`resolve_policy`]'s; a caller that has resolved its
+    /// own snapshot opens with [`Self::resolve_under`].
     pub fn resolve(
         role: WhatAmI,
         stated: StatedEndpoints,
         document: Option<&str>,
+    ) -> Result<Self, OpenRefusal> {
+        Self::resolve_under(role, stated, document, resolve_policy)
+    }
+
+    /// [`Self::resolve`], with the policies the plan runs under made by `policy_of` from the
+    /// document the reader parsed (`None` when it parsed none).
+    pub fn resolve_under(
+        role: WhatAmI,
+        stated: StatedEndpoints,
+        document: Option<&str>,
+        policy_of: impl FnOnce(Option<&ZenohNodeConfig>) -> SessionPolicy,
     ) -> Result<Self, OpenRefusal> {
         let ingest = match document.map(ZenohNodeConfig::from_json5) {
             Some(Ok(ingest)) => Some(ingest),
@@ -1052,15 +1077,16 @@ impl OpenPlan {
             ignored
         });
         let node = ingest.map(|ingest| ingest.config);
+        let session_policy = policy_of(node.as_ref());
         // The width of the sequence numbers the sessions offer, unicast and in a group's Join:
         // `transport/link/tx/sequence_number_resolution` when the document states a width other
-        // than upstream's, the build's `sn-resolution` policy otherwise. A document rendered from
+        // than upstream's, the open's `sn-resolution` policy otherwise. A document rendered from
         // a whole configuration states every key at its default, so upstream's own width there is
-        // no instruction, and the build's policy stands.
+        // no instruction, and the policy stands.
         let upstream_width = ZenohNodeConfig::default().sn_resolution;
         let sn_resolution = match node.as_ref().map(|node| node.sn_resolution) {
             Some(stated) if stated != upstream_width => stated,
-            _ => SessionPolicy::from_build().sn_resolution(),
+            _ => session_policy.sn_resolution(),
         };
         let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
         // How the node keeps its south apart (`gateway/south`): the preset unless the document
@@ -1341,6 +1367,7 @@ impl OpenPlan {
             read_files,
             ignored,
             session,
+            session_policy,
         })
     }
 
@@ -1461,6 +1488,7 @@ impl OpenPlan {
                 gateway_south: self.gateway_south,
                 groups,
                 session_defaults: self.session,
+                session_policy: self.session_policy,
             },
         }
     }
@@ -1478,8 +1506,9 @@ const fn held(present: bool) -> &'static str {
 /// The decisions that belong to the calling ABI and not to the document. They join the plan at
 /// [`OpenPlan::into_arguments`], so the plan is one value for every ABI.
 pub struct AbiChoices {
-    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::default`]) or pico's caller-thread
-    /// write ([`TxQueueConf::pico`]).
+    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::of_policy`]) or pico's
+    /// caller-thread write ([`TxQueueConf::pico_of_policy`]), each under the plan's
+    /// [`OpenPlan::session_policy`].
     pub tx_queue: TxQueueConf,
     /// Whether the session's read task runs from the start.
     pub start_read_task: bool,
@@ -1972,7 +2001,7 @@ mod tests {
             .expect("a client with an endpoint opens")
         };
         let abi = |offer_shm| AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2002,7 +2031,7 @@ mod tests {
             plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
                 .expect("a client with an endpoint opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::default(),
+                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -2061,18 +2090,19 @@ mod tests {
                 .tx_queue
         };
         let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
-        assert!(!stance(off, TxQueueConf::default()).batching);
-        assert!(!stance(off, TxQueueConf::pico()).batching);
+        assert!(!stance(off, TxQueueConf::of_policy(&SessionPolicy::defaults())).batching);
+        assert!(!stance(off, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())).batching);
         let bound =
             r#"{ transport: { link: { tx: { queue: { batching: { time_limit: 4 } } } } } }"#;
         assert_eq!(
-            stance(bound, TxQueueConf::default()).batching_time_limit_us,
+            stance(bound, TxQueueConf::of_policy(&SessionPolicy::defaults()))
+                .batching_time_limit_us,
             4_000
         );
         let init =
             r#"{ transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#;
         assert_eq!(
-            stance(init, TxQueueConf::default()).allocation,
+            stance(init, TxQueueConf::of_policy(&SessionPolicy::defaults())).allocation,
             wz_session_core::link::QueueAllocation::Init
         );
         // Upstream's own value is no instruction, and silence is none either: the model keeps
@@ -2080,8 +2110,14 @@ mod tests {
         let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true,
                                                                       time_limit: 1 },
                                                           allocation: { mode: "lazy" } } } } } }"#;
-        assert_eq!(stance(on, TxQueueConf::pico()), TxQueueConf::pico());
-        assert_eq!(stance("{}", TxQueueConf::default()), TxQueueConf::default());
+        assert_eq!(
+            stance(on, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())),
+            TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+        );
+        assert_eq!(
+            stance("{}", TxQueueConf::of_policy(&SessionPolicy::defaults())),
+            TxQueueConf::of_policy(&SessionPolicy::defaults())
+        );
     }
 
     /// The width of the sequence numbers a group's Join states is the `sn-resolution` policy's,
@@ -2134,6 +2170,56 @@ mod tests {
             ),
             OpenRefusal::DocumentUnreadable
         );
+    }
+
+    /// A plan runs under the snapshot it is handed and not under the build's: a document that
+    /// states no width offers the handed snapshot's `sn-resolution`, and the stance the plan
+    /// becomes carries that snapshot to the machines the open makes.
+    #[test]
+    fn a_plan_runs_under_the_snapshot_it_is_handed() {
+        let build = SessionPolicy::defaults();
+        let other = if build.sn_resolution() == SnResolution::Bits16 {
+            SnResolution::Bits8
+        } else {
+            SnResolution::Bits16
+        };
+        let mut handed = SessionPolicy::defaults();
+        if handed.select_sn_resolution(other).is_err() {
+            // The build allows one width: there is no other to hand.
+            return;
+        }
+        let plan = OpenPlan::resolve_under(
+            WhatAmI::Client,
+            StatedEndpoints {
+                connect: vec!["tcp/127.0.0.1:7447".to_owned()],
+                listen: Vec::new(),
+            },
+            Some("{}"),
+            |_| handed,
+        )
+        .expect("a client with an endpoint opens");
+        assert_eq!(plan.sn_resolution, other);
+        assert_eq!(plan.session_policy, handed);
+        let stance = plan
+            .into_arguments(AbiChoices {
+                tx_queue: TxQueueConf::of_policy(&handed),
+                start_read_task: true,
+                local_delivery: LocalDeliveryDrain::Caller,
+                liveliness_to_self: true,
+                initial_interest: true,
+                face_drive: FaceDrive::PerFace,
+                shm_clients: crate::faces::no_shm_clients(),
+                offer_shm: false,
+                groups_report_shm: false,
+            })
+            .stance;
+        assert_eq!(stance.sn_resolution, other);
+        assert_eq!(stance.session_policy, handed);
+        // Control: the open that resolves its own snapshot offers the build's width.
+        let own = plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], "{}")
+            .expect("a client with an endpoint opens");
+        assert_eq!(own.sn_resolution, build.sn_resolution());
+        assert_eq!(own.session_policy, build);
     }
 
     /// The role is read from the `mode` key, and the default is the build's.
@@ -2259,7 +2345,7 @@ mod tests {
             "the plan says what the document says: the key defaults on"
         );
         let abi = |groups_report_shm| AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2705,7 +2791,7 @@ mod tests {
 
         let expected = plan.session.clone();
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2833,7 +2919,7 @@ mod tests {
                 .expect("key expressions");
         assert_eq!(plan.session.aggregation, expected);
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::default(),
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2868,7 +2954,7 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::default(),
+                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,

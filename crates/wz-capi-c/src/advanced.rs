@@ -2158,6 +2158,7 @@ mod tests {
             SharedSession::new(
                 wz_runtime_tokio::runtime_impl::TokioTime::new(),
                 [0x11; 16].into(),
+                wz_session_core::policy::SessionPolicy::defaults(),
             )
             .expect("test host entropy"),
         );

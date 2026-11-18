@@ -1959,6 +1959,7 @@ mod tests {
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
                 [0x11; 16].into(),
+                wz_session_core::policy::SessionPolicy::defaults(),
             )
             .expect("test host entropy"),
         );
@@ -2045,6 +2046,7 @@ mod tests {
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
                 [0x11; 16].into(),
+                wz_session_core::policy::SessionPolicy::defaults(),
             )
             .expect("test host entropy"),
         );

@@ -450,7 +450,8 @@ pub trait SessionEngine: Send + Sync + 'static {
     // engine decides: the provided answers are those of an engine that does not number its links,
     // which refuses a set by name ([`LinksNotHonoured`]) and makes the call of its no-set twin for
     // no set. An engine that honours a set overrides them. The policy itself is the entry point's
-    // to apply (`LinkRestriction::admit_in_build`) before a set reaches an engine.
+    // to apply, by the session's snapshot (`LinkRestriction::admit_by`), before a set reaches an
+    // engine.
 
     /// [`Self::declare_subscriber_on_wire`] limited to the links of `links`: declared to the nodes
     /// behind those links only. `Err` when the engine cannot honour a set it was given, and

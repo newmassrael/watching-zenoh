@@ -73,7 +73,7 @@ use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::policy::SnResolution;
+use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
@@ -212,6 +212,12 @@ pub const DEFAULT_ACCEPT_PENDING: usize = 100;
 /// Faces the session holds besides the dial role's, when the config states none: zenoh's
 /// `transport/unicast/max_sessions`.
 pub const DEFAULT_MAX_FACES: usize = 1000;
+
+/// The policies a session [`CoopEngine::open`] opens from `config` runs under: the one place that
+/// open decides them. The build defaults, until the config carries a value for a policy.
+fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
+    SessionPolicy::defaults()
+}
 
 /// Why no session was opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +448,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// Each handshake's cookie key and nonce come from here.
     entropy: SharedEntropy,
     config: CoopConfig,
+    /// The policies the session runs under, as its open was handed them: every link's session
+    /// is given them, and the replay and the admission of a second link follow them.
+    policy: SessionPolicy,
     /// The zid in its wire form, which every handshake of the session announces.
     wire_zid: SessionZid,
     /// The session's say on a link to a node it holds a link to, asked while the link's handshake
@@ -835,7 +844,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie: Vec::new(),
             tx_queue: self.config.tx_queue,
             link_rx: self.config.link_rx,
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy: self.policy,
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
@@ -1473,11 +1482,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// handshake, stepping it on this thread until it does. `entropy` mints the zid the config
     /// does not state and each attempt's cookie key, for this open and every redial after it.
     /// An open that no endpoint answers fails: the session redials only a link it had.
+    ///
+    /// The session runs under the snapshot this open resolves from `config` (`resolve_policy`);
+    /// an ABI that has resolved its own opens with [`Self::open_with_policy`].
     pub fn open(
         links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
         config: CoopConfig,
+    ) -> Result<Arc<Self>, OpenError> {
+        let policy = resolve_policy(&config);
+        Self::open_with_policy(links, clock, entropy, config, policy)
+    }
+
+    /// [`Self::open`], the session running under `policy`, the snapshot its creator resolved:
+    /// every link's session is handed it, a link's declarations are replayed at the pace it
+    /// states, and two links to one node are told apart by its `link-tie-order`.
+    pub fn open_with_policy(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        config: CoopConfig,
+        policy: SessionPolicy,
     ) -> Result<Arc<Self>, OpenError> {
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match &config.zid {
@@ -1494,7 +1520,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             faces: vec![Face {
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },
-                replay: Replay::new(),
+                replay: Replay::with_pacing(ReplayPacing::of_policy(&policy)),
             }],
             next_face: 1,
             #[cfg(feature = "connectivity")]
@@ -1504,8 +1530,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             listeners: Vec::new(),
             entropy,
             config,
+            policy,
             #[cfg(feature = "listen")]
-            admission: Arc::new(LinkRegistry::<CoopRuntime<C>>::new(&wire)),
+            admission: Arc::new(LinkRegistry::<CoopRuntime<C>>::with_order(
+                &wire,
+                policy.link_tie_order(),
+            )),
             wire_zid: wire,
             subscribers: Vec::new(),
             keyexprs: Vec::new(),
@@ -1631,15 +1661,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// State how the declarations of a link go out, for a caller that wants a pace regardless of
-    /// the build (a test, or a program whose image is built for another policy); the build states
-    /// it by default (`ReplayPacing::from_build`). `Some` sends a burst of declarations a step and
-    /// waits at least the interval before the next burst; `None` sends them all in one.
+    /// the session's policies (a test, or a program whose image is built for another policy); the
+    /// snapshot the session opened under states it otherwise (`ReplayPacing::of_policy`). `Some`
+    /// sends a burst of declarations a step and waits at least the interval before the next burst;
+    /// `None` sends them all in one.
     pub fn set_replay_pacing(&self, pacing: Option<ReplayPacing>) {
         if let Some(mut core) = self.live() {
             for face in &mut core.0.faces {
                 face.replay.set_pacing(pacing);
             }
         }
+    }
+
+    /// How the dial role's face replays its declarations now, and the snapshot the session opened
+    /// under: what a test reads to tell the session's policies from the build's.
+    #[cfg(test)]
+    pub(crate) fn policy_in_force(&self) -> Option<(Option<ReplayPacing>, SessionPolicy)> {
+        self.live()
+            .map(|core| (core.0.dial().replay.pacing(), core.0.policy))
     }
 
     /// Whether the peer of every established link has been told every declaration the session

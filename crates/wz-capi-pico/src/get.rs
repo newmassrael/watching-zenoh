@@ -1377,12 +1377,13 @@ pub(crate) fn issue_get(
         value_meta,
     );
 
-    // A target reaches here only from `wz_ext_get_to_peer` with the `targeted-query` policy on,
-    // and the policy is a value of the build. Read as a `const` item, it is decided when the
-    // crate is compiled, so a build with the policy off has no addressed path below: off costs
-    // nothing. (A plain call of the `const fn` is not folded; measured +1,824 bytes of
-    // `issue_get` that way in the default pico build.)
-    const TARGETED: bool = wz_session_core::policy::SessionPolicy::from_build().targeted_query();
+    // A target reaches here only from `wz_ext_get_to_peer`, which admitted it by the session's
+    // snapshot, so only a build whose domain allows the `targeted-query` policy on can be handed
+    // one. Read as a `const` item, the domain is decided when the crate is compiled, so a build
+    // that allows only off has no addressed path below: off costs nothing. (A plain call of a
+    // `const fn` is not folded; measured +1,824 bytes of `issue_get` that way in the default pico
+    // build.)
+    const TARGETED: bool = crate::get_to_peer::TARGETED_IN_DOMAIN;
     let target_peer = if TARGETED { target_peer } else { None };
     let Some(target_peer) = target_peer else {
         return fan_get(closure, gate, token, |fan, leg| {

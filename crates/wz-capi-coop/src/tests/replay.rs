@@ -187,6 +187,46 @@ fn a_replay_cut_short_by_a_lost_link_begins_again_on_the_next() {
     assert_eq!(told(&next), 3, "the new peer was told all three, once");
 }
 
+/// A session opened under a snapshot holds that snapshot and replays at the pace it states, not
+/// at the build's; the open that resolves its own snapshot holds the build's.
+#[test]
+fn a_session_replays_at_the_pace_of_the_snapshot_it_is_handed() {
+    use wz_session_core::policy::{DeclarationSyncPacing, SessionPolicy};
+    let build = SessionPolicy::defaults();
+    let other = if build.declaration_sync_pacing() {
+        DeclarationSyncPacing::Off
+    } else {
+        DeclarationSyncPacing::On
+    };
+    let mut handed = SessionPolicy::defaults();
+    if handed.select_declaration_sync_pacing(other).is_err() {
+        // The build allows one value: there is no other snapshot to hand.
+        return;
+    }
+    let router = Router::start(CatchAll::None);
+    let engine = Engine::open_with_policy(
+        super::PosixLinks::new(super::LOOPBACK, super::PosixTcpDial).waited_by_owner(),
+        super::PosixClock,
+        super::PosixEntropy,
+        config(&router),
+        handed,
+    )
+    .expect("the session opens");
+    let (pacing, held) = engine.policy_in_force().expect("the session is open");
+    assert_eq!(held, handed);
+    assert_eq!(pacing, ReplayPacing::of_policy(&handed));
+    assert_ne!(pacing, ReplayPacing::of_policy(&build));
+    SessionDrive::close(&*engine);
+
+    // Control: the open that resolves its own snapshot holds the build's and its pace.
+    let second = Router::start(CatchAll::None);
+    let own = open_with(config(&second));
+    let (pacing, held) = own.policy_in_force().expect("the session is open");
+    assert_eq!(held, build);
+    assert_eq!(pacing, ReplayPacing::of_policy(&build));
+    SessionDrive::close(&*own);
+}
+
 /// Without a pace the replay is one turn: everything the session holds goes out when the link
 /// comes up, and the session is synced at once.
 #[test]

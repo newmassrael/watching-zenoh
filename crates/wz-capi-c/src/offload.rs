@@ -22,8 +22,9 @@
 //! room in a drain step that a session's drive loop awaits, and this ABI's subscription is fed by
 //! several sessions and by puts on the caller's thread, so there is no one loop whose wait it
 //! would be. A declaration that states nothing (NULL, or the `_default` statement) takes `reject`,
-//! the answer every build of this door can give. `WZ_CAPI_C_OVERLOAD_BUILD` asks for the build's
-//! `subscriber-overload` policy by name, and is refused in a build whose policy is `block`.
+//! the answer every build of this door can give. `WZ_CAPI_C_OVERLOAD_BUILD` asks for the
+//! `subscriber-overload` policy of the session's snapshot by name, and is refused on a session
+//! whose policy is `block`.
 //!
 //! What the lane holds, refused and took out is read with
 //! [`wz_capi_c_subscriber_offload_stats`]. Undeclaring the subscriber stops the lane: a sample
@@ -35,11 +36,13 @@ use crate::abi::{
 };
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::session::session_handle;
 use crate::sub::{declare_subscriber_delivered, offload_of, z_subscriber_options_t, Delivery};
 use wz_session_core::link_restriction::LinkRestriction;
-use wz_session_core::policy::SubscriberOverload;
+use wz_session_core::policy::{SessionPolicy, SubscriberOverload};
 
-/// The build's `subscriber-overload` policy, asked for by name: refused where that is `block`.
+/// The `subscriber-overload` policy of the session, asked for by name: refused where that is
+/// `block`.
 pub const WZ_CAPI_C_OVERLOAD_BUILD: u8 = 0;
 /// `block`: refused by this door (see the module note).
 pub const WZ_CAPI_C_OVERLOAD_BLOCK: u8 = 1;
@@ -85,15 +88,27 @@ pub struct wz_capi_c_offload_stats_t {
     pub overload: u8,
 }
 
-/// The answer a C value states, or `None` for a value that names none.
-fn overload_of(value: u8) -> Option<SubscriberOverload> {
+/// The answer a C value states under `policy`, the snapshot of the session the subscriber is
+/// declared on, or `None` for a value that names none.
+fn overload_of(value: u8, policy: &SessionPolicy) -> Option<SubscriberOverload> {
     match value {
-        WZ_CAPI_C_OVERLOAD_BUILD => Some(SubscriberOverload::default()),
+        WZ_CAPI_C_OVERLOAD_BUILD => Some(policy.subscriber_overload()),
         WZ_CAPI_C_OVERLOAD_BLOCK => Some(SubscriberOverload::Block),
         WZ_CAPI_C_OVERLOAD_REJECT => Some(SubscriberOverload::Reject),
         WZ_CAPI_C_OVERLOAD_KEEP_LATEST => Some(SubscriberOverload::KeepLatest),
         _ => None,
     }
+}
+
+/// Whether a C value names an answer, whichever session it is asked of.
+fn names_an_answer(value: u8) -> bool {
+    matches!(
+        value,
+        WZ_CAPI_C_OVERLOAD_BUILD
+            | WZ_CAPI_C_OVERLOAD_BLOCK
+            | WZ_CAPI_C_OVERLOAD_REJECT
+            | WZ_CAPI_C_OVERLOAD_KEEP_LATEST
+    )
 }
 
 /// The C value of an answer.
@@ -132,7 +147,7 @@ pub unsafe extern "C" fn wz_capi_c_offload_options_default(
 
 /// `z_declare_subscriber` whose callback runs off the receive path, behind a lane of its own, with
 /// the answer `offload` states to a full lane (NULL for the default statement, `reject`). A value
-/// that names no answer is `Z_EINVAL`; `block`, stated or asked of a build whose policy it is
+/// that names no answer is `Z_EINVAL`; `block`, stated or asked of a session whose policy it is
 /// (`WZ_CAPI_C_OVERLOAD_BUILD`), is `Z_EUNAVAILABLE`. A refused declaration leaves `subscriber` in
 /// its gravestone state and has consumed `callback`, as `z_declare_subscriber` does on every path.
 ///
@@ -152,9 +167,15 @@ pub unsafe extern "C" fn wz_capi_c_declare_subscriber_offloaded(
         .copied()
         .unwrap_or(STATED_NOTHING)
         .overload;
-    let (links, delivery) = match overload_of(stated) {
-        Some(overload) => (Ok(LinkRestriction::Any), Delivery::Offloaded(overload)),
-        // Refused through the declaration's own refusal path, which consumes the closure.
+    // Refusals go through the declaration's own refusal path, which consumes the closure. A value
+    // that names no answer is refused whatever the session; the session's own policy is read off
+    // its snapshot, and a session that is not there is the declaration's `Z_ENULL`.
+    // SAFETY: the caller's contract for `session`.
+    let held = unsafe { session_handle(session) };
+    let (links, delivery) = match held.map(|held| overload_of(stated, held.session_policy())) {
+        Some(Some(overload)) => (Ok(LinkRestriction::Any), Delivery::Offloaded(overload)),
+        Some(None) => (Err(Z_EINVAL), Delivery::Inline),
+        None if names_an_answer(stated) => (Err(Z_ENULL), Delivery::Inline),
         None => (Err(Z_EINVAL), Delivery::Inline),
     };
     // SAFETY: the caller's contract, delegated.
@@ -216,9 +237,10 @@ mod tests {
     /// Every C value maps to the answer it names, and back; a value past the last names none.
     #[test]
     fn each_overload_value_names_its_answer() {
+        let defaults = SessionPolicy::defaults();
         assert_eq!(
-            overload_of(WZ_CAPI_C_OVERLOAD_BUILD),
-            Some(SubscriberOverload::default())
+            overload_of(WZ_CAPI_C_OVERLOAD_BUILD, &defaults),
+            Some(defaults.subscriber_overload())
         );
         for (value, answer) in [
             (WZ_CAPI_C_OVERLOAD_BLOCK, SubscriberOverload::Block),
@@ -228,10 +250,49 @@ mod tests {
                 SubscriberOverload::KeepLatest,
             ),
         ] {
-            assert_eq!(overload_of(value), Some(answer));
+            assert_eq!(overload_of(value, &defaults), Some(answer));
             assert_eq!(overload_value(answer), value);
+            assert!(names_an_answer(value));
         }
-        assert_eq!(overload_of(WZ_CAPI_C_OVERLOAD_KEEP_LATEST + 1), None);
+        assert!(names_an_answer(WZ_CAPI_C_OVERLOAD_BUILD));
+        assert_eq!(
+            overload_of(WZ_CAPI_C_OVERLOAD_KEEP_LATEST + 1, &defaults),
+            None
+        );
+        assert!(!names_an_answer(WZ_CAPI_C_OVERLOAD_KEEP_LATEST + 1));
+    }
+
+    /// The session's policy, asked for by name, is the policy of the snapshot the session holds
+    /// and not the build's: each value the build's domain allows is answered as that value.
+    #[test]
+    fn the_policy_asked_for_by_name_is_the_snapshots() {
+        for answer in [
+            SubscriberOverload::Block,
+            SubscriberOverload::Reject,
+            SubscriberOverload::KeepLatest,
+        ] {
+            let mut handed = SessionPolicy::defaults();
+            if handed.select_subscriber_overload(answer).is_err() {
+                // The build's domain leaves the value out: no snapshot can hold it.
+                continue;
+            }
+            assert_eq!(
+                overload_of(WZ_CAPI_C_OVERLOAD_BUILD, &handed),
+                Some(handed.subscriber_overload()),
+                "{}",
+                answer.id()
+            );
+            if !<SubscriberOverload as wz_session_core::policy_binding::PolicyValue>::DOMAIN
+                .is_singleton()
+            {
+                assert_eq!(
+                    overload_of(WZ_CAPI_C_OVERLOAD_BUILD, &handed),
+                    Some(answer),
+                    "{}",
+                    answer.id()
+                );
+            }
+        }
     }
 
     /// The default statement is `reject`, which every build takes, and NULL is no write.
@@ -245,7 +306,7 @@ mod tests {
         }
         assert_eq!(options.overload, WZ_CAPI_C_OVERLOAD_REJECT);
         assert_eq!(
-            overload_of(options.overload),
+            overload_of(options.overload, &SessionPolicy::defaults()),
             Some(SubscriberOverload::Reject)
         );
     }
