@@ -8,11 +8,11 @@
 //! # What this is
 //!
 //! The dissect library joins the pieces a deployment splits its large messages
-//! into, by a profile the caller declares (`wz_capture::segment_profile`). A
+//! into, by a profile the caller declares (`wz_app_frame::segment_profile`). A
 //! participant that SENDS such a message to that deployment must write the same
 //! header, and this module is the writer: an owned sender made from the same
 //! profile text, which writes each piece by the reader's own field layout and CRC
-//! rule (`wz_capture::segment_sender`). The two cannot disagree about a header.
+//! rule (`wz_app_frame::segment_sender`). The two cannot disagree about a header.
 //!
 //! # Two doors for the pieces
 //!
@@ -48,7 +48,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use wz_capture::segment_sender::{Rollover, SegmentSender, Split, SplitError};
+use wz_app_frame::segment_sender::{Rollover, SegmentSender, Split, SplitError};
 
 use crate::abi::{
     z_loaned_publisher_t, z_moved_bytes_t, z_owned_bytes_t, z_owned_string_t, Handle,

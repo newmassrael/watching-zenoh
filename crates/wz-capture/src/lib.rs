@@ -158,8 +158,9 @@ pub mod fields_json;
 // A message an application split over several samples on one key: the header
 // a deployment declares for its pieces, the state that joins them, and the
 // writer of the pieces. Each is documented by its own `//!` text, as the
-// end-to-end modules above are. The header's profile is the `wz-app-frame`
-// crate's, re-exported here for the reason given above.
+// end-to-end modules above are. The header's profile and the writer of the
+// pieces are the `wz-app-frame` crate's, re-exported here for the reason given
+// above.
 pub mod segment_chain;
 #[cfg(test)]
 mod segment_chain_tests;
@@ -171,7 +172,7 @@ mod segment_row_tests;
 // Pieces carried in query replies, beside the live ones, through every door.
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod reply_segment_tests;
-pub mod segment_sender;
+pub use wz_app_frame::segment_sender;
 #[cfg(test)]
 mod segment_sender_tests;
 // Open-debt item 924, step 5 -- the field walk's per-row digests, kept as one

@@ -33,10 +33,12 @@
 //! | `e2e_profile` | the profile of an end-to-end protection header, read from a JSON document | `alloc` |
 //! | `e2e_frame` | building and opening a protected frame under a profile | `alloc` |
 //! | `segment_profile` | the profile of the header in front of each piece of a split message | `alloc` |
+//! | `segment_sender` | the writer of those pieces: one message cut under a segment profile | `alloc` |
 //!
 //! `no_std`, with no third-party dependency. The CRC engine and the judge need
 //! no allocator, so a build without `alloc` links none; the three profile
-//! modules read a JSON document and keep its fields on the heap.
+//! modules read a JSON document and keep its fields on the heap, and the piece
+//! writer builds each piece in a `Vec`.
 
 // The allocator is linked by the profile modules (`alloc`) and by the unit
 // tests, and by nothing else: a build without `alloc` that names a `Vec` is
@@ -53,3 +55,5 @@ pub mod e2e_frame;
 pub mod e2e_profile;
 #[cfg(feature = "alloc")]
 pub mod segment_profile;
+#[cfg(feature = "alloc")]
+pub mod segment_sender;

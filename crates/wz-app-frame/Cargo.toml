@@ -4,7 +4,7 @@
 # wz-app-frame — the APPLICATION FRAME: the header an application writes in front of its payload,
 # or in front of each piece of a message it splits over several samples, described as data by a
 # profile. The CRC engine, the receiver's judgment of a stream of frames, the frame profile, the
-# frames built and opened under it, and the segment profile.
+# frames built and opened under it, the segment profile, and the writer of the pieces it describes.
 #
 # Its own crate so a session runtime and the C ABIs can build and judge such frames without
 # linking the capture crate, which keeps the analysis planes above these modules and re-exports
@@ -31,9 +31,9 @@ path = "src/lib.rs"
 [features]
 default = ["alloc"]
 
-# The profile, frame and segment-profile modules. Each reads a profile from the workspace's JSON
-# reader (`wz_session_core::json5`, behind the core's own `alloc`) and holds its fields in a
-# `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link no allocator.
+# The profile, frame, segment-profile and segment-sender modules. Each reads a profile from the
+# workspace's JSON reader (`wz_session_core::json5`, behind the core's own `alloc`) and holds its
+# fields in a `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link no allocator.
 alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 
 # `segment_profile::synthetic`: a synthetic segment profile and a builder of its pieces, for the

@@ -3903,6 +3903,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wz-abi-stamp",
+ "wz-app-frame",
  "wz-auth",
  "wz-capi-core",
  "wz-capi-port",

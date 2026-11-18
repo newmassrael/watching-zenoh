@@ -289,7 +289,8 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 ] }
 
 # The application frame: the CRC engine, the judge, the frame profile and the
-# frames, and the segment profile, re-exported at `crate::e2e_crc` and the rest.
+# frames, the segment profile and its piece writer, re-exported at
+# `crate::e2e_crc` and the rest.
 # Its own crate so a node builds and judges frames without linking this one. At
 # its defaults (`alloc`), which this crate's documents and planes all read.
 wz-app-frame = { path = "../wz-app-frame" }

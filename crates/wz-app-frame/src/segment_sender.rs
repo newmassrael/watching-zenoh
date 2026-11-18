@@ -4,8 +4,8 @@
 //! The SENDING side of a segment profile: one message of the application's
 //! own cut into pieces whose header the profile declares.
 //!
-//! [`crate::segment_profile`] reads a piece and [`crate::segment_chain`] joins
-//! the pieces of one transfer. A participant that speaks to a deployment which
+//! [`crate::segment_profile`] reads a piece and the capture crate's
+//! `segment_chain` joins the pieces of one transfer. A participant that speaks to a deployment which
 //! splits its large messages that way must also WRITE them, and a writer kept
 //! apart from the reader would be a second statement of the same header. This
 //! module takes the profile the reader takes, as the same text, and writes
@@ -35,7 +35,7 @@
 //!
 //! # The transfer number
 //!
-//! The rule is the end-to-end counter's ([`crate::e2e_sender`]):
+//! The rule is the end-to-end counter's (the capture crate's `e2e_sender`):
 //!
 //! * The first message carries the value the sender is made with, and each
 //!   message after it the next value. [`SegmentSender::set`] changes it.

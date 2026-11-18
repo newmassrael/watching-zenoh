@@ -429,8 +429,7 @@ impl SegmentProfile {
 
     /// The CRC `spec` computes over `header` and `chunk`, fed in the order its
     /// `cover` lists. The one place that order is applied: a reader checks a
-    /// piece with it and the capture crate's `segment_sender` writes a piece's
-    /// CRC with it.
+    /// piece with it and [`crate::segment_sender`] writes a piece's CRC with it.
     pub fn crc_over(&self, spec: &CrcSpec, header: &[u8], chunk: &[u8]) -> u64 {
         let mut digest = spec.engine.start();
         for cover in &spec.cover {

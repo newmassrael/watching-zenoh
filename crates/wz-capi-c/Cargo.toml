@@ -182,9 +182,10 @@ identity-make = ["transport_tls", "wz-capi-core/identity-make"]
 lifecycle-doors = ["wz-capi-core/lifecycle-doors"]
 # `wz_capi_c_segment_sender_*` (`src/segment_sender.rs`): one message of the application's own cut
 # into the pieces a declared segment profile describes, put on a publisher or handed to a callback.
-# OFF by default: zenoh-c has no such doors, and they link the piece writer of `wz-capture`; a
-# participant that sends to a deployment which splits its large messages turns it on.
-segment-sender = ["dep:wz-capture", "wz-capi-core/segment-sender"]
+# OFF by default: zenoh-c has no such doors, and they link the piece writer of `wz-app-frame`; a
+# participant that sends to a deployment which splits its large messages turns it on. The writer
+# is the application frame's, not the capture crate's, so the feature links no analysis plane.
+segment-sender = ["dep:wz-app-frame", "wz-capi-core/segment-sender"]
 # `wz_capi_c_declare_subscriber_offloaded` and `wz_capi_c_subscriber_offload_stats`
 # (`src/offload.rs`): a subscriber whose callback runs on the application runtime behind a bounded
 # delivery lane that every face feeds. OFF by default: zenoh-c has no such door, and a callback
@@ -443,8 +444,16 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
 # Optional, behind `e2e-sender`: a client that only queries never sends an end-to-end protected
 # message, and this crate was 212 KB of the 1.9 MB of symbols of its minimal library.
 wz-capture = { path = "../wz-capture", default-features = false, features = ["reassembly"], optional = true }
+# The piece writer behind `segment_sender`, the sending side of a declared segment profile. At its
+# defaults (`alloc`), which the writer is behind. Optional, behind `segment-sender`.
+wz-app-frame = { path = "../wz-app-frame", optional = true }
 
 [dev-dependencies]
+# The joiner the segment sender's integration test reads its pieces back with
+# (`segment_chain`), an oracle that is the analysis plane's and never the
+# library's: the library's `segment-sender` links `wz-app-frame` alone. Named as
+# the optional dependency above is, for the reason given there.
+wz-capture = { path = "../wz-capture", default-features = false, features = ["reassembly"] }
 # R311y867 — for `free_port()`, which three test files here used to carry a
 # private copy of. The copies were a bind-read-DROP probe whose port was handed
 # to `z_open` afterwards, and the gap between the two is what took Layer C1cc
