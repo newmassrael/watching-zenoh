@@ -1286,6 +1286,83 @@ def validate_switches(data: dict) -> list[str]:
     return out
 
 
+# Where a policy or a limit is bound (deploy/wz-config.toml, "Where a value is bound"). The scopes
+# are listed widest first, and a limit held at several scopes lists them in this order.
+SCOPES = ("runtime", "session", "link", "entity", "message")
+BINDINGS = ("build", "open", "live")
+MUTABILITIES = ("fixed", "quiescent", "hot")
+WIRES = ("none", "timing", "visible", "negotiated")
+LIMIT_STORAGES = ("capacity", "quota", "both")
+# A storage profile that does not read the limit binds it at no stage.
+LIMIT_BINDINGS = BINDINGS + ("none",)
+LIMIT_KEYS = {"id", "kconfig", "default", "help",
+              "storage", "scope", "binding_heap", "binding_fixed", "wire"}
+
+
+def stated_one_of(out: list[str], where: str, row: dict, key: str,
+                  values: tuple[str, ...]) -> str | None:
+    """The row's `key` when it is one of `values`; otherwise None, with the problem in `out`."""
+    if key not in row:
+        out.append(f"{where}: it states no `{key}`, one of {', '.join(values)}")
+        return None
+    value = row[key]
+    if not isinstance(value, str) or value not in values:
+        out.append(f"{where}: `{key}` is {value!r}, one of {', '.join(values)}")
+        return None
+    return value
+
+
+def limit_scope_problems(where: str, lim: dict) -> list[str]:
+    """A limit's `scope` is one scope, or an array of the scopes it is held at when there are
+    several: each once, in the order of SCOPES, so one set has one spelling."""
+    if not isinstance(lim.get("scope"), list):
+        out: list[str] = []
+        stated_one_of(out, where, lim, "scope", SCOPES)
+        return out
+    scope = lim["scope"]
+    canonical = [s for s in SCOPES if s in scope]
+    if len(scope) < 2 or any(s not in SCOPES for s in scope) or scope != canonical:
+        return [f"{where}: `scope` is {scope!r}; a limit held at more than one scope lists two or "
+                f"more of {', '.join(SCOPES)}, each once, in that order"]
+    return []
+
+
+def limit_binding_problems(lid: str, lim: dict) -> list[str]:
+    """What a limit sizes or bounds, and the latest stage each storage profile may decide it at.
+
+    A capacity sizes storage, so no profile decides it while running; a quota bounds storage that
+    is already there, so no profile fixes it at the build; a limit that is both is the capacity of
+    the fixed profile and a quota of the heap profile. A limit neither profile reads is no limit.
+    """
+    where = f"limit `{lid}`"
+    out = limit_scope_problems(where, lim)
+    storage = stated_one_of(out, where, lim, "storage", LIMIT_STORAGES)
+    heap = stated_one_of(out, where, lim, "binding_heap", LIMIT_BINDINGS)
+    fixed = stated_one_of(out, where, lim, "binding_fixed", LIMIT_BINDINGS)
+    stated_one_of(out, where, lim, "wire", WIRES)
+    if heap is None or fixed is None:
+        return out
+    bindings = (("binding_heap", heap), ("binding_fixed", fixed))
+    if heap == fixed == "none":
+        out.append(f"{where}: neither storage profile reads it (`binding_heap` and `binding_fixed` "
+                   "are both 'none')")
+    if storage == "capacity":
+        for key, stage in bindings:
+            if stage == "live":
+                out.append(f"{where}: a `capacity` sizes storage, so it is decided by the open at "
+                           f"the latest; its `{key}` is 'live'")
+    elif storage == "quota":
+        for key, stage in bindings:
+            if stage == "build":
+                out.append(f"{where}: a `quota` bounds storage that is already there, so it is "
+                           f"decided at the open or later; its `{key}` is 'build'")
+    elif storage == "both" and (fixed != "build" or heap not in ("open", "live")):
+        out.append(f"{where}: a limit that is `both` is the capacity of the fixed profile, decided at "
+                   f"'build', and a quota of the heap profile, decided at 'open' or 'live'; it says "
+                   f"`binding_heap` {heap!r} and `binding_fixed` {fixed!r}")
+    return out
+
+
 def validate_limits(limits: list[dict]) -> list[str]:
     out: list[str] = []
     ids = [l.get("id") for l in limits]
@@ -1293,6 +1370,9 @@ def validate_limits(limits: list[dict]) -> list[str]:
         out.append("a limit id is declared twice")
     for lim in limits:
         lid = lim.get("id", "?")
+        for key in sorted(set(lim) - LIMIT_KEYS):
+            out.append(f"limit `{lid}`: `{key}` is not a key a limit has")
+        out += limit_binding_problems(lid, lim)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", str(lid)):
             out.append(f"limit `{lid}`: an id is a Rust constant name, SCREAMING_SNAKE_CASE")
         if lim.get("kconfig") != f"WZ_LIMIT_{lid}":
@@ -1312,7 +1392,36 @@ def validate_limits(limits: list[dict]) -> list[str]:
 
 POLICY_KINDS = ("bool", "choice")
 POLICY_ID_RE = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*")
-POLICY_KEYS = {"id", "kind", "kconfig", "choices", "default", "upstream", "since", "help"}
+POLICY_KEYS = {"id", "kind", "kconfig", "choices", "default", "upstream", "since", "help",
+               "scope", "binding", "mutability", "boundary", "wire"}
+
+
+def policy_binding_problems(pid: str, pol: dict) -> list[str]:
+    """Where a policy is bound. Only a value decided while running can change, so `mutability`
+    is `fixed` exactly when `binding` is not `live`; a `quiescent` change waits for a moment the
+    policy names in `boundary`, which no other policy states."""
+    out: list[str] = []
+    where = f"policy `{pid}`"
+    stated_one_of(out, where, pol, "scope", SCOPES)
+    binding = stated_one_of(out, where, pol, "binding", BINDINGS)
+    mutability = stated_one_of(out, where, pol, "mutability", MUTABILITIES)
+    stated_one_of(out, where, pol, "wire", WIRES)
+    if binding is not None and mutability is not None:
+        if binding == "live" and mutability == "fixed":
+            out.append(f"{where}: its `binding` is 'live', so its `mutability` is 'quiescent' or "
+                       "'hot', not 'fixed'")
+        elif binding != "live" and mutability != "fixed":
+            out.append(f"{where}: its `binding` is {binding!r}, decided before it runs, so its "
+                       f"`mutability` is 'fixed', not {mutability!r}")
+    if mutability == "quiescent":
+        boundary = pol.get("boundary")
+        if not isinstance(boundary, str) or not boundary.strip():
+            out.append(f"{where}: a 'quiescent' policy states its `boundary`, the moment a change "
+                       "takes effect")
+    elif mutability is not None and "boundary" in pol:
+        out.append(f"{where}: `boundary` is stated only by a 'quiescent' policy; its `mutability` "
+                   f"is {mutability!r}")
+    return out
 
 
 def snake(name: str) -> str:
@@ -1392,6 +1501,7 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
         if not POLICY_ID_RE.fullmatch(str(pid)):
             out.append(f"policy `{pid}`: an id is lowercase words joined by `-`")
             continue
+        out += policy_binding_problems(pid, pol)
         kind = pol.get("kind")
         if kind not in POLICY_KINDS:
             out.append(f"policy `{pid}`: kind is {kind!r}, one of {', '.join(POLICY_KINDS)}")
@@ -3173,6 +3283,11 @@ help = "A sample role."
 id = "MAX_A"
 kconfig = "WZ_LIMIT_MAX_A"
 default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 A table.
 '''
@@ -3259,6 +3374,11 @@ kconfig = "WZ_POLICY_WIRE_MODE"
 choices = ["os-default", "on", "off"]
 default = "os-default"
 upstream = "Leaves the operating system's own setting."
+scope = "link"
+binding = "live"
+mutability = "quiescent"
+boundary = "the next time the link opens"
+wire = "visible"
 since = 3
 help = '''
 How the wire is set.
@@ -3270,6 +3390,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_EAGER_FLUSH"
 default = "off"
 upstream = "Flushes on the batch boundary."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+wire = "timing"
 since = 3
 help = '''
 Flush early.
@@ -3710,6 +3834,36 @@ def cmd_selftest() -> int:
            policy_refused('["os-default", "on", "off"]', '["os-default", "on", "on"]', "listed twice"))
     expect("a policy declared twice is refused",
            any("declared twice" in p for p in validate_decl(read_decl_toml(with_policy + POLICY_SAMPLE))))
+    # Where a policy is bound.
+    quiescent = 'mutability = "quiescent"\nboundary = "the next time the link opens"\n'
+    expect("a policy that states no `wire` is refused",
+           policy_refused('wire = "timing"\n', "", "states no `wire`"))
+    expect("a policy that states no `binding` is refused",
+           policy_refused('binding = "open"\n', "", "states no `binding`"))
+    expect("a policy scope outside the scopes is refused",
+           policy_refused('scope = "session"\nbinding', 'scope = "galaxy"\nbinding',
+                          "policy `eager-flush`: `scope` is 'galaxy', one of runtime"))
+    expect("a policy binding outside the stages is refused",
+           policy_refused('binding = "open"', 'binding = "later"', "`binding` is 'later', one of build"))
+    expect("a policy wire outside its set is refused",
+           policy_refused('wire = "timing"', 'wire = "loud"', "`wire` is 'loud', one of none"))
+    expect("a policy decided at the open that changes while running is refused",
+           policy_refused('mutability = "fixed"', 'mutability = "hot"', "so its `mutability` is 'fixed'"))
+    expect("a policy decided at the build that waits for a boundary is refused",
+           policy_refused('binding = "open"\nmutability = "fixed"\n',
+                          'binding = "build"\n' + quiescent, "so its `mutability` is 'fixed'"))
+    expect("a live policy that is fixed is refused",
+           policy_refused(quiescent, 'mutability = "fixed"\n', "not 'fixed'"))
+    expect("a boundary on a policy that is not quiescent is refused",
+           policy_refused('mutability = "fixed"\n', 'mutability = "fixed"\nboundary = "never"\n',
+                          "only by a 'quiescent' policy"))
+    expect("a boundary on a hot policy is refused",
+           policy_refused(quiescent, 'mutability = "hot"\nboundary = "never"\n',
+                          "only by a 'quiescent' policy"))
+    expect("a quiescent policy without its boundary is refused",
+           policy_refused('boundary = "the next time the link opens"\n', "", "states its `boundary`"))
+    expect("a live policy that changes at once, with no boundary, validates",
+           validate_decl(read_decl_toml(with_policy.replace(quiescent, 'mutability = "hot"\n'))) == [])
     kpolicies = emit_kconfig_policies(pdecl)
     expect("a choice policy is a Kconfig choice that defaults to upstream's value",
            "choice WZ_POLICY_WIRE_MODE\n\tprompt \"wire-mode\"\n\tdefault WZ_POLICY_WIRE_MODE_OS_DEFAULT" in kpolicies
@@ -3770,6 +3924,60 @@ def cmd_selftest() -> int:
     two_para = SAMPLE.replace("A table.\n'''", "A table.\n\nMore.\n'''")
     expect("a limit help of two paragraphs is refused",
            any("paragraph" in p for p in validate_decl(read_decl_toml(two_para))))
+
+    # Where a limit is bound: SAMPLE's limit is both a capacity and a quota.
+    def limit_text(**stated: str) -> str:
+        text = SAMPLE
+        for key, value in stated.items():
+            text = re.sub(rf"(?m)^{key} = .*$", f"{key} = {value}", text)
+        return text
+
+    def limit_refused(text: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(text)))
+
+    expect("a limit that states no `storage` is refused",
+           limit_refused(SAMPLE.replace('storage = "both"\n', ""), "limit `MAX_A`: it states no `storage`"))
+    expect("a limit that states no `binding_fixed` is refused",
+           limit_refused(SAMPLE.replace('binding_fixed = "build"\n', ""), "states no `binding_fixed`"))
+    expect("a limit storage outside its set is refused",
+           limit_refused(limit_text(storage='"pool"'), "`storage` is 'pool', one of capacity"))
+    expect("a limit binding outside the stages is refused",
+           limit_refused(limit_text(binding_heap='"later"'), "`binding_heap` is 'later', one of build"))
+    expect("a limit wire outside its set is refused",
+           limit_refused(limit_text(wire='"loud"'), "`wire` is 'loud', one of none"))
+    expect("a limit scope outside the scopes is refused",
+           limit_refused(limit_text(scope='"galaxy"'), "`scope` is 'galaxy', one of runtime"))
+    expect("a key a limit does not have is refused",
+           limit_refused(SAMPLE.replace("default = 4\n", "default = 4\nspare = 1\n"),
+                         "`spare` is not a key a limit has"))
+    expect("a capacity decided while running is refused",
+           limit_refused(limit_text(storage='"capacity"', binding_heap='"live"'),
+                         "a `capacity` sizes storage, so it is decided by the open at the latest; "
+                         "its `binding_heap` is 'live'"))
+    expect("a capacity the heap profile decides at the open validates",
+           validate_decl(read_decl_toml(limit_text(storage='"capacity"'))) == [])
+    expect("a capacity only the fixed profile reads validates",
+           validate_decl(read_decl_toml(limit_text(storage='"capacity"', binding_heap='"none"'))) == [])
+    expect("a quota fixed at the build is refused",
+           limit_refused(limit_text(storage='"quota"'), "its `binding_fixed` is 'build'"))
+    expect("a quota decided while running validates",
+           validate_decl(read_decl_toml(limit_text(storage='"quota"', binding_heap='"live"',
+                                                   binding_fixed='"live"'))) == [])
+    expect("a limit that is both, decided at the open by the fixed profile, is refused",
+           limit_refused(limit_text(binding_fixed='"open"'), "a limit that is `both`"))
+    expect("a limit that is both, fixed at the build by the heap profile, is refused",
+           limit_refused(limit_text(binding_heap='"build"'), "a limit that is `both`"))
+    expect("a limit neither storage profile reads is refused",
+           limit_refused(limit_text(storage='"quota"', binding_heap='"none"', binding_fixed='"none"'),
+                         "neither storage profile reads it"))
+    expect("a limit held at two scopes validates",
+           validate_decl(read_decl_toml(limit_text(scope='["runtime", "link"]'))) == [])
+    expect("a scope array out of order is refused",
+           limit_refused(limit_text(scope='["link", "runtime"]'), "lists two or more"))
+    expect("a scope array of one scope is refused",
+           limit_refused(limit_text(scope='["session"]'), "lists two or more"))
+    expect("a scope array naming a scope twice is refused",
+           limit_refused(limit_text(scope='["runtime", "runtime"]'), "lists two or more"))
     def caps_refused(old: str, new: str, words: str) -> bool:
         return any(words in p for p in validate_decl(read_decl_toml(SAMPLE.replace(old, new))))
 

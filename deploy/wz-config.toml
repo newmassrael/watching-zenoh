@@ -61,6 +61,43 @@
 # (deploy/zephyr-common/wz_zephyr_board.cmake). The code reads each limit from the generated
 # module, and `crates/wz-session-core/src/caps.rs` binds the name the code uses to it.
 #
+# `storage` says what a limit is to the memory behind it. A `capacity` sizes storage: the rows a
+# table is built with, paid for whether they are used or not. A `quota` bounds storage that is
+# already there, refusing the one more without sizing anything. A limit that is `both` is the
+# capacity of the fixed storage profile and a quota of the heap profile. `binding_heap` and
+# `binding_fixed` are its binding (below) under each storage profile, `none` where that profile
+# does not read it. A capacity is decided by the open at the latest, a quota at the open or later.
+#
+# ## Where a value is bound
+#
+# Every policy and every limit states where its value is held, when it is decided and what a peer
+# sees of it, and a policy also whether it may change once decided. These state what the code may
+# rely on: where the code decides a value earlier than its binding allows, the code is what moves,
+# not the declaration.
+#
+# `scope` is what holds one value. A `runtime` is one node and everything it opens; a `session` is
+# one session of it with one peer or group; a `link` is one link of a session; an `entity` is one
+# declared publisher, subscriber, queryable, querier or token of a session; a `message` is one call
+# or one message. Each scope lies inside the one before it, except that a link and an entity are
+# both inside a session and neither inside the other. A limit held at more than one scope lists
+# each, widest first, as an array.
+#
+# `binding` is the latest stage the value may be decided at. `build` is when the image or library
+# is compiled; `open` is when the thing its scope names is opened, and the value then holds for
+# its life; `live` is any moment while it runs.
+#
+# `mutability` is whether a value bound `live` may change after it was first decided: `fixed` it
+# may not (and every value bound at `build` or `open` is `fixed`); `quiescent` it may, taking
+# effect only at the moment `boundary` names, when nothing the value governs is in flight; `hot`
+# it may, taking effect at its next use. `boundary` is stated by a `quiescent` policy and by no
+# other.
+#
+# `wire` is what a peer sees when the value changes within its range. `none`: the bytes a peer
+# receives are the same, and what the value leaves out past its range is `none` too. `timing`: the
+# same bytes, sent at other moments or in other turns. `visible`: other bytes, which a peer reads
+# without having agreed to them. `negotiated`: the value is exchanged with the peer when the
+# session opens, and both ends adopt what they agree on.
+#
 # ## Images and their axes
 #
 # An `image` is a Zephyr application whose node is chosen along axes. An `axis` is a Kconfig
@@ -1803,6 +1840,13 @@ note = "the per-link transport counters; zenoh-c has no C door for them and neit
 id = "MAX_KEYEXPR_BYTES"
 kconfig = "WZ_LIMIT_MAX_KEYEXPR_BYTES"
 default = 256
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# left out.
+wire = "none"
 help = '''
 The longest key expression, in bytes, a session stores: a subscription's
 pattern, or a key a peer declared. A longer one is refused, never cut short.
@@ -1813,6 +1857,11 @@ Every table that stores keys sizes its rows by this.
 id = "MAX_SUBSCRIPTIONS"
 kconfig = "WZ_LIMIT_MAX_SUBSCRIPTIONS"
 default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The subscribers a session holds at once. Declaring one more is refused
 while the table is full.
@@ -1822,6 +1871,11 @@ while the table is full.
 id = "MATCH_MEMO_SLOTS"
 kconfig = "WZ_LIMIT_MATCH_MEMO_SLOTS"
 default = 8
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
 help = '''
 How many distinct keys the receive match cache remembers at once: the keys
 whose matching subscriptions it can answer without matching again. It is a
@@ -1838,6 +1892,11 @@ whether used or not, a heap's only as it fills.
 id = "MATCH_MEMO_FIXED_SLOTS"
 kconfig = "WZ_LIMIT_MATCH_MEMO_FIXED_SLOTS"
 default = 0
+storage = "capacity"
+scope = "session"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 MATCH_MEMO_SLOTS for a build whose tables are fixed in size (no allocator,
 or the fixed storage policy): how many distinct keys the receive match cache
@@ -1853,6 +1912,11 @@ cache for the keys of its table.
 id = "MATCH_MEMO_KEY_BYTES"
 kconfig = "WZ_LIMIT_MATCH_MEMO_KEY_BYTES"
 default = 64
+storage = "capacity"
+scope = "session"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The longest key, in bytes, the receive match cache of a fixed-size build
 remembers. A longer key is matched every time it arrives, never cut short.
@@ -1863,6 +1927,11 @@ Read only where MATCH_MEMO_FIXED_SLOTS is above 0.
 id = "DELIVERY_LANE_EVENTS"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_EVENTS"
 default = 64
+storage = "both"
+scope = "entity"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 How many samples the delivery lane of an offloaded subscriber holds at once:
 the samples the receive path has copied in and its callback has not yet run
@@ -1873,6 +1942,11 @@ on. A sample past this is refused and counted. It must be at least 1.
 id = "DELIVERY_LANE_BYTES"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_BYTES"
 default = 65536
+storage = "quota"
+scope = "entity"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
 help = '''
 How many bytes of copied samples a delivery lane holds at once: the key, the
 payload, the attachment and the encoding schema of each waiting sample, and
@@ -1884,6 +1958,11 @@ does not fit is refused and counted. It must be at least 1.
 id = "DELIVERY_LANE_CALLBACKS"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_CALLBACKS"
 default = 256
+storage = "quota"
+scope = "entity"
+binding_heap = "live"
+binding_fixed = "none"
+wire = "none"
 help = '''
 How many callback invocations a delivery lane owes at once. A host that admits
 a sample once for each subscription it reaches owes one callback per sample, so
@@ -1896,6 +1975,11 @@ least 1.
 id = "MAX_QUERYABLES"
 kconfig = "WZ_LIMIT_MAX_QUERYABLES"
 default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The queryables a session holds at once. Declaring one more is refused
 while the table is full.
@@ -1905,6 +1989,11 @@ while the table is full.
 id = "MAX_PENDING_QUERIES"
 kconfig = "WZ_LIMIT_MAX_PENDING_QUERIES"
 default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The queries (gets) a session has waiting for their replies at once.
 Issuing one more is refused while the table is full.
@@ -1914,6 +2003,11 @@ Issuing one more is refused while the table is full.
 id = "MAX_DECL_OBSERVERS"
 kconfig = "WZ_LIMIT_MAX_DECL_OBSERVERS"
 default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The observers an application installs on the declarations of its peers
 (subscribers, queryables and liveliness tokens appearing or leaving), per
@@ -1925,6 +2019,11 @@ needed; one more is refused.
 id = "MAX_LIVELINESS_SUBSCRIPTIONS"
 kconfig = "WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS"
 default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The liveliness subscribers a session holds at once. Declaring one more
 is refused while the table is full.
@@ -1934,6 +2033,13 @@ is refused while the table is full.
 id = "MAX_LOCAL_TOKENS"
 kconfig = "WZ_LIMIT_MAX_LOCAL_TOKENS"
 default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# left out.
+wire = "none"
 help = '''
 The liveliness tokens a session itself declares and holds at once.
 Declaring one more is refused while the table is full.
@@ -1943,6 +2049,11 @@ Declaring one more is refused while the table is full.
 id = "MAX_PENDING_LIVELINESS_GETS"
 kconfig = "WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"
 default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The liveliness gets (snapshots of the tokens alive) a session has waiting
 for their answer at once. A get ends as soon as its answer is complete, so
@@ -1953,6 +2064,13 @@ few are waiting together; one more is refused while the table is full.
 id = "MAX_PENDING_DECLARES"
 kconfig = "WZ_LIMIT_MAX_PENDING_DECLARES"
 default = 32
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# refused.
+wire = "none"
 help = '''
 The declarations a session can have ready to send in answer to its peers'
 interests between two sends: each answer is the session's matching
@@ -1964,6 +2082,13 @@ counted, never sent in part.
 id = "MAX_INBOUND_SUB_INTERESTS"
 kconfig = "WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS"
 default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# left out.
+wire = "none"
 help = '''
 The peers' interests in this session's subscribers that the session
 remembers, so that a subscriber declared later is announced to them: one
@@ -1975,6 +2100,13 @@ the subscribers of the moment, not the later ones.
 id = "MAX_PEER_KEYEXPR_ALIASES"
 kconfig = "WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"
 default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# dropped.
+wire = "none"
 help = '''
 The key expressions one peer may have declared to this session at a time,
 to name them by a short id. One more is refused and counted, and a message
@@ -1985,6 +2117,11 @@ that names it is dropped, as one naming an undeclared id is.
 id = "MAX_REMOTE_DECLS"
 kconfig = "WZ_LIMIT_MAX_REMOTE_DECLS"
 default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The declarations of one kind (subscribers, queryables, liveliness tokens)
 one peer may hold open to this session at a time. One more is refused and
@@ -1995,6 +2132,11 @@ counted, and the application is not told of it.
 id = "MAX_PENDING_REPLIES"
 kconfig = "WZ_LIMIT_MAX_PENDING_REPLIES"
 default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The replies a session's queryables may have ready to send between two
 sends. One more is refused and counted, and the handler that made it is
@@ -2005,6 +2147,13 @@ told.
 id = "MAX_PENDING_FINALS"
 kconfig = "WZ_LIMIT_MAX_PENDING_FINALS"
 default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# refused.
+wire = "none"
 help = '''
 The queries a session may owe the end of an answer between two sends. A
 query that would need one more is refused, and counted, before its
@@ -2016,6 +2165,11 @@ waiting until its own timeout.
 id = "MAX_REPLY_PAYLOAD_BYTES"
 kconfig = "WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES"
 default = 1024
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The largest payload of one reply, in bytes, and the largest attachment
 beside it. A larger reply is refused, never cut short.
@@ -2025,6 +2179,11 @@ beside it. A larger reply is refused, never cut short.
 id = "MAX_ADMIN_REPLY_BYTES"
 kconfig = "WZ_LIMIT_MAX_ADMIN_REPLY_BYTES"
 default = 1024
+storage = "capacity"
+scope = "runtime"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The largest admin space reply, in bytes. A larger one is refused, counted,
 and answered to the asker as an error, never cut short. It cannot exceed
@@ -2035,6 +2194,11 @@ the largest reply payload (WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES).
 id = "MAX_ADMIN_LOCATORS"
 kconfig = "WZ_LIMIT_MAX_ADMIN_LOCATORS"
 default = 4
+storage = "capacity"
+scope = "runtime"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The listening locators a node without an allocator reports in its admin
 space. One more is refused when the node starts, never dropped.
@@ -2044,6 +2208,11 @@ space. One more is refused when the node starts, never dropped.
 id = "MAX_ADMIN_SESSION_LINKS"
 kconfig = "WZ_LIMIT_MAX_ADMIN_SESSION_LINKS"
 default = 2
+storage = "capacity"
+scope = "session"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The links one session's row lists in the admin space. A unicast session
 has one; a row with more is refused and counted, not listed in part.
@@ -2053,6 +2222,11 @@ has one; a row with more is refused and counted, not listed in part.
 id = "MAX_MULTICAST_REPLIES"
 kconfig = "WZ_LIMIT_MAX_MULTICAST_REPLIES"
 default = 8
+storage = "capacity"
+scope = "session"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The replies a node without an allocator holds for a multicast group before
 it sends them. One more is dropped and counted: a group is best effort, and
@@ -2063,6 +2237,11 @@ an asker whose reply was dropped asks again.
 id = "MAX_TASKS"
 kconfig = "WZ_LIMIT_MAX_TASKS"
 default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The most tasks the runtime of a fixed-memory image may hold: a ceiling on
 the task table the image declares, which the image is checked against when
@@ -2073,6 +2252,11 @@ it compiles.
 id = "MAX_TIMERS"
 kconfig = "WZ_LIMIT_MAX_TIMERS"
 default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The most timers the runtime of a fixed-memory image may hold: a ceiling on
 the timer table the image declares, checked as the task ceiling is.
@@ -2082,6 +2266,11 @@ the timer table the image declares, checked as the task ceiling is.
 id = "MAX_LOCATOR_LEN"
 kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
 default = 64
+storage = "both"
+scope = ["runtime", "link"]
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The longest locator, in bytes, a node stores: one it is told to connect
 to, or one it listens on (for example udp/192.168.1.10:7447). A longer one
@@ -2093,6 +2282,11 @@ scheme and port.
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 default = 8
+storage = "both"
+scope = "runtime"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The locators a node is told to connect to. A list longer than this stops
 at the limit; a fixed deployment names a few peers.
@@ -2102,6 +2296,11 @@ at the limit; a fixed deployment names a few peers.
 id = "MAX_PEER_NODES"
 kconfig = "WZ_LIMIT_MAX_PEER_NODES"
 default = 0
+storage = "capacity"
+scope = "runtime"
+binding_heap = "none"
+binding_fixed = "build"
+wire = "none"
 help = '''
 The nodes a fixed-memory image may be asked to open a session with by their
 zid, beside the locators it is told to connect to: one a session lifecycle
@@ -2116,6 +2315,11 @@ is refused.
 id = "QUERIER_MAX_PENDING_QUERIES"
 kconfig = "WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"
 default = 0
+storage = "quota"
+scope = "entity"
+binding_heap = "live"
+binding_fixed = "none"
+wire = "none"
 help = '''
 The queries one declared querier may have in flight at once; one more is
 refused until a pending one ends. A query ends when its final arrives, its
@@ -2130,6 +2334,11 @@ ABIs and the cooperative engine do not hold to it yet.
 id = "TX_NO_PROGRESS_WINDOW_US"
 kconfig = "WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"
 default = 1000000
+storage = "quota"
+scope = "session"
+binding_heap = "live"
+binding_fixed = "open"
+wire = "timing"
 help = '''
 How long, in microseconds, a blocking message may wait with no progress
 when the tx-no-progress-deadline policy is on: no fragment of it going out.
@@ -2141,6 +2350,11 @@ than the total wait before the session is closed, which is set as before.
 id = "TX_EXPIRY_CLOSE_AFTER"
 kconfig = "WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"
 default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "live"
+binding_fixed = "open"
+wire = "timing"
 help = '''
 How many blocking messages in a row may find no room within their deadline
 before the session is closed as unresponsive, when the tx-expiry-keeps-session
@@ -2153,6 +2367,11 @@ closes the session, which is the policy as it was before this limit. At most
 id = "DATAGRAM_FRAGMENT_BURST"
 kconfig = "WZ_LIMIT_DATAGRAM_FRAGMENT_BURST"
 default = 8
+storage = "quota"
+scope = "link"
+binding_heap = "live"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How many fragments of a message a UDP link's writer writes in a row when the
 datagram-fragment-pacing policy is on, before the next one waits for
@@ -2163,6 +2382,11 @@ DATAGRAM_FRAGMENT_GAP_US. At least 1. It is read only when that policy is on.
 id = "DATAGRAM_FRAGMENT_GAP_US"
 kconfig = "WZ_LIMIT_DATAGRAM_FRAGMENT_GAP_US"
 default = 1000
+storage = "quota"
+scope = "link"
+binding_heap = "live"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How long, in microseconds, must pass after the last fragment was written
 before a UDP link's writer writes another one past the burst, when the
@@ -2176,6 +2400,11 @@ millisecond. It is read only when that policy is on.
 id = "QUERY_PARAMETERS_MAX_BYTES"
 kconfig = "WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES"
 default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "live"
+binding_fixed = "live"
+wire = "none"
 help = '''
 The most bytes of selector parameters a query from a peer may carry for this
 node to run it. A query whose parameters are longer reaches no queryable, is
@@ -2189,6 +2418,11 @@ session is not bounded: the caller already holds what it passed.
 id = "QUERY_ATTACHMENT_MAX_BYTES"
 kconfig = "WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES"
 default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "live"
+binding_fixed = "live"
+wire = "none"
 help = '''
 The most bytes of attachment a query from a peer may carry for this node to
 run it. It is applied as QUERY_PARAMETERS_MAX_BYTES is: a longer attachment
@@ -2201,6 +2435,13 @@ limit.
 id = "HANDSHAKE_COOKIE_BYTES"
 kconfig = "WZ_LIMIT_HANDSHAKE_COOKIE_BYTES"
 default = 128
+storage = "capacity"
+scope = "session"
+# Its fixed profile is a `session-slot` build, which holds the cookie in storage of fixed size.
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, the cookie is left out.
+wire = "none"
 help = '''
 How many bytes of a peer's cookie a session keeps on the fixed-memory profile:
 the cookie in the peer's INIT acknowledgement, which the node echoes in its
@@ -2217,6 +2458,11 @@ does not read it.
 id = "PICO_TX_QUEUE_SIZE"
 kconfig = "WZ_LIMIT_PICO_TX_QUEUE_SIZE"
 default = 8
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How many batches each priority's outbound queue holds for the pico C ABI, in
 1 to 16 (upstream's range for a queue size; a value outside it counts as the
@@ -2234,6 +2480,11 @@ costs memory only under a peer that does not drain.
 id = "SNAPSHOT_PERIOD_MS"
 kconfig = "WZ_LIMIT_SNAPSHOT_PERIOD_MS"
 default = 1000
+storage = "quota"
+scope = "runtime"
+binding_heap = "live"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How often, in milliseconds, the node takes a snapshot of itself: what it spends
 and how its messages are spaced. The node holds no timer for it: the program
@@ -2245,6 +2496,12 @@ passed since the last. At least 1 and at most 2147483 (about 35 minutes).
 id = "SNAPSHOT_HISTOGRAM_BUCKETS"
 kconfig = "WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS"
 default = 24
+storage = "both"
+scope = ["runtime", "session"]
+binding_heap = "open"
+binding_fixed = "build"
+# `wire` is visible: the bucket count is part of the snapshot's format.
+wire = "visible"
 help = '''
 How many buckets the snapshot's message-interval histogram has, each 8 bytes.
 Bucket 0 holds intervals of 0 and 1 microsecond, bucket b the intervals from
@@ -2258,6 +2515,11 @@ snapshot longer. At least 1 and at most 32.
 id = "SUPERVISION_CHECKPOINTS"
 kconfig = "WZ_LIMIT_SUPERVISION_CHECKPOINTS"
 default = 4
+storage = "both"
+scope = "runtime"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 How many checkpoints the node's supervisor watches. Each is a deadline an
 application feeds, and the node is healthy only while every checkpoint that is
@@ -2268,6 +2530,11 @@ supervised has been fed in time. At least 1 and at most 64.
 id = "EVENT_RING_SLOTS"
 kconfig = "WZ_LIMIT_EVENT_RING_SLOTS"
 default = 64
+storage = "both"
+scope = "runtime"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
 help = '''
 How many event records the node's event ring holds. When the ring is full,
 the event-ring-full policy decides which record is lost: the oldest or the
@@ -2279,6 +2546,11 @@ number times that size. At least 1.
 id = "EVENT_RECORD_ARGS"
 kconfig = "WZ_LIMIT_EVENT_RECORD_ARGS"
 default = 4
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "none"
+wire = "none"
 help = '''
 How many integer arguments one event record carries, each 8 bytes. A record
 has no text: the format an event is read with is a constant the reader holds,
@@ -2290,6 +2562,11 @@ first of them. At most 255.
 id = "CLOCK_SOURCES"
 kconfig = "WZ_LIMIT_CLOCK_SOURCES"
 default = 1
+storage = "quota"
+scope = "runtime"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
 help = '''
 How many clock sources an application can register with the node at once, when
 the clock-source capability is on. A node reads its time from the registered
@@ -2302,6 +2579,11 @@ none, which leaves the system clock as the only source.
 id = "CLOCK_MAX_FORWARD_STEP_MS"
 kconfig = "WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS"
 default = 500
+storage = "quota"
+scope = "runtime"
+binding_heap = "live"
+binding_fixed = "none"
+wire = "none"
 help = '''
 How far ahead of the node's clock, in milliseconds, a timestamp from another
 node may be before the node's hybrid logical clock refuses it, as zenoh's
@@ -2316,6 +2598,11 @@ any timestamp ahead of the clock.
 id = "DECLARATION_SYNC_BURST_MESSAGES"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES"
 default = 8
+storage = "quota"
+scope = "session"
+binding_heap = "live"
+binding_fixed = "open"
+wire = "timing"
 help = '''
 How many declarations one turn of a paced declaration replay sends, when the
 declaration-sync-pacing policy is on. It is read only when that policy is on.
@@ -2326,6 +2613,11 @@ It must be at least 1: a turn that sends nothing would never finish.
 id = "DECLARATION_SYNC_FINAL_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_FINAL_TIMEOUT_MS"
 default = 1000
+storage = "quota"
+scope = "session"
+binding_heap = "live"
+binding_fixed = "live"
+wire = "none"
 help = '''
 How long, in milliseconds, a node waits for the peer's answer to an interest it
 sent before it counts the interest as unanswered and goes on. It bounds the
@@ -2338,6 +2630,11 @@ or not the declaration-sync-pacing policy is on, and must be at least 1.
 id = "DECLARATION_SYNC_INTERVAL_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS"
 default = 10
+storage = "quota"
+scope = "session"
+binding_heap = "live"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits between two of its
 turns, when the declaration-sync-pacing policy is on. The session keeps being
@@ -2353,6 +2650,11 @@ least 1.
 id = "PICO_UNICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"
 default = 2048
+storage = "quota"
+scope = "link"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "negotiated"
 help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises when
 it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
@@ -2363,6 +2665,12 @@ send frames no larger than the smaller of the two sizes. At most 65535.
 id = "PICO_MULTICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES"
 default = 2048
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+# `wire` is visible: the Join states it, and a member that states another size is refused.
+wire = "visible"
 help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises in
 the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE. zenoh-pico
@@ -2374,6 +2682,11 @@ states the same. At most 65535.
 id = "PICO_LEASE_MS"
 kconfig = "WZ_LIMIT_PICO_LEASE_MS"
 default = 10000
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "negotiated"
 help = '''
 The lease, in milliseconds, a session of the zenoh-pico interface advertises,
 unicast and in a multicast group's Join, as zenoh-pico's Z_TRANSPORT_LEASE. A
@@ -2384,6 +2697,11 @@ peer that hears nothing from the session for this long closes it.
 id = "PICO_SOCKET_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_PICO_SOCKET_TIMEOUT_MS"
 default = 100
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How long, in milliseconds, one read step of the cooperative zenoh-pico session
 waits on its link before it returns with nothing, as zenoh-pico's
@@ -2394,6 +2712,11 @@ Z_CONFIG_SOCKET_TIMEOUT.
 id = "PICO_CONNECT_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS"
 default = 10000
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How long, in milliseconds, opening a cooperative zenoh-pico session waits for
 the session to be established before the open fails, as zenoh-pico's
@@ -2404,6 +2727,11 @@ Z_TRANSPORT_CONNECT_TIMEOUT.
 id = "PICO_FRAG_MAX_BYTES"
 kconfig = "WZ_LIMIT_PICO_FRAG_MAX_BYTES"
 default = 4096
+storage = "quota"
+scope = "link"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
 help = '''
 The largest message, in bytes, a session of the zenoh-pico interface rejoins
 from fragments, unicast and in a multicast group, as zenoh-pico's
@@ -2416,6 +2744,11 @@ measured against it.
 id = "PICO_ACCEPT_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_PICO_ACCEPT_TIMEOUT_MS"
 default = 1000
+storage = "quota"
+scope = "link"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How long, in milliseconds, a listening session of the zenoh-pico interface gives
 an inbound link to complete its whole handshake, link handshake included,
@@ -2428,6 +2761,11 @@ interface reads it from transport/unicast/accept_timeout.
 id = "PICO_KEEPALIVES_PER_LEASE"
 kconfig = "WZ_LIMIT_PICO_KEEPALIVES_PER_LEASE"
 default = 3
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
 help = '''
 How many keepalives a session of the zenoh-pico interface sends in one lease,
 as zenoh-pico's Z_TRANSPORT_LEASE_EXPIRE_FACTOR: whenever the line has been
@@ -2441,6 +2779,9 @@ The lease is the smaller of the two the peers advertised.
 # default). Each is a field of `SessionPolicy` (crates/wz-session-core/src/policy_generated.rs,
 # generated) and a Kconfig symbol; a build states it as `WZ_POLICY_<NAME>`. A policy enters in its
 # own change, with a pair of tests that name each of its values.
+#
+# A policy states `scope`, `binding`, `mutability` and `wire`, and `boundary` when it is
+# `quiescent`, as the header defines them ("Where a value is bound").
 [[policy]]
 id = "multicast-loopback"
 kind = "choice"
@@ -2448,6 +2789,11 @@ kconfig = "WZ_POLICY_MULTICAST_LOOPBACK"
 choices = ["os-default", "on", "off"]
 default = "os-default"
 upstream = "Never sets IP_MULTICAST_LOOP on a multicast socket, so each sending socket keeps the operating system's setting."
+scope = "link"
+binding = "open"
+mutability = "fixed"
+# `wire` is none: it decides whether a member on the same host receives, not the bytes sent.
+wire = "none"
 since = 2
 help = '''
 Whether a datagram a node sends to a multicast group is also delivered to
@@ -2463,6 +2809,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_TX_NO_PROGRESS_DEADLINE"
 default = "off"
 upstream = "Gives a blocking message one wait_before_close for the whole of it, however many fragments go out: its deadline has no cap to extend by, so a fragment out leaves the deadline where it is."
+scope = "session"
+binding = "live"
+mutability = "hot"
+wire = "timing"
 since = 2
 help = '''
 Whether a blocking message gets a second bound beside its total wait: the
@@ -2478,6 +2828,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"
 default = "off"
 upstream = "Closes the session as unresponsive when a blocking message found no room in its deadline, and tells the sender nothing."
+scope = "session"
+binding = "live"
+mutability = "hot"
+wire = "visible"
 since = 2
 help = '''
 What happens when a blocking message finds no room within its deadline. Off,
@@ -2495,6 +2849,11 @@ kind = "bool"
 kconfig = "WZ_POLICY_DECLARATION_SYNC_PACING"
 default = "off"
 upstream = "Replays every declaration it holds to a new peer in one call, as soon as the session is open again."
+scope = "link"
+binding = "live"
+mutability = "quiescent"
+boundary = "the start of the next replay of declarations"
+wire = "timing"
 since = 2
 help = '''
 How a node tells a peer its declarations again after a reconnect. Off, all of
@@ -2513,6 +2872,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_DATAGRAM_FRAGMENT_PACING"
 default = "off"
 upstream = "Writes the fragments of a large message to a datagram socket back to back, as fast as the socket takes them, however small the receiver's buffer."
+scope = "link"
+binding = "open"
+mutability = "fixed"
+wire = "timing"
 since = 2
 help = '''
 How fast the fragments of one large message leave a UDP link, unicast or
@@ -2534,6 +2897,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE"
 default = "off"
 upstream = "Opens a multicast link whose locator names no interface on the first interface that can carry multicast, or on the kernel's choice when the host has none, so the link may sit on an interface nobody chose."
+scope = "link"
+binding = "open"
+mutability = "fixed"
+wire = "none"
 since = 2
 help = '''
 Whether a multicast link may be opened without an interface the locator
@@ -2552,6 +2919,10 @@ kconfig = "WZ_POLICY_RELIABLE_GAP_RECONNECT"
 choices = ["off", "until-declarations-synced", "always"]
 default = "off"
 upstream = "Accepts a forward jump of the reliable channel's sequence number without a word: the frames in between are lost, the session stays open and nothing is repaired, so a peer's declaration lost that way is never noticed."
+scope = "session"
+binding = "live"
+mutability = "hot"
+wire = "visible"
 since = 2
 help = '''
 What a node does when a frame on the reliable channel arrives with a sequence
@@ -2576,6 +2947,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_ENTITY_LINK_RESTRICTION"
 default = "off"
 upstream = "Lets every entity use every link of the session: a put reaches every link that wants it, a declaration is made to every link, a query goes to every link."
+scope = "entity"
+binding = "open"
+mutability = "fixed"
+wire = "visible"
 since = 2
 help = '''
 Whether an entity may be declared with a set of links it is limited to. Off, the
@@ -2596,6 +2971,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_TARGETED_QUERY"
 default = "off"
 upstream = "Sends a query to every link whose peers declared a queryable it matches, and a caller cannot name the peer a query is for."
+scope = "message"
+binding = "live"
+mutability = "hot"
+wire = "visible"
 since = 2
 help = '''
 Whether a query may be addressed to one peer by its node identity. Off, the call
@@ -2614,6 +2993,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_PUBLISHER_ADMISSION_RETRY"
 default = "off"
 upstream = "Sends a put to every link at once and waits on each link for room in its queue; a put that finds none on a link is dropped there (or closes the session) and still reports success, and a caller cannot ask for it to be tried again."
+scope = "message"
+binding = "live"
+mutability = "hot"
+wire = "visible"
 since = 2
 help = '''
 Whether a publish may state a bounded retry for the case where no link took
@@ -2639,6 +3022,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_MULTI_ROUTE_ATOMIC_TX"
 default = "off"
 upstream = "Sends a put to each link on its own terms: a link whose queue is full drops the frame or waits for room while the other links take it, so one put can reach some links and not others."
+scope = "message"
+binding = "live"
+mutability = "hot"
+wire = "visible"
 since = 2
 help = '''
 Whether a publish may ask to be delivered to all of the links it reaches or to
@@ -2668,6 +3055,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"
 default = "off"
 upstream = "Hands every received sample's timestamp to the subscriber and every reply's to the querier, and lets any publisher attach the timestamp it is given."
+scope = "entity"
+binding = "open"
+mutability = "fixed"
+wire = "visible"
 since = 2
 help = '''
 What an entity does with a timestamp when its declaration says nothing. Off,
@@ -2686,6 +3077,10 @@ kind = "bool"
 kconfig = "WZ_POLICY_REPLY_AUTO_TIMESTAMP"
 default = "off"
 upstream = "Sends a reply with the timestamp its handler gave it and with none when the handler gave none."
+scope = "entity"
+binding = "open"
+mutability = "fixed"
+wire = "visible"
 since = 2
 help = '''
 What a queryable's reply carries when its handler gave it no timestamp. Off, it
@@ -2705,6 +3100,10 @@ kconfig = "WZ_POLICY_SUBSCRIBER_OVERLOAD"
 choices = ["block", "reject", "keep-latest"]
 default = "block"
 upstream = "Hands a sample to a channel handler that blocks its sender when the handler is full, so a slow consumer applies backpressure into the session and no sample is lost."
+scope = "entity"
+binding = "open"
+mutability = "fixed"
+wire = "timing"
 since = 2
 help = '''
 What a subscriber whose callback runs off the receive path does when its
@@ -2729,6 +3128,10 @@ kconfig = "WZ_POLICY_KEY_SET"
 choices = ["open", "closed"]
 default = "open"
 upstream = "Takes a message on any key a peer sends, and finds the subscribers it reaches by matching that key against each subscription's pattern as text."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+wire = "none"
 since = 2
 help = '''
 Which keys the receive path takes a message on (the closed key set). `open` takes
@@ -2749,6 +3152,10 @@ kconfig = "WZ_POLICY_SN_RESOLUTION"
 choices = ["bits-32", "bits-8", "bits-16", "bits-64"]
 default = "bits-32"
 upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group unless its configuration states another: zenoh reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+wire = "negotiated"
 since = 2
 help = '''
 The width of the sequence numbers the sessions of the C interfaces advertise
@@ -2773,6 +3180,10 @@ kconfig = "WZ_POLICY_SUPERVISION_AFTER_EXPIRY"
 choices = ["latch", "rearm"]
 default = "latch"
 upstream = "Supervises nothing: an application that stops making progress is not noticed by the library, so there is no expiry and nothing for a later feed to do."
+scope = "runtime"
+binding = "live"
+mutability = "hot"
+wire = "none"
 since = 2
 help = '''
 What a checkpoint does when it is fed after its deadline was missed. `latch`
@@ -2790,6 +3201,11 @@ kconfig = "WZ_POLICY_EVENT_RING_FULL"
 choices = ["overwrite-oldest", "drop-newest"]
 default = "overwrite-oldest"
 upstream = "Keeps no record of the events a node has: a log call with no logger installed is dropped, so neither the oldest nor the newest of them survives."
+scope = "runtime"
+binding = "live"
+mutability = "quiescent"
+boundary = "after the consumer has read every record"
+wire = "none"
 since = 2
 help = '''
 Which event a full event ring gives up. `overwrite-oldest` writes the new event
@@ -2807,6 +3223,10 @@ kconfig = "WZ_POLICY_CLOCK_QUALITY_STAMPING"
 choices = ["always", "trusted-only"]
 default = "always"
 upstream = "Stamps with whatever time the system clock reads, and has no notion of whether that clock is set or follows a reference."
+scope = "runtime"
+binding = "live"
+mutability = "hot"
+wire = "visible"
 since = 2
 help = '''
 Whether a node stamps data with a time it does not trust. `always` stamps with
@@ -2827,6 +3247,10 @@ kconfig = "WZ_POLICY_ROUTING_FACE_DRIVE"
 choices = ["task-per-face", "one-task"]
 default = "task-per-face"
 upstream = "Reads each link of a node on a task of its own, spawned on the node's receive runtime (two worker threads unless the runtime is configured otherwise), and routes what that link brings on the same task under a read lock of the routing tables, so the links of a node are served by several threads at once."
+scope = "runtime"
+binding = "open"
+mutability = "fixed"
+wire = "timing"
 since = 2
 help = '''
 How a node that routes for others serves its links. `task-per-face` gives each
@@ -2846,6 +3270,11 @@ kconfig = "WZ_POLICY_ROUTING_TABLE_SHARING"
 choices = ["rwlock", "snapshot"]
 default = "rwlock"
 upstream = "Keeps a router's routing tables behind one reader-writer lock (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face coming up or one leaving waits for the messages being routed, and they wait for it."
+scope = "runtime"
+# Decided at the open of the runtime, before it serves its first face.
+binding = "open"
+mutability = "fixed"
+wire = "timing"
 since = 2
 help = '''
 How a node that routes for others shares its routing tables between the links
@@ -2869,6 +3298,10 @@ kconfig = "WZ_POLICY_REASSEMBLY_POOL_OVERFLOW"
 choices = ["reject", "diagnostic-event", "oldest-wins"]
 default = "reject"
 upstream = "Keeps one defragmentation buffer for each peer and channel, so a new fragmented message never waits on another peer's and there is no shared pool to fill. None of the three values is upstream's, since upstream has no such moment; `reject` is what wz did before the policy existed."
+scope = "session"
+binding = "live"
+mutability = "hot"
+wire = "none"
 since = 2
 help = '''
 What a node does with the first fragment of a new fragmented message when every
@@ -2893,6 +3326,11 @@ kconfig = "WZ_POLICY_LINK_TIE_ORDER"
 choices = ["zid-number", "zid-bytes"]
 default = "zid-number"
 upstream = "Two nodes that dial each other at once keep one transport; zenoh orders the two zids as the 128-bit numbers they are, the wire carrying a zid's little-endian bytes. zenoh-pico keeps no such rule, and compares two ids byte by byte from the first wire byte (`_z_id_cmp`)."
+scope = "link"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: both ends of a link must state the same value.
+wire = "visible"
 since = 2
 help = '''
 How a node orders two zids when it and a peer dialled each other at the same
