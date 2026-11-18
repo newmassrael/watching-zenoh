@@ -83,14 +83,15 @@ pub mod doc_revision;
 // documented by its own `//!` text and carries no outer `///` here: the two
 // would be merged, and the module's relative links would then be resolved from
 // this scope instead of from the module.
+//
+// The engine, the judge, the profile and the frames are the `wz-app-frame`
+// crate's, so a node can build and judge frames without linking this one; they
+// are re-exported at the paths they have here, and the documents over them stay.
+pub use wz_app_frame::{e2e_crc, e2e_frame, e2e_judge, e2e_profile};
 pub mod e2e_body;
 #[cfg(test)]
 mod e2e_body_tests;
-pub mod e2e_crc;
-pub mod e2e_frame;
 pub mod e2e_json;
-pub mod e2e_judge;
-pub mod e2e_profile;
 // The declaration that binds a key expression pattern to a profile, and the
 // judgement state a capture keeps per slot. Each is documented by its own `//!`
 // text, for the reason given above.
@@ -157,11 +158,12 @@ pub mod fields_json;
 // A message an application split over several samples on one key: the header
 // a deployment declares for its pieces, the state that joins them, and the
 // writer of the pieces. Each is documented by its own `//!` text, as the
-// end-to-end modules above are.
+// end-to-end modules above are. The header's profile is the `wz-app-frame`
+// crate's, re-exported here for the reason given above.
 pub mod segment_chain;
 #[cfg(test)]
 mod segment_chain_tests;
-pub mod segment_profile;
+pub use wz_app_frame::segment_profile;
 #[cfg(test)]
 mod segment_profile_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]

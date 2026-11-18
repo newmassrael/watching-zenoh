@@ -73,6 +73,7 @@ on:
       - "crates/wz-workload/**"
       - "crates/wz-tls-record/**"
       - "crates/wz-capture/**"
+      - "crates/wz-app-frame/**"
       - "crates/wz-cdylib-build/**"
       - "crates/wz-abi-stamp/**"
       - "crates/wz-conformance-build/**"

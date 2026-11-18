@@ -14,6 +14,12 @@ dependency edge or a path in its source, has folded the layers back into one,
 and nothing in the build would refuse it, because Cargo accepts any acyclic
 graph and a dev-dependency is not even a cycle.
 
+`wz-app-frame` is held to the same direction without being server-layer: the
+application frame (the CRC engine, the judge and the profiles) left the capture
+crate so a session runtime and the C ABIs can use it, and it is built on the
+core. The graph and source rules below cover it; the module rule does not,
+because no application-frame module was ever the core's.
+
 ## What is checked
 
 1. THE MODULES STILL IN CORE. A module of `crates/wz-session-core/src` (a
@@ -70,6 +76,14 @@ UPPER = {
     "wz-admin": "wz_admin",
 }
 
+# Every crate built on the core and never named by it: the server-layer crates
+# above and the crates that are not server-layer but sit above the core all the
+# same. The graph and source rules read this; the module rule reads `UPPER`.
+ABOVE_CORE = {
+    **UPPER,
+    "wz-app-frame": "wz_app_frame",
+}
+
 # A module stem is server-layer when it matches this. `extauth` itself and
 # `auth_dispatch` do not: they are the transport handshake and stay in core.
 SERVER_STEM = re.compile(r"^(?:storage_\w+|admin\w*|extauth_\w+)$")
@@ -81,8 +95,8 @@ SERVER_STEM = re.compile(r"^(?:storage_\w+|admin\w*|extauth_\w+)$")
 IN_CORE: frozenset[str] = frozenset()
 
 UPPER_PATH = re.compile(
-    r"\b(?:extern\s+crate\s+(?:" + "|".join(UPPER.values()) + r")\b|(?:"
-    + "|".join(UPPER.values())
+    r"\b(?:extern\s+crate\s+(?:" + "|".join(ABOVE_CORE.values()) + r")\b|(?:"
+    + "|".join(ABOVE_CORE.values())
     + r")\s*::)"
 )
 
@@ -146,12 +160,12 @@ def grade(meta: dict, in_core: frozenset[str]) -> tuple[list[str], str]:
 
     # 2. The graph.
     for dep in pkgs[CORE].get("dependencies", []):
-        if dep.get("name") in UPPER:
+        if dep.get("name") in ABOVE_CORE:
             findings.append(
                 f"{CORE} has a {_kind(dep)} dependency on {dep['name']}: the core never "
                 f"depends on an upper crate (a test that needs it moves to {dep['name']})"
             )
-    present_upper = [u for u in UPPER if u in pkgs]
+    present_upper = [u for u in ABOVE_CORE if u in pkgs]
     for upper in present_upper:
         normal = {
             d.get("name")
@@ -180,7 +194,7 @@ def grade(meta: dict, in_core: frozenset[str]) -> tuple[list[str], str]:
 
     census = (
         f"{len(found)} server module(s) still in {CORE} of {len(in_core)} listed; "
-        f"{len(present_upper)} of {len(UPPER)} upper crate(s) built; "
+        f"{len(present_upper)} of {len(ABOVE_CORE)} upper crate(s) built; "
         f"{len(rust_files)} core Rust file(s) read"
     )
     return findings, census
@@ -318,6 +332,30 @@ def selftest() -> int:
             {"core_line": "extern crate wz_admin;\n"},
             True,
             "names an upper crate's path",
+        ),
+        (
+            "the core depends on the application frame",
+            {"core_deps": (_dep("wz-app-frame", "dev"),)},
+            True,
+            "dev dependency on wz-app-frame",
+        ),
+        (
+            "the core names the application frame's path",
+            {"core_line": "use wz_app_frame::e2e_crc::Crc;\n"},
+            True,
+            "names an upper crate's path",
+        ),
+        (
+            "the application frame built on the core",
+            {"upper": {"wz-app-frame": (_dep(CORE),)}},
+            False,
+            "",
+        ),
+        (
+            "the application frame not built on the core",
+            {"upper": {"wz-app-frame": ()}},
+            True,
+            "no normal dependency on",
         ),
         (
             "prose that names a crate is not a path",

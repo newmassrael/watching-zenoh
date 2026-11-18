@@ -91,6 +91,11 @@ members = [
     # zenoh; the seam is a byte stream plus a direction, so a live tap can
     # replace the file reader without touching the decode side.
     "wz-capture",
+    # The application frame (the header an application writes in front of its
+    # payload, described by a profile): the CRC engine, the judge and the
+    # profiles. Below `wz-capture`, which re-exports it, and built on the core,
+    # so a session runtime or a C ABI can use it without the capture crate.
+    "wz-app-frame",
     # Round 1998 (item 470) — Linux packet I/O: the `AF_PACKET` socket, the
     # raweth link over it, and the capture tap. Split out of `wz-runtime-tokio`,
     # which never drove either and whose MANDATORY `tokio` is what kept the tap

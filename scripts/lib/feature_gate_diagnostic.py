@@ -120,6 +120,11 @@ AXIS: dict[str, str] = {
     # core's crate root gated until step 6 moved it: a consumer now types
     # `wz_admin::admin_connect`, so the probe is this crate's.
     "wz-admin": "wz_admin",
+    # The application frame, which left `wz-capture` with the segment profile
+    # and its synthetic fixture. Its one non-default feature, `fixtures`, gates
+    # `segment_profile::synthetic`, the path a consumer's test types; the probe
+    # is read off the module tree, as the storage plane's are off its root.
+    "wz-app-frame": "wz_app_frame",
 }
 
 # package -> feature -> the probes that prove a consumer is told about it.
@@ -163,6 +168,7 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
     # Derived, as the core's: an empty entry says every probe is read off the root.
     "wz-storage": {},
     "wz-admin": {},
+    "wz-app-frame": {},
 }
 
 # package -> feature -> why it gates no public path. A reason is what the next
@@ -475,6 +481,8 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-slot",
         )
     },
+    # Its one non-default feature gates a public path, probed off the module tree.
+    "wz-app-frame": {},
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public
@@ -827,6 +835,7 @@ DEFERRED: dict[str, dict[str, str]] = {
         ),
     },
     "wz-admin": {},
+    "wz-app-frame": {},
 }
 
 # A crate-root item a `#[cfg(feature)]` is attached to, by the shape that names

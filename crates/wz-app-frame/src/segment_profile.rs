@@ -7,13 +7,13 @@
 //!
 //! # What kind of splitting this is
 //!
-//! Not zenoh's. A transport `Fragment` chain is the protocol's, and this crate
-//! joins it under `above_transport`. Some senders split ABOVE zenoh instead: a
-//! message larger than they will put in one sample is cut into chunks, and each
-//! chunk goes out as an ordinary `Put` on the message's own key, its payload a
-//! small header (where the chunk sits in the whole, how large the whole is,
-//! which transfer it belongs to, a check value) followed by the chunk. To zenoh
-//! these are unrelated samples; only a reader that knows the header sees one
+//! Not zenoh's. A transport `Fragment` chain is the protocol's, and the capture
+//! crate joins it under `above_transport`. Some senders split ABOVE zenoh
+//! instead: a message larger than they will put in one sample is cut into
+//! chunks, and each chunk goes out as an ordinary `Put` on the message's own
+//! key, its payload a small header (where the chunk sits in the whole, how
+//! large the whole is, which transfer it belongs to, a check value) followed by
+//! the chunk. To zenoh these are unrelated samples; only a reader that knows the header sees one
 //! message, and only after the pieces are joined does the message's own
 //! framing (an end-to-end protection header, a serialized body) start.
 //!
@@ -21,7 +21,7 @@
 //!
 //! For the reason [`crate::e2e_profile`] gives: this repository is public, and
 //! a header's marks, widths and order are that deployment's. A profile is DATA,
-//! declared once in the declaration text, and this crate's tests run on
+//! declared once in the declaration text, and the workspace's tests run on
 //! synthetic profiles deliberately unlike any deployed one.
 //!
 //! # The description
@@ -429,8 +429,9 @@ impl SegmentProfile {
 
     /// The CRC `spec` computes over `header` and `chunk`, fed in the order its
     /// `cover` lists. The one place that order is applied: a reader checks a
-    /// piece with it and [`crate::segment_sender`] writes a piece's CRC with it.
-    pub(crate) fn crc_over(&self, spec: &CrcSpec, header: &[u8], chunk: &[u8]) -> u64 {
+    /// piece with it and the capture crate's `segment_sender` writes a piece's
+    /// CRC with it.
+    pub fn crc_over(&self, spec: &CrcSpec, header: &[u8], chunk: &[u8]) -> u64 {
         let mut digest = spec.engine.start();
         for cover in &spec.cover {
             match cover {
@@ -650,13 +651,16 @@ fn read_crc(value: &Json5Value, path: &str, fields: &[Field]) -> Result<CrcSpec,
     })
 }
 
-/// A SYNTHETIC segment profile and a builder of its pieces, for this crate's
-/// tests and for the fixtures other crates' tests build captures from.
+/// A SYNTHETIC segment profile and a builder of its pieces, for the capture
+/// crate's tests and for the fixtures other crates' tests build captures from.
 ///
 /// Deliberately unlike any deployed header: a big-endian mark, a little-endian
 /// stream value, a one-byte transfer number, three-byte little-endian size and
 /// offset, and a big-endian CRC-16 over everything but itself, chunk last.
-#[cfg(any(test, feature = "fixtures"))]
+///
+/// Behind `fixtures` alone: no test of this crate builds a piece, and a
+/// `cfg(test)` arm would not reach the crates whose tests do.
+#[cfg(feature = "fixtures")]
 pub mod synthetic {
     use alloc::vec::Vec;
 

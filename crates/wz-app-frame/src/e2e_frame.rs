@@ -106,7 +106,7 @@ impl Values {
     /// reads them itself. A reserved key still counts in the check that no key
     /// appears twice, so a repeat of one is refused here and not resolved
     /// silently.
-    pub(crate) fn from_tree(root: &Json5Value, reserved: &[&str]) -> Result<Self, DocError> {
+    pub fn from_tree(root: &Json5Value, reserved: &[&str]) -> Result<Self, DocError> {
         let entries = object(root, "")?;
         check_distinct(entries, "")?;
         let mut out = Vec::with_capacity(entries.len());
@@ -139,7 +139,7 @@ impl Values {
     }
 
     /// Whether the caller supplied `field`, whole or by its parts.
-    pub(crate) fn states(&self, field: &str) -> bool {
+    pub fn states(&self, field: &str) -> bool {
         self.get(field).is_some()
     }
 }

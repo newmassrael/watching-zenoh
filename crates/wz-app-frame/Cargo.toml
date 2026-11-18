@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-app-frame — the APPLICATION FRAME: the header an application writes in front of its payload,
+# or in front of each piece of a message it splits over several samples, described as data by a
+# profile. The CRC engine, the receiver's judgment of a stream of frames, the frame profile, the
+# frames built and opened under it, and the segment profile.
+#
+# Its own crate so a session runtime and the C ABIs can build and judge such frames without
+# linking the capture crate, which keeps the analysis planes above these modules and re-exports
+# them at the paths it has always had (`wz_capture::e2e_crc` and the rest). Built on the core and
+# never named by it (`scripts/lib/layer_direction_gate.py`).
+#
+# No third-party dependency, and `no_std`. The CRC engine and the judge need no allocator; the
+# profiles read a JSON document and are behind `alloc`.
+[package]
+name = "wz-app-frame"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Application frames of a wz node: CRC, judgment and the profiles that describe a header."
+
+[lib]
+name = "wz_app_frame"
+path = "src/lib.rs"
+
+[features]
+default = ["alloc"]
+
+# The profile, frame and segment-profile modules. Each reads a profile from the workspace's JSON
+# reader (`wz_session_core::json5`, behind the core's own `alloc`) and holds its fields in a
+# `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link no allocator.
+alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
+
+# `segment_profile::synthetic`: a synthetic segment profile and a builder of its pieces, for the
+# tests of crates above this one. A `#[cfg(test)]` module cannot cross a crate boundary, so the
+# capture crate turns this on for its own tests and forwards it from its `fixtures` feature.
+fixtures = ["alloc"]
+
+[dependencies]
+wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
+
+[lints]
+workspace = true

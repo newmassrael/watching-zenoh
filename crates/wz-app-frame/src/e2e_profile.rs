@@ -19,7 +19,7 @@
 //!
 //! This repository is public and the masks, bit meanings and header shapes of
 //! a deployed protocol are that deployment's. So a profile is DATA, passed on
-//! every call, and this crate's own tests run on synthetic profiles whose
+//! every call, and the workspace's tests run on synthetic profiles whose
 //! widths, orders, masks and names are deliberately unlike any real one. The
 //! only fixed constants are the published CRC definitions in
 //! [`crate::e2e_crc`]'s tests.
@@ -64,10 +64,10 @@
 //! * `counter` names the field the judge reads, the largest forward step it
 //!   accepts and the silence it tolerates.
 //! * `slot` (optional) says which frames of a CAPTURE share one counter, for
-//!   the pipeline that keeps a judge per slot (`crate::e2e_slots`); the
-//!   stateless doors ignore it. A slot is the key expression the frame was
-//!   published under, the sender, and the logical values of the `message`
-//!   fields (none by default, so one key carries one message). `by_zid`
+//!   the pipeline that keeps a judge per slot (`e2e_slots`, in the capture
+//!   crate); the stateless doors ignore it. A slot is the key expression the
+//!   frame was published under, the sender, and the logical values of the
+//!   `message` fields (none by default, so one key carries one message). `by_zid`
 //!   (default true) keeps two senders' counters apart; a deployment whose
 //!   receiver keeps one counter per message regardless of sender says `false`.
 //!   A `message` field may not be the crc, length or counter field: each of
@@ -142,7 +142,7 @@ pub enum DocError {
 }
 
 impl DocError {
-    pub(crate) fn invalid(path: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn invalid(path: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::Invalid {
             path: path.into(),
             reason: reason.into(),
@@ -411,7 +411,7 @@ impl Profile {
 /// whole grammar and refuses nesting past [`MAX_JSON_DEPTH`] without recursing
 /// beyond it; only then is the tree built, by a parser that has no bound of its
 /// own. Both refusals carry the byte they stopped at.
-pub(crate) fn read_json(text: &str) -> Result<Json5Value, DocError> {
+pub fn read_json(text: &str) -> Result<Json5Value, DocError> {
     let syntax = |e: Json5Error| DocError::Syntax {
         offset: e.offset,
         expected: e.expected,
@@ -424,7 +424,7 @@ pub(crate) fn read_json(text: &str) -> Result<Json5Value, DocError> {
 
 /// Everything below reads one part of the document. A path is built as the
 /// reader descends, so every refusal names where it stands.
-pub(crate) fn child(path: &str, key: &str) -> String {
+pub fn child(path: &str, key: &str) -> String {
     let mut out = String::from(path);
     out.push('/');
     for c in key.chars() {
@@ -437,7 +437,7 @@ pub(crate) fn child(path: &str, key: &str) -> String {
     out
 }
 
-pub(crate) fn at(path: &str, index: usize) -> String {
+pub fn at(path: &str, index: usize) -> String {
     format!("{path}/{index}")
 }
 
@@ -452,9 +452,9 @@ pub(crate) fn describe(value: &Json5Value) -> &'static str {
     }
 }
 
-pub(crate) type Entries = [(String, Json5Value)];
+pub type Entries = [(String, Json5Value)];
 
-pub(crate) fn object<'a>(value: &'a Json5Value, path: &str) -> Result<&'a Entries, DocError> {
+pub fn object<'a>(value: &'a Json5Value, path: &str) -> Result<&'a Entries, DocError> {
     match value {
         Json5Value::Object(entries) => Ok(entries),
         other => Err(DocError::invalid(
@@ -464,7 +464,7 @@ pub(crate) fn object<'a>(value: &'a Json5Value, path: &str) -> Result<&'a Entrie
     }
 }
 
-pub(crate) fn array<'a>(value: &'a Json5Value, path: &str) -> Result<&'a [Json5Value], DocError> {
+pub fn array<'a>(value: &'a Json5Value, path: &str) -> Result<&'a [Json5Value], DocError> {
     match value {
         Json5Value::Array(items) => Ok(items),
         other => Err(DocError::invalid(
@@ -477,7 +477,7 @@ pub(crate) fn array<'a>(value: &'a Json5Value, path: &str) -> Result<&'a [Json5V
 /// Refuse a key outside `allowed` and a key that appears twice. The reader
 /// keeps every member, and resolving a repeat silently (last one wins) would
 /// make a typo in a profile read as a choice.
-pub(crate) fn check_keys(entries: &Entries, allowed: &[&str], path: &str) -> Result<(), DocError> {
+pub fn check_keys(entries: &Entries, allowed: &[&str], path: &str) -> Result<(), DocError> {
     for (key, _) in entries {
         if !allowed.contains(&key.as_str()) {
             return Err(DocError::invalid(
@@ -491,7 +491,7 @@ pub(crate) fn check_keys(entries: &Entries, allowed: &[&str], path: &str) -> Res
 
 /// Refuse a key that appears twice, for an object whose keys are the caller's
 /// own names rather than a fixed list.
-pub(crate) fn check_distinct(entries: &Entries, path: &str) -> Result<(), DocError> {
+pub fn check_distinct(entries: &Entries, path: &str) -> Result<(), DocError> {
     for (i, (key, _)) in entries.iter().enumerate() {
         if entries[..i].iter().any(|(earlier, _)| earlier == key) {
             return Err(DocError::invalid(
@@ -503,11 +503,11 @@ pub(crate) fn check_distinct(entries: &Entries, path: &str) -> Result<(), DocErr
     Ok(())
 }
 
-pub(crate) fn optional<'a>(entries: &'a Entries, key: &str) -> Option<&'a Json5Value> {
+pub fn optional<'a>(entries: &'a Entries, key: &str) -> Option<&'a Json5Value> {
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-pub(crate) fn required<'a>(
+pub fn required<'a>(
     entries: &'a Entries,
     key: &str,
     path: &str,
@@ -542,7 +542,7 @@ fn uint_from_text(text: &str) -> Result<u64, String> {
 
 /// An unsigned integer as a profile or a values document writes one: a plain
 /// decimal JSON number, or a string of decimal or `0x` hex digits.
-pub(crate) fn read_uint(value: &Json5Value, path: &str) -> Result<u64, DocError> {
+pub fn read_uint(value: &Json5Value, path: &str) -> Result<u64, DocError> {
     let result = match value {
         Json5Value::Number(text) => {
             if is_plain_decimal(text) {
@@ -564,7 +564,7 @@ pub(crate) fn read_uint(value: &Json5Value, path: &str) -> Result<u64, DocError>
     result.map_err(|reason| DocError::invalid(path, reason))
 }
 
-pub(crate) fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError> {
+pub fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError> {
     match value {
         Json5Value::Bool(b) => Ok(*b),
         other => Err(DocError::invalid(
@@ -574,7 +574,7 @@ pub(crate) fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError
     }
 }
 
-pub(crate) fn read_string<'a>(value: &'a Json5Value, path: &str) -> Result<&'a str, DocError> {
+pub fn read_string<'a>(value: &'a Json5Value, path: &str) -> Result<&'a str, DocError> {
     match value {
         Json5Value::String(s) => Ok(s),
         other => Err(DocError::invalid(

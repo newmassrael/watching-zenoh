@@ -3878,6 +3878,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-app-frame"
+version = "0.1.0"
+dependencies = [
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-auth"
 version = "0.1.0"
 dependencies = [
@@ -4009,6 +4016,7 @@ name = "wz-capture"
 version = "0.1.0"
 dependencies = [
  "regex-automata",
+ "wz-app-frame",
  "wz-codecs",
  "wz-packet-fixtures",
  "wz-session-core",

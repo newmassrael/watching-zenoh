@@ -51,7 +51,11 @@ reassembly = ["wz-session-core/reassembly"]
 # It pulls `codec-*` through `network-codecs` because the captures carry real
 # `DeclKexpr` and `Push` records — a fixture that could not encode them would be
 # grading a shape rather than the wire.
-fixtures = ["network-codecs"]
+#
+# It forwards `wz-app-frame/fixtures`, the synthetic segment profile behind
+# `segment_profile::synthetic`: that module is re-exported from there, and the
+# consumers that build split-message captures name it through this crate.
+fixtures = ["network-codecs", "wz-app-frame/fixtures"]
 
 # R311y855 — the FIELD walker, and DEFAULT-OFF, which is the one place this
 # crate's default set says no.
@@ -284,6 +288,12 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # graph, including as a dev-dependency.
 ] }
 
+# The application frame: the CRC engine, the judge, the frame profile and the
+# frames, and the segment profile, re-exported at `crate::e2e_crc` and the rest.
+# Its own crate so a node builds and judges frames without linking this one. At
+# its defaults (`alloc`), which this crate's documents and planes all read.
+wz-app-frame = { path = "../wz-app-frame" }
+
 # `filter-regex`'s engine, and only it: see that feature. `alloc` without `std`,
 # the meta engine and the Unicode tables a pattern's classes read.
 regex-automata = { version = "0.4", default-features = false, optional = true, features = [
@@ -311,6 +321,15 @@ path = "../wz-packet-fixtures"
 # rule is load-bearing for the MCU profiles.
 [dev-dependencies.wz-session-wire-fixtures]
 path = "../wz-session-wire-fixtures"
+
+# The synthetic segment profile (`segment_profile::synthetic`) the split-message
+# tests build their pieces with. It was a `#[cfg(test)]` module while the
+# profile lived here; across the crate boundary it is `wz-app-frame`'s
+# `fixtures` feature, which this crate's own tests need whether or not its
+# `fixtures` feature is on. A dev-dependency, so no consumer is charged for it.
+[dev-dependencies.wz-app-frame]
+path = "../wz-app-frame"
+features = ["fixtures"]
 
 # R2107 (open-debt item 527) — `wire_const::T_MID_KEEP_ALIVE`, so the decode
 # bench's payload is REAL zenoh session traffic rather than filler. Its first
