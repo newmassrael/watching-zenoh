@@ -115,7 +115,7 @@ fn asking(peer: SocketAddr) -> Member {
 fn params(timeout_ms: u64, exit_on_first: bool) -> ScoutParams {
     ScoutParams {
         what: WHAT,
-        zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        zid: Some([0xAA, 0xBB, 0xCC, 0xDD].into()),
         timeout_ms,
         exit_on_first,
     }

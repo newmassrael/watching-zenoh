@@ -97,7 +97,7 @@ const VALUE: &str = "WZ-MCAST-DIALIN-R311no";
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: vec![0x77; 4],
+        zid: [0x77; 4].into(),
         lease_ms: 5_000,
         join_interval_ms: 50,
         seq_num_res: PICO_SN_RESOLUTION,

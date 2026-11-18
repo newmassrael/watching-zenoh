@@ -171,6 +171,9 @@ pub struct ScoutedHello {
 pub fn decode_scouted_hello(bytes: &[u8]) -> Option<ScoutedHello> {
     let view = ScoutingHelloView::decode(&mut SceCursor::new(bytes)).ok()?;
     let hello = view.body;
+    // A Hello naming a zid no node has is no Hello, as for zenoh's decoder
+    // (`crate::scouting_message::parse_scouting` cites it).
+    crate::session_zid::SessionZid::new(hello.zid.into_inner()).ok()?;
     Some(ScoutedHello {
         version: hello.version,
         whatami: WhatAmI::from_wire(hello.cbyte),
@@ -275,19 +278,19 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
     fn scout_emit(&mut self) {
         let a = &self.inner;
         R::with_mutex_mut(&a.trace, |trace| trace.scout_emit += 1);
-        let zid = &a.params.zid;
+        let zid = a.params.zid;
         // `what` in the flags byte's low three bits; the I flag and the zid's length
-        // above them are the document's, from whether a zid is presented. An empty
-        // zid is the Scout that names no asker (I clear), as zenoh's own is.
+        // above them are the document's, from whether a zid is presented. No zid
+        // is the Scout that names no asker (I clear), as zenoh's own is.
         let mut flags = Scout::new();
         flags.set_what(a.params.what);
         let body = ScoutParts {
             version: wz_codecs::wire_const::PROTOCOL_VERSION,
             cbyte: flags.cbyte,
             // The id is at most the codec's own bound (`zid_len_m1` is four bits).
-            zid: (!zid.is_empty()).then(|| {
+            zid: zid.as_ref().map(|zid| {
                 sce_forge_runtime::codec::Bounded::new(zid.as_slice())
-                    .expect("a scouting zid is 1..=16 bytes, the codec's bounds")
+                    .expect("a SessionZid is 1..=16 bytes, the codec's bounds")
             }),
         };
         // The whole message, header and chain included, by its document
@@ -488,7 +491,10 @@ pub fn window_datagram<R: Runtime>(
         false
     };
     if !advanced {
-        actions.record_ignored(classify_ignored_scout_rx(&actions.params.zid, bytes));
+        actions.record_ignored(classify_ignored_scout_rx(
+            actions.params.zid.as_deref().unwrap_or(&[]),
+            bytes,
+        ));
     }
 }
 

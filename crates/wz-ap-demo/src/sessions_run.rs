@@ -51,10 +51,13 @@ use wz::runtime_tokio::session_open::{
 };
 use wz::runtime_tokio::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 
-use crate::args::{resolve_node_zid, session_init_params_for, ScoutSocketArgs, TransportTuning};
+use crate::args::{
+    resolve_node_zid, session_init_params_for, session_zid_of, ScoutSocketArgs, TransportTuning,
+};
 use crate::sessions::{Mode, SessionLink, SessionSpec, SessionsPlan};
 use crate::sessions_driver::DriverEntry;
 use crate::shutdown::shutdown_signal;
+use wz::runtime_tokio::session_glue::SessionZid;
 
 /// How often a session looks for questions whose deadline has passed: the
 /// one-shot run modes' default `--sweep-cadence-ms`.
@@ -119,7 +122,7 @@ pub(crate) async fn run_sessions(plan: SessionsPlan) -> io::Result<bool> {
 
 /// The session's identity: its own zid, else the document's, else a random
 /// one drawn as upstream draws one when the config names no `id`.
-fn session_zid(spec: &SessionSpec) -> io::Result<Vec<u8>> {
+fn session_zid(spec: &SessionSpec) -> io::Result<SessionZid> {
     let written = match &spec.zid {
         // The rules admitted the spelling, so this is upstream's own reading
         // of it; a refusal here would be the two disagreeing.
@@ -131,7 +134,7 @@ fn session_zid(spec: &SessionSpec) -> io::Result<Vec<u8>> {
         })?),
         None => None,
     };
-    resolve_node_zid(written)
+    session_zid_of(&resolve_node_zid(written)?)
 }
 
 fn whatami(mode: Mode) -> WhatAmI {
@@ -195,7 +198,11 @@ async fn answer_scouts(
     Ok(())
 }
 
-async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool>) -> SessionEnd {
+async fn run_session(
+    spec: SessionSpec,
+    zid: SessionZid,
+    stop: watch::Receiver<bool>,
+) -> SessionEnd {
     let name = spec.name.clone();
     let asked = Asked {
         driver: &spec.driver,
@@ -248,9 +255,9 @@ async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool
 fn unicast_params(
     name: &str,
     whatami: WhatAmI,
-    zid: &[u8],
+    zid: SessionZid,
 ) -> Result<wz::runtime_tokio::session_glue::SessionInitParams, SessionEnd> {
-    session_init_params_for(whatami, zid.to_vec(), &TransportTuning::default()).map_err(|e| {
+    session_init_params_for(whatami, zid, &TransportTuning::default()).map_err(|e| {
         eprintln!("wz-ap-demo session {name}: failed: {e}");
         SessionEnd::Failed
     })
@@ -260,14 +267,14 @@ fn unicast_params(
 async fn run_connect(
     name: &str,
     whatami: WhatAmI,
-    zid: Vec<u8>,
+    zid: SessionZid,
     endpoints: &[String],
     asked: &Asked<'_>,
     mut stop: watch::Receiver<bool>,
 ) -> SessionEnd {
     let mut why = Vec::new();
     for endpoint in endpoints {
-        let params = match unicast_params(name, whatami, &zid) {
+        let params = match unicast_params(name, whatami, zid) {
             Ok(p) => p,
             Err(end) => return end,
         };
@@ -437,7 +444,7 @@ async fn serve_unicast(
 async fn run_listen(
     name: &str,
     whatami: WhatAmI,
-    zid: Vec<u8>,
+    zid: SessionZid,
     endpoint: &str,
     max_sessions: usize,
     asked: &Asked<'_>,
@@ -491,7 +498,7 @@ async fn run_listen(
         };
         match link {
             Ok(link) => {
-                let Ok(params) = unicast_params(name, whatami, &zid) else {
+                let Ok(params) = unicast_params(name, whatami, zid) else {
                     failed = true;
                     break;
                 };
@@ -571,7 +578,7 @@ struct GroupPolicy<'a> {
 #[cfg(feature = "transport-multicast")]
 async fn run_group(
     name: &str,
-    zid: Vec<u8>,
+    zid: SessionZid,
     endpoint: &str,
     join_interval_ms: u64,
     lease_ms: u64,
@@ -616,7 +623,7 @@ async fn run_group(
 /// offer, the default queue. The two intervals are the document's.
 #[cfg(feature = "transport-multicast")]
 fn group_params(
-    zid: Vec<u8>,
+    zid: SessionZid,
     join_interval_ms: u64,
     lease_ms: u64,
 ) -> wz::runtime_tokio::multicast_glue::MulticastParams {
@@ -830,7 +837,7 @@ where
 #[cfg(not(feature = "transport-multicast"))]
 async fn run_group(
     name: &str,
-    _zid: Vec<u8>,
+    _zid: SessionZid,
     _endpoint: &str,
     _join_interval_ms: u64,
     _lease_ms: u64,
@@ -924,7 +931,7 @@ mod group_rejoin_tests {
     use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
     use wz_runtime_tokio_test_support::multicast_bus::{GroupBus, GroupBusLink};
 
-    use super::{group_params, serve_group, SessionEnd};
+    use super::{group_params, serve_group, SessionEnd, SessionZid};
 
     const ENDPOINT: &str = "udp/224.0.0.224:7446";
 
@@ -967,7 +974,10 @@ mod group_rejoin_tests {
         let (stop_tx, stop_rx) = watch::channel(false);
         let carrier = Arc::new(Notify::new());
         let (a_lines, b_lines) = (Lines::default(), Lines::default());
-        let (zid_a, zid_b) = (vec![0xA1, 0x01], vec![0xB2, 0x02]);
+        let (zid_a, zid_b) = (
+            SessionZid::from([0xA1, 0x01]),
+            SessionZid::from([0xB2, 0x02]),
+        );
         let (hex_a, hex_b) = (zid_to_zenoh_hex(&zid_a), zid_to_zenoh_hex(&zid_b));
         let binds = Cell::new(0u16);
         let bind_a = || {
@@ -1070,7 +1080,10 @@ mod group_rejoin_tests {
         let (stop_a_tx, stop_a_rx) = watch::channel(false);
         let (stop_b_tx, stop_b_rx) = watch::channel(false);
         let (a_lines, b_lines) = (Lines::default(), Lines::default());
-        let (zid_a, zid_b) = (vec![0xA1, 0x01], vec![0xB2, 0x02]);
+        let (zid_a, zid_b) = (
+            SessionZid::from([0xA1, 0x01]),
+            SessionZid::from([0xB2, 0x02]),
+        );
         let (hex_a, hex_b) = (zid_to_zenoh_hex(&zid_a), zid_to_zenoh_hex(&zid_b));
 
         let a = {

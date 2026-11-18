@@ -134,7 +134,7 @@ fn group_member(zid_byte: u8) -> (impl std::future::Future<Output = ()>, Multica
         let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
         let params = MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: vec![zid_byte; 4],
+            zid: [zid_byte; 4].into(),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,

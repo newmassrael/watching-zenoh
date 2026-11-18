@@ -194,7 +194,7 @@ async fn scout_discovers_peer_locator_over_multicast() {
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
         what: 0x03, // ROUTER | PEER
-        zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        zid: Some([0xAA, 0xBB, 0xCC, 0xDD].into()),
         timeout_ms: 1000,
         // The implicit-scout arm: this e2e asserts ONE discovered locator.
         exit_on_first: true,
@@ -277,7 +277,7 @@ async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_grou
             .expect("bind the MOVED multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
-            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            zid: Some([0xAA, 0xBB, 0xCC, 0xDD].into()),
             timeout_ms: 500,
             exit_on_first: true,
         });
@@ -365,7 +365,7 @@ async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
         what: 0x03,
-        zid: OUR_ZID.to_vec(),
+        zid: Some(wz_session_core::session_init_params::zid_bytes(OUR_ZID)),
         timeout_ms: 1500,
         // The survey arm: the window is closed by its deadline, so every
         // datagram below is observed by ONE window.
@@ -457,7 +457,7 @@ async fn an_empty_answer_from_the_group_does_not_end_an_exit_on_first_window() {
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
         what: 0x03,
-        zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        zid: Some([0xAA, 0xBB, 0xCC, 0xDD].into()),
         timeout_ms: 2000,
         // The SESSION-OPEN arm, which is the one the defect reached.
         exit_on_first: true,
@@ -606,7 +606,7 @@ mod round2 {
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03, // ROUTER | PEER
-            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            zid: Some([0xAA, 0xBB, 0xCC, 0xDD].into()),
             timeout_ms: 1000,
             // The implicit-scout arm: this e2e asserts ONE discovered locator.
             exit_on_first: true,
@@ -744,7 +744,7 @@ mod round3_tls {
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03, // ROUTER | PEER
-            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            zid: Some([0xAA, 0xBB, 0xCC, 0xDD].into()),
             timeout_ms: 1000,
             // The implicit-scout arm: this e2e asserts ONE discovered locator.
             exit_on_first: true,

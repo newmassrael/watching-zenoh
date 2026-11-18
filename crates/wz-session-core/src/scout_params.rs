@@ -5,7 +5,8 @@
 //!
 //! The inputs `scout_emit()` packs into the outbound Scout frame
 //! (`sources/codecs/scout.scxml` body = version + cbyte + zid). Pure
-//! owned value type; alloc-gated (the `zid` is a `Vec<u8>`). The
+//! owned value type; the `zid` is a [`crate::session_zid::SessionZid`] when the
+//! Scout names its asker. The
 //! scouting-side sibling of [`crate::session_init_params::SessionInitParams`]
 //! — kept separate so the pre-session scouting subsystem does not reuse
 //! (and thereby couple to) the session handshake parameter bundle.
@@ -21,8 +22,6 @@
 //! belongs to the runtime. This is the deploy-configurable window the
 //! prior revision's note anticipated.
 
-use alloc::vec::Vec;
-
 /// Inputs for one outbound Scout frame plus the active-scouting deadline.
 ///
 /// No protocol version: a Scout announces the protocol's
@@ -36,12 +35,10 @@ pub struct ScoutParams {
     /// scouting for routers and peers sends `0x03`). Mirrors
     /// `_z_s_msg_make_scout(what, zid)`'s `what` argument.
     pub what: u8,
-    /// The scouter's own zenoh id. When non-empty, `scout_emit` sets the
+    /// The scouter's own zenoh id. When present, `scout_emit` sets the
     /// Scout cbyte `I` flag, packs `zid_len - 1` into the high nibble,
-    /// and appends the bytes; an empty zid emits an I=0 Scout (no id on
-    /// the wire). Length must be 1..=16 when present (the 4-bit
-    /// `zid_len_m1` field caps it).
-    pub zid: Vec<u8>,
+    /// and appends the bytes; `None` emits an I=0 Scout (no id on the wire).
+    pub zid: Option<crate::session_zid::SessionZid>,
     /// Active-scouting window in milliseconds (docs/scouting-fsm.md §2.5,
     /// `scouting.timeout_ms`, default 1000). The host drive loop
     /// (`scouting_glue::drive_scouting_until_resolved`) raises

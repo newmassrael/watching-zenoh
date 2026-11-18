@@ -392,7 +392,8 @@ impl ScoutLink {
         loop {
             let actions = ScoutingActions::new(ScoutParams {
                 what,
-                zid: zid.to_vec(),
+                // The node's own zid names it as the asker; bytes that are no zid ask as nobody.
+                zid: wz_session_core::session_zid::SessionZid::new(zid).ok(),
                 timeout_ms: window_ms,
                 // The survey arm: every responder of the window, not the first (upstream's
                 // callback returns `Loop::Continue` always).
@@ -716,7 +717,7 @@ mod tests {
     fn a_window_hands_each_hello_over_once_and_only_of_the_roles_asked_for() {
         let actions: std::sync::Arc<ScoutingActions> = ScoutingActions::new(ScoutParams {
             what: 2,
-            zid: vec![9],
+            zid: Some([9].into()),
             timeout_ms: 1000,
             exit_on_first: false,
         });

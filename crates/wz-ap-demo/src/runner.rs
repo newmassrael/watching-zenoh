@@ -987,7 +987,8 @@ pub(crate) async fn scout_for_peer_locator(
     // carries. `--zid` therefore reaches here, not only the session params.
     let actions = ScoutingActions::new(ScoutParams {
         what: SCOUT_WHAT,
-        zid,
+        // The node's zid names the asker; bytes that are no zid ask as nobody.
+        zid: wz::runtime_tokio::session_glue::SessionZid::new(&zid).ok(),
         timeout_ms: SCOUT_CYCLE_MS,
         // The IMPLICIT scout: this path wants one dial target and returns as
         // soon as it has one, which is what pico's session-open scout passes
@@ -1307,7 +1308,7 @@ async fn spawn_scouting_autoconnect(
         // with no consequence, and asking for fewer would hide a peer the policy
         // admits.
         what: role_bits(args.matcher),
-        zid: zid.to_vec(),
+        zid: wz::runtime_tokio::session_glue::SessionZid::new(zid).ok(),
         timeout_ms: SCOUT_CYCLE_MS,
         // SURVEY mode. `--scout` sets this because it wants ONE dial target;
         // this plane must see every responder in the window, which is the arm
@@ -2871,7 +2872,7 @@ async fn install_rescout_plan(
         driver,
         ScoutParams {
             what: SCOUT_WHAT,
-            zid: plan.zid.clone(),
+            zid: wz::runtime_tokio::session_glue::SessionZid::new(&plan.zid).ok(),
             timeout_ms: SCOUT_CYCLE_MS,
             // Overwritten to `true` by `ScoutedGroup::new` (pico's
             // `_z_locators_by_scout` passes `true`); named here so the value
@@ -6837,7 +6838,7 @@ async fn run_router_hat_until(
             // `transport/link/tx/queue`, as the unicast sessions do, and its
             // `transport/link/rx/max_message_size`.
             wz::runtime_tokio::multicast_glue::RouterGroupProfile {
-                zid: params.zid.to_vec(),
+                zid: params.zid,
                 qos: multicast_qos,
                 compression: false,
                 tx_queue: params.tx_queue,

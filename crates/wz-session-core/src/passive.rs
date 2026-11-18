@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 
 use crate::chain_loss::ChainLoss;
 use crate::ext_header::{establishment_ext_id as est_ext, ext_eid};
-use crate::inbound::{parse_inbound_consuming, InboundFrame};
+use crate::inbound::{parse_inbound_observed, InboundFrame};
 #[cfg(feature = "codec-frame")]
 use crate::network_message::{
     parse_frame_payload_best_effort, parse_lowlatency_payload_best_effort, BatchParse,
@@ -1513,6 +1513,13 @@ pub struct PassiveFrame {
     /// verdict, and the capture layer's `is_complete` deliberately does not
     /// consult it.
     pub undefined_mandatory_ext: Option<u8>,
+    /// The message names a zid no node has (an Init or a Join whose zid is
+    /// zero): a participant refuses it where it reads it
+    /// ([`crate::parse_error::InboundParseError::InvalidZid`]); the observer
+    /// reads it, keeps the row, and says so here. Why, in full, is
+    /// [`InboundFrame::names_no_zid`] of the row's frame. A fact about the
+    /// SENDER, like [`Self::undefined_mandatory_ext`].
+    pub names_no_zid: bool,
     /// This message's OWN bytes, when the batch it came out of was
     /// lz4 on the wire; `None` for every message read straight off the wire.
     ///
@@ -2177,7 +2184,7 @@ pub const OPENS_LZ4_BATCHES: bool = cfg!(feature = "transport-compression");
 fn unit_reads_whole(unit: &[u8]) -> bool {
     let mut pos = 0;
     while pos < unit.len() {
-        match parse_inbound_consuming(&unit[pos..]) {
+        match parse_inbound_observed(&unit[pos..]) {
             Ok((frame, consumed))
                 if consumed > 0
                     && frame
@@ -4132,6 +4139,7 @@ fn walk_unit(
                     wire_end,
                     batch_offset: None,
                     undefined_mandatory_ext: None,
+                    names_no_zid: false,
                     prefix_width,
                     frame: Err(InboundParseError::CompressionFailed),
                     context: *judge.context(),
@@ -4180,10 +4188,10 @@ fn walk_unit(
                 rest.len(),
             ))
         } else {
-            parse_inbound_consuming(rest)
+            parse_inbound_observed(rest)
         };
         #[cfg(not(feature = "codec-frame"))]
-        let parsed = parse_inbound_consuming(rest);
+        let parsed = parse_inbound_observed(rest);
         // An Init or a Join announcing another protocol version is not read past
         // that byte: see `InboundParseError::ForeignVersion`. It takes the
         // decode-error path from here, so it names nobody, folds nothing and,
@@ -4288,6 +4296,7 @@ fn walk_unit(
             wire_end,
             batch_offset,
             undefined_mandatory_ext,
+            names_no_zid: frame.as_ref().is_ok_and(|f| f.names_no_zid().is_some()),
             prefix_width,
             frame,
             context: *judge.context(),
@@ -7549,6 +7558,28 @@ mod tests {
             0,
             "the counter is per direction"
         );
+    }
+
+    /// A capture of a peer that names a zero zid in its InitSyn still dissects: a participant
+    /// refuses the message, and the observer reads it, keeps its row and says why on it. The
+    /// control is the same InitSyn naming a zid.
+    #[test]
+    #[cfg(feature = "codec-init-body")]
+    fn an_init_naming_a_zero_zid_is_read_and_reported_on_its_row() {
+        let init = |zid: u8| [crate::wire_const::T_MID_INIT, 0x09, 0x01, zid];
+        let mut s = PassiveSession::new();
+        let named = sole(s.next_datagram(Direction::A, &init(0xAA), 0));
+        assert!(named.frame.is_ok());
+        assert!(!named.names_no_zid, "the control arm");
+
+        let mut s = PassiveSession::new();
+        let zero = sole(s.next_datagram(Direction::A, &init(0x00), 0));
+        assert!(
+            zero.frame.is_ok(),
+            "the observer reads the message a participant refuses"
+        );
+        assert!(zero.names_no_zid);
+        assert!(crate::inbound::parse_inbound(&init(0x00)).is_err());
     }
 
     /// R311y610 (§4.1) — the SOURCE says it lost bytes, and that is evidence

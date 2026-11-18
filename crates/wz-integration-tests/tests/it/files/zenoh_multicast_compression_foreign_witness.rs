@@ -234,7 +234,7 @@ async fn bind_member(port: u16) -> std::io::Result<UdpDriver> {
 fn member_params(zid_byte: u8, compression: bool) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: vec![zid_byte; 4],
+        zid: [zid_byte; 4].into(),
         lease_ms: 5_000,
         join_interval_ms: 100,
         seq_num_res: 0x02,

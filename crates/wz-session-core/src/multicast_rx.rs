@@ -38,7 +38,7 @@ use crate::link::RxBytes;
 use crate::multicast_dispatch::{FrameIngest, JoinOutcome, MulticastDispatcher, TableGrowth};
 #[cfg(feature = "transport-qos")]
 use crate::multicast_join::decode_join_qos;
-use crate::multicast_join::{decode_join, judge_join, JoinMismatch};
+use crate::multicast_join::{decode_join_named, judge_join, JoinMismatch};
 use crate::multicast_params::{GroupJoinRule, MulticastParams};
 use crate::multicast_peer_arrived::MulticastPeerArrived;
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLostReason};
@@ -371,7 +371,7 @@ where
             // A JOIN announces its zid; validate (§3.2 rejection rules), then
             // admit / refresh the peer at this address. Filter our own zid: a
             // node is not its own peer.
-            if let Some(join) = decode_join(bytes) {
+            if let Some((join, zid)) = decode_join_named(bytes) {
                 // R2848 — counted before the own-zid filter: the loopback echo
                 // of our own beacon is a message this link received.
                 stats.transport_message_received();
@@ -402,19 +402,14 @@ where
                             // peer's periodic beacon.
                             #[cfg(feature = "transport-qos")]
                             let admission = dispatcher.ingest_join_qos(
-                                join.zid.into_inner(),
+                                zid,
                                 src,
                                 baseline,
                                 qos_next_sns,
                                 now_ms,
                             );
                             #[cfg(not(feature = "transport-qos"))]
-                            let admission = dispatcher.ingest_join(
-                                join.zid.into_inner(),
-                                src,
-                                baseline,
-                                now_ms,
-                            );
+                            let admission = dispatcher.ingest_join(zid, src, baseline, now_ms);
                             // R2728 — announce the ARRIVAL, the half this surface
                             // lacked: the departure event has existed since R311y784
                             // and nothing ever said a peer had COME. Fired only on

@@ -66,11 +66,23 @@ pub fn join_message_len(bytes: &[u8]) -> Option<usize> {
 /// `crate::multicast_join::judge_join`) before feeding it to
 /// [`MulticastDispatcher::ingest_join`](crate::multicast_dispatch::MulticastDispatcher::ingest_join).
 pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
+    decode_join_named(bytes).map(|(join, _)| join)
+}
+
+/// [`decode_join`] with the zid the JOIN names as a
+/// [`SessionZid`](crate::session_zid::SessionZid), which is what a group admits
+/// its member under. A JOIN whose zid is zero is no JOIN, refused here where it
+/// is read as zenoh's decoder refuses it: it reads the bytes of an id and
+/// refuses the message when they are not a non-zero id
+/// (`commons/zenoh-codec/src/core/zenohid.rs` @
+/// `ZenohIdProto::try_from(&id[..size]).map_err(|_| DidntRead)`).
+pub fn decode_join_named(bytes: &[u8]) -> Option<(Join<'_>, crate::session_zid::SessionZid)> {
     let (view, _) = read_join(bytes)?;
     let in_seconds = view.t();
     let mut join = view.body;
     join.lease = crate::lease::lease_from_wire(in_seconds, join.lease);
-    Some(join)
+    let zid = crate::session_zid::SessionZid::new(join.zid.into_inner()).ok()?;
+    Some((join, zid))
 }
 
 /// If `bytes` is a multicast JOIN datagram, decode it and return the

@@ -82,7 +82,7 @@ const PAYLOAD: &[u8] = b"pub-over-multicast";
 /// (the pico-faithful two-channel group) and the default transmission queue.
 fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroupProfile {
     wz_runtime_tokio::multicast_glue::RouterGroupProfile {
-        zid,
+        zid: wz_session_core::session_init_params::zid_bytes(&zid),
         qos: false,
         compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
@@ -113,7 +113,7 @@ async fn bind_publisher(port: u16) -> std::io::Result<UdpDriver> {
 fn mc_params(zid_byte: u8) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: vec![zid_byte; 4],
+        zid: [zid_byte; 4].into(),
         lease_ms: 5_000,
         join_interval_ms: 50,
         seq_num_res: 0x02,

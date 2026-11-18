@@ -112,7 +112,15 @@ pub enum ScoutingFrame {
 /// "multicast transports are not expected to handle INIT messages"
 /// (`src/transport/multicast/rx.c:493-504`).
 pub fn parse_scouting(bytes: &[u8]) -> Result<ScoutingFrame, InboundParseError> {
-    parse_scouting_consuming(bytes).map(|(frame, _)| frame)
+    let (frame, _) = parse_scouting_consuming(bytes)?;
+    // A participant refuses a Scout or a Hello that names a zid no node has, as
+    // zenoh's decoder refuses it: it reads the id's bytes and refuses the message
+    // when they are not a non-zero id (`commons/zenoh-codec/src/core/zenohid.rs` @
+    // `ZenohIdProto::try_from(&id[..size]).map_err(|_| DidntRead)`).
+    match frame.names_no_zid() {
+        Some(refused) => Err(InboundParseError::InvalidZid(refused)),
+        None => Ok(frame),
+    }
 }
 
 /// [`parse_scouting`], and how many bytes of `bytes` the message took: the
@@ -258,6 +266,25 @@ impl ScoutingFrame {
             ScoutingFrame::Unknown { .. } => None,
         }
     }
+
+    /// Why the zid this message names is no zid: a Hello's, and a Scout's when
+    /// it names its asker. `None` for a zid, for a Scout that names nobody and
+    /// for a MID this build does not know. A participant refuses such a message
+    /// ([`parse_scouting`]); an observer reads it and reports this on its row.
+    pub fn names_no_zid(&self) -> Option<crate::session_zid::ZidError> {
+        match self {
+            #[cfg(feature = "codec-scout")]
+            ScoutingFrame::Scout { body, .. } => body
+                .zid
+                .as_ref()
+                .and_then(|zid| crate::session_zid::SessionZid::new(zid.as_slice()).err()),
+            #[cfg(feature = "codec-hello")]
+            ScoutingFrame::Hello { body, .. } => {
+                crate::session_zid::SessionZid::new(body.zid.as_slice()).err()
+            }
+            ScoutingFrame::Unknown { .. } => None,
+        }
+    }
 }
 
 /// [`parse_scouting`] as a passive OBSERVER reads a datagram: a Scout or a Hello
@@ -378,6 +405,38 @@ mod tests {
             }
             other => panic!("HELLO decoded as {other:?}"),
         }
+    }
+
+    /// A participant refuses a Hello whose zid is zero where it reads it, as zenoh's decoder
+    /// does; an observer reads the same Hello and is told why it names nobody.
+    #[cfg(feature = "codec-hello")]
+    #[test]
+    fn a_hello_naming_a_zero_zid_is_refused_by_a_participant_and_read_by_an_observer() {
+        let hello_of = |zid: &[u8]| {
+            let mut hello = Hello::new();
+            hello.version = wire_const::PROTOCOL_VERSION;
+            hello.set_whatami(0x01);
+            hello.set_zid_len_m1((zid.len() - 1) as u8);
+            hello.zid = wz_codecs::Bounded::new(zid).unwrap();
+            let mut wire = alloc::vec![wire_const::S_MID_HELLO];
+            wire.extend_from_slice(&hello.encode_to_vec());
+            wire
+        };
+        let zero = hello_of(&[0, 0, 0, 0]);
+        assert_eq!(
+            parse_scouting(&zero).err(),
+            Some(InboundParseError::InvalidZid(
+                crate::session_zid::ZidError::AllZero { len: 4 }
+            ))
+        );
+        let (observed, _) = parse_scouting_observed(&zero).expect("an observer reads it");
+        assert_eq!(
+            observed.names_no_zid(),
+            Some(crate::session_zid::ZidError::AllZero { len: 4 })
+        );
+        // Control: one byte that is not zero makes the same Hello a zid's.
+        let named = hello_of(&[0, 0, 0, 1]);
+        assert!(parse_scouting(&named).is_ok());
     }
 
     /// An observer refuses a Hello and a Scout of another protocol version; a

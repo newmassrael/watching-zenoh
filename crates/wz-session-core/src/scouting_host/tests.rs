@@ -60,3 +60,22 @@ fn an_empty_window_delivers_nothing() {
     assert_eq!(deliver_in_upstream_order(&[], |_| seen += 1), 0);
     assert_eq!(seen, 0);
 }
+
+/// A scouting window does not record a Hello whose zid is zero: it is no Hello, as for zenoh's
+/// decoder. The same Hello naming a zid is recorded with it.
+#[test]
+fn a_hello_naming_a_zero_zid_is_not_a_scouted_hello() {
+    let hello_of = |zid: &[u8]| {
+        let mut hello = wz_codecs::lent::Hello::new();
+        hello.version = wire_const::PROTOCOL_VERSION;
+        hello.set_whatami(0x01);
+        hello.set_zid_len_m1((zid.len() - 1) as u8);
+        hello.zid = wz_codecs::Bounded::new(zid).unwrap();
+        let mut wire = vec![wire_const::S_MID_HELLO];
+        wire.extend_from_slice(&hello.encode_to_vec());
+        wire
+    };
+    assert!(decode_scouted_hello(&hello_of(&[0, 0])).is_none());
+    let named = decode_scouted_hello(&hello_of(&[0, 0x01])).expect("a Hello naming a zid");
+    assert_eq!(named.zid, vec![0, 0x01]);
+}

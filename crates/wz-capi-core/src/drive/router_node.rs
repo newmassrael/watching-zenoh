@@ -462,7 +462,7 @@ struct JoinedGroup {
 /// is on.
 async fn join_group(
     join: &GroupJoin,
-    zid: &[u8],
+    zid: SessionZid,
     link_conf: LinkConf,
 ) -> Result<JoinedGroup, OpenError> {
     let Some(ResolvedGroup {
@@ -492,7 +492,7 @@ async fn join_group(
         group,
         port,
         wz_runtime_tokio::multicast_glue::RouterGroupProfile {
-            zid: zid.to_vec(),
+            zid,
             qos: join.profile.is_qos,
             compression: join.profile.compression,
             tx_queue: link_conf.tx.queue,
@@ -887,7 +887,7 @@ async fn run_router(
     // cannot be joined fails the open. Its locator is among the node's own, as the manager of
     // upstream lists its multicast listener beside the unicast ones.
     let group = match groups.first() {
-        Some(join) => match join_group(join, &zid, link_conf).await {
+        Some(join) => match join_group(join, zid, link_conf).await {
             Ok(group) => Some(group),
             Err(cause) => {
                 let _ = tx.send(Err(cause));

@@ -91,7 +91,7 @@ const ITER_CAP: usize = 4096;
 fn group_params(zid_byte: u8) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: vec![zid_byte; 4],
+        zid: [zid_byte; 4].into(),
         lease_ms: 5_000,
         join_interval_ms: 50,
         seq_num_res: 0x02,

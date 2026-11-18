@@ -3699,7 +3699,7 @@ struct GroupSetup {
     shared: Arc<SharedSession>,
     /// The session's wire zid, which every group's beacon carries and its receive gate
     /// drops when its own traffic loops back.
-    zid: Vec<u8>,
+    zid: SessionZid,
     whatami: WhatAmI,
     tx_queue: TxQueueConf,
     /// The session's receive half, which bounds what each group rejoins from fragments as it
@@ -3745,7 +3745,7 @@ impl ResolvedGroup {
     /// which fails the open.
     fn resolve(
         join: &GroupJoin,
-        zid: &[u8],
+        zid: SessionZid,
         whatami: WhatAmI,
         tx_queue: TxQueueConf,
         link_rx: LinkRxConf,
@@ -3769,7 +3769,7 @@ impl ResolvedGroup {
             link,
             params: wz_runtime_tokio::multicast_glue::MulticastParams {
                 whatami,
-                zid: zid.to_vec(),
+                zid,
                 lease_ms,
                 join_interval_ms,
                 seq_num_res,
@@ -3843,7 +3843,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
     }
     let Some(groups) = joins
         .iter()
-        .map(|join| ResolvedGroup::resolve(join, &zid, whatami, tx_queue, link_rx))
+        .map(|join| ResolvedGroup::resolve(join, zid, whatami, tx_queue, link_rx))
         .collect::<Option<Vec<_>>>()
     else {
         // An endpoint that names no group this build can join: pico's listen of it finds no
@@ -4672,7 +4672,7 @@ pub fn open_blocking(
             let group_setup = GroupSetup {
                 joins: groups,
                 shared: drive_shared.clone(),
-                zid: wire_zid.to_vec(),
+                zid: wire_zid,
                 whatami: dial_whatami,
                 tx_queue: link_conf.tx.queue,
                 link_rx: link_conf.rx,
@@ -6099,7 +6099,7 @@ mod multicast_face_tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid.to_vec(),
+            zid: wz_session_core::multicast_params::zid_vec(zid),
             lease_ms: 10_000,
             join_interval_ms: 100,
             seq_num_res: 0x02,

@@ -29613,7 +29613,7 @@ mod tests {
         crate::multicast_pipeline::MulticastTxTap::attach(
             &wz_session_core::multicast_params::MulticastParams {
                 whatami: wz_session_core::WhatAmI::Router,
-                zid: vec![0x01],
+                zid: [0x01].into(),
                 lease_ms: 5_000,
                 join_interval_ms: 100,
                 seq_num_res: 0x02,
