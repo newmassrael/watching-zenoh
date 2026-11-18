@@ -281,6 +281,19 @@ resource-snapshot = [
     "wz-capi-port/resource-snapshot",
     "wz-capi-core?/resource-snapshot",
 ]
+# `segment-sender`: the sending side of a declared segment profile and the doors that drive it
+# (`wz_ext_segment_sender_*`): one message of the application's own cut into the pieces the
+# profile's header describes, put on a publisher or handed to a callback. wz's own, which zenoh-pico
+# has not, so off as the reference build is, and part of the unstable surface: it implies
+# `unstable-api`. The piece writer is `wz-app-frame`'s, the one the zenoh-c ABI's doors of the same
+# capability write with. Each sender is held under the host's lock, so it selects `std`. A put is
+# the publisher's, which both engines have, so it selects neither and forwards weakly.
+segment-sender = [
+    "std",
+    "unstable-api",
+    "dep:wz-app-frame",
+    "wz-capi-core?/segment-sender",
+]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /
 # `zp_stop_admin_space`, the queryable that answers pico's `@/<zid>/pico/**` documents, and the
 # `auto_start_admin_space` flag of the open options. Upstream refuses the switch without
@@ -467,6 +480,9 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # named by `advanced`.
 wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 wz-node-time = { path = "../wz-node-time", optional = true }
+# The piece writer behind `segment-sender` (`src/segment_sender.rs`), at its defaults (`alloc`),
+# which the writer is behind. Optional: a build without the capability links none of it.
+wz-app-frame = { path = "../wz-app-frame", optional = true }
 # The port between this ABI and the engine that runs its sessions: the vocabulary both name
 # (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI
 # layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1). Without its
@@ -624,3 +640,7 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", fea
 # The tests drive the runtime's own sessions beside the C ABI's (a wz peer, a router); the
 # library itself reaches the runtime only through its engine, `wz_capi_core::runtime`.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false }
+# The synthetic segment profile and its hand-laid piece builder (`segment_profile::synthetic`,
+# behind `fixtures`): the oracle the segment sender's door tests hold every piece to, which lays
+# each field by hand and computes the CRC from the model's parameters, not from a parsed profile.
+wz-app-frame = { path = "../wz-app-frame", features = ["fixtures"] }

@@ -226,9 +226,10 @@ identity-make = ["transport_tls", "wz-runtime-tokio/tls-identity-make"]
 # ABI's own (`wz-capi-c/lifecycle-doors`) over `wz_session_core::lifecycle_wire`, which every build
 # has, so this feature only carries the capability's name, as `e2e-sender`'s does.
 lifecycle-doors = []
-# The sending side of a declared segment profile. The model has nothing behind it: the doors and the
-# piece writer they use are the zenoh-c ABI's own (`wz-capi-c/segment-sender`), so this feature only
-# carries the capability's name, as `e2e-sender`'s does.
+# The sending side of a declared segment profile. The model has nothing behind it: the doors are
+# each C ABI's own (`wz-capi-c/segment-sender`, `wz-capi-pico/segment-sender`) over the piece
+# writer of `wz-app-frame`, so this feature only carries the capability's name, as `e2e-sender`'s
+# does.
 segment-sender = []
 # A subscriber whose callback runs off the receive path. The model has nothing behind it: the lane
 # is the runtime's (`wz_runtime_tokio::session::DetachedOffload`), fed through the subscriber

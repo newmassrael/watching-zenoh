@@ -33,6 +33,7 @@ mod remote_only_local_delivery;
 mod remote_only_queryable;
 mod reply_err_options_roundtrip;
 mod reply_options_roundtrip;
+mod segment_sender_doors;
 mod serial_link_roundtrip;
 mod session_check;
 mod teardown_drain;

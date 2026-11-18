@@ -126,3 +126,10 @@ pub const Z_ERR_TRANSPORT_OPEN_FAILED: ZResult = -102;
 /// An allocation failed. Matches pico `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 /// (`utils/result.h`).
 pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;
+
+/// A value the caller configured an object with is refused. Matches pico
+/// `_Z_ERR_CONFIG_INVALID_VALUE` (`utils/result.h`). Kept apart from
+/// [`Z_EINVAL`] where one door refuses both: the segment sender's
+/// `wz_ext_segment_sender_new` answers this for a profile or values text it
+/// refuses, and `Z_EINVAL` for an argument it cannot read at all.
+pub const Z_ERR_CONFIG_INVALID_VALUE: ZResult = -89;

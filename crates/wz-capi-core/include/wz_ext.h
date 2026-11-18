@@ -283,6 +283,136 @@ size_t wz_ext_snapshot_size(void);
  * length. */
 z_result_t wz_ext_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
 
+/* The sending side of a declared segment profile: one message of the program's
+ * own cut into pieces, each an ordinary sample on the message's key whose
+ * payload is a header the profile describes (where the chunk sits, how large
+ * the whole is, which transfer it belongs to, a check value) and the chunk.
+ * Part of the unstable surface, and present only in a build with the
+ * segment-sender capability. The pieces are written by the same field layout
+ * and CRC rule a reader of that profile joins them by.
+ *
+ * WHO WRITES WHICH FIELD. A field with "equals" holds that value; the transfer
+ * field is the sender's number; the total and offset fields are the message's
+ * length and where each chunk starts; the crc field is the CRC the profile's
+ * "cover" list describes. Every other field is the program's, stated once in
+ * values_json as a JSON object keyed by field name ({"origin": 4660}, or
+ * "0x1234" as a string). Leaving one out, or stating one the profile or the
+ * mechanism writes, is refused.
+ *
+ * THE TRANSFER NUMBER. The first message carries first_transfer, each after it
+ * the next value. A message refused before any piece consumes no number; a
+ * message whose first piece went out has used its number, even when a later
+ * piece did not. After the largest value the field holds the next message is
+ * refused, unless the sender restarts, which goes back to first_transfer.
+ *
+ * OWNERSHIP. A sender is owned by the program from wz_ext_segment_sender_new
+ * until wz_ext_segment_sender_drop, which leaves the null state; a second drop
+ * does nothing. The doors that use it take the loan. A refusal string, when
+ * one is written, is the program's to drop with z_string_drop.
+ *
+ * THREADS. One sender may be called from several threads: a message's pieces
+ * are written and handed on under one lock, so two messages on one sender never
+ * interleave. A split callback runs on the calling thread, inside that lock, so
+ * it must not call its own sender. */
+
+typedef uint8_t wz_ext_segment_rollover_t;
+#define WZ_EXT_SEGMENT_ROLLOVER_REFUSE 0  /* refuse the next message */
+#define WZ_EXT_SEGMENT_ROLLOVER_RESTART 1 /* go back to first_transfer */
+
+typedef struct wz_ext_owned_segment_sender_t {
+  void *_handle;
+} wz_ext_owned_segment_sender_t;
+typedef struct wz_ext_loaned_segment_sender_t {
+  void *_handle;
+} wz_ext_loaned_segment_sender_t;
+typedef struct wz_ext_moved_segment_sender_t {
+  wz_ext_owned_segment_sender_t _this;
+} wz_ext_moved_segment_sender_t;
+
+/* How far one put or split went. */
+typedef struct wz_ext_segment_result_t {
+  uint64_t transfer; /* the number the pieces carried; 0 when refused */
+  size_t pieces;     /* how many pieces the message was cut into; 0 when
+                        refused */
+  size_t sent;       /* how many pieces went out */
+} wz_ext_segment_result_t;
+
+/* The options of a put. timestamp is a const z_timestamp_t *, BORROWED for the
+ * call, that every piece carries; NULL for none. */
+typedef struct wz_ext_segment_put_options_t {
+  const void *timestamp;
+} wz_ext_segment_put_options_t;
+
+/* What a split hands each piece to. piece is valid only during the call.
+ * Anything but Z_OK stops the split, which returns it. */
+typedef z_result_t wz_ext_segment_piece_fn(void *context, const uint8_t *piece,
+                                           size_t len);
+
+/* A sender for the profile profile_json describes, with the program's fields in
+ * values_json, whose first message carries first_transfer. this_ holds the null
+ * state on every error. refusal may be NULL; when it is not, it holds the null
+ * state on success and, on _Z_ERR_CONFIG_INVALID_VALUE (-89), the reason,
+ * beginning "profile" or "values" and naming the place.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_, profile_json or values_json; Z_EINVAL
+ * (-75) for text that is not UTF-8 or an unknown rollover;
+ * _Z_ERR_CONFIG_INVALID_VALUE (-89) for a profile or values text that is
+ * refused. */
+z_result_t wz_ext_segment_sender_new(wz_ext_owned_segment_sender_t *this_,
+                                     const char *profile_json,
+                                     const char *values_json,
+                                     uint64_t first_transfer,
+                                     wz_ext_segment_rollover_t rollover,
+                                     z_owned_string_t *refusal);
+
+/* Fill in the default put options: no timestamp. */
+void wz_ext_segment_put_options_default(wz_ext_segment_put_options_t *this_);
+
+/* Cut message into chunks of chunk_bytes and put each piece on publisher, in
+ * order (options may be NULL). result and refusal may be NULL.
+ *
+ * Z_OK when every piece was put; Z_EINVAL (-75) when the message was refused
+ * before any piece (empty, longer than the profile admits, a chunk size of 0, a
+ * value that does not fit its field, the number spent), refusal saying why and
+ * no number used; the failing put's code, after result->sent pieces, when one
+ * failed (the number is used); Z_ERR_NULL for a NULL or dropped sender, a NULL
+ * publisher, or a NULL message with a length. */
+z_result_t wz_ext_segment_sender_put(
+    const wz_ext_loaned_segment_sender_t *this_,
+    const z_loaned_publisher_t *publisher, const uint8_t *message, size_t len,
+    size_t chunk_bytes, const wz_ext_segment_put_options_t *options,
+    wz_ext_segment_result_t *result, z_owned_string_t *refusal);
+
+/* As wz_ext_segment_sender_put, but each piece, header and chunk, is handed to
+ * emit with context instead of put: for a program that sends the pieces some
+ * other way, as the replies of a query for instance. Returns what emit returned
+ * when it stopped the split; Z_ERR_NULL for a NULL emit. */
+z_result_t wz_ext_segment_sender_split(
+    const wz_ext_loaned_segment_sender_t *this_, const uint8_t *message,
+    size_t len, size_t chunk_bytes, wz_ext_segment_piece_fn *emit,
+    void *context, wz_ext_segment_result_t *result, z_owned_string_t *refusal);
+
+/* The number the next message carries. false, and nothing written, when the
+ * largest was sent and the sender does not restart, or for a NULL argument or
+ * a dropped sender. */
+bool wz_ext_segment_sender_next(const wz_ext_loaned_segment_sender_t *this_,
+                                uint64_t *out);
+
+/* Make value the number the next message carries. A value past the transfer
+ * field's width is refused by the next message, as a first number is. Z_OK;
+ * Z_ERR_NULL for a NULL or dropped sender. */
+z_result_t wz_ext_segment_sender_set(const wz_ext_loaned_segment_sender_t *this_,
+                                     uint64_t value);
+
+const wz_ext_loaned_segment_sender_t *wz_ext_segment_sender_loan(
+    const wz_ext_owned_segment_sender_t *this_);
+wz_ext_moved_segment_sender_t *wz_ext_segment_sender_move(
+    wz_ext_owned_segment_sender_t *this_);
+void wz_ext_segment_sender_drop(wz_ext_moved_segment_sender_t *this_);
+void wz_ext_internal_segment_sender_null(wz_ext_owned_segment_sender_t *this_);
+bool wz_ext_internal_segment_sender_check(
+    const wz_ext_owned_segment_sender_t *this_);
+
 /* The conformance digest of this build, read from the configuration it
  * was built with: "sha256:" and 64 lowercase hex digits, NUL-terminated and
  * static. It is the digest wz_config.py prints in the conformance statement

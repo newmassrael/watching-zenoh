@@ -328,9 +328,10 @@ config WZ_CAP_LIFECYCLE_DOORS
 config WZ_CAP_SEGMENT_SENDER
 	bool "segment-sender"
 	default n
+	select WZ_CAP_UNSTABLE_API
 	help
-	  The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz-own doors).
-	  Exported by: c.
+	  The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors).
+	  Exported by: pico, c.
 
 config WZ_CAP_RX_CALLBACK_OFFLOAD
 	bool "rx-callback-offload"

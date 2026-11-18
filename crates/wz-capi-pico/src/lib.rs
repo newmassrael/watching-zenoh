@@ -202,6 +202,10 @@ pub mod reply_keyexpr;
 pub mod result;
 #[cfg(any(feature = "scout", feature = "scout-mcu"))]
 pub mod scout;
+// The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
+// over the piece writer the zenoh-c ABI's doors of the same capability write with.
+#[cfg(feature = "segment-sender")]
+pub mod segment_sender;
 pub mod serde;
 pub mod session;
 mod session_ext;

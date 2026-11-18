@@ -3978,6 +3978,7 @@ dependencies = [
  "tokio",
  "windows-sys 0.61.2",
  "wz-abi-stamp",
+ "wz-app-frame",
  "wz-capi-coop",
  "wz-capi-core",
  "wz-capi-port",

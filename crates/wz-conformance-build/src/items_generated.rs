@@ -62,7 +62,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("config-verdict", &["core", "c"]),
     ("identity-make", &["core", "c"]),
     ("lifecycle-doors", &["core", "c"]),
-    ("segment-sender", &["core", "c"]),
+    ("segment-sender", &["core", "pico", "c"]),
     ("rx-callback-offload", &["core", "c"]),
     ("switch-doors", &["core", "c"]),
     ("transport_compression", &["core", "c"]),

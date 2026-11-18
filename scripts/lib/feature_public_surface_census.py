@@ -495,6 +495,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `resource-snapshot` gates `pub mod snapshot`, whose public items are wz's own doors
         # `wz_ext_snapshot_set_source`, `_poll`, `_size` and `_read`, and the types they take,
         # declared in `wz_ext.h`, off by default as `supervision` is.
+        # `segment-sender` gates `pub mod segment_sender`, whose public items are wz's own doors
+        # `wz_ext_segment_sender_new`, `_put`, `_split`, `_next`, `_set`, `_loan`, `_move`,
+        # `_drop`, `wz_ext_segment_put_options_default` and the two `wz_ext_internal_*` doors,
+        # and the types and constants they take, declared in `wz_ext.h`; off by default, as
+        # upstream has no such doors.
         # `scout-mcu` gates `pub mod scout` beside the default `scout`: the same module, whose
         # public items are pico's `z_scout`, `z_hello_*` and `z_closure_hello*` doors, each
         # `#[no_mangle] extern "C"`, and the types they take; the feature only changes the window
@@ -506,6 +511,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "event-ring",
                 "resource-snapshot",
                 "scout-mcu",
+                "segment-sender",
                 "supervision",
             }
         ),

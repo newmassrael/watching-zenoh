@@ -384,6 +384,12 @@ transport-link-unixpipe,transport-link-ws|"
     # clock's time on an event, a supervision expiry written as an event, the ring's loss count in
     # the snapshot (`observation_links`, which `Cargo.toml` requires all four features for).
     "wz-capi-pico|hook|clock-source,event-ring,supervision,resource-snapshot,peer|--test=observation_links"
+    # The sender of a declared segment profile driven from C (`wz_ext_segment_sender_*`): the file
+    # that splits to a callback, refuses what it cannot cut, and puts the pieces on a publisher
+    # over loopback (`segment_sender_doors`, whose module is behind the feature, and its loopback
+    # half behind `peer` too). The doors have no unit tests of their own, so the file is the
+    # feature's whole population.
+    "wz-capi-pico|hook|segment-sender,peer|--test=segment_sender_doors"
     # What those doors do, once, in the port both C ABIs and both engines share
     # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
     "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot|"
