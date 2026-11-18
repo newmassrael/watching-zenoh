@@ -293,6 +293,7 @@ fn an_aliased_reserved_publish_needs_the_declaration_and_gives_the_room_back_whe
 
 /// The reservation of a whole chain `session` grants for `payload`; the test fails when the lane
 /// had no room for it.
+#[cfg(feature = "transport-fragmentation")]
 fn chain_reserved(session: &TokioSession, payload: &[u8]) -> WireReservation {
     match session.reserve_wire_chain("home/chain", payload, &remote()) {
         Ok(WireRoom::Granted(reservation)) => reservation,

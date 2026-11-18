@@ -2111,7 +2111,7 @@ mod chain_frames_tests {
         assert_eq!(chain_frames(chunk + 1, mtu), 2);
         assert_eq!(chain_frames(3 * chunk, mtu), 3);
         assert_eq!(chain_frames(3 * chunk + 1, mtu), 4);
-        for len in 1..1000 {
+        for len in 1usize..1000 {
             let plain = len.div_ceil(fragment_chunk_size(mtu, false)).max(1);
             assert!(chain_frames(len, mtu) >= plain, "{len} bytes");
         }
