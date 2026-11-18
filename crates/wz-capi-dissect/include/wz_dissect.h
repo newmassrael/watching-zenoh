@@ -1234,6 +1234,11 @@
  * latency object (keys that exist from census revision 17 and take the rule
  * from their first appearance: `total_ns` is a SUM, and 2^53 nanoseconds is 104
  * days of summed latency, which a long capture of many exchanges reaches); to
+ * the `messages`, `trimmed` and `unobserved` of a census's `observed` object
+ * (keys that exist from census revision 25 and take the rule from their first
+ * appearance: a live handle's census counts every message since its planes
+ * began, the ones a ceiling took included, so no bound on what the host holds
+ * bounds them); to
  * the `value`, `min`, `max`, `stored` and `ring_max` of a `transport_build` or
  * `transport_layout` layout row (those documents take the rule from their first
  * revision: a sequence number or a lease can be eight bytes, and the top of a

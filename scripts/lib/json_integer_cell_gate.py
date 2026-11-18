@@ -119,6 +119,9 @@ _PARAMETERS_ROW = "integer `value` of a `parameters` entry"
 #: Field document 47: the floors under two of those entries.
 _FLOORED_HEADER = "the `at_least` and `stated` of an `sn_mask` or `batch_size` entry of a flow's `context.parameters`"
 _LATENCY_HEADER = "the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census latency object"
+#: Census revision 25: the three counts of the `observed` object, one call each.
+_OBSERVED_HEADER = "the `messages`, `trimmed` and `unobserved` of a census's `observed` object"
+_OBSERVED_ROW = "`messages`, `trimmed` and `unobserved` take the integer rule"
 #: The protected-frame documents take the rule from their first revision. The
 #: field cells are written by ONE helper both documents share, so they are
 #: declared once, under `e2e_wrap`, and the `e2e_open` row names them as well.
@@ -202,6 +205,14 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=17,
         ),
         Cell("census", "a latency's total_ns", _LATENCY_HEADER, "`total_ns` is a SUM", born=17),
+    ),
+    # Census revision 25: what the planes folded since they began. A live
+    # handle's census goes on across front trims, so these count past anything
+    # the host holds; the interval's packet indices stay bare numbers.
+    ("crates/wz-capture/src/census_json.rs", "observed_into"): (
+        Cell("census", "the observed object's messages", _OBSERVED_HEADER, _OBSERVED_ROW, born=25),
+        Cell("census", "the observed object's trimmed", _OBSERVED_HEADER, _OBSERVED_ROW, born=25),
+        Cell("census", "the observed object's unobserved", _OBSERVED_HEADER, _OBSERVED_ROW, born=25),
     ),
     ("crates/wz-capture/src/report.rs", "capture_json"): (
         Cell("summary", "an interest's id", _ID_HEADER, "the `id` and `solicited_by` of an interest"),

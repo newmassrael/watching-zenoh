@@ -4877,6 +4877,12 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // fold resolves every message to its capture packet), `null` when none was
     // folded. It is not a plane and never `null`.
     //
+    // `messages`, `trimmed` and `unobserved` take the integer rule from their
+    // first appearance: a live handle's census counts every message since its
+    // planes began, the ones a ceiling took included, so what the host holds
+    // does not bound them. The interval's `first` and `last` are packet indices
+    // and stay bare numbers.
+    //
     // A VALUE MOVES on one door: a live handle's census goes on across a front
     // trim, so its planes count every message folded since they began, the ones
     // a ceiling took included, where it began again over what was held. A
