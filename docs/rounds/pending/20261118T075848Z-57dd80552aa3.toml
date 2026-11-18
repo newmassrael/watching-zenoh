@@ -1,0 +1,15 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"]
+decision = '''
+The application layer that vehicle deployments run above a zenoh session (end-to-end protection with a receiving judge, judging state per sender, an instance key read from payload fields, reception supervision, a replay cache answered on a key suffix, and one message catalog that drives them) is planned as one wz plane of switches, every one OFF by default. Its axis is the stream (one message, one instance, one sender); wire shapes are byte-identical to a deployed peer's and are proven by an oracle lane against a build of that peer, while the repository's tests use synthetic profiles only. The catalog is one JSON5 declaration with two paths: a host library reads it at run time, a fixed-memory image is generated from it.
+'''
+changes = '''
+`docs/application-plane.md` (new): the six planes, what wz has and lacks for each, six principles, the switch table (e2e-receiver, e2e-sender-demux, e2e-supervision, instance-key, replay-cache, message-catalog, and e2e-sender widened to the pico ABI), the judging rules A1, sections A2 to A6, a six-step order with acceptance, and two decisions left to the owner.
+'''
+verification = '''
+Design only, no code: every switch, capability and limit the plan names as existing was read in `deploy/wz-config.toml` at ddcc2f3a42 (e2e-sender, segment-sender, remote-declaration-watch, declarations-synced-event, advanced, clock-source, event-ring, supervision, targeted-query, QUERIER_MAX_PENDING_QUERIES), and their ABI reach as stated there.
+The confidential-vocabulary scan passes on the document.
+'''
+carry = '''
+Step 0 of `docs/application-plane.md`: move the pure protection code out of `wz-capture` into a runtime crate, and give the pico ABI the four prerequisite doors.
+The two owner decisions of the document (protected query requests; where a supervision loss is delivered).
+'''
