@@ -57,22 +57,6 @@ pub use wz_session_core::scouting_host::{
 /// path). `z_scout` does not use it: its window is the caller's whole budget.
 pub const SCOUT_CYCLE_MS: u64 = 1000;
 
-/// A fresh random zid for a scout that has none configured.
-///
-/// Random rather than all-zeros: a peer may read an all-zero zid as "unset" and
-/// answer differently, so a scout with no configured identity announces one it
-/// could plausibly open a session with.
-pub fn fresh_scout_zid() -> SessionZid {
-    let mut zid = [0u8; 16];
-    // Entropy is unavailable only in a profile that cannot open a session
-    // either, and sixteen zero bytes name nobody; a fixed non-zero pattern
-    // still scouts.
-    if getrandom::getrandom(&mut zid).is_err() || zid == [0u8; 16] {
-        zid = [0xA5; 16];
-    }
-    SessionZid::from(zid)
-}
-
 /// Drive scouting for `budget_ms`, then invoke `on_hello` once per peer that
 /// answered, in `deliver_in_upstream_order` — after the window, last responder
 /// first, which is what both ABIs' `z_scout` does.
@@ -197,18 +181,4 @@ fn scout_window(
         .await;
         actions.scouted_hellos()
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A scout with no configured id announces a fresh sixteen-byte one. Reading
-    /// a configured id is [`crate::drive::ConfiguredZid`]'s, and the reading
-    /// that used to sit here (per byte, in written order, even length only) was
-    /// the reverse of zenoh's and refused text zenoh accepts.
-    #[test]
-    fn a_fresh_scout_zid_is_sixteen_bytes() {
-        assert_eq!(fresh_scout_zid().as_slice().len(), 16);
-    }
 }

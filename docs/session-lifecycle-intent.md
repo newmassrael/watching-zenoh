@@ -1923,11 +1923,12 @@ peer table, and `ScoutParams::zid` is an `Option<SessionZid>` (a Scout names
 its asker optionally). A participant refuses a JOIN, Scout or Hello whose zid
 is out of range or zero where it reads it (`decode_join_named`,
 `parse_scouting`, `decode_scouted_hello`), and a scouted Hello holds the zid
-it checked (`ScoutedHello::zid`). The C ABIs' scout calls refuse a stated zid
-that their open refuses, with the open's code (`Z_EINVAL` for zenoh-c,
-`Z_ERR_INVALID` for zenoh-pico, whose scout reads the key as its open does);
-a config that states none asks with a fresh zid on zenoh-c and as nobody on
-zenoh-pico, as pico's `z_scout` does.
+it checked (`ScoutedHello::zid`). zenoh-c's `z_scout` and the Rust API's
+`scout` name no asker whatever the config states, as upstream's scout writes
+`zid: None`; a node's own autoconnect scout still names the node, which a wz
+responder's self-echo gate compares. zenoh-pico's `z_scout` names the id its
+config states, read as its open reads it and refused with the open's
+`Z_ERR_INVALID`, and nobody when it states none, as pico's `z_scout` does.
 
 An observer is not a participant: a capture of a peer that sends a zero zid
 must still dissect. The refusal therefore lives in the participant's entry
