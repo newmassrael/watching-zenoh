@@ -183,6 +183,20 @@ pub struct MessageList {
     /// `undecided` where the document shows the field. Such units are rare, so
     /// they are kept here, once a unit, and let go with their last row.
     whole_units: alloc::collections::BTreeMap<u64, (u64, alloc::boxed::Box<[u8]>)>,
+    /// The earliest instant among the rows held, kept as rows are appended and
+    /// discarded, so [`Self::oldest_observed_ns`] reads no row but the one that
+    /// carries it.
+    oldest: crate::oldest_instant::OldestInstant,
+}
+
+/// The instant of the row at produced-index `produced` among `rows`, whose
+/// oldest held row is at `first_produced`: read off its head, decoding nothing.
+fn instant_in(rows: &Store, first_produced: u64, produced: u64) -> Option<u64> {
+    let position = usize::try_from(produced.checked_sub(first_produced)?).ok()?;
+    match rows {
+        Store::Held(log) => log.get(position).and_then(|frame| frame.observed_at_ns),
+        Store::Indexed(index) => index.head(position, first_produced)?.observed_at_ns,
+    }
 }
 
 /// The chain fold over every message a list was ever appended, and what it made
@@ -1147,6 +1161,29 @@ impl MessageList {
             #[cfg(feature = "reassembly")]
             chains: ChainFacts::default(),
             whole_units: alloc::collections::BTreeMap::new(),
+            oldest: crate::oldest_instant::OldestInstant::new(),
+        }
+    }
+
+    /// The earliest capture instant among the messages held, in nanoseconds, or
+    /// `None` when none carries one. Kept as messages are appended and
+    /// discarded, so asking reads one row's head and walks none.
+    pub fn oldest_observed_ns(&self) -> Option<u64> {
+        let row = self.oldest.oldest_row()?;
+        instant_in(&self.rows, self.produced - self.len() as u64, row)
+    }
+
+    /// Note the rows appended from produced-index `from` on in the earliest
+    /// instant kept: called by every door that appends, once the rows are in.
+    fn note_instants(&mut self, from: u64) {
+        let first_produced = self.produced - self.len() as u64;
+        let end = self.produced;
+        let Self { rows, oldest, .. } = self;
+        let rows: &Store = rows;
+        for row in from..end {
+            oldest.push(row, instant_in(rows, first_produced, row), |earlier| {
+                instant_in(rows, first_produced, earlier)
+            });
         }
     }
 
@@ -1249,6 +1286,7 @@ impl MessageList {
             Store::Indexed(index) => index.push_held(self.produced, frame),
         }
         self.produced += 1;
+        self.note_instants(self.produced - 1);
     }
 
     /// Append a decoded batch, which is what a datagram unit yields.
@@ -1293,6 +1331,7 @@ impl MessageList {
         self.index()
             .push_unit(produced, start, &frames, Locus::Streamed, None);
         self.produced += frames.len() as u64;
+        self.note_instants(produced);
     }
 
     /// Append every record of one datagram unit, as
@@ -1446,6 +1485,7 @@ impl MessageList {
             spans,
         );
         self.produced += frames.len() as u64;
+        self.note_instants(produced);
     }
 
     /// The list's index, made of the rows it keeps whole if it has none yet:
@@ -1495,6 +1535,7 @@ impl MessageList {
             Store::Held(log) => log.pop_front()?,
             Store::Indexed(index) => index.pop_front(first_produced, source)?,
         };
+        self.oldest.release_through(first_produced);
         // The one moment the message is still in hand: fold what a chain's
         // identity needs of it, so the count does not depend on how much of the
         // front a ceiling has taken. See the field's doc.
@@ -1850,7 +1891,9 @@ pub struct ListMemory {
     /// still open. Kept by every list that has seen a fragment, whether it keeps
     /// its rows as entries or whole.
     pub chains: usize,
-    /// The rest of the index, which does not follow the row count.
+    /// The rest of the index, which does not follow the row count, and the runs
+    /// that keep the list's earliest instant, which follow the times the clock
+    /// stepped back or was absent and not the rows.
     pub small: usize,
 }
 
@@ -1951,6 +1994,7 @@ impl MessageList {
         };
         ListMemory {
             chains: self.chain_bytes(),
+            small: held.small + self.oldest.allocated_bytes(),
             // The bytes of the units kept whole are units' bytes the list keeps.
             unit_log: held.unit_log
                 + self
@@ -3115,6 +3159,12 @@ impl<'a> Messages<'a> {
     #[inline]
     pub fn produced(&self) -> u64 {
         self.list.produced
+    }
+
+    /// [`MessageList::oldest_observed_ns`].
+    #[inline]
+    pub fn oldest_observed_ns(&self) -> Option<u64> {
+        self.list.oldest_observed_ns()
     }
 
     /// [`MessageList::chain_prefix`].
@@ -5238,5 +5288,100 @@ mod tests {
         assert!(ended.suffixes.is_empty(), "a chain's suffix goes with it");
         ended.release_through(7);
         assert_eq!(ended.iter().count(), 0);
+    }
+
+    /// The earliest instant a list holds, by walking every row it holds.
+    fn walked_oldest(list: &MessageList, source: &dyn UnitBytes) -> Option<u64> {
+        list.read(source)
+            .iter()
+            .filter_map(|row| row.observed_at_ns)
+            .min()
+    }
+
+    /// The instants a list's rows are given: a clock that moves forward, stands
+    /// still, steps back past rows still held, and is absent.
+    const CLOCK: [Option<u64>; 12] = [
+        Some(5_000),
+        Some(6_000),
+        Some(6_000),
+        None,
+        Some(9_000),
+        Some(4_000),
+        Some(7_000),
+        None,
+        Some(3_000),
+        Some(8_000),
+        Some(8_500),
+        Some(2_000),
+    ];
+
+    fn timed(frame: &mut PassiveFrame, at: Option<u64>) {
+        frame.observed_at_ns = at;
+        frame.observed_at_ms = at.map(|ns| ns / crate::passive::NANOS_PER_MILLI);
+    }
+
+    /// A list that keeps its rows whole names the earliest instant it holds
+    /// after every append and every discard, the head of the list or not.
+    #[test]
+    fn a_list_kept_whole_keeps_its_earliest_instant_as_rows_come_and_go() {
+        let mut list = MessageList::new();
+        let mut census = DroppedFrameCensus::default();
+        assert_eq!(list.oldest_observed_ns(), None, "nothing held");
+        for (k, at) in CLOCK.iter().cycle().take(5 * CLOCK.len()).enumerate() {
+            let mut row = frame();
+            timed(&mut row, *at);
+            list.push(row);
+            if k % 3 == 2 {
+                census.absorb(list.discard_oldest(&NoBytes).expect("a row"));
+            }
+            assert_eq!(
+                list.oldest_observed_ns(),
+                walked_oldest(&list, &NoBytes),
+                "after row {k}"
+            );
+        }
+        while !list.is_empty() {
+            census.absorb(list.discard_oldest(&NoBytes).expect("a row"));
+            assert_eq!(list.oldest_observed_ns(), walked_oldest(&list, &NoBytes));
+        }
+        assert_eq!(list.oldest_observed_ns(), None, "nothing held again");
+    }
+
+    /// A list that keeps its rows as index entries reads the instants off their
+    /// heads, and keeps the same answer as a walk of its rows through appends of
+    /// whole units and discards that cut a unit.
+    #[test]
+    fn a_list_of_entries_keeps_its_earliest_instant_as_rows_come_and_go() {
+        let units = datagrams(4 * CLOCK.len());
+        let mut session = crate::passive::PassiveSession::new();
+        let mut list = MessageList::new();
+        let mut census = DroppedFrameCensus::default();
+        for (packet, unit) in units.iter().enumerate() {
+            let Some(mut read) =
+                session.next_datagram_unit_on(Direction::A, unit, packet, LinkHandshake::Present)
+            else {
+                continue;
+            };
+            for frame in &mut read.frames {
+                timed(frame, CLOCK[packet % CLOCK.len()]);
+            }
+            list.push_datagram(read, unit, None, LinkHandshake::Present);
+            if packet % 2 == 1 {
+                census.absorb(list.discard_oldest(&NoBytes).expect("a row"));
+            }
+            assert_eq!(
+                list.oldest_observed_ns(),
+                walked_oldest(&list, &NoBytes),
+                "after packet {packet}"
+            );
+        }
+        assert!(
+            matches!(list.rows, Store::Indexed(_)),
+            "the units became entries, or this read nothing but whole rows"
+        );
+        while !list.is_empty() {
+            census.absorb(list.discard_oldest(&NoBytes).expect("a row"));
+            assert_eq!(list.oldest_observed_ns(), walked_oldest(&list, &NoBytes));
+        }
     }
 }
