@@ -332,6 +332,13 @@ config WZ_CAP_SEGMENT_SENDER
 	  The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz-own doors).
 	  Exported by: c.
 
+config WZ_CAP_RX_CALLBACK_OFFLOAD
+	bool "rx-callback-offload"
+	default n
+	help
+	  A subscriber whose callback runs off the receive path: every face copies its samples into one bounded lane and the callback runs on the application runtime, in order (wz_capi_c_declare_subscriber_offloaded, wz_capi_c_subscriber_offload_stats, wz-own doors).
+	  Exported by: c.
+
 config WZ_CAP_SWITCH_DOORS
 	bool "switch-doors"
 	default n

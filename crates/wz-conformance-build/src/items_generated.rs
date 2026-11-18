@@ -62,6 +62,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("identity-make", &["core", "c"]),
     ("lifecycle-doors", &["core", "c"]),
     ("segment-sender", &["core", "c"]),
+    ("rx-callback-offload", &["core", "c"]),
     ("switch-doors", &["core", "c"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
