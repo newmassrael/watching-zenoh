@@ -6410,7 +6410,7 @@ mod reconnect_tx_tests {
     fn paced_fixture_declarations(
         actions: &super::SessionLinkActions,
         driver: &crate::test_fixtures::RecordingLinkDriver,
-        plain_subscribers: u64,
+        plain_subscribers: u32,
     ) -> Vec<Vec<u8>> {
         actions
             .send_declare_keyexpr(7, "home/base")

@@ -7772,20 +7772,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // QueryableId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_queryable(wire_id, mapping_id, suffix, options.complete)
+                .prepare_declare_queryable(id.entity_id(), mapping_id, suffix, options.complete)
                 .map_err(map_queryable_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step, like declare_subscriber.
             actions
-                .declare_queryable_recorded(wire_id, mapping_id, suffix, options.complete, || {
-                    self.send_network_message(
-                        wz_session_core::network_message::NetworkMessage::Declare(Box::new(
-                            declare,
-                        )),
-                        /*reliable=*/ true,
-                        /*express=*/ false,
-                    )
-                })
+                .declare_queryable_recorded(
+                    id.entity_id(),
+                    mapping_id,
+                    suffix,
+                    options.complete,
+                    || {
+                        self.send_network_message(
+                            wz_session_core::network_message::NetworkMessage::Declare(Box::new(
+                                declare,
+                            )),
+                            /*reliable=*/ true,
+                            /*express=*/ false,
+                        )
+                    },
+                )
                 .map_err(|e| map_queryable_err(SendDeclareError::from(e)))?;
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Queryable` stays free of the wire-codec types.
@@ -8266,13 +8272,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SubscriptionId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_subscriber(wire_id, mapping_id, suffix)
+                .prepare_declare_subscriber(id.entity_id(), mapping_id, suffix)
                 .map_err(map_subscribe_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step: a declaration made while a paced replay is walking the cache is replayed in its
             // turn and not sent ahead of what it depends on.
             actions
-                .declare_subscriber_recorded(wire_id, mapping_id, suffix, || {
+                .declare_subscriber_recorded(id.entity_id(), mapping_id, suffix, || {
                     self.send_network_message(
                         wz_session_core::network_message::NetworkMessage::Declare(Box::new(
                             declare,
@@ -8376,11 +8382,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // the seam) rather than letting the multicast send arm's
             // UnsupportedVariant reach map_decl_err's `other => unreachable!`.
             let actions = self.actions();
-            let token_id = u64::from(
-                actions
-                    .alloc_next_token_id()
-                    .ok_or(LivelinessAliasError::IdsExhausted)?,
-            );
+            let token_id = actions
+                .alloc_next_token_id()
+                .ok_or(LivelinessAliasError::IdsExhausted)?;
             // declare_token always builds in literal mode (mapping_id = 0,
             // suffix = Some(_)), so the alias-resolution reject variants
             // cannot fire; the `unreachable!()` guards future refactors that
@@ -8462,7 +8466,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let declared_on = (0, keyexpr_string.clone());
             Ok(LivelinessToken::new_held(
                 self.clone(),
-                token_id,
+                u64::from(token_id),
                 keyexpr_string,
                 declared_on,
                 options,
@@ -8524,11 +8528,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     composed
                 }
             };
-            let token_id = u64::from(
-                actions
-                    .alloc_next_token_id()
-                    .ok_or(LivelinessAliasError::IdsExhausted)?,
-            );
+            let token_id = actions
+                .alloc_next_token_id()
+                .ok_or(LivelinessAliasError::IdsExhausted)?;
             // R311mw (B5b-2b-3) — aliased Declare onto the send seam; same
             // shape as `Session::declare_token`, routed by (mapping_id,
             // inline_suffix) instead of (0, literal). The seam's
@@ -8619,7 +8621,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // register identically by construction.
             Ok(LivelinessToken::new_held(
                 self.clone(),
-                token_id,
+                u64::from(token_id),
                 resolved,
                 (mapping_id, inline_suffix.unwrap_or_default().to_string()),
                 options,

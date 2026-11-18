@@ -565,10 +565,10 @@ impl SubEntry {
     /// Declare this subscriber over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
         if self.wire.is_literal() {
-            actions.send_declare_subscriber(u64::from(self.id), 0, Some(&self.keyexpr))
+            actions.send_declare_subscriber(self.id, 0, Some(&self.keyexpr))
         } else {
             actions.send_declare_subscriber(
-                u64::from(self.id),
+                self.id,
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
             )
@@ -593,15 +593,10 @@ impl QblEntry {
     /// Declare this queryable over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
         if self.wire.is_literal() {
-            actions.send_declare_queryable(
-                u64::from(self.id),
-                0,
-                Some(&self.keyexpr),
-                self.complete,
-            )
+            actions.send_declare_queryable(self.id, 0, Some(&self.keyexpr), self.complete)
         } else {
             actions.send_declare_queryable(
-                u64::from(self.id),
+                self.id,
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
                 self.complete,

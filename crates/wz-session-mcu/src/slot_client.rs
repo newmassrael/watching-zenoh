@@ -42,6 +42,7 @@ use wz_session_core::replay_pacing::ReplayPacing;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
+use wz_session_core::wire_id::{listed_entity_id, EntityId};
 
 use crate::connect_manager::{
     ConnectManager, DeclaredPeer, DeclaredRefusal, EndpointSource, PeerStore,
@@ -373,7 +374,7 @@ fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + '
     }
     let mut cursor = session.replay(declarations.len());
     replay_turn(&mut cursor, replay_burst(pacing), |at| {
-        declare(session.actions(), at as u64 + 1, &declarations[at])
+        listed_entity_id(at).is_some_and(|id| declare(session.actions(), id, &declarations[at]))
     });
     if let Some(at_ms) = next_turn_after(pacing, cursor.finished(), now_ms) {
         session.set_next_turn(at_ms);
@@ -486,7 +487,7 @@ mod tests {
 /// Send one declaration under `id`: `true` once it went out.
 fn declare<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
     actions: &SessionHandle<C, D>,
-    id: u64,
+    id: EntityId,
     declaration: &Declaration,
 ) -> bool {
     // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.

@@ -83,6 +83,15 @@ pub fn u32_id_taken(update: Result<u64, u64>) -> Option<u32> {
     update.ok().and_then(|held| u32::try_from(held).ok())
 }
 
+/// The entity id of the `index`th of a fixed list of declarations numbered from
+/// 1, or `None` for an index past the last `u32` id: a list that long sends its
+/// tail under no id rather than under a wrapped one.
+pub fn listed_entity_id(index: usize) -> Option<EntityId> {
+    index
+        .checked_add(1)
+        .and_then(|id| EntityId::try_from(id).ok())
+}
+
 /// An interest's id (`commons/zenoh-protocol/src/network/interest.rs` @
 /// `pub type InterestId = u32;`), which also correlates a liveliness get's
 /// replies, as a request id correlates a get's.
@@ -132,6 +141,16 @@ mod tests {
         assert_eq!(u32_id_taken(Ok(7)), Some(7));
         assert_eq!(u32_id_taken(Ok(u64::from(u32::MAX))), Some(u32::MAX));
         assert_eq!(u32_id_taken(Err(u64::from(u32::MAX) + 1)), None);
+    }
+
+    #[test]
+    fn a_listed_declaration_is_numbered_from_one_up_to_the_last_u32_id() {
+        assert_eq!(listed_entity_id(0), Some(1));
+        assert_eq!(listed_entity_id(4), Some(5));
+        let last = usize::try_from(u32::MAX - 1).expect("a u32 index fits usize here");
+        assert_eq!(listed_entity_id(last), Some(u32::MAX));
+        assert_eq!(listed_entity_id(last + 1), None);
+        assert_eq!(listed_entity_id(usize::MAX), None);
     }
 
     #[test]
