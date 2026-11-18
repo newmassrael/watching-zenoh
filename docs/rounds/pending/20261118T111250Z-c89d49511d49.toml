@@ -1,0 +1,13 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+An Init's Z flag is derived from the extension chain the encoder is given, so it cannot announce a chain that is not written; a test now holds that for InitSyn and InitAck at patch levels 0 and 1 and with no chain. The case it guards is an InitAck answering a peer that announced no patch: wz writes the patch entry at level 0 behind a set Z, where zenoh-pico 1.10.2 lowers its level, keeps Z and writes no entry.
+'''
+changes = '''
+`crates/wz-session-core/src/handshake_encode.rs`: test `an_init_sets_z_exactly_when_its_patch_entry_is_written`.
+'''
+verification = '''
+`cargo test -p wz-session-core --lib --features alloc,codec-init-body,codec-open-body handshake_encode` on pc2: 6 passed, the new test among them (the default feature set compiles none of these tests, so a filtered run there executes zero); clippy with the same features clean.
+'''
+carry = '''
+None.
+'''
