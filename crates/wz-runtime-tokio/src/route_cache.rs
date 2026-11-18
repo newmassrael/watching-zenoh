@@ -183,15 +183,33 @@ pub struct RouteCache<T, S = Zid> {
     /// in test builds only, where the instruments read it, so that a reader pays nothing for it.
     #[cfg(test)]
     off_version: Arc<OffVersion>,
-    /// Whether a change takes every route it reaches out one by one however many it reaches, the
-    /// form before a change that reaches most routes started the new memo from those that stay
-    /// (`Kept::without`). Kept in test builds, and carried to every memo brought from this one,
-    /// for the instrument that measures one form against the other.
+    /// How a change leaves out the routes it reaches, when not as the router does
+    /// ([`RetireForm::ROUTER`]): one of the forms before, kept in test builds and carried to every
+    /// memo brought from this one, for the instrument that measures the forms against each other.
     #[cfg(test)]
-    retires_by_route: bool,
+    retire_form: RetireForm,
     /// Set on the memo of a write's draft ([`open_draft`](Self::open_draft)), and never on a
     /// published version's.
     draft: Option<Box<Draft<T, S>>>,
+}
+
+/// How a change leaves out of a memo the routes it reaches ([`Kept::retiring`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetireForm {
+    /// A change that reaches more than half of the routes starts the memo from those that stay,
+    /// rather than taking each route it reaches out.
+    drops_whole: bool,
+    /// The index's walk for a changed key stops past half of the routes, and the key is asked of
+    /// every route instead.
+    bounds_walk: bool,
+}
+
+impl RetireForm {
+    /// The form the router's memos take.
+    const ROUTER: Self = Self {
+        drops_whole: true,
+        bounds_walk: true,
+    };
 }
 
 /// What a memo keeps: its routes and, for an indexed memo, their keys by keyexpr. One value behind
@@ -257,17 +275,22 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
     /// refines them with `reaches`, so its cost follows the routes the changes meet. A memo with no
     /// index tries every route against every changed key.
     ///
-    /// With `drops_whole`, a change that reaches every route starts the memo empty, and one that
-    /// reaches more than half of them starts it empty and puts back the routes that stay
-    /// ([`without`](Self::without)); otherwise each route reached is taken out.
+    /// With `form.drops_whole`, a change that reaches every route starts the memo empty, and one
+    /// that reaches more than half of them starts it empty and puts back the routes that stay
+    /// ([`without`](Self::without)); otherwise each route reached is taken out. With
+    /// `form.bounds_walk`, the index's walk for a changed key stops once it has found more than half
+    /// of the routes, and that key is asked of every route instead, as a memo with no index asks:
+    /// past that many, the walk costs more than the scan (`docs/router-table-snapshots.md`, section
+    /// 6.9), and the change goes the way of `drops_whole` whichever found its routes.
     fn retiring(
         mut self,
         since: u64,
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
         reaches: impl Fn(&str, &[&str]) -> bool,
-        drops_whole: bool,
+        form: RetireForm,
     ) -> Option<Self> {
         let held = self.routes.len();
+        let routes = &self.routes;
         let mut reached: Vec<RouteKey<S>> = Vec::new();
         // Whether one changed key reached every route. A walk of the index finds each member once
         // and the scan each route once, so as many found as routes held is every route.
@@ -278,23 +301,41 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
             // The index's candidates for each key that moved, each split to be asked.
             Some(index) => changes(since, &mut |changed| {
                 // Every route goes already: nothing a later key reaches can add to that.
-                if every && drops_whole {
+                if every && form.drops_whole {
                     return;
                 }
                 let before = reached.len();
-                reached.extend(
-                    index
-                        .intersecting(changed)
-                        .into_iter()
-                        .filter(|cached| {
-                            // The key as the index lends it, which outlives the buffer.
-                            let cached: &RouteKey<S> = cached;
-                            chunks.clear();
-                            chunks.extend(cached.keyexpr.split('/'));
-                            reaches(changed, &chunks)
-                        })
-                        .cloned(),
-                );
+                let candidates = if form.bounds_walk {
+                    index.intersecting_within(changed, held / 2)
+                } else {
+                    Some(index.intersecting(changed))
+                };
+                match candidates {
+                    Some(candidates) => reached.extend(
+                        candidates
+                            .into_iter()
+                            .filter(|cached| {
+                                // The key as the index lends it, which outlives the buffer.
+                                let cached: &RouteKey<S> = cached;
+                                chunks.clear();
+                                chunks.extend(cached.keyexpr.split('/'));
+                                reaches(changed, &chunks)
+                            })
+                            .cloned(),
+                    ),
+                    // The walk passed its bound: every kept keyexpr is asked of this key.
+                    None => reached.extend(
+                        routes
+                            .keys()
+                            .filter(|cached| {
+                                let cached: &RouteKey<S> = cached;
+                                chunks.clear();
+                                chunks.extend(cached.keyexpr.split('/'));
+                                reaches(changed, &chunks)
+                            })
+                            .cloned(),
+                    ),
+                }
                 every |= held > 0 && reached.len() - before == held;
             }),
             // Every kept keyexpr, split once and asked of every key that moved.
@@ -303,7 +344,7 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
                 let complete = changes(since, &mut |changed| moved.push(changed.to_owned()));
                 if complete && !moved.is_empty() {
                     reached.extend(
-                        self.routes
+                        routes
                             .keys()
                             .filter(|cached| {
                                 let cached: &RouteKey<S> = cached;
@@ -321,7 +362,7 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
         if !complete {
             return None;
         }
-        if !drops_whole {
+        if !form.drops_whole {
             for key in &reached {
                 self.remove(key);
             }
@@ -450,21 +491,21 @@ impl<T, S> RouteCache<T, S> {
             #[cfg(test)]
             off_version: Arc::default(),
             #[cfg(test)]
-            retires_by_route: false,
+            retire_form: RetireForm::ROUTER,
             draft: None,
         }
     }
 
-    /// Whether a change that reaches most of this memo's routes starts the next memo from the
-    /// routes that stay; in a test build, unless the memo was made to retire route by route.
-    fn drops_whole(&self) -> bool {
+    /// How a change leaves out this memo's routes: the router's form, or in a test build the form
+    /// the memo was made with.
+    fn retire_form(&self) -> RetireForm {
         #[cfg(test)]
         {
-            !self.retires_by_route
+            self.retire_form
         }
         #[cfg(not(test))]
         {
-            true
+            RetireForm::ROUTER
         }
     }
 }
@@ -485,11 +526,27 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     }
 
     /// This memo, made to take every route a change reaches out one by one however many it
-    /// reaches, as every memo brought from it does: the form the instrument of
-    /// `docs/router-table-snapshots.md` section 6.9 measures the default against.
+    /// reaches, its index walked to the end, as every memo brought from it does: the form before
+    /// a change that reaches most routes started the memo from those that stay, which the
+    /// instrument of `docs/router-table-snapshots.md` section 6.9 measures the router's against.
     #[cfg(test)]
     pub(crate) fn retiring_by_route(mut self) -> Self {
-        self.retires_by_route = true;
+        self.retire_form = RetireForm {
+            drops_whole: false,
+            bounds_walk: false,
+        };
+        self
+    }
+
+    /// This memo, made to start from the routes that stay as the router's does, its index walked
+    /// to the end however many routes a changed key reaches, as every memo brought from it does:
+    /// the form before the walk was bounded, which the same instrument measures.
+    #[cfg(test)]
+    pub(crate) fn retiring_wholesale_unbounded(mut self) -> Self {
+        self.retire_form = RetireForm {
+            drops_whole: true,
+            bounds_walk: false,
+        };
         self
     }
 
@@ -565,7 +622,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             #[cfg(test)]
             off_version: Arc::clone(&base.off_version),
             #[cfg(test)]
-            retires_by_route: base.retires_by_route,
+            retire_form: base.retire_form,
             draft: Some(Box::new(Draft {
                 base,
                 indexed,
@@ -638,7 +695,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             Some(was) if was.net == inputs.net => {
                 let kept = Kept::clone(&memo.kept.read());
                 let indexed = kept.is_indexed();
-                kept.retiring(was.table, changes, reaches, memo.drops_whole())
+                kept.retiring(was.table, changes, reaches, memo.retire_form())
                     .unwrap_or_else(|| Kept::empty(indexed))
             }
             _ => Kept::empty(memo.kept.read().is_indexed()),
@@ -655,7 +712,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             #[cfg(test)]
             off_version: Arc::clone(&memo.off_version),
             #[cfg(test)]
-            retires_by_route: memo.retires_by_route,
+            retire_form: memo.retire_form,
             draft: None,
         });
     }
@@ -1038,22 +1095,24 @@ mod tests {
             let mut draw = Draw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut scanned: Arc<RouteCache<u64, ()>> = at(AT);
             let mut indexed = indexed_at(AT);
-            let mut by_route = {
-                let mut memo = Arc::new(RouteCache::<u64, ()>::indexed().retiring_by_route());
+            let brought = |memo: RouteCache<u64, ()>| {
+                let mut memo = Arc::new(memo);
                 RouteCache::bring_to(&mut memo, AT);
                 memo
             };
+            let mut by_route = brought(RouteCache::indexed().retiring_by_route());
+            let mut unbounded = brought(RouteCache::indexed().retiring_wholesale_unbounded());
             let mut inputs = AT;
             for step in 0..40 {
                 for _ in 0..12 {
                     let keyexpr = draw.keyexpr();
                     let route = draw.next();
-                    for memo in [&scanned, &indexed, &by_route] {
+                    for memo in [&scanned, &indexed, &by_route, &unbounded] {
                         memo.get_or_compute(inputs, &(), &keyexpr, || true, || route);
                     }
                 }
                 let before = kept_keys(&scanned);
-                for memo in [&indexed, &by_route] {
+                for memo in [&indexed, &by_route, &unbounded] {
                     assert_eq!(
                         kept_keys(memo),
                         before,
@@ -1066,7 +1125,7 @@ mod tests {
                     table: inputs.table + 1,
                     ..inputs
                 };
-                for memo in [&mut scanned, &mut indexed, &mut by_route] {
+                for memo in [&mut scanned, &mut indexed, &mut by_route, &mut unbounded] {
                     RouteCache::bring_to_retiring(
                         memo,
                         moved,
@@ -1101,6 +1160,11 @@ mod tests {
                     kept_keys(&by_route),
                     want,
                     "seed {seed} step {step}: taken out route by route, the same routes go"
+                );
+                assert_eq!(
+                    kept_keys(&unbounded),
+                    want,
+                    "seed {seed} step {step}: with the index walked to the end, the same routes go"
                 );
             }
         }
@@ -1191,7 +1255,7 @@ mod tests {
                     true
                 },
                 keyexpr_intersects_target,
-                true,
+                RetireForm::ROUTER,
             )
             .expect("the change says what moved");
         let keyexprs: BTreeSet<String> =

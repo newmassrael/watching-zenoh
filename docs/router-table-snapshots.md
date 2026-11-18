@@ -726,8 +726,12 @@ reading below found costs more than the scan. A removal and a put each copy one 
 and one of the index, so a change that reaches more than half of the routes now starts the new
 memo empty and puts back the routes it does not reach (`Kept::without` in `route_cache.rs`), and
 one that reaches every route, as one changed key's walk of the index or the scan counts it, puts
-nothing back. The mesh legs keep no index: a move of their inputs starts their memo empty, so they
-never ask which routes a key reaches. A memo built with no index still finds the routes by the
+nothing back. The walk itself also costs more a route found than the scan costs a route tried, so
+the walk for a changed key stops once it has found more than half of the routes
+(`KeyexprIndex::intersecting_within`), and that key is asked of every route instead, exactly as a
+memo with no index asks it; a key that meets one route or none walks as before. The mesh legs
+keep no index: a move of their inputs starts their memo empty, so they never ask which routes a
+key reaches. A memo built with no index still finds the routes by the
 scan, which is the form the instrument measures the index against; in test builds a memo can be
 made to take each reached route out one by one however many a change reaches
 (`RouteCache::retiring_by_route`), the form the reading below was taken of.
@@ -794,8 +798,10 @@ instrument in a process of its own, `uptime` recorded per run, two or three runs
   routing-router-hat --lib the_routes_a_change_reaches_measured_found_by_the_index_and_by_a_scan
   -- --ignored --nocapture`. 2,048 client faces, 256 to 65,536 keys kept (`WZ_MEMO_KEYS` names
   others); the forms take turns in one process. `scan` and `index` take each route a change
-  reaches out one by one, the forms the reading below was taken of, and `index_wholesale` is the
-  memo as the router builds it now. Its lines are the writer's bring of the client leg's memo, the
+  reaches out one by one, the forms the first reading below was taken of; `index_wholesale` starts
+  the memo from the routes that stay, its index walked to the end, the form the second reading
+  adds; and `index_bounded`, the memo as the router builds it now, also stops the walk past half
+  of the routes. Its lines are the writer's bring of the client leg's memo, the
   part of a publish this changes, for a key no route meets, a key one route meets and a key every
   route meets, and a reader's miss and hit with and without the index.
 - A delivery's face lookups: `cargo test -p wz-runtime-tokio --release --features
@@ -804,7 +810,7 @@ instrument in a process of its own, `uptime` recorded per run, two or three runs
   held faces take turns in one process. The reading below was taken of a held form that read the
   tier of a held `RouterFaceState` (`held_state`); the instrument's held form is now the route as
   the client leg keeps it (`held_face`), which reads the tier and the closed mark of a `HeldFace`,
-  and its reading is not taken yet. A `perf record --comm wz-publisher` of
+  read once more below. A `perf record --comm wz-publisher` of
   `the_puts_routed_measured_against_the_faces_up` at 2,048 faces gives the share of a Put's cycles
   in `PersistentMap::get` beside it.
 
@@ -876,7 +882,38 @@ A reader's route, in nanoseconds a route, run 1; run 2:
   every route crosses the half, so the shape measured does not place the break-even between one
   route and every route; more than half is where a put and a removal, each one path copied in the
   routes and one in the index, cost the same in number. The instrument now times this form beside
-  the two above as `index_wholesale`; its reading is not taken yet.
+  the two above as `index_wholesale`.
+
+A second reading, on pc2 with the client leg's routes holding their faces, one run of the same
+instrument with `index_wholesale` beside the two forms above (the host's load was not recorded,
+so only the forms' order within the run is read), the median microseconds of the writer's bring:
+
+| Keys kept | Write | `scan` | `index` | `index_wholesale` |
+|---|---|---|---|---|
+| 256 | reaches no route | 7.4 | 0.22 | 0.22 |
+| 256 | reaches one route | 7.5 | 1.0 | 1.0 |
+| 256 | reaches every route | 62.9 | 258.1 | 103.4 |
+| 2,048 | reaches no route | 68.1 | 0.24 | 0.23 |
+| 2,048 | reaches one route | 67.9 | 1.3 | 1.3 |
+| 2,048 | reaches every route | 379.8 | 1,572.3 | 529.0 |
+| 16,384 | reaches no route | 578.7 | 0.55 | 0.40 |
+| 16,384 | reaches one route | 583.9 | 3.7 | 3.0 |
+| 16,384 | reaches every route | 5,020.6 | 20,585.8 | 9,622.7 |
+| 65,536 | reaches no route | 2,631.8 | 1.3 | 0.93 |
+| 65,536 | reaches one route | 2,738.2 | 7.2 | 6.0 |
+| 65,536 | reaches every route | 12,106.5 | 114,513.7 | 67,240.4 |
+
+- Starting the memo from the routes that stay took 41 to 66 % off the indexed form's cost for a
+  key that meets every route, and left the other two writes where they were.
+- It is still 1.4 to 5.6 times the scan, and what is left is the walk of the index: each member
+  found is a state visited and kept in the walk's set, about 0.26 us a route at 2,048 keys and
+  1.0 us at 65,536, where the scan tries a route in 0.19 us at both.
+- So the walk for a changed key now stops once it has found more than half of the routes, and the
+  key is asked of every route instead; the instrument times that form as `index_bounded`. The bound
+  stops a walk that will find every route halfway, so its cost is the half walk and the scan: by the
+  per-route costs above, still more than the scan alone at 65,536 keys. A lower bound would cost
+  less there and would send keys that meet fewer routes to the scan too; the bound is half until
+  the reading of `index_bounded`, which is not taken yet, says otherwise.
 
 *A delivery's face lookups.* The median nanoseconds a delivery took to find its faces and read
 each one's tier, by id in the version's face table and from state the route held, run 1; run 2:
@@ -901,6 +938,21 @@ windows of the same runs (a fan-out of 4, a few faces up); at a fan-out of 512 i
 is ruled out: the lookups cost a delivery what a run tells. Rule (c) is built (above, after the
 rules).
 
+The same instrument with the built form (`held_face`, the tier and the closed mark of a
+`HeldFace`), in the run of the second reading of the routes a change reaches:
+
+| Faces up | Fan-out | By id | Held face | By id over held |
+|---|---|---|---|---|
+| 512 | 4 | 18 | 2 | 9 |
+| 512 | 64 | 295 | 35 | 8.4 |
+| 512 | 512 | 3,056 | 427 | 7.2 |
+| 2,048 | 4 | 27 | 2 | 13.5 |
+| 2,048 | 64 | 446 | 36 | 12 |
+| 2,048 | 512 | 5,185 | 406 | 13 |
+
+With the closed mark, an atomic read a face, the held form is 7 to 14 times cheaper than the
+lookups by id of the same run: 0.5 to 0.8 ns a face, against 4.5 to 10.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
@@ -916,8 +968,7 @@ rules).
   a closed mark that `deregister` sets stops a send through a route kept from before, and the face's
   aliases, the one fact that moves while it is up, are kept out of the held route's egress by its
   type (a literal Put, whose key needs no alias). What is not built: the mesh legs still name their
-  next hops by zid, and the query plane's client leg (`ClientQueryRoutes`) by face id; the held
-  form's own reading (`held_face`) is not taken.
+  next hops by zid, and the query plane's client leg (`ClientQueryRoutes`) by face id.
 - **The memo of a route a writer reads.** A writer that routes through its own draft (a replay,
   an interest answered while it declares) reads at inputs no memo has yet, and computes its route
   without keeping it (section 6.8). Section 6.9 counted none in the declaring window of its
@@ -928,8 +979,10 @@ rules).
   reach by trying every route kept against every changed key. Section 6.9 indexes the client legs'
   memos and finds the reached routes by the index, from 5.7 to 5,221 times cheaper for a change
   that reaches one route or none, at 11 to 57 % more for a reader's miss. A change that reaches more
-  than half of the routes now starts the new memo from the routes that stay; that form's reading,
-  and where between one route and every route the break-even lies, are not taken.
+  than half of the routes now starts the new memo from the routes that stay, which took 41 to 66 %
+  off a change that meets every route and left it 1.4 to 5.6 times the scan; the walk that finds
+  those routes now stops past half of them and the scan finishes the key. That bounded form's
+  reading, and where between one route and every route the break-even lies, are not taken.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).

@@ -209,12 +209,30 @@ impl<M> KeyexprIndex<M> {
         self.walk(keyexpr).found
     }
 
+    /// [`intersecting`](Self::intersecting) while it finds `most` members or fewer, and `None`, its
+    /// walk stopped, once it has found more: for a caller that has a cheaper way to the answer
+    /// past that many, a scan of every member it holds elsewhere. A walk visits states, a set of
+    /// them kept, and costs more a member found than a scan costs a member tried.
+    pub(crate) fn intersecting_within(&self, keyexpr: &str, most: usize) -> Option<Vec<&M>> {
+        if self.len == 0 {
+            return Some(Vec::new());
+        }
+        let walk = self.walk_within(keyexpr, most);
+        (!walk.over).then_some(walk.found)
+    }
+
     fn walk<'q>(&self, keyexpr: &'q str) -> Walk<'_, 'q, M> {
+        self.walk_within(keyexpr, usize::MAX)
+    }
+
+    fn walk_within<'q>(&self, keyexpr: &'q str, most: usize) -> Walk<'_, 'q, M> {
         let chunks: Vec<&str> = keyexpr.split('/').collect();
         let mut walk = Walk {
             chunks,
             seen: HashSet::new(),
             found: Vec::new(),
+            most,
+            over: false,
         };
         walk.visit(&self.root, 0);
         walk
@@ -338,11 +356,15 @@ struct Walk<'i, 'q, M> {
     chunks: Vec<&'q str>,
     seen: HashSet<(*const IndexNode<M>, usize)>,
     found: Vec<&'i M>,
+    /// The most members the walk finds before it stops ([`KeyexprIndex::intersecting_within`]).
+    most: usize,
+    /// Whether it found more than `most`, and stopped.
+    over: bool,
 }
 
 impl<'i, M> Walk<'i, '_, M> {
     fn visit(&mut self, node: &'i IndexNode<M>, at: usize) {
-        if !self.seen.insert((node as *const IndexNode<M>, at)) {
+        if self.over || !self.seen.insert((node as *const IndexNode<M>, at)) {
             return;
         }
         // A stored `**` stands for none or any number of the query's remaining chunks.
@@ -353,6 +375,7 @@ impl<'i, M> Walk<'i, '_, M> {
         }
         let Some(&head) = self.chunks.get(at) else {
             self.found.extend(node.members.iter());
+            self.over = self.found.len() > self.most;
             return;
         };
         if head == ANY_CHUNKS {
@@ -594,6 +617,40 @@ mod tests {
         }
         let found: BTreeSet<u32> = index.intersecting("a/**").into_iter().copied().collect();
         assert_eq!(found, (0..1_000).collect());
+    }
+
+    /// A bounded walk answers what the full walk answers while it finds no more than its bound,
+    /// and stops with no answer once it finds more. Turned red by a bounded walk that answers past
+    /// its bound, or loses a member within it.
+    #[test]
+    fn a_bounded_walk_answers_within_its_bound_and_stops_past_it() {
+        let mut index: KeyexprIndex<u32> = KeyexprIndex::new();
+        for i in 0..100u32 {
+            index.insert(&format!("a/{i}"), i);
+        }
+        index.insert("b/x", 1_000);
+        let full: BTreeSet<u32> = index.intersecting("a/**").into_iter().copied().collect();
+        assert_eq!(full.len(), 100);
+        let within: BTreeSet<u32> = index
+            .intersecting_within("a/**", 100)
+            .expect("100 members are within a bound of 100")
+            .into_iter()
+            .copied()
+            .collect();
+        assert_eq!(within, full);
+        assert!(
+            index.intersecting_within("a/**", 99).is_none(),
+            "100 members are past a bound of 99"
+        );
+        assert!(
+            index.intersecting_within("b/x", 0).is_none(),
+            "one member is past a bound of none"
+        );
+        assert_eq!(
+            index.intersecting_within("c/x", 0).map(|found| found.len()),
+            Some(0),
+            "a walk that finds nothing answers"
+        );
     }
 
     /// An empty index answers a query with nothing, before anything is stored and after the last
