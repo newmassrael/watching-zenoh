@@ -1390,8 +1390,7 @@ trait DeclPlane {
     /// Whether the faces of a south region the peer hat serves are told this plane's
     /// declarations only for an interest they hold ([`Tables::serves_asking_peers`]). The
     /// plane then also supplies [`push_asked`](Self::push_asked) and
-    /// [`retract_asked`](Self::retract_asked); the liveliness plane has its own rule for them
-    /// and keeps the flood.
+    /// [`retract_asked`](Self::retract_asked).
     const ASKED_FOR: bool = false;
     /// Advertise `value` for `keyexpr` to the faces of `target` that asked for it.
     fn push_asked<T: std::ops::DerefMut<Target = Tables>>(
@@ -1556,6 +1555,22 @@ impl DeclPlane for TokenPlane {
     }
     fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
         build_undeclare_token_with_keyexpr(keyexpr)
+    }
+    const ASKED_FOR: bool = true;
+    fn push_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+        (): (),
+    ) {
+        fwd.push_token_to_asking(target, keyexpr);
+    }
+    fn retract_asked<T: std::ops::DerefMut<Target = Tables>>(
+        fwd: &mut OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) {
+        fwd.retract_token_from_asking(target, keyexpr);
     }
     const KEEPS_SENT: bool = true;
     /// Advertised if it was sent (the record) or if the rule says it is held (the fold): a token
@@ -7859,14 +7874,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the sub/qabl future store). CLIENT-only + literal-target, same gate — the
         // full-net token replay is client-directed (zenoh declare_token_interest:1001).
         #[cfg(feature = "routing-token-tables")]
-        // Only a client is told of the tokens that come alive after its interest: a peer of the
-        // peer hat is replayed the router's tokens when its face comes up and is sent each
-        // withdrawal by the mesh, so a stored interest would tell it a withdrawal twice.
         let store_future_token = interest.f() && body.to() && self.is_client_face(inbound);
         #[cfg(feature = "routing-token-tables")]
         if store_future_token {
             if let Some(t) = target.as_deref() {
                 self.tables.future_tokens_mut().store_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
+        // A face of a south region the peer hat serves is told a token of another region only
+        // for an interest it holds (`zenoh/src/net/routing/hat/peer/token.rs` @
+        // `if dst_face.region.bound().is_north()`), so its interest is kept as its subscriber and
+        // queryable interests are.
+        #[cfg(feature = "routing-token-tables")]
+        if interest.f() && body.to() && peer_hat_face {
+            if let Some(t) = target.as_deref() {
+                self.tables.future_tokens_mut().store_peer_hat_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -7901,14 +7928,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     store_future_qabl || (interest.f() && peer_hat_face),
                 );
             }
-            // §5.21 routing-token-tables (slice-4): the CURRENT liveliness-TOKEN dump —
-            // the FIRST reader of the token tables (makes the slice-1/2/3 bubble
-            // observable). CLIENT-GATED, UNLIKE the sub/qabl dumps above: zenoh
-            // `declare_token_interest` (token.rs:1001) gates the token replay on
-            // `Client || (Peer && !full_net)`, and wz is full-net (peers land in
-            // `linkstatepeer_tokens`), so it reduces to CLIENT-ONLY (`declare_sub_interest`
-            // is bare `if mode.current()`). A peer's token Interest(current) gets only the
-            // DeclareFinal below — peers learn tokens via the linkstate flood, not replay.
+            // §5.21 routing-token-tables: the CURRENT liveliness-token dump, for the faces
+            // [`asks_for_tokens`](Self::asks_for_tokens) names. A FUTURE interest's reply carries
+            // the id the face is told the token under from then on, as its later pushes do.
             #[cfg(feature = "routing-token-tables")]
             if body.to() && self.asks_for_tokens(inbound) {
                 self.dump_interest_tokens(
@@ -7917,7 +7939,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     aggregate,
                     &self_zid,
                     interest_id,
-                    store_future_token,
+                    store_future_token || (interest.f() && peer_hat_face),
                 );
             }
             // R311y512 (`routing-interest-pending-gc`) — the peer hat's BROKER leg. zenoh does
@@ -9562,10 +9584,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let pushes =
-            self.tables
-                .future_tokens_mut()
-                .pushes_for_new(new_ke, Some(origin), |_, _, _| ());
+        // A face of a south peer-hat region is told a token by what self advertises into its
+        // region ([`push_token_to_asking`](Self::push_token_to_asking)), which the inter-region
+        // filter decides; a push from here would pass a token the filter holds back.
+        let pushes = self.tables.future_tokens_mut().pushes_for_new_in(
+            new_ke,
+            Some(origin),
+            |_, role| role != InterestOrigin::PeerHat,
+            |_, _, _| (),
+        );
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_token(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -10119,6 +10146,79 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
+    /// The liveliness-token twin of
+    /// [`push_subscriber_to_asking`](Self::push_subscriber_to_asking): the token self now
+    /// advertises into the south peer-hat region `target`, told to each face of it that holds a
+    /// matching token interest, at most once.
+    #[cfg(feature = "routing-token-tables")]
+    fn push_token_to_asking(&mut self, target: Region, keyexpr: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let pushes = Arc::make_mut(&mut tables.future_tokens).pushes_for_new_in(
+            keyexpr,
+            None,
+            |face, _| faces.get(&face).is_some_and(|s| s.tier == target),
+            |_, _, _| (),
+        );
+        for (face, reply_ke, id, ()) in pushes {
+            match build_declare_token(id, 0, Some(&reply_ke)) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_token_pushes.bump();
+                }
+                Err(e) => log::warn!(
+                    "router forward: peer-hat token push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
+        }
+    }
+
+    /// The liveliness-token twin of
+    /// [`retract_subscriber_from_asking`](Self::retract_subscriber_from_asking), with the arm the
+    /// token plane alone has: a face of `target` that asked and was never told the token is told
+    /// it is gone by a one-shot `UndeclareToken` carrying the keyexpr
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `Token has never been declared on this face.`).
+    #[cfg(feature = "routing-token-tables")]
+    fn retract_token_from_asking(&mut self, target: Region, keyexpr: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let forgets = Arc::make_mut(&mut tables.future_tokens).forgets_for_withdrawn_in(
+            keyexpr,
+            |face| faces.get(&face).is_some_and(|s| s.tier == target),
+            |reply_ke, aggregate| aggregate || reply_ke != keyexpr,
+        );
+        let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
+        let told = self.tables.future_tokens.unannounced_withdrawals_in(
+            keyexpr,
+            &announced,
+            |face, origin| {
+                origin == InterestOrigin::PeerHat
+                    && self
+                        .tables
+                        .faces
+                        .get(&face)
+                        .is_some_and(|s| s.tier == target)
+            },
+        );
+        // Each withdrawal names its key: a token leaves for a south peer face under the number
+        // the face was given it by ([`declaration_ids`]), which the egress finds by the key.
+        let withdrawals = forgets
+            .into_iter()
+            .map(|(face, reply_ke, _)| (face, reply_ke))
+            .chain(told.into_iter().map(|face| (face, keyexpr.to_owned())));
+        for (face, reply_ke) in withdrawals {
+            if let Ok(undeclare) = build_undeclare_token_with_keyexpr(&reply_ke) {
+                self.send_one_to_face(face, NetworkMessage::Declare(Box::new(undeclare)));
+            }
+        }
+    }
+
     /// Bring what self advertises of the liveliness tokens into line with what the rule admits
     /// now: declare what it admits and self has not advertised, retract what self advertised and
     /// it no longer admits. The rule is the pin's inter-region filter, whose answer moves when a
@@ -10146,11 +10246,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .unwrap_or_default();
             for keyexpr in desired.iter().filter(|keyexpr| !sent.contains(*keyexpr)) {
                 TokenPlane::remember(self, target, keyexpr, Some(()));
-                self.flood_self_sourced(target, keyexpr, |ke| TokenPlane::declare(ke, ()));
+                self.advertise_change::<TokenPlane>(target, keyexpr, Some(()));
             }
             for keyexpr in sent.iter().filter(|keyexpr| !desired.contains(*keyexpr)) {
                 TokenPlane::remember(self, target, keyexpr, None);
-                self.flood_self_sourced(target, keyexpr, TokenPlane::undeclare);
+                self.advertise_change::<TokenPlane>(target, keyexpr, None);
             }
         }
     }
@@ -10409,11 +10509,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let tables: &mut Tables = &mut self.tables;
+        // A face of a south peer-hat region is told the withdrawal of what self advertised into
+        // its region ([`retract_token_from_asking`](Self::retract_token_from_asking)), and not
+        // from here.
+        let asking: Vec<Region> = tables
+            .hats
+            .regions()
+            .filter(|region| tables.serves_asking_peers(*region))
+            .collect();
         let hats = &tables.hats;
-        let forgets = Arc::make_mut(&mut tables.future_tokens)
-            .forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
-                any_token_matches_in(hats, rk, aggregate)
-            });
+        let faces = &tables.faces;
+        let forgets = Arc::make_mut(&mut tables.future_tokens).forgets_for_withdrawn_in(
+            withdrawn_ke,
+            |face| !faces.get(&face).is_some_and(|s| asking.contains(&s.tier)),
+            |rk, aggregate| any_token_matches_in(hats, rk, aggregate),
+        );
         let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
         for (face, reply_ke, id) in forgets {
             self.send_one_to_face_about(
@@ -15529,8 +15639,9 @@ mod tests {
         }
     }
 
-    /// `face` holds a future interest in the subscribers and the queryables of every keyexpr, as
-    /// a peer does that has declared a publisher and a querier. A face of a south region the peer
+    /// `face` holds a future interest in the subscribers, the queryables and the liveliness
+    /// tokens of every keyexpr, as a peer does that has declared a publisher, a querier and a
+    /// liveliness subscriber. A face of a south region the peer
     /// hat serves is told what another region holds only for an interest like this one
     /// ([`Tables::serves_asking_peers`]), so a test that watches such a face for an advertisement
     /// has the face ask first.
@@ -15544,6 +15655,12 @@ mod tests {
         let queryables = build_interest_queryables(9002, false, true, 0, Some("**"))
             .expect("build queryables interest");
         forward_one(fwd, face, NetworkMessage::Interest(queryables));
+        #[cfg(feature = "routing-token-tables")]
+        forward_one(
+            fwd,
+            face,
+            token_interest_msg(9003, "**", false, true, false),
+        );
     }
 
     /// A literal `DeclareSubscriber` for `keyexpr` (id 0, no ext_nodeid — the
@@ -25069,6 +25186,9 @@ mod tests {
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         fwd.register(FaceId(2), &p);
+        // The peer asked for tokens, as the pin's peer hat requires of a south face before it
+        // is told one (`zenoh/src/net/routing/hat/peer/token.rs` @ `if dst_face.region.bound().is_north()`).
+        peer_asks_for_everything(&fwd, FaceId(2));
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
         fwd.tick();
@@ -25384,6 +25504,9 @@ mod tests {
             } else {
                 discover_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
             }
+            // AA asks for tokens as BB does through `advertise_link_back`: a south peer face is
+            // told a token only for an interest it holds.
+            peer_asks_for_everything(&fwd, FaceId(0));
             fwd.tick();
             sink_a.reset();
             sink_b.reset();
@@ -25855,6 +25978,83 @@ mod tests {
             forwarded_declare(&sink_p.frame_bytes(0)).body,
             DeclareOwnedVariant::CodecZenohDeclToken(_)
         ));
+    }
+
+    /// A peer of a router is told a token that comes alive after its future token interest, and
+    /// the token's withdrawal, as the pin's peer hat tells a south face what it asked for
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `if dst_face.region.bound().is_north()`). A
+    /// peer that did not ask is told neither, and one that asked after the token came alive is
+    /// told the withdrawal by a one-shot `UndeclareToken` with id 0, carrying the key.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_peer_of_a_router_is_told_a_later_token_only_for_its_future_interest() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        let (asker, sink_asker) = face(zid(0xBB), WIRE_PEER);
+        let (quiet, sink_quiet) = face(zid(0xCC), WIRE_PEER);
+        let (late, sink_late) = face(zid(0xDD), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &asker);
+        fwd.register(FaceId(2), &quiet);
+        fwd.register(FaceId(3), &late);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(5, "live/**", false, true, false),
+        );
+        sink_asker.reset();
+        sink_quiet.reset();
+        sink_late.reset();
+
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
+        assert_eq!(declare_frame_count(&sink_asker), 1, "the asker is told");
+        assert!(matches!(
+            forwarded_declare(&sink_asker.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+        ));
+        assert_eq!(
+            declare_frame_count(&sink_quiet),
+            0,
+            "a south peer that asked for nothing is told nothing"
+        );
+        assert_eq!(declare_frame_count(&sink_late), 0, "nor yet the late one");
+
+        forward_one(
+            &fwd,
+            FaceId(3),
+            token_interest_msg(6, "live/**", false, true, false),
+        );
+        sink_asker.reset();
+        sink_late.reset();
+        forward_one(&fwd, FaceId(0), undeclare_client_token_msg(7));
+        assert_eq!(
+            declare_frame_count(&sink_asker),
+            1,
+            "the asker is told the withdrawal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_asker.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+        assert_eq!(
+            declare_frame_count(&sink_quiet),
+            0,
+            "the quiet peer still nothing"
+        );
+        assert_eq!(
+            declare_frame_count(&sink_late),
+            1,
+            "the late asker is told the withdrawal"
+        );
+        match forwarded_declare(&sink_late.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
+                assert_eq!(
+                    u.id, 0,
+                    "a one-shot id: the late asker was never told the token"
+                )
+            }
+            other => panic!("expected an UndeclToken, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "routing-token-tables")]

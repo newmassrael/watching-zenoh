@@ -709,6 +709,20 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     ///
     /// Read-only, and it walks the same `Client` role the push paths do.
     pub fn unannounced_withdrawals(&self, withdrawn_ke: &str, announced: &[FaceId]) -> Vec<FaceId> {
+        self.unannounced_withdrawals_in(withdrawn_ke, announced, |_, origin| {
+            origin == InterestOrigin::Client
+        })
+    }
+
+    /// [`unannounced_withdrawals`](Self::unannounced_withdrawals) for the faces `reaches` admits,
+    /// given the face and the role it is held under: the withdrawal of what self advertised into
+    /// one region, which the asking faces of that region alone are told.
+    pub fn unannounced_withdrawals_in<R: Fn(FaceId, InterestOrigin) -> bool>(
+        &self,
+        withdrawn_ke: &str,
+        announced: &[FaceId],
+        reaches: R,
+    ) -> Vec<FaceId> {
         self.faces_asking_about(withdrawn_ke)
             .into_iter()
             .filter(|face| {
@@ -716,7 +730,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
                     .by_face
                     .get(face)
                     .expect("a face the index names holds an entry");
-                state.origin == InterestOrigin::Client
+                reaches(*face, state.origin)
                     && !announced.contains(face)
                     && state
                         .interests
