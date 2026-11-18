@@ -250,11 +250,15 @@ ALLOWED = [
         "`drops.frames`, and no held message reads these bytes",
     ),
     (
-        "wz-capture/e2e_slots.rs",
-        "let _ = self.judged.remove(&key);",
-        "Open-debt item 924, D9 — the end-to-end outcomes the ledger kept of "
-        "rows a front trim has taken: the rows are gone and counted where they "
-        "went, and an outcome is read only for its own row",
+        # The outcomes moved from the slot ledger to the payload plane's judge,
+        # kept by list, row and record place; the trim is the same one.
+        "wz-capture/e2e_plane.rs",
+        ".retain(|&(at, produced, _), _| at != list || produced >= first_held);",
+        "Open-debt item 924, D9 — the end-to-end judgements the payload "
+        "plane's judge kept of rows a front trim has taken "
+        "(`E2eJudgements::forget_before`): the rows are gone and counted where "
+        "they went, and a judgement is read only for its own row, so no "
+        "reader can ask for one again",
     ),
     (
         "wz-session-core/passive_messages.rs",
