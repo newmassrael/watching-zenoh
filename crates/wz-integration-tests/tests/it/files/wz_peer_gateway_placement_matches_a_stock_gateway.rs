@@ -247,6 +247,8 @@ fn spawn_wz_gateway(listen: u16, dial: [u16; 2]) -> (ChildGuard, String, File) {
     (gateway, root, reader)
 }
 
+// wz-proves: none -- a differential of where a peer gateway places its south remotes
+// against a stock gateway's own answer; no atom claims the partition yet.
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features routing-peer,zenoh-config); Layer Z runs via --ignored"]
 fn a_wz_peer_gateway_places_its_south_remotes_where_a_stock_gateway_does() {
