@@ -33,7 +33,7 @@ const MESSAGE: &[u8] = br#"{"temp":21}"#;
 
 /// The live key, and the key a history query names and its replies carry.
 const LIVE: &str = "demo/large";
-const HISTORY: &str = "demo/large/@history";
+const HISTORY: &str = "demo/large/@sidecar";
 
 /// The responder's id, as the reply's extension carries it.
 const RESPONDER: [u8; 18] = [
@@ -415,7 +415,7 @@ fn a_reply_piece_that_cannot_chain_is_answered_as_a_published_one_is() {
 }
 
 /// A rule covers a reply by the reply's own key: a rule on the live key, or
-/// one ending in `**`, does not reach `<key>/@history`, and a rule naming it
+/// one ending in `**`, does not reach `<key>/@sidecar`, and a rule naming it
 /// does. The live key is the other way round.
 #[test]
 fn a_reply_is_covered_by_the_rule_for_its_own_key_and_no_other() {

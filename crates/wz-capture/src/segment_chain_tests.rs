@@ -201,13 +201,13 @@ fn streams_are_kept_apart_by_origin_key_and_suffix() {
         (key(), 1u16),
         (key(), 2),
         (by_id(None), 1),
-        (by_id(Some("/@history")), 1),
+        (by_id(Some("/@sidecar")), 1),
     ] {
         let v = feed_on(&mut l, &p, k, origin, 1, 0..6);
         assert_eq!((v.place, v.ended.len()), (Some(Place::First), 0));
     }
     // And each closes on its own second half.
-    for (k, origin) in [(by_id(Some("/@history")), 1u16), (key(), 2)] {
+    for (k, origin) in [(by_id(Some("/@sidecar")), 1u16), (key(), 2)] {
         let v = feed_on(&mut l, &p, k, origin, 1, 6..12);
         assert_eq!(v.place, Some(Place::Closing));
     }

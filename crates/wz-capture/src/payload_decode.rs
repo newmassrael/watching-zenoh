@@ -1727,7 +1727,7 @@ fn subtree_key_read(field: &Field, at: KeyexprAt<'_>) -> Option<(String, Option<
 /// The suffix rides beside the id rather than inside it, as the wire wrote it and
 /// unread: `None` when the `WireExpr` carried none. A sender whose key ids are
 /// fixed in advance (no declaration on the wire) appends a suffix to an id to
-/// name a different resource under it, `<id>/@history` beside `<id>`, and with
+/// name a different resource under it, `<id>/@sidecar` beside `<id>`, and with
 /// the id alone the two references read as one. The suffix is NOT resolved
 /// against anything: a reader that maps ids to names maps the id and appends
 /// this text, the same concatenation a resolved reference has already had done

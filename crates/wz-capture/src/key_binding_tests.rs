@@ -189,7 +189,7 @@ fn a_reference_the_wire_does_not_answer_is_read_under_the_fixed_key() {
     for link in LINKS {
         let mut wire = Wire::new(link, true);
         put(&mut wire, 7, None, MESSAGE);
-        put(&mut wire, 7, Some("/@history"), MESSAGE);
+        put(&mut wire, 7, Some("/@sidecar"), MESSAGE);
         put(&mut wire, 9, None, MESSAGE);
         let doc = document(&mut wire, "#%7=demo/sensor\ndemo/**=json");
         let entries = records(&doc);
@@ -198,7 +198,7 @@ fn a_reference_the_wire_does_not_answer_is_read_under_the_fixed_key() {
         assert_eq!(word(member(&entries[0], "keyexpr")), Some("demo/sensor"));
         assert_eq!(
             word(member(&entries[1], "keyexpr")),
-            Some("demo/sensor/@history"),
+            Some("demo/sensor/@sidecar"),
             "{link:?}: {doc}"
         );
         for entry in &entries[..2] {
@@ -218,7 +218,7 @@ fn a_reference_the_wire_does_not_answer_is_read_under_the_fixed_key() {
         }
         assert!(matches!(
             member(&entries[1], "keyexpr_suffix"),
-            Some(Json5Value::String(s)) if s == "/@history"
+            Some(Json5Value::String(s)) if s == "/@sidecar"
         ));
         // An id no declaration fixed stays unresolved.
         assert!(matches!(
@@ -230,7 +230,7 @@ fn a_reference_the_wire_does_not_answer_is_read_under_the_fixed_key() {
             Some(Json5Value::Null)
         ));
         // The rule for the fixed key reads the payload. `demo/**` does not
-        // cover `demo/sensor/@history`: `**` matches no chunk that opens with
+        // cover `demo/sensor/@sidecar`: `**` matches no chunk that opens with
         // `@`, which is a fact about the key and not about where it came from.
         // The rows that carry no payload (the session's own) are left out.
         let tree = json5::parse(&doc).expect("JSON");

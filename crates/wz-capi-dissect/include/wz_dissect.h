@@ -425,7 +425,7 @@
  * none, a key that resolved (its `keyexpr` already ends with the suffix) and a
  * message that referenced none all write `null`. It is the text as the wire
  * carried it, read against nothing: a sender whose key ids are fixed in
- * advance names `<id>` and `<id>/@history` with one id, and this is what keeps
+ * advance names `<id>` and `<id>/@sidecar` with one id, and this is what keeps
  * those two references apart. A reader that maps ids to names maps the id and
  * appends this text. Like `keyexpr_id` it can change in an issued row.
  *
@@ -548,7 +548,7 @@
  * (`%` and the decimal id; a `key_binding` line of the declaration verdict,
  * verdict revision 5). A reference the wire's tables do not answer and whose id
  * is fixed is then READ under the fixed key with the reference's suffix
- * appended (`7` and `/@history` read as `demo/sensor/@history`), and every rule
+ * appended (`7` and `/@sidecar` read as `demo/sensor/@sidecar`), and every rule
  * applies to that key: `payload_decode`, `e2e`, a segment rule's pattern and
  * the `joined` message's own decode. A reference the wire does answer is the
  * wire's, whatever is fixed.
@@ -819,7 +819,7 @@
  *
  * A REPLY'S FRAME, at field-document revision 66. A reply is matched against
  * the rules by its OWN key, as the wire wrote it, exactly as a `Push` is: a
- * responder that answers `demo/a/@history` writes that key, a `**` after `demo`
+ * responder that answers `demo/a/@sidecar` writes that key, a `**` after `demo`
  * does not cover a verbatim `@` chunk, and a rule whose pattern covers the
  * reply's key is the one that applies. Nothing in the key is stripped or interpreted. Its
  * frame is read, and its CRC and length are judged (they are properties of its

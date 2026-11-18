@@ -2532,7 +2532,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // Revision 58 ADDS `keyexpr_suffix` to every `carried` entry (the row's and
     // a completed chain's `above_transport.carried`), beside `keyexpr_id`, and
     // retires nothing. It is the suffix an UNRESOLVED reference wrote after its
-    // id, verbatim and unread, so `<id>` and `<id>/@history` from a sender with
+    // id, verbatim and unread, so `<id>` and `<id>/@sidecar` from a sender with
     // fixed key ids stay two references. `null` when the miss wrote no suffix,
     // and on every entry that is not a miss: a resolved `keyexpr` has its suffix
     // appended already. Like `keyexpr_id` it can change in an issued row.

@@ -203,9 +203,9 @@ fn pieces_under_an_unresolved_id_join_per_suffix_under_the_rule_for_every_key() 
         let mut wire = Wire::new(link, true);
         // Two streams under one id, told apart by the suffix alone.
         put(&mut wire, (7, None), &piece(1, 1, 0..6));
-        put(&mut wire, (7, Some("/@history")), &piece(1, 1, 0..6));
+        put(&mut wire, (7, Some("/@sidecar")), &piece(1, 1, 0..6));
         put(&mut wire, (7, None), &piece(1, 1, 6..11));
-        put(&mut wire, (7, Some("/@history")), &piece(1, 1, 6..11));
+        put(&mut wire, (7, Some("/@sidecar")), &piece(1, 1, 6..11));
         let doc = document(&mut wire, &declarations(""));
         assert_eq!(
             places(&doc),

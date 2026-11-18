@@ -4436,7 +4436,7 @@ fn push_keyexpr_miss(miss: Option<&crate::payload_decode::UnresolvedRef>, out: &
         None => out.push_str("null"),
     }
     // Revision 58: the suffix the reference wrote after that id, verbatim, so
-    // `<id>` and `<id>/@history` stay two references. `null` on a miss whose
+    // `<id>` and `<id>/@sidecar` stay two references. `null` on a miss whose
     // `WireExpr` wrote none, and on every entry that is not a miss: a resolved
     // `keyexpr` already has its suffix appended, and no reference has none.
     out.push_str(",\"keyexpr_suffix\":");
@@ -8464,11 +8464,11 @@ mod tests {
 
     /// AN UNRESOLVED REFERENCE NAMES ITS SUFFIX TOO (revision 58), verbatim.
     ///
-    /// A sender with fixed key ids names `<id>` and `<id>/@history` with one id,
+    /// A sender with fixed key ids names `<id>` and `<id>/@sidecar` with one id,
     /// and the id alone reads the two as one reference. The same capture is
     /// written twice, its reference carrying a suffix and carrying none:
     ///
-    /// * with one, the unresolved entry says `7` AND `"/@history"`;
+    /// * with one, the unresolved entry says `7` AND `"/@sidecar"`;
     /// * with none, it says `7` and `null`, which is a value and not an absence;
     /// * in both, every entry has the key, and no entry that is not a miss
     ///   carries a suffix: a resolved key has its suffix appended already.
@@ -8476,7 +8476,7 @@ mod tests {
     fn an_unresolved_reference_names_the_suffix_it_wrote_after_its_id() {
         let (d, file) =
             crate::agg::tests::multilink_session_declaring_after_the_reference_carrying_with_file(
-                crate::agg::tests::push_for_item_713_with_suffix("/@history"),
+                crate::agg::tests::push_for_item_713_with_suffix("/@sidecar"),
             );
         let suffixed = fields_json(&d, &file, None, None);
         let (d, file) =
@@ -8491,7 +8491,7 @@ mod tests {
         }
         assert_eq!(
             misses(&suffixed),
-            vec![("\"no_declaration\"", "7", "\"/@history\"")],
+            vec![("\"no_declaration\"", "7", "\"/@sidecar\"")],
             "the unresolved reference must name id 7 and its suffix: {suffixed}"
         );
         assert_eq!(
@@ -8581,7 +8581,7 @@ mod tests {
             ),
             (
                 "an id and a suffix the tables do not answer",
-                missed(push_naming(7, Some("/@history"))),
+                missed(push_naming(7, Some("/@sidecar"))),
                 ("null", "\"no_declaration\"", "\"id_and_suffix\""),
             ),
         ];
