@@ -4775,6 +4775,25 @@
       "carry_forward_bullets": [
         "None."
       ]
+    },
+    "Round 4510": {
+      "decision_summary": "Eleven design notes leave the tracked tree by the owner's decision: closed-key-set, observation-plane, exec-split-tasks, pool-monitor, declaration-sync-pacing, declarations-synced-event, remote-declaration-watch, rx-delivery-lane, build-configuration, conformance-suite and storage-policy-and-link-layer. Every tracked citation of them is rewritten: a bare path is dropped or replaced by the name of the switch it is about, and a cited decision or step is restated in one clause where it stood. Frozen ledger rounds keep their citations.",
+      "changes_bullets": [
+        "The eleven notes removed from `docs/`; citations rewritten in the remaining docs, in comments of the session, runtime, C ABI and integration crates, in scripts, hooks, workflows, `deploy/wz-config.toml`, the conformance suite, the zenoh API crate manifests and four SCXML sources.",
+        "`scripts/lib/wz_config.py` emits no note path; its seven outputs are regenerated (three defconfigs, `Kconfig.policies`, `policy_generated.rs`, `items_generated.rs`, `statement_vectors.json`, whose digests are unchanged).",
+        "`out/**` regenerated through the `regen-codegen` action (nine source-hash lines); `docs/reason-review-pins.md` re-pins `session-close-ingress` on four files whose changes are comments only."
+      ],
+      "verification_bullets": [
+        "`cargo test -p wz-conformance-build` on pc2: 12 passed, the statement vectors reproduced with unchanged digests; `cargo check -p wz-session-core --all-targets --all-features` and `cargo fmt --all --check` pass.",
+        "`wz_config.py --check` and `reason_review_pin_gate.py --check` pass; `git grep` for the eleven note names outside the frozen ledger returns nothing."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "None."
+      ]
     }
   },
   "inventory_entries": {
