@@ -71,13 +71,10 @@ fn literal_key(push: &PushOwned) -> Option<&str> {
 pub(super) struct LiteralPush(PushOwned);
 
 impl LiteralPush {
-    /// `push` as a literal Push, or `push` back when its key expression names an alias or no key.
-    pub(super) fn new(push: PushOwned) -> Result<Self, PushOwned> {
-        if literal_key(&push).is_some() {
-            Ok(Self(push))
-        } else {
-            Err(push)
-        }
+    /// `push` as a literal Push, or `None` when its key expression names an alias or no key. The
+    /// caller has no use for a Push refused, so it is dropped rather than handed back.
+    pub(super) fn new(push: PushOwned) -> Option<Self> {
+        literal_key(&push).is_some().then_some(Self(push))
     }
 
     /// The key the Push names.
@@ -132,21 +129,18 @@ mod tests {
     use super::*;
     use wz_session_core::push_build::{build_push_aliased, build_push_literal};
 
-    /// A Push that names an alias is refused, and given back whole; a literal one is taken and
-    /// names its key. Turned red by a `LiteralPush` made of a Push whose key needs an alias table.
+    /// A Push that names an alias is refused; a literal one is taken and names its key. Turned red
+    /// by a `LiteralPush` made of a Push whose key needs an alias table.
     #[test]
     fn a_literal_push_is_only_made_of_a_push_with_a_literal_key() {
         let aliased = build_push_aliased(5, None, b"x").expect("build aliased push");
-        let Err(refused) = LiteralPush::new(aliased) else {
-            panic!("a Push naming an alias is refused");
-        };
-        assert_eq!(
-            id_and_suffix(&refused.keyexpr.body),
-            (5, None),
-            "the refused Push is given back as it was"
+        assert_eq!(id_and_suffix(&aliased.keyexpr.body), (5, None));
+        assert!(
+            LiteralPush::new(aliased).is_none(),
+            "a Push naming an alias is refused"
         );
         let literal = build_push_literal("demo/a", b"x").expect("build literal push");
-        let Ok(taken) = LiteralPush::new(literal) else {
+        let Some(taken) = LiteralPush::new(literal) else {
             panic!("a literal Push is taken");
         };
         assert_eq!(taken.keyexpr(), "demo/a");

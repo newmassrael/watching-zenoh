@@ -1949,7 +1949,7 @@ fn client_carrier(push: &PushOwned, keyexpr: &str) -> Option<LiteralPush> {
         "a Push for the client faces",
     )
     .ok()?;
-    LiteralPush::new(carrier).ok()
+    LiteralPush::new(carrier)
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
