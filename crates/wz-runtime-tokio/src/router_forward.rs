@@ -9594,7 +9594,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// guard `|| dst.zid == tables.zid` (zenoh `propagate_simple_token_to:98`, the
     /// token-only disjunct absent from the sub guard) targets the router's own
     /// co-located local-session face; wz's forwarder has NO self-session face (external
-    /// transport faces only, and `future_tokens` stores CLIENT faces only), so the
+    /// transport faces only), so the
     /// guard is a faithful NO-OP here — if wz later co-locates a session on the router
     /// node, this push must NOT exclude a face whose zid == self's zid.
     #[cfg(feature = "routing-token-tables")]
@@ -9602,13 +9602,35 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        // A face of a south peer-hat region is told a token by what self advertises into its
-        // region ([`push_token_to_asking`](Self::push_token_to_asking)), which the inter-region
-        // filter decides; a push from here would pass a token the filter holds back.
-        let pushes = self.tables.future_tokens_mut().pushes_for_new_in(
+        // A face of a south peer-hat region is offered every registration of a token another
+        // region holds, whether or not what self advertises into its region moved, and is told
+        // the token if it asked and was not told it yet: the pin propagates each registration to
+        // every region the inter-region filter admits
+        // (`zenoh/src/net/routing/dispatcher/token.rs` @ `tables.hats[dst].propagate_token(ctx!(), res.clone());`),
+        // where a face already told the token is skipped
+        // (`zenoh/src/net/routing/hat/peer/token.rs` @ `if self.face_hat(dst_face).local_tokens.contains_key(res) {`).
+        // So the push reaches such a face where the filter lets the token into its region, and
+        // never from a holder of the same region.
+        let origin_tier = self.tables.faces.get(&origin).map(|s| s.tier);
+        let admitted: Vec<Region> = self
+            .tables
+            .hats
+            .regions()
+            .filter(|region| {
+                self.tables.serves_asking_peers(*region)
+                    && Some(*region) != origin_tier
+                    && self.self_advertises_token_into(*region, new_ke)
+            })
+            .collect();
+        let tables: &mut Tables = &mut self.tables;
+        let faces = &tables.faces;
+        let pushes = Arc::make_mut(&mut tables.future_tokens).pushes_for_new_in(
             new_ke,
             Some(origin),
-            |_, role| role != InterestOrigin::PeerHat,
+            |face, role| {
+                role != InterestOrigin::PeerHat
+                    || faces.get(&face).is_some_and(|s| admitted.contains(&s.tier))
+            },
             |_, _, _| (),
         );
         for (face, reply_ke, id, ()) in pushes {
@@ -15733,6 +15755,71 @@ mod tests {
             sink_p.frame_count() > 0,
             "the replay must reach the wire, not only the counter"
         );
+    }
+
+    /// A peer of a router that asks for subscribers with a FUTURE-only interest after a
+    /// subscriber on `K` is already advertised is told `K` when a second holder declares it: the
+    /// pin offers every registration to each region that another region's subscriber reaches
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);`)
+    /// and tells a face that asked what it was not told yet
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn maybe_propagate_subscriber`).
+    #[test]
+    fn a_late_future_subscriber_asker_is_told_a_subscriber_a_second_holder_declares() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sf) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xBB), WIRE_CLIENT);
+        let (peer, sink_p) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &peer);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/k"));
+        forward_one(
+            &fwd,
+            FaceId(2),
+            interest_with_mode(5, "demo/**", false, true, true, false, false),
+        );
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/k"));
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the second holder's registration tells the late asker the subscriber"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_)
+        ));
+    }
+
+    /// The queryable twin of
+    /// [`a_late_future_subscriber_asker_is_told_a_subscriber_a_second_holder_declares`]
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn maybe_propagate_queryable`).
+    #[test]
+    fn a_late_future_queryable_asker_is_told_a_queryable_a_second_holder_declares() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sf) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xBB), WIRE_CLIENT);
+        let (peer, sink_p) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &peer);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/k", false));
+        forward_one(
+            &fwd,
+            FaceId(2),
+            interest_with_mode(5, "demo/**", false, true, false, true, false),
+        );
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/k", false));
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the second holder's registration tells the late asker the queryable"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_)
+        ));
     }
 
     /// The peer of a router that comes up late has asked for nothing, so it is told nothing
@@ -26129,6 +26216,41 @@ mod tests {
             }
             other => panic!("expected an UndeclToken, got {other:?}"),
         }
+    }
+
+    /// A peer of a router that asks for tokens with a FUTURE-only interest after a token on `K` is
+    /// already advertised is not told it then, and is told it when a second holder declares `K`:
+    /// the pin propagates every registration, not only one that moves the fold
+    /// (`zenoh/src/net/routing/dispatcher/token.rs` @ `tables.hats[dst].propagate_token(ctx!(), res.clone());`),
+    /// and tells a face that asked the token it was not told yet
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `if self.face_hat(dst_face).local_tokens.contains_key(res) {`).
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_late_future_token_asker_is_told_a_token_a_second_holder_declares() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sf) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xBB), WIRE_CLIENT);
+        let (peer, sink_p) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &peer);
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/k"));
+        forward_one(
+            &fwd,
+            FaceId(2),
+            token_interest_msg(5, "live/**", false, true, false),
+        );
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_client_token_msg(8, "live/k"));
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the second holder's registration tells the late asker the token"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+        ));
     }
 
     #[cfg(feature = "routing-token-tables")]
