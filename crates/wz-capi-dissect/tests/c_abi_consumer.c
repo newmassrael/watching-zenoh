@@ -327,6 +327,8 @@ static int check_live_door(void) {
               "and it must say what it observed: %s", census);
         CHECK(strstr(census, "\"trimmed\":") != NULL,
               "including what was trimmed of it: %s", census);
+        CHECK(strstr(census, "\"unobserved\":") != NULL,
+              "and what left before it was folded: %s", census);
         wz_dissect_string_free(census);
 
         /* An empty selector is the identity; a broken one is refused BY NAME
@@ -4327,9 +4329,10 @@ int main(void) {
      * 24: `fragment_chains.aborted_superseded` counts the chains a restart
      * stranded, off the router's word for the other chain a fragment ended;
      * it read 0 on every capture before. Values move under stationary keys.
-     * 25: the document gains `observed` (`messages`, `trimmed`, and the
-     * packet `interval` they span), and a live handle's census goes on across
-     * a front trim, counting what its planes folded since they began. */
+     * 25: the document gains `observed` (`messages`, `trimmed`, `unobserved`
+     * and the packet `interval` they span), and a live handle's census goes
+     * on across a front trim, counting what its planes folded since they
+     * began. */
     revisioned[0].revision = 25;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);

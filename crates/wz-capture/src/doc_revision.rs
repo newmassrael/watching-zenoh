@@ -4870,7 +4870,8 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     },
     // Revision 25 ADDS `observed`, after the envelope, and retires nothing:
     // `messages`, the transport messages the planes folded since they began;
-    // `trimmed`, how many of those the lists no longer hold; `interval`, where
+    // `trimmed`, how many of those the lists no longer hold; `unobserved`, the
+    // messages a trim took before any call folded them; `interval`, where
     // the first and the last of them stand, in the shape of an
     // `anchor_intervals` entry with its `offset_space` (always `packet`: the
     // fold resolves every message to its capture packet), `null` when none was
@@ -33984,8 +33985,8 @@ pub const CENSUS_R21_KEYS: &[&str] = &[
 ];
 
 /// The keys the census document carries at revision 25: revision 21's PLUS
-/// `observed` and the two keys inside it that revision 21 did not carry,
-/// `trimmed` and `interval` (`messages`, and the interval's `offset_space`,
+/// `observed` and the three keys inside it that revision 21 did not carry,
+/// `trimmed`, `unobserved` and `interval` (`messages`, and the interval's `offset_space`,
 /// `first` and `last`, were already in the set). The range is an interval in a
 /// named space and not a `first_packet`, the node plane's key that revision 2
 /// retired for naming a byte offset a packet.
@@ -34162,6 +34163,7 @@ pub const CENSUS_R25_KEYS: &[&str] = &[
     "unknown_ids",
     "unlocatable_records",
     "unmeasured_payloads",
+    "unobserved",
     "unparsed_bytes",
     "unread",
     "unresolvable_fragments",

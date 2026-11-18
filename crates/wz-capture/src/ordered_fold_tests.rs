@@ -797,6 +797,73 @@ fn a_history_census_goes_on_across_trims_and_counts_everything_observed() {
     );
 }
 
+/// A MESSAGE A TRIM TAKES BEFORE ANY CALL FOLDS IT is counted `unobserved`: a
+/// caller asking once per twenty pushes on a list that holds six reads the hole,
+/// exactly, and one asking at every push, or a census over the capture, reads
+/// none.
+#[cfg(feature = "dissect")]
+#[test]
+fn a_history_census_counts_what_left_before_it_was_folded() {
+    let any = Filter::any();
+    let record = |round: u8| frame_carrying(&push(sender_space(7, None), &[round; 12]));
+
+    let mut slow = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    slow.wire(true, &frame_carrying(&declare_kexpr(7, "demo/temp")));
+    let first = census_json_where_resumable(&slow.bounded, &any, &mut memory);
+    assert_eq!(observed_value(&first, "unobserved"), "0", "{first}");
+    let folded_through = slow.produced();
+    for round in 0..20u8 {
+        slow.wire(true, &record(round));
+    }
+    let first_held = slow.produced() - slow.held();
+    assert!(
+        first_held > folded_through,
+        "the fixture must trim past what the first call folded"
+    );
+    let after = census_json_where_resumable(&slow.bounded, &any, &mut memory);
+    assert_eq!(
+        observed_value(&after, "unobserved"),
+        alloc::format!("{}", first_held - folded_through),
+        "the messages trimmed between the two calls: {after}"
+    );
+    assert_eq!(
+        observed_value(&after, "messages"),
+        alloc::format!("{}", folded_through + slow.held()),
+        "{after}"
+    );
+    assert_eq!(
+        memory.stats().restarts,
+        PLANES,
+        "the planes went on across the hole: {:?}",
+        memory.stats()
+    );
+    let over_the_capture = census_json_where(&slow.bounded, &any);
+    assert_eq!(
+        observed_value(&over_the_capture, "unobserved"),
+        "0",
+        "{over_the_capture}"
+    );
+
+    let mut fast = Twin::new(6);
+    let mut memory = CensusMemory::over_history();
+    fast.wire(true, &frame_carrying(&declare_kexpr(7, "demo/temp")));
+    census_json_where_resumable(&fast.bounded, &any, &mut memory);
+    for round in 0..20u8 {
+        fast.wire(true, &record(round));
+        let doc = census_json_where_resumable(&fast.bounded, &any, &mut memory);
+        assert_eq!(
+            observed_value(&doc, "unobserved"),
+            "0",
+            "push {round}: {doc}"
+        );
+    }
+    assert!(
+        fast.produced() > fast.held(),
+        "the fast caller's list was trimmed too, so its 0 is not for want of a trim"
+    );
+}
+
 /// A census over its history gives up what its planes keep of the rows no list
 /// holds, and its document does not move for it: the entries kept stay near
 /// what the lists hold, where every row ever folded would be kept otherwise.

@@ -7677,6 +7677,31 @@ impl Dissection {
         self.capture_order_since_policy(prev, TrimPolicy::Restart)
     }
 
+    /// The messages the lists produced after the walk that left `prev` and a
+    /// front trim took before any walk reached them: for a list `prev` names,
+    /// the ones between where that walk stopped and the oldest message held now;
+    /// for a list it does not name (one that appeared since), every one no
+    /// longer held. 0 when the lists are not the ones `prev` was taken over,
+    /// which no walk from it goes on across.
+    pub(crate) fn trimmed_unwalked(&self, prev: &OrderMarks) -> u64 {
+        let current: alloc::vec::Vec<(FlowKey, MessageListOrigin, messages::Messages<'_>)> =
+            self.message_lists_with_origin().collect();
+        let Some(continues) = list_continuations(&current, Some(&prev.lists)) else {
+            return 0;
+        };
+        current
+            .iter()
+            .zip(&continues)
+            .map(|((_, _, frames), at)| {
+                let first_held = frames.produced() - frames.len() as u64;
+                match at {
+                    Some(at) => first_held.saturating_sub(prev.lists[*at].produced),
+                    None => first_held,
+                }
+            })
+            .sum()
+    }
+
     /// [`Self::capture_order_since`] for a fold that holds the HISTORY of the
     /// messages it has taken and so may go on across a front trim: the same four
     /// conditions with the second one lifted. See [`TrimPolicy::Continue`].

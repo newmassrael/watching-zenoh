@@ -7221,17 +7221,28 @@ int wz_dissect_pcap_local_options_of_link_type(
  * container door's for the same packets. Its "observed" object says what it
  * covers:
  *
- *     "observed":{"messages":M,"trimmed":T,
+ *     "observed":{"messages":M,"trimmed":T,"unobserved":U,
  *                 "interval":{"offset_space":"packet","first":P,"last":Q}}
  *
  * M is the transport messages folded since the planes began, T how many of
  * those the lists no longer hold (0 for every container door, and for a
- * handle until it is trimmed), and the interval where the first and the last
+ * handle until it is trimmed), U the messages the lists produced since the
+ * planes began that a ceiling took before any call folded them, and the
+ * interval where the first and the last
  * of them stand, in the shape of a keyexpr row's anchor_intervals entry
  * (null when none was folded). Its space is the capture PACKET on every link,
  * a stream's included, because the census folds each message at the packet
  * that carried it; the planes' own anchors keep their own spaces. A reader
  * that wants a census of what is held only reads T > 0 as "this is history".
+ *
+ * U ABOVE 0 IS A HOLE. The census counts what it folded, and a message that
+ * arrived and was trimmed between two calls was never folded: the planes say
+ * nothing of it, and M + U is what arrived. It is 0 for every container door,
+ * and for a caller that calls at least once per turnover of the fullest list
+ * (wz_dissect_live_retention's held.fullest_window.messages against the
+ * frames_per_flow ceiling says how close that is). A caller that reads U > 0
+ * either calls more often or opens the handle with a larger ceiling; U counts
+ * from the planes' last beginning, so it is 0 again after they begin.
  *
  * WHAT A CALL COSTS. The planes are kept between calls, for the selector of
  * the last call, so a census drawn again folds the messages that arrived,

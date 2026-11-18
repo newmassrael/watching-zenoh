@@ -353,6 +353,12 @@ fn census_document(
 /// reader who wants only what is held reads that as the part of the planes that
 /// is history.
 ///
+/// `unobserved` is the messages the lists produced since the planes began that a
+/// front trim took before any call folded them: a hole in a census that goes on
+/// across trims, which opens when it is asked less often than a list turns over.
+/// It is 0 for a census of what the capture holds, and for a caller that asks
+/// before a ceiling takes what arrived.
+///
 /// The interval is written in the shape of a keyexpr row's `anchor_intervals`
 /// entry, its space named beside it as every anchor's is. Its space is the
 /// capture PACKET on every link: the walk the planes fold in resolves a stream
@@ -367,6 +373,8 @@ fn observed_into(d: &crate::Dissection, observed: crate::ordered_fold::Observed,
     u64_into(observed.messages, out);
     out.push_str(",\"trimmed\":");
     u64_into(observed.messages.saturating_sub(held), out);
+    out.push_str(",\"unobserved\":");
+    u64_into(observed.unobserved, out);
     match observed.packets {
         Some((first, last)) => {
             let _ = write!(

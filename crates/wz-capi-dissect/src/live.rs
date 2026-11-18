@@ -1087,6 +1087,12 @@ impl LiveDissection {
     /// (`trimmed`) and the `interval` of capture packets the first and the last
     /// stand at.
     ///
+    /// It counts what it FOLDED: a message that arrived and was trimmed between
+    /// two calls was never folded, and `observed.unobserved` counts those since
+    /// the planes began. Above 0 the census has a hole, and the caller either
+    /// calls more often than its fullest list turns over or opens the handle
+    /// with a larger ceiling.
+    ///
     /// # What it costs
     ///
     /// The planes are kept between calls, so a census drawn again folds the
