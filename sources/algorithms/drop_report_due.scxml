@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the drops held since the last report are reported at `now_ms`, at most one report per
+  `interval_ms` on a millisecond clock that does not wrap.
+
+  0 holds them: there are none (`pending` is 0), or the interval since the last report
+  (`last_ms`, when `has_last`) has not passed. 1 reports them now: the first drops ever, or the
+  interval has passed. 2 holds them and starts the interval again from `now_ms`: the clock reads
+  earlier than the last report, which a clock that stepped back does, and holding every report
+  until it caught up would hide the drops for as long as it stepped. The caller keeps the count
+  and the instant; this says only what to do with them.
+
+  The time passed is `saturatingSub(now_ms, last_ms)`, which the case before it has already
+  held at or above 0. An interval of 0 reports every drop.
+
+  The instance keys (wz-app-frame `instance_key::Keyer`) ask it at every drop and at a flush.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="drop_report_due"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="pending" type="uint64"/>
+    <sce:param name="has_last" type="bool"/>
+    <sce:param name="last_ms" type="uint64"/>
+    <sce:param name="now_ms" type="uint64"/>
+    <sce:param name="interval_ms" type="uint64"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="pending === 0">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="!has_last">
+      <sce:return expr="1"/>
+    </sce:if>
+    <sce:if cond="now_ms &lt; last_ms">
+      <sce:return expr="2"/>
+    </sce:if>
+    <sce:if cond="saturatingSub(now_ms, last_ms) &gt;= interval_ms">
+      <sce:return expr="1"/>
+    </sce:if>
+    <sce:return expr="0"/>
+  </sce:body>
+</scxml>
