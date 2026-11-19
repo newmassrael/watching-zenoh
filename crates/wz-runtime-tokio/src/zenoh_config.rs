@@ -1586,6 +1586,13 @@ pub struct ZenohNodeConfig {
     /// defaults. [`Self::to_json5`] writes it as a `wz` member that this build reads back to an
     /// equal snapshot and provenance.
     pub policies: crate::policy_document::Resolved,
+    /// `wz/key-ids`: the key ids every node of the deployment shares and the endpoints whose
+    /// key-wire form the document states apart from the session's, read with the policies of the
+    /// same member and refused in the same list ([`ConfigIngestError::PoliciesRefused`]). Nothing
+    /// when the document states no such member; a build without the `shared-key-ids` capability
+    /// refuses the member by name. [`Self::to_json5`] writes it back.
+    #[cfg(feature = "shared-key-ids")]
+    pub key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1767,6 +1774,8 @@ impl Default for ZenohNodeConfig {
             aggregation_publishers: Vec::new(),
             stats_filters: Vec::new(),
             policies: build_policies(),
+            #[cfg(feature = "shared-key-ids")]
+            key_ids: Default::default(),
         }
     }
 }
@@ -1983,7 +1992,8 @@ impl ZenohNodeConfig {
     /// bottom.
     ///
     /// The [`WZ_MEMBER`] comes last, and only when a value of the policies is
-    /// not the build default: a node whose document stated nothing of wz's is
+    /// not the build default or the node holds key ids (`wz/key-ids`, with the
+    /// `shared-key-ids` capability): a node whose document stated nothing of wz's is
     /// emitted as before, and stock zenoh, which has no such member, is handed
     /// none.
     pub fn to_json5(&self) -> String {
@@ -2369,7 +2379,7 @@ impl ZenohNodeConfig {
             }
             out.push_str("] }");
         }
-        push_wz_member(&self.policies, &mut out);
+        push_wz_member(&self.policies, self.key_ids_member(), &mut out);
         out.push_str("\n}\n");
         out
     }
@@ -2387,7 +2397,14 @@ impl ZenohNodeConfig {
 /// one of them set is written as the document's own statement and reads back as the document's.
 ///
 /// [`Origin::Api`]: crate::policy_document::Origin::Api
-fn push_wz_member(policies: &crate::policy_document::Resolved, out: &mut String) {
+///
+/// `key_ids` is the member's `key-ids`, already written ([`ZenohNodeConfig::key_ids_member`]),
+/// which comes last, and makes the member written when no policy needs it.
+fn push_wz_member(
+    policies: &crate::policy_document::Resolved,
+    key_ids: Option<String>,
+    out: &mut String,
+) {
     use crate::policy_document::Origin;
 
     let profile = policies
@@ -2407,7 +2424,7 @@ fn push_wz_member(policies: &crate::policy_document::Resolved, out: &mut String)
         })
         .map(|(entry, _)| (entry.id(), entry.value_in(&policies.policy)))
         .collect();
-    if profile.is_none() && stated.is_empty() {
+    if profile.is_none() && stated.is_empty() && key_ids.is_none() {
         return;
     }
     out.push_str(",\n  ");
@@ -2416,7 +2433,7 @@ fn push_wz_member(policies: &crate::policy_document::Resolved, out: &mut String)
     if let Some(id) = profile {
         out.push_str(" \"profile\": ");
         escape_into(id, out);
-        if !stated.is_empty() {
+        if !stated.is_empty() || key_ids.is_some() {
             out.push(',');
         }
     }
@@ -2432,8 +2449,68 @@ fn push_wz_member(policies: &crate::policy_document::Resolved, out: &mut String)
             escape_into(value, out);
         }
         out.push_str(" }");
+        if key_ids.is_some() {
+            out.push(',');
+        }
+    }
+    if let Some(member) = key_ids {
+        out.push_str(&member);
     }
     out.push_str(" }");
+}
+
+impl ZenohNodeConfig {
+    /// The `key-ids` member of the [`WZ_MEMBER`] that states [`Self::key_ids`] again, as a
+    /// document states it, or `None` when it holds neither a dictionary nor a form of an
+    /// endpoint. The dictionary is written ascending by id, which the reader does not depend on.
+    #[cfg(feature = "shared-key-ids")]
+    fn key_ids_member(&self) -> Option<String> {
+        let dictionary = self.key_ids.ids.as_deref().filter(|ids| !ids.is_empty());
+        let links = &self.key_ids.links;
+        if dictionary.is_none() && links.is_empty() {
+            return None;
+        }
+        let mut out = String::from(" ");
+        escape_into("key-ids", &mut out);
+        out.push_str(": {");
+        if let Some(ids) = dictionary {
+            out.push_str(" \"dictionary\": [");
+            for (index, (id, key)) in ids.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, " {{ \"id\": {id}, \"key\": ");
+                escape_into(key, &mut out);
+                out.push_str(" }");
+            }
+            out.push_str(" ]");
+            if !links.is_empty() {
+                out.push(',');
+            }
+        }
+        if !links.is_empty() {
+            out.push_str(" \"links\": [");
+            for (index, (locator, form)) in links.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(" { \"locator\": ");
+                escape_into(locator, &mut out);
+                out.push_str(", \"form\": ");
+                escape_into(form.id(), &mut out);
+                out.push_str(" }");
+            }
+            out.push_str(" ]");
+        }
+        out.push_str(" }");
+        Some(out)
+    }
+
+    /// See the twin with the capability: a build without it holds no key ids.
+    #[cfg(not(feature = "shared-key-ids"))]
+    fn key_ids_member(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Upstream's `transport/link/tx/queue/batching/time_limit`, in milliseconds, which a file that
@@ -4579,6 +4656,10 @@ pub fn config_key_disposition(path: &str) -> ConfigKeyDisposition {
     if wz_member_path_is_read(path) {
         return ConfigKeyDisposition::Honoured;
     }
+    // Reached by a build without the capability that reads them, which refuses them by name.
+    if names_key_ids(path) {
+        return ConfigKeyDisposition::NotInBuild;
+    }
     if honours_config_key(path) {
         // What wz honours, answered for the build asked: a capability's key is honoured only by a
         // build that has the capability.
@@ -5065,9 +5146,13 @@ pub const WZ_MEMBER: &str = "wz";
 
 /// Whether `path` is a part of the document's [`WZ_MEMBER`] that the open reads: the member
 /// itself, `wz/profile`, `wz/policies`, and `wz/policies/<id>` where `<id>` names a policy of
-/// the build. Any other path below the member is one the open refuses by name
+/// the build, and, in a build with the `shared-key-ids` capability, `wz/key-ids` and its two
+/// lists. Any other path below the member is one the open refuses by name
 /// ([`ConfigIngestError::PoliciesRefused`]), and is no key wz honours.
 pub fn wz_member_path_is_read(path: &str) -> bool {
+    if names_key_ids(path) {
+        return cfg!(feature = "shared-key-ids");
+    }
     let Some(below) = path.strip_prefix(WZ_MEMBER) else {
         return false;
     };
@@ -5084,6 +5169,16 @@ pub fn wz_member_path_is_read(path: &str) -> bool {
             .any(|entry| entry.id() == policy),
         Some(_) => false,
     }
+}
+
+/// Whether `path` is `wz/key-ids` or one of its two lists: the paths the `shared-key-ids`
+/// capability reads, and a build without it refuses by name. An entry of a list is a value of the
+/// list and no path of its own.
+fn names_key_ids(path: &str) -> bool {
+    matches!(
+        path,
+        "wz/key-ids" | "wz/key-ids/dictionary" | "wz/key-ids/links"
+    )
 }
 
 /// The top-level `wz` members of a document, taken out of `members` and gathered, in their order,
@@ -5119,12 +5214,29 @@ fn build_policies() -> crate::policy_document::Resolved {
 fn policies_of(
     wz_member: &Json5Value,
 ) -> Result<crate::policy_document::Resolved, ConfigIngestError> {
-    crate::policy_document::resolve_document(build_policies().policy, wz_member).map_err(
-        |refusals| ConfigIngestError::PoliciesRefused {
-            refusals: refusals.iter().map(ToString::to_string).collect(),
-            unreported: refusals.unreported(),
-        },
-    )
+    crate::policy_document::resolve_document(build_policies().policy, wz_member)
+        .map_err(member_refused)
+}
+
+/// The key ids the `wz` member of a document states (`wz/key-ids`), read by the reader that
+/// resolves its policies ([`policies_of`]), which refuses the member first when it refuses any of
+/// it; nothing when the member states none.
+#[cfg(feature = "shared-key-ids")]
+fn key_ids_of(
+    wz_member: &Json5Value,
+) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, ConfigIngestError> {
+    crate::policy_document::statements_from_json5(wz_member)
+        .map(|read| read.key_ids)
+        .map_err(member_refused)
+}
+
+/// Every refusal of the `wz` member, as the sentences [`ConfigIngestError::PoliciesRefused`]
+/// carries.
+fn member_refused(refusals: crate::policy_document::Refusals<'_>) -> ConfigIngestError {
+    ConfigIngestError::PoliciesRefused {
+        refusals: refusals.iter().map(ToString::to_string).collect(),
+        unreported: refusals.unreported(),
+    }
 }
 
 /// A honoured key's value, with zenoh's "null means default" already applied.
@@ -8110,6 +8222,10 @@ impl ZenohNodeConfig {
 
         let mut out = reading.start();
         out.policies = policies_of(&wz_member)?;
+        #[cfg(feature = "shared-key-ids")]
+        {
+            out.key_ids = key_ids_of(&wz_member)?;
+        }
         let mut named: Vec<&'static str> = Vec::new();
         // R2081 (open-debt item 500) — keys the document states for OTHER modes.
         // Neither honoured (this node got no instruction) nor ignored (wz reads
@@ -15176,6 +15292,122 @@ mod wz_member_tests {
                 "{path}"
             );
         }
+    }
+
+    /// `wz/key-ids` and its two lists are read by a build with the capability and out of the
+    /// build of one without it; a path below them is no key at all.
+    #[test]
+    fn the_key_ids_paths_are_read_by_a_build_with_the_capability_alone() {
+        let with = cfg!(feature = "shared-key-ids");
+        for path in ["wz/key-ids", "wz/key-ids/dictionary", "wz/key-ids/links"] {
+            assert_eq!(wz_member_path_is_read(path), with, "{path}");
+            assert_eq!(
+                config_key_disposition(path),
+                if with {
+                    ConfigKeyDisposition::Honoured
+                } else {
+                    ConfigKeyDisposition::NotInBuild
+                },
+                "{path}"
+            );
+            assert!(!honours_config_key(path), "{path} is no admin write");
+        }
+        for path in [
+            "wz/key-ids/colour",
+            "wz/key-ids/dictionary/0",
+            "wz/key-idsx",
+        ] {
+            assert!(!wz_member_path_is_read(path), "{path}");
+            assert_eq!(
+                config_key_disposition(path),
+                ConfigKeyDisposition::Unknown,
+                "{path}"
+            );
+        }
+    }
+
+    /// The document's key ids are read into the node with its policies, and the export reads
+    /// back to the same key ids.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn the_key_ids_of_the_member_are_read_and_exported_again() {
+        use wz_session_core::policy::KeyWireForm;
+        use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen};
+
+        let read = ZenohNodeConfig::from_json5(
+            r#"{ mode: "peer", wz: { "key-ids": {
+                dictionary: [ { id: 41, key: "lab/rig/alpha" }, { id: 40, key: "lab/rig" } ],
+                links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" } ] } } }"#,
+        )
+        .expect("the member reads");
+        let expected = KeyIdsAtOpen {
+            ids: Some(std::sync::Arc::new(
+                KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("valid"),
+            )),
+            links: vec![("tcp/192.0.2.7:7447".to_owned(), KeyWireForm::Literal)],
+        };
+        assert_eq!(read.config.key_ids, expected);
+        assert_eq!(
+            read.config.policies,
+            build_policies(),
+            "key ids state no policy"
+        );
+        let export = read.config.to_json5();
+        let again = ZenohNodeConfig::from_json5(&export).expect("the export reads back");
+        assert_eq!(again.config.key_ids, expected, "{export}");
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ mode: "peer" }"#)
+                .expect("reads")
+                .config
+                .key_ids,
+            KeyIdsAtOpen::default(),
+            "a document with no member holds no key ids"
+        );
+    }
+
+    /// A refused part of `wz/key-ids` fails the ingest as a refused policy does, named in the
+    /// same error.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn a_refused_key_ids_member_fails_the_ingest_by_name() {
+        let error = ZenohNodeConfig::from_json5(
+            r#"{ wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ],
+                                    links: [ { locator: "tcp/192.0.2.7:7447", form: "loud" } ] },
+                       policies: { "key-set": "ajar" } } }"#,
+        )
+        .unwrap_err();
+        let ConfigIngestError::PoliciesRefused { refusals, .. } = &error else {
+            panic!("not the member's refusal: {error:?}");
+        };
+        assert_eq!(refusals.len(), 3, "{refusals:?}");
+        let text = error.to_string();
+        for named in [
+            "id 0 in entry 0 of `wz/key-ids/dictionary`",
+            "the key-wire form `loud` for `tcp/192.0.2.7:7447`",
+            "`key-set` = `ajar`",
+        ] {
+            assert!(text.contains(named), "{named} is not named: {text}");
+        }
+    }
+
+    /// A build without the capability refuses the member by name and opens nothing on it.
+    #[cfg(not(feature = "shared-key-ids"))]
+    #[test]
+    fn a_key_ids_member_is_refused_by_a_build_without_the_capability() {
+        let error = ZenohNodeConfig::from_json5(
+            r#"{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigIngestError::PoliciesRefused { .. }),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("a build without the `shared-key-ids` capability"),
+            "{error}"
+        );
     }
 
     /// A node whose document states nothing of wz's is emitted without the member.
