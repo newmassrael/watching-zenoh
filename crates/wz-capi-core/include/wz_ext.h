@@ -1032,6 +1032,43 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
                                            const char *locator,
                                            const char *form);
 
+/* ================================================ the periodic run API
+ *
+ * No door of wz's own: this section states the order in which a program that
+ * runs its own scheduler calls zenoh-pico's run API on the pico C ABI, and
+ * what each call does on each engine (docs/periodic-run-api.md has the table;
+ * crates/wz-capi-pico/examples/c/periodic.c runs it).
+ *
+ *   1 open       z_open. Multi-threaded arm: the read task starts with the
+ *                session unless the open options say not to.
+ *   2 tasks      Multi-threaded: zp_start_read_task if the open did not; a
+ *                program may open without it, declare, then start it.
+ *                zp_start_lease_task / zp_stop_lease_task answer Z_OK and do
+ *                nothing, as in zenoh-pico 1.10. Single-threaded: no task.
+ *   3 declare    A subscriber the program reads on its own thread hands its
+ *                samples to a ring or fifo channel; the program pulls with
+ *                the channel's try_recv until Z_CHANNEL_NODATA.
+ *   4 each cycle zp_batch_start, the cycle's puts, zp_batch_flush: the puts
+ *                leave together at the flush, and the window stays open.
+ *                Single-threaded: then zp_spin_once. Then pull the channels.
+ *                Then wait for the cycle's absolute deadline (z_clock_now,
+ *                z_clock_advance_ms) with z_condvar_wait_until or a sleep.
+ *   5 end        zp_batch_stop, the undeclarations, zp_stop_read_task if
+ *                wanted, z_close.
+ *
+ * THE TWO ENGINES. The cooperative engine does the single-threaded arm's work
+ * in the calls: zp_read and zp_spin_once read and run the callbacks on the
+ * caller's thread, zp_send_keep_alive sends one. The tokio engine reads,
+ * keeps the lease and runs the callbacks on a thread of its own in either arm:
+ * its zp_read, zp_send_keep_alive and zp_spin_once answer for a live session
+ * and do no work, and its zp_send_join asks a joined group for a Join. A
+ * program built for the single-threaded arm's promise that callbacks run only
+ * inside its own calls therefore locks what its callbacks share, or reads
+ * through channels, when its library runs the tokio engine (on Windows, the
+ * only engine). In the multi-threaded arm neither engine, nor zenoh-pico, has
+ * a call that steps the session on the program's thread: the program sends
+ * and pulls, the read task does the rest. */
+
 /* ================================================ the program's transport
  *
  * A transport the program supplies: a program with a network stack of its
