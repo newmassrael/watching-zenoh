@@ -19,7 +19,7 @@
 //! a key deeper than the bound is not this node's on a no-heap MCU.
 
 use wz_session_core::bounded::BoundedVec;
-use wz_session_core::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
+use wz_session_core::keyexpr_match::{keyexpr_intersects, MAX_KEYEXPR_CHUNKS};
 
 /// The number of chunks in front of an admin config-write sub-key:
 /// `@` / `<zid>` / `<whatami>` / `config`. Upstream states the same four as a
@@ -71,10 +71,10 @@ pub fn subkey_in_config_space<'k>(
         }
     }
     // GATE 1 — upstream's set-semantics membership test. This also rejects
-    // an empty chunk in the arriving key (`keyexpr_intersects_target` ->
-    // `target_chunks_well_formed`), which is the non-canonical shape
-    // upstream never receives because its wire expression was validated.
-    if !keyexpr_intersects_target(pattern, &chunks) {
+    // an empty chunk in the arriving key (`keyexpr_intersects` refuses a
+    // text with one), which is the non-canonical shape upstream never
+    // receives because its wire expression was validated.
+    if !keyexpr_intersects(pattern, keyexpr) {
         return Err(ConfigSpaceRefusal::NotInSpace);
     }
     // GATE 2a — a `**` where the format writes a one-chunk spec. Checked

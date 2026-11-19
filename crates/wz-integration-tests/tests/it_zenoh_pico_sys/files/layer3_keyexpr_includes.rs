@@ -19,8 +19,8 @@
 //!
 //! The y261 lesson: a differential that agrees with the foreign side on the WIRE can
 //! still leave the atom's own cfg-gated code unexercised, and then the claim is worth
-//! nothing. Here `wz_session_core::keyexpr_match::keyexpr_includes_patterns` is itself
-//! `#[cfg(feature = "keyexpr-includes")]` (keyexpr_match.rs:567) — turn the feature off
+//! nothing. Here `wz_session_core::keyexpr_match::keyexpr_includes` is itself
+//! `#[cfg(feature = "keyexpr-includes")]` (keyexpr_match.rs) — turn the feature off
 //! and this test does not compile, let alone pass. The claim binds to the atom.
 //!
 //! ## The witness
@@ -63,9 +63,7 @@ fn zenoh_pico_includes(a: &str, b: &str) -> bool {
 
 /// wz-side inclusion, through the atom's OWN cfg-gated entry point.
 fn wz_includes(a: &str, b: &str) -> bool {
-    let a_chunks: Vec<&str> = a.split('/').collect();
-    let b_chunks: Vec<&str> = b.split('/').collect();
-    wz_session_core::keyexpr_match::keyexpr_includes_patterns(&a_chunks, &b_chunks)
+    wz_session_core::keyexpr_match::keyexpr_includes(a, b)
 }
 
 /// Assert wz and zenoh-pico agree on `a ⊇ b` — and, because the relation is DIRECTIONAL,
@@ -197,7 +195,7 @@ fn keyexpr_includes_dollar_star() {
 // wz-proves: keyexpr-includes codec-parity partial
 #[test]
 fn keyexpr_includes_implies_intersects_in_both_impls() {
-    use wz_runtime_tokio::pubsub::keyexpr_intersect_patterns;
+    use wz_runtime_tokio::keyexpr_match::keyexpr_intersects;
 
     for (a, b) in [
         ("**", "*"),
@@ -212,12 +210,9 @@ fn keyexpr_includes_implies_intersects_in_both_impls() {
         // The differential first: wz and pico must give the SAME inclusion answer.
         assert_includes_agree(a, b);
 
-        let a_chunks: Vec<&str> = a.split('/').collect();
-        let b_chunks: Vec<&str> = b.split('/').collect();
-
         if wz_includes(a, b) {
             assert!(
-                keyexpr_intersect_patterns(&a_chunks, &b_chunks),
+                keyexpr_intersects(a, b),
                 "wz: `{a}` ⊇ `{b}` but they do not intersect — the matchers disagree",
             );
         }

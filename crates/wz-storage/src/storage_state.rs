@@ -34,7 +34,7 @@
 //! - The query-match set = `get_matching_keys` (service.rs:628-658):
 //!   iterate `get_all_entries()` and keep every stored key whose keyexpr
 //!   `intersects` the query keyexpr (service.rs:646). wz reuses
-//!   [`keyexpr_intersects_target`]
+//!   [`keyexpr_intersects`]
 //!   — the SAME matcher the pub/sub route and the local subscriber
 //!   registry consult, so a storage's query-reply set cannot diverge from
 //!   what a subscriber on the same keyexpr would have received.
@@ -74,7 +74,7 @@
 //!   ([`wz_session_core::keyexpr_match::is_wild`]), registers it in the
 //!   `wildcard_puts` / `wildcard_deletes` registries (the wz analog of zenoh's
 //!   two `KeBoxTree`s — a `BTreeMap` keyed on the full keyexpr, matched via the
-//!   [`keyexpr_intersects_target`] SSOT, not string equality), materializes it
+//!   [`keyexpr_intersects`] SSOT, not string equality), materializes it
 //!   onto every already-stored matching key, and shadow-checks every concrete
 //!   sample against the registries (the resurrection guard). With the feature
 //!   OFF the minimal state treats a wildcard key as an ordinary stored key
@@ -166,7 +166,7 @@ use crate::storage_backend::{
 use crate::storage_replication::{
     build_digest, Digest, IntervalIdx, ReplicationConfig, ReplicationLog,
 };
-use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::keyexpr_match::keyexpr_intersects;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::sample_kind::SampleKind;
@@ -217,7 +217,7 @@ pub struct StorageState<B: StorageBackend> {
     /// Registered Wildcard Puts, keyed on the FULL (un-stripped) wildcard
     /// keyexpr — the wz analog of zenoh's `wildcard_puts` `KeBoxTree`
     /// (service.rs:88). A `BTreeMap` (no `KeBoxTree` in the no_std+alloc port)
-    /// matched via the [`keyexpr_intersects_target`] SSOT; a re-issued wildcard
+    /// matched via the [`keyexpr_intersects`] SSOT; a re-issued wildcard
     /// upserts (zenoh `KeBoxTree.insert` semantics). Kept SEPARATE from
     /// `wildcard_deletes` because a `WildcardPut` and a `WildcardDelete` on the
     /// same keyexpr must coexist (their relative order matters across the
@@ -595,7 +595,6 @@ impl<B: StorageBackend> StorageState<B> {
     /// key. Mirrors zenoh's `reply_query` replying every `StoredData` `get`
     /// returns (`storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`).
     pub fn matching_versions(&self, query_keyexpr: &str) -> Vec<(String, Vec<StoredData>)> {
-        let target_chunks: Vec<&str> = query_keyexpr.split('/').collect();
         let mut out = Vec::new();
         for stored_key in self.listed_keys() {
             // Restore the configured strip_prefix so the match + reply key are
@@ -605,7 +604,7 @@ impl<B: StorageBackend> StorageState<B> {
             let Some(full_key) = self.full_key_for(stored_key.as_deref()) else {
                 continue;
             };
-            if keyexpr_intersects_target(&full_key, &target_chunks) {
+            if keyexpr_intersects(&full_key, query_keyexpr) {
                 let versions = self.versions_for_reply(stored_key.as_deref());
                 if !versions.is_empty() {
                     out.push((full_key, versions));
@@ -836,7 +835,6 @@ impl<B: StorageBackend> StorageState<B> {
             encoding.clone(),
         );
 
-        let target_chunks: Vec<&str> = wildcard_ke.split('/').collect();
         // Collect (stored, full) pairs so the restored full key computed for the
         // match filter is reused by the override lookup below (one
         // `full_key_for` per key). The owned Vec releases the `&self` borrow
@@ -858,7 +856,7 @@ impl<B: StorageBackend> StorageState<B> {
             .into_iter()
             .filter_map(|(stored, _ts)| {
                 let full = self.full_key_for(stored.as_deref())?;
-                keyexpr_intersects_target(&full, &target_chunks).then_some((stored, full))
+                keyexpr_intersects(&full, wildcard_ke).then_some((stored, full))
             })
             .collect();
         let mut first_error = Ok(());
@@ -1039,9 +1037,8 @@ impl<B: StorageBackend> StorageState<B> {
         if run_delete_phase {
             let mut lowest: Option<&WildcardUpdate> = None;
             for (wildcard_ke, wu) in &self.wildcard_deletes {
-                let chunks: Vec<&str> = wildcard_ke.split('/').collect();
                 // `wu.ts >= incoming_ts` ⇔ NOT (incoming_ts strictly newer).
-                if keyexpr_intersects_target(full_key, &chunks)
+                if keyexpr_intersects(full_key, wildcard_ke)
                     && !timestamp_strictly_newer(incoming_ts, &wu.data.timestamp)
                 {
                     match lowest {
@@ -1073,9 +1070,8 @@ impl<B: StorageBackend> StorageState<B> {
             let mut latest_ts = incoming_ts.clone();
             let mut latest: Option<&WildcardUpdate> = None;
             for (wildcard_ke, wu) in &self.wildcard_puts {
-                let chunks: Vec<&str> = wildcard_ke.split('/').collect();
                 // `wu.ts >= latest_ts` ⇔ NOT (latest_ts strictly newer).
-                if keyexpr_intersects_target(full_key, &chunks)
+                if keyexpr_intersects(full_key, wildcard_ke)
                     && !timestamp_strictly_newer(&latest_ts, &wu.data.timestamp)
                 {
                     latest_ts = wu.data.timestamp.clone();

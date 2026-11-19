@@ -11,7 +11,7 @@
 //! `to` must not be a key `key` can match: the republished sample would reach
 //! this same subscriber and circulate for ever, so the document is refused.
 
-use wz::runtime_tokio::keyexpr_match::keyexpr_intersect_patterns;
+use wz::runtime_tokio::keyexpr_match::keyexpr_intersects;
 use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{PublishOptions, SubscribeOptions};
 use wz::runtime_tokio::Reliability;
@@ -34,9 +34,7 @@ fn check(args: &Args) -> Vec<(&'static str, String)> {
     let (Some(key), Some(to)) = (args.text("key"), args.text("to")) else {
         return Vec::new();
     };
-    let key_chunks: Vec<&str> = key.split('/').collect();
-    let to_chunks: Vec<&str> = to.split('/').collect();
-    if keyexpr_intersect_patterns(&key_chunks, &to_chunks) {
+    if keyexpr_intersects(key, to) {
         vec![(
             "to",
             format!("must not be matched by `key` ({key}): the role would forward its own samples"),

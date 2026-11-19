@@ -28,9 +28,9 @@
 //! 2. **Emission.** Each binding's keyexpr is canonicalized with
 //!    [`wz_session_core::keyexpr_canon::canonize_keyexpr`] — the SAME
 //!    canonicalizer the runtime [`SwitchboardRegistry`] uses, so the
-//!    static (MCU) and dynamic (AP) stored chunk forms cannot diverge —
-//!    then emitted as a `&'static str` chunk literal matched by the shared
-//!    no-alloc [`wz_session_core::keyexpr_match::keyexpr_pattern_matches`].
+//!    static (MCU) and dynamic (AP) stored forms cannot diverge —
+//!    then emitted as a `&'static str` keyexpr literal matched by the shared
+//!    no-alloc [`wz_session_core::keyexpr_match::keyexpr_matches`].
 //!    The emitted function mirrors `SwitchboardRegistry::dispatch`:
 //!    every matching row fires in declaration order. A signal row injects an
 //!    empty `_event.data`; a value row decodes the wire payload with its
@@ -342,7 +342,7 @@ fn event_descriptor_matches(descriptor: &str, name: &str) -> bool {
 }
 
 /// Emit a Rust string literal for `s`, escaping `\` and `"` so an arbitrary
-/// (already-validated) keyexpr chunk or event name embeds safely.
+/// (already-validated) keyexpr or event name embeds safely.
 fn rust_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -710,17 +710,13 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
         }
 
         // Canonicalize the keyexpr with the runtime's own canonicalizer
-        // (shared SSOT) so the static chunks match the wire form.
+        // (shared SSOT) so the static pattern matches the wire form.
         let canonical = wz_session_core::keyexpr_canon::canonize_keyexpr(&binding.keyexpr)
             .map_err(|e| CodegenError::Keyexpr {
                 keyexpr: binding.keyexpr.clone(),
                 reason: e.to_string(),
             })?;
-        let chunks = canonical
-            .split('/')
-            .map(rust_string_literal)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let pattern = rust_string_literal(&canonical);
 
         match &binding.codec {
             // ---- signal row ------------------------------------------------
@@ -735,12 +731,12 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                 );
                 arms.push_str(&format!(
                     "\n    // {canonical} -> {event} (signal)\n    \
-                     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
+                     if wz_session_core::keyexpr_match::keyexpr_matches({pattern}, target_keyexpr) {{\n        \
                      {inject}\n        \
                      injected += 1;\n    }}\n",
                     canonical = canonical,
                     event = binding.event,
-                    chunks = chunks,
+                    pattern = pattern,
                     inject = inject,
                 ));
             }
@@ -808,13 +804,13 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                 // decode, which is what `inject_value` returns.
                 arms.push_str(&format!(
                     "\n    // {canonical} -> {event} (value via {codec})\n    \
-                     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr)\n        \
+                     if wz_session_core::keyexpr_match::keyexpr_matches({pattern}, target_keyexpr)\n        \
                      && injector.inject_value({event_lit}, payload)\n    {{\n        \
                      injected += 1;\n    }}\n",
                     canonical = canonical,
                     event = binding.event,
                     codec = codec.name,
-                    chunks = chunks,
+                    pattern = pattern,
                     event_lit = rust_string_literal(&binding.event),
                 ));
 
@@ -925,11 +921,7 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                     reason: e.to_string(),
                 }
             })?;
-        let chunks = canonical
-            .split('/')
-            .map(rust_string_literal)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let pattern = rust_string_literal(&canonical);
 
         // The ARRIVING key travels with the name, which is what lets the
         // injector name the session the command acts on -- the same argument
@@ -939,12 +931,12 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
         // exactly as it does on the dynamic side.
         arms.push_str(&format!(
             "\n    // {canonical} -> {event} (command)\n    \
-             if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
+             if wz_session_core::keyexpr_match::keyexpr_matches({pattern}, target_keyexpr) {{\n        \
              if injector.inject_command({event_lit}, target_keyexpr) {{\n            \
              injected += 1;\n        }}\n    }}\n",
             canonical = canonical,
             event = row.event,
-            chunks = chunks,
+            pattern = pattern,
             event_lit = rust_string_literal(&row.event),
         ));
     }
@@ -1034,7 +1026,7 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
             "// @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.\n\
              //\n\
              // Static keyexpr -> SCXML domain-event switchboard for machine\n\
-             // {machine:?}. Closed match, no heap: &'static str chunk literals over\n\
+             // {machine:?}. Closed match, no heap: &'static str keyexpr literals over\n\
              // the shared no-alloc matcher. Signal path only (empty _event.data) —\n\
              // this switchboard declares no value bindings, so it keeps the\n\
              // dyn EventInjector port. Regenerate by editing the source\n\
@@ -1337,8 +1329,8 @@ mod tests {
             "the command shape carries the arriving key; got:\n{out}"
         );
         assert!(
-            out.contains(r#"keyexpr_pattern_matches(&["@", "wz", "session", "close", "*"]"#),
-            "the row's pattern is canonicalized into static chunks; got:\n{out}"
+            out.contains(r#"keyexpr_matches("@/wz/session/close/*", target_keyexpr)"#),
+            "the row's pattern is canonicalized into a static keyexpr; got:\n{out}"
         );
         // DOCUMENT ORDER, which is what makes the two profiles agree: the
         // binding arm is written before the lifecycle arm, exactly as
@@ -1445,7 +1437,7 @@ mod tests {
 // @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.
 //
 // Static keyexpr -> SCXML domain-event switchboard for machine
-// \"sensor_monitor\". Closed match, no heap: &'static str chunk literals over
+// \"sensor_monitor\". Closed match, no heap: &'static str keyexpr literals over
 // the shared no-alloc matcher. Signal path only (empty _event.data) —
 // this switchboard declares no value bindings, so it keeps the
 // dyn EventInjector port. Regenerate by editing the source
@@ -1462,13 +1454,13 @@ pub fn dispatch_switchboard(
     let mut injected = 0usize;
 
     // home/*/temp -> temp_update (signal)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"*\", \"temp\"], target_keyexpr) {
+    if wz_session_core::keyexpr_match::keyexpr_matches(\"home/*/temp\", target_keyexpr) {
         injector.inject(\"temp_update\", \"\");
         injected += 1;
     }
 
     // home/livingroom/humidity -> humidity_update (signal)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"livingroom\", \"humidity\"], target_keyexpr) {
+    if wz_session_core::keyexpr_match::keyexpr_matches(\"home/livingroom/humidity\", target_keyexpr) {
         injector.inject(\"humidity_update\", \"\");
         injected += 1;
     }
@@ -1485,7 +1477,7 @@ pub fn dispatch_switchboard(
         assert!(out.contains("pub fn dispatch_switchboard("));
         assert!(out.contains("let mut injected = 0usize;"));
         // No arms emitted.
-        assert!(!out.contains("keyexpr_pattern_matches"));
+        assert!(!out.contains("keyexpr_matches"));
     }
 
     // ---- naming-filter mirrors (pin the SCE contract) ----
@@ -1669,14 +1661,14 @@ pub fn dispatch_switchboard(
     let mut injected = 0usize;
 
     // home/*/temp -> temp_update (value via temp_payload)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"*\", \"temp\"], target_keyexpr)
+    if wz_session_core::keyexpr_match::keyexpr_matches(\"home/*/temp\", target_keyexpr)
         && injector.inject_value(\"temp_update\", payload)
     {
         injected += 1;
     }
 
     // home/door -> door_opened (signal)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"door\"], target_keyexpr) {
+    if wz_session_core::keyexpr_match::keyexpr_matches(\"home/door\", target_keyexpr) {
         injector.inject(\"door_opened\", \"\");
         injected += 1;
     }

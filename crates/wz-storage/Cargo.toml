@@ -84,7 +84,7 @@ storage-mgr-strip-prefix = ["wz-session-core/keyexpr-prefix"]
 # mirror of zenoh's `process_sample` wildcard ingest+materialize+shadow-check
 # (storages_mgt/service.rs:213-494). cfg-ACTIVE. Composes the core's keyexpr
 # wildcard matcher (`keyexpr-wildcard-single`/`-double`): a `demo/**` update must
-# match multi-chunk keys, else `keyexpr_intersects_target` degrades to literal
+# match multi-chunk keys, else `keyexpr_intersects` degrades to literal
 # equality and the wildcard silently materializes onto nothing. Deliberately does
 # NOT compose `storage-aligner`: the write-path override is a storage-manager
 # concern independent of replication (zenoh's `Action` param is reduced here to

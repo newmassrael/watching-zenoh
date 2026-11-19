@@ -154,12 +154,11 @@ pub const RELATE_SIDES: [&str; 2] = ["a", "b"];
 /// assumes.
 ///
 /// The two relations are the engines the C drop-in's `z_keyexpr_includes` and
-/// `z_keyexpr_intersects` ask, over the chunks of each text, so this door, the
+/// `z_keyexpr_intersects` ask, over the text of each side, so this door, the
 /// drop-in and a router's own matching cannot differ about an overlap.
 #[cfg(feature = "keyexpr-relation")]
 pub fn keyexpr_relate_json(a: &str, b: &str) -> String {
-    use alloc::vec::Vec;
-    use wz_session_core::keyexpr_match::{keyexpr_includes_patterns, keyexpr_intersect_patterns};
+    use wz_session_core::keyexpr_match::{keyexpr_includes, keyexpr_intersects};
 
     let mut out = String::from("{");
     envelope_into(KEYEXPR_RELATE, &mut out);
@@ -173,12 +172,10 @@ pub fn keyexpr_relate_json(a: &str, b: &str) -> String {
             return out;
         }
     }
-    let a_chunks: Vec<&str> = a.split('/').collect();
-    let b_chunks: Vec<&str> = b.split('/').collect();
     out.push_str(&format!(
         ",\"ok\":true,\"includes\":{},\"intersects\":{}}}",
-        keyexpr_includes_patterns(&a_chunks, &b_chunks),
-        keyexpr_intersect_patterns(&a_chunks, &b_chunks)
+        keyexpr_includes(a, b),
+        keyexpr_intersects(a, b)
     ));
     out
 }

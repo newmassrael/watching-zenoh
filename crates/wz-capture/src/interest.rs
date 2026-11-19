@@ -1117,7 +1117,7 @@ impl InterestCensus {
     /// are patterns here — a `demo/*/pose` subscriber is a correct answer to a
     /// `demo/**` ask and to a `demo/1/**` one — and upstream's own filter is
     /// `sub.matches(res)`, which is the intersect predicate
-    /// ([`wz_session_core::keyexpr_match::keyexpr_intersects_target`]), not
+    /// ([`wz_session_core::keyexpr_match::keyexpr_intersects`]), not
     /// the covers-a-literal one the coverage join runs against traffic keys.
     /// Using the literal matcher here would report every wildcard declaration
     /// in a normal session as a divergence.
@@ -1233,14 +1233,13 @@ impl InterestCensus {
                 out.unclaimed_exact = false;
                 continue;
             }
-            let chunks: Vec<&str> = pattern.split('/').collect();
             let mut keys = Vec::new();
             let mut totals = KeyexprCounts::default();
             let mut outside_window = Vec::new();
             let mut partial_window = Vec::new();
             let mut window_undecidable = Vec::new();
             for (i, row) in rows.iter().enumerate() {
-                if !wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, &row.keyexpr) {
+                if !wz_session_core::keyexpr_match::keyexpr_matches(pattern, &row.keyexpr) {
                     continue;
                 }
                 claimed[i] = true;
@@ -1344,8 +1343,7 @@ fn scope_verdict(
     if !pattern_is_decidable(answer) {
         return Verdict::Unjudged(UnjudgedReason::AnswerUndecidable);
     }
-    let ask_chunks: Vec<&str> = ask.split('/').collect();
-    if wz_session_core::keyexpr_match::keyexpr_intersects_target(answer, &ask_chunks) {
+    if wz_session_core::keyexpr_match::keyexpr_intersects(answer, ask) {
         Verdict::InScope
     } else {
         Verdict::Mismatched

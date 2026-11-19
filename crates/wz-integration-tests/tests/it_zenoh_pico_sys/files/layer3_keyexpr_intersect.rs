@@ -4,7 +4,7 @@
 //! Layer 3 wire-interop fixture — keyexpr intersection matcher.
 //!
 //! This is the cross-validation gate for the R293 / R296 closure
-//! claim that `wz_runtime_tokio::pubsub::keyexpr_intersect_patterns`
+//! claim that `wz_runtime_tokio::keyexpr_match::keyexpr_intersects`
 //! is functionally equivalent to zenoh-pico's intersects-mode
 //! chunk-level matcher (`_z_keyexpr_forward_intersects` →
 //! `_z_chunk_forward_intersects` → `chunk_special_intersects` →
@@ -17,8 +17,7 @@
 //! Test shape per case:
 //!
 //!   1. Take a `(a, b)` keyexpr string pair from the corpus.
-//!   2. wz path: split each on `/` into chunks, feed to
-//!      `keyexpr_intersect_patterns`.
+//!   2. wz path: hand both texts to `keyexpr_intersects`.
 //!   3. pico path: pass the raw `(ptr, len)` slices directly to
 //!      `_z_keyexpr_forward_intersects` (zenoh-pico's worker that
 //!      `_z_keyexpr_intersects` dispatches into after extracting
@@ -58,12 +57,10 @@ fn zenoh_pico_intersects(a: &str, b: &str) -> bool {
     }
 }
 
-/// wz-side intersection. Splits the keyexpr string on `/` and feeds
-/// the resulting chunk slices into the R293 + R296 matcher.
+/// wz-side intersection: the two keyexpr texts handed to the R293 +
+/// R296 matcher.
 fn wz_intersects(a: &str, b: &str) -> bool {
-    let a_chunks: Vec<&str> = a.split('/').collect();
-    let b_chunks: Vec<&str> = b.split('/').collect();
-    wz_runtime_tokio::pubsub::keyexpr_intersect_patterns(&a_chunks, &b_chunks)
+    wz_runtime_tokio::keyexpr_match::keyexpr_intersects(a, b)
 }
 
 /// Assert that wz and zenoh-pico return the same intersect answer
