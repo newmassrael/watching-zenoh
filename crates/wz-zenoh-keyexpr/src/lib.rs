@@ -24,8 +24,9 @@
 //! the two relations between the sets.
 //!
 //! The language is written from its definition here and not transcribed: a validator that reports
-//! the same fault upstream's does for every string, a canonizer, and the two relations as dynamic
-//! programs over chunks. `conformance/differential` holds each to upstream's over every string of a
+//! the same fault upstream's does for every string and a canonizer. The two relations are
+//! watching-zenoh's one key expression matcher (`wz_session_core::keyexpr_match`), the code its
+//! sessions route by. `conformance/differential` holds each to upstream's over every string of a
 //! small alphabet up to a length, which is the evidence that the two agree.
 //!
 //! The crate holds the key expression types, their canonization and the relations, and the

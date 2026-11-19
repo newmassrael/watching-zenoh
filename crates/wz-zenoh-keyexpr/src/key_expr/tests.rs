@@ -108,6 +108,76 @@ fn a_verbatim_chunk_is_matched_by_itself_only() {
     assert!(!ke("a$*").intersects(ke("@a")));
 }
 
+/// The default algorithms answer what the methods of `keyexpr` answer, both through the impl every
+/// algorithm gets for `&keyexpr` and through their byte impls.
+#[test]
+fn the_default_algorithms_answer_as_the_methods_do() {
+    use super::{include::Includer, intersect::Intersector};
+    let texts = [
+        "a", "a/b", "*", "**", "a/*", "*/b", "a/**", "a/**/b", "a$*", "$*b", "@a", "a/@b",
+        "a/**/@b",
+    ];
+    for l in texts {
+        for r in texts {
+            let (kl, kr) = (ke(l), ke(r));
+            let (meet, cover) = (kl.intersects(kr), kl.includes(kr));
+            let (bl, br) = (l.as_bytes(), r.as_bytes());
+            assert_eq!(
+                super::intersect::DEFAULT_INTERSECTOR.intersect(kl, kr),
+                meet,
+                "`{l}` and `{r}`"
+            );
+            assert_eq!(
+                super::intersect::DEFAULT_INTERSECTOR.intersect(bl, br),
+                meet,
+                "`{l}` and `{r}` as bytes"
+            );
+            assert_eq!(
+                super::include::DEFAULT_INCLUDER.includes(kl, kr),
+                cover,
+                "`{l}` over `{r}`"
+            );
+            assert_eq!(
+                super::include::DEFAULT_INCLUDER.includes(bl, br),
+                cover,
+                "`{l}` over `{r}` as bytes"
+            );
+        }
+    }
+}
+
+/// Bytes that are not UTF-8 spell no key expression: the byte impls put them in no relation, not
+/// even with `**` or with themselves.
+#[test]
+fn bytes_that_are_not_utf8_are_in_no_relation() {
+    use super::{include::Includer, intersect::Intersector};
+    let not_utf8: &[u8] = &[b'a', 0xff];
+    let all = b"**".as_slice();
+    assert!(!super::intersect::DEFAULT_INTERSECTOR.intersect(all, not_utf8));
+    assert!(!super::intersect::DEFAULT_INTERSECTOR.intersect(not_utf8, all));
+    assert!(!super::intersect::DEFAULT_INTERSECTOR.intersect(not_utf8, not_utf8));
+    assert!(!super::include::DEFAULT_INCLUDER.includes(all, not_utf8));
+    assert!(!super::include::DEFAULT_INCLUDER.includes(not_utf8, not_utf8));
+    // The same calls on text are answered by the language.
+    assert!(super::intersect::DEFAULT_INTERSECTOR.intersect(all, b"a".as_slice()));
+    assert!(super::include::DEFAULT_INCLUDER.includes(all, b"a".as_slice()));
+}
+
+/// A key deeper than the fixed chunk bound of a heapless build is related like any other: this
+/// crate's matcher runs on the growable backing.
+#[test]
+fn a_key_of_many_chunks_is_related_like_any_other() {
+    let deep = ["a"; 40].join("/");
+    let deep_wild = format!("{}/*", ["a"; 39].join("/"));
+    assert!(ke(&deep).intersects(ke(&deep)));
+    assert!(ke(&deep).includes(ke(&deep)));
+    assert!(ke("**").includes(ke(&deep)));
+    assert!(ke(&deep_wild).includes(ke(&deep)));
+    assert!(!ke(&deep).includes(ke(&deep_wild)));
+    assert!(ke(&deep).intersects(ke("a/**")));
+    assert!(!ke(&deep).intersects(ke("b/**")));
+}
+
 #[test]
 #[cfg(feature = "unstable")]
 fn the_relation_is_ordered_by_how_much_is_shared() {
