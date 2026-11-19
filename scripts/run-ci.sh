@@ -8062,7 +8062,9 @@ layer_c1ay_cargo_test_router_hat() {
     # 2026-11-18 -- 42 -> 57, printed on a build host: the 8e configuration witnesses (f579c00540
     # eight, 736f35bec1 four, ddcf3426ce and the keys honoured beside them). Hosted C1ay stopped
     # at its first guard since, so this one was never read.
-    _runci_guarded_test "C1AY stock_config_tests 57" 57 \
+    # 57 -> 59 with step 4a of the staged policy binding (a `--config` file's `wz` member among
+    # them), printed by `guarded_count_gate.py` on a build host.
+    _runci_guarded_test "C1AY stock_config_tests 59" 59 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -8121,7 +8123,8 @@ layer_c1ay_cargo_test_router_hat() {
     # compile it. MEASURED by `guarded_count_gate.py` on this exact command: 48
     # passed.
     # 2026-11-18 -- 48 -> 63, printed on a build host: the fifteen of the guard above.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 63" 63 \
+    # 63 -> 65, the same two of the guard above.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 65" 65 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
