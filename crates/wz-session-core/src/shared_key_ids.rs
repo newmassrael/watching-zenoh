@@ -828,3 +828,228 @@ mod tests {
         assert_eq!(vle_len(u64::from(u16::MAX)), 3);
     }
 }
+
+/// The receive path's reading of an id only the dictionary holds, on both mapping bits and in the
+/// resolver's heap and bounded forms (`crate::wireexpr_resolve`).
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use crate::codec_owned::owned_string;
+    use crate::wireexpr_resolve::{
+        resolve_declared_keyexpr, resolve_wireexpr_in, resolve_wireexpr_into, KeyexprBuf,
+        MappingSpaces,
+    };
+    use alloc::string::ToString;
+    use hashbrown::HashMap;
+    use wz_codecs::wireexpr::WireexprOwnedVariant;
+    use wz_codecs::wireexpr_local::WireexprLocalOwned;
+    use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
+
+    /// `M=1`: the id is in the sender's space.
+    fn sender_mapped(id: ExprId, suffix: Option<&str>) -> WireexprOwnedVariant {
+        WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+            id,
+            suffix_len: suffix.map(|s| s.len() as u64),
+            suffix: suffix.map(owned_string).transpose().expect("suffix fits"),
+        })
+    }
+
+    /// `M=0`: the id is in the receiver's space.
+    fn receiver_mapped(id: ExprId, suffix: Option<&str>) -> WireexprOwnedVariant {
+        WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+            id,
+            suffix_len: suffix.map(|s| s.len() as u64),
+            suffix: suffix.map(owned_string).transpose().expect("suffix fits"),
+        })
+    }
+
+    fn dictionary() -> KeyIds {
+        KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("a valid dictionary")
+    }
+
+    #[test]
+    fn an_id_only_the_dictionary_holds_resolves_on_either_bit() {
+        let ids = dictionary();
+        let (peer, own) = (HashMap::new(), HashMap::<ExprId, String>::new());
+        let spaces = MappingSpaces::with_own(&peer, &own).with_shared(&ids);
+        for body in [sender_mapped(41, None), receiver_mapped(41, None)] {
+            assert_eq!(
+                resolve_wireexpr_in(&body, spaces).as_deref(),
+                Some("lab/rig/alpha")
+            );
+        }
+        for body in [
+            sender_mapped(40, Some("/gamma")),
+            receiver_mapped(40, Some("/gamma")),
+        ] {
+            assert_eq!(
+                resolve_wireexpr_in(&body, spaces).as_deref(),
+                Some("lab/rig/gamma"),
+                "an id and the rest of the key compose as a declared one does"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_dictionary_the_same_ids_resolve_to_nothing() {
+        let (peer, own) = (HashMap::new(), HashMap::<ExprId, String>::new());
+        let spaces = MappingSpaces::with_own(&peer, &own);
+        for body in [
+            sender_mapped(41, None),
+            receiver_mapped(41, None),
+            sender_mapped(40, Some("/gamma")),
+        ] {
+            assert_eq!(
+                resolve_wireexpr_in(&body, spaces),
+                None,
+                "an undeclared id is refused as upstream refuses it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_id_is_read_before_the_dictionary_and_never_across_spaces() {
+        let ids = dictionary();
+        let mut peer = HashMap::new();
+        peer.insert(41u64, "peer/declared".to_string());
+        let mut own = HashMap::<ExprId, String>::new();
+        own.insert(40, "ours/declared".to_string());
+        let spaces = MappingSpaces::with_own(&peer, &own).with_shared(&ids);
+        assert_eq!(
+            resolve_wireexpr_in(&sender_mapped(41, None), spaces).as_deref(),
+            Some("peer/declared"),
+            "the peer's declaration of the id wins"
+        );
+        assert_eq!(
+            resolve_wireexpr_in(&receiver_mapped(40, None), spaces).as_deref(),
+            Some("ours/declared"),
+            "our declaration of the id wins"
+        );
+        assert_eq!(
+            resolve_wireexpr_in(&receiver_mapped(41, None), spaces).as_deref(),
+            Some("lab/rig/alpha"),
+            "M=0 does not read the peer's 41: our space lacks it, so the dictionary answers"
+        );
+    }
+
+    #[test]
+    fn an_id_the_dictionary_does_not_hold_still_resolves_to_nothing() {
+        let ids = dictionary();
+        let (peer, own) = (HashMap::new(), HashMap::<ExprId, String>::new());
+        let spaces = MappingSpaces::with_own(&peer, &own).with_shared(&ids);
+        assert_eq!(resolve_wireexpr_in(&sender_mapped(42, None), spaces), None);
+        assert_eq!(
+            resolve_wireexpr_in(&receiver_mapped(42, None), spaces),
+            None
+        );
+    }
+
+    #[test]
+    fn the_bounded_form_answers_as_the_heap_form() {
+        let ids = dictionary();
+        let (peer, own) = (HashMap::new(), HashMap::<ExprId, String>::new());
+        let spaces = MappingSpaces::with_own(&peer, &own).with_shared(&ids);
+        let mut out = KeyexprBuf::new();
+        let alone = sender_mapped(41, None);
+        assert_eq!(
+            resolve_wireexpr_into(&alone, spaces, &mut out),
+            Ok(Some("lab/rig/alpha"))
+        );
+        let ours = receiver_mapped(40, Some("/gamma"));
+        assert_eq!(
+            resolve_wireexpr_into(&ours, spaces, &mut out),
+            Ok(Some("lab/rig/gamma"))
+        );
+        let theirs = sender_mapped(40, Some("/gamma"));
+        assert_eq!(
+            resolve_wireexpr_into(&theirs, spaces, &mut out),
+            Ok(Some("lab/rig/gamma"))
+        );
+        let unknown = receiver_mapped(42, None);
+        assert_eq!(resolve_wireexpr_into(&unknown, spaces, &mut out), Ok(None));
+    }
+
+    #[test]
+    fn a_keyexpr_declared_on_a_dictionary_id_binds_the_dictionarys_key() {
+        let ids = dictionary();
+        let (peer, own) = (HashMap::new(), HashMap::<ExprId, String>::new());
+        let spaces = MappingSpaces::with_own(&peer, &own).with_shared(&ids);
+        assert_eq!(
+            resolve_declared_keyexpr(&sender_mapped(40, Some("/delta")), spaces).as_deref(),
+            Some("lab/rig/delta")
+        );
+        assert_eq!(
+            resolve_declared_keyexpr(
+                &sender_mapped(40, Some("/delta")),
+                MappingSpaces::with_own(&peer, &own)
+            ),
+            None,
+            "CONTROL: without the dictionary the scope names nothing"
+        );
+    }
+}
+
+/// A subscriber of a session that holds the dictionary hears a put sent by a dictionary id with
+/// no declaration; the same put to a session without it is dropped.
+#[cfg(all(test, feature = "pubsub-put"))]
+mod registry_tests {
+    use super::*;
+    use crate::network_message::NetworkMessage;
+    use crate::pubsub::SubscriberRegistry;
+    use crate::push_build::build_push_aliased;
+    use crate::sample::Reliability;
+    use crate::sink::SampleView;
+    use alloc::boxed::Box;
+    use alloc::string::ToString;
+    use std::sync::{Arc, Mutex};
+
+    fn dictionary() -> SharedKeyIds {
+        Arc::new(KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("valid"))
+    }
+
+    /// A registry with one subscriber on `lab/rig/**`, and the keys it hears.
+    fn listening() -> (
+        SubscriberRegistry<crate::sink::BoxedSink>,
+        Arc<Mutex<alloc::vec::Vec<String>>>,
+    ) {
+        let mut registry = SubscriberRegistry::new();
+        let heard = Arc::new(Mutex::new(alloc::vec::Vec::new()));
+        let into = heard.clone();
+        registry.register("lab/rig/**", move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.keyexpr().to_string());
+        });
+        (registry, heard)
+    }
+
+    fn push_by_id(
+        registry: &mut SubscriberRegistry<crate::sink::BoxedSink>,
+        id: ExprId,
+        suffix: Option<&str>,
+    ) {
+        let push = build_push_aliased(id, suffix, b"value").expect("a push");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
+    }
+
+    #[test]
+    fn a_put_by_a_dictionary_id_reaches_the_subscriber_with_no_declaration() {
+        let (mut registry, heard) = listening();
+        registry.set_shared_key_ids(dictionary());
+        push_by_id(&mut registry, 41, None);
+        push_by_id(&mut registry, 40, Some("/gamma"));
+        assert_eq!(*heard.lock().unwrap(), ["lab/rig/alpha", "lab/rig/gamma"]);
+    }
+
+    #[test]
+    fn a_session_without_the_dictionary_drops_the_undeclared_id() {
+        let (mut registry, heard) = listening();
+        push_by_id(&mut registry, 41, None);
+        assert!(heard.lock().unwrap().is_empty());
+        registry.set_shared_key_ids(dictionary());
+        registry.clear_shared_key_ids();
+        push_by_id(&mut registry, 41, None);
+        assert!(
+            heard.lock().unwrap().is_empty(),
+            "a released dictionary answers nothing"
+        );
+    }
+}

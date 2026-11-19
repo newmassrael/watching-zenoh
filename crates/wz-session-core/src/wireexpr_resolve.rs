@@ -312,6 +312,10 @@ pub type SharedOwnMappingSpace = alloc::rc::Rc<dyn OwnMappingSpace>;
 pub struct MappingSpaces<'a> {
     peer: PeerSpace<'a>,
     own: Option<&'a dyn OwnMappingSpace>,
+    /// The key ids every node of the deployment shares, when the session holds them
+    /// ([`Self::with_shared`]): read for an id the space its `M` bit names does not hold.
+    #[cfg(feature = "shared-key-ids")]
+    shared: Option<&'a crate::shared_key_ids::KeyIds>,
 }
 
 /// The peer's id space as a [`MappingSpaces`] reads it: a plain map (a router
@@ -420,10 +424,7 @@ impl<'a> MappingSpaces<'a> {
     /// form names its key in the sender's space only (the `ext_keyexpr` of an
     /// undeclaration) and must not be handed an `M=0` half it would silently read.
     pub fn without_own(self) -> Self {
-        Self {
-            peer: self.peer,
-            own: None,
-        }
+        Self { own: None, ..self }
     }
 
     /// Only the peer's space is known. `M=0` aliases refuse.
@@ -432,6 +433,8 @@ impl<'a> MappingSpaces<'a> {
         Self {
             peer: PeerSpace::of_map(peer),
             own: None,
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
         }
     }
 
@@ -441,7 +444,34 @@ impl<'a> MappingSpaces<'a> {
         Self {
             peer: PeerSpace::of_map(peer),
             own: Some(own),
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
         }
+    }
+
+    /// This pair with the key ids every node of the deployment shares beside it. An id the
+    /// dictionary holds names the same key in both spaces, since every node holds the same
+    /// dictionary and declares nothing under its ids; it is read only for an id the space the
+    /// `M` bit names does not hold, so a peer's own declaration of an id is read first, and the
+    /// two declared spaces are still never read for each other.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn with_shared(self, ids: &'a crate::shared_key_ids::KeyIds) -> Self {
+        Self {
+            shared: Some(ids),
+            ..self
+        }
+    }
+
+    /// The key the shared dictionary names `id`, when the pair holds one that does.
+    #[cfg(feature = "shared-key-ids")]
+    fn shared_literal(&self, id: crate::wire_id::ExprId) -> Option<&'a str> {
+        self.shared.and_then(|ids| ids.key_of(id))
+    }
+
+    /// No dictionary in a build without the shared key ids.
+    #[cfg(not(feature = "shared-key-ids"))]
+    fn shared_literal(&self, _id: crate::wire_id::ExprId) -> Option<&'a str> {
+        None
     }
 
     /// The pair for a message this node SENDS: its `M=1` names the ids we declared
@@ -455,6 +485,8 @@ impl<'a> MappingSpaces<'a> {
         Self {
             peer: PeerSpace(PeerSpaceRepr::Ours(ours)),
             own: Some(theirs),
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
         }
     }
 
@@ -472,6 +504,8 @@ impl<'a> MappingSpaces<'a> {
         Self {
             peer: P::peer_space(peer),
             own,
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
         }
     }
 
@@ -480,8 +514,8 @@ impl<'a> MappingSpaces<'a> {
     /// its own to put beside it needs, without a table type to name.
     pub fn with_own_space(self, own: &'a dyn OwnMappingSpace) -> Self {
         Self {
-            peer: self.peer,
             own: Some(own),
+            ..self
         }
     }
 
@@ -587,9 +621,18 @@ pub fn resolve_wireexpr_in<S: WireexprStorage>(
         // why an `M=0` literal resolves even with no own space installed.
         return suffix_opt.map(str::to_string);
     }
+    // An id the named space does not hold may still be one of the shared dictionary's, which
+    // names the same key in both spaces; never the other declared space.
     let base = match arm {
-        Space::Peer => spaces.peer.literal(id).map(str::to_string)?,
-        Space::Own => spaces.own?.resolve_own_mapping(id)?,
+        Space::Peer => spaces
+            .peer
+            .literal(id)
+            .or_else(|| spaces.shared_literal(id))
+            .map(str::to_string)?,
+        Space::Own => spaces
+            .own
+            .and_then(|own| own.resolve_own_mapping(id))
+            .or_else(|| spaces.shared_literal(id).map(str::to_string))?,
     };
     Some(match suffix_opt {
         Some(s) => {
@@ -738,8 +781,13 @@ fn resolve_parts<'k>(
     out.clear();
     match arm {
         // `M=1`: the PEER's space, a table this call can lend from.
+        // An id the peer did not declare may be one of the shared dictionary's.
         Space::Peer => {
-            let Some(base) = spaces.peer.literal(id) else {
+            let Some(base) = spaces
+                .peer
+                .literal(id)
+                .or_else(|| spaces.shared_literal(id))
+            else {
                 return Ok(None);
             };
             let Some(suffix) = suffix_opt else {
@@ -748,15 +796,18 @@ fn resolve_parts<'k>(
             out.push_str(base).map_err(|_| KeyexprPastBound)?;
             out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
         }
-        // `M=0`: OUR space, which is copied out of its lock into `out`.
+        // `M=0`: OUR space, which is copied out of its lock into `out`, and for an id we did not
+        // declare, the shared dictionary.
         Space::Own => {
-            let Some(own) = spaces.own else {
-                return Ok(None);
-            };
-            match own.append_own_mapping(id, out) {
-                None => return Ok(None),
+            match spaces.own.and_then(|own| own.append_own_mapping(id, out)) {
                 Some(Err(_)) => return Err(KeyexprPastBound),
                 Some(Ok(())) => {}
+                None => {
+                    let Some(base) = spaces.shared_literal(id) else {
+                        return Ok(None);
+                    };
+                    out.push_str(base).map_err(|_| KeyexprPastBound)?;
+                }
             }
             if let Some(suffix) = suffix_opt {
                 out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
@@ -854,7 +905,8 @@ pub fn resolve_declared_keyexpr<S: WireexprStorage>(
         (Some(_), Some(_)) => return None,
         (Some(peer), None) => peer,
         (None, Some(own)) => own,
-        (None, None) => return None,
+        // Neither declared space knows it: the shared dictionary's, when it is one of its ids.
+        (None, None) => spaces.shared_literal(id).map(str::to_string)?,
     };
     Some(match suffix_opt {
         Some(s) => {
@@ -907,6 +959,8 @@ fn resolve_declared_parts<'k>(
         return Ok(suffix_opt);
     }
     out.clear();
+    // Neither declared space knowing the id, the shared dictionary's literal stands where the
+    // peer's would: it is the same in both spaces, so it cannot disagree with either.
     let peer_base = spaces.peer.literal(id);
     let own_base = match spaces.own {
         Some(own) => match own.append_own_mapping(id, out) {
@@ -919,18 +973,20 @@ fn resolve_declared_parts<'k>(
     match (peer_base, own_base) {
         (Some(peer), true) if peer == out.as_str() => {}
         (Some(_), true) => return Ok(None),
-        (Some(peer), false) => {
-            // The peer's literal alone: lent as it is when nothing follows it.
-            let Some(suffix) = suffix_opt else {
-                return Ok(Some(peer));
+        (None, true) => {}
+        (lent, false) => {
+            // The peer's literal alone, or the dictionary's: lent as it is when nothing follows it.
+            let Some(base) = lent.or_else(|| spaces.shared_literal(id)) else {
+                return Ok(None);
             };
-            out.push_str(peer).map_err(|_| KeyexprPastBound)?;
+            let Some(suffix) = suffix_opt else {
+                return Ok(Some(base));
+            };
+            out.push_str(base).map_err(|_| KeyexprPastBound)?;
             out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
             let out: &'k KeyexprBuf = out;
             return Ok(Some(out.as_str()));
         }
-        (None, true) => {}
-        (None, false) => return Ok(None),
     }
     // Ours is in `out` (alone, or agreeing with the peer's): the suffix follows.
     if let Some(suffix) = suffix_opt {

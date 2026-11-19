@@ -1971,6 +1971,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// access pattern.
     #[cfg(feature = "alloc")]
     pub outbound_mappings: R::Mutex<HashMap<crate::wire_id::ExprId, String>>,
+    /// The key ids every node of the deployment shares (`shared-key-ids`), installed by the
+    /// engine that opened the link ([`Self::install_shared_key_ids`]). An id the dictionary holds
+    /// names its key in this node's space as well as the peer's, so
+    /// [`Self::resolve_outbound_mapping`] answers it when no declaration of ours does, and a
+    /// declaration or a message this node sends by such an id needs no `DeclareKeyExpr` first.
+    #[cfg(feature = "shared-key-ids")]
+    shared_key_ids: R::Mutex<Option<crate::shared_key_ids::SharedKeyIds>>,
     /// The egress admission of a REPLY: the §5.16 verdict the session that owns this bundle
     /// installs when it holds an egress policy, asked of every `Response`, and of every
     /// `Declare` that answers a peer's Interest, before it is sent.
@@ -3840,6 +3847,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
+                #[cfg(feature = "shared-key-ids")]
+                shared_key_ids: R::new_mutex(None::<crate::shared_key_ids::SharedKeyIds>),
                 #[cfg(all(
                     feature = "alloc",
                     any(
@@ -13993,6 +14002,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.outbound_mappings, |table| {
             table.get(&mapping_id).cloned()
         })
+        .or_else(|| self.shared_key_literal(mapping_id))
+    }
+
+    /// Hand this link the key ids every node of the deployment shares: an id the dictionary
+    /// holds is then one this node may name a key by with no declaration of its own, and the
+    /// node declares no key expression under it (the engine allocates its ids past the
+    /// dictionary's). Installed before the link carries anything; a second install replaces the
+    /// first.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn install_shared_key_ids(&self, ids: crate::shared_key_ids::SharedKeyIds) {
+        R::with_mutex_mut(&self.shared_key_ids, |held| *held = Some(ids));
+    }
+
+    /// The key the installed dictionary names `id`, when one is installed and holds it.
+    #[cfg(feature = "shared-key-ids")]
+    fn shared_key_literal(&self, id: crate::wire_id::ExprId) -> Option<String> {
+        R::with_mutex_mut(&self.shared_key_ids, |held| {
+            held.as_ref()
+                .and_then(|ids| ids.key_of(id))
+                .map(String::from)
+        })
+    }
+
+    /// A build without the shared key ids has no dictionary to answer from.
+    #[cfg(all(feature = "alloc", not(feature = "shared-key-ids")))]
+    fn shared_key_literal(&self, _id: crate::wire_id::ExprId) -> Option<String> {
+        None
     }
 
     /// R283 — `true` once the session-FSM has entered the `Established`
