@@ -65,13 +65,22 @@ A JSON object. The values below are SYNTHETIC; a deployment states its own.
 
 ```json
 {
-  "wz": {"features": "", "build_env": {}},
+  "wz": {"features": "shared-key-ids", "build_env": {}},
   "session": {"connect_mode": "client"},
+  "key_ids": {"dictionary": [{"id": 7, "key": "lane/e2e/small"},
+                             {"id": 9, "key": "lane/e2e/large"}],
+              "forms": {"listen": "shared", "connect": "shared"}},
   "checks": [
     {"name": "small-frames", "kind": "e2e", "key": "lane/e2e/small",
      "profile": "profiles/small.json", "values": {"ident": 4660},
      "payload_len": 12, "skip_beyond_gap": 3, "first_counter": 0,
      "peer": {"message": "small"}},
+    {"name": "large-frames", "kind": "e2e", "key": "lane/e2e/large",
+     "profile": "profiles/large.json", "values": {"ident": 4661},
+     "payload_len": 900, "skip_beyond_gap": 3,
+     "segment": {"profile": "profiles/pieces.json", "values": {"origin": 9},
+                 "first_transfer": 0, "chunk_bytes": 256},
+     "peer": {"message": "large"}},
     {"name": "answers", "kind": "replay", "key": "lane/replay/one", "suffix": "/ask",
      "profile": "profiles/large.json", "values": {"ident": 4661},
      "payload_len": 600, "frames": 4, "depth": 4,
@@ -87,6 +96,8 @@ A JSON object. The values below are SYNTHETIC; a deployment states its own.
 | `wz.features` | wz-capi-pico features wz's party needs beyond the four above, a comma list |
 | `wz.build_env` | `WZ_POLICY_*` and `WZ_LIMIT_*` values wz's build states, as a deployment's node would be built; `WZ_POLICY_REPLAY_REPLY_SHAPE` is refused, the lane states it per check |
 | `session.connect_mode` | the mode of the side that dials: `client` (default) or `peer` |
+| `key_ids.dictionary` | optional: the key ids every node of the deployment shares, `[{id, key}]`; each id 1 to 65535 and named once, each key a canonical key expression named once. wz's party hands it to `wz_ext_config_key_ids` before it opens, in every role, so its session reads a key named by one of these ids though nobody declared it. It needs `shared-key-ids` in `wz.features`, and is refused without it |
+| `key_ids.forms` | optional: the key-wire form (`declared`, `shared` or `literal`) of the `listen` side's endpoint and of the `connect` side's, which wz's party states with `wz_ext_config_key_wire_form_for`; a side not named takes the session's form, the `key-wire-form` policy, which `wz.build_env` may state |
 | `name` | lower-case letters, digits and dashes; the check directory's name |
 | `kind` | `e2e` (protected frames on a key) or `replay` (a replay cache and the subscriber that asks it) |
 | `key` | the key expression the frames travel on |
@@ -95,7 +106,8 @@ A JSON object. The values below are SYNTHETIC; a deployment states its own.
 | `skip_beyond_gap` | `e2e`: how many frames the sender holds back in one run so that the next frame's counter step is beyond the deployment's allowance (for an allowance of N steps, N) |
 | `first_counter` | the counter of a stream's first frame, 0 by default |
 | `suffix`, `frames`, `depth` | `replay`: the suffix the cache serves on, how many frames it records, its ring depth (at least `frames`) |
-| `segment` | `replay`, optional: the segment profile and values documents the answers travel as, the first transfer number and the chunk size; its presence makes the check `segmented` |
+| `segment` | optional: the segment profile and values documents, the first transfer number and the chunk size; its presence makes the check `segmented`. Under `replay` the answers travel as these pieces. Under `e2e` every frame put travels as them, for a message a deployment always sends cut: both senders cut each put, the next transfer number each, and both receivers join before they judge |
+| `suffix` under `e2e` | optional with a `segment`: wz's receiver joins pieces in its replay subscriber, which watches for a cache on the key and this suffix and is answered by none; `/lane-no-cache` by default. A lane file whose `wz.build_env` states `replay-live-before-answer` `hold-back` is refused for such a check, since no round ever releases what it holds |
 | `peer` | any JSON, written to the check directory as `peer.json` for the deployment's party; wz's party does not read it |
 
 ## The party contract
@@ -115,7 +127,8 @@ The check directory holds:
 
 | File | Content |
 |---|---|
-| `params` | one `name value` per line: `kind`, `key`, `expect` (how many frames the receiving side is handed), `first_counter`, `frame_max`, and for `replay` `suffix`, `depth`, `segmented` (0 or 1), `first_transfer`, `chunk_bytes` |
+| `params` | one `name value` per line: `kind`, `key`, `expect` (how many frames the receiving side is handed), `first_counter`, `frame_max`, `segmented` (0 or 1), with a segment `first_transfer` and `chunk_bytes`, for `replay` (and a segmented `e2e`) `suffix` and `depth`, and with `key_ids.forms` `key_form_listen` and `key_form_connect` |
+| `key-ids` | with `key_ids`: one `<id> <key>` per line, the dictionary the session opens with |
 | `plan` | one `<action> <payload hex>` per frame, in the order the frames are built |
 | `profile.json`, `values.json` | wz's documents for the check |
 | `segment-profile.json`, `segment-values.json` | the same for the pieces, under `segmented` |
@@ -129,10 +142,15 @@ XORed with 0x01, then the frame. Every frame of the plan is built, whatever its 
 
 What each role does:
 
+- every role opens its session with the dictionary in `key-ids`, when there is one, and the
+  form `params` states for its own side (`key_form_listen` or `key_form_connect`) on its
+  endpoint.
 - `send`: build every frame, print each; dial; put a probe on `<key>/probe` every 50 ms until
-  the file `go` exists; carry out the plan; keep the session until `stop` exists.
+  the file `go` exists; carry out the plan; keep the session until `stop` exists. Under
+  `segmented` each put is the pieces of the frame, printed as they go out.
 - `receive`: subscribe to `<key>` and `<key>/probe`, print `ready`; print `probe` once a probe
-  arrives; judge every frame of `<key>` as it arrives until `expect` frames came.
+  arrives; judge every frame of `<key>` as it arrives until `expect` frames came. Under
+  `segmented` a frame is judged once its pieces are joined.
 - `serve`: build and record every frame, print each (and, under `segmented`, the pieces each
   is cut into, numbered from `first_transfer` as a first answer numbers them); serve on
   `<key><suffix>`; print `ready`; keep serving until `stop` exists.
@@ -146,7 +164,7 @@ Transcript lines, on standard output:
 | `ready` | every role, once its entities are declared |
 | `probe` | `receive`, once |
 | `frame <i> <hex>` | `send`, `serve`: frame `i` of the plan as built |
-| `piece <i> <j> <hex>` | `serve` under `segmented`: piece `j` of frame `i` |
+| `piece <i> <j> <hex>` | under `segmented`, piece `j` of: frame `i` of the plan (`serve`), or the `i`-th put, counted from 0 in the order put (`send`) |
 | `got <n> <class> <payload hex>` | `receive`, `ask`: the `n`-th frame handed to it, its class and its payload |
 | `round <live\|abandoned>` | `ask`: how the round ended |
 | `refused <text>` | any role refused before it exchanged anything |
@@ -188,6 +206,10 @@ For a `replay` check:
   each `intact`, and its round ended `live`.
 - **pieces byte for byte** (under `segmented`): both caches printed the pieces of every
   frame, and they are the same bytes.
+
+For a segmented `e2e` check, also **pieces byte for byte**: both senders printed the pieces of
+every put, a repeat and a corrupted copy each under a transfer number of its own, and they are
+the same bytes.
 
 ## Pointing it at a deployment's build
 
