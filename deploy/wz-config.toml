@@ -3487,9 +3487,11 @@ How a publisher's replay cache answers a query. `frame-per-sample` answers one
 reply per sample of the ring, each the frame exactly as it was sent, then the
 final. `segmented` answers each sample as the pieces of the message's declared
 segment profile, every sample under the next transfer number, for a message
-whose frames are larger than a deployment puts in one sample. A subscriber that
-asks for a replay under `segmented` is refused until it joins pieces. Decided
-when the cache or the subscriber is made, and fixed for its life.
+whose frames are larger than a deployment puts in one sample; the cache's live
+sends go out as pieces too, and a subscriber joins the pieces, live and
+replied, before it judges a frame, giving up only a frame a piece of which
+never came. Decided when the cache or the subscriber is made, and fixed for its
+life.
 '''
 
 [[policy]]

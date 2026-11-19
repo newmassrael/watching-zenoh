@@ -29,8 +29,11 @@
 //! Under the session's `replay-live-before-answer = hold-back` the live samples that arrive before
 //! the first round is over are held in the program's store and handed on after its last reply;
 //! under `deliver` they are handed on as they arrive. A reply of an abandoned round is dropped.
-//! Under `replay-reply-shape = segmented` a reply is one piece of a frame, which this library does
-//! not join yet, so such a subscriber is refused by name.
+//! Under `replay-reply-shape = segmented` every payload, live or replied, is one piece of a frame
+//! of the segment profile the options name: the pieces are joined first
+//! ([`wz_app_frame::replay_pieces`]), the replies of each query apart from the live ones and from
+//! each other's, and only a joined frame is admitted, judged and handed on. A frame with a piece
+//! missing is given up, and counted, and the frames around it are not.
 //!
 //! # Time
 //!
@@ -53,6 +56,7 @@ use std::time::Instant;
 
 use wz_app_frame::e2e_receiver::Receiver;
 use wz_app_frame::replay_admission::{admit, Admission};
+use wz_app_frame::replay_pieces::{Joined, PieceJoiner};
 use wz_session_core::policy::ReplayReplyShape;
 use wz_session_core::replay_subscriber::{
     CreateRefused, Deadlines, LiveFate, Phase, PublisherSlot, ReplaySubscriber, ReplyFate,
@@ -80,7 +84,7 @@ use crate::pubsub::{
     z_owned_subscriber_t, z_sample_payload, z_subscriber_move, z_undeclare_subscriber,
 };
 use crate::result::{
-    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
+    ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
     Z_OK,
 };
 use crate::session::{session_handle, z_loaned_session_t};
@@ -179,6 +183,9 @@ pub struct wz_ext_replay_subscriber_options_t {
     /// The program's clock, or null for the library's monotonic clock.
     pub clock: Option<wz_ext_replay_clock_fn>,
     pub clock_context: *mut c_void,
+    /// Under `replay-reply-shape = segmented`, the segment profile the pieces are cut by
+    /// (NUL-terminated JSON, BORROWED for the call); not read under `frame-per-sample`.
+    pub segment_profile: *const c_char,
 }
 
 impl Default for wz_ext_replay_subscriber_options_t {
@@ -196,6 +203,7 @@ impl Default for wz_ext_replay_subscriber_options_t {
             round_ms: 0,
             clock: None,
             clock_context: core::ptr::null_mut(),
+            segment_profile: core::ptr::null(),
         }
     }
 }
@@ -218,6 +226,10 @@ pub struct wz_ext_replay_subscriber_counts_t {
     pub table_full: u64,
     /// Rounds abandoned.
     pub abandoned: u64,
+    /// Under `segmented`, frames given up with a piece missing.
+    pub frames_given_up: u64,
+    /// Under `segmented`, payloads that joined nothing: not a piece, a wrong CRC, no place.
+    pub unjoined_pieces: u64,
 }
 
 /// An owned subscriber: the handle in its one word, null for the gravestone.
@@ -287,19 +299,18 @@ struct State {
     /// Room for one held sample, as it is released.
     released: Vec<u8>,
     dropped: Dropped,
+    /// Under `segmented`, the joining of the pieces; `None` under `frame-per-sample`.
+    joiner: Option<PieceJoiner>,
+    /// The number the next query's replies are joined under, a stream of their own.
+    next_request: u64,
 }
 
-/// A publisher to ask: its row and its zenoh id, padded as `z_id_t` lays it out.
+/// A publisher to ask: its row, its zenoh id padded as `z_id_t` lays it out, and the number its
+/// query's replies are joined under.
 struct Ask {
     slot: usize,
     zid: [u8; ZID_MAX],
-    zid_len: usize,
-}
-
-impl Ask {
-    fn zid(&self) -> &[u8] {
-        &self.zid[..self.zid_len]
-    }
+    request: u64,
 }
 
 /// What the session's callbacks and the doors share.
@@ -334,6 +345,7 @@ struct Handle {
 struct ReplyContext {
     shared: Arc<Shared>,
     slot: usize,
+    request: u64,
 }
 
 impl State {
@@ -381,28 +393,72 @@ impl State {
         }
     }
 
-    /// The publisher a row holds, as a get addresses it; `None` for a free row.
-    fn ask_of(&self, slot: usize) -> Option<Ask> {
+    /// The zenoh id of the publisher a row holds, padded as `z_id_t` lays it out, and its length;
+    /// `None` for a free row.
+    fn zid_of(&self, slot: usize) -> Option<([u8; ZID_MAX], usize)> {
         let zid = self.round.as_ref()?.zid(slot);
         if zid.is_empty() {
             return None;
         }
         let mut padded = [0u8; ZID_MAX];
         padded[..zid.len()].copy_from_slice(zid);
-        Some(Ask {
-            slot,
-            zid: padded,
-            zid_len: zid.len(),
-        })
+        Some((padded, zid.len()))
+    }
+
+    /// The publisher a row holds, as a get addresses it, under the next query number; `None` for
+    /// a free row.
+    fn ask_of(&mut self, slot: usize) -> Option<Ask> {
+        let (zid, _) = self.zid_of(slot)?;
+        let request = self.next_request;
+        self.next_request = self.next_request.wrapping_add(1);
+        Some(Ask { slot, zid, request })
+    }
+
+    /// The frame a payload makes: the payload itself under `frame-per-sample`; under `segmented`
+    /// the whole frame on the piece that completes one, and `None` for any other piece.
+    fn join(&mut self, request: Option<u64>, payload: &[u8]) -> Option<Joining> {
+        let Some(joiner) = self.joiner.as_mut() else {
+            return Some(Joining::Payload);
+        };
+        let joined = match request {
+            Some(request) => joiner.reply(request, payload),
+            None => joiner.live(payload),
+        };
+        match joined {
+            Joined::Frame(frame) => Some(Joining::Frame(frame.to_vec())),
+            Joined::Pending | Joined::Unjoined => None,
+        }
+    }
+}
+
+/// What a payload is, once joined: itself, or the frame its pieces make.
+enum Joining {
+    Payload,
+    Frame(Vec<u8>),
+}
+
+impl Joining {
+    fn bytes<'a>(&'a self, payload: &'a [u8]) -> &'a [u8] {
+        match self {
+            Self::Payload => payload,
+            Self::Frame(frame) => frame,
+        }
     }
 }
 
 impl Shared {
     /// A live sample arrived.
-    fn live(&self, frame: &[u8]) {
+    fn live(&self, payload: &[u8]) {
         let mut guard = locked(&self.state);
         let state = &mut *guard;
         let now = state.clock.now();
+        if state.round.is_none() {
+            return;
+        }
+        let Some(joining) = state.join(None, payload) else {
+            return;
+        };
+        let frame = joining.bytes(payload);
         let Some(round) = state.round.as_mut() else {
             return;
         };
@@ -412,8 +468,8 @@ impl Shared {
         }
     }
 
-    /// A reply of the query of row `slot` arrived.
-    fn reply(&self, slot: usize, frame: &[u8]) {
+    /// A reply of the query `request` of row `slot` arrived.
+    fn reply(&self, slot: usize, request: u64, payload: &[u8]) {
         let mut guard = locked(&self.state);
         let state = &mut *guard;
         let now = state.clock.now();
@@ -423,23 +479,30 @@ impl Shared {
         if round.reply(slot, now) == ReplyFate::Late {
             return;
         }
-        let Some(from) = state.ask_of(slot) else {
+        let Some((zid, zid_len)) = state.zid_of(slot) else {
             return;
         };
+        let Some(joining) = state.join(Some(request), payload) else {
+            return;
+        };
+        let frame = joining.bytes(payload);
         match admit(&state.receiver, state.stream, frame, state.depth) {
             Admission::Duplicate => {
                 state.dropped.duplicates = state.dropped.duplicates.saturating_add(1);
             }
             Admission::Stale => state.dropped.stale = state.dropped.stale.saturating_add(1),
-            Admission::Judge => state.hand_on(frame, Some(from.zid()), now),
+            Admission::Judge => state.hand_on(frame, Some(&zid[..zid_len]), now),
         }
     }
 
-    /// The query of row `slot` ended; the next publisher to ask, if one waits.
-    fn query_ended(&self, slot: usize) -> Option<Ask> {
+    /// The query `request` of row `slot` ended; the next publisher to ask, if one waits.
+    fn query_ended(&self, slot: usize, request: u64) -> Option<Ask> {
         let mut guard = locked(&self.state);
         let state = &mut *guard;
         let now = state.clock.now();
+        if let Some(joiner) = state.joiner.as_mut() {
+            joiner.close(request);
+        }
         let next = state.round.as_mut()?.query_ended(slot, now);
         state.release(now);
         next.and_then(|slot| state.ask_of(slot))
@@ -493,6 +556,7 @@ unsafe fn ask(shared: &Arc<Shared>, ask: Ask) {
     let context = Box::into_raw(Box::new(ReplyContext {
         shared: Arc::clone(shared),
         slot: ask.slot,
+        request: ask.request,
     }))
     .cast::<c_void>();
     let mut view: z_view_keyexpr_t = core::mem::zeroed();
@@ -549,9 +613,11 @@ unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, context: *mut c_void
         let Some(payload) = bytes_ref(z_sample_payload(z_reply_ok(reply))) else {
             return;
         };
-        reply_context
-            .shared
-            .reply(reply_context.slot, payload.as_slice());
+        reply_context.shared.reply(
+            reply_context.slot,
+            reply_context.request,
+            payload.as_slice(),
+        );
     });
 }
 
@@ -559,7 +625,10 @@ unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, context: *mut c_void
 unsafe extern "C" fn on_reply_drop(context: *mut c_void) {
     let reply_context = Box::from_raw(context.cast::<ReplyContext>());
     let _ = catch(|| {
-        if let Some(next) = reply_context.shared.query_ended(reply_context.slot) {
+        if let Some(next) = reply_context
+            .shared
+            .query_ended(reply_context.slot, reply_context.request)
+        {
             ask(&reply_context.shared, next);
         }
     });
@@ -688,9 +757,10 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_options_default(
 /// (or its gravestone), options, slot table or `deliver`, or a null store under `hold-back`;
 /// `Z_ERR_SESSION_CLOSED` for a closed session; `Z_EINVAL` for a suffix that is not UTF-8, no
 /// slot, a deadline of 0 or past 2147483647, a depth of 0, a hold-back store with no room for one
-/// cell, or a cell past 2^32 - 1; `Z_ERR_INVALID` for a suffixed key that is not a key expression;
-/// `WZ_EXT_ERR_UNSUPPORTED` under `replay-reply-shape = segmented`; otherwise what declaring the
-/// subscriber or the watch answers.
+/// cell, a cell past 2^32 - 1, or a segment profile that is not UTF-8; `Z_ERR_INVALID` for a
+/// suffixed key that is not a key expression; under `replay-reply-shape = segmented`, `Z_ERR_NULL`
+/// for no segment profile and `_Z_ERR_CONFIG_INVALID_VALUE` for one refused; otherwise what
+/// declaring the subscriber or the watch answers.
 ///
 /// # Safety
 /// `this_` is writable; `session` and `keyexpr` are null or loans of this library, the session
@@ -740,9 +810,6 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
             return refuse(Z_ERR_SESSION_CLOSED);
         }
         let policy = &handle.ext.policy;
-        if policy.replay_reply_shape() == ReplayReplyShape::Segmented {
-            return refuse(WZ_EXT_ERR_UNSUPPORTED);
-        }
         let (Some(key), Some(suffix)) = (keyexpr_str(keyexpr), utf8_arg(suffix)) else {
             return refuse(Z_EINVAL);
         };
@@ -751,6 +818,21 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
             return refuse(Z_ERR_INVALID);
         }
         let options = *options;
+        let joiner = match policy.replay_reply_shape() {
+            ReplayReplyShape::FramePerSample => None,
+            ReplayReplyShape::Segmented => {
+                if options.segment_profile.is_null() {
+                    return refuse(Z_ERR_NULL);
+                }
+                let Some(profile) = utf8_arg(options.segment_profile) else {
+                    return refuse(Z_EINVAL);
+                };
+                match PieceJoiner::new(profile, key) {
+                    Ok(joiner) => Some(joiner),
+                    Err(_) => return refuse(Z_ERR_CONFIG_INVALID_VALUE),
+                }
+            }
+        };
         if options.slots.is_null() {
             return refuse(Z_ERR_NULL);
         }
@@ -809,6 +891,8 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
                 context: SendPtr(context),
                 released: vec![0u8; options.held_cell],
                 dropped: Dropped::default(),
+                joiner,
+                next_request: 0,
             }),
             session: z_loaned_session_t {
                 _val: (*session)._val,
@@ -949,6 +1033,8 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_counts(
             held: counts.held,
             table_full: counts.table_full,
             abandoned: counts.abandoned,
+            frames_given_up: state.joiner.as_ref().map_or(0, PieceJoiner::abandoned),
+            unjoined_pieces: state.joiner.as_ref().map_or(0, PieceJoiner::unjoined),
         };
         Z_OK
     })

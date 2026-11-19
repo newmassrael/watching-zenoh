@@ -11,7 +11,10 @@
 //! appears later is asked in a round of its own, and what the first answers again (when the
 //! session's `targeted-query` policy is off, so a get asks every publisher) is dropped as a
 //! duplicate or stale rather than handed on; an empty cache answers the final alone and the
-//! round goes live; the doors refuse what they cannot do by name. The order of each policy's two
+//! round goes live; the doors refuse what they cannot do by name. The files run alike under both
+//! values of `replay-reply-shape`: under `segmented` every frame, answered or put, crosses as the
+//! pieces of a synthetic segment profile and the subscriber joins them before it judges, so what
+//! is handed on is the same. The order of each policy's two
 //! values is held by the model tests of `wz-session-core` (`replay_subscriber`,
 //! `replay_publisher`); here the build's own values are read and asserted. The profile is
 //! synthetic.
@@ -60,6 +63,19 @@ const PROFILE: &str = r#"{
   "length": {"field": "length", "counts": "frame"},
   "counter": {"field": "counter", "max_gap": 3, "timeout_ms": 60000}
 }"#;
+
+/// The pieces a frame is cut into under the build's `replay-reply-shape = segmented`, read by
+/// nothing under `frame-per-sample`: a mark, a stream field and two-byte number, total and place,
+/// synthetic. A frame of [`frame`] is eleven bytes, so it is three pieces of [`CHUNK`].
+const SEGMENTS: &str = r#"{"name":"replay-door-pieces","segments":{"fields":[
+  {"name":"mark","bytes":1,"equals":"0x7E"},
+  {"name":"source","bytes":2},
+  {"name":"seq","bytes":2},
+  {"name":"whole","bytes":2},
+  {"name":"pos","bytes":2}],
+  "stream":["source"],"transfer":"seq","total":"whole","offset":"pos","total_max":1024}}"#;
+const SEGMENT_VALUES: &str = r#"{"source": 9}"#;
+const CHUNK: usize = 4;
 
 fn frame(counter: u64) -> Vec<u8> {
     let profile = Profile::parse(PROFILE).expect("valid");
@@ -188,14 +204,24 @@ impl Peer {
         );
     }
 
+    /// Serve, with the segment profile the build's `segmented` reads and `frame-per-sample` does
+    /// not.
     unsafe fn serve(&self) {
         let ke = view(KEY);
+        let profile = CString::new(SEGMENTS).unwrap();
+        let values = CString::new(SEGMENT_VALUES).unwrap();
+        let mut options: wz_ext_replay_serve_options_t = std::mem::zeroed();
+        wz_ext_replay_serve_options_default(&mut options);
+        options.segment_profile = profile.as_ptr();
+        options.segment_values = values.as_ptr();
+        options.first_transfer = 1;
+        options.chunk_bytes = CHUNK;
         assert_eq!(
             wz_ext_replay_publisher_serve(
                 wz_ext_replay_publisher_loan(&self.cache),
                 z_view_keyexpr_loan(&ke),
                 SUFFIX.as_ptr(),
-                std::ptr::null(),
+                &options,
                 std::ptr::null_mut(),
             ),
             Z_OK
@@ -246,6 +272,8 @@ impl Listener {
         options.depth = DEPTH as usize;
         options.progress_ms = 3000;
         options.round_ms = 9000;
+        let segments = CString::new(SEGMENTS).unwrap();
+        options.segment_profile = segments.as_ptr();
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let context = Box::into_raw(Box::new(seen.clone())).cast::<c_void>();
         let ke = view(KEY);

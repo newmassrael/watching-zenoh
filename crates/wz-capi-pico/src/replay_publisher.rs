@@ -36,7 +36,7 @@
 use core::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex};
 
-use wz_app_frame::segment_sender::{Rollover, SegmentSender};
+use wz_app_frame::segment_sender::{Rollover, SegmentSender, SplitError};
 use wz_session_core::policy::ReplayReplyShape;
 use wz_session_core::replay_publisher::{
     CreateRefused, Dispatch, Phase, RecordRefused, ReplayPublisher, SendKind, Shape,
@@ -150,6 +150,9 @@ struct Shared {
     cache: Mutex<Option<ReplayPublisher<'static>>>,
     /// The segment sender of a `segmented` answer, once the cache serves.
     segments: Mutex<Option<SegmentSender>>,
+    /// The segment sender of the live sends under `segmented`, numbering its transfers apart from
+    /// the answers', once the cache serves.
+    live_segments: Mutex<Option<SegmentSender>>,
     chunk_bytes: Mutex<usize>,
     shape: ReplayReplyShape,
     frame_max: usize,
@@ -260,15 +263,41 @@ unsafe fn with_payload(bytes: &[u8], put: impl FnOnce(*mut z_moved_bytes_t) -> Z
 }
 
 impl Shared {
-    /// Put `frame` on the program's publisher.
+    /// Put `frame` on the program's publisher: as it is under `frame-per-sample`, as the pieces of
+    /// the live segment sender under `segmented`.
     fn put(&self, frame: &[u8]) -> ZResult {
-        // SAFETY: the program keeps its publisher declared while the cache lives (the module
-        // doc), and the put consumes the payload on every path.
-        unsafe {
-            with_payload(frame, |payload| {
-                z_publisher_put(&self.publisher, payload, core::ptr::null())
-            })
+        let put_one = |bytes: &[u8]| -> ZResult {
+            // SAFETY: the program keeps its publisher declared while the cache lives (the module
+            // doc), and the put consumes the payload on every path.
+            unsafe {
+                with_payload(bytes, |payload| {
+                    z_publisher_put(&self.publisher, payload, core::ptr::null())
+                })
+            }
+        };
+        if self.shape == ReplayReplyShape::FramePerSample {
+            return put_one(frame);
         }
+        let chunk = *locked(&self.chunk_bytes);
+        let mut live = locked(&self.live_segments);
+        let Some(sender) = live.as_mut() else {
+            return Z_EINVAL;
+        };
+        let emit = |piece: &[u8]| match put_one(piece) {
+            Z_OK => Ok(()),
+            code => Err(code),
+        };
+        match sender.split(frame, chunk, emit) {
+            Ok(_) => Z_OK,
+            Err(SplitError::Emit { error, .. }) => error,
+            Err(SplitError::Refused(_)) => Z_EINVAL,
+        }
+    }
+
+    /// Whether a send can go out in the shape the cache answers in: always under
+    /// `frame-per-sample`, and under `segmented` once the cache serves and has its pieces' profile.
+    fn can_send(&self) -> bool {
+        self.shape == ReplayReplyShape::FramePerSample || locked(&self.live_segments).is_some()
     }
 
     /// An answer is over: end it, and when it was the last, send what was held, oldest first,
@@ -426,6 +455,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
         let shared = Arc::new(Shared {
             cache: Mutex::new(Some(cache)),
             segments: Mutex::new(None),
+            live_segments: Mutex::new(None),
             chunk_bytes: Mutex::new(0),
             shape: policy.replay_reply_shape(),
             frame_max: shape.frame_max,
@@ -489,10 +519,16 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_record(
 /// receives a `WZ_EXT_REPLAY_SENT`, `_HELD`, `_HELD_REPLACED`, `_DEFERRED` or `_DEFERRED_OVERWROTE`
 /// value.
 ///
+/// Under `replay-reply-shape = segmented` the frame goes out as the pieces of the segment profile
+/// the serve door was given, numbered apart from the answers' transfers, so a subscriber joins the
+/// live frames as it joins the replies; such a cache puts nothing before it serves.
+///
 /// The frame is recorded before it is put, whether or not the put succeeds. Returns `Z_OK` when it
-/// was put or held; the put's code when the put failed; `Z_EINVAL` for an instance the cache does
-/// not have, a frame longer than its `frame_max` or a kind this library does not know (nothing
-/// recorded); `Z_ERR_NULL` for a null cache, the gravestone, or a null frame with a length.
+/// was put or held; the put's code when the put (of a piece) failed; `Z_EINVAL` for an instance
+/// the cache does not have, a frame longer than its `frame_max`, a kind this library does not know,
+/// or under `segmented` a cache that does not serve yet (nothing recorded), and under `segmented`
+/// a frame the segment sender refuses (recorded, not put); `Z_ERR_NULL` for a null cache, the
+/// gravestone, or a null frame with a length.
 ///
 /// # Safety
 /// `this_` is null or a loaned cache; `frame` is readable for `len` bytes; `dispatch` is null or
@@ -519,6 +555,9 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_put(
             WZ_EXT_REPLAY_SEND_EVENT => SendKind::Event,
             _ => return Z_EINVAL,
         };
+        if !handle.shared.can_send() {
+            return Z_EINVAL;
+        }
         let frame = bytes_arg(frame, len);
         let decided = match locked(&handle.shared.cache).as_mut() {
             Some(cache) => cache.send(instance, time_ms, frame, kind),
@@ -618,9 +657,14 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_serve(
             ) else {
                 return Z_EINVAL;
             };
-            match SegmentSender::new(profile, values, options.first_transfer, Rollover::Restart) {
-                Ok(sender) => *locked(&shared.segments) = Some(sender),
-                Err(why) => {
+            let make =
+                || SegmentSender::new(profile, values, options.first_transfer, Rollover::Restart);
+            match (make(), make()) {
+                (Ok(answers), Ok(live)) => {
+                    *locked(&shared.segments) = Some(answers);
+                    *locked(&shared.live_segments) = Some(live);
+                }
+                (Err(why), _) | (_, Err(why)) => {
                     write_refusal(refusal, &why.to_string());
                     return Z_ERR_CONFIG_INVALID_VALUE;
                 }

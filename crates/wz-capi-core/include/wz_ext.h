@@ -1092,10 +1092,12 @@ z_result_t wz_ext_replay_publisher_record(
     uint64_t time_ms, const uint8_t *frame, size_t len);
 
 /* Record a frame and put it, or hold it while an answer is served under
- * replay-serve-holds-sends; dispatch (may be NULL) says which. Z_OK when put
- * or held; the put's code when it failed (the frame is recorded); Z_EINVAL for
- * no such instance, a frame past frame_max or an unknown kind (nothing
- * recorded); Z_ERR_NULL. */
+ * replay-serve-holds-sends; dispatch (may be NULL) says which. Under
+ * segmented the frame goes out as the pieces of the serve door's profile, so
+ * such a cache puts nothing before it serves. Z_OK when put or held; the
+ * put's code when it failed (the frame is recorded); Z_EINVAL for no such
+ * instance, a frame past frame_max, an unknown kind, or a segmented cache that
+ * does not serve yet (nothing recorded); Z_ERR_NULL. */
 z_result_t wz_ext_replay_publisher_put(
     const wz_ext_loaned_replay_publisher_t *this_, size_t instance,
     uint64_t time_ms, const uint8_t *frame, size_t len, uint8_t kind,
@@ -1172,6 +1174,8 @@ typedef struct wz_ext_replay_subscriber_options_t {
   uint32_t round_ms;    /* 1 to 2147483647, no default */
   wz_ext_replay_clock_fn *clock; /* NULL: the library's clock */
   void *clock_context;
+  const char *segment_profile; /* under segmented: the pieces' profile (JSON,
+                                  BORROWED); not read otherwise */
 } wz_ext_replay_subscriber_options_t;
 
 typedef struct wz_ext_replay_subscriber_counts_t {
@@ -1182,6 +1186,8 @@ typedef struct wz_ext_replay_subscriber_counts_t {
   uint64_t held;
   uint64_t table_full;
   uint64_t abandoned;
+  uint64_t frames_given_up; /* segmented: a piece never came */
+  uint64_t unjoined_pieces; /* segmented: not a piece, bad CRC, no place */
 } wz_ext_replay_subscriber_counts_t;
 
 typedef struct wz_ext_owned_replay_subscriber_t {
@@ -1204,9 +1210,12 @@ void wz_ext_replay_subscriber_options_default(
  * receiver and context are taken on every path: on a refusal the receiver is
  * dropped and drop(context) runs before this returns. Z_OK; Z_ERR_NULL;
  * Z_ERR_SESSION_CLOSED; Z_EINVAL (-75) for an option out of range;
- * Z_ERR_INVALID for a suffixed key that is no key expression;
- * WZ_EXT_ERR_UNSUPPORTED under replay-reply-shape segmented; otherwise what
- * declaring the subscription or the watch answers. */
+ * Z_ERR_INVALID for a suffixed key that is no key expression; under
+ * replay-reply-shape segmented, Z_ERR_NULL for no segment_profile and
+ * _Z_ERR_CONFIG_INVALID_VALUE for one refused; otherwise what declaring the
+ * subscription or the watch answers. Under segmented every payload, live or
+ * replied, is joined from its pieces before it is judged; a frame with a
+ * piece missing is given up and counted. */
 z_result_t wz_ext_replay_subscriber_new(
     wz_ext_owned_replay_subscriber_t *this_, const z_loaned_session_t *session,
     const z_loaned_keyexpr_t *keyexpr, const char *suffix,
