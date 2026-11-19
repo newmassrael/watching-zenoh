@@ -54,7 +54,12 @@ z_result_t wz_ext_config_device_requires(const z_loaned_config_t *config,
  * of the one the document names. wz_ext_config_document hands the config a
  * zenoh JSON5 document of which only the wz member is read, so the document
  * a zenoh-c program opens with configures these policies alike; a second
- * call replaces the first. */
+ * call replaces the first. In a build with the shared-key-ids capability the
+ * member's wz/key-ids states the key ids every node shares (dictionary, a
+ * list of { id, key }, and links, a list of { locator, form }), under what
+ * wz_ext_config_key_ids and wz_ext_config_key_wire_form_for state; a build
+ * without it refuses wz/key-ids, and a refused part of it refuses the
+ * document, as a refused policy does. */
 z_result_t wz_ext_config_policy(z_loaned_config_t *config, const char *policy,
                                 const char *value);
 z_result_t wz_ext_config_profile(z_loaned_config_t *config,
@@ -1480,6 +1485,10 @@ const char *wz_ext_conformance_digest(void);
  * rest, whichever is cheaper than the whole key). A count of 0 takes back a
  * dictionary handed before. Every node of the deployment must hand the same
  * dictionary; a peer without it cannot read a key named by one of its ids.
+ * The config's document may state the same as wz/key-ids
+ * (wz_ext_config_document): a dictionary handed here replaces the
+ * document's, a form stated for an endpoint here replaces the document's
+ * for that endpoint, and what is not stated here is the document's.
  * Part of the unstable surface, and present only in a build with the
  * shared-key-ids capability.
  *

@@ -627,13 +627,20 @@ pub unsafe extern "C" fn z_open(
         };
         // The key-wire form, judged for the engine the session opens on, and the key ids every
         // node shares that the config states (`crate::key_ids`).
+        #[cfg(feature = "shared-key-ids")]
+        let key_ids = match crate::key_ids::admit_at_open(&cfg, &policy) {
+            Ok(key_ids) => key_ids,
+            Err(code) => return code,
+        };
+        #[cfg(not(feature = "shared-key-ids"))]
         if let Err(code) = crate::key_ids::admit_at_open(&cfg, &policy) {
             return code;
         }
         #[cfg(not(feature = "engine-tokio"))]
-        let key_ids = crate::key_ids::coop_key_ids(&cfg);
-        #[cfg(all(feature = "engine-tokio", feature = "shared-key-ids"))]
-        let key_ids = cfg.key_ids.clone();
+        let key_ids = crate::key_ids::coop_key_ids(
+            #[cfg(feature = "shared-key-ids")]
+            key_ids,
+        );
         let connect: Vec<String> = match (connect, &listen) {
             (Some(connect), _) => vec![connect],
             (None, Some(_)) => Vec::new(),

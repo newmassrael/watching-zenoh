@@ -10,6 +10,10 @@
 //! and its rules are `wz_session_core::shared_key_ids`'s; both engines hold it, and each link of a
 //! session names its keys as the form stated for its endpoint, or the session's, says.
 //!
+//! A config handed a document (`wz_ext_config_document`, the `config-document` capability) may
+//! state the same in the document's `wz/key-ids`; what these doors state goes over it, as the
+//! policy doors go over the document's policies.
+//!
 //! What every build has here is the open's judgement of the key-wire form ([`admit_at_open`]): a
 //! session whose form, or an endpoint's, is `shared` and whose config states no dictionary is
 //! refused, and so is any form but `declared` in a build without the capability. A refusal is the
@@ -22,7 +26,9 @@ use core::ffi::{c_char, CStr};
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::policy::SessionPolicy;
 #[cfg(feature = "shared-key-ids")]
-use wz_session_core::shared_key_ids::{form_in_domain, key_wire_form_named, KeyIds, KeyIdsRefused};
+use wz_session_core::shared_key_ids::{
+    form_in_domain, key_wire_form_named, KeyIds, KeyIdsAtOpen, KeyIdsRefused,
+};
 
 #[cfg(feature = "shared-key-ids")]
 use crate::abi::z_loaned_config_t;
@@ -53,7 +59,9 @@ unsafe fn state_of<'c>(config: *mut z_loaned_config_t) -> Option<&'c mut ConfigS
 /// id `ids[i]` and the key expression `keys[i]`, a NUL-terminated UTF-8 string. The session
 /// `z_open` makes of the config holds the dictionary: it reads an id only the dictionary names,
 /// declares no key expression under one of its ids, and names a key by one as its key-wire form
-/// says. A `count` of 0 takes back a dictionary handed before.
+/// says. A `count` of 0 takes back a dictionary handed before. A dictionary handed here replaces
+/// the one the config's document states (`wz_ext_config_document`, `wz/key-ids`); with none
+/// handed here, the document's stands.
 ///
 /// `Z_OK`; `Z_ERR_NULL` for a NULL config, a NULL array with entries, or a NULL key;
 /// `Z_ERR_INVALID` for a key that is not UTF-8 or not a canonical key expression, an id of 0, and
@@ -155,15 +163,25 @@ pub unsafe extern "C" fn wz_ext_config_key_wire_form_for(
     })
 }
 
-/// Whether a session may open from `cfg` under `policy`'s key-wire form, or the code `z_open`
-/// answers: `Z_ERR_INVALID` when the session's form or an endpoint's is `shared` and the config
-/// states no dictionary.
+/// The key ids a session opened from `cfg` holds, or the code `z_open` answers. What the doors
+/// state (`wz_ext_config_key_ids`, `wz_ext_config_key_wire_form_for`) goes over what the
+/// `wz/key-ids` of the config's document states (`wz_ext_config_document`), the order the config's
+/// policies are composed in: a dictionary handed through the door replaces the document's, and a
+/// form stated for an endpoint replaces the document's for that endpoint. A `count` of 0 at the
+/// door states no dictionary, so the document's stands.
+///
+/// `Z_ERR_INVALID` when the session's form, `policy`'s, or an endpoint's is `shared` and neither
+/// states a dictionary.
 #[cfg(feature = "shared-key-ids")]
-pub(crate) fn admit_at_open(cfg: &ConfigState, policy: &SessionPolicy) -> Result<(), ZResult> {
-    cfg.key_ids
+pub(crate) fn admit_at_open(
+    cfg: &ConfigState,
+    policy: &SessionPolicy,
+) -> Result<KeyIdsAtOpen, ZResult> {
+    let at_open = cfg.key_ids.over(cfg.policies.document_key_ids()?);
+    at_open
         .forms(policy.key_wire_form())
-        .map(|_| ())
-        .map_err(|_| Z_ERR_INVALID)
+        .map_err(|_| Z_ERR_INVALID)?;
+    Ok(at_open)
 }
 
 /// See the twin with the capability. A build without it names keys as upstream does and no other
@@ -179,18 +197,19 @@ pub(crate) fn admit_at_open(cfg: &ConfigState, policy: &SessionPolicy) -> Result
     Ok(())
 }
 
-/// The key ids `cfg` hands the cooperative engine's open: the dictionary and the endpoints'
-/// forms the config states, or none.
+/// The key ids the cooperative engine's open is handed: those [`admit_at_open`] admitted, or
+/// none in a build without the capability.
 #[cfg(not(feature = "engine-tokio"))]
 #[inline(always)]
-pub(crate) fn coop_key_ids(cfg: &ConfigState) -> wz_capi_coop::OpenKeyIds {
+pub(crate) fn coop_key_ids(
+    #[cfg(feature = "shared-key-ids")] at_open: KeyIdsAtOpen,
+) -> wz_capi_coop::OpenKeyIds {
     #[cfg(feature = "shared-key-ids")]
     {
-        wz_capi_coop::OpenKeyIds::new(cfg.key_ids.clone())
+        wz_capi_coop::OpenKeyIds::new(at_open)
     }
     #[cfg(not(feature = "shared-key-ids"))]
     {
-        let _ = cfg;
         wz_capi_coop::OpenKeyIds::none()
     }
 }
@@ -200,6 +219,8 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use crate::prelude::*;
+    #[cfg(feature = "config-document")]
+    use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
     use wz_session_core::policy::KeyWireForm;
 
     /// `state` as the loaned config the doors are handed.
@@ -356,33 +377,177 @@ mod tests {
     }
 
     #[test]
+    /// Whether a session opens from `state` under `form`, or the code `z_open` answers.
+    fn admits(state: &ConfigState, form: KeyWireForm) -> Result<(), ZResult> {
+        admit_at_open(state, &policy_of(form)).map(|_| ())
+    }
+
+    #[test]
     fn the_open_needs_a_dictionary_for_a_shared_form_only() {
         let mut state = ConfigState::default();
-        assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Shared)),
-            Err(Z_ERR_INVALID)
-        );
+        assert_eq!(admits(&state, KeyWireForm::Shared), Err(Z_ERR_INVALID));
         for form in [KeyWireForm::Declared, KeyWireForm::Literal] {
-            assert_eq!(admit_at_open(&state, &policy_of(form)), Ok(()));
+            assert_eq!(admits(&state, form), Ok(()));
         }
         state
             .key_ids
             .set_link("tcp/192.0.2.7:7447", KeyWireForm::Shared);
         assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
+            admits(&state, KeyWireForm::Declared),
             Err(Z_ERR_INVALID),
             "an endpoint stated shared needs the dictionary too"
         );
         state.key_ids.ids = Some(alloc::sync::Arc::new(
             KeyIds::new([(40, "lab/rig")]).expect("valid"),
         ));
+        assert_eq!(admits(&state, KeyWireForm::Shared), Ok(()));
+        assert_eq!(admits(&state, KeyWireForm::Declared), Ok(()));
+        assert_eq!(
+            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
+            Ok(state.key_ids.clone()),
+            "with no document the open holds what the doors stated"
+        );
+    }
+
+    /// The document the tests of both C ABIs hand a config (the zenoh-c ABI's twin is in its
+    /// `config` tests), and the key ids it states.
+    #[cfg(feature = "config-document")]
+    const DOCUMENT: &CStr = cr#"{ mode: "peer", wz: { "key-ids": {
+        dictionary: [ { id: 40, key: "lab/rig" }, { id: 41, key: "lab/rig/alpha" } ],
+        links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" } ] } } }"#;
+
+    #[cfg(feature = "config-document")]
+    fn document_key_ids() -> KeyIdsAtOpen {
+        KeyIdsAtOpen {
+            ids: Some(alloc::sync::Arc::new(
+                KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("valid"),
+            )),
+            links: alloc::vec![("tcp/192.0.2.7:7447".to_owned(), KeyWireForm::Literal)],
+        }
+    }
+
+    #[cfg(feature = "config-document")]
+    fn hand_document(state: &mut ConfigState, text: &CStr) -> ZResult {
+        let mut config = loaned(state);
+        // SAFETY: a live config and a live string.
+        unsafe { crate::config_policy::wz_ext_config_document(&mut config, text.as_ptr()) }
+    }
+
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn a_documents_key_ids_reach_the_open() {
+        let mut state = ConfigState::default();
+        assert_eq!(hand_document(&mut state, DOCUMENT), Z_OK);
         assert_eq!(
             admit_at_open(&state, &policy_of(KeyWireForm::Shared)),
-            Ok(())
+            Ok(document_key_ids()),
+            "the document's dictionary makes the shared form admissible"
+        );
+    }
+
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn the_doors_statements_go_over_the_documents() {
+        let mut state = ConfigState::default();
+        assert_eq!(hand_document(&mut state, DOCUMENT), Z_OK);
+        let mut config = loaned(&mut state);
+        assert_eq!(
+            unsafe {
+                wz_ext_config_key_wire_form_for(
+                    &mut config,
+                    c"tcp/192.0.2.7:7447".as_ptr(),
+                    c"declared".as_ptr(),
+                )
+            },
+            Z_OK
+        );
+        let at_open =
+            admit_at_open(&state, &policy_of(KeyWireForm::Shared)).expect("the document's ids");
+        assert_eq!(
+            at_open.ids,
+            document_key_ids().ids,
+            "no dictionary through the door leaves the document's"
+        );
+        assert_eq!(
+            at_open.links,
+            [("tcp/192.0.2.7:7447".to_owned(), KeyWireForm::Declared)],
+            "the door's form of an endpoint replaces the document's"
+        );
+
+        let ids = [7u16];
+        let keys = [c"lab/other".as_ptr()];
+        let mut config = loaned(&mut state);
+        assert_eq!(
+            unsafe { wz_ext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), 1) },
+            Z_OK
+        );
+        let at_open =
+            admit_at_open(&state, &policy_of(KeyWireForm::Shared)).expect("the door's ids");
+        let held = at_open.ids.as_deref().expect("a dictionary");
+        assert_eq!(held.key_of(7), Some("lab/other"));
+        assert_eq!(
+            held.key_of(40),
+            None,
+            "the door's dictionary replaces the document's whole"
+        );
+
+        let mut config = loaned(&mut state);
+        assert_eq!(
+            unsafe { wz_ext_config_key_ids(&mut config, core::ptr::null(), core::ptr::null(), 0) },
+            Z_OK
+        );
+        assert_eq!(
+            admit_at_open(&state, &policy_of(KeyWireForm::Shared))
+                .expect("the document's ids")
+                .ids,
+            document_key_ids().ids,
+            "a dictionary taken back at the door leaves the document's"
+        );
+    }
+
+    /// One document, through this ABI's document door and through the reader of the zenoh
+    /// document the zenoh-c ABI's open reads it with, gives equal key ids; the zenoh-c ABI's own
+    /// test of the same text holds its open to the same value.
+    #[cfg(all(
+        feature = "config-document",
+        feature = "engine-tokio",
+        feature = "scout"
+    ))]
+    #[test]
+    fn one_document_gives_the_key_ids_the_zenoh_reader_gives() {
+        let mut state = ConfigState::default();
+        assert_eq!(hand_document(&mut state, DOCUMENT), Z_OK);
+        let through_door =
+            admit_at_open(&state, &policy_of(KeyWireForm::Declared)).expect("admitted");
+        let text = DOCUMENT.to_str().expect("UTF-8");
+        let zenoh = wz_capi_core::runtime::zenoh_config::ZenohNodeConfig::from_json5(text)
+            .expect("the zenoh reader takes the document");
+        assert_eq!(zenoh.config.key_ids, through_door);
+        assert_eq!(through_door, document_key_ids());
+    }
+
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn a_document_whose_key_ids_are_refused_is_refused_at_the_door() {
+        let mut state = ConfigState::default();
+        assert_eq!(
+            hand_document(
+                &mut state,
+                cr#"{ wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#
+            ),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(
+            hand_document(
+                &mut state,
+                cr#"{ wz: { "key-ids": { links: [ { locator: "tcp/192.0.2.7:7447", form: "loud" } ] } } }"#
+            ),
+            Z_ERR_CONFIG_INVALID_VALUE
         );
         assert_eq!(
             admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
-            Ok(())
+            Ok(KeyIdsAtOpen::default()),
+            "a refused document leaves the config as it was"
         );
     }
 }

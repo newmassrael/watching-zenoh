@@ -83,6 +83,23 @@ impl PolicyStatements {
         policy_document::resolve_under(base, overrides).map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
+    /// The key ids the `wz/key-ids` of the document `wz_ext_config_document` was handed states,
+    /// read by the reader that composes its policies, or none when the config was handed no
+    /// document. The door kept the document only when that reader took it whole, so a refusal
+    /// here is of a config no door made, and `Z_ERR_CONFIG_INVALID_VALUE` like the policies'.
+    #[cfg(feature = "shared-key-ids")]
+    pub(crate) fn document_key_ids(
+        &self,
+    ) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, ZResult> {
+        #[cfg(feature = "config-document")]
+        if let Some(document) = &self.document {
+            return policy_document::statements_from_json5(document)
+                .map(|read| read.key_ids)
+                .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE);
+        }
+        Ok(Default::default())
+    }
+
     /// `policy` is to take `value` in the API layer; an earlier statement of the policy is
     /// replaced.
     fn state_policy(&mut self, policy: &str, value: &str) {
@@ -203,12 +220,15 @@ pub unsafe extern "C" fn wz_ext_config_profile(
     })
 }
 
-/// Hands `config` a zenoh JSON5 document, of which the `wz` member is read: the profile it names
-/// and its `wz/policies`. The rest of the document is not read, so the document a zenoh-c program
-/// opens with configures these sessions' policies alike. A second call replaces the first. Text
-/// that is no JSON5 object, a `wz` member whose shape is refused (one that is not an object, a
-/// value that is not a string, a member wz does not read, `wz/limits`, a member stated twice), a
-/// profile the build does not have and a statement the build refuses are refused with
+/// Hands `config` a zenoh JSON5 document, of which the `wz` member is read: the profile it names,
+/// its `wz/policies` and, in a build with the `shared-key-ids` capability, its `wz/key-ids`, the
+/// key ids every node shares, under what `wz_ext_config_key_ids` and
+/// `wz_ext_config_key_wire_form_for` state. The rest of the document is not read, so the document
+/// a zenoh-c program opens with configures these sessions alike. A second call replaces the first.
+/// Text that is no JSON5 object, a `wz` member whose shape is refused (one that is not an object,
+/// a value that is not a string, a member wz does not read, `wz/limits`, `wz/key-ids` in a build
+/// without the capability, a member stated twice), a profile the build does not have, a statement
+/// the build refuses and a refused part of `wz/key-ids` are refused with
 /// `Z_ERR_CONFIG_INVALID_VALUE`, and the config is left as it was.
 ///
 /// In a build with the `config-document` capability alone: the door links a JSON5 reader that a
@@ -513,6 +533,24 @@ mod tests {
         assert_eq!(
             resolved.provenance.origin(entry.id()),
             Some(Origin::Document)
+        );
+    }
+
+    /// A build without the `shared-key-ids` capability refuses a document that states key ids,
+    /// by name, and keeps the config as it was.
+    #[cfg(all(feature = "config-document", not(feature = "shared-key-ids")))]
+    #[test]
+    fn the_document_door_refuses_key_ids_without_the_capability() {
+        let mut config = Config::new();
+        assert_eq!(
+            config.document(
+                r#"{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#
+            ),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(
+            config.resolved(),
+            Resolved::unchanged(SessionPolicy::defaults())
         );
     }
 
