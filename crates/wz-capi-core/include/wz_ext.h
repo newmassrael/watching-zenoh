@@ -867,10 +867,15 @@ bool wz_ext_internal_e2e_receiver_check(
  * link that the peer has sent everything it held when the link came up
  * (WZ_EXT_DECL_SYNCED); without it that event is never told.
  *
- * A watch hears the peers from the moment it is declared, on every link the
- * session holds and every link that comes up later; what a peer declared
- * before is not told again. A link that is lost tells no undeclaration for
- * what its peer held, and the members of a multicast group are not watched. */
+ * A watch of subscribers or queryables is told first what each peer holds
+ * when it is declared, as WZ_EXT_DECL_DECLARED events ahead of every live
+ * event of that link, then what the peers declare and retract from then on,
+ * on every link the session holds and every link that comes up later; each
+ * declaration is told once. A watch of tokens hears only what comes after it
+ * is declared. A watch declared after a link's peer finished its initial
+ * declarations is not told WZ_EXT_DECL_SYNCED for that link. A link that is
+ * lost tells no undeclaration for what its peer held, and the members of a
+ * multicast group are not watched. */
 
 /* What an event says. */
 #define WZ_EXT_DECL_DECLARED 0
@@ -995,9 +1000,9 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
  * reply) or the round deadline passes. Under replay-live-before-answer
  * hold-back, the live samples that arrive before the first round is over are
  * held in the program's store and handed on after its replies; under deliver,
- * as they arrive. A publisher that declared its queryable before the
- * subscriber was made is not told again: make the subscriber before the links
- * to its publishers come up.
+ * as they arrive. A publisher whose queryable a link held before the
+ * subscriber was made is asked all the same: the declaration watch tells
+ * what each peer holds first.
  *
  * TIME is milliseconds: the program's own for a publisher's frames (it orders
  * an answer), and for a subscriber its clock in 32 bits that wrap, given in

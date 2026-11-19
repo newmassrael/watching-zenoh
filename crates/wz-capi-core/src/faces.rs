@@ -1538,9 +1538,13 @@ fn install_decl_watch(
             sink(event);
         }
     };
+    // A subscriber or a queryable the peer declared before the watch was installed (a watch
+    // declared after the link came up, or a link whose declarations arrived before its face took
+    // the watch) is told first, from the face's table, ahead of every live event. The runtime
+    // keeps no table of the tokens a peer holds, so a token watch hears what comes after.
     let listener = match plane {
-        DeclPlane::Subscribers => session.declare_remote_subscriber_listener(callback),
-        DeclPlane::Queryables => session.declare_remote_queryable_listener(callback),
+        DeclPlane::Subscribers => session.declare_remote_subscriber_listener_from_held(callback),
+        DeclPlane::Queryables => session.declare_remote_queryable_listener_from_held(callback),
         DeclPlane::Tokens => session.declare_remote_token_listener(callback),
     };
     listener.ok()
@@ -6650,6 +6654,10 @@ impl SharedSession {
         for face in guard.faces.values_mut() {
             if let Some(listener) = install_decl_watch(&face.session, plane, &sink) {
                 face.decl_watches.insert(id, listener);
+                // What the face's peer holds is staged, not told: the drive loop is woken to tell
+                // it now (the face reports itself due while fires wait), rather than at the next
+                // inbound message or keepalive tick.
+                face.revised.notify_one();
             }
         }
         guard.decl_watches.push(DeclWatchEntry { id, plane, sink });

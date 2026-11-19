@@ -13477,6 +13477,96 @@ fn remote_queryable_listener_delivers_decl_and_undecl_events() {
     assert!(listener.undeclare());
 }
 
+/// A listener declared from what is held is told first each queryable the peer declared before
+/// it, then what comes after, each once; the plain form is told only what comes after.
+#[cfg(feature = "declare-queryable")]
+#[test]
+fn remote_queryable_listener_from_held_tells_what_the_peer_holds_first() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use sce_forge_runtime::codec::Heap;
+    use wz_codecs::declare::DeclareOwnedVariant;
+
+    let (session, _driver) = build_session();
+    let declare = |body: &DeclareOwnedVariant<Heap>| {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(body, &HashMap::new());
+    };
+    declare(&make_decl_queryable(3, "home/held"));
+    let held: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let plain: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let (held_cb, plain_cb) = (held.clone(), plain.clone());
+    let from_held = session
+        .declare_remote_queryable_listener_from_held(move |e| held_cb.lock().unwrap().push(e))
+        .expect("declare-queryable is on in this lane");
+    let live_only = session
+        .declare_remote_queryable_listener(move |e| plain_cb.lock().unwrap().push(e))
+        .expect("declare-queryable is on in this lane");
+    declare(&make_decl_queryable(4, "home/live"));
+    declare(&make_undecl_queryable(3));
+    session.drain_deferred_fires();
+    let declared = |id: u64, key: &str| DeclEvent::Declared {
+        id,
+        keyexpr: key.to_string(),
+        peer: None,
+    };
+    assert_eq!(
+        *held.lock().unwrap(),
+        vec![
+            declared(3, "home/held"),
+            declared(4, "home/live"),
+            DeclEvent::Undeclared { id: 3, peer: None },
+        ],
+        "what was held, ahead of what came after"
+    );
+    assert_eq!(
+        *plain.lock().unwrap(),
+        vec![
+            declared(4, "home/live"),
+            DeclEvent::Undeclared { id: 3, peer: None },
+        ],
+        "the plain form is told only what came after"
+    );
+    assert!(from_held.undeclare());
+    assert!(live_only.undeclare());
+}
+
+/// The subscriber twin of the test above.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn remote_subscriber_listener_from_held_tells_what_the_peer_holds_first() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_declare(&make_decl_subscriber(8, "home/sub"), &HashMap::new());
+    let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = session
+        .declare_remote_subscriber_listener_from_held(move |e| log_cb.lock().unwrap().push(e))
+        .expect("declare-subscriber is on in this lane");
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![DeclEvent::Declared {
+            id: 8,
+            keyexpr: "home/sub".to_string(),
+            peer: None,
+        }]
+    );
+    assert!(listener.undeclare());
+}
+
 /// R290-style local DeclToken / UndeclToken constructors for the
 /// R311lc token-plane listener test (the wz-session-core-test-support
 /// builders are not a dev-dep here per R311ds).
