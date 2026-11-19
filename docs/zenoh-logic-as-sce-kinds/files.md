@@ -214,6 +214,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/clock_source.rs` | S7 | |
 | `crates/wz-capi-pico/src/codec.rs` | S7 | |
 | `crates/wz-capi-pico/src/config.rs` | S7 | |
+| `crates/wz-capi-pico/src/config_policy.rs` | S7 | |
 | `crates/wz-capi-pico/src/conformance.rs` | S7 | |
 | `crates/wz-capi-pico/src/connectivity.rs` | S7 | |
 | `crates/wz-capi-pico/src/coop_host.rs` | S7 | |
@@ -409,6 +410,11 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-posix/src/net.rs` | S9 | |
 | `crates/wz-runtime-posix/src/slot.rs` | S9 | |
 | `crates/wz-runtime-posix/src/stream.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows/links.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows/mod.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows/net.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows/stream.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows_arith.rs` | S9 | |
 | `crates/wz-runtime-tokio/src/accept_bounds.rs` | S10 | |
 | `crates/wz-runtime-tokio/src/accept_loop.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/accept_loop/discovered_links.rs` | S4 | |
