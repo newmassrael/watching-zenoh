@@ -81,8 +81,19 @@ static void check_sleep_and_clock(void) {
     z_clock_advance_ms(&later, 2500);
     unsigned long ms = zp_clock_elapsed_ms_since(&later, &epoch);
     CHECK(ms >= 2499 && ms <= 2501, "2500 ms advanced read as %lu ms", ms);
+    /* Whole seconds are pico's per host: on a Unix the difference of the two readings' second
+     * fields (system/unix/system.c), so 2.5 s reads 2 or 3 by where in its second the epoch
+     * fell; on Windows the counter interval over the frequency, truncated, so it reads 2. */
     unsigned long s = zp_clock_elapsed_s_since(&later, &epoch);
-    CHECK(s == 2, "2500 ms advanced read as %lu s (whole seconds, dropped)", s);
+#if defined(ZENOH_WINDOWS)
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    unsigned long pico_s = (unsigned long)((double)(later.QuadPart - epoch.QuadPart) / (double)frequency.QuadPart);
+#else
+    unsigned long pico_s = (unsigned long)(later.tv_sec - epoch.tv_sec);
+#endif
+    CHECK(s == pico_s, "2500 ms advanced read as %lu s, and pico's formula for this host gives %lu", s, pico_s);
+    CHECK(s == 2 || s == 3, "2500 ms advanced read as %lu s", s);
     unsigned long us = zp_clock_elapsed_us_since(&later, &epoch);
     CHECK(us >= 2499000 && us <= 2501000, "2500 ms advanced read as %lu us", us);
     CHECK(zp_clock_elapsed_ms_since(&epoch, &later) == 0, "a reading before its epoch reads 0");
