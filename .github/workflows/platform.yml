@@ -885,6 +885,116 @@ jobs:
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "a pico C program over a transport it supplies" app-transport
 
+  # The pico C ABI on the cooperative engine, the single-threaded arm: the program drives its
+  # session with `zp_read`, `zp_send_keep_alive` and `zp_spin_once` from its own loop, and every
+  # callback runs on its one thread. On Windows the engine's host is `wz-runtime-posix`'s Windows
+  # module (the performance counter, the system's random number generator, the precise system
+  # time, Winsock); on Linux it is the POSIX host the build machines already run it on, which
+  # makes the Linux row the control of the program and the script.
+  #
+  # Steps, in this order because each later build replaces the library of the one before in the
+  # same target directory: the Windows host's own unit tests; the library on the cooperative
+  # engine alone and beside a transport the program supplies, which opens no socket of the
+  # host's; and a single-threaded C program run as two processes on one loopback port, a
+  # listening session with a subscriber and a queryable and a client that puts and gets until
+  # the answer says its put arrived (`WZ_PICO_PROGRAM_ROLES`, scripts/pico-c-program.sh).
+  #
+  # A job of its own and not steps of `capi`, for the reason `capi-examples` is: that job's
+  # budget is spent by what it gates, and a cooperative build is a second build of the library.
+  # Observed, not yet gated, as each new program has started: every step is `continue-on-error`
+  # and so is the job; each verdict line in the job summary is the reading, until two
+  # consecutive hosted runs read it green on both hosts.
+  capi-coop:
+    name: C ABI cooperative engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            host: linux
+          - os: windows-latest
+            host: windows
+    env:
+      WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
+    steps:
+      - name: Checkout (with submodules)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        shell: bash
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          # A READER of the `leg` job's entry (class `rust-host-workspace`). The leg runs
+          # on macOS and Windows only, so the Linux row finds no entry and builds cold.
+          shared-key: host-workspace
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Set up Python (the pico C programs' header is rendered in python)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
+      # The vendored pico library's bindings are generated through libclang, which the Linux
+      # image may not carry; installed only when none is found.
+      - name: libclang for the pico bindings, where the image has none
+        if: ${{ env.WZ_HOST_SELECTED == 'true' && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          if compgen -G "/usr/lib/llvm-*/lib/libclang*.so*" > /dev/null; then
+            echo "libclang: $(compgen -G '/usr/lib/llvm-*/lib/libclang*.so*' | head -n 1)"
+          else
+            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
+          fi
+
+      - name: the cooperative engine's host and library on this host (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 30
+        continue-on-error: true
+        shell: bash
+        run: |
+          verdict() {
+            echo "capi-coop on ${RUNNER_OS}: $1 $2"
+            echo "capi-coop on ${RUNNER_OS}: $1 $2" >> "$GITHUB_STEP_SUMMARY"
+          }
+          overall=PASS
+          host=FAIL
+          (cd crates && cargo test -p wz-runtime-posix --lib) && host=PASS
+          verdict "the host's unit tests (wz-runtime-posix):" "$host"
+          [ "$host" = PASS ] || overall=FAIL
+          for features in engine-coop engine-coop,app-transport; do
+            built=FAIL
+            (cd crates && cargo build -p wz-capi-pico --no-default-features --features "$features") && built=PASS
+            verdict "wz-capi-pico builds with ${features}:" "$built"
+            [ "$built" = PASS ] || overall=FAIL
+          done
+          [ "$overall" = PASS ]
+
+      - name: a single-threaded pico C program on the cooperative engine (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 25
+        continue-on-error: true
+        shell: bash
+        env:
+          WZ_PICO_ENGINE: coop
+          WZ_PICO_PROGRAM_ROLES: listen dial
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_coop_single_thread.c "a single-threaded pico C program on the cooperative engine" peer,query,queryable
+
   # The C examples of the pico C ABI (crates/wz-capi-pico/examples/c/), on Linux and on
   # Windows: the policy profile the library is built with, the three transport configs over
   # the system's sockets and over a transport the program supplies, batching, end-to-end

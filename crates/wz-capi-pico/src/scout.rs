@@ -146,7 +146,7 @@ mod window {
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
         wz_capi_coop::scout::run_scout(
-            &wz_runtime_posix::PosixClock,
+            &crate::coop_host::clock(),
             group,
             port,
             what,
@@ -166,7 +166,7 @@ mod window {
         _policy: &SessionPolicy,
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout::scout_first(
-            &wz_runtime_posix::PosixClock,
+            &crate::coop_host::clock(),
             group,
             port,
             what,

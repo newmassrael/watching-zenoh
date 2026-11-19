@@ -11,6 +11,9 @@
 #
 # Not the host profile of the C ABI (`wz-capi-c`, tokio, threads, a heap): that one is the drop-in
 # for zenoh-c. This one is the same session code the MCU images run, at a Linux socket.
+#
+# On Windows the same seams are the system's own calls (`src/windows/`): the clock, entropy, wall
+# clock and Winsock sockets the pico C ABI's cooperative engine is opened over there.
 
 [package]
 name = "wz-runtime-posix"
@@ -21,22 +24,41 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Host cooperative single-thread runtime profile with no allocator: a monotonic clock, entropy, wall clock and UDP socket over libc for the shared MCU session code."
+description = "Host cooperative single-thread runtime profile with no allocator: a monotonic clock, entropy, wall clock and UDP socket over libc for the shared MCU session code, and over the system's own calls on Windows."
 
 [lib]
 name = "wz_runtime_posix"
 path = "src/lib.rs"
 
 [dependencies]
-# The system calls (`clock_gettime`, `getrandom`, `socket`, `poll`, `recvfrom`, `write`). No `std`
-# feature: this crate is `#![no_std]`, and `libc` is the C library's own names.
-libc = { version = "0.2", default-features = false }
 # The cooperative executor SSOT (CoopRuntime + ClockSource) and the datagram link every stack with
 # BSD sockets shares (`udp_link`): this profile reuses both, parameterised by the clock and the
 # socket.
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
 # The traits the seams implement (`EntropySource`, `EpochSource`).
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
+
+# The POSIX hosts' system calls (`clock_gettime`, `getrandom`, `socket`, `poll`, `recvfrom`,
+# `write`). No `std` feature: this crate is `#![no_std]`, and `libc` is the C library's own names.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", default-features = false }
+
+# The Windows host's (`src/windows/`): the performance counter, the system's random number
+# generator, the precise system time and Winsock, each feature one namespace the module calls into
+# (`System_IO` because `WSASend` and `WSAIoctl` name its overlapped structure, `System_Threading`
+# for the process id a duplicated socket is made for). Already in this workspace's graph at this
+# version (the pico C ABI's Windows host layer takes it), so this adds no new third-party crate.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security_Cryptography",
+    "Win32_System_IO",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+]
 
 [features]
 # `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually

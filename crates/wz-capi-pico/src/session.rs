@@ -1221,7 +1221,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // value does at the keys, and never degrades to a session without the protection asked for.
     #[cfg(feature = "tls-mbedtls")]
     let links = match wz_capi_coop::tls::HostTls::from_config(
-        wz_runtime_posix::stream::PosixTcpDial,
+        crate::coop_host::tcp_dial(),
         &request.tls,
         wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
     ) {

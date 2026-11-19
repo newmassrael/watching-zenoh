@@ -25,6 +25,17 @@
 # there is the value of the rendered header's switch too; a source file given with a feature
 # list is linked against the library with those features.
 #
+# WZ_PICO_ENGINE names the engine the library runs its sessions on: `tokio` (or unset), the
+# default build's, or `coop`, the cooperative engine alone (`--no-default-features` with
+# `engine-coop` and the feature list), whose header arm is rendered with `--engine coop`. A
+# cooperative build replaces the default one in the same target directory, so a step that asks
+# for it comes after the steps that link the default library.
+#
+# WZ_PICO_PROGRAM_ROLES, when set, is a list of words the program is run with, one process each,
+# all at once, each given its role and one loopback port the script picks (`<exe> <role> <port>`):
+# the shape of a program whose sessions cannot share a thread, as two single-threaded sessions
+# that dial each other cannot. The program passes when every process exits 0.
+#
 # Reads RUNNER_OS and RUNNER_TEMP, which the Actions runner sets, and appends its verdict
 # to GITHUB_STEP_SUMMARY when that is set. Exit status 0 means the program built, ran and
 # passed. A failure to build is reported as NOT-MEASURED and is a non-zero exit too: a
@@ -41,6 +52,15 @@ what="$2"
 # The capabilities beyond the default build that the program's doors need (a comma list of
 # wz-capi-pico features); none for a program of the default build.
 features="${3:-}"
+engine="${WZ_PICO_ENGINE:-tokio}"
+case "$engine" in
+    tokio | coop) ;;
+    *)
+        echo "pico-c-program: WZ_PICO_ENGINE is \`tokio\` or \`coop\`, not \`$engine\`" >&2
+        exit 2
+        ;;
+esac
+roles="${WZ_PICO_PROGRAM_ROLES:-}"
 # wz's extension header, for a program that uses a wz_ext_* door.
 ext_inc="$PWD/crates/wz-capi-core/include"
 os="${RUNNER_OS:-$(uname -s)}"
@@ -62,9 +82,20 @@ if [ ! -f "$src" ]; then
     exit 2
 fi
 
+# The cooperative engine is the build without the default features (which name the tokio
+# engine), with `engine-coop` in front of the program's capabilities; the header renderer adds
+# `engine-coop` itself when it is told the engine.
+build_features="$features"
+engine_args=()
+header_engine=()
+if [ "$engine" = coop ]; then
+    build_features="engine-coop${features:+,$features}"
+    engine_args=(--no-default-features)
+    header_engine=(--engine coop)
+fi
 feature_args=()
-if [ -n "$features" ]; then
-    feature_args=(--features "wz-capi-pico/${features//,/,wz-capi-pico/}")
+if [ -n "$build_features" ]; then
+    feature_args=(--features "wz-capi-pico/${build_features//,/,wz-capi-pico/}")
 fi
 # Cargo's own report of the build names the include directory: the vendored library's build script
 # installs the headers of the arm THIS feature list selects into its own out directory, and a tree
@@ -74,7 +105,8 @@ fi
 build_report="$(mktemp)"
 # Expanded as `${a[@]+...}`: macOS's bash 3.2 reads an empty array as unbound under `set -u`.
 if ! (cd crates && cargo build --message-format=json-render-diagnostics -p zenoh-pico-sys \
-    -p wz-capi-pico ${feature_args[@]+"${feature_args[@]}"}) > "$build_report"; then
+    -p wz-capi-pico ${engine_args[@]+"${engine_args[@]}"} \
+    ${feature_args[@]+"${feature_args[@]}"}) > "$build_report"; then
     say "pico-program-probe on ${os}: the pico headers and the cdylib did not build NOT-MEASURED"
     exit 1
 fi
@@ -131,7 +163,8 @@ arm_inc="$temp/pico-arm-include-$(basename "${src%.c}")"
 rm -rf "$arm_inc"
 mkdir -p "$arm_inc"
 cp -R "$inc"/. "$arm_inc"/
-if ! "$py" scripts/lib/wz_config.py --pico-config-h "$features" > "$arm_inc/zenoh-pico/config.h"; then
+if ! "$py" scripts/lib/wz_config.py --pico-config-h ${header_engine[@]+"${header_engine[@]}"} \
+    "$features" > "$arm_inc/zenoh-pico/config.h"; then
     say "pico-program-probe on ${os}: the header of the library's arm did not render NOT-MEASURED"
     exit 1
 fi
@@ -173,6 +206,27 @@ if [ "$compiled" != PASS ]; then
 fi
 
 result=FAIL
-PATH="$lib_dir:$PATH" "$exe" && result=PASS
+if [ -z "$roles" ]; then
+    PATH="$lib_dir:$PATH" "$exe" && result=PASS
+else
+    # One loopback port for every process of the run, picked here as the session programs pick
+    # theirs: a fixed number would collide with a second run on the same host.
+    port=$((20000 + RANDOM % 20000))
+    read -r -a role_list <<< "$roles"
+    pids=()
+    for role in "${role_list[@]}"; do
+        PATH="$lib_dir:$PATH" "$exe" "$role" "$port" &
+        pids+=("$!")
+    done
+    result=PASS
+    i=0
+    for role in "${role_list[@]}"; do
+        if ! wait "${pids[$i]}"; then
+            echo "pico-c-program: the \`$role\` process of the program failed"
+            result=FAIL
+        fi
+        i=$((i + 1))
+    done
+fi
 say "pico-program-probe on ${os} (${compiler}): ${what}: ${result}"
 [ "$result" = PASS ]
