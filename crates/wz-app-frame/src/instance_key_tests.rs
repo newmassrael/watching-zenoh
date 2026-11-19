@@ -229,8 +229,11 @@ fn a_value_outside_the_list_is_dropped_counted_and_reported_at_a_bounded_rate() 
     assert_eq!(k.report_interval_ms(), 100);
     let outside = zone_only(6);
     let dropped = |report: Option<u64>| Dropped {
-        refusal: Refusal::NotListed { field: 0 },
-        report: report.map(|dropped| Report { dropped }),
+        refusal: OUTSIDE,
+        report: report.map(|dropped| Report {
+            dropped,
+            latest: OUTSIDE,
+        }),
     };
     // The first drop is reported at once; the next within the interval is held.
     assert_eq!(k.index(&outside, 1_000), Err(dropped(Some(1))));
@@ -240,19 +243,35 @@ fn a_value_outside_the_list_is_dropped_counted_and_reported_at_a_bounded_rate() 
     // Once the interval has passed, the drop carries the ones held with it.
     assert_eq!(k.index(&outside, 1_100), Err(dropped(Some(2))));
     assert_eq!(k.flush(1_150), None, "nothing is held");
-    assert_eq!(k.index(&outside, 1_150), Err(dropped(None)));
+    // A drop of another reason is held the same way, and the report names it
+    // as the latest.
+    assert_eq!(
+        k.index(&[0x08], 1_150),
+        Err(Dropped {
+            refusal: Refusal::Undecodable,
+            report: None
+        })
+    );
     assert_eq!(k.flush(1_199), None, "the interval has not passed");
-    assert_eq!(k.flush(1_200), Some(Report { dropped: 1 }));
+    assert_eq!(
+        k.flush(1_200),
+        Some(Report {
+            dropped: 1,
+            latest: Refusal::Undecodable
+        })
+    );
     assert_eq!(k.flush(5_000), None);
     assert_eq!(
         k.counts(),
         Counts {
-            undecodable: 0,
+            undecodable: 1,
             absent: 0,
-            not_listed: 4,
+            not_listed: 3,
         }
     );
 }
+
+const OUTSIDE: Refusal = Refusal::NotListed { field: 0 };
 
 #[test]
 fn a_clock_that_steps_back_starts_the_interval_again() {
@@ -264,7 +283,13 @@ fn a_clock_that_steps_back_starts_the_interval_again() {
     assert!(k.index(&outside, 5_000).unwrap_err().report.is_some());
     assert_eq!(k.index(&outside, 10).unwrap_err().report, None);
     assert_eq!(k.flush(109), None);
-    assert_eq!(k.flush(110), Some(Report { dropped: 1 }));
+    assert_eq!(
+        k.flush(110),
+        Some(Report {
+            dropped: 1,
+            latest: OUTSIDE
+        })
+    );
 }
 
 #[test]
@@ -276,7 +301,10 @@ fn an_interval_of_zero_reports_every_drop_and_the_default_is_stated() {
     for t in [0u64, 0, 1] {
         assert_eq!(
             every.index(&zone_only(6), t).unwrap_err().report,
-            Some(Report { dropped: 1 })
+            Some(Report {
+                dropped: 1,
+                latest: OUTSIDE
+            })
         );
     }
     let default =
@@ -762,8 +790,11 @@ fn a_frame_of_no_instance_is_dropped_and_not_judged() {
     assert_eq!(
         judge(&mut rx_keyer, &mut rx, no_last(), &outside, 1).expect("judged"),
         Judged::Dropped(Dropped {
-            refusal: Refusal::NotListed { field: 0 },
-            report: Some(Report { dropped: 1 }),
+            refusal: OUTSIDE,
+            report: Some(Report {
+                dropped: 1,
+                latest: OUTSIDE
+            }),
         })
     );
     match judge(&mut rx_keyer, &mut rx, no_last(), &second, 2).expect("judged") {

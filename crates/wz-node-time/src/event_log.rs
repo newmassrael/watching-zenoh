@@ -45,6 +45,11 @@ pub mod library {
     /// a stall, otherwise the negative Mbed TLS or PSA code as a 32-bit word, or `0` where the
     /// failure has none).
     pub const TLS_HANDSHAKE_DROPPED: u16 = LIBRARY_SOURCE_BASE + 1;
+    /// Samples of a message whose payload is no instance of its instance key were dropped. Three
+    /// integers: why the one that carries the report was (`0` its payload is not a message of the
+    /// schema, `1` a key field with presence is absent, `2` a key value is in no list), which key
+    /// field (`0` for the first reason), and how many were dropped since the last report.
+    pub const INSTANCE_KEY_DROPPED: u16 = LIBRARY_SOURCE_BASE + 2;
 }
 
 /// The ring type every event log has, sized by the build.

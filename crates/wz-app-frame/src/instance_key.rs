@@ -212,6 +212,8 @@ impl fmt::Display for Refusal {
 pub struct Report {
     /// The drops since the last report, the one that carries it included.
     pub dropped: u64,
+    /// Why the latest of them was dropped.
+    pub latest: Refusal,
 }
 
 /// A sample that was dropped.
@@ -284,6 +286,8 @@ pub struct Keyer {
     counts: Counts,
     /// The drops since the last report.
     pending: u64,
+    /// Why the latest drop was; `None` before the first.
+    latest: Option<Refusal>,
     /// When the last report was given; `None` before the first.
     last_report_ms: Option<u64>,
 }
@@ -355,6 +359,7 @@ impl Keyer {
             report_interval_ms,
             counts: Counts::default(),
             pending: 0,
+            latest: None,
             last_report_ms: None,
         })
     }
@@ -453,6 +458,7 @@ impl Keyer {
         };
         *counter = counter.saturating_add(1);
         self.pending = self.pending.saturating_add(1);
+        self.latest = Some(refusal);
         Dropped {
             refusal,
             report: self.report_due(now_ms),
@@ -460,9 +466,9 @@ impl Keyer {
     }
 
     fn report_due(&mut self, now_ms: u64) -> Option<Report> {
-        if self.pending == 0 {
+        let (true, Some(latest)) = (self.pending > 0, self.latest) else {
             return None;
-        }
+        };
         if let Some(last) = self.last_report_ms {
             // A clock that steps back starts the interval again from where it
             // now reads, rather than holding every report until it catches up.
@@ -476,6 +482,7 @@ impl Keyer {
         }
         let report = Report {
             dropped: self.pending,
+            latest,
         };
         self.pending = 0;
         self.last_report_ms = Some(now_ms);
