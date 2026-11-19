@@ -292,8 +292,10 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # frames, the segment profile and its piece writer, re-exported at
 # `crate::e2e_crc` and the rest.
 # Its own crate so a node builds and judges frames without linking this one. At
-# its defaults (`alloc`), which this crate's documents and planes all read.
-wz-app-frame = { path = "../wz-app-frame" }
+# its defaults (`alloc`), which this crate's documents and planes all read, and
+# with its `.proto` schema reader and typed payload reader (`proto`), re-exported
+# at `crate::proto_schema` and `crate::proto_decode`.
+wz-app-frame = { path = "../wz-app-frame", features = ["proto"] }
 
 # `filter-regex`'s engine, and only it: see that feature. `alloc` without `std`,
 # the meta engine and the Unicode tables a pattern's classes read.

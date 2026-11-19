@@ -36,6 +36,12 @@ default = ["alloc"]
 # fields in a `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link no allocator.
 alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 
+# The `.proto` schema reader and the typed reader of a payload (`proto_lex`, `proto_parse`,
+# `proto_schema`, `proto_decode`): what a node that reads a payload by its fields needs, and what the
+# capture crate's schema documents and payload formats read, re-exported there at the paths they had.
+# Off, a node that only frames its payloads links none of it.
+proto = ["alloc"]
+
 # `segment_profile::synthetic`: a synthetic segment profile and a builder of its pieces, for the
 # tests of crates above this one. A `#[cfg(test)]` module cannot cross a crate boundary, so the
 # capture crate turns this on for its own tests and forwards it from its `fixtures` feature.

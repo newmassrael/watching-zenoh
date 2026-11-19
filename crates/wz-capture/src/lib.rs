@@ -516,7 +516,11 @@ mod memory_matrix;
 // No outer docs on these, for the reason the `e2e_*` modules give: an outer
 // doc is merged with the module's own `//!` docs and their links would then be
 // resolved from this scope instead of from the module.
-pub mod proto_decode;
+//
+// The schema reader and the typed reader are `wz-app-frame`'s, so a node can
+// read a payload by its fields without linking this crate; they are re-exported
+// at the paths they have here, and the documents over them stay.
+pub use wz_app_frame::proto_decode;
 pub mod proto_decode_json;
 #[cfg(test)]
 mod proto_decode_tests;
@@ -528,9 +532,10 @@ pub mod proto_encode;
 pub mod proto_encode_json;
 #[cfg(test)]
 mod proto_encode_tests;
-/// The `.proto` tokenizer behind [`proto_schema`], private for the reason
-/// [`payload_builtin`] is.
-mod proto_lex;
+// The `.proto` tokenizer behind the schema reader, whose positions the writer's
+// diagnostics carry. Named here and not re-exported, for the reason
+// `payload_builtin` is private.
+use wz_app_frame::proto_lex;
 pub mod proto_message_list;
 pub mod proto_message_list_json;
 #[cfg(test)]
@@ -538,10 +543,10 @@ mod proto_message_list_tests;
 pub mod proto_nanopb;
 #[cfg(test)]
 mod proto_nanopb_tests;
-/// The `.proto` parser behind [`proto_schema`] and [`proto_encode`]: the part of
-/// the syntax tree the declaration and value doors need, and the refusals that
-/// are syntax.
-mod proto_parse;
+// The `.proto` parser behind the schema reader and [`proto_encode`]: the part of
+// the syntax tree the declaration and value doors need. Named here and not
+// re-exported, as the tokenizer is.
+use wz_app_frame::proto_parse;
 pub mod proto_range;
 #[cfg(test)]
 mod proto_range_tests;
@@ -549,8 +554,8 @@ mod proto_range_tests;
 /// protobuf payload's wire format does not carry, in the dialect
 /// [`payload::formats::FormatMap`] already installs.
 ///
-/// Ungated and dependency-free like the rest of this crate: a reader of text,
-/// with no capture and no codec in it.
+/// Ungated like the rest of this crate: a writer of text over the schema
+/// reader of `wz-app-frame`, with no capture and no codec in it.
 pub mod proto_schema;
 #[cfg(test)]
 mod proto_schema_tests;

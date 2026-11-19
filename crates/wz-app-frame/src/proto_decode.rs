@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! Protobuf wire bytes READ by the types a `.proto` schema gives them: the
-//! reading half of [`crate::proto_encode`].
+//! reading half of the capture crate's writer (`proto_encode`).
 //!
 //! ## What this is for
 //!
 //! The wire format carries a field's number and one of four wire types, and
-//! nothing else. The schema-less walk ([`crate::payload::formats::Protobuf`])
+//! nothing else. The schema-less walk (the capture crate's `Protobuf` format)
 //! reads what that much allows: a `sint32` of `-3` shows as `varint 5`, a
 //! `double` as eight bytes of hex, a packed run of integers as a blob, and a
 //! string and a nested message are told apart by guessing. A reader that HOLDS
@@ -62,7 +62,7 @@
 //! reported, and nothing decoded before it is returned with it: a partial
 //! listing reads as the whole message.
 //!
-//! The schema is refused as [`crate::proto_encode`] refuses it, with the same
+//! The schema is refused as the writer refuses it, with the same
 //! diagnostic: the reader is the same, and so is the order (an argument, the
 //! files, the root message).
 //!
@@ -85,7 +85,7 @@ use crate::proto_schema::{
 
 /// How many messages deep the reader walks: a message inside a message is one
 /// level. The writer's values may nest about thirty messages
-/// ([`crate::proto_encode::MAX_VALUES_DEPTH`] counts an array or a map as a
+/// (the writer's `MAX_VALUES_DEPTH` counts an array or a map as a
 /// level too), so every message it can build reads back.
 pub const MAX_DECODE_DEPTH: usize = 64;
 
@@ -206,7 +206,7 @@ impl fmt::Display for WireError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecodeError {
     /// The schema, or an argument about it, was refused: the diagnostic
-    /// [`crate::proto_encode`] gives for the same schema.
+    /// the writer gives for the same schema.
     Schema(ProtoDiagnostic),
     /// The schema is sound and the bytes are not a message of it.
     Wire(WireError),
@@ -234,7 +234,7 @@ impl<'f, 'a> LinkedSchema<'f, 'a> {
     ///
     /// # Errors
     ///
-    /// The diagnostic [`crate::proto_encode::encode_message`] gives for the same
+    /// The diagnostic the writer's `encode_message` gives for the same
     /// schema and name.
     pub fn link(
         files: &'f [ProtoFile<'a>],
@@ -268,7 +268,7 @@ impl<'f, 'a> LinkedSchema<'f, 'a> {
 
 /// A schema read from EVERY file given and held without borrowing them: what a
 /// declaration text that carries `.proto` files keeps for as long as the map it
-/// built is consulted ([`crate::payload::formats::FormatMap`]).
+/// built is consulted (the capture crate's `FormatMap`).
 ///
 /// [`LinkedSchema`] borrows its files and names one root, which is right for a
 /// door that reads one frame. A map is consulted for every message of a capture
@@ -300,7 +300,7 @@ impl SchemaSet {
     /// # Errors
     ///
     /// The first problem found, in the order the files are listed, with the
-    /// diagnostic [`crate::proto_encode`] gives for the same file.
+    /// diagnostic the writer gives for the same file.
     pub fn read(files: &[ProtoFile<'_>]) -> Result<Self, ProtoDiagnostic> {
         let (msgs, enums) = Linker::read_all(files)?.into_types();
         Ok(Self { msgs, enums })
