@@ -1578,6 +1578,13 @@ pub struct ZenohNodeConfig {
     /// `stats/filters`: the key expressions the node's transports count payloads under, each
     /// filter's `key` in the document's order. Empty, upstream's default, counts under no key.
     pub stats_filters: Vec<String>,
+    /// `wz`: the policies the document states for the node (`wz/profile`, `wz/policies`),
+    /// resolved over the build defaults, with the layer each value came from. A document with no
+    /// `wz` member, or one that states it `null`, leaves every value at the build default. The
+    /// snapshot is for the creator of a session the node opens to hand its machines; a member the
+    /// resolution refuses is [`ConfigIngestError::PoliciesRefused`], never this field at the
+    /// defaults.
+    pub policies: crate::policy_document::Resolved,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1758,6 +1765,9 @@ impl Default for ZenohNodeConfig {
             aggregation_subscribers: Vec::new(),
             aggregation_publishers: Vec::new(),
             stats_filters: Vec::new(),
+            policies: crate::policy_document::Resolved::unchanged(
+                crate::policy::SessionPolicy::defaults(),
+            ),
         }
     }
 }
@@ -4902,6 +4912,18 @@ pub enum ConfigIngestError {
         /// either of which compiles it.
         capability: &'static str,
     },
+    /// The `wz` member, wz's own statements about the node, is refused: a policy, a value or a
+    /// profile the build does not have, a value the build's domain leaves out, a member of `wz`
+    /// this build does not read, a member stated twice, a shape that is not the one it reads
+    /// ([`crate::policy_document::Reason`]). One refusal refuses the document, so a node is never
+    /// opened on part of what the member states.
+    PoliciesRefused {
+        /// Each refusal held, in the order found, as a sentence naming the policy, the value,
+        /// the layer and the reason.
+        refusals: Vec<String>,
+        /// How many more were found past those held.
+        unreported: usize,
+    },
 }
 
 impl core::fmt::Display for ConfigIngestError {
@@ -4938,11 +4960,62 @@ impl core::fmt::Display for ConfigIngestError {
                      is the `{capability}` capability, which the build was made without"
                 )
             }
+            ConfigIngestError::PoliciesRefused {
+                refusals,
+                unreported,
+            } => {
+                f.write_str("the `wz` member is refused: ")?;
+                for (index, refusal) in refusals.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("; ")?;
+                    }
+                    f.write_str(refusal)?;
+                }
+                match *unreported {
+                    0 => Ok(()),
+                    more => write!(f, "; and {more} more"),
+                }
+            }
         }
     }
 }
 
 impl core::error::Error for ConfigIngestError {}
+
+/// The top-level member of a document that holds wz's own statements about the node.
+const WZ_MEMBER: &str = "wz";
+
+/// The top-level `wz` members of a document, taken out of `members` and gathered, in their order,
+/// as the members of a document of their own, which is what [`policies_of`] resolves.
+///
+/// Taken by the member's key and not by the leaf path: a top-level key spelled `"wz/policies"` is
+/// no `wz` member, stays in the document and is judged there as the key zenoh does not have. A
+/// `null` is zenoh's spelling of a member left unset ([`honoured`]), so a `wz: null` states
+/// nothing; every other value is kept, a second `wz` member included, for the resolution to judge.
+fn take_wz_member(members: &mut Vec<(String, Json5Value)>) -> Json5Value {
+    let (wz, zenoh): (Vec<_>, Vec<_>) = core::mem::take(members)
+        .into_iter()
+        .partition(|(key, _)| key == WZ_MEMBER);
+    *members = zenoh;
+    Json5Value::Object(
+        wz.into_iter()
+            .filter(|(_, value)| !matches!(value, Json5Value::Null))
+            .collect(),
+    )
+}
+
+/// The snapshot the `wz` member of a document resolves to over the build defaults, the profile it
+/// names and then its own policies ([`crate::policy_document::resolve_document`]), or every
+/// refusal found, as the sentences [`ConfigIngestError::PoliciesRefused`] carries.
+fn policies_of(
+    wz_member: &Json5Value,
+) -> Result<crate::policy_document::Resolved, ConfigIngestError> {
+    crate::policy_document::resolve_document(crate::policy::SessionPolicy::defaults(), wz_member)
+        .map_err(|refusals| ConfigIngestError::PoliciesRefused {
+            refusals: refusals.iter().map(ToString::to_string).collect(),
+            unreported: refusals.unreported(),
+        })
+}
 
 /// A honoured key's value, with zenoh's "null means default" already applied.
 fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
@@ -7900,10 +7973,13 @@ impl ZenohNodeConfig {
         source: &str,
         reading: ConfigReading,
     ) -> Result<ZenohConfigIngest, ConfigIngestError> {
-        let doc = wz_session_core::json5::parse(source).map_err(ConfigIngestError::Syntax)?;
-        if !matches!(doc, Json5Value::Object(_)) {
+        let mut doc = wz_session_core::json5::parse(source).map_err(ConfigIngestError::Syntax)?;
+        let Json5Value::Object(members) = &mut doc else {
             return Err(ConfigIngestError::NotAnObject);
-        }
+        };
+        // wz's own member is no key of zenoh's: it is taken out before the boundary below, which
+        // judges the document against zenoh's surface, and resolved on its own after it.
+        let wz_member = take_wz_member(members);
 
         // The ACCEPTANCE BOUNDARY, matched to zenoh's before anything is read.
         // Checked first so a typo is reported as a typo rather than as a
@@ -7923,6 +7999,7 @@ impl ZenohNodeConfig {
         }
 
         let mut out = reading.start();
+        out.policies = policies_of(&wz_member)?;
         let mut named: Vec<&'static str> = Vec::new();
         // R2081 (open-debt item 500) — keys the document states for OTHER modes.
         // Neither honoured (this node got no instruction) nor ignored (wz reads
@@ -14790,5 +14867,149 @@ mod tests {
                 ConfigKeyDisposition::Honoured
             );
         }
+    }
+}
+
+/// The `wz` member of a document: resolved into the node's snapshot of the policies, never judged
+/// as a key of zenoh's, and refused whole, by name, when any of it is refused.
+#[cfg(test)]
+mod wz_member_tests {
+    use super::*;
+    use crate::policy::{SessionPolicy, SubscriberOverload};
+    use crate::policy_document::{Origin, Resolved, MAX_REPORTED};
+    use wz_session_core::policy_binding::PolicyValue;
+
+    /// A value of `subscriber-overload` other than the build default that the build's domain
+    /// allows, by its id; the build default itself where the build allows one value.
+    fn a_chosen_overload() -> &'static str {
+        <SubscriberOverload as PolicyValue>::ALL
+            .iter()
+            .copied()
+            .find(|value| {
+                *value != <SubscriberOverload as PolicyValue>::DEFAULT
+                    && <SubscriberOverload as PolicyValue>::DOMAIN.contains(*value)
+            })
+            .unwrap_or(<SubscriberOverload as PolicyValue>::DEFAULT)
+            .id()
+    }
+
+    #[test]
+    fn a_document_with_no_wz_member_resolves_to_the_build_defaults() {
+        let unchanged = Resolved::unchanged(SessionPolicy::defaults());
+        assert_eq!(ZenohNodeConfig::default().policies, unchanged);
+        for document in ["{}", r#"{ mode: "peer" }"#, "{ wz: null }", "{ wz: {} }"] {
+            let read = ZenohNodeConfig::from_json5(document)
+                .unwrap_or_else(|error| panic!("{document}: {error}"));
+            assert_eq!(read.config.policies, unchanged, "{document}");
+            assert!(
+                read.config
+                    .policies
+                    .provenance
+                    .iter()
+                    .all(|(_, origin)| origin == Origin::BuildDefault),
+                "{document}"
+            );
+            assert!(read.ignored.is_empty(), "{document}: {:?}", read.ignored);
+        }
+    }
+
+    /// The member's statement reaches the node's snapshot with the document as its origin, and
+    /// no leaf of the member is judged against zenoh's keys, named or reported ignored.
+    #[test]
+    fn the_wz_member_is_resolved_into_the_node_snapshot() {
+        let value = a_chosen_overload();
+        let document = format!(
+            r#"{{ mode: "peer", wz: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#
+        );
+        let read = ZenohNodeConfig::from_json5(&document).expect("the member resolves");
+        let policies = read.config.policies;
+        assert_eq!(policies.policy.subscriber_overload().id(), value);
+        assert_eq!(
+            policies.provenance.origin("subscriber-overload"),
+            Some(Origin::Document)
+        );
+        assert_eq!(
+            policies.provenance.origin("key-set"),
+            Some(Origin::BuildDefault)
+        );
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        assert!(
+            read.named.iter().all(|key| !key.starts_with(WZ_MEMBER)),
+            "{:?}",
+            read.named
+        );
+        // The daemon's reading reads the member the same way.
+        let daemon = ZenohNodeConfig::from_json5_read_as(&document, ConfigReading::Daemon)
+            .expect("the member resolves");
+        assert_eq!(daemon.config.policies, policies);
+    }
+
+    /// One refusal refuses the document, and the error names every refusal found: a member of
+    /// `wz` this build does not read, `wz/limits` by its name, and a value the policy lacks.
+    #[test]
+    fn a_refused_wz_member_fails_the_ingest_naming_each_refusal() {
+        let error = ZenohNodeConfig::from_json5(
+            r#"{ mode: "peer", wz: { colour: "blue", limits: {}, policies: { "key-set": "ajar" } } }"#,
+        )
+        .unwrap_err();
+        let ConfigIngestError::PoliciesRefused {
+            refusals,
+            unreported,
+        } = &error
+        else {
+            panic!("not the member's refusal: {error:?}");
+        };
+        assert_eq!(refusals.len(), 3, "{refusals:?}");
+        assert_eq!(*unreported, 0);
+        let text = error.to_string();
+        assert!(text.starts_with("the `wz` member is refused: "), "{text}");
+        for named in ["`wz/colour`", "`wz/limits`", "`key-set` = `ajar`"] {
+            assert!(text.contains(named), "{named} is not named: {text}");
+        }
+    }
+
+    /// Past the refusals the error holds, the rest are counted, and the count is said.
+    #[test]
+    fn refusals_past_those_held_are_counted() {
+        let policies: String = (0..MAX_REPORTED + 2)
+            .map(|n| format!(r#""unknown-{n}": "on", "#))
+            .collect();
+        let error =
+            ZenohNodeConfig::from_json5(&format!("{{ wz: {{ policies: {{ {policies} }} }} }}"))
+                .unwrap_err();
+        let ConfigIngestError::PoliciesRefused {
+            refusals,
+            unreported,
+        } = &error
+        else {
+            panic!("not the member's refusal: {error:?}");
+        };
+        assert_eq!(refusals.len(), MAX_REPORTED);
+        assert_eq!(*unreported, 2);
+        assert!(error.to_string().ends_with("; and 2 more"), "{error}");
+    }
+
+    /// A top-level key spelled with the member's path is no `wz` member: it stays in the
+    /// document, which is judged as zenoh judges it, and zenoh has no such key.
+    #[test]
+    fn a_flat_key_spelled_as_a_wz_path_is_a_key_zenoh_does_not_have() {
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ "wz/policies/key-set": "open" }"#),
+            Err(ConfigIngestError::UnknownKey {
+                path: String::from("wz/policies/key-set")
+            })
+        );
+    }
+
+    /// The member is resolved after the boundary: a key zenoh does not have beside a member that
+    /// would be refused is reported as that key.
+    #[test]
+    fn a_key_zenoh_does_not_have_is_reported_before_the_member() {
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ colour: "blue", wz: { colour: "blue" } }"#),
+            Err(ConfigIngestError::UnknownKey {
+                path: String::from("colour")
+            })
+        );
     }
 }

@@ -61,6 +61,8 @@ const KEY_ACCEPT_TIMEOUT: &str = "transport/unicast/accept_timeout";
 const KEY_ACCEPT_PENDING: &str = "transport/unicast/accept_pending";
 /// `transport/unicast/max_links`.
 const KEY_MAX_LINKS: &str = "transport/unicast/max_links";
+/// `wz`, the member of wz's own statements about the node; not a key of zenoh's.
+const KEY_WZ: &str = "wz";
 
 /// One place a finding is about: a config key path, in a node.
 ///
@@ -210,6 +212,7 @@ impl ConfigIngestError {
             | ConfigIngestError::NotInBuild { path, .. } => Some(*path),
             ConfigIngestError::UnknownMode { .. } => Some(KEY_MODE),
             ConfigIngestError::UnknownKey { path } => Some(path.as_str()),
+            ConfigIngestError::PoliciesRefused { .. } => Some(KEY_WZ),
         };
         let keys: Vec<&str> = key.into_iter().collect();
         Finding::describing(self, None, sites_in(node, &keys))
@@ -525,6 +528,11 @@ mod tests {
             ),
             ("[]", "NotAnObject", None),
             ("{", "Syntax", None),
+            (
+                r#"{ "wz": { "policies": { "key-set": "ajar" } } }"#,
+                "PoliciesRefused",
+                Some(KEY_WZ),
+            ),
         ] {
             let error = ZenohNodeConfig::from_json5(document).unwrap_err();
             let finding = error.finding(Some("edge"));

@@ -593,6 +593,12 @@ pub use wz_session_core::policy;
 ))]
 use wz_session_core::policy::MulticastLoopback;
 
+/// The open stage of the policies: the snapshot a document's `wz` member resolves over the build
+/// defaults, where each of its values came from, and why a document is refused. Re-exported so a
+/// creator that holds a read configuration names `policy_document::Resolved` through the facade.
+/// Ungated, like `policy`.
+pub use wz_session_core::policy_document;
+
 /// session-extqos (R311y506) — the `init::ext::QoSLink` establishment codec:
 /// [`extqos::QosLinkState`] (the priority band + reliability a link declares),
 /// its z64 packing, and [`extqos::QosLinkError`], which
