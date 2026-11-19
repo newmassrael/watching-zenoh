@@ -44,6 +44,7 @@ use alloc::vec::Vec;
 
 use wz_session_core::json5::Json5Value;
 
+use crate::e2e_crc::Digest;
 use crate::e2e_profile::{
     check_distinct, child, object, read_json, read_uint, Cover, DocError, Profile,
 };
@@ -64,12 +65,31 @@ pub enum Supplied {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Values {
     entries: Vec<(String, Supplied)>,
+    /// The node's address, for the fields and parts the profile derives from
+    /// it (`derive`); `None` when the caller stated none.
+    address: Option<u64>,
 }
+
+/// The member of a values text that states the node's address. A field name
+/// cannot begin with `@`, so it never names a field.
+pub const ADDRESS: &str = "@address";
 
 impl Values {
     /// No values yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// State the node's address, which the profile's derived fields and parts
+    /// are computed from.
+    pub fn address(mut self, address: u64) -> Self {
+        self.address = Some(address);
+        self
+    }
+
+    /// The node's address, when it was stated.
+    pub fn stated_address(&self) -> Option<u64> {
+        self.address
     }
 
     /// Supply a plain field.
@@ -110,11 +130,16 @@ impl Values {
         let entries = object(root, "")?;
         check_distinct(entries, "")?;
         let mut out = Vec::with_capacity(entries.len());
+        let mut address = None;
         for (name, value) in entries
             .iter()
             .filter(|(n, _)| !reserved.contains(&n.as_str()))
         {
             let here = child("", name);
+            if name == ADDRESS {
+                address = Some(read_uint(value, &here)?);
+                continue;
+            }
             let supplied = match value {
                 Json5Value::Object(parts) => {
                     check_distinct(parts, &here)?;
@@ -128,7 +153,10 @@ impl Values {
             };
             out.push((name.clone(), supplied));
         }
-        Ok(Self { entries: out })
+        Ok(Self {
+            entries: out,
+            address,
+        })
     }
 
     fn get(&self, field: &str) -> Option<&Supplied> {
@@ -273,10 +301,21 @@ fn read_be(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0, |acc, &b| (acc << 8) | u64::from(b))
 }
 
-fn write_be(out: &mut [u8], value: u64) {
+pub(crate) fn write_be(out: &mut [u8], value: u64) {
     let n = out.len();
     for (i, slot) in out.iter_mut().enumerate() {
         *slot = (value >> (8 * (n - 1 - i))) as u8;
+    }
+}
+
+/// Feed one covered piece of `frame` to `digest`, as it stands on the wire.
+pub(crate) fn feed(profile: &Profile, digest: &mut Digest<'_>, item: Cover, frame: &[u8]) {
+    match item {
+        Cover::Field(index) => {
+            let field = &profile.fields()[index];
+            digest.update(&frame[field.offset..field.offset + field.bytes]);
+        }
+        Cover::Payload => digest.update(&frame[profile.header_bytes()..]),
     }
 }
 
@@ -284,14 +323,8 @@ fn write_be(out: &mut [u8], value: u64) {
 /// profile's order, each as it stands on the wire.
 fn crc_over(profile: &Profile, frame: &[u8]) -> u64 {
     let mut digest = profile.crc().engine.start();
-    for item in &profile.crc().cover {
-        match *item {
-            Cover::Field(index) => {
-                let field = &profile.fields()[index];
-                digest.update(&frame[field.offset..field.offset + field.bytes]);
-            }
-            Cover::Payload => digest.update(&frame[profile.header_bytes()..]),
-        }
+    for &item in &profile.crc().cover {
+        feed(profile, &mut digest, item, frame);
     }
     digest.finish()
 }
@@ -300,19 +333,51 @@ fn invalid(path: String, reason: String) -> BuildError {
     BuildError::Values(DocError::invalid(path, reason))
 }
 
-/// Resolve what was supplied for one field to its logical value and parts.
+/// The node's address a derived field or part needs, or the refusal that names
+/// what needed it.
+fn address_for(address: Option<u64>, what: &str) -> Result<u64, BuildError> {
+    address.ok_or_else(|| {
+        invalid(
+            String::new(),
+            format!("no `{ADDRESS}` is stated, and {what} is derived from it"),
+        )
+    })
+}
+
+/// Resolve what was supplied for one field, and the node's address, to its
+/// logical value and parts.
 fn resolve(
     profile: &Profile,
     index: usize,
     supplied: Option<&Supplied>,
+    address: Option<u64>,
 ) -> Result<(u64, Vec<u64>), BuildError> {
     let field = &profile.fields()[index];
     let path = child("", &field.name);
-    let Some(supplied) = supplied else {
-        return Err(invalid(
-            String::new(),
-            format!("no value for the field `{}`", field.name),
-        ));
+    if let Some(derive) = &field.derive {
+        if supplied.is_some() {
+            return Err(invalid(
+                path,
+                format!(
+                    "the field `{}` is derived from `{ADDRESS}`: leave it out",
+                    field.name
+                ),
+            ));
+        }
+        let address = address_for(address, &format!("the field `{}`", field.name))?;
+        return Ok((derive.apply(address), Vec::new()));
+    }
+    let all_derived = !field.parts.is_empty() && field.parts.iter().all(|p| p.derive.is_some());
+    let empty = Supplied::Parts(Vec::new());
+    let supplied = match supplied {
+        Some(supplied) => supplied,
+        None if all_derived => &empty,
+        None => {
+            return Err(invalid(
+                String::new(),
+                format!("no value for the field `{}`", field.name),
+            ))
+        }
     };
     match supplied {
         Supplied::Whole(value) => {
@@ -346,22 +411,38 @@ fn resolve(
                 ));
             }
             for (i, (name, _)) in given.iter().enumerate() {
-                if !field.parts.iter().any(|p| &p.name == name) {
+                let Some(part) = field.parts.iter().find(|p| &p.name == name) else {
                     return Err(invalid(
                         child(&path, name),
                         format!("the field `{}` has no part called `{name}`", field.name),
                     ));
-                }
+                };
                 if given[..i].iter().any(|(earlier, _)| earlier == name) {
                     return Err(invalid(
                         child(&path, name),
                         format!("the part `{name}` is supplied twice"),
                     ));
                 }
+                if part.derive.is_some() {
+                    return Err(invalid(
+                        child(&path, name),
+                        format!(
+                            "the part `{name}` of `{}` is derived from `{ADDRESS}`: leave it out",
+                            field.name
+                        ),
+                    ));
+                }
             }
             let mut value = 0u64;
             let mut out = Vec::with_capacity(field.parts.len());
             for part in &field.parts {
+                if let Some(derive) = &part.derive {
+                    let what = format!("the part `{}` of `{}`", part.name, field.name);
+                    let v = derive.apply(address_for(address, &what)?);
+                    value |= v << part.lsb;
+                    out.push(v);
+                    continue;
+                }
                 let Some((_, v)) = given.iter().find(|(n, _)| n == &part.name) else {
                     return Err(invalid(
                         path,
@@ -383,6 +464,27 @@ fn resolve(
             Ok((value, out))
         }
     }
+}
+
+/// The logical value the field at `index` carries in a frame built from
+/// `values`: the value a receiver expects of it. Every part of a split field is
+/// needed, as for a build, and a derived one is computed from the address.
+///
+/// Refused as [`build`] refuses the field: a value missing, of the wrong shape,
+/// or that does not fit; a value for a derived field or part; a derived one
+/// with no address. The CRC and the length have no value to expect.
+pub fn logical_value(profile: &Profile, index: usize, values: &Values) -> Result<u64, BuildError> {
+    let field = &profile.fields()[index];
+    if index == profile.crc().field || index == profile.length().field {
+        return Err(invalid(
+            child("", &field.name),
+            format!(
+                "the field `{}` is computed: it has no value to expect",
+                field.name
+            ),
+        ));
+    }
+    resolve(profile, index, values.get(&field.name), values.address).map(|(value, _)| value)
 }
 
 /// Build the frame for `values` and `payload` under `profile`.
@@ -436,7 +538,7 @@ pub fn build(profile: &Profile, values: &Values, payload: &[u8]) -> Result<Built
         } else if index == length_at {
             (length, Vec::new())
         } else {
-            resolve(profile, index, values.get(&field.name))?
+            resolve(profile, index, values.get(&field.name), values.address)?
         };
         let raw = value ^ field.xor;
         write_be(&mut bytes[field.offset..field.offset + field.bytes], raw);

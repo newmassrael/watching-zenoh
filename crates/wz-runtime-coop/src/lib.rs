@@ -320,6 +320,12 @@ pub mod stream_link;
 #[cfg(feature = "session-unicast")]
 pub mod ip_stack;
 
+// The links above over a transport the program supplies: its streams, datagram links and groups
+// as this engine's seams, and the session shell's links over them, so a session opens no socket
+// of the system's. Documented in its own `//!`.
+#[cfg(all(feature = "app-link", feature = "alloc", not(feature = "session-slot")))]
+pub mod app_link;
+
 // The multicast group session's seam to the network stack, the twin of
 // `session_drive::SessionDatagramLink`. The trait carries no dependency and no
 // allocator, so it is not feature-gated: a stack's crate names it to supply a

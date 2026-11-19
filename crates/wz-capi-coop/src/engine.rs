@@ -242,6 +242,9 @@ pub enum OpenError {
     EntropyUnavailable,
     /// The configured zid is not one: it is not one to sixteen bytes, or its bytes are all zero.
     InvalidZid(ZidError),
+    /// The session states no zid and its `zid-derivation` is `address-ports`, and its `listen`
+    /// endpoints give the node no address a zid can be built on.
+    ZidDerivation(wz_session_core::zid_derivation::ZidDerivationError),
     /// The session's `key-wire-form` cannot be honoured: see [`KeyWireFormRefused`].
     KeyWireForm(KeyWireFormRefused),
 }
@@ -356,6 +359,23 @@ fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
     if zid.iter().all(|b| *b == 0) {
         return Err(OpenError::EntropyUnavailable);
     }
+    wire_zid(&zid)
+}
+
+/// The zid `zid-derivation = address-ports` derives from the `listen` endpoints and eight bytes
+/// of `entropy` (see `wz_session_core::zid_derivation`), in its wire form.
+pub(crate) fn derived_zid(
+    listen: &[String],
+    entropy: &mut dyn EntropySource,
+) -> Result<SessionZid, OpenError> {
+    use wz_session_core::zid_derivation::{ListenerFacts, RANDOM_BYTES};
+    let mut random = [0u8; RANDOM_BYTES];
+    entropy
+        .try_fill_bytes(&mut random)
+        .map_err(|_| OpenError::EntropyUnavailable)?;
+    let zid = ListenerFacts::of_endpoints(listen.iter().map(String::as_str))
+        .derive(None, random)
+        .map_err(OpenError::ZidDerivation)?;
     wire_zid(&zid)
 }
 
@@ -855,6 +875,11 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
         let mut registry = registry.borrow_mut();
         // The queries this frame carries arrive on this face's link, whichever was dialled last.
         plane.arriving.store(generation, Ordering::Release);
+        // The application's queryables serve every face, so this face's session states its own
+        // answer to a query it cannot resolve before its frame is dispatched.
+        registry
+            .app
+            .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
         // A query by an id of the shared dictionary is kept, so its replies mirror its key form.
         #[cfg(feature = "shared-key-ids")]
         actions.note_requests(&event);
@@ -1254,6 +1279,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// its node, and no other link to the node is kept beside it.
     fn admit(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
         self.bring_up(at, wire, now_us);
+    }
+
+    /// Tell the peer of every face whose link is up everything the session holds again, as a link
+    /// that has just come up is told (`begin_replay`), at the session's pace; the count of faces.
+    /// What the application asks for when it holds that a peer lost declarations the session made.
+    fn redeclare(&mut self) -> usize {
+        let now_ms = self.clock.now_us() / 1000;
+        let mut told = 0;
+        for at in 0..self.faces.len() {
+            let actions = match &self.faces[at].link {
+                Link::Up(wire) => Rc::clone(&wire.actions),
+                _ => continue,
+            };
+            self.begin_replay(at, &actions, now_ms);
+            told += 1;
+        }
+        told
     }
 
     /// The link of the face at `at` is `wire`, up: what the session holds is declared over it from
@@ -1677,9 +1719,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
         let mut entropy = SharedEntropy::new(entropy);
-        let wire = match &config.zid {
-            Some(zid) => wire_zid(zid)?,
-            None => fresh_zid(&mut entropy)?,
+        let wire = match (&config.zid, policy.zid_derivation()) {
+            (Some(zid), _) => wire_zid(zid)?,
+            (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(&mut entropy)?,
+            (None, wz_session_core::policy::ZidDerivation::AddressPorts) => {
+                derived_zid(&config.listen, &mut entropy)?
+            }
         };
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
@@ -2542,6 +2587,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.live().is_some_and(|core| {
             core.0.key_ids.is_some() || core.0.key_forms.departs_from_declared()
         })
+    }
+
+    fn redeclare(&self) -> Result<usize, wz_capi_port::RedeclareRefusal> {
+        let mut core = self.live().ok_or(wz_capi_port::RedeclareRefusal::Closed)?;
+        Ok(core.0.redeclare())
     }
 
     fn publish_on_wire_all(

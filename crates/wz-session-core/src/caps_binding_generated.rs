@@ -388,6 +388,15 @@ pub const SUPERVISION_CHECKPOINTS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::E2E_SUPERVISED_STREAMS`] is bound.
+pub const E2E_SUPERVISED_STREAMS: LimitBinding = LimitBinding {
+    storage: Storage::Quota,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::EVENT_RING_SLOTS`] is bound.
 pub const EVENT_RING_SLOTS: LimitBinding = LimitBinding {
     storage: Storage::Both,
@@ -412,6 +421,15 @@ pub const CLOCK_SOURCES: LimitBinding = LimitBinding {
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Open),
     binding_fixed: None,
+    wire: Wire::None,
+};
+
+/// Where [`super::E2E_SENDER_SLOTS`] is bound.
+pub const E2E_SENDER_SLOTS: LimitBinding = LimitBinding {
+    storage: Storage::Both,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
 

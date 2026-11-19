@@ -237,7 +237,10 @@ pub enum RxAdmit {
 
 /// Whether a forward gap on the reliable channel ends the link under `mode`
 /// (the `reliable-gap-reconnect` policy). `peer_declarations_final` is whether
-/// the peer's initial declarations have all arrived. A pure decision: the
+/// the peer's initial declarations are settled: their end has arrived, or, under
+/// `until-declarations-synced-when-begun` on a link this node accepted, the
+/// peer let a quiet window pass without beginning any
+/// (`SessionLinkActions::peer_declarations_settled`). A pure decision: the
 /// caller has already established that the frame is a reliable-channel gap.
 pub const fn reacts_to_gap(
     mode: crate::policy::ReliableGapReconnect,
@@ -246,7 +249,9 @@ pub const fn reacts_to_gap(
     use crate::policy::ReliableGapReconnect as Mode;
     match mode {
         Mode::Off => false,
-        Mode::UntilDeclarationsSynced => !peer_declarations_final,
+        Mode::UntilDeclarationsSynced | Mode::UntilDeclarationsSyncedWhenBegun => {
+            !peer_declarations_final
+        }
         Mode::Always => true,
     }
 }
@@ -900,6 +905,8 @@ mod tests {
         assert!(!reacts_to_gap(Mode::Off, true));
         assert!(reacts_to_gap(Mode::UntilDeclarationsSynced, false));
         assert!(!reacts_to_gap(Mode::UntilDeclarationsSynced, true));
+        assert!(reacts_to_gap(Mode::UntilDeclarationsSyncedWhenBegun, false));
+        assert!(!reacts_to_gap(Mode::UntilDeclarationsSyncedWhenBegun, true));
         assert!(reacts_to_gap(Mode::Always, false));
         assert!(reacts_to_gap(Mode::Always, true));
     }

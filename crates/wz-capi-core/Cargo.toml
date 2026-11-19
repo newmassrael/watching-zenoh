@@ -211,9 +211,15 @@ transport_unixsock-stream = ["transport-link-unixsock"]
 transport_multilink = ["transport-multilink"]
 auth_pubkey = ["access-extauth-pubkey"]
 # The sending side of an end-to-end protected message. The model has nothing behind it: the doors
-# and the frame writer they use are the zenoh-c ABI's own (`wz-capi-c/e2e-sender`), so this
-# feature only carries the capability's name, as the declaration requires of every capability.
+# are each C ABI's own (`wz-capi-c/e2e-sender`, `wz-capi-pico/e2e-sender`) over a frame writer
+# (`wz-capture`'s for the zenoh-c ABI, `wz-app-frame`'s for the pico ABI), so this feature only
+# carries the capability's name, as the declaration requires of every capability.
 e2e-sender = []
+# The receiving judge of end-to-end protected frames, and its judging state per sender. The model
+# has nothing behind either: the doors are the pico ABI's own (`wz-capi-pico/e2e-receiver`) over
+# the judge of `wz-app-frame`, so these features only carry the capabilities' names.
+e2e-receiver = []
+e2e-sender-demux = ["e2e-receiver"]
 # A configuration judged, emitted and costed without opening it. In the model it is what an open of
 # a plan asks of the operating system (`open_facilities`), which only the zenoh-c ABI's door reads;
 # the validators and the emitter it reaches are the runtime's, used by those doors alone
@@ -231,6 +237,16 @@ lifecycle-doors = []
 # writer of `wz-app-frame`, so this feature only carries the capability's name, as `e2e-sender`'s
 # does.
 segment-sender = []
+# Reception supervision per stream. The model has nothing behind it: the supervisor is
+# `wz-session-core`'s (`stream_supervisor`) and the doors are the pico ABI's own
+# (`wz-capi-pico/e2e-supervision`), so this feature only carries the capability's name, as
+# `e2e-sender`'s does.
+e2e-supervision = []
+# A transport the program supplies: every link a session opens goes over the program's own network
+# stack, through the calls of its port, and over no socket of the system's. The model threads the
+# transport from the stance to each dial and listen config (`OpenStance::app_transport`); the
+# links themselves are the runtime's (`wz_runtime_tokio::app_link`).
+app-transport = ["wz-runtime-tokio/transport-link-app"]
 # A subscriber whose callback runs off the receive path. The model has nothing behind it: the lane
 # is the runtime's (`wz_runtime_tokio::session::DetachedOffload`), fed through the subscriber
 # factory every face already takes, and the doors are the zenoh-c ABI's own

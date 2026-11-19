@@ -78,9 +78,12 @@ pub(super) const SNAPSHOT_HISTOGRAM_BUCKETS: usize =
     limit(option_env!("WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS"), 24);
 pub(super) const SUPERVISION_CHECKPOINTS: usize =
     limit(option_env!("WZ_LIMIT_SUPERVISION_CHECKPOINTS"), 4);
+pub(super) const E2E_SUPERVISED_STREAMS: usize =
+    limit(option_env!("WZ_LIMIT_E2E_SUPERVISED_STREAMS"), 32);
 pub(super) const EVENT_RING_SLOTS: usize = limit(option_env!("WZ_LIMIT_EVENT_RING_SLOTS"), 64);
 pub(super) const EVENT_RECORD_ARGS: usize = limit(option_env!("WZ_LIMIT_EVENT_RECORD_ARGS"), 4);
 pub(super) const CLOCK_SOURCES: usize = limit(option_env!("WZ_LIMIT_CLOCK_SOURCES"), 1);
+pub(super) const E2E_SENDER_SLOTS: usize = limit(option_env!("WZ_LIMIT_E2E_SENDER_SLOTS"), 8);
 pub(super) const CLOCK_MAX_FORWARD_STEP_MS: usize =
     limit(option_env!("WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS"), 500);
 pub(super) const DECLARATION_SYNC_BURST_MESSAGES: usize =

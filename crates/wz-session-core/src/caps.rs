@@ -475,6 +475,17 @@ pub const SNAPSHOT_HISTOGRAM_BUCKETS: usize = generated::SNAPSHOT_HISTOGRAM_BUCK
 /// at most `64`: a check names the checkpoints that expired in one 64-bit word.
 pub const SUPERVISION_CHECKPOINTS: usize = generated::SUPERVISION_CHECKPOINTS;
 
+/// How many streams one reception supervisor holds (`stream_supervisor::StreamSupervisor`). Its
+/// table is the caller's storage, so this bounds the rows used of it and sizes nothing. At least
+/// `1`.
+pub const E2E_SUPERVISED_STREAMS: usize = generated::E2E_SUPERVISED_STREAMS;
+
+/// The most bytes one link of a transport the program supplies queues in either direction
+/// (`app_link_table::AppLinkTable`): what the program handed in that the session has not read, and
+/// what a writer that cannot wait handed over that the program has not taken. A quota: past it the
+/// program's bytes are refused and nothing is sized by it.
+pub const APP_LINK_QUEUE_BYTES: usize = generated::APP_LINK_QUEUE_BYTES;
+
 /// How many event records the node's event ring holds (`event_ring::EventRing`). A count of
 /// records of a fixed size, so it sizes the ring's memory. At least `1`.
 pub const EVENT_RING_SLOTS: usize = generated::EVENT_RING_SLOTS;
@@ -487,6 +498,11 @@ pub const EVENT_RECORD_ARGS: usize = generated::EVENT_RECORD_ARGS;
 /// on (`wz_node_time::clock_registry`). `0` registers none and leaves the system clock the only
 /// source. A count of entries in a table whose rows are allocated when they are registered.
 pub const CLOCK_SOURCES: usize = generated::CLOCK_SOURCES;
+
+/// How many senders one receiving judge of end-to-end protected frames keeps a counter for, when
+/// `e2e-sender-demux` is on (`wz_app_frame::e2e_receiver`). The program sizes each judge's slots
+/// when it makes it, at most this many. At least `1`.
+pub const E2E_SENDER_SLOTS: usize = generated::E2E_SENDER_SLOTS;
 
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
 /// the hybrid logical clock (`hlc::HlcCore`) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
@@ -510,6 +526,23 @@ pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = generated::DECLARATION_SYNC
 /// `declaration-sync-pacing` policy is on. It is read only then, and must be at least `1`. A time
 /// and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTERVAL_MS;
+
+/// How long, in milliseconds, a paced declaration replay waits before it tries a turn the link
+/// refused again, its own wait and not [`DECLARATION_SYNC_INTERVAL_MS`]
+/// ([`crate::replay_pacing::ReplayPacing::after_refusal`]). `0` tries none again: the refusal
+/// ends the replay, as it did before this limit. A time and not a table size.
+pub const DECLARATION_SYNC_RETRY_INTERVAL_MS: usize = generated::DECLARATION_SYNC_RETRY_INTERVAL_MS;
+
+/// How long, in milliseconds, a paced replay that retries refused turns goes on with no
+/// declaration sent before it gives up and the link ends
+/// ([`crate::replay_pacing::ReplayPacing::after_refusal`]). `0` gives up only when the link does.
+pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: usize = generated::DECLARATION_SYNC_TX_NO_PROGRESS_MS;
+
+/// How long, in milliseconds, a session waits for the next of its peer's initial declarations
+/// before it takes the sync as cut short, when `reliable-gap-reconnect` is not `off`
+/// ([`crate::declaration_sync::stall_deadline`]). `0` keeps no watch, as upstream keeps none. A
+/// time and not a table size: it sizes no memory.
+pub const DECLARATION_SYNC_RX_NO_PROGRESS_MS: usize = generated::DECLARATION_SYNC_RX_NO_PROGRESS_MS;
 
 // The numbers of zenoh-pico's value build switches, as the pico C ABI states them. Each defaults
 // to pico's own default (`upstream_switch_map.py` holds that, the `maps` rows of

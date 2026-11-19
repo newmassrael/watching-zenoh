@@ -584,6 +584,19 @@ pub unsafe extern "C" fn z_open(
             dial_whatami,
             zid: _,
         } = open;
+        // A config that carries the program's transport opens every link on it, so a locator the
+        // transport does not carry, and an open that would scout on the system's sockets, are
+        // refused here, before anything is opened.
+        #[cfg(feature = "app-transport")]
+        let app_transport = cfg.transport.clone();
+        #[cfg(feature = "app-transport")]
+        if app_transport.is_some() {
+            if let Some(code) =
+                crate::app_transport::refused_open(connect.as_deref(), listen.as_deref())
+            {
+                return code;
+            }
+        }
         // R311y406 / R311y534 — the TLS material, RESOLVED here (path or inline
         // base64 -> PEM bytes) because the key numbers are this ABI's knowledge.
         // A malformed value fails the open rather than degrading to a plaintext
@@ -651,6 +664,8 @@ pub unsafe extern "C" fn z_open(
             #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
             policy,
+            #[cfg(feature = "app-transport")]
+            app_transport,
             #[cfg(any(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
             key_ids,
         };
@@ -895,6 +910,9 @@ struct OpenRequest {
     /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
+    /// The transport the program supplies, when the config carries one: every link goes over it.
+    #[cfg(feature = "app-transport")]
+    app_transport: Option<alloc::sync::Arc<wz_session_core::app_transport::AppTransport>>,
     /// The key ids every node of the deployment shares that the config states, and the endpoints
     /// whose key-wire form it states apart, as the engine the session opens on takes them.
     #[cfg(not(feature = "engine-tokio"))]
@@ -920,6 +938,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         start_admin_space,
         tls,
         policy,
+        #[cfg(feature = "app-transport")]
+        app_transport,
         #[cfg(feature = "shared-key-ids")]
         key_ids,
     } = request;
@@ -1079,6 +1099,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(not(feature = "shared-key-ids"))]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
+            #[cfg(feature = "app-transport")]
+            app_transport,
         },
     ) {
         Ok(state) => {
@@ -1190,63 +1212,90 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
+    let config = wz_capi_coop::CoopConfig {
+        endpoints: connect,
+        whatami: dial_whatami,
+        zid,
+        // The numbers of pico's value build switches, as this build states them: the
+        // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
+        // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
+        // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
+        // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
+        batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+        lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+        keep_alive: PICO_KEEP_ALIVE,
+        sn_resolution,
+        link_rx: PICO_LINK_RX,
+        tx_queue,
+        // How long an inbound link may take to complete its handshake is pico's
+        // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
+        // `PICO_ACCEPT` says; how long a dialled one may take is its
+        // `Z_TRANSPORT_CONNECT_TIMEOUT`, one deadline over both of its receives, so the
+        // session machine holds the handshake to the bound `open_timeout_ms` holds the
+        // endpoint to and to no shorter one.
+        timeouts: wz_session_core::session_timeouts::SessionTimeouts {
+            accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+            opening_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
+            ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
+        },
+        open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
+        // pico tries again every 1000 ms while the reopen fails
+        // (`vendor/zenoh-pico/src/net/session.c` @
+        // `return _z_fut_fn_result_wake_up_after(1000);`).
+        redial_ms: Some(1000),
+        // A read waits on the link as long as pico's socket receive times out, its
+        // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
+        idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
+        // The bounds of an accept are upstream's, as the tokio engine's are
+        // (`PICO_ACCEPT`): pico bounds no count of pending accepts or of sessions.
+        listen,
+        accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
+        max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
+    };
+    // A config that carries the program's transport opens the engine over its links, and over no
+    // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
+    // way the session holds the key ids the config states (`crate::key_ids`).
+    #[cfg(feature = "app-transport")]
+    let opened = match request.app_transport {
+        Some(transport) => wz_capi_coop::CoopEngine::open_with_key_ids(
+            wz_capi_coop::app_link::AppLinks::new(transport)
+                .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+            crate::coop_host::clock(),
+            crate::coop_host::entropy(),
+            config,
+            policy,
+            request.key_ids,
+        )
+        .map(wz_capi_coop::CoopEngine::into_drive),
+        None => wz_capi_coop::CoopEngine::open_with_key_ids(
+            links.waited_by_owner(),
+            crate::coop_host::clock(),
+            crate::coop_host::entropy(),
+            config,
+            policy,
+            request.key_ids,
+        )
+        .map(wz_capi_coop::CoopEngine::into_drive),
+    };
+    #[cfg(not(feature = "app-transport"))]
     let opened = wz_capi_coop::CoopEngine::open_with_key_ids(
         links.waited_by_owner(),
         crate::coop_host::clock(),
         crate::coop_host::entropy(),
-        wz_capi_coop::CoopConfig {
-            endpoints: connect,
-            whatami: dial_whatami,
-            zid,
-            // The numbers of pico's value build switches, as this build states them: the
-            // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
-            // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
-            // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
-            // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
-            batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
-            lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
-            keep_alive: PICO_KEEP_ALIVE,
-            sn_resolution,
-            link_rx: PICO_LINK_RX,
-            tx_queue,
-            // How long an inbound link may take to complete its handshake is pico's
-            // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
-            // `PICO_ACCEPT` says; how long a dialled one may take is its
-            // `Z_TRANSPORT_CONNECT_TIMEOUT`, one deadline over both of its receives, so the
-            // session machine holds the handshake to the bound `open_timeout_ms` holds the
-            // endpoint to and to no shorter one.
-            timeouts: wz_session_core::session_timeouts::SessionTimeouts {
-                accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
-                opening_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
-                ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
-            },
-            open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
-            // pico tries again every 1000 ms while the reopen fails
-            // (`vendor/zenoh-pico/src/net/session.c` @
-            // `return _z_fut_fn_result_wake_up_after(1000);`).
-            redial_ms: Some(1000),
-            // A read waits on the link as long as pico's socket receive times out, its
-            // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
-            idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
-            // The bounds of an accept are upstream's, as the tokio engine's are
-            // (`PICO_ACCEPT`): pico bounds no count of pending accepts or of sessions.
-            listen,
-            accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
-            max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
-        },
+        config,
         policy,
         request.key_ids,
-    );
-    let engine = match opened {
-        Ok(engine) => engine,
+    )
+    .map(wz_capi_coop::CoopEngine::into_drive);
+    let drive = match opened {
+        Ok(drive) => drive,
         Err(wz_capi_coop::OpenError::EntropyUnavailable) => return crate::result::Z_ERR_GENERIC,
         // `z_open` judged the form before this (`crate::key_ids::admit_at_open`), and the engine
         // judges it again with the same rule.
         Err(wz_capi_coop::OpenError::KeyWireForm(_)) => return crate::result::Z_ERR_INVALID,
         Err(_) => return crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     };
-    let zid = wz_capi_port::SessionDrive::zid(&*engine);
-    let drive = wz_capi_coop::CoopEngine::into_drive(engine);
+    let zid = drive.zid();
     #[cfg(feature = "connectivity")]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, &drive.engine());
     #[cfg(not(feature = "connectivity"))]

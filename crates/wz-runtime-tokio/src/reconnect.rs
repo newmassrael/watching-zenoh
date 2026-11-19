@@ -290,7 +290,7 @@ pub struct ReconnectingSession {
 /// test, or a caller that wants it on regardless of the session's snapshot, can state it
 /// ([`ReconnectingSession::set_replay_pacing`]); the snapshot states it through
 /// [`ReplayPacing::of_policy`].
-pub use wz_session_core::replay_pacing::ReplayPacing;
+pub use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 
 /// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
 /// surviving [`SessionLinkActions`] bundle (the last sink clone — the writer
@@ -371,8 +371,27 @@ impl ReconnectingSession {
         );
         tokio::pin!(driven);
         let paced = async {
+            // When the replay last sent a declaration, for the no-progress bound of its retries.
+            let mut last_progress_ms = clock.now_monotonic_ms();
             loop {
-                let turn = actions.replay_turn(pacing.burst())?;
+                let turn = match actions.replay_turn(pacing.burst()) {
+                    Ok(turn) => turn,
+                    // A turn the transport did not take now is tried again from the declaration
+                    // it refused, after the retry wait, while the pace says to.
+                    Err(refused) if refused.is_transport_refusal() => {
+                        match pacing.after_refusal(last_progress_ms, clock.now_monotonic_ms()) {
+                            RefusalStep::RetryIn(wait_ms) => {
+                                clock.sleep(wait_ms).await;
+                                continue;
+                            }
+                            RefusalStep::EndsLink => return Err(refused),
+                        }
+                    }
+                    Err(rejected) => return Err(rejected),
+                };
+                if turn.emitted > 0 {
+                    last_progress_ms = clock.now_monotonic_ms();
+                }
                 if turn.finished {
                     return Ok::<(), ReplayDeclarationsError>(());
                 }

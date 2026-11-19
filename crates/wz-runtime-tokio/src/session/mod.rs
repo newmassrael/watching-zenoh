@@ -4904,6 +4904,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 obs.replies.set_shm_handoff_shared(shared.clone());
                 obs.queryables.set_shm_handoff_shared(shared);
             }
+            // The observer may serve more than this session, so the session states its own
+            // `query-unanswerable-final` value, from the snapshot it was handed, before each
+            // dispatch, as it states its negotiated SHM capability above.
+            #[cfg(feature = "query-queryable")]
+            obs.queryables
+                .set_unanswerable_final(self.actions().params.policy.query_unanswerable_final());
             // `declarations-synced-event` — the peer's `DeclareFinal` of the initial interest
             // turns the subscriber plane's flag on; read before and after, the dispatch that
             // turns it on is the one that tells the listeners, and one that finds it on already

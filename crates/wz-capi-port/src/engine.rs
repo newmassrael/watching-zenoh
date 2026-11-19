@@ -39,6 +39,15 @@ use crate::{
     Tick, TickerId, TokenId, WireKey,
 };
 
+/// Why [`SessionEngine::redeclare`] told no peer anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedeclareRefusal {
+    /// The engine keeps no record of what the session declared, so it has nothing to send again.
+    Unsupported,
+    /// The session is closed.
+    Closed,
+}
+
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
 ///
 /// Every method takes `&self`: an engine is shared between the C session handle and every entity
@@ -161,6 +170,15 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// since every count is cumulative.
     fn message_reading(&self) -> Option<wz_session_core::resource_snapshot::BuildMessageReading> {
         None
+    }
+
+    /// Tell the peer of every link that is up everything the session holds again (its
+    /// subscriptions, queryables, tokens and interests), as a link that has just come up is told,
+    /// at the pace the session's snapshot states. The count of links told. An engine that keeps
+    /// no record of what it declared answers [`RedeclareRefusal::Unsupported`], the provided
+    /// answer.
+    fn redeclare(&self) -> Result<usize, RedeclareRefusal> {
+        Err(RedeclareRefusal::Unsupported)
     }
 
     /// Whether any connected peer is a ROUTER — zenoh-pico's `_z_session_has_router_peer`, the

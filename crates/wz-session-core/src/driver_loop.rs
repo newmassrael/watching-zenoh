@@ -246,6 +246,26 @@ pub enum DriverLoopOutcome {
     /// level.
     #[cfg(feature = "codec-init-body")]
     InitRegionRejected,
+    /// A handshake message (an Init or an Open) arrived in a handshake step that awaits another
+    /// one, and the session's `handshake-stray-message` is `fail`: the attempt ends with
+    /// `framing.error` and so a Close(INVALID), as upstream's establishment ends on any message
+    /// but the one it reads next.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayRejected,
+    /// The same message under `handshake-stray-message = ignore`: dropped before it is admitted
+    /// or merged, and the step goes on waiting for its own message under the deadline it had.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayIgnored,
+    /// Under `handshake-stray-message = ignore-and-replay`, the peer repeated the step this
+    /// side's last establishment answer answered, and the held answer went out again as it was
+    /// first sent; the step goes on waiting under the deadline it had.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayReplayed,
+    /// The same repeat, with no answer held to send again (it was longer than
+    /// `HELD_ANSWER_MAX`, or the link took no slot for it): the message is dropped as under
+    /// `ignore`, and this names that the replay did not happen.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayNotReplayed,
     /// An InitSyn announced a protocol version other than
     /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], carried here.
     ///

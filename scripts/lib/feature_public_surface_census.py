@@ -420,7 +420,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`tls_coop_roundtrip`); `shared-key-ids` gates `OpenKeyIds::shared` and "
         "`OpenKeyIds::new`, the dictionary and the endpoints' key-wire forms an open hands the "
         "session, which `tests/shared_key_ids.rs` runs over loopback",
-        frozenset({"scout", "scout-datagram", "listen", "tls-mbedtls", "shared-key-ids"}),
+        frozenset({"listen", "scout", "scout-datagram", "shared-key-ids", "tls-mbedtls"}),
     ),
     "wz-tls-mbedtls": (
         "the secure channel over Mbed TLS that the cooperative engine's `tls/` link runs (its "
@@ -441,7 +441,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`shared-key-ids` gates `wire_on_link`, a key as one link's key-wire form names it, which "
         "both engines call for each link and the cooperative engine's `shared_key_ids` tests run",
         frozenset(
-            {"clock-source", "event-ring", "supervision", "resource-snapshot", "shared-key-ids"}
+            {"clock-source", "event-ring", "resource-snapshot", "shared-key-ids", "supervision"}
         ),
     ),
     "wz-capi-c": (
@@ -509,6 +509,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `_drop`, `wz_ext_segment_put_options_default` and the two `wz_ext_internal_*` doors,
         # and the types and constants they take, declared in `wz_ext.h`; off by default, as
         # upstream has no such doors.
+        # `e2e-sender` and `e2e-receiver` each gate `pub mod e2e` (either one is enough), whose
+        # public items are wz's own doors `wz_ext_e2e_sender_*` and `wz_ext_e2e_receiver_*`, the
+        # types and constants they take, declared in `wz_ext.h`; `e2e-sender-demux` gates the
+        # receiver's sender slots inside it. Off by default in this ABI, as upstream has no such
+        # doors.
         # `scout-mcu` gates `pub mod scout` beside the default `scout`: the same module, whose
         # public items are pico's `z_scout`, `z_hello_*` and `z_closure_hello*` doors, each
         # `#[no_mangle] extern "C"`, and the types they take; the feature only changes the window
@@ -518,14 +523,30 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`, the event struct, the owned
         # watch and the constants they take, declared in `wz_ext.h`, off by default as the
         # observation plane's doors are.
+        # `e2e-supervision` gates `pub mod stream_supervision`, whose public items are wz's own
+        # doors `wz_ext_stream_supervisor_new`, `_add`, `_received`, `_set_condition`,
+        # `_set_sender_present`, `_set_callback`, `_poll`, `_stream_errors`, `_node_errors`,
+        # `_phase`, `_notify`, `_start_task`, `_stop_task`, `_loan`, `_move`, `_drop` and the two
+        # `wz_ext_internal_*` doors, and the types and constants they take, declared in
+        # `wz_ext.h`; off by default, as upstream has no such doors.
+        # `app-transport` gates `pub mod app_transport`, whose public items are wz's own doors
+        # `wz_ext_transport_new`, `_received`, `_event`, `_accepted`, `_loan`, `_move`, `_drop`,
+        # `wz_ext_config_transport` and the two `wz_ext_internal_transport_*` doors, and the types
+        # and constants they take, declared in `wz_ext.h`; off by default, as upstream has no such
+        # doors.
         # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
         # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",
+                "app-transport",
                 "clock-source",
                 "declarations-synced-event",
+                "e2e-receiver",
+                "e2e-sender",
+                "e2e-sender-demux",
+                "e2e-supervision",
                 "event-ring",
                 "remote-declaration-watch",
                 "resource-snapshot",

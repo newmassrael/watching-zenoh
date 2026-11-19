@@ -2172,6 +2172,9 @@ fn document_selected<W: DocOut>(
     write_membership(d.control(), out);
     // Revision 77 — the interfaces a flow's `network.interface_ids` name.
     write_capture_interfaces(capture, out);
+    // Revision 80 — the name lookups, capture-wide because a lookup precedes
+    // the flow it names, and when it fails there is no flow.
+    write_dns(d.dns(), &tcp_openings(d), out);
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
     // fact about what the capture turned out to hold, and both producers above
@@ -6075,6 +6078,162 @@ fn write_handshake<W: DocOut>(found: Handshakes<'_>, out: &mut W) {
             out.close_map();
         }
     }
+    out.close_map();
+}
+
+/// Every TCP connection attempt of the capture: the endpoint its SYN was sent
+/// to and the packet of that SYN, in capture order.
+fn tcp_openings(d: &crate::Dissection) -> Vec<(crate::link::Endpoint, usize)> {
+    let mut openings: Vec<(crate::link::Endpoint, usize)> = d
+        .flows()
+        .iter()
+        .filter(|f| f.flow.link() == crate::link::LinkKind::Tcp)
+        .flat_map(|f| {
+            f.ingest.tcp_facts().attempts().iter().map(move |a| {
+                let acceptor = if a.opener_is_a {
+                    f.flow.high
+                } else {
+                    f.flow.low
+                };
+                (acceptor, a.first_syn.packet)
+            })
+        })
+        .collect();
+    openings.sort_by_key(|(_, packet)| *packet);
+    openings
+}
+
+/// The document's `dns` member (revision 80): every A, AAAA and SRV question
+/// the capture's DNS and multicast DNS datagrams asked, in the order first
+/// sent, with what answered it ([`crate::dns`]).
+///
+/// ```text
+/// "dns":{"queries":[{"name":"router.local","qtype":"a","mdns":false,
+///                    "asker":{"addr":"10.0.0.1","port":40000},
+///                    "server":{"addr":"10.0.0.53","port":53},
+///                    "query_packet":0,"query_ns":T,"sent":1,
+///                    "answered":true,"answer_packet":1,"answer_ns":T,
+///                    "rcode":"noerror","rcode_number":0,
+///                    "addresses":[{"addr":"10.0.0.2","target":null,
+///                                  "port":null,"ttl_s":60,
+///                                  "connected":{"syn_packet":2,
+///                                               "port":7447}}],
+///                    "addresses_more":0}],
+///        "more":0,"unmatched_answers":0}
+/// ```
+///
+/// `sent` counts the query and its resends; `answered` is `false`, with the
+/// answer's keys `null`, when no response came. `rcode` is `noerror`,
+/// `formerr`, `servfail`, `nxdomain`, `notimp`, `refused` or `other`, its
+/// number beside it. `addresses` are the response's records about the name
+/// and its SRV targets: an A or AAAA record's `addr`, an SRV record's `target`
+/// and `port`, each `ttl_s`; `connected` the first TCP SYN the capture holds to
+/// that address (and to the SRV port, for an SRV record's target) sent after
+/// the answer, `null` when none was. `more` counts the queries past the
+/// capture's bound of 256, `addresses_more` a query's records past 16, and
+/// `unmatched_answers` the responses that answered no query the capture held.
+fn write_dns<W: DocOut>(
+    plane: &crate::dns::DnsPlane,
+    openings: &[(crate::link::Endpoint, usize)],
+    out: &mut W,
+) {
+    use crate::link::LinkKind;
+    let endpoint = |e: &crate::link::Endpoint, out: &mut W| {
+        out.open_map();
+        out.key("addr");
+        out.text(&e.addr_text(LinkKind::Udp));
+        out.key("port");
+        out.uint(u64::from(e.port));
+        out.close_map();
+    };
+    let instant = |at: Option<u64>, out: &mut W| match at {
+        Some(ns) => out.uint_exact(ns),
+        None => out.null(),
+    };
+    out.key("dns");
+    out.open_map();
+    out.key("queries");
+    out.open_array();
+    for q in plane.queries() {
+        out.open_map();
+        out.key("name");
+        out.text(&q.name);
+        out.key("qtype");
+        out.text(q.qtype.name());
+        out.key("mdns");
+        out.bool(q.mdns);
+        out.key("asker");
+        endpoint(&q.asker, out);
+        out.key("server");
+        endpoint(&q.server, out);
+        out.key("query_packet");
+        out.uint(q.query.packet as u64);
+        out.key("query_ns");
+        instant(q.query.at_ns, out);
+        out.key("sent");
+        out.uint(u64::from(q.sent));
+        out.key("answered");
+        out.bool(q.answer.is_some());
+        out.key("answer_packet");
+        out.opt_uint(q.answer.map(|a| a.packet as u64));
+        out.key("answer_ns");
+        instant(q.answer.and_then(|a| a.at_ns), out);
+        out.key("rcode");
+        out.opt_text(q.rcode.map(|r| crate::dns::Rcode::of(r).name()));
+        out.key("rcode_number");
+        out.opt_uint(q.rcode.map(u64::from));
+        out.key("addresses");
+        out.open_array();
+        let after = q.answer.map_or(usize::MAX, |a| a.packet);
+        // An SRV record's port, for the addresses of its target.
+        let srv_port = q.records.iter().find_map(|r| r.port);
+        for r in &q.records {
+            out.open_map();
+            out.key("addr");
+            match &r.addr {
+                Some(a) => out.text(&a.addr_text(LinkKind::Udp)),
+                None => out.null(),
+            }
+            out.key("target");
+            out.opt_text(r.target.as_deref());
+            out.key("port");
+            out.opt_uint(r.port.map(u64::from));
+            out.key("ttl_s");
+            out.uint(u64::from(r.ttl_s));
+            out.key("connected");
+            let opening = r.addr.and_then(|a| {
+                openings.iter().find(|(to, packet)| {
+                    *packet > after
+                        && to.addr() == a.addr()
+                        && match srv_port {
+                            Some(port) => u32::from(port) == to.port,
+                            None => true,
+                        }
+                })
+            });
+            match opening {
+                Some((to, packet)) => {
+                    out.open_map();
+                    out.key("syn_packet");
+                    out.uint(*packet as u64);
+                    out.key("port");
+                    out.uint(u64::from(to.port));
+                    out.close_map();
+                }
+                None => out.null(),
+            }
+            out.close_map();
+        }
+        out.close_array();
+        out.key("addresses_more");
+        out.uint(q.records_more);
+        out.close_map();
+    }
+    out.close_array();
+    out.key("more");
+    out.uint(plane.more());
+    out.key("unmatched_answers");
+    out.uint(plane.unmatched());
     out.close_map();
 }
 
@@ -10118,6 +10277,15 @@ mod tests {
                 arms.push(members(|out| write_tcp(Some(&facts), out)));
             }
         }
+        // Revision 80 — the document's `dns`, with every word and an address
+        // a later SYN connected to.
+        {
+            let plane = crate::dns::tests::every_word();
+            let opened = [(crate::link::Endpoint::new(&[10, 0, 0, 2], 7447), 50)];
+            arms.push(members(|out| write_dns(&plane, &opened, out)));
+            let empty = crate::dns::DnsPlane::default();
+            arms.push(members(|out| write_dns(&empty, &[], out)));
+        }
         // Revision 79 — a flow's `handshake`: TLS with every word, WebSocket
         // with a Ping and a Pong, QUIC answered and not, and `null`.
         {
@@ -12087,7 +12255,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 111] = [
+        let live: [(&str, &str, Vec<&'static str>); 113] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -12161,6 +12329,10 @@ mod tests {
                 alloc::vec![dir_name(Direction::A), dir_name(Direction::B)],
             ),
             (rev::FIELDS, "control", alloc::vec!["ping", "pong"]),
+            // A name lookup's question type and its answer's rcode (revision
+            // 80).
+            (rev::FIELDS, "qtype", crate::dns::QueryType::names()),
+            (rev::FIELDS, "rcode", crate::dns::Rcode::names()),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the

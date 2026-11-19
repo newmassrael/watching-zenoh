@@ -401,7 +401,8 @@ fn regen_codec_deployment(
 /// directory per consuming crate, mirroring each build.rs's emits:
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer,
-///                      peer_connection, clock_quality, supervision (statecharts);
+///                      peer_connection, clock_quality, supervision,
+///                      stream_activation, app_link (statecharts);
 ///                      tick_elapsed, tick_until_due, key_facts (algorithms);
 ///                      key_facts_schema (the event-schema key_facts returns)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
@@ -439,6 +440,10 @@ fn regen_statecharts_and_pools(root: &Path) {
         "clock_quality",
         // The observation plane's supervision — a deadline the application feeds.
         "supervision",
+        // Reception supervision per stream — when a receiver judges its periodic streams.
+        "stream_activation",
+        // The lifecycle of one link over a transport the program supplies.
+        "app_link",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
     }
@@ -481,6 +486,13 @@ fn regen_statecharts_and_pools(root: &Path) {
     for stem in ["key_facts_schema", "keyexpr_shape_schema"] {
         codegen.emit_event_schema(stem, &algorithms, &sc_out);
     }
+    // The receiving judge of end-to-end protected frames (wz-app-frame `e2e_judge`): the step of
+    // a counter from its baseline in the counter's own width, and what that step is.
+    let app_frame_out = root.join("out/wz-app-frame");
+    mkdir(&app_frame_out);
+    for stem in ["e2e_counter_step", "e2e_counter_verdict"] {
+        codegen.emit_algorithm(stem, &algorithms, &app_frame_out);
+    }
 
     // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
     let pools: &[(&str, &str)] = &[
@@ -517,12 +529,13 @@ fn regen_statecharts_and_pools(root: &Path) {
         "wz-runtime-tokio",
         "wz-runtime-coop",
         "wz-link-lwip",
+        "wz-app-frame",
     ] {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }
 
     println!(
-        "xtask: regenerated 8 statecharts + 2 algorithms + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
+        "xtask: regenerated 9 statecharts + 2 algorithms + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
         pools.len()
     );
 }

@@ -227,6 +227,18 @@
               "x-wz-mutability": "hot",
               "x-wz-wire": "none"
             },
+            "e2e-supervision-notify": {
+              "description": "What a reception supervisor tells the application when a stream stops arriving.",
+              "enum": [
+                "status-only",
+                "last-value"
+              ],
+              "default": "status-only",
+              "x-wz-scope": "runtime",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "none"
+            },
             "event-ring-full": {
               "description": "Which event a full event ring gives up.",
               "enum": [
@@ -676,6 +688,17 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "E2E_SUPERVISED_STREAMS": {
+              "description": "How many periodic streams one reception supervisor holds.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 32,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "EVENT_RING_SLOTS": {
               "description": "How many event records the node's event ring holds.",
               "type": "integer",
@@ -696,6 +719,17 @@
               "x-wz-scope": "runtime",
               "x-wz-binding-heap": "open",
               "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "E2E_SENDER_SLOTS": {
+              "description": "How many senders one receiving judge of end-to-end protected frames keeps a counter for, when the e2e-sender-demux capability is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
             "CLOCK_MAX_FORWARD_STEP_MS": {

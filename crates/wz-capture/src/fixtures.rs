@@ -368,12 +368,30 @@ pub(crate) fn tcp_connection_capture(payloads: &[(bool, &[u8])]) -> Vec<u8> {
             high_seq += payload.len() as u32;
         }
     }
+    pcap_of(&packets)
+}
+
+/// An Ethernet pcap of `packets`, the `i`th at 1 s and `i` microseconds.
+#[cfg(test)]
+pub(crate) fn pcap_of(packets: &[Vec<u8>]) -> Vec<u8> {
     let refs: Vec<(u32, u32, &[u8])> = packets
         .iter()
         .enumerate()
         .map(|(i, p)| (1u32, i as u32, p.as_slice()))
         .collect();
     crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
+}
+
+/// One UDP datagram in an Ethernet frame.
+#[cfg(test)]
+pub(crate) fn udp_datagram(
+    src: [u8; 4],
+    sport: u16,
+    dst: [u8; 4],
+    dport: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    udp_packet(src, sport, dst, dport, payload)
 }
 
 /// One message of a TCP stream: the two-byte little-endian length zenoh puts in

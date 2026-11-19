@@ -389,6 +389,15 @@ config WZ_LIMIT_SUPERVISION_CHECKPOINTS
 	  application feeds, and the node is healthy only while every checkpoint that is
 	  supervised has been fed in time. At least 1 and at most 64.
 
+config WZ_LIMIT_E2E_SUPERVISED_STREAMS
+	int "E2E_SUPERVISED_STREAMS"
+	default 32
+	help
+	  How many periodic streams one reception supervisor holds. The table of streams
+	  is storage the application gives the supervisor when it makes it, one fixed row
+	  per stream, so this bounds how many rows of it are used and sizes nothing; a
+	  stream added past it is refused. At least 1.
+
 config WZ_LIMIT_EVENT_RING_SLOTS
 	int "EVENT_RING_SLOTS"
 	default 64
@@ -416,6 +425,16 @@ config WZ_LIMIT_CLOCK_SOURCES
 	  sources in the order they were registered, and the first that can say what time
 	  it is answers; with none registered it reads the system clock. 0 registers
 	  none, which leaves the system clock as the only source.
+
+config WZ_LIMIT_E2E_SENDER_SLOTS
+	int "E2E_SENDER_SLOTS"
+	default 8
+	help
+	  How many senders one receiving judge of end-to-end protected frames keeps a
+	  counter for, when the e2e-sender-demux capability is on. Each slot is one
+	  sender, bound by a list or taken by the first intact frame of a sender in
+	  arrival order; a frame of a sender no slot holds is not judged and is counted.
+	  At least 1.
 
 config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
 	int "CLOCK_MAX_FORWARD_STEP_MS"

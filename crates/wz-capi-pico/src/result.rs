@@ -148,6 +148,28 @@ pub const WZ_EXT_ERR_POLICY_OFF: ZResult = -2;
 /// declared or sent. wz's own code, for the reason [`WZ_EXT_ERR_POLICY_OFF`] is.
 pub const WZ_EXT_ERR_UNSUPPORTED: ZResult = -3;
 
+/// A call of the program's into its transport (`wz_ext_transport_*`) named a link the transport
+/// does not hold: it never did, or the session has let it go. wz's own code, for the reason
+/// [`WZ_EXT_ERR_POLICY_OFF`] is, as are the three after it.
+pub const WZ_EXT_ERR_LINK_UNKNOWN: ZResult = -4;
+
+/// A call of the program's into its transport named a link that is not up yet: bytes or an accept
+/// before the program said the link is connected.
+pub const WZ_EXT_ERR_LINK_NOT_OPEN: ZResult = -5;
+
+/// A call of the program's into its transport named a link that is closing or closed: the bytes
+/// were not taken.
+pub const WZ_EXT_ERR_LINK_CLOSED: ZResult = -6;
+
+/// A call of the program's into its transport does not apply to the link's kind: bytes handed to a
+/// listener, an accept on a link that is not one.
+pub const WZ_EXT_ERR_LINK_KIND: ZResult = -7;
+
+/// A call of the program's into its transport handed bytes to a link that already queues its
+/// bound (`APP_LINK_QUEUE_BYTES`) of bytes the session has not read: nothing was taken. The
+/// program hands the same bytes in again after its `drained` call for the link.
+pub const WZ_EXT_ERR_LINK_FULL: ZResult = -8;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,10 +197,19 @@ mod tests {
             Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Z_ERR_CONFIG_INVALID_VALUE,
         ];
-        for wz in [WZ_EXT_ERR_POLICY_OFF, WZ_EXT_ERR_UNSUPPORTED] {
-            assert!(wz < 0, "{wz} must read as a failure");
-            assert!(!pico.contains(&wz), "{wz} is a pico code");
+        let wz = [
+            WZ_EXT_ERR_POLICY_OFF,
+            WZ_EXT_ERR_UNSUPPORTED,
+            WZ_EXT_ERR_LINK_UNKNOWN,
+            WZ_EXT_ERR_LINK_NOT_OPEN,
+            WZ_EXT_ERR_LINK_CLOSED,
+            WZ_EXT_ERR_LINK_KIND,
+            WZ_EXT_ERR_LINK_FULL,
+        ];
+        for (at, code) in wz.iter().enumerate() {
+            assert!(*code < 0, "{code} must read as a failure");
+            assert!(!pico.contains(code), "{code} is a pico code");
+            assert!(!wz[..at].contains(code), "{code} is given twice");
         }
-        assert_ne!(WZ_EXT_ERR_POLICY_OFF, WZ_EXT_ERR_UNSUPPORTED);
     }
 }

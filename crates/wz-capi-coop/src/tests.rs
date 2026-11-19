@@ -1111,6 +1111,72 @@ fn a_session_that_redials_none_ends_with_its_link() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
+/// The redeclare door: an open session tells the peer of its one link everything it holds again
+/// and answers the count of links, and a closed one answers that it is closed.
+#[test]
+fn a_session_redeclares_over_each_link_that_is_up_and_a_closed_one_refuses() {
+    use wz_capi_port::RedeclareRefusal;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(SessionEngine::redeclare(&*engine), Ok(1), "the dial link");
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the session to end", || {
+        SessionDrive::is_closed(&*engine)
+    });
+    assert_eq!(
+        SessionEngine::redeclare(&*engine),
+        Err(RedeclareRefusal::Closed)
+    );
+}
+
+/// `zid-derivation = address-ports`: the zid is the first listen endpoint's own address, the
+/// lowest tcp and udp ports and the eight bytes the source gives, in the wire form; a session
+/// whose listeners name no address of the node is refused with the reason, and a source that
+/// fails is the entropy refusal a random zid gets.
+#[test]
+fn a_derived_zid_is_the_listeners_address_and_ports_then_the_sources_bytes() {
+    use crate::engine::derived_zid;
+    use crate::OpenError;
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+    use wz_session_core::zid_derivation::ZidDerivationError;
+
+    struct Seeded(u8);
+    impl EntropySource for Seeded {
+        fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            for byte in buf.iter_mut() {
+                *byte = self.0;
+                self.0 = self.0.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+    struct Failing;
+    impl EntropySource for Failing {
+        fn try_fill_bytes(&mut self, _buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            Err(EntropyUnavailable)
+        }
+    }
+
+    let listen = std::vec![
+        "udp/10.77.0.5:28001".to_string(),
+        "tcp/10.77.0.5:28000".to_string(),
+    ];
+    let zid = derived_zid(&listen, &mut Seeded(0x31)).expect("a listener names the node");
+    let expected: [u8; 16] = [
+        10, 77, 0, 5, 0x60, 0x6D, 0x61, 0x6D, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+    ];
+    assert_eq!(zid.to_vec(), expected.to_vec());
+    assert_eq!(
+        derived_zid(&["tcp/0.0.0.0:28000".to_string()], &mut Seeded(1)),
+        Err(OpenError::ZidDerivation(ZidDerivationError::NoAddress))
+    );
+    assert_eq!(
+        derived_zid(&listen, &mut Failing),
+        Err(OpenError::EntropyUnavailable)
+    );
+}
+
 /// A configured zid is refused when the session is opened, once: all zero bytes, none, and
 /// seventeen are refused, and one and sixteen, trailing zeros trimmed, are the zid the session
 /// announces.

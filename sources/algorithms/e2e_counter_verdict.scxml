@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  What a counter step is, for the receiving judge of end-to-end protected frames: 0 when it is 1
+  to `max_gap` (in range, skipped counters included), 1 when it is 0 (the same counter again, a
+  repetition), 2 when it is above `max_gap` (out of range). The step is `e2e_counter_step`'s.
+
+  What each verdict then does to the stream's state (a repetition never moves the baseline; a step
+  out of range moves it unless the profile keeps it) is the judge's, in wz-app-frame `e2e_judge`.
+  The predicate is total: no integer operation, so it cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="e2e_counter_verdict"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="step" type="uint64"/>
+    <sce:param name="max_gap" type="uint64"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="step === 0">
+      <sce:return expr="1"/>
+    </sce:if>
+    <sce:if cond="step &lt;= max_gap">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:return expr="2"/>
+  </sce:body>
+</scxml>
