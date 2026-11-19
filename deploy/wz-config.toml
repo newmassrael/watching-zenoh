@@ -1283,6 +1283,23 @@ implies = ["e2e-receiver"]
 help = "Judging state per sender for the receiving judge, keyed by a header field, in slots bound by a list or taken in arrival order (E2E_SENDER_SLOTS)."
 
 [[capability]]
+id = "instance-key"
+kconfig = "WZ_CAP_INSTANCE_KEY"
+# Off by default: neither zenoh-pico nor zenoh-c tells the instances of one message apart. On, a
+# message names up to INSTANCE_KEY_FIELDS fields of its payload, read through its schema, and the
+# values each may take; the position of a sample's values in the product of those lists is its
+# instance, at most INSTANCES_PER_MESSAGE of them. The instance is the stream the end-to-end doors
+# judge and count in, and a last value is kept per instance; a sample of no instance is dropped and
+# counted. Instance keys and sender slots are exclusive on one message, and the doors refuse a
+# receiver keyed by sender.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "The instance of a message a sample is, read from fields of its payload: a stream of the end-to-end doors and a last value per instance, samples of no instance dropped and counted (wz_ext_instance_keyer_*, wz-own doors; INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE)."
+
+[[capability]]
 id = "config-verdict"
 kconfig = "WZ_CAP_CONFIG_VERDICT"
 # On by default: a program that writes or checks configurations for other nodes links the default
@@ -2737,6 +2754,44 @@ counter for, when the e2e-sender-demux capability is on. Each slot is one
 sender, bound by a list or taken by the first intact frame of a sender in
 arrival order; a frame of a sender no slot holds is not judged and is counted.
 At least 1.
+'''
+
+[[limit]]
+id = "INSTANCE_KEY_FIELDS"
+kconfig = "WZ_LIMIT_INSTANCE_KEY_FIELDS"
+default = 2
+storage = "both"
+# One keyer of the instance-key capability: the program names its key fields when it makes the
+# keyer, at most this many, and a description that names more is refused.
+scope = "entity"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How many fields of a payload one message's instance key names, when the
+instance-key capability is on. Each is an integer, an enumeration or a string
+field read through the message's schema; the instance is the position of their
+values in the product of the lists of values each may take. A description that
+names more fields is refused. At least 1.
+'''
+
+[[limit]]
+id = "INSTANCES_PER_MESSAGE"
+kconfig = "WZ_LIMIT_INSTANCES_PER_MESSAGE"
+default = 32
+storage = "both"
+# One keyer of the instance-key capability: the product of the lengths of its value lists, which
+# sizes the streams of the end-to-end doors and the last values kept for the message.
+scope = "entity"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How many instances one message's instance key may tell apart, when the
+instance-key capability is on: the product of the lengths of the lists of
+values its key fields may take. Each instance is a stream of the end-to-end
+doors and a last value, so this bounds the state kept per message. A
+description whose lists make more is refused. At least 1.
 '''
 
 [[limit]]

@@ -220,6 +220,10 @@ e2e-sender = []
 # the judge of `wz-app-frame`, so these features only carry the capabilities' names.
 e2e-receiver = []
 e2e-sender-demux = ["e2e-receiver"]
+# The instance a sample of a message is, read from fields of its payload. The model has nothing
+# behind it: the doors are the pico ABI's own (`wz-capi-pico/instance-key`) over the keyer of
+# `wz-app-frame`, so this feature only carries the capability's name, as `e2e-receiver`'s does.
+instance-key = []
 # A configuration judged, emitted and costed without opening it. In the model it is what an open of
 # a plan asks of the operating system (`open_facilities`), which only the zenoh-c ABI's door reads;
 # the validators and the emitter it reaches are the runtime's, used by those doors alone
