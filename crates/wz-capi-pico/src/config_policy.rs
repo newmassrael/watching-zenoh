@@ -5,8 +5,10 @@
 //! config states for the session [`z_open`](crate::session::z_open) opens from it.
 //!
 //! pico's config is a set of numbered keys and has none for wz's policies, so these are doors wz
-//! has and zenoh-pico does not: `wz_ext_*`, declared in `wz_ext.h`. They are in every build. An
-//! MCU image whose domain of a policy holds one value refuses every other value of it by name.
+//! has and zenoh-pico does not: `wz_ext_*`, declared in `wz_ext.h`. The first two are in every
+//! build; `wz_ext_config_document` is in a build with the `config-document` capability, since it
+//! links a JSON5 reader. An MCU image whose domain of a policy holds one value refuses every other
+//! value of it by name.
 //!
 //! What the doors state is kept in the config ([`PolicyStatements`]) and composed by the open,
 //! lowest first, through [`policy_document::resolve_document_under`], the reader the other ABIs
@@ -25,7 +27,9 @@
 
 use core::ffi::{c_char, CStr};
 
-use wz_session_core::json5::{self, Json5Value};
+#[cfg(feature = "config-document")]
+use wz_session_core::json5;
+use wz_session_core::json5::Json5Value;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::policy_document::{self, Overrides, Resolved, Statement};
 
@@ -36,6 +40,7 @@ use crate::prelude::*;
 use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_OK};
 
 /// The top-level member of a zenoh document that holds wz's own statements.
+#[cfg(feature = "config-document")]
 const WZ_MEMBER: &str = "wz";
 
 /// What a config's doors stated about its policies, as they stated it: the open judges and
@@ -96,6 +101,7 @@ impl PolicyStatements {
 /// document of their own, or `Z_ERR_CONFIG_INVALID_VALUE` for text that is no JSON5 object. A
 /// `wz: null` states nothing: zenoh's spelling of a member left unset, as the zenoh-c ABI's reader
 /// of the same document takes it.
+#[cfg(feature = "config-document")]
 fn wz_members(text: &str) -> Result<Json5Value, ZResult> {
     let Ok(Json5Value::Object(members)) = json5::parse(text) else {
         return Err(Z_ERR_CONFIG_INVALID_VALUE);
@@ -201,8 +207,13 @@ pub unsafe extern "C" fn wz_ext_config_profile(
 /// profile the build does not have and a statement the build refuses are refused with
 /// `Z_ERR_CONFIG_INVALID_VALUE`, and the config is left as it was.
 ///
+/// In a build with the `config-document` capability alone: the door links a JSON5 reader that a
+/// build stating its policies through [`wz_ext_config_policy`] and [`wz_ext_config_profile`] does
+/// not need.
+///
 /// # Safety
 /// `config` must be null or a live loaned config; `json5` must be null or a NUL-terminated string.
+#[cfg(feature = "config-document")]
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_config_document(
     config: *mut z_loaned_config_t,
@@ -255,6 +266,7 @@ mod tests {
             unsafe { wz_ext_config_profile(self.loaned(), profile.as_ptr()) }
         }
 
+        #[cfg(feature = "config-document")]
         fn document(&mut self, text: &str) -> ZResult {
             let text = CString::new(text).unwrap();
             // SAFETY: a live config and a live string.
@@ -415,6 +427,7 @@ mod tests {
                 wz_ext_config_profile(config.loaned(), core::ptr::null()),
                 Z_ERR_NULL
             );
+            #[cfg(feature = "config-document")]
             assert_eq!(
                 wz_ext_config_document(config.loaned(), core::ptr::null()),
                 Z_ERR_NULL
@@ -464,6 +477,7 @@ mod tests {
 
     /// Every shape step 4a refuses in a document's `wz` member, and text that is no JSON5 object,
     /// is refused by the document door, which keeps the document it held.
+    #[cfg(feature = "config-document")]
     #[test]
     fn the_document_door_refuses_each_refused_shape_and_keeps_the_last_document() {
         let (entry, value) = one_allowed();
@@ -498,6 +512,7 @@ mod tests {
     }
 
     /// A document with no `wz` member, or a `wz: null`, states nothing.
+    #[cfg(feature = "config-document")]
     #[test]
     fn a_document_without_a_wz_member_states_nothing() {
         for text in ["{ mode: \"peer\" }", "{ mode: \"peer\", wz: null }"] {
@@ -513,6 +528,7 @@ mod tests {
 
     /// The door's statement wins over the document's, the document's over the profile's, whatever
     /// order the doors were called in, and each value records the layer it came from.
+    #[cfg(feature = "config-document")]
     #[test]
     fn the_door_overrides_the_document_which_overrides_the_profile() {
         let (Some((entry, in_document, in_door)), Some(_)) = (two_allowed(), upstream_allowed())
@@ -550,6 +566,7 @@ mod tests {
     }
 
     /// With no profile door, the profile the document names is the layer below its policies.
+    #[cfg(feature = "config-document")]
     #[test]
     fn the_documents_profile_stands_when_the_door_names_none() {
         if upstream_allowed().is_none() {
@@ -570,6 +587,7 @@ mod tests {
 
     /// One document, through this door and through the reader of the zenoh document, resolves to
     /// one snapshot with one provenance.
+    #[cfg(feature = "config-document")]
     #[test]
     fn one_document_resolves_as_the_zenoh_reader_resolves_it() {
         let (entry, value) = match two_allowed() {

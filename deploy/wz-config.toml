@@ -1332,6 +1332,20 @@ implies = ["query", "queryable", "liveliness"]
 help = "The statements of a call beyond the zenoh-c options: the links an entity may use, a publish's retry and all-or-none form, a query's target node (the wz_capi_c_*_ext doors, wz-own, refused while the policy that admits the statement is off)."
 
 [[capability]]
+id = "config-document"
+kconfig = "WZ_CAP_CONFIG_DOCUMENT"
+# Off by default: zenoh-pico's config is a set of numbered keys and reads no document, and the door
+# links a JSON5 reader. A pico build states its policies through wz_ext_config_policy and
+# wz_ext_config_profile in every build; this one hands it the zenoh JSON5 document the zenoh-c ABI
+# reads, whose wz member states the policies of both ABIs alike.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own)."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []

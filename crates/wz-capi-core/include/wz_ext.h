@@ -37,9 +37,10 @@ z_result_t wz_ext_config_device_requires(const z_loaned_config_t *config,
 /* The policies of the session z_open opens from this config, stated from
  * code. The open composes them, lowest first: the build defaults, the
  * profile (wz_ext_config_profile's, else the document's), the document's
- * wz/policies, then wz_ext_config_policy's statements. Present in every
- * build; a build whose domain of a policy holds one value refuses every
- * other value of it.
+ * wz/policies, then wz_ext_config_policy's statements. The first two doors
+ * are in every build, wz_ext_config_document in a build with the
+ * config-document capability (it links a JSON5 reader); a build whose
+ * domain of a policy holds one value refuses every other value of it.
  *
  * Each call is checked at once against the build, as the open will compose
  * it: a policy, value or profile the build does not have, a value the

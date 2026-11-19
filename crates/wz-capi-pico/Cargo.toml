@@ -335,6 +335,12 @@ local-queryable = ["wz-capi-core?/local-queryable", "wz-capi-coop?/local-queryab
 # cancel blocks on the host's condition variable (`wz-capi-port`'s `cancellation`), so it selects
 # `std`, as do the planes below whose modules are still written against the host's library.
 unstable-api = ["std", "wz-capi-core?/unstable-api"]
+# `config-document`: `wz_ext_config_document`, the door that hands a config the zenoh JSON5 document
+# the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
+# config is a set of numbered keys and reads no document, and the door links a JSON5 reader a
+# build that states its policies through `wz_ext_config_policy` and `wz_ext_config_profile` does
+# not need.
+config-document = ["wz-capi-core?/config-document"]
 # `connectivity` (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and the event
 # listeners of pico's connectivity plane. Upstream declares it only with the unstable API. Both
 # engines report their faces through the port, so it selects neither.
