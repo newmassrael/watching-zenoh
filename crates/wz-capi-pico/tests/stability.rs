@@ -163,7 +163,10 @@ fn count_panics() {
 }
 
 fn panics_so_far() -> (usize, Vec<String>) {
-    let text = PANIC_TEXT.lock().map(|t| t.clone()).unwrap_or_default();
+    let text = PANIC_TEXT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     (PANICS.load(Ordering::SeqCst), text)
 }
 
