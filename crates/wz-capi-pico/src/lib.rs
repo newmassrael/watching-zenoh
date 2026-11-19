@@ -241,6 +241,12 @@ pub mod qos;
 pub mod querier;
 #[cfg(feature = "queryable")]
 pub mod query;
+// The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
+// doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+#[cfg(feature = "replay-cache")]
+pub mod replay_publisher;
+#[cfg(feature = "replay-cache")]
+pub mod replay_subscriber;
 #[cfg(any(feature = "query", feature = "queryable"))]
 pub mod reply_keyexpr;
 pub mod result;

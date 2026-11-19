@@ -158,9 +158,10 @@ pub mod fields_json;
 // A message an application split over several samples on one key: the header
 // a deployment declares for its pieces, the state that joins them, and the
 // writer of the pieces. Each is documented by its own `//!` text, as the
-// end-to-end modules above are. The header's profile and the writer of the
-// pieces are the `wz-app-frame` crate's, re-exported here for the reason given
-// above.
+// end-to-end modules above are. The header's profile, the joining state and
+// the writer of the pieces are the `wz-app-frame` crate's, re-exported here for
+// the reason given above; `segment_chain` keeps beside them what only the
+// field walker remembers of each row.
 pub mod segment_chain;
 #[cfg(test)]
 mod segment_chain_tests;

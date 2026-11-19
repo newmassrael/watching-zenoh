@@ -337,7 +337,7 @@ fn a_final_ends_its_querys_replies_and_nothing_else() {
 #[cfg(feature = "dissect")]
 #[test]
 fn a_kept_verdict_is_recalled_by_its_row_and_forgotten_with_it() {
-    let (p, mut l) = (demo_profile(), SegmentLedger::new());
+    let (p, mut l) = (demo_profile(), crate::segment_chain::JudgedSegments::new());
     let v = feed(&mut l, &p, 1, 0..12);
     l.remember(0, 5, 0, &v);
     l.remember(0, 9, 0, &v);

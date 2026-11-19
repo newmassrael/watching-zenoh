@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Replay serving - whether a publisher's replay cache is answering a query, and so whether the
+  sends of its message are held.
+
+  A publisher that keeps a ring of the frames it sent answers a query on the message's suffixed
+  key with the ring, from a snapshot taken when the answer begins. While it answers, a frame sent
+  live could reach the subscriber before the replay that precedes it, so a deployment may ask that
+  the message's sends wait (the `replay-serve-holds-sends` policy): a periodic send keeps only the
+  latest frame of each instance, and an event send is deferred to a bounded queue. Once the last
+  answer is over the held frames go out, in the order they were sent, and the sends that come
+  while they go out are held behind them, so nothing newer overtakes them.
+
+  Division of labour with the host (the machine owns the phases, the host owns the frames):
+    - The host counts the answers in progress (several subscribers may ask at once) and raises
+      `answer.begun` for each one that begins, and `answer.ended` when the last one ends.
+    - The ring, the queue of deferred frames, the latest periodic frame of each instance and the
+      sends themselves are the host's. While the phase is not Idle, and the policy says so, the
+      host holds every send; in Releasing it sends what it held, and raises `released` once none
+      is left.
+
+  The states:
+    Idle      - no answer is in progress and nothing held is waiting: a send goes out at once.
+    Serving   - at least one answer is in progress.
+    Releasing - the last answer ended and the held frames are going out.
+
+  Engine-free: every effect is a no-arg `<sce:action>` host-trait call, so the generated
+  `ReplayServingPolicy<A>` carries no `IScriptEngine` and compiles `no_std`.
+
+  Host actions (the generated `ReplayServingActions` trait):
+    hold_sends    - entered Serving: hold the message's sends, when the policy says so.
+    release_sends - entered Releasing: send the held frames, oldest first.
+
+  Events fed by the host:
+    answer.begun - an answer began: its snapshot of the ring is taken.
+    answer.ended - the last answer in progress ended.
+    released     - every held frame went out.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="replay_serving"
+       version="1.0"
+       initial="Idle">
+
+  <state id="Idle">
+    <transition event="answer.begun" target="Serving"/>
+  </state>
+
+  <!-- No transition on answer.begun: a second answer that begins while one is in progress is
+       counted by the host, and the sends are held already. -->
+  <state id="Serving">
+    <onentry>
+      <sce:action name="hold_sends" effect="duty"/>
+    </onentry>
+    <transition event="answer.ended" target="Releasing"/>
+  </state>
+
+  <state id="Releasing">
+    <onentry>
+      <sce:action name="release_sends" effect="duty"/>
+    </onentry>
+    <transition event="answer.begun" target="Serving"/>
+    <transition event="released" target="Idle"/>
+  </state>
+
+</scxml>
