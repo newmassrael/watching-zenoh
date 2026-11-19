@@ -466,7 +466,12 @@ mod tests {
 
     /// A session of a node that holds a clock.
     fn clocked() -> Arc<SharedSession> {
-        let clock = NodeHlc::for_node(&test_zid(), WhatAmI::Peer, TimestampingEnabled::all(true));
+        let clock = NodeHlc::for_node_by(
+            &test_zid(),
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        );
         Arc::new(
             SharedSession::new_with_node_clock(
                 TokioTime::new(),

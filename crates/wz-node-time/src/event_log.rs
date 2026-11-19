@@ -247,7 +247,12 @@ mod tests {
     #[test]
     fn a_node_with_a_clock_stamps_the_event_and_one_without_records_time_zero() {
         let log = log(FullPolicy::OverwriteOldest);
-        let router = NodeHlc::for_node(&[1], WhatAmI::Router, TimestampingEnabled::default());
+        let router = NodeHlc::for_node_by(
+            &[1],
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        );
         let none = NodeHlc::disabled();
         log.emit(&router, 0, 1, &[]);
         log.emit(&none, 0, 2, &[]);

@@ -845,11 +845,12 @@ mod one_session_time_tests {
     }
 
     fn node_clock() -> NodeHlc {
-        NodeHlc::for_node_over_source(
+        NodeHlc::for_node_over_source_by(
             &ZID,
             WhatAmI::Peer,
             TimestampingEnabled::all(true),
             StandingClock,
+            &wz_session_core::policy::SessionPolicy::defaults(),
         )
         .with_trusted_only_stamping(false)
     }
@@ -1000,11 +1001,12 @@ mod clock_reading_tests {
     #[test]
     fn a_trusted_only_session_gives_a_program_the_time_of_the_clock_it_stamps_data_with() {
         let zid = [0x5c; crate::zid::Z_ID_SIZE];
-        let hlc = NodeHlc::for_node_over_source(
+        let hlc = NodeHlc::for_node_over_source_by(
             &zid,
             WhatAmI::Peer,
             TimestampingEnabled::all(true),
             SystemEpoch,
+            &wz_session_core::policy::SessionPolicy::defaults(),
         )
         .with_trusted_only_stamping(true);
         assert!(

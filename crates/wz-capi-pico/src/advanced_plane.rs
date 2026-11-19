@@ -307,11 +307,12 @@ mod tests {
 
     /// The session's node clock, under the `trusted-only` policy (`true`) or `always` (`false`).
     fn node_clock(trusted_only: bool) -> NodeHlc {
-        NodeHlc::for_node_over_source(
+        NodeHlc::for_node_over_source_by(
             &ZID,
             WhatAmI::Peer,
             TimestampingEnabled::all(true),
             SystemEpoch,
+            &wz_session_core::policy::SessionPolicy::defaults(),
         )
         .with_trusted_only_stamping(trusted_only)
     }

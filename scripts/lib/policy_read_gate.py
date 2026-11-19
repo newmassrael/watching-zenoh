@@ -113,7 +113,6 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-mcu-session-acceptor/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-mesh-client/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-node-time/src/event_log.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
-    ("crates/wz-node-time/src/node_clock.rs", "build_defaults", WRAPPER + " (NodeHlc::for_node_by and its two siblings)"),
     ("crates/wz-replay/src/live.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-runtime-tokio-test-support/src/lib.rs", "fixture_policy", "creator: resolves the snapshot (build defaults until a run-time document is read); a test fixture"),
     ("crates/wz-runtime-tokio/src/datagram_pacing.rs", "of_build_defaults", WRAPPER + " (Pacing::of_policy); the multicast writer's, until MulticastParams carries a snapshot"),

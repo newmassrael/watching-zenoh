@@ -83,13 +83,6 @@
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::policy::SessionPolicy;
 
-/// The build defaults, which the constructors that take no snapshot ([`NodeHlc::for_node`] and its
-/// two siblings) build the clock with. A node's creator resolves the snapshot of its node and hands
-/// it to the `_by` form instead.
-fn build_defaults() -> SessionPolicy {
-    SessionPolicy::defaults()
-}
-
 /// zenoh's `timestamping.enabled` per-role map: whether a node of a given role
 /// timestamps data messages that do not already carry one.
 ///
@@ -350,14 +343,8 @@ impl NodeHlc {
     /// describes; that is why the parameter list is the node's identity and
     /// role rather than anything a per-consumer call site would have handy.
     ///
-    /// The `clock-quality-stamping` policy is the build default's; a creator that holds the
-    /// snapshot of its node builds the clock with [`Self::for_node_by`].
-    pub fn for_node(zid: &[u8], whatami: WhatAmI, enabled: TimestampingEnabled) -> Self {
-        Self::for_node_by(zid, whatami, enabled, &build_defaults())
-    }
-
-    /// [`Self::for_node`] for the node whose creator resolved the snapshot `policy`: the node's
-    /// `clock-quality-stamping` policy is the one `policy` holds, read once, here.
+    /// `policy` is the snapshot the node's creator resolved: the node's `clock-quality-stamping`
+    /// policy is the one it holds, read once, here.
     #[cfg_attr(not(feature = "time-hlc"), allow(unused_variables))]
     pub fn for_node_by(
         zid: &[u8],
@@ -392,20 +379,9 @@ impl NodeHlc {
         }
     }
 
-    /// [`for_node`](Self::for_node) reading the time from `registry` instead of the process's own:
-    /// the registered sources when there are any, the system clock when there are none. For a host
-    /// that keeps its registry elsewhere, and for a test that must not share one.
-    #[cfg(feature = "clock-source")]
-    pub fn for_node_with_registry(
-        zid: &[u8],
-        whatami: WhatAmI,
-        enabled: TimestampingEnabled,
-        registry: &'static crate::clock_registry::ClockRegistry,
-    ) -> Self {
-        Self::for_node_with_registry_by(zid, whatami, enabled, registry, &build_defaults())
-    }
-
-    /// [`Self::for_node_with_registry`] for the snapshot `policy` the node's creator resolved.
+    /// [`for_node_by`](Self::for_node_by) reading the time from `registry` instead of the
+    /// process's own: the registered sources when there are any, the system clock when there are
+    /// none. For a host that keeps its registry elsewhere, and for a test that must not share one.
     #[cfg(feature = "clock-source")]
     pub fn for_node_with_registry_by(
         zid: &[u8],
@@ -424,20 +400,9 @@ impl NodeHlc {
         )
     }
 
-    /// [`for_node`](Self::for_node) over `source`, a clock the application owns, in place of the
-    /// system clock: what `uhlc`'s `HLCBuilder::with_clock` gives upstream's node. Its standing is
-    /// its own, as a node over the system clock keeps.
-    #[cfg(feature = "time-hlc")]
-    pub fn for_node_over_source(
-        zid: &[u8],
-        whatami: WhatAmI,
-        enabled: TimestampingEnabled,
-        source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
-    ) -> Self {
-        Self::for_node_over_source_by(zid, whatami, enabled, source, &build_defaults())
-    }
-
-    /// [`Self::for_node_over_source`] for the snapshot `policy` the node's creator resolved.
+    /// [`for_node_by`](Self::for_node_by) over `source`, a clock the application owns, in place of
+    /// the system clock: what `uhlc`'s `HLCBuilder::with_clock` gives upstream's node. Its standing
+    /// is its own, as a node over the system clock keeps.
     #[cfg(feature = "time-hlc")]
     pub fn for_node_over_source_by(
         zid: &[u8],
@@ -562,7 +527,7 @@ impl NodeHlc {
         self.trusted_only && !clock.standing.cell().is_trusted()
     }
 
-    /// A node that does not timestamp. Distinct from [`Self::for_node`] with a
+    /// A node that does not timestamp. Distinct from [`Self::for_node_by`] with a
     /// disabling map only in that it names the intent at the call site (a test
     /// fixture, or a construction path with no role to consult yet).
     pub fn disabled() -> Self {
@@ -571,7 +536,7 @@ impl NodeHlc {
 
     /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder).
     ///
-    /// A BUILDER rather than a fourth argument to [`Self::for_node`], because
+    /// A BUILDER rather than another argument to [`Self::for_node_by`], because
     /// this knob is orthogonal to the role gate and every one of that
     /// constructor's callers means the upstream default. Making it positional
     /// would have edited a dozen sites to write `false`.

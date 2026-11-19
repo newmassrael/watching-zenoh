@@ -2,13 +2,19 @@ use super::*;
 
 use crate::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_codecs::whatami::WhatAmI;
+use wz_session_core::policy::SessionPolicy;
 
 /// A node clock that DOES stamp, whatever the feature set — the fixture for
 /// the HLC-path tests. On a build without `time-hlc` this is still a
 /// non-stamping ZST, which is why every test that asserts HLC behaviour
 /// carries the feature gate.
 fn stamping_node(zid: &[u8]) -> NodeHlc {
-    NodeHlc::for_node(zid, WhatAmI::Router, TimestampingEnabled::default())
+    NodeHlc::for_node_by(
+        zid,
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    )
 }
 
 #[test]
@@ -84,7 +90,12 @@ fn a_non_stamping_node_falls_the_stamper_back_to_the_wall_clock() {
     // `Session::new_timestamp()` `None` arm, not a zero or a bare counter
     // that every real timestamp would dominate under newer-wins.
     let zid = vec![0x0F];
-    let off = NodeHlc::for_node(&zid, WhatAmI::Peer, TimestampingEnabled::default());
+    let off = NodeHlc::for_node_by(
+        &zid,
+        WhatAmI::Peer,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
     assert!(!off.is_stamping(), "the zenoh default gates a peer off");
     let stamper = FallbackStamp::new(zid.clone(), off);
     let ts = stamper.stamp();

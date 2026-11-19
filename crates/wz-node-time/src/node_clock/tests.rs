@@ -33,7 +33,12 @@ fn the_single_boolean_spelling_applies_to_every_role() {
 fn a_role_gated_off_node_holds_no_clock() {
     // True in BOTH feature configs (a build without `time-hlc` never
     // stamps), so this test is not gated.
-    let off = NodeHlc::for_node(&[0x01], WhatAmI::Peer, TimestampingEnabled::default());
+    let off = NodeHlc::for_node_by(
+        &[0x01],
+        WhatAmI::Peer,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
     assert!(!off.is_stamping());
     assert!(off.stamp().is_none());
     assert!(!NodeHlc::disabled().is_stamping());
@@ -43,7 +48,12 @@ fn a_role_gated_off_node_holds_no_clock() {
 #[test]
 fn a_stamping_node_mints_strictly_increasing_stamps_carrying_its_zid() {
     let zid = vec![0xDE, 0xAD, 0xBE, 0xEF];
-    let node = NodeHlc::for_node(&zid, WhatAmI::Router, TimestampingEnabled::default());
+    let node = NodeHlc::for_node_by(
+        &zid,
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
     assert!(node.is_stamping());
     let mut prev = 0u64;
     for _ in 0..1000 {
@@ -61,7 +71,12 @@ fn a_stamping_node_mints_strictly_increasing_stamps_carrying_its_zid() {
 #[test]
 fn a_node_that_does_not_stamp_gives_a_reply_no_stamp() {
     use wz_session_core::reply_stage::ReplyClock;
-    let off = NodeHlc::for_node(&[0x01], WhatAmI::Peer, TimestampingEnabled::default());
+    let off = NodeHlc::for_node_by(
+        &[0x01],
+        WhatAmI::Peer,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
     assert!(off.next_stamp().is_none());
     assert!(NodeHlc::disabled().next_stamp().is_none());
 }
@@ -71,7 +86,12 @@ fn a_node_that_does_not_stamp_gives_a_reply_no_stamp() {
 fn a_stamping_node_stamps_a_reply_with_its_own_identity_and_a_later_time_each_time() {
     use wz_session_core::reply_stage::ReplyClock;
     let zid = [0xDE, 0xAD, 0xBE, 0xEF];
-    let node = NodeHlc::for_node(&zid, WhatAmI::Router, TimestampingEnabled::default());
+    let node = NodeHlc::for_node_by(
+        &zid,
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
     let first = node.next_stamp().expect("a router-role node stamps");
     let second = node.next_stamp().expect("and again");
     assert_eq!(first.zid.as_slice(), &zid);
@@ -90,7 +110,12 @@ fn a_stamping_node_stamps_a_reply_with_its_own_identity_and_a_later_time_each_ti
 #[test]
 fn a_node_whose_identity_is_longer_than_a_timestamp_carries_stamps_no_reply() {
     use wz_session_core::reply_stage::ReplyClock;
-    let node = NodeHlc::for_node(&[7; 17], WhatAmI::Router, TimestampingEnabled::default());
+    let node = NodeHlc::for_node_by(
+        &[7; 17],
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
     assert!(
         node.stamp().is_some(),
         "its data is still stamped as it was"
@@ -277,11 +302,12 @@ fn the_policy_trusted_only_stamps_nothing_until_a_reference_is_reported_and_afte
 fn a_node_reads_a_source_registered_after_it_was_built_and_none_it_stamps_nothing() {
     use crate::clock_registry::ClockRegistry;
     let registry: &'static ClockRegistry = Box::leak(Box::new(ClockRegistry::new(2)));
-    let node = NodeHlc::for_node_with_registry(
+    let node = NodeHlc::for_node_with_registry_by(
         &[0x05],
         WhatAmI::Router,
         TimestampingEnabled::default(),
         registry,
+        &SessionPolicy::defaults(),
     );
     assert!(
         node.stamp().is_some(),
@@ -328,11 +354,12 @@ fn nodes_over_one_registry_share_its_standing_and_the_host_reports_through_eithe
     use crate::clock_registry::ClockRegistry;
     let registry: &'static ClockRegistry = Box::leak(Box::new(ClockRegistry::new(1)));
     let build = |zid: u8| {
-        NodeHlc::for_node_with_registry(
+        NodeHlc::for_node_with_registry_by(
             &[zid],
             WhatAmI::Router,
             TimestampingEnabled::default(),
             registry,
+            &SessionPolicy::defaults(),
         )
         .with_trusted_only_stamping(true)
     };
@@ -503,7 +530,12 @@ mod forward_stamp {
     fn a_non_stamping_node_leaves_the_push_byte_identical() {
         // The default path off a router, and the ONLY path on a build without
         // `time-hlc`: the forward wire is unchanged by this seam existing.
-        let node = NodeHlc::for_node(&[0x01], WhatAmI::Peer, TimestampingEnabled::default());
+        let node = NodeHlc::for_node_by(
+            &[0x01],
+            WhatAmI::Peer,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        );
         let before = bare_put();
         let mut after = before.clone();
         node.treat_timestamp(&mut after);
@@ -555,7 +587,12 @@ mod forward_stamp {
         // foreign-observable branch: a pico subscriber prints
         // `with timestamp:` only when the field is present.
         let node_zid = [0xA1, 0xB2];
-        let node = NodeHlc::for_node(&node_zid, WhatAmI::Router, TimestampingEnabled::default());
+        let node = NodeHlc::for_node_by(
+            &node_zid,
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        );
         let mut push = bare_put();
         assert!(
             read_push_timestamp(&push).is_none(),
@@ -649,7 +686,12 @@ mod forward_stamp {
     #[cfg(feature = "time-hlc")]
     #[test]
     fn a_delete_that_carries_a_time_keeps_it_when_the_session_publishes_it() {
-        let node = NodeHlc::for_node(&[0x01], WhatAmI::Router, TimestampingEnabled::default());
+        let node = NodeHlc::for_node_by(
+            &[0x01],
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        );
         let mut push = build_push_del_literal("demo/hlc").expect("build del");
         let given = wz_session_core::sample::TimestampHint {
             time: 1u64 << 40,
@@ -672,7 +714,12 @@ mod forward_stamp {
         // timestamp; rewriting it would destroy the ordering the publisher
         // established. Absorption is still observable locally: the node's
         // next own stamp must sort after the timestamp it just absorbed.
-        let node = NodeHlc::for_node(&[0x01], WhatAmI::Router, TimestampingEnabled::default());
+        let node = NodeHlc::for_node_by(
+            &[0x01],
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        );
         let publisher_zid = [0x0B, 0x0C];
         let inbound_time = crate::timestamp_source::wall_clock_ntp64();
         let mut push = stamped_put(inbound_time, &publisher_zid);
@@ -698,7 +745,12 @@ mod forward_stamp {
         // dropping. 10s ahead is two orders of magnitude past the bound, so
         // this does not sit near a threshold.
         let node_zid = [0x01];
-        let node = NodeHlc::for_node(&node_zid, WhatAmI::Router, TimestampingEnabled::default());
+        let node = NodeHlc::for_node_by(
+            &node_zid,
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        );
         let ten_seconds = 10u64 << 32;
         let future_time = crate::timestamp_source::wall_clock_ntp64() + ten_seconds;
         let mut push = stamped_put(future_time, &[0x0B, 0x0C]);
@@ -731,7 +783,12 @@ mod forward_stamp {
         let future_time = crate::timestamp_source::wall_clock_ntp64() + ten_seconds;
 
         // CONTROL: shipped default — relay, with the timestamp replaced.
-        let keeps = NodeHlc::for_node(&node_zid, WhatAmI::Router, TimestampingEnabled::default());
+        let keeps = NodeHlc::for_node_by(
+            &node_zid,
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        );
         let mut relayed = stamped_put(future_time, &[0x0B, 0x0C]);
         assert_eq!(
             keeps.treat_timestamp(&mut relayed),
@@ -745,8 +802,13 @@ mod forward_stamp {
         );
 
         // The knob ON: the same input through the same role, dropped.
-        let drops = NodeHlc::for_node(&node_zid, WhatAmI::Router, TimestampingEnabled::default())
-            .with_drop_future_timestamp(true);
+        let drops = NodeHlc::for_node_by(
+            &node_zid,
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        )
+        .with_drop_future_timestamp(true);
         let mut dropped = stamped_put(future_time, &[0x0B, 0x0C]);
         assert_eq!(
             drops.treat_timestamp(&mut dropped),
@@ -766,8 +828,13 @@ mod forward_stamp {
     #[cfg(feature = "time-hlc")]
     #[test]
     fn the_drop_knob_leaves_the_mint_and_absorb_arms_alone() {
-        let node = NodeHlc::for_node(&[0x01], WhatAmI::Router, TimestampingEnabled::default())
-            .with_drop_future_timestamp(true);
+        let node = NodeHlc::for_node_by(
+            &[0x01],
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            &SessionPolicy::defaults(),
+        )
+        .with_drop_future_timestamp(true);
 
         let mut bare = bare_put();
         assert_eq!(
@@ -912,9 +979,19 @@ fn an_oversized_or_empty_zid_still_yields_a_usable_clock() {
     // empty one falls back to the guard id, so neither panics during
     // construction — the absorb path derives an id from an INBOUND zid, so
     // this guard is reachable from the wire, not only from a test.
-    let long = NodeHlc::for_node(&[0xAB; 32], WhatAmI::Router, TimestampingEnabled::all(true));
+    let long = NodeHlc::for_node_by(
+        &[0xAB; 32],
+        WhatAmI::Router,
+        TimestampingEnabled::all(true),
+        &SessionPolicy::defaults(),
+    );
     assert!(long.stamp().is_some());
-    let empty = NodeHlc::for_node(&[], WhatAmI::Router, TimestampingEnabled::all(true));
+    let empty = NodeHlc::for_node_by(
+        &[],
+        WhatAmI::Router,
+        TimestampingEnabled::all(true),
+        &SessionPolicy::defaults(),
+    );
     assert!(empty.stamp().is_some());
 }
 
@@ -930,10 +1007,11 @@ fn read_interception(bytes: &[u8]) -> (u64, Vec<u8>) {
 #[cfg(feature = "pubsub-ts-stack")]
 #[test]
 fn an_interception_is_stamped_with_the_zid_of_the_node_and_strictly_increases() {
-    let node = NodeHlc::for_node(
+    let node = NodeHlc::for_node_by(
         &[0x0A, 0x0B],
         WhatAmI::Router,
         TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
     );
     let mut prev = 0;
     for _ in 0..100 {
@@ -949,7 +1027,12 @@ fn an_interception_is_stamped_with_the_zid_of_the_node_and_strictly_increases() 
 #[cfg(feature = "pubsub-ts-stack")]
 #[test]
 fn a_node_whose_role_stamps_no_data_still_stamps_its_interceptions() {
-    let peer = NodeHlc::for_node(&[0x01], WhatAmI::Peer, TimestampingEnabled::default());
+    let peer = NodeHlc::for_node_by(
+        &[0x01],
+        WhatAmI::Peer,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
     assert!(peer.stamp().is_none(), "no data is stamped on a peer");
     let (_, id) = read_interception(&peer.interception_timestamp().expect("a stamp"));
     assert_eq!(id, [0x01]);
