@@ -7676,7 +7676,7 @@ fn a_queryable_that_says_nothing_leaves_stamping_to_its_session() {
 /// A queryable that says nothing is given the `entity-timestamp-opt-in` value of the session it
 /// is declared on, not the build's: the stamp the session makes for it stamps exactly when that
 /// value is off, and a stated choice is the queryable's under either value.
-#[cfg(feature = "pubsub-timestamp")]
+#[cfg(all(feature = "query-queryable", feature = "pubsub-timestamp"))]
 #[test]
 fn a_queryable_that_says_nothing_stamps_as_its_sessions_snapshot_says() {
     use wz_session_core::policy::EntityTimestampOptIn;
