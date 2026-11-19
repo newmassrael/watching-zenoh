@@ -401,6 +401,15 @@ transport-link-unixpipe,transport-link-ws|"
     # by name. The doors have no unit tests of their own; the mechanism's are `wz-app-frame`'s.
     "wz-capi-pico|hook|e2e-sender,e2e-sender-demux|--test=e2e_doors"
     "wz-capi-pico|hook|e2e-sender,e2e-receiver|--test=e2e_doors"
+    # The replay cache driven from C (`wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*`):
+    # the unit tests of the two modules and the file that answers a late subscriber's asking over
+    # loopback, two publishers appearing at different times (`replay_cache_doors`, whose module is
+    # behind the feature). The round, the ring and the admission have model tests of their own in
+    # `wz-session-core` and `wz-app-frame`, each a leg below.
+    "wz-capi-pico|hook|replay-cache|"
+    # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
+    # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
+    "wz-app-frame|hook|replay|"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
@@ -679,6 +688,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         query-source-info,\
         query-value,\
         reassembly,\
+        replay-cache,\
         reply-source-info,\
         resource-snapshot,\
         routing-namespace,\

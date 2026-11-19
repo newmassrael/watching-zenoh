@@ -546,6 +546,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
         # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
+        # `replay-cache` gates `pub mod replay_publisher` and `pub mod replay_subscriber`, whose
+        # public items are wz's own doors `wz_ext_replay_publisher_storage_size`, `_new`,
+        # `_record`, `_put`, `_serve`, `_phase`, `_counts`, `_loan`, `_move`, `_drop`,
+        # `wz_ext_replay_serve_options_default`, `wz_ext_replay_subscriber_options_default`,
+        # `_new`, `_poll`, `_phase`, `_counts`, `_loan`, `_move`, `_drop` and the four
+        # `wz_ext_internal_replay_*` doors, and the types and constants they take, declared in
+        # `wz_ext.h`; off by default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",
@@ -558,6 +565,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "e2e-supervision",
                 "event-ring",
                 "remote-declaration-watch",
+                "replay-cache",
                 "resource-snapshot",
                 "scout-mcu",
                 "segment-sender",
