@@ -8989,7 +8989,8 @@ mod stock_config_tests {
     /// binary does not parse would satisfy it while the wire stayed exactly
     /// where it was — a green that measures the expansion talking to itself.
     /// This is the other half: the expanded argv is read back through
-    /// [`TransportTuning::from_argv`], which is the same call `main` makes, and
+    /// [`TransportTuning::from_argv`], the read `main` makes (`from_argv_under`) under the
+    /// demo's own snapshot, and
     /// the params [`demo_session_init_params`] builds from it carry the
     /// operator's numbers rather than the demo's.
     ///
@@ -10927,8 +10928,9 @@ impl TransportTuning {
     /// failure this whole round exists to remove.
     ///
     /// The node's snapshot is the demo's own ([`resolve_policy`]); `main` reads the tuning
-    /// through [`Self::from_argv_under`] with the snapshot its `--config` file resolved.
-    #[cfg(all(test, feature = "zenoh-config"))]
+    /// through [`Self::from_argv_under`] with the snapshot its `--config` file resolved, so only
+    /// the tests read the tuning this way.
+    #[cfg(test)]
     pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
         Self::from_argv_under(rest, resolve_policy())
     }
@@ -11133,7 +11135,7 @@ impl NodeTimestamping {
     /// Read `--timestamping <true|false>` off the command line.
     ///
     /// A malformed value is an ERROR rather than a silent fallback, for
-    /// [`TransportTuning::from_argv`]'s reason: the operator asked for a
+    /// [`TransportTuning::from_argv_under`]'s reason: the operator asked for a
     /// specific stamping policy, and quietly running the other one is exactly
     /// the failure the config expansion exists to remove. `true` / `false` are
     /// the only spellings, because they are the two json5 spellings the key
