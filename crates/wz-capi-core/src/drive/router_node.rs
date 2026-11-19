@@ -457,6 +457,15 @@ pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     if stance.app_transport.is_some() {
         return Some("a transport the program supplies");
     }
+    // The node's faces name keys as upstream's do and read no id of a dictionary: the key ids
+    // every node shares are the registry of faces' (`faces::KeyIdPlan`).
+    if stance.session_policy.key_wire_form() != wz_session_core::policy::KeyWireForm::Declared {
+        return Some("a `key-wire-form` other than `declared`");
+    }
+    #[cfg(feature = "shared-key-ids")]
+    if stance.session_defaults.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default() {
+        return Some("the key ids every node shares (`wz/key-ids`)");
+    }
     None
 }
 

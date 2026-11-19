@@ -4805,6 +4805,16 @@ pub fn open_blocking(
             return Err(OpenError::DriveFailed);
         }
     };
+    // A build without the dictionary names keys as upstream does and no other way, so a session
+    // told to name them otherwise is not opened as if it had not been told.
+    #[cfg(not(feature = "shared-key-ids"))]
+    if session_policy.key_wire_form() != wz_session_core::policy::KeyWireForm::Declared {
+        log_open_failure(
+            "key-wire form",
+            &"a build without the shared-key-ids capability names keys as `declared` only",
+        );
+        return Err(OpenError::DriveFailed);
+    }
     // R311y820 — one line below the mint, and fallible for the same reason:
     // both need OS entropy and neither has an honest constant to fall back to.
     let shared = Arc::new(

@@ -252,9 +252,9 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, Op
             },
         },
         aggregation,
-        // A zenoh document states no key ids; an ABI that holds them hands them over itself.
+        // The key ids the document's `wz/key-ids` states, read with its policies.
         #[cfg(feature = "shared-key-ids")]
-        key_ids: Default::default(),
+        key_ids: node.key_ids.clone(),
     })
 }
 
@@ -3097,6 +3097,92 @@ mod tests {
                 stated.router_refusal(),
                 Some("`aggregation/subscribers` or `aggregation/publishers`"),
                 "{list}"
+            );
+        }
+    }
+
+    /// The key ids a document's `wz/key-ids` states reach the session the plan opens, the same
+    /// value the reader read, through what the session applies above its links.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn the_plan_hands_the_documents_key_ids_to_the_session() {
+        use wz_session_core::policy::KeyWireForm;
+        use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen};
+
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ],
+                                    links: [ { locator: "tcp/127.0.0.1:1", form: "literal" } ] } } }"#,
+        )
+        .expect("opens");
+        assert_eq!(
+            plan.session.key_ids,
+            KeyIdsAtOpen {
+                ids: Some(std::sync::Arc::new(
+                    KeyIds::new([(40, "lab/rig")]).expect("valid")
+                )),
+                links: vec![("tcp/127.0.0.1:1".to_owned(), KeyWireForm::Literal)],
+            }
+        );
+        assert_eq!(
+            refusal_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:1"],
+                &[],
+                r#"{ scouting: { multicast: { enabled: false } },
+                     wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#,
+            ),
+            OpenRefusal::Policies,
+            "a refused member refuses the open as a refused policy does"
+        );
+    }
+
+    /// A node's faces read no id of a dictionary and name keys as upstream's do, so a node asked
+    /// for another key-wire form, or handed key ids, is refused by name and not opened without
+    /// them.
+    #[cfg(feature = "router-node")]
+    #[test]
+    fn a_node_refuses_a_key_wire_form_it_does_not_carry() {
+        let arguments = |document: &str| {
+            plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
+                .expect("opens")
+                .into_arguments(AbiChoices {
+                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                    start_read_task: true,
+                    local_delivery: LocalDeliveryDrain::Caller,
+                    liveliness_to_self: true,
+                    initial_interest: true,
+                    face_drive: FaceDrive::PerFace,
+                    shm_clients: crate::faces::no_shm_clients(),
+                    offer_shm: false,
+                    groups_report_shm: false,
+                })
+        };
+        let declared = arguments(
+            r#"{ scouting: { multicast: { enabled: false } },
+                 wz: { policies: { "key-wire-form": "declared" } } }"#,
+        );
+        assert_eq!(declared.router_refusal(), None, "CONTROL: upstream's form");
+        let literal = arguments(
+            r#"{ scouting: { multicast: { enabled: false } },
+                 wz: { policies: { "key-wire-form": "literal" } } }"#,
+        );
+        assert_eq!(
+            literal.router_refusal(),
+            Some("a `key-wire-form` other than `declared`")
+        );
+        #[cfg(feature = "shared-key-ids")]
+        {
+            let handed = arguments(
+                r#"{ scouting: { multicast: { enabled: false } },
+                     wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
+            );
+            assert_eq!(
+                handed.router_refusal(),
+                Some("the key ids every node shares (`wz/key-ids`)")
             );
         }
     }
