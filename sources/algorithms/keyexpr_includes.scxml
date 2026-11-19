@@ -10,12 +10,14 @@
   * A text with an empty chunk covers and is covered by nothing, and on a build
     whose key buffer is fixed (`bounded`) neither is one of more than
     `chunk_bound` chunks.
-  * Without `**` the chunks are covered one for one (keyexpr_chunk_includes).
   * A `**` of b with none in a: no; a chunk that is not `**` does not cover any
     number of chunks.
-  * With `**` in a, keyexpr_includes_dp fills the table of their prefixes, its
-    bits over b when b has at most 63 chunks and over a otherwise; two texts of
-    more than 63 chunks each are refused, the bound of a uint64 row.
+  * With `**` in a alone, or nowhere, keyexpr_walk walks b's chunks from a
+    (relation 2, keyexpr_chunk_includes at each step).
+  * With `**` on both sides, keyexpr_includes_dp fills the table of their
+    prefixes, its bits over b when b has at most 63 chunks and over a
+    otherwise; two such texts of more than 63 chunks each are refused, the
+    bound of a uint64 row.
 
   `wild_single`, `wild_double` and `wild_dsl` are the build's wildcard switches
   (`keyexpr-wildcard-single`, `keyexpr-wildcard-double`, `keyexpr-dollar-star`):
@@ -28,10 +30,9 @@
        sce:kind="algorithm"
        name="keyexpr_includes"
        version="1.0">
-  <sce:import kind="algorithm" src="keyexpr_chunk_count.scxml" as="keyexpr_chunk_count"/>
-  <sce:import kind="algorithm" src="keyexpr_chunk_end.scxml" as="keyexpr_chunk_end"/>
-  <sce:import kind="algorithm" src="keyexpr_has_double.scxml" as="keyexpr_has_double"/>
-  <sce:import kind="algorithm" src="keyexpr_chunk_includes.scxml" as="keyexpr_chunk_includes"/>
+  <sce:import kind="algorithm" src="keyexpr_shape.scxml" as="keyexpr_shape"/>
+  <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
+  <sce:import kind="algorithm" src="keyexpr_walk.scxml" as="keyexpr_walk"/>
   <sce:import kind="algorithm" src="keyexpr_includes_dp.scxml" as="keyexpr_includes_dp"/>
   <sce:signature>
     <sce:param name="a" type="bytes"/>
@@ -44,51 +45,40 @@
     <sce:return type="bool"/>
   </sce:signature>
   <sce:body>
-    <sce:var name="na" type="uint32" init="keyexpr_chunk_count(a)"/>
-    <sce:var name="nb" type="uint32" init="keyexpr_chunk_count(b)"/>
-    <sce:if cond="na === 0 || nb === 0">
-      <sce:return expr="false"/>
-    </sce:if>
-    <sce:if cond="bounded &amp;&amp; (na &gt; chunk_bound || nb &gt; chunk_bound)">
-      <sce:return expr="false"/>
-    </sce:if>
-    <sce:var name="da" type="bool" init="wild_double &amp;&amp; keyexpr_has_double(a)"/>
-    <sce:var name="db" type="bool" init="wild_double &amp;&amp; keyexpr_has_double(b)"/>
-    <sce:if cond="da">
-      <sce:if cond="nb &lt;= 63">
-        <sce:return expr="keyexpr_includes_dp(a, b, false, wild_single, wild_dsl)"/>
+    <!-- Where no chunk bound applies, the walk from a judges both texts as it
+         goes and answers unless b holds a `**`; only then are the two shapes
+         read. -->
+    <sce:if cond="!bounded">
+      <sce:var name="quick" type="uint8" init="keyexpr_walk(a, b, 2, wild_single, wild_double, wild_dsl)"/>
+      <sce:if cond="quick !== 2">
+        <sce:return expr="quick === 1"/>
       </sce:if>
-      <sce:if cond="na &lt;= 63">
-        <sce:return expr="keyexpr_includes_dp(a, b, true, wild_single, wild_dsl)"/>
-      </sce:if>
+    </sce:if>
+    <sce:var name="sa" type="record:Shape" init="keyexpr_shape(a)"/>
+    <sce:var name="sb" type="record:Shape" init="keyexpr_shape(b)"/>
+    <!-- A `$*` chunk is spelled with a `$`: without one in either text the
+         chunk steps need not look for it. -->
+    <sce:var name="dsl" type="bool" init="wild_dsl &amp;&amp; (sa.dollar || sb.dollar)"/>
+    <sce:if cond="sa.chunks === 0 || sb.chunks === 0">
       <sce:return expr="false"/>
     </sce:if>
+    <sce:if cond="bounded &amp;&amp; (sa.chunks &gt; chunk_bound || sb.chunks &gt; chunk_bound)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:var name="da" type="bool" init="wild_double &amp;&amp; sa.double_star"/>
+    <sce:var name="db" type="bool" init="wild_double &amp;&amp; sb.double_star"/>
     <sce:if cond="db">
-      <sce:return expr="false"/>
-    </sce:if>
-    <!-- No `**`: the chunks are covered one for one. -->
-    <sce:if cond="na !== nb">
-      <sce:return expr="false"/>
-    </sce:if>
-    <sce:var name="an" type="uint32" init="len(a)"/>
-    <sce:var name="bn" type="uint32" init="len(b)"/>
-    <sce:var name="as_" type="uint32" init="0"/>
-    <sce:var name="bs_" type="uint32" init="0"/>
-    <sce:var name="more" type="bool" init="true"/>
-    <sce:while cond="more">
-      <sce:var name="ae_" type="uint32" init="keyexpr_chunk_end(a, as_)"/>
-      <sce:var name="be_" type="uint32" init="keyexpr_chunk_end(b, bs_)"/>
-      <sce:if cond="!keyexpr_chunk_includes(a, as_, ae_, b, bs_, be_, wild_single, wild_dsl)">
+      <sce:if cond="!da">
         <sce:return expr="false"/>
       </sce:if>
-      <sce:if cond="ae_ &lt; an &amp;&amp; be_ &lt; bn">
-        <sce:assign target="as_" expr="ae_ + 1"/>
-        <sce:assign target="bs_" expr="be_ + 1"/>
-        <sce:else>
-          <sce:assign target="more" expr="false"/>
-        </sce:else>
+      <sce:if cond="sb.chunks &lt;= 63">
+        <sce:return expr="keyexpr_includes_dp(a, b, false, wild_single, dsl)"/>
       </sce:if>
-    </sce:while>
-    <sce:return expr="true"/>
+      <sce:if cond="sa.chunks &lt;= 63">
+        <sce:return expr="keyexpr_includes_dp(a, b, true, wild_single, dsl)"/>
+      </sce:if>
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:return expr="keyexpr_walk(a, b, 2, wild_single, wild_double, dsl) === 1"/>
   </sce:body>
 </scxml>

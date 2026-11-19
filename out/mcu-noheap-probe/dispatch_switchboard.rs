@@ -88,14 +88,14 @@ pub fn dispatch_switchboard(
     let mut injected = 0usize;
 
     // home/*/temp -> temp_reading (value via temp_reading_codec)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&["home", "*", "temp"], target_keyexpr)
+    if wz_session_core::keyexpr_match::keyexpr_matches("home/*/temp", target_keyexpr)
         && injector.inject_value("temp_reading", payload)
     {
         injected += 1;
     }
 
     // home/*/reset -> reset (signal)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&["home", "*", "reset"], target_keyexpr) {
+    if wz_session_core::keyexpr_match::keyexpr_matches("home/*/reset", target_keyexpr) {
         injector.inject("reset", "");
         injected += 1;
     }

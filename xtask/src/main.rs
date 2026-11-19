@@ -461,6 +461,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         "keyexpr_intersects",
         "keyexpr_includes",
         "keyexpr_matches",
+        "keyexpr_walk",
         "keyexpr_intersects_dp",
         "keyexpr_includes_dp",
         "keyexpr_chunk_intersects",
@@ -469,17 +470,17 @@ fn regen_statecharts_and_pools(root: &Path) {
         "keyexpr_dsl_matches",
         "keyexpr_range_equal",
         "keyexpr_has_dsl",
-        "keyexpr_has_star",
-        "keyexpr_has_double",
-        "keyexpr_chunk_count",
+        "keyexpr_shape",
         "keyexpr_chunk_end",
         "keyexpr_chunk_kind",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }
-    // The record type key_facts returns, emitted beside it: an algorithm names its
-    // record's schema as the sibling module `super::<schema>`.
-    codegen.emit_event_schema("key_facts_schema", &algorithms, &sc_out);
+    // The record types the algorithms above return, emitted beside them: an algorithm
+    // names its record's schema as the sibling module `super::<schema>`.
+    for stem in ["key_facts_schema", "keyexpr_shape_schema"] {
+        codegen.emit_event_schema(stem, &algorithms, &sc_out);
+    }
 
     // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
     let pools: &[(&str, &str)] = &[
