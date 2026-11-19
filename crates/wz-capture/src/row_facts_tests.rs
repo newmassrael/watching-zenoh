@@ -66,6 +66,30 @@ fn document(d: &Dissection, file: &[u8], declared: Option<&str>, trees: Trees) -
     .expect("nothing stops the call")
 }
 
+/// [`document`] written as CBOR by the writer itself
+/// ([`crate::fields_json::fields_cbor_since_judged`]), from a fresh memory.
+fn document_cbor(d: &Dissection, file: &[u8], declared: Option<&str>, trees: Trees) -> Vec<u8> {
+    let mut map = FormatMap::new();
+    if let Some(text) = declared {
+        map.declare_all(text).expect("the declarations install");
+    }
+    crate::fields_json::fields_cbor_since_judged(
+        d,
+        file,
+        declared.map(|_| &map),
+        None,
+        declared.unwrap_or(""),
+        &Numbered,
+        Since {
+            after_seq: 0,
+            through_seq: u64::MAX,
+        },
+        &mut FieldsMemory::with_trees(trees),
+        None,
+    )
+    .expect("nothing stops the call")
+}
+
 /// Where the object or array that opens at `start` closes, one past its last
 /// byte, read through strings and their escapes.
 fn balanced_end(text: &str, start: usize) -> usize {
@@ -168,6 +192,19 @@ fn holds(d: &Dissection, file: &[u8], declared: Option<&str>, trees_seen: &[&str
     );
     let summary = crate::payload_cbor::scan_cbor(&cbor).expect("the CBOR is well-formed");
     assert_eq!(summary.top_level, crate::payload_cbor::CborKind::Map);
+
+    // THE WRITER'S OWN CBOR is the mapping of its JSON, byte for byte, in both
+    // shapes: one writer, two encodings, and no fact read twice.
+    assert_eq!(
+        document_cbor(d, file, declared, Trees::Left),
+        cbor,
+        "the row-facts CBOR the writer wrote differs from the mapping of {facts}"
+    );
+    assert_eq!(
+        document_cbor(d, file, declared, Trees::Written),
+        crate::cbor_of_json::cbor_of_json(&full).expect("the document is JSON"),
+        "the field CBOR the writer wrote differs from the mapping of {full}"
+    );
 }
 
 #[test]

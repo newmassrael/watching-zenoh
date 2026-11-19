@@ -13,7 +13,9 @@
 //! trees. This measures, on a capture of small pushes like that one, how much
 //! of a row's bytes and of the call are the trees ([`Trees::Written`] against
 //! [`Trees::Left`]), and what writing the treeless document again as CBOR
-//! ([`cbor_of_json`]) adds.
+//! ([`cbor_of_json`]) adds, against the writer writing that CBOR straight
+//! ([`fields_cbor_since_judged`], the row-facts door since it stopped
+//! converting).
 //!
 //! The documents are written by the remembering since-door, the one a live
 //! handle's doors call, from cursor 0 over the whole capture and then step by
@@ -36,7 +38,8 @@ use std::time::Instant;
 
 use wz_capture::cbor_of_json::cbor_of_json;
 use wz_capture::fields_json::{
-    fields_json_since_remembering_progress, FieldsMemory, RowCoordinates, Since, Trees,
+    fields_cbor_since_judged, fields_json_since_remembering_progress, FieldsMemory, RowCoordinates,
+    Since, Trees,
 };
 use wz_capture::fixtures::{push_run_capture_of, RunTransport};
 use wz_capture::Dissection;
@@ -106,6 +109,27 @@ fn whole(d: &Dissection, file: &[u8], rows: u64, trees: Trees) -> String {
     .expect("nothing stops the call")
 }
 
+/// [`whole`] in CBOR, written by the writer itself: what the row-facts door
+/// does.
+fn whole_cbor(d: &Dissection, file: &[u8], rows: u64, trees: Trees) -> Vec<u8> {
+    let mut memory = FieldsMemory::with_trees(trees);
+    fields_cbor_since_judged(
+        d,
+        file,
+        None,
+        None,
+        "",
+        &OneList,
+        Since {
+            after_seq: 0,
+            through_seq: rows,
+        },
+        &mut memory,
+        None,
+    )
+    .expect("nothing stops the call")
+}
+
 /// The capture read in [`STEPS`] steps, each from the cursor the last one gave,
 /// with one memory of `trees`' shape: the microseconds the doors took in all and
 /// the bytes they wrote. The dissections are made before the clock starts.
@@ -152,6 +176,11 @@ fn measure(pushes: usize) {
     let (trees_us, with_trees) = fastest(|| whole(&d, &file, rows, Trees::Written));
     let (facts_us, facts) = fastest(|| whole(&d, &file, rows, Trees::Left));
     let (cbor_us, cbor) = fastest(|| cbor_of_json(&facts).expect("the document is JSON"));
+    let (straight_us, straight) = fastest(|| whole_cbor(&d, &file, rows, Trees::Left));
+    assert_eq!(
+        straight, cbor,
+        "the CBOR written straight is the mapping of the text"
+    );
 
     assert_eq!(with_trees.matches("\"seq\":").count() as u64, rows);
     assert_eq!(facts.matches("\"seq\":").count() as u64, rows);
@@ -197,6 +226,16 @@ fn measure(pushes: usize) {
         per_row(cbor_us as f64),
         cbor.len(),
         per_row(cbor.len() as f64)
+    );
+    println!(
+        "  text + conversion     {:>9} us {:>7.2} us/row",
+        facts_us + cbor_us,
+        per_row((facts_us + cbor_us) as f64)
+    );
+    println!(
+        "  CBOR written straight {straight_us:>9} us {:>7.2} us/row  {:>10} B",
+        per_row(straight_us as f64),
+        straight.len()
     );
     println!(
         "  {STEPS} steps, with trees     {step_trees_us:>9} us {:>7.2} us/row  {:>10} B",

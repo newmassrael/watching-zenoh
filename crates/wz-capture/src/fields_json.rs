@@ -55,12 +55,11 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use wz_session_core::dissect::to_json;
-use wz_session_core::json::escape_into;
+use wz_session_core::doc_out::{CborOut, DocOut, JsonOut};
 use wz_session_core::passive::{Direction, PassiveFrame};
 
-use crate::census_json::{dir_name, push_flow};
-use crate::payload_decode::{decode_payload, push_decoding, Declarations, KeyexprAt};
+use crate::census_json::{dir_name, write_flow};
+use crate::payload_decode::{decode_payload, write_decoding, Declarations, KeyexprAt};
 
 /// Every message in `capture`, dissected into fields.
 ///
@@ -419,6 +418,10 @@ pub fn fields_json_since_coordinated(
 #[derive(Debug, Default)]
 pub struct FieldsMemory {
     key: Option<String>,
+    /// The encoding of the rows it wrote ([`DocOut::ENCODING`]), whose
+    /// digests it holds: another encoding empties it, as another declaration
+    /// text does.
+    encoding: Option<&'static str>,
     /// The shape of every row this memory writes. Not emptied with the rest when
     /// the declaration text changes.
     trees: Trees,
@@ -644,12 +647,74 @@ pub fn fields_json_since_judged(
     memory: &mut FieldsMemory,
     progress: Option<&crate::Progress<'_>>,
 ) -> Option<String> {
-    if memory.key.as_deref() != Some(key) {
+    document_since_judged::<JsonOut>(
+        d,
+        capture,
+        map,
+        judged,
+        key,
+        coordinates,
+        since,
+        memory,
+        progress,
+    )
+}
+
+/// [`fields_json_since_judged`]'s document in its binary form, written
+/// straight: RFC 8949's CBOR, byte for byte the mapping (§6.2) of the JSON
+/// [`fields_json_since_judged`] writes at the same state, by the same writer
+/// through [`CborOut`] ([`wz_session_core::doc_out`]). The JSON text is never
+/// made.
+///
+/// `memory` holds the digests of the rows it wrote, and those are of the CBOR
+/// rows here: a memory used by both doors would compare one encoding's rows
+/// with the other's, so a memory that changes encoding begins again, as one
+/// that changes declaration text does.
+#[allow(clippy::too_many_arguments)]
+pub fn fields_cbor_since_judged(
+    d: &crate::Dissection,
+    capture: &[u8],
+    map: Option<&crate::payload::formats::FormatMap<'_>>,
+    judged: Option<&crate::e2e_plane::E2eTable>,
+    key: &str,
+    coordinates: &dyn RowCoordinates,
+    since: Since,
+    memory: &mut FieldsMemory,
+    progress: Option<&crate::Progress<'_>>,
+) -> Option<alloc::vec::Vec<u8>> {
+    document_since_judged::<CborOut>(
+        d,
+        capture,
+        map,
+        judged,
+        key,
+        coordinates,
+        since,
+        memory,
+        progress,
+    )
+}
+
+/// The since-document of [`fields_json_since_judged`] in `W`'s encoding.
+#[allow(clippy::too_many_arguments)]
+fn document_since_judged<W: DocOut>(
+    d: &crate::Dissection,
+    capture: &[u8],
+    map: Option<&crate::payload::formats::FormatMap<'_>>,
+    judged: Option<&crate::e2e_plane::E2eTable>,
+    key: &str,
+    coordinates: &dyn RowCoordinates,
+    since: Since,
+    memory: &mut FieldsMemory,
+    progress: Option<&crate::Progress<'_>>,
+) -> Option<W::Done> {
+    if memory.key.as_deref() != Some(key) || memory.encoding != Some(W::ENCODING) {
         let nodes = core::mem::take(&mut memory.nodes);
         let pairing = core::mem::take(&mut memory.pairing);
         let pairing_work = memory.pairing_work;
         *memory = FieldsMemory {
             key: Some(String::from(key)),
+            encoding: Some(W::ENCODING),
             trees: memory.trees,
             nodes,
             pairing,
@@ -906,8 +971,8 @@ pub fn fields_json_since_judged(
             let declared = map.map(|m| {
                 declared_run(m, crate::segment_chain::PieceLedger::new(), judged.as_ref())
             });
-            let probe = RowSink::new(alloc::collections::BTreeSet::new());
-            let _ = fields_json_selected(
+            let probe = RowSink::<W::Done>::new(alloc::collections::BTreeSet::new());
+            let _ = document_selected::<W>(
                 d,
                 capture,
                 None,
@@ -954,7 +1019,7 @@ pub fn fields_json_since_judged(
         }
     }
 
-    let sink = RowSink::new(revised);
+    let sink = RowSink::<W::Done>::new(revised);
     // The pieces this walk joins against: the last walk's when it goes on from
     // there. Open-debt item 924, D9 — and when it begins again, too, with what
     // they joined of each row, when they are still this capture's and every row
@@ -976,7 +1041,7 @@ pub fn fields_json_since_judged(
     // A walk that begins with a new table takes the one the pairing's walk filled,
     // when it did.
     let absorbed_anew = (!keep_table && absorbed).then_some(absorbed_anew);
-    let document = fields_json_selected(
+    let document = document_selected::<W>(
         d,
         capture,
         None,
@@ -1395,14 +1460,15 @@ pub fn fields_json_grouped(
 /// input — something that joins a row to, or picks it out by, a fact outside
 /// this document. All three default to absent, which is the document a capture
 /// door writes.
-#[derive(Default)]
-struct RowAttachments<'a> {
+///
+/// `D` is what a row of the document's encoding is held as ([`RowSink`]).
+struct RowAttachments<'a, D> {
     verdicts: Option<&'a RowJudgement>,
     coordinates: Option<&'a dyn RowCoordinates>,
     since: Option<Since>,
     /// What a since-document remembers of the rows it writes and which earlier
     /// rows it writes again. Absent for every document that remembers nothing.
-    sink: Option<&'a RowSink>,
+    sink: Option<&'a RowSink<D>>,
     /// The exchange plane's pairing of requests and finals, when the caller
     /// already holds it (a selector's walk made one, or a live handle kept one
     /// between calls). Absent: the document makes the pairing itself, over the
@@ -1421,6 +1487,23 @@ struct RowAttachments<'a> {
     /// Whether the rows write the trees their walks made. Every door but the
     /// row-facts door writes them.
     trees: Trees,
+}
+
+// By hand, not derived: a derive would ask `D` for a default, and `D` is only
+// ever behind the reference.
+impl<D> Default for RowAttachments<'_, D> {
+    fn default() -> Self {
+        Self {
+            verdicts: None,
+            coordinates: None,
+            since: None,
+            sink: None,
+            closings: None,
+            progress: None,
+            walk: None,
+            trees: Trees::default(),
+        }
+    }
 }
 
 /// What names the request a `ResponseFinal` row closed: the exchange plane's
@@ -1714,8 +1797,29 @@ fn fields_json_selected(
     max_messages_shown_per_flow: Option<usize>,
     declarations: Option<&Declarations<'_>>,
     grouping: &crate::node::SessionGrouping,
-    attach: RowAttachments<'_>,
+    attach: RowAttachments<'_, String>,
 ) -> String {
+    document_selected::<JsonOut>(
+        d,
+        capture,
+        max_messages_shown_per_flow,
+        declarations,
+        grouping,
+        attach,
+    )
+}
+
+/// [`fields_json_selected`] in any encoding: the one writer of the field
+/// document and of the row-facts document, whose JSON and CBOR forms are the
+/// same document ([`wz_session_core::doc_out`]).
+fn document_selected<W: DocOut>(
+    d: &crate::Dissection,
+    capture: &[u8],
+    max_messages_shown_per_flow: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
+    grouping: &crate::node::SessionGrouping,
+    attach: RowAttachments<'_, W::Done>,
+) -> W::Done {
     let RowAttachments {
         verdicts,
         coordinates,
@@ -1846,16 +1950,18 @@ fn fields_json_selected(
     }
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
-    let mut out = String::from("{");
+    let mut document = W::default();
+    let out = &mut document;
+    out.open_map();
     // A document whose rows leave their trees out is a document of its own, with
     // its own name and revision: the name is what tells a reader which shape it
     // holds, so a row with no `fields` is not read as one the walker declined.
-    crate::doc_revision::envelope_into(
+    crate::doc_revision::write_envelope(
         match trees {
             Trees::Written => crate::doc_revision::FIELDS,
             Trees::Left => crate::doc_revision::ROW_FACTS,
         },
-        &mut out,
+        out,
     );
     // Which rows were asked for, written by the since-door ALONE, on the
     // precedent `list_id` set: a key only one door writes is still in the key
@@ -1865,12 +1971,16 @@ fn fields_json_selected(
         through_seq,
     }) = since
     {
-        let _ = write!(
-            out,
-            ",\"window\":{{\"after_seq\":{after_seq},\"through_seq\":{through_seq}}}"
-        );
+        out.key("window");
+        out.open_map();
+        out.key("after_seq");
+        out.uint(after_seq);
+        out.key("through_seq");
+        out.uint(through_seq);
+        out.close_map();
     }
-    out.push_str(",\"stream_flows\":[");
+    out.key("stream_flows");
+    out.open_array();
     // Re-read ONCE, ahead of both flow tables: a stream row now
     // names the packet holding its first byte and that packet's link
     // addresses, which only the capture's own bytes can say.
@@ -1896,9 +2006,6 @@ fn fields_json_selected(
         Reread::of(capture)
     };
     for (i, flow) in d.flows().iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
         let mut own = None;
         let spaces = enter(
             &mut *spaces,
@@ -1947,14 +2054,13 @@ fn fields_json_selected(
                 trees,
             },
             run,
-            &mut out,
+            out,
         );
     }
-    out.push_str("],\"datagram_flows\":[");
+    out.close_array();
+    out.key("datagram_flows");
+    out.open_array();
     for (i, flow) in d.datagram_flows().iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
         let mut own = None;
         let spaces = enter(
             &mut *spaces,
@@ -2000,7 +2106,7 @@ fn fields_json_selected(
                 trees,
             },
             run,
-            &mut out,
+            out,
         );
         // R2460 (open-debt item 705) — the flow's QUIC sub-lists, folded after
         // its cleartext one and before the next flow, which is where the census
@@ -2015,7 +2121,9 @@ fn fields_json_selected(
     // Said rather than left to be inferred from empty datagram listings: a
     // capture this reader cannot parse a second time yields no datagram rows
     // for a reason that has nothing to do with the traffic.
-    let _ = write!(out, "],\"capture_reread\":{},", reread.is_some());
+    out.close_array();
+    out.key("capture_reread");
+    out.bool(reread.is_some());
     // R311y917 (open-debt item 366) — WHAT A CEILING COST, in the document the
     // ceiling made short.
     //
@@ -2036,19 +2144,17 @@ fn fields_json_selected(
     // list is always there for a since-document and empty unless the handle
     // remembered a row whose digest has changed; see `RowSink`.
     if since.is_some() {
-        out.push_str("\"revised\":[");
+        out.key("revised");
+        out.open_array();
         if let Some(sink) = sink {
-            for (i, row) in sink.kept.borrow().values().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(row);
+            for row in sink.kept.borrow().values() {
+                out.splice(row);
             }
         }
-        out.push_str("],");
+        out.close_array();
     }
-    out.push_str("\"dropped_by_limits\":");
-    out.push_str(&crate::report::dropped_by_limits_json(d));
+    out.key("dropped_by_limits");
+    crate::report::write_dropped_by_limits(d, out);
     // THE CHAINS NO ROW ENDED, beside the rows that begin them.
     //
     // A reader indexing `chain.chain_id` finds some chains with a `begun` row
@@ -2059,17 +2165,16 @@ fn fields_json_selected(
     // report carries (`report::reassembly_json`), a second consumer rather
     // than a second spelling. Capture-wide because that is the grain the
     // dissection books them at.
-    out.push_str(",\"reassembly\":");
-    out.push_str(&crate::report::reassembly_json(d));
-    out.push(',');
+    out.key("reassembly");
+    crate::report::write_reassembly(d, out);
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
     // fact about what the capture turned out to hold, and both producers above
     // decide it while they walk. Emitted even for a caller that declared
     // nothing, so the key is structural rather than conditional.
-    crate::payload_decode::push_misbindings(declarations, &mut out);
-    out.push('}');
-    out
+    crate::payload_decode::write_misbindings(declarations, out);
+    out.close_map();
+    document.finish()
 }
 
 /// R2458 (open-debt item 703) — the `Dissection::message_lists` index of every
@@ -2241,29 +2346,31 @@ fn inherited_order_packet(flow: &crate::FlowDissection, from: usize, to: usize) 
 // Eight: the seven a flow producer always took and the walk it resumes.
 // Folding `run` into `RowTags` would put a `&mut` in a `Copy` struct.
 #[allow(clippy::too_many_arguments)]
-fn push_stream_flow(
+fn push_stream_flow<W: DocOut>(
     flow: &crate::FlowDissection,
     spaces: &mut crate::agg::KeyexprSpaces,
     reread: Option<&Reread>,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
-    tags: RowTags<'_>,
+    tags: RowTags<'_, W::Done>,
     mut run: Option<FlowRun<'_>>,
-    out: &mut String,
+    out: &mut W,
 ) {
-    out.push_str("{\"flow\":");
-    push_flow(&flow.flow, out);
+    out.open_map();
+    out.key("flow");
+    write_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
-    push_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
-    push_unit_readings(flow.ingest.readings(), out);
-    push_context(
+    write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
+    write_unit_readings(flow.ingest.readings(), out);
+    write_context(
         &flow.session.context(),
         &ParameterGrounds::of(&flow.session),
         out,
     );
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
-    out.push_str(",\"messages\":[");
-    let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    out.key("messages");
+    out.open_array();
+    let (mut shown, mut omitted) = (0usize, 0usize);
     tags.enter_list(declarations);
     // The produced-index of the OLDEST message still held, so a row's
     // sequence number is looked up by an index a front trim does not move.
@@ -2502,18 +2609,14 @@ fn push_stream_flow(
             }
             continue;
         }
-        let mut again = String::new();
-        let w: &mut String = if revising {
+        let mut again = W::default();
+        let w: &mut W = if revising {
             &mut again
         } else {
             shown += 1;
-            if emitted > 0 {
-                out.push(',');
-            }
-            emitted += 1;
             &mut *out
         };
-        let row_start = w.len();
+        let row_start = w.begin_item();
         let mut declined = false;
         let space = crate::anchor_space_of(frame);
         // The anchor under the key its space names, as a datagram row writes
@@ -2524,19 +2627,20 @@ fn push_stream_flow(
             crate::AnchorSpace::StreamBytes => ("message_at", message_at(frame)),
             crate::AnchorSpace::PacketIndex => ("packet", frame.stream_offset),
         };
-        let _ = write!(
-            w,
-            // R311y919 — the word comes from `AnchorSpace` now, so this row and
-            // the census planes cannot drift into two vocabularies for one fact.
-            // R2206 (open-debt item 561) — and it comes off the FRAME, not from
-            // a literal named here. A literal per producer is exactly what the
-            // message-list enumeration used to carry, and the serial line is
-            // what it cost: two places deciding one fact, with nothing joining
-            // either to the caller that chose the coordinate.
-            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"{anchor_key}\":{at},",
-            dir_name(frame.direction),
-            space.name()
-        );
+        // R311y919 — the word comes from `AnchorSpace` now, so this row and
+        // the census planes cannot drift into two vocabularies for one fact.
+        // R2206 (open-debt item 561) — and it comes off the FRAME, not from
+        // a literal named here. A literal per producer is exactly what the
+        // message-list enumeration used to carry, and the serial line is
+        // what it cost: two places deciding one fact, with nothing joining
+        // either to the caller that chose the coordinate.
+        w.open_map();
+        w.key("direction");
+        w.text(dir_name(frame.direction));
+        w.key("offset_space");
+        w.text(space.name());
+        w.key(anchor_key);
+        w.uint(at as u64);
         push_coordinates(
             tags.list_id,
             frame.stream_offset as u64,
@@ -2579,12 +2683,12 @@ fn push_stream_flow(
             reread,
             w,
         );
-        w.push('}');
-        tags.record_row(seq, &w[row_start..], declined);
+        w.close_map();
+        tags.record_row(seq, w.written_since(row_start), declined);
         if revising {
             // A row that now reads `declined` is not a correction: the row the
             // consumer holds stays true. It was never put in the set.
-            tags.keep_revised(seq, again);
+            tags.keep_revised(seq, again.finish());
         }
     }
     if let Some(r) = run.as_mut() {
@@ -2608,36 +2712,42 @@ fn push_stream_flow(
             },
         );
     }
-    let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}");
+    out.close_array();
+    out.key("shown");
+    out.uint(shown as u64);
+    out.key("omitted");
+    out.uint(omitted as u64);
     push_ended_chains(&flow.frames, spaces, out);
-    out.push('}');
+    out.close_map();
 }
 
 // Eight: see `push_stream_flow`.
 #[allow(clippy::too_many_arguments)]
-fn push_datagram_flow(
+fn push_datagram_flow<W: DocOut>(
     flow: &crate::DatagramDissection,
     spaces: &mut crate::agg::KeyexprSpaces,
     reread: Option<&Reread>,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
-    tags: RowTags<'_>,
+    tags: RowTags<'_, W::Done>,
     mut run: Option<FlowRun<'_>>,
-    out: &mut String,
+    out: &mut W,
 ) {
-    out.push_str("{\"flow\":");
-    push_flow(&flow.flow, out);
+    out.open_map();
+    out.key("flow");
+    write_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
-    push_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
-    push_unit_readings(flow.ingest.readings(), out);
-    push_context(
+    write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
+    write_unit_readings(flow.ingest.readings(), out);
+    write_context(
         &flow.session.context(),
         &ParameterGrounds::of(&flow.session),
         out,
     );
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
-    out.push_str(",\"messages\":[");
-    let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    out.key("messages");
+    out.open_array();
+    let (mut shown, mut omitted) = (0usize, 0usize);
     tags.enter_list(declarations);
     // See the stream producer: a resumed walk starts where the last stopped, and
     // where that is is counted from the front of the list AS IT STANDS.
@@ -2778,26 +2888,23 @@ fn push_datagram_flow(
             }
             continue;
         }
-        let mut again = String::new();
-        let w: &mut String = if revising {
+        let mut again = W::default();
+        let w: &mut W = if revising {
             &mut again
         } else {
             shown += 1;
-            if emitted > 0 {
-                out.push(',');
-            }
-            emitted += 1;
             &mut *out
         };
-        let row_start = w.len();
-        let _ = write!(
-            w,
-            // R2206 (open-debt item 561) — off the FRAME, on the argument the
-            // stream producer above makes.
-            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"packet\":{index},",
-            dir_name(frame.direction),
-            crate::anchor_space_of(frame).name()
-        );
+        let row_start = w.begin_item();
+        // R2206 (open-debt item 561) — off the FRAME, on the argument the
+        // stream producer above makes.
+        w.open_map();
+        w.key("direction");
+        w.text(dir_name(frame.direction));
+        w.key("offset_space");
+        w.text(crate::anchor_space_of(frame).name());
+        w.key("packet");
+        w.uint(index as u64);
         push_coordinates(tags.list_id, index as u64, frame.batch_index as u64, seq, w);
         push_selected(tags.selection, &row, w);
         push_walk(
@@ -2829,10 +2936,10 @@ fn push_datagram_flow(
             reread,
             w,
         );
-        w.push('}');
-        tags.record_row(seq, &w[row_start..], false);
+        w.close_map();
+        tags.record_row(seq, w.written_since(row_start), false);
         if revising {
-            tags.keep_revised(seq, again);
+            tags.keep_revised(seq, again.finish());
         }
     }
     // R2629 (open-debt item 744) — AND THE SCOUTING LIST, which this document
@@ -2887,16 +2994,13 @@ fn push_datagram_flow(
             continue;
         }
         shown += 1;
-        if emitted > 0 {
-            out.push(',');
-        }
-        emitted += 1;
-        let _ = write!(
-            out,
-            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"packet\":{index},",
-            dir_name(datagram.direction),
-            crate::AnchorSpace::PacketIndex.name()
-        );
+        out.open_map();
+        out.key("direction");
+        out.text(dir_name(datagram.direction));
+        out.key("offset_space");
+        out.text(crate::AnchorSpace::PacketIndex.name());
+        out.key("packet");
+        out.uint(index as u64);
         // R2765 (open debt 788) — a SCOUTING row is unjudged BY CONSTRUCTION,
         // and it says so directly rather than through a lookup. The payload
         // plane never sees these: the comment above this loop's cap says a
@@ -2949,18 +3053,26 @@ fn push_datagram_flow(
             reread,
             out,
         );
-        out.push('}');
+        out.close_map();
     }
-    let _ = write!(
-        out,
-        "],\"shown\":{shown},\"omitted\":{omitted},\
-         \"disagreements\":{{\"count\":{disagreed},\"named\":["
-    );
-    for (i, (at, why)) in named.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        let _ = write!(out, "{{\"at\":{at},\"why\":\"{why}\"}}");
+    out.close_array();
+    out.key("shown");
+    out.uint(shown as u64);
+    out.key("omitted");
+    out.uint(omitted as u64);
+    out.key("disagreements");
+    out.open_map();
+    out.key("count");
+    out.uint(disagreed as u64);
+    out.key("named");
+    out.open_array();
+    for (at, why) in &named {
+        out.open_map();
+        out.key("at");
+        out.uint(*at as u64);
+        out.key("why");
+        out.text(why);
+        out.close_map();
     }
     if let Some(r) = run.as_mut() {
         // Where this walk stopped, for the next one to start from: the first message of
@@ -2979,9 +3091,10 @@ fn push_datagram_flow(
             },
         );
     }
-    out.push_str("]}");
+    out.close_array();
+    out.close_map();
     push_ended_chains(&flow.frames, spaces, out);
-    out.push('}');
+    out.close_map();
 }
 
 /// Revision 63: the flow's `ended_chains`, every fragment chain of its list that
@@ -2992,59 +3105,58 @@ fn push_datagram_flow(
 /// The key a message head names is resolved against the tables as they stand
 /// after the flow's last row (or a key a declaration fixed); its id and suffix
 /// are written beside it, as on a `carried` entry.
-fn push_ended_chains(
+fn push_ended_chains<W: DocOut>(
     list: &crate::messages::MessageList,
     spaces: &crate::agg::KeyexprSpaces,
-    out: &mut String,
+    out: &mut W,
 ) {
-    let integer = push_ended_integer;
-    out.push_str(",\"ended_chains\":[");
-    for (i, ended) in list.ended_chains().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
+    let integer = push_ended_integer::<W>;
+    out.key("ended_chains");
+    out.open_array();
+    for ended in list.ended_chains() {
         let (direction, reliable, priority) = ended.key;
-        let _ = write!(out, "{{\"chain_id\":{},\"ending\":", ended.chain_id);
-        escape_into(ended.ending.word(), out);
-        out.push_str(",\"reason\":");
+        out.open_map();
+        out.key("chain_id");
+        out.uint(ended.chain_id);
+        out.key("ending");
+        out.text(ended.ending.word());
+        out.key("reason");
         match ended.ending {
             wz_session_core::passive_messages::ChainEnding::Aborted(why) => {
-                escape_into(ChainReason::of_abort(why).name(), out);
+                out.text(ChainReason::of_abort(why).name());
             }
-            _ => out.push_str("null"),
+            _ => out.null(),
         }
-        let _ = write!(
-            out,
-            ",\"conduit\":{{\"direction\":\"{}\",\"priority\":",
-            dir_name(direction)
-        );
-        escape_into(priority.name(), out);
-        let _ = write!(
-            out,
-            ",\"reliable\":{reliable}}},\"fragments\":{},\"bytes\":{},\"first_sn\":",
-            ended.fragments, ended.bytes
-        );
+        out.key("conduit");
+        out.open_map();
+        out.key("direction");
+        out.text(dir_name(direction));
+        out.key("priority");
+        out.text(priority.name());
+        out.key("reliable");
+        out.bool(reliable);
+        out.close_map();
+        out.key("fragments");
+        out.uint(u64::from(ended.fragments));
+        out.key("bytes");
+        out.uint(ended.bytes);
+        out.key("first_sn");
         match ended.first_sn {
             Some(sn) => integer(sn, out),
-            None => out.push_str("null"),
+            None => out.null(),
         }
-        out.push_str(",\"last_sn\":");
+        out.key("last_sn");
         match ended.last_sn {
             Some(sn) => integer(sn, out),
-            None => out.push_str("null"),
+            None => out.null(),
         }
-        let _ = write!(
-            out,
-            ",\"starts_at_message\":{},\"message\":",
-            ended.starts_at_message
-        );
+        out.key("starts_at_message");
+        out.bool(ended.starts_at_message);
+        out.key("message");
         let head = ended.head.as_ref();
-        match head.and_then(|h| h.message) {
-            Some(message) => escape_into(message.name(), out),
-            None => out.push_str("null"),
-        }
+        out.opt_text(head.and_then(|h| h.message).map(|message| message.name()));
         let key = head.and_then(|h| h.keyexpr.as_ref());
-        out.push_str(",\"keyexpr\":");
+        out.key("keyexpr");
         let resolved = key.and_then(|k| {
             let space = if k.mapping == 1 {
                 direction
@@ -3057,29 +3169,23 @@ fn push_ended_chains(
                 .or_else(|| spaces.fixed_binding(k.id, k.suffix.as_deref()))
                 .filter(|keyexpr| !keyexpr.is_empty())
         });
-        match &resolved {
-            Some(keyexpr) => escape_into(keyexpr, out),
-            None => out.push_str("null"),
-        }
-        out.push_str(",\"keyexpr_id\":");
+        out.opt_text(resolved.as_deref());
+        out.key("keyexpr_id");
         match key {
             Some(k) => integer(k.id, out),
-            None => out.push_str("null"),
+            None => out.null(),
         }
-        out.push_str(",\"keyexpr_suffix\":");
-        match key.and_then(|k| k.suffix.as_deref()) {
-            Some(suffix) => escape_into(suffix, out),
-            None => out.push_str("null"),
-        }
-        out.push('}');
+        out.key("keyexpr_suffix");
+        out.opt_text(key.and_then(|k| k.suffix.as_deref()));
+        out.close_map();
     }
-    out.push(']');
+    out.close_array();
 }
 
 /// Every integer of an `ended_chains` entry that is a wire value, through the
 /// shared integer door: `first_sn`, `last_sn` and `keyexpr_id`.
-fn push_ended_integer(value: u64, out: &mut String) {
-    wz_session_core::json::u64_into(value, out);
+fn push_ended_integer<W: DocOut>(value: u64, out: &mut W) {
+    out.uint_exact(value);
 }
 
 /// The bytes of one datagram frame's message: the lz4 batch's own copy when the
@@ -3224,7 +3330,7 @@ struct RowWalk<'a> {
     trees: Trees,
 }
 
-fn push_walk(row: RowWalk<'_>, out: &mut String) {
+fn push_walk<W: DocOut>(row: RowWalk<'_>, out: &mut W) {
     let RowWalk {
         bytes,
         space,
@@ -3260,11 +3366,11 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
         Ok(Some(field)) => {
             if walk_agrees(&field.name, framed) {
                 let at = KeyexprAt::new(direction, spaces);
-                out.push_str("\"name\":");
-                escape_into(&field.name, out);
+                out.key("name");
+                out.text(&field.name);
                 if trees == Trees::Written {
-                    out.push_str(",\"fields\":");
-                    out.push_str(&to_json(&field));
+                    out.key("fields");
+                    wz_session_core::dissect::write_tree(&field, out);
                 }
                 push_row_header_facts(&field, out);
                 let planes = RecordPlanes {
@@ -3548,9 +3654,9 @@ fn record_place(place: usize) -> u32 {
     u32::try_from(place).unwrap_or(u32::MAX)
 }
 
-fn push_declined(why: &str, out: &mut String) {
-    out.push_str("\"declined\":");
-    escape_into(why, out);
+fn push_declined<W: DocOut>(why: &str, out: &mut W) {
+    out.key("declined");
+    out.text(why);
 }
 
 /// The `payload_decode` key of ONE walked message, or nothing.
@@ -3583,18 +3689,18 @@ fn push_declined(why: &str, out: &mut String) {
 /// were SHM and could not say WHICH. That is item 563, and the consuming
 /// surface's own sufficient condition is exactly this marker -- it does not ask
 /// for the descriptor bytes, which were never on the wire either.
-fn push_payload_block(
+fn push_payload_block<W: DocOut>(
     field: &wz_session_core::dissect::Field,
     declarations: Option<&Declarations<'_>>,
     at: KeyexprAt<'_>,
-    out: &mut String,
+    out: &mut W,
 ) {
     if let Some(declarations) = declarations {
-        out.push_str(",\"payload_decode\":");
-        push_decoding(&decode_payload(field, declarations, at), out);
+        out.key("payload_decode");
+        write_decoding(&decode_payload(field, declarations, at), out);
     } else if let Some(decoding) = crate::payload_decode::shm_decoding(field) {
-        out.push_str(",\"payload_decode\":");
-        push_decoding(&decoding, out);
+        out.key("payload_decode");
+        write_decoding(&decoding, out);
     }
 }
 
@@ -3759,40 +3865,37 @@ fn push_payload_block(
 /// and an `Interest` gives each its own answer. It is written by [`push_body`]
 /// in both lists, the row's `carried` and a completed chain's
 /// `above_transport.carried`, and no existing key moves.
-fn push_carried(
+fn push_carried<W: DocOut>(
     bytes: &[u8],
     field: &wz_session_core::dissect::Field,
     space: MidSpace,
     at: KeyexprAt<'_>,
     judging: E2eRow<'_>,
     planes: RecordPlanes<'_>,
-    out: &mut String,
+    out: &mut W,
 ) {
     let RecordPlanes { closes, session } = planes;
-    out.push_str(",\"carried\":[");
-    let mut first = true;
-    let mut entry = |word: &str,
-                     node: &wz_session_core::dissect::Field,
-                     is_record: bool,
-                     facts: bool,
-                     keyexpr: Option<crate::payload_decode::KeyReference>,
-                     payload: Option<crate::payload_decode::PayloadSlot>,
-                     judged: RecordJudged<'_>,
-                     closed: Option<String>,
-                     answered: Option<String>,
-                     out: &mut String| {
-        if !first {
-            out.push(',');
-        }
-        first = false;
-        out.push_str("{\"message\":");
-        escape_into(word, out);
+    out.key("carried");
+    out.open_array();
+    let entry = |word: &str,
+                 node: &wz_session_core::dissect::Field,
+                 is_record: bool,
+                 facts: bool,
+                 keyexpr: Option<crate::payload_decode::KeyReference>,
+                 payload: Option<crate::payload_decode::PayloadSlot>,
+                 judged: RecordJudged<'_>,
+                 closed: Option<(RowCloses<'_>, usize)>,
+                 answered: Option<(RowCloses<'_>, usize)>,
+                 out: &mut W| {
+        out.open_map();
+        out.key("message");
+        out.text(word);
         push_body(node, out);
-        let _ = write!(
-            out,
-            ",\"start\":{},\"end\":{},\"keyexpr\":",
-            node.span.start, node.span.end
-        );
+        out.key("start");
+        out.uint(node.span.start as u64);
+        out.key("end");
+        out.uint(node.span.end as u64);
+        out.key("keyexpr");
         push_keyexpr_read(keyexpr.as_ref(), judging.declarations, out);
         push_payload_slot(payload.as_ref(), out);
         push_payload_size(session, is_record.then_some(node), out);
@@ -3802,15 +3905,21 @@ fn push_carried(
         // On EVERY entry, `null` on one that is not a `ResponseFinal`: the rule
         // `body` states, and the reason `message` stays a passenger in the
         // declared `carries` axis (see `RowCloses`).
-        out.push_str(",\"closes\":");
-        out.push_str(closed.as_deref().unwrap_or("null"));
+        out.key("closes");
+        match closed {
+            Some((closes, record)) => closes.write_value(record, out),
+            None => out.null(),
+        }
         // The same rule: on every entry, `null` on one that is not a `Response`.
-        out.push_str(",\"answers\":");
-        out.push_str(answered.as_deref().unwrap_or("null"));
+        out.key("answers");
+        match answered {
+            Some((closes, record)) => closes.write_answer(record, out),
+            None => out.null(),
+        }
         // Revision 66: what a final ended of its query's replies, by the same
         // rule.
         push_final_ends(judged.closed.as_deref(), out);
-        out.push('}');
+        out.close_map();
     };
     // The first listing entry is the row itself; subsequent entries are its
     // network records. A lean row and its sole record share the same span.
@@ -3861,10 +3970,8 @@ fn push_carried(
         // exchange plane folds a batch's records in the order this list is in.
         let closed = closes
             .filter(|_| word == "ResponseFinal")
-            .map(|c| c.value(index));
-        let answered = closes
-            .filter(|_| word == "Response")
-            .map(|c| c.answer_value(index));
+            .map(|c| (c, index));
+        let answered = closes.filter(|_| word == "Response").map(|c| (c, index));
         entry(
             word,
             record,
@@ -3878,7 +3985,7 @@ fn push_carried(
             out,
         );
     }
-    out.push(']');
+    out.close_array();
 }
 
 /// The `segment` key of one `carried` entry: the verdict on a PIECE of a
@@ -3933,111 +4040,113 @@ fn push_carried(
 ///
 /// Every integer goes through the shared integer door, because a header field
 /// is up to eight bytes wide.
-fn push_segment(
+fn push_segment<W: DocOut>(
     entry: Option<&SegmentEntry<'_>>,
     record: &wz_session_core::dissect::Field,
     declarations: Option<&Declarations<'_>>,
     at: KeyexprAt<'_>,
-    out: &mut String,
+    out: &mut W,
 ) {
-    let integer = push_segment_integer;
     let Some(entry) = entry else {
         return;
     };
+    let integer = push_segment_integer::<W>;
     let (profile, verdict) = (entry.judged.profile, &entry.judged.verdict);
     let value_of = |index: usize| verdict.values[index];
-    out.push_str(",\"segment\":{\"profile\":");
-    escape_into(profile.name(), out);
-    out.push_str(",\"matched_rule\":");
-    crate::payload_decode::push_matched_rule(&entry.judged.rule, out);
-    out.push_str(",\"header\":[");
+    out.key("segment");
+    out.open_map();
+    out.key("profile");
+    out.text(profile.name());
+    out.key("matched_rule");
+    crate::payload_decode::write_matched_rule(&entry.judged.rule, out);
+    out.key("header");
+    out.open_array();
     for (i, field) in profile.fields().iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"name\":");
-        escape_into(&field.name, out);
-        let _ = write!(
-            out,
-            ",\"offset\":{},\"bytes\":{},\"value\":",
-            field.offset, field.bytes
-        );
+        out.open_map();
+        out.key("name");
+        out.text(&field.name);
+        out.key("offset");
+        out.uint(field.offset as u64);
+        out.key("bytes");
+        out.uint(field.bytes as u64);
+        out.key("value");
         integer(value_of(i), out);
-        out.push('}');
+        out.close_map();
     }
-    let _ = write!(out, "],\"chunk_bytes\":{}", verdict.chunk_bytes);
+    out.close_array();
+    out.key("chunk_bytes");
+    out.uint(verdict.chunk_bytes as u64);
     match verdict.crc {
         Some(crc) => {
-            out.push_str(",\"crc_stated\":");
+            out.key("crc_stated");
             integer(crc.stated, out);
-            out.push_str(",\"crc_computed\":");
+            out.key("crc_computed");
             integer(crc.computed, out);
-            out.push_str(",\"crc_error\":");
-            out.push_str(if crc.matches() { "false" } else { "true" });
+            out.key("crc_error");
+            out.bool(!crc.matches());
         }
-        None => out.push_str(",\"crc_stated\":null,\"crc_computed\":null,\"crc_error\":null"),
+        None => {
+            for key in ["crc_stated", "crc_computed", "crc_error"] {
+                out.key(key);
+                out.null();
+            }
+        }
     }
-    out.push_str(",\"stream\":[");
-    for (i, &field) in profile.stream().iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"name\":");
-        escape_into(&profile.fields()[field].name, out);
-        out.push_str(",\"value\":");
+    out.key("stream");
+    out.open_array();
+    for &field in profile.stream() {
+        out.open_map();
+        out.key("name");
+        out.text(&profile.fields()[field].name);
+        out.key("value");
         integer(value_of(field), out);
-        out.push('}');
+        out.close_map();
     }
-    out.push_str("],\"transfer\":");
+    out.close_array();
+    out.key("transfer");
     integer(value_of(profile.transfer()), out);
-    out.push_str(",\"whole_bytes\":");
+    out.key("whole_bytes");
     integer(value_of(profile.total()), out);
-    out.push_str(",\"chunk_offset\":");
+    out.key("chunk_offset");
     integer(value_of(profile.offset()), out);
-    out.push_str(",\"unjoined\":");
-    match verdict.unjoined {
-        Some(why) => escape_into(why.word(), out),
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"place\":");
-    match verdict.place {
-        Some(place) => escape_into(place.word(), out),
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"missing_ranges\":[");
-    for (i, (from, to)) in verdict.missing.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('[');
+    out.key("unjoined");
+    out.opt_text(verdict.unjoined.map(|why| why.word()));
+    out.key("place");
+    out.opt_text(verdict.place.map(|place| place.word()));
+    out.key("missing_ranges");
+    out.open_array();
+    for (from, to) in &verdict.missing {
+        out.open_array();
         integer(*from, out);
-        out.push(',');
         integer(*to, out);
-        out.push(']');
+        out.close_array();
     }
-    let _ = write!(
-        out,
-        "],\"out_of_order\":{},\"overlap\":{},\"ended_transfers\":",
-        verdict.out_of_order, verdict.overlap
-    );
+    out.close_array();
+    out.key("out_of_order");
+    out.bool(verdict.out_of_order);
+    out.key("overlap");
+    out.bool(verdict.overlap);
+    out.key("ended_transfers");
     push_ended_transfers(&verdict.ended, out);
-    out.push_str(",\"joined\":");
+    out.key("joined");
     match (&verdict.joined, declarations) {
         (Some(joined), Some(declarations)) => {
-            let _ = write!(out, "{{\"whole_bytes\":{}", joined.len());
+            out.open_map();
+            out.key("whole_bytes");
+            out.uint(joined.len() as u64);
             push_e2e(entry.joined_e2e.as_ref(), out);
-            out.push_str(",\"payload_decode\":");
-            push_decoding(
+            out.key("payload_decode");
+            write_decoding(
                 &crate::payload_decode::decode_joined(record, joined, declarations, at),
                 out,
             );
-            out.push('}');
+            out.close_map();
         }
         // A piece is only ever judged under declarations, so a joined message
         // without them cannot occur; `null` keeps the block total.
-        _ => out.push_str("null"),
+        _ => out.null(),
     }
-    out.push('}');
+    out.close_map();
 }
 
 /// Every integer of a `segment` block, through the shared integer door: the
@@ -4046,8 +4155,8 @@ fn push_segment(
 /// `missing_ranges` pair and the `transfer`, `whole_bytes` and `received_bytes`
 /// of each `ended_transfers` entry. One writer, so the block's integers are one
 /// cell of the integer rule rather than twelve that could drift apart.
-fn push_segment_integer(value: u64, out: &mut String) {
-    wz_session_core::json::u64_into(value, out);
+fn push_segment_integer<W: DocOut>(value: u64, out: &mut W) {
+    out.uint_exact(value);
 }
 
 /// An `ended_transfers` array: each transfer ended before it completed, with
@@ -4058,38 +4167,35 @@ fn push_segment_integer(value: u64, out: &mut String) {
 /// `ended_by` is the word (`superseded`, `evicted`, `closed`;
 /// [`crate::segment_chain::Ending`]) and `evicted` the boolean the block wrote
 /// before the word, kept beside it.
-fn push_ended_transfers(ended: &[crate::segment_chain::Ended], out: &mut String) {
-    let integer = push_segment_integer;
-    out.push('[');
-    for (i, ended) in ended.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"transfer\":");
+fn push_ended_transfers<W: DocOut>(ended: &[crate::segment_chain::Ended], out: &mut W) {
+    let integer = push_segment_integer::<W>;
+    out.open_array();
+    for ended in ended {
+        out.open_map();
+        out.key("transfer");
         integer(ended.transfer, out);
-        out.push_str(",\"whole_bytes\":");
+        out.key("whole_bytes");
         integer(ended.total, out);
-        out.push_str(",\"received_bytes\":");
+        out.key("received_bytes");
         integer(ended.received, out);
-        let _ = write!(
-            out,
-            ",\"evicted\":{},\"ended_by\":\"{}\"}}",
-            ended.evicted(),
-            ended.ending.word()
-        );
+        out.key("evicted");
+        out.bool(ended.evicted());
+        out.key("ended_by");
+        out.text(ended.ending.word());
+        out.close_map();
     }
-    out.push(']');
+    out.close_array();
 }
 
 /// The `ended_transfers` key of one `carried` entry: on a `ResponseFinal` read
 /// under declared segment rules, the reply transfers of its query it ended
 /// before they completed (an empty array when it ended none); `null` on every
 /// other entry, on the rule `closes` keeps.
-fn push_final_ends(closed: Option<&[crate::segment_chain::Ended]>, out: &mut String) {
-    out.push_str(",\"ended_transfers\":");
+fn push_final_ends<W: DocOut>(closed: Option<&[crate::segment_chain::Ended]>, out: &mut W) {
+    out.key("ended_transfers");
     match closed {
         Some(ended) => push_ended_transfers(ended, out),
-        None => out.push_str("null"),
+        None => out.null(),
     }
 }
 
@@ -4099,10 +4205,10 @@ fn push_final_ends(closed: Option<&[crate::segment_chain::Ended]>, out: &mut Str
 /// for the reader who registered a profile, and an entry it has nothing to say
 /// about is not made to carry a key that answers a question nobody asked. See
 /// `crate::e2e_row` for the block.
-fn push_e2e(judged: Option<&crate::payload_decode::E2eJudged<'_>>, out: &mut String) {
+fn push_e2e<W: DocOut>(judged: Option<&crate::payload_decode::E2eJudged<'_>>, out: &mut W) {
     if let Some(judged) = judged {
-        out.push_str(",\"e2e\":");
-        crate::e2e_row::push_block(judged, out);
+        out.key("e2e");
+        crate::e2e_row::write_block(judged, out);
     }
 }
 
@@ -4114,40 +4220,34 @@ fn push_e2e(judged: Option<&crate::payload_decode::E2eJudged<'_>>, out: &mut Str
 /// and otherwise a string, so a consumer reading it never confuses "the default"
 /// with "nothing was said"; the two are different facts on the wire. A schema
 /// that is not UTF-8 is `schema_hex` beside it (revision 67).
-fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mut String) {
-    out.push_str(",\"payload\":");
+fn push_payload_slot<W: DocOut>(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mut W) {
+    out.key("payload");
     let Some(slot) = slot else {
-        out.push_str("null");
+        out.null();
         return;
     };
-    let _ = write!(
-        out,
-        "{{\"start\":{},\"end\":{},\"encoding\":",
-        slot.start, slot.end
-    );
-    match &slot.encoding {
-        Some(encoding) => escape_into(encoding, out),
-        None => out.push_str("null"),
-    }
+    out.open_map();
+    out.key("start");
+    out.uint(slot.start as u64);
+    out.key("end");
+    out.uint(slot.end as u64);
+    out.key("encoding");
+    out.opt_text(slot.encoding.as_deref());
     // Revision 67 — a schema that is not UTF-8 is not in `encoding`, which
     // names the id alone then, and is written here as its bytes in hex. Only
     // then: a reader that sees no `schema_hex` reads the schema, if any, in
     // `encoding`.
     if let Some(hex) = &slot.schema_hex {
-        out.push_str(",\"schema_hex\":");
-        escape_into(hex, out);
+        out.key("schema_hex");
+        out.text(hex);
     }
-    out.push_str(",\"shm_descriptor\":");
-    out.push_str(if slot.shm_descriptor() {
-        "true"
-    } else {
-        "false"
-    });
+    out.key("shm_descriptor");
+    out.bool(slot.shm_descriptor());
     // Revision 64 — which node the range is the span of. The range is the
     // body's `payload` leaf exactly when this says `payload`.
-    out.push_str(",\"span_of\":");
-    escape_into(slot.span_of.word(), out);
-    out.push('}');
+    out.key("span_of");
+    out.text(slot.span_of.word());
+    out.close_map();
 }
 
 /// The `declared_id` and `timestamp_ntp64` keys of one `carried` entry, after
@@ -4163,14 +4263,14 @@ fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mu
 /// so it is a decimal string on every stamped sample. `message` is `None` for a
 /// row's own entry when the row is split into records, which then speak for
 /// themselves.
-fn push_message_facts(message: Option<&wz_session_core::dissect::Field>, out: &mut String) {
-    let optional = |value: Option<u64>, out: &mut String| match value {
-        Some(value) => wz_session_core::json::u64_into(value, out),
-        None => out.push_str("null"),
+fn push_message_facts<W: DocOut>(message: Option<&wz_session_core::dissect::Field>, out: &mut W) {
+    let optional = |value: Option<u64>, out: &mut W| match value {
+        Some(value) => out.uint_exact(value),
+        None => out.null(),
     };
-    out.push_str(",\"declared_id\":");
+    out.key("declared_id");
     optional(message.and_then(crate::tree_facts::declared_id), out);
-    out.push_str(",\"timestamp_ntp64\":");
+    out.key("timestamp_ntp64");
     optional(message.and_then(crate::tree_facts::body_timestamp), out);
 }
 
@@ -4184,32 +4284,27 @@ fn push_message_facts(message: Option<&wz_session_core::dissect::Field>, out: &m
 /// row's tree that the walker names no extension for, in walk order, over the
 /// transport header's chain, the network messages' and the bodies'; an empty
 /// array when there is none. Each extension is listed once.
-fn push_row_header_facts(row: &wz_session_core::dissect::Field, out: &mut String) {
-    out.push_str(",\"transport_header\":");
+fn push_row_header_facts<W: DocOut>(row: &wz_session_core::dissect::Field, out: &mut W) {
+    out.key("transport_header");
     match crate::tree_facts::transport_header(row) {
         Some(header) => {
-            out.push_str("{\"sn\":");
-            wz_session_core::json::u64_into(header.sn, out);
-            let _ = write!(out, ",\"reliable\":{},\"more\":", header.reliable);
-            match header.more {
-                Some(more) => out.push_str(if more { "true" } else { "false" }),
-                None => out.push_str("null"),
-            }
-            out.push('}');
+            out.open_map();
+            out.key("sn");
+            out.uint_exact(header.sn);
+            out.key("reliable");
+            out.bool(header.reliable);
+            out.key("more");
+            out.opt_bool(header.more);
+            out.close_map();
         }
-        None => out.push_str("null"),
+        None => out.null(),
     }
-    out.push_str(",\"unnamed_extensions\":[");
-    for (i, id) in crate::tree_facts::unnamed_extensions(row)
-        .iter()
-        .enumerate()
-    {
-        if i > 0 {
-            out.push(',');
-        }
-        let _ = write!(out, "{id}");
+    out.key("unnamed_extensions");
+    out.open_array();
+    for id in crate::tree_facts::unnamed_extensions(row) {
+        out.uint(id);
     }
-    out.push(']');
+    out.close_array();
 }
 
 /// The SESSION's parse of the batch a walked list's records come from, and
@@ -4319,23 +4414,24 @@ struct RecordPlanes<'a> {
 /// read has no slot and has a census size (`unresolved`), and a query value's
 /// slot includes the length prefix the census does not count. Nested under
 /// `payload`, the census's answer would be missing exactly where it differs.
-fn push_payload_size(
+fn push_payload_size<W: DocOut>(
     session: Option<SessionBatch<'_>>,
     record: Option<&wz_session_core::dissect::Field>,
-    out: &mut String,
+    out: &mut W,
 ) {
     use crate::agg::PayloadSize;
-    out.push_str(",\"payload_size\":");
+    out.key("payload_size");
     let size = record
         .zip(session)
         .and_then(|(record, session)| session.message_at(record))
         .and_then(crate::agg::payload_size);
     let Some(size) = size else {
-        out.push_str("null");
+        out.null();
         return;
     };
-    out.push_str("{\"size_verdict\":");
-    escape_into(size.name(), out);
+    out.open_map();
+    out.key("size_verdict");
+    out.text(size.name());
     // Both numbers on every word, `null` where the word gives none, so the
     // word decides the values and not which keys arrive.
     let (bytes, at_most) = match size {
@@ -4343,11 +4439,11 @@ fn push_payload_size(
         PayloadSize::Elsewhere => (None, None),
         PayloadSize::Unresolved { at_most } => (None, Some(at_most)),
     };
-    out.push_str(",\"bytes\":");
-    push_opt_u64(bytes, out);
-    out.push_str(",\"at_most_bytes\":");
-    push_opt_u64(at_most, out);
-    out.push('}');
+    out.key("bytes");
+    out.opt_uint(bytes);
+    out.key("at_most_bytes");
+    out.opt_uint(at_most);
+    out.close_map();
 }
 
 /// The `body` key of one `carried` entry, after its `message`: the name of the
@@ -4365,12 +4461,9 @@ fn push_payload_size(
 /// decide which keys arrive, which turns `message` into a discriminant in the
 /// document's declared `carries` axis and so changes what every consumer was
 /// told about it.
-fn push_body(node: &wz_session_core::dissect::Field, out: &mut String) {
-    out.push_str(",\"body\":");
-    match node.body() {
-        Some(body) => escape_into(body.name(), out),
-        None => out.push_str("null"),
-    }
+fn push_body<W: DocOut>(node: &wz_session_core::dissect::Field, out: &mut W) {
+    out.key("body");
+    out.opt_text(node.body().map(|body| body.name()));
 }
 
 /// The `keyexpr_cause`, `keyexpr_id` and `keyexpr_suffix` keys of one `carried`
@@ -4384,25 +4477,22 @@ fn push_body(node: &wz_session_core::dissect::Field, out: &mut String) {
 /// (a bare number up to 2^53 - 1, a decimal string past it); the wire id is a
 /// 32-bit value in practice, and the door is what makes that a property of the
 /// writer rather than of a capture that obeys it.
-fn push_keyexpr_read(
+fn push_keyexpr_read<W: DocOut>(
     reference: Option<&crate::payload_decode::KeyReference>,
     declarations: Option<&Declarations<'_>>,
-    out: &mut String,
+    out: &mut W,
 ) {
     let outcome = reference.map(|r| &r.outcome);
     // The key the message is READ under: the wire's, or, since revision 61,
     // the key a declaration fixed for an id the wire did not answer.
-    match outcome.and_then(crate::payload_decode::key_read_as) {
-        Some(keyexpr) => escape_into(keyexpr, out),
-        None => out.push_str("null"),
-    }
+    out.opt_text(outcome.and_then(crate::payload_decode::key_read_as));
     let miss = outcome.and_then(|o| o.as_ref().err());
     push_keyexpr_miss(miss, out);
     // Revision 61: where `keyexpr` came from. `wire` when the wire's tables
     // answered the reference, `fixed_id` when they did not and a declaration
     // fixed the id (the miss cells above still say what the wire did not
     // answer), `null` when there is no key.
-    out.push_str(",\"keyexpr_source\":");
+    out.key("keyexpr_source");
     match outcome.and_then(crate::payload_decode::KeySource::of) {
         Some(source) => {
             if let (crate::payload_decode::KeySource::FixedId, Some(declarations), Some(miss)) =
@@ -4410,40 +4500,31 @@ fn push_keyexpr_read(
             {
                 declarations.record_key_binding(miss.id);
             }
-            escape_into(source.word(), out);
+            out.text(source.word());
         }
-        None => out.push_str("null"),
+        None => out.null(),
     }
     // Revision 65: how the wire carried the key (`whole_key`, `id`,
     // `id_and_suffix`), on a resolved reference as on a miss, so a reader of a
     // row without its tree can still tell. `null` when there is no reference.
-    out.push_str(",\"keyexpr_carriage\":");
-    match reference {
-        Some(reference) => escape_into(reference.carriage.word(), out),
-        None => out.push_str("null"),
-    }
+    out.key("keyexpr_carriage");
+    out.opt_text(reference.map(|reference| reference.carriage.word()));
 }
 
-fn push_keyexpr_miss(miss: Option<&crate::payload_decode::UnresolvedRef>, out: &mut String) {
-    out.push_str(",\"keyexpr_cause\":");
+fn push_keyexpr_miss<W: DocOut>(miss: Option<&crate::payload_decode::UnresolvedRef>, out: &mut W) {
+    out.key("keyexpr_cause");
+    out.opt_text(miss.map(|miss| miss.cause.name()));
+    out.key("keyexpr_id");
     match miss {
-        Some(miss) => escape_into(miss.cause.name(), out),
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"keyexpr_id\":");
-    match miss {
-        Some(miss) => wz_session_core::json::u64_into(miss.id, out),
-        None => out.push_str("null"),
+        Some(miss) => out.uint_exact(miss.id),
+        None => out.null(),
     }
     // Revision 58: the suffix the reference wrote after that id, verbatim, so
     // `<id>` and `<id>/@sidecar` stay two references. `null` on a miss whose
     // `WireExpr` wrote none, and on every entry that is not a miss: a resolved
     // `keyexpr` already has its suffix appended, and no reference has none.
-    out.push_str(",\"keyexpr_suffix\":");
-    match miss.and_then(|miss| miss.suffix.as_deref()) {
-        Some(suffix) => escape_into(suffix, out),
-        None => out.push_str("null"),
-    }
+    out.key("keyexpr_suffix");
+    out.opt_text(miss.and_then(|miss| miss.suffix.as_deref()));
 }
 
 /// The network records a `Frame` batched, or nothing for every other message.
@@ -4615,51 +4696,49 @@ impl CarriedState {
 /// chain's records at the fragment that completed it, which is this row, in the
 /// order of this array; a fragment row carries no records of its own, so the
 /// record's place here is its place in the pairing.
-fn push_above_transport(
+fn push_above_transport<W: DocOut>(
     carried: Option<&wz_session_core::passive::Carried>,
     at: KeyexprAt<'_>,
     judging: E2eRow<'_>,
     closes: Option<RowCloses<'_>>,
     trees: Trees,
-    out: &mut String,
+    out: &mut W,
 ) {
     let declarations = judging.declarations;
-    out.push_str(",\"above_transport\":");
+    out.key("above_transport");
     let Some(carried) = carried else {
-        out.push_str("null");
+        out.null();
         return;
     };
-    out.push_str("{\"carried_state\":");
-    escape_into(carried_state(carried).name(), out);
+    out.open_map();
+    out.key("carried_state");
+    out.text(carried_state(carried).name());
     if let wz_session_core::passive::Carried::Reassembled { joined, batch, .. } = carried {
         let walked = wz_session_core::dissect::dissect_batch(joined, 0);
         // Walked from offset 0 of the buffer the session parsed, so the two
         // readers' coordinates are the same.
         let session = SessionBatch::joined(batch);
         if trees == Trees::Written {
-            out.push_str(",\"fields\":[");
-            for (i, record) in walked.records.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&to_json(record));
+            out.key("fields");
+            out.open_array();
+            for record in &walked.records {
+                wz_session_core::dissect::write_tree(record, out);
             }
-            out.push(']');
+            out.close_array();
         }
-        out.push_str(",\"carried\":[");
+        out.key("carried");
+        out.open_array();
         for (i, record) in walked.records.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
             let word = record_word(joined, record);
-            out.push_str("{\"message\":");
-            escape_into(word, out);
+            out.open_map();
+            out.key("message");
+            out.text(word);
             push_body(record, out);
-            let _ = write!(
-                out,
-                ",\"start\":{},\"end\":{},\"keyexpr\":",
-                record.span.start, record.span.end
-            );
+            out.key("start");
+            out.uint(record.span.start as u64);
+            out.key("end");
+            out.uint(record.span.end as u64);
+            out.key("keyexpr");
             let reference = crate::payload_decode::subtree_keyexpr_reference(record, at);
             push_keyexpr_read(reference.as_ref(), judging.declarations, out);
             let outcome = reference.map(|r| r.outcome);
@@ -4696,22 +4775,22 @@ fn push_above_transport(
             // On every entry, like the row's own, and from the same pairing: the
             // exchange plane folded this record at this row, at place `i`.
             // Last, so the keys the entry always wrote keep their order.
-            out.push_str(",\"closes\":");
+            out.key("closes");
             match closes.filter(|_| word == "ResponseFinal") {
-                Some(c) => out.push_str(&c.value(i)),
-                None => out.push_str("null"),
+                Some(c) => c.write_value(i, out),
+                None => out.null(),
             }
-            out.push_str(",\"answers\":");
+            out.key("answers");
             match closes.filter(|_| word == "Response") {
-                Some(c) => out.push_str(&c.answer_value(i)),
-                None => out.push_str("null"),
+                Some(c) => c.write_answer(i, out),
+                None => out.null(),
             }
             push_final_ends(judged.closed.as_deref(), out);
-            out.push('}');
+            out.close_map();
         }
-        out.push(']');
+        out.close_array();
     }
-    out.push('}');
+    out.close_map();
 }
 
 /// What the session decided about ONE row that this document had
@@ -5165,87 +5244,77 @@ fn sn_row(frame: &PassiveFrame) -> Option<SnRow> {
 }
 
 /// Render the row's `sn` and `chain` keys.
-fn push_session_row(row: &SessionRow, out: &mut String) {
-    out.push_str(",\"sn\":");
+fn push_session_row<W: DocOut>(row: &SessionRow, out: &mut W) {
+    out.key("sn");
     match &row.sn {
-        None => out.push_str("null"),
+        None => out.null(),
         Some(sn) => {
-            out.push_str("{\"verdict\":");
-            escape_into(sn.verdict.name(), out);
+            out.open_map();
+            out.key("verdict");
+            out.text(sn.verdict.name());
             // The number of sequence numbers the gap skipped. It is read off
             // the wire as a distance in the session's SN window, which is as
             // wide as 2^63 at a 64-bit resolution: no host limit bounds it, so
             // it takes the shared integer door (a string past 2^53 - 1).
-            out.push_str(",\"missing\":");
+            out.key("missing");
             match sn.missing {
-                Some(n) => wz_session_core::json::u64_into(n, out),
-                None => out.push_str("null"),
+                Some(n) => out.uint_exact(n),
+                None => out.null(),
             }
-            let _ = write!(
-                out,
-                ",\"conduit\":{{\"direction\":\"{}\",\"priority\":",
-                dir_name(sn.direction)
-            );
-            escape_into(sn.priority.name(), out);
-            let _ = write!(out, ",\"reliable\":{}}}}}", sn.reliable);
+            out.key("conduit");
+            out.open_map();
+            out.key("direction");
+            out.text(dir_name(sn.direction));
+            out.key("priority");
+            out.text(sn.priority.name());
+            out.key("reliable");
+            out.bool(sn.reliable);
+            out.close_map();
+            out.close_map();
         }
     }
-    out.push_str(",\"chain\":");
+    out.key("chain");
     match &row.chain {
-        None => out.push_str("null"),
+        None => out.null(),
         Some(chain) => {
-            out.push_str("{\"outcome\":");
-            escape_into(chain.outcome.name(), out);
-            out.push_str(",\"reason\":");
-            match chain.reason {
-                Some(reason) => escape_into(reason.name(), out),
-                None => out.push_str("null"),
-            }
-            out.push_str(",\"chain_id\":");
-            match chain.chain_id {
-                Some(id) => {
-                    let _ = write!(out, "{id}");
-                }
-                None => out.push_str("null"),
-            }
+            out.open_map();
+            out.key("outcome");
+            out.text(chain.outcome.name());
+            out.key("reason");
+            out.opt_text(chain.reason.map(|reason| reason.name()));
+            out.key("chain_id");
+            out.opt_uint(chain.chain_id);
             // Revision 62. Counts of bytes and fragments this reader holds are
             // bare numbers; a sequence number is a wire value up to the ring,
             // and takes the integer door.
-            match chain.placed {
-                Some((index, offset, length)) => {
-                    let _ = write!(
-                        out,
-                        ",\"index\":{index},\"offset\":{offset},\"length\":{length}"
-                    );
-                }
-                None => out.push_str(",\"index\":null,\"offset\":null,\"length\":null"),
+            let placed = chain
+                .placed
+                .map(|(index, offset, length)| [u64::from(index), offset, length]);
+            for (at, key) in ["index", "offset", "length"].into_iter().enumerate() {
+                out.key(key);
+                out.opt_uint(placed.map(|placed| placed[at]));
             }
-            out.push_str(",\"expected_sn\":");
+            out.key("expected_sn");
             match chain.sns.and_then(|(expected, _)| expected) {
                 Some(sn) => push_chain_sn(sn, out),
-                None => out.push_str("null"),
+                None => out.null(),
             }
-            out.push_str(",\"received_sn\":");
+            out.key("received_sn");
             match chain.sns {
                 Some((_, sn)) => push_chain_sn(sn, out),
-                None => out.push_str("null"),
+                None => out.null(),
             }
-            match chain.held {
-                Some((fragments, bytes)) => {
-                    let _ = write!(
-                        out,
-                        ",\"held_fragments\":{fragments},\"held_bytes\":{bytes}"
-                    );
-                }
-                None => out.push_str(",\"held_fragments\":null,\"held_bytes\":null"),
+            let held = chain
+                .held
+                .map(|(fragments, bytes)| [u64::from(fragments), bytes]);
+            for (at, key) in ["held_fragments", "held_bytes"].into_iter().enumerate() {
+                out.key(key);
+                out.opt_uint(held.map(|held| held[at]));
             }
             // Revision 69.
-            out.push_str(",\"displaced\":");
-            match chain.displaced {
-                Some(word) => escape_into(word.name(), out),
-                None => out.push_str("null"),
-            }
-            out.push('}');
+            out.key("displaced");
+            out.opt_text(chain.displaced.map(|word| word.name()));
+            out.close_map();
         }
     }
 }
@@ -5253,8 +5322,8 @@ fn push_session_row(row: &SessionRow, out: &mut String) {
 /// The `expected_sn` and `received_sn` of a row's `chain`, through the shared
 /// integer door: a sequence number is a wire value as wide as the session's
 /// ring, which can pass 2^53.
-fn push_chain_sn(sn: u64, out: &mut String) {
-    wz_session_core::json::u64_into(sn, out);
+fn push_chain_sn<W: DocOut>(sn: u64, out: &mut W) {
+    out.uint_exact(sn);
 }
 
 /// The captured packet holding a row's FIRST BYTE, and the link
@@ -5280,29 +5349,27 @@ struct FirstByte {
     payload_offset: usize,
 }
 
-fn push_first_byte(at: Option<FirstByte>, reread: Option<&Reread>, out: &mut String) {
+fn push_first_byte<W: DocOut>(at: Option<FirstByte>, reread: Option<&Reread>, out: &mut W) {
     let packet = at
         .as_ref()
         .and_then(|a| reread.and_then(|file| file.packet(a.packet)));
-    out.push_str(",\"first_byte\":");
+    out.key("first_byte");
     match &at {
-        None => out.push_str("null"),
+        None => out.null(),
         Some(a) => {
-            let _ = write!(
-                out,
-                "{{\"packet\":{},\"payload_offset\":{},\"frame_offset\":",
-                a.packet, a.payload_offset
+            out.open_map();
+            out.key("packet");
+            out.uint(a.packet as u64);
+            out.key("payload_offset");
+            out.uint(a.payload_offset as u64);
+            out.key("frame_offset");
+            out.opt_uint(
+                packet
+                    .as_ref()
+                    .and_then(|p| crate::link::transport_payload_at(p.link_type, p.index, p.data))
+                    .map(|base| (base + a.payload_offset) as u64),
             );
-            match packet
-                .as_ref()
-                .and_then(|p| crate::link::transport_payload_at(p.link_type, p.index, p.data))
-            {
-                Some(base) => {
-                    let _ = write!(out, "{}", base + a.payload_offset);
-                }
-                None => out.push_str("null"),
-            }
-            out.push('}');
+            out.close_map();
         }
     }
     push_l2(
@@ -5319,42 +5386,34 @@ fn push_first_byte(at: Option<FirstByte>, reread: Option<&Reread>, out: &mut Str
 /// `frame_offset` is the same word `first_byte` uses for where a byte sits in
 /// the captured frame, and means the same thing here: an offset from the
 /// frame's first byte. `length` is how many bytes the header spans.
-fn push_l2(header: Option<crate::link::EthernetHeader>, out: &mut String) {
-    out.push_str(",\"l2\":");
+fn push_l2<W: DocOut>(header: Option<crate::link::EthernetHeader>, out: &mut W) {
+    out.key("l2");
     match header {
-        None => out.push_str("null"),
+        None => out.null(),
         Some(h) => {
-            out.push_str("{\"src\":\"");
+            out.open_map();
+            out.key("src");
             push_mac(&h.src, out);
-            out.push_str("\",\"dst\":\"");
+            out.key("dst");
             push_mac(&h.dst, out);
-            let _ = write!(
-                out,
-                "\",\"frame_offset\":{},\"length\":{}}}",
-                h.frame_offset, h.length
-            );
+            out.key("frame_offset");
+            out.uint(h.frame_offset as u64);
+            out.key("length");
+            out.uint(h.length as u64);
+            out.close_map();
         }
     }
 }
 
-fn push_mac(mac: &[u8; 6], out: &mut String) {
-    for (i, b) in mac.iter().enumerate() {
-        if i > 0 {
-            out.push(':');
-        }
-        let _ = write!(out, "{b:02x}");
-    }
+fn push_mac<W: DocOut>(mac: &[u8; 6], out: &mut W) {
+    let [a, b, c, d, e, f] = *mac;
+    out.text_fmt(format_args!(
+        "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}"
+    ));
 }
 
-/// A boolean that may be unknown, in the document's spelling: `null` is
-/// "not known", a different answer from `false`.
-fn tri_state(v: Option<bool>) -> &'static str {
-    match v {
-        Some(true) => "true",
-        Some(false) => "false",
-        None => "null",
-    }
-}
+// A boolean that may be unknown is written by `DocOut::opt_bool`: `null` is
+// "not known", a different answer from `false`.
 
 /// Revision 43 — whether the flow's bytes are zenoh, and what that rests on:
 /// three keys, shared with the session table, which writes them on a row and on
@@ -5394,61 +5453,70 @@ pub(crate) fn push_zenoh(
     evidence: &crate::zenoh_evidence::ZenohEvidence,
     out: &mut String,
 ) {
+    JsonOut::members_onto(out, |out| write_zenoh(versions, evidence, out));
+}
+
+/// [`push_zenoh`]'s members, written through any [`DocOut`].
+pub(crate) fn write_zenoh<W: DocOut>(
+    versions: wz_session_core::passive::VersionEvidence,
+    evidence: &crate::zenoh_evidence::ZenohEvidence,
+    out: &mut W,
+) {
     use crate::zenoh_evidence::{model, Check};
-    let crossed = evidence.crossing().map(|c| c.packet);
-    let _ = write!(
-        out,
-        ",\"zenoh\":\"{}\",\"announced_version\":\"{}\",\"zenoh_evidence\":{{\
-         \"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":{},\
-         \"no_at_millibits\":{},\"model\":{},\"crossed_at_packet\":",
-        crate::session_table::ZenohVerdict::of(evidence).name(),
-        crate::session_table::AnnouncedVersion::of(versions).name(),
-        evidence.log2_lr_millibits(),
-        evidence.log2_lr_no_millibits(),
-        model::YES_AT,
-        model::NO_AT,
-        model::MODEL,
-    );
-    match crossed {
-        Some(packet) => {
-            let _ = write!(out, "{packet}");
-        }
-        None => out.push_str("null"),
-    }
-    let _ = write!(
-        out,
-        ",\"log2_lr_max_millibits\":{},\"log2_lr_min_millibits\":{},\
-         \"log2_lr_no_max_millibits\":{},\"log2_lr_no_min_millibits\":{},\"checks\":[",
-        evidence.log2_lr_max_millibits(),
-        evidence.log2_lr_min_millibits(),
-        evidence.log2_lr_no_max_millibits(),
-        evidence.log2_lr_no_min_millibits(),
-    );
-    let mut first = true;
+    out.key("zenoh");
+    out.text(crate::session_table::ZenohVerdict::of(evidence).name());
+    out.key("announced_version");
+    out.text(crate::session_table::AnnouncedVersion::of(versions).name());
+    out.key("zenoh_evidence");
+    out.open_map();
+    out.key("log2_lr_millibits");
+    out.int(evidence.log2_lr_millibits());
+    out.key("log2_lr_no_millibits");
+    out.int(evidence.log2_lr_no_millibits());
+    out.key("yes_at_millibits");
+    out.int(model::YES_AT);
+    out.key("no_at_millibits");
+    out.int(model::NO_AT);
+    out.key("model");
+    out.uint(u64::from(model::MODEL));
+    out.key("crossed_at_packet");
+    out.opt_uint(evidence.crossing().map(|c| c.packet));
+    out.key("log2_lr_max_millibits");
+    out.int(evidence.log2_lr_max_millibits());
+    out.key("log2_lr_min_millibits");
+    out.int(evidence.log2_lr_min_millibits());
+    out.key("log2_lr_no_max_millibits");
+    out.int(evidence.log2_lr_no_max_millibits());
+    out.key("log2_lr_no_min_millibits");
+    out.int(evidence.log2_lr_no_min_millibits());
+    out.key("checks");
+    out.open_array();
     for check in Check::ALL {
         let tally = evidence.tally(check);
         if !tally.observed() {
             continue;
         }
-        if !first {
-            out.push(',');
-        }
-        first = false;
-        let _ = write!(
-            out,
-            "{{\"check\":\"{}\",\"strength\":\"{}\",\"confirmed\":{},\"violated\":{},\
-             \"millibits\":{},\"no_millibits\":{},\"q_basis\":\"{}\",\"eps_basis\":\"{}\"}}",
-            check.name(),
-            check.strength().name(),
-            tally.confirmed,
-            tally.violated,
-            tally.millibits,
-            tally.no_millibits,
-            check.q_basis().name(),
-            check.eps_basis().name(),
-        );
+        out.open_map();
+        out.key("check");
+        out.text(check.name());
+        out.key("strength");
+        out.text(check.strength().name());
+        out.key("confirmed");
+        out.uint(tally.confirmed);
+        out.key("violated");
+        out.uint(tally.violated);
+        out.key("millibits");
+        out.int(tally.millibits);
+        out.key("no_millibits");
+        out.int(tally.no_millibits);
+        out.key("q_basis");
+        out.text(check.q_basis().name());
+        out.key("eps_basis");
+        out.text(check.eps_basis().name());
+        out.close_map();
     }
-    out.push_str("]}");
+    out.close_array();
+    out.close_map();
 }
 
 /// Revision 42 — how the flow's framing units READ, beside the verdict
@@ -5467,26 +5535,31 @@ pub(crate) fn push_unit_readings(
     readings: wz_session_core::passive::ReadingEvidence,
     out: &mut String,
 ) {
-    let _ = write!(
-        out,
-        ",\"unit_readings\":{{\"explained\":{},\"residual\":{},\"undecoded\":{}}}",
-        TallyJson(readings.explained),
-        TallyJson(readings.residual),
-        TallyJson(readings.undecoded)
-    );
+    JsonOut::members_onto(out, |out| write_unit_readings(readings, out));
 }
 
-/// One tally as `{"units":N,"bytes":B}`.
-struct TallyJson(wz_session_core::passive::UnitTally);
-
-impl core::fmt::Display for TallyJson {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "{{\"units\":{},\"bytes\":{}}}",
-            self.0.units, self.0.bytes
-        )
+/// [`push_unit_readings`]' member, written through any [`DocOut`].
+pub(crate) fn write_unit_readings<W: DocOut>(
+    readings: wz_session_core::passive::ReadingEvidence,
+    out: &mut W,
+) {
+    out.key("unit_readings");
+    out.open_map();
+    for (key, tally) in [
+        ("explained", readings.explained),
+        ("residual", readings.residual),
+        ("undecoded", readings.undecoded),
+    ] {
+        // One tally as `{"units":N,"bytes":B}`.
+        out.key(key);
+        out.open_map();
+        out.key("units");
+        out.uint(tally.units);
+        out.key("bytes");
+        out.uint(tally.bytes);
+        out.close_map();
     }
+    out.close_map();
 }
 
 /// The flow's observation CONTEXT: what the handshake it watched
@@ -5521,51 +5594,43 @@ impl core::fmt::Display for TallyJson {
 /// message could read it, so a header drawn from the flow's context had to go
 /// back to that row. See [`wz_session_core::passive::FlowContext::version`] for
 /// why the acceptor's word is preferred.
+#[cfg(test)]
 pub(crate) fn push_context(
     context: &wz_session_core::passive::FlowContext,
     compression: &ParameterGrounds,
     out: &mut String,
 ) {
-    out.push_str(",\"context\":{\"phase\":");
-    escape_into(phase_word(context.phase).name(), out);
-    let _ = write!(
-        out,
-        ",\"negotiated\":{},\"lowlatency\":{},\"compression\":{},\"qos\":{},\
-         \"patch\":",
-        context.negotiated(),
-        tri_state(context.lowlatency()),
-        tri_state(context.compression()),
-        tri_state(context.qos()),
-    );
-    match context.patch {
-        Some(p) => {
-            let _ = write!(out, "{p}");
-        }
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"sn_mask\":");
-    match context.sn_mask() {
-        Some(m) => {
-            let _ = write!(out, "{m}");
-        }
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"batch_size\":");
-    match context.batch_size() {
-        Some(b) => {
-            let _ = write!(out, "{b}");
-        }
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"version\":");
-    match context.version {
-        Some(v) => {
-            let _ = write!(out, "{v}");
-        }
-        None => out.push_str("null"),
-    }
+    JsonOut::members_onto(out, |out| write_context(context, compression, out));
+}
+
+/// [`push_context`]'s member, written through any [`DocOut`].
+pub(crate) fn write_context<W: DocOut>(
+    context: &wz_session_core::passive::FlowContext,
+    compression: &ParameterGrounds,
+    out: &mut W,
+) {
+    out.key("context");
+    out.open_map();
+    out.key("phase");
+    out.text(phase_word(context.phase).name());
+    out.key("negotiated");
+    out.bool(context.negotiated());
+    out.key("lowlatency");
+    out.opt_bool(context.lowlatency());
+    out.key("compression");
+    out.opt_bool(context.compression());
+    out.key("qos");
+    out.opt_bool(context.qos());
+    out.key("patch");
+    out.opt_uint(context.patch.map(u64::from));
+    out.key("sn_mask");
+    out.opt_uint(context.sn_mask());
+    out.key("batch_size");
+    out.opt_uint(context.batch_size().map(u64::from));
+    out.key("version");
+    out.opt_uint(context.version.map(u64::from));
     push_parameters(context, compression, out);
-    out.push('}');
+    out.close_map();
 }
 
 /// What the bytes of a session say about its parameters beside what its
@@ -5635,41 +5700,45 @@ impl ParameterGrounds {
 ///
 /// The integers follow the integer rule: a bare number up to 2^53 - 1 and a
 /// string of the same digits above it, which `sn_mask` can reach.
-fn push_parameters(
+fn push_parameters<W: DocOut>(
     context: &wz_session_core::passive::FlowContext,
     compression: &ParameterGrounds,
-    out: &mut String,
+    out: &mut W,
 ) {
     use wz_session_core::passive::Reading;
-    out.push_str(",\"parameters\":{");
+    out.key("parameters");
+    out.open_map();
     push_compression(compression, out);
-    let flag = |name: &str, reading: Reading<bool>, out: &mut String| {
-        let _ = write!(out, ",\"{name}\":{{\"value\":{}", tri_state(reading.value));
+    let flag = |name: &str, reading: Reading<bool>, out: &mut W| {
+        out.key(name);
+        out.open_map();
+        out.key("value");
+        out.opt_bool(reading.value);
         push_basis(reading.basis, out);
-        out.push('}');
+        out.close_map();
     };
     flag("lowlatency", Reading::stated(context.lowlatency()), out);
     flag("qos", Reading::stated(context.qos()), out);
-    let number = |name: &str, reading: Reading<u64>, out: &mut String| {
-        let _ = write!(out, ",\"{name}\":{{\"value\":");
+    let number = |name: &str, reading: Reading<u64>, out: &mut W| {
+        out.key(name);
+        out.open_map();
+        out.key("value");
         match reading.value {
-            Some(v) => wz_session_core::json::u64_into(v, out),
-            None => out.push_str("null"),
+            Some(v) => out.uint_exact(v),
+            None => out.null(),
         }
         push_basis(reading.basis, out);
-        out.push('}');
+        out.close_map();
     };
     number("patch", Reading::stated(context.patch.map(u64::from)), out);
-    out.push(',');
     floored("sn_mask", compression.sn_mask, out);
-    out.push(',');
     floored("batch_size", compression.batch_size, out);
     number(
         "version",
         Reading::stated(context.version.map(u64::from)),
         out,
     );
-    out.push('}');
+    out.close_map();
 }
 
 /// Revision 47 — an entry of [`push_parameters`] the bytes bound from below:
@@ -5687,72 +5756,82 @@ fn push_parameters(
 ///   `null` since neither is taken.
 ///
 /// Under `stated` neither key is written: the handshake's value is exact.
-fn floored(name: &str, reading: wz_session_core::passive::FloorReading, out: &mut String) {
+fn floored<W: DocOut>(name: &str, reading: wz_session_core::passive::FloorReading, out: &mut W) {
     use wz_session_core::passive::Basis;
-    let integer = |v: Option<u64>, out: &mut String| match v {
-        Some(v) => wz_session_core::json::u64_into(v, out),
-        None => out.push_str("null"),
+    let integer = |v: Option<u64>, out: &mut W| match v {
+        Some(v) => out.uint_exact(v),
+        None => out.null(),
     };
-    let _ = write!(out, "\"{name}\":{{\"value\":");
+    out.key(name);
+    out.open_map();
+    out.key("value");
     integer(reading.value, out);
     push_basis(reading.basis, out);
     match reading.basis {
         Basis::Absent if reading.at_least.is_some() => {
-            out.push_str(",\"at_least\":");
+            out.key("at_least");
             integer(reading.at_least, out);
         }
         Basis::Conflicting => {
-            out.push_str(",\"evidence\":{\"stated\":");
+            out.key("evidence");
+            out.open_map();
+            out.key("stated");
             integer(reading.stated, out);
-            out.push_str(",\"at_least\":");
+            out.key("at_least");
             integer(reading.at_least, out);
-            out.push('}');
+            out.close_map();
         }
         _ => {}
     }
-    out.push('}');
+    out.close_map();
 }
 
 /// The `compression` entry of [`push_parameters`], from the session's reading
 /// and its two directions' evidence (`a` then `b`). The four counts are
 /// counts of units this library read, which the integer rule leaves bare.
-fn push_compression(grounds: &ParameterGrounds, out: &mut String) {
+fn push_compression<W: DocOut>(grounds: &ParameterGrounds, out: &mut W) {
     use wz_session_core::passive::Basis;
-    out.push_str("\"compression\":{\"value\":");
-    match grounds.reading.value {
-        Some(true) => out.push_str("\"lz4\""),
-        Some(false) => out.push_str("\"off\""),
-        None => out.push_str("null"),
-    }
+    out.key("compression");
+    out.open_map();
+    out.key("value");
+    out.opt_text(
+        grounds
+            .reading
+            .value
+            .map(|lz4| if lz4 { "lz4" } else { "off" }),
+    );
     push_basis(grounds.reading.basis, out);
-    out.push_str(",\"evidence\":");
+    out.key("evidence");
     if !matches!(grounds.reading.basis, Basis::Inferred | Basis::Conflicting) {
-        out.push_str("null}");
+        out.null();
+        out.close_map();
         return;
     }
-    out.push_str("{\"halves\":[");
-    for (i, (direction, e)) in [Direction::A, Direction::B]
-        .iter()
-        .zip(grounds.evidence)
-        .enumerate()
-    {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"direction\":");
-        escape_into(dir_name(*direction), out);
-        let _ = write!(
-            out,
-            ",\"headed_units\":{},\"plain_units\":{},\"headed_resyncs\":{},\"plain_resyncs\":{}}}",
-            e.headed_units, e.plain_units, e.headed_resyncs, e.plain_resyncs
-        );
+    out.open_map();
+    out.key("halves");
+    out.open_array();
+    for (direction, e) in [Direction::A, Direction::B].iter().zip(grounds.evidence) {
+        out.open_map();
+        out.key("direction");
+        out.text(dir_name(*direction));
+        out.key("headed_units");
+        out.uint(e.headed_units);
+        out.key("plain_units");
+        out.uint(e.plain_units);
+        out.key("headed_resyncs");
+        out.uint(e.headed_resyncs);
+        out.key("plain_resyncs");
+        out.uint(e.plain_resyncs);
+        out.close_map();
     }
-    out.push_str("]}}");
+    out.close_array();
+    out.close_map();
+    out.close_map();
 }
 
-fn push_basis(basis: wz_session_core::passive::Basis, out: &mut String) {
-    out.push_str(",\"basis\":");
-    escape_into(BasisWord::of(basis).name(), out);
+fn push_basis<W: DocOut>(basis: wz_session_core::passive::Basis, out: &mut W) {
+    out.key("basis");
+    out.text(BasisWord::of(basis).name());
 }
 
 /// Revision 45 — the word a parameter's `basis` carries
@@ -5834,61 +5913,62 @@ impl BasisWord {
 /// clock, and none of it is decided here. The two instants-and-leases follow
 /// the integer rule: a bare number up to 2^53 - 1 and a string of the same
 /// digits above it, and `last_seen_ts_ns` is past that on a real clock.
-fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut String) {
-    use wz_session_core::json::u64_into;
-    out.push_str(",\"halves\":[");
-    for (i, (direction, half)) in [(Direction::A, a), (Direction::B, b)]
-        .into_iter()
-        .enumerate()
-    {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"direction\":");
-        escape_into(dir_name(direction), out);
-        out.push_str(",\"lease_ms\":");
+fn push_halves<W: DocOut>(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut W) {
+    out.key("halves");
+    out.open_array();
+    for (direction, half) in [(Direction::A, a), (Direction::B, b)] {
+        out.open_map();
+        out.key("direction");
+        out.text(dir_name(direction));
+        out.key("lease_ms");
         match half.lease_ms {
-            Some(ms) => u64_into(ms, out),
-            None => out.push_str("null"),
+            Some(ms) => out.uint_exact(ms),
+            None => out.null(),
         }
-        out.push_str(",\"last_seen_ts_ns\":");
+        out.key("last_seen_ts_ns");
         match half.last_seen_ns {
-            Some(ns) => u64_into(ns, out),
-            None => out.push_str("null"),
+            Some(ns) => out.uint_exact(ns),
+            None => out.null(),
         }
-        let _ = write!(
-            out,
-            ",\"close_seen\":{},\"fin_seen\":{},\"rst_seen\":{},\"batch_header\":\"{}\"",
-            half.close_seen,
-            tri_state(half.fin_seen),
-            tri_state(half.rst_seen),
-            BatchHeaderWord::of(half.batch_header).name()
-        );
+        out.key("close_seen");
+        out.bool(half.close_seen);
+        out.key("fin_seen");
+        out.opt_bool(half.fin_seen);
+        out.key("rst_seen");
+        out.opt_bool(half.rst_seen);
+        out.key("batch_header");
+        out.text(BatchHeaderWord::of(half.batch_header).name());
         // Revision 70 — the origin the direction's `Open` announced, a wire
         // sequence number (the integer door), and whether it is zenoh's
         // derivation over the two zids.
-        out.push_str(",\"initial_sn\":");
+        out.key("initial_sn");
         match half.initial_sn {
-            Some(sn) => u64_into(sn, out),
-            None => out.push_str("null"),
+            Some(sn) => out.uint_exact(sn),
+            None => out.null(),
         }
-        out.push_str(",\"initial_sn_derivation\":");
-        match half.initial_sn_derivation {
-            Some(derivation) => escape_into(DerivationWord::of(derivation).name(), out),
-            None => out.push_str("null"),
-        }
+        out.key("initial_sn_derivation");
+        out.opt_text(
+            half.initial_sn_derivation
+                .map(|derivation| DerivationWord::of(derivation).name()),
+        );
         // Revision 45 — the direction's own parameter, in `push_parameters`'
         // shape: the lease its `Open` stated, or nothing.
         let lease = wz_session_core::passive::Reading::stated(half.lease_ms);
-        out.push_str(",\"parameters\":{\"lease_ms\":{\"value\":");
+        out.key("parameters");
+        out.open_map();
+        out.key("lease_ms");
+        out.open_map();
+        out.key("value");
         match lease.value {
-            Some(ms) => u64_into(ms, out),
-            None => out.push_str("null"),
+            Some(ms) => out.uint_exact(ms),
+            None => out.null(),
         }
         push_basis(lease.basis, out);
-        out.push_str("}}}");
+        out.close_map();
+        out.close_map();
+        out.close_map();
     }
-    out.push(']');
+    out.close_array();
 }
 
 /// Revision 70 — the word a half's `initial_sn_derivation` carries: whether
@@ -6110,8 +6190,9 @@ impl<'a> RowSelection<'a> {
 /// something outside this document is the same kind of input. `list_id` is the
 /// flow's own list; `scouting_list_id` is its scouting list, which only a
 /// datagram flow has.
-#[derive(Clone, Copy)]
-struct RowTags<'a> {
+///
+/// `D` is what a row of the document's encoding is held as ([`RowSink`]).
+struct RowTags<'a, D> {
     selection: Option<RowSelection<'a>>,
     list_id: Option<u64>,
     /// The number this document gives the flow's list, printed on the flow
@@ -6141,7 +6222,7 @@ struct RowTags<'a> {
     judged_list: Option<usize>,
     /// What a since-document remembers of the rows it writes, and the earlier
     /// rows it writes again. `None` for a document that remembers nothing.
-    sink: Option<&'a RowSink>,
+    sink: Option<&'a RowSink<D>>,
     /// The pairing a `ResponseFinal` row names its request from, and this flow's
     /// list index in it. `None` where the list has no index (a row this document
     /// does not render), which leaves its finals without a `closes` key rather
@@ -6154,6 +6235,16 @@ struct RowTags<'a> {
     /// Whether the rows write their trees ([`Trees`]).
     trees: Trees,
 }
+
+// By hand, not derived: a derive would ask `D` to be `Copy`, and `D` is only
+// ever behind the reference.
+impl<D> Clone for RowTags<'_, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D> Copy for RowTags<'_, D> {}
 
 /// The exchange plane's pairing, and the list it is read for.
 #[derive(Clone, Copy)]
@@ -6253,8 +6344,8 @@ struct RowCloses<'a> {
 impl<'a> RowCloses<'a> {
     /// The pairing for the row `frame` is, or `None` where the document has none
     /// for this list.
-    fn of(
-        tags: &RowTags<'a>,
+    fn of<D>(
+        tags: &RowTags<'a, D>,
         requests: Option<&'a RequestIndex>,
         frame: &crate::messages::Row<'_>,
     ) -> Option<Self> {
@@ -6269,64 +6360,66 @@ impl<'a> RowCloses<'a> {
 
     /// The value of `closes` for the `ResponseFinal` that is record `record` of
     /// this row.
-    fn value(&self, record: usize) -> String {
-        let mut out = String::new();
+    fn write_value<W: DocOut>(&self, record: usize, out: &mut W) {
         let Some(closing) = self.table.closing(&self.row, record) else {
             // The orphan: an object, so it is told from an entry that is not a
             // final (`null`), with nothing to name.
-            out.push_str(
-                "{\"request_kind\":null,\"request_seq\":null,\"request_record\":null,\
-                 \"completion_ns\":null}",
-            );
-            return out;
+            out.open_map();
+            for key in [
+                "request_kind",
+                "request_seq",
+                "request_record",
+                "completion_ns",
+            ] {
+                out.key(key);
+                out.null();
+            }
+            out.close_map();
+            return;
         };
-        self.push_request(
-            closing.kind,
-            &closing.request,
-            closing.request_record,
-            &mut out,
-        );
-        out.push_str(",\"completion_ns\":");
-        push_opt_u64(closing.completion_ns, &mut out);
-        out.push('}');
-        out
+        self.push_request(closing.kind, &closing.request, closing.request_record, out);
+        out.key("completion_ns");
+        out.opt_uint(closing.completion_ns);
+        out.close_map();
     }
 
     /// The value of `answers` for the `Response` that is record `record` of
     /// this row.
-    fn answer_value(&self, record: usize) -> String {
-        let mut out = String::new();
+    fn write_answer<W: DocOut>(&self, record: usize, out: &mut W) {
         let Some(answer) = self.table.answer(&self.row, record) else {
             // The orphan: an object of nulls, told from an entry that is not a
             // response (`null`) and from a first reply with no round trip
             // (`first_reply` true, `round_trip_ns` null).
-            out.push_str(
-                "{\"request_kind\":null,\"request_seq\":null,\"request_record\":null,\
-                 \"first_reply\":null,\"round_trip_ns\":null}",
-            );
-            return out;
+            out.open_map();
+            for key in [
+                "request_kind",
+                "request_seq",
+                "request_record",
+                "first_reply",
+                "round_trip_ns",
+            ] {
+                out.key(key);
+                out.null();
+            }
+            out.close_map();
+            return;
         };
-        self.push_request(
-            answer.kind,
-            &answer.request,
-            answer.request_record,
-            &mut out,
-        );
-        let _ = write!(out, ",\"first_reply\":{}", answer.first_reply);
-        out.push_str(",\"round_trip_ns\":");
-        push_opt_u64(answer.round_trip_ns, &mut out);
-        out.push('}');
-        out
+        self.push_request(answer.kind, &answer.request, answer.request_record, out);
+        out.key("first_reply");
+        out.bool(answer.first_reply);
+        out.key("round_trip_ns");
+        out.opt_uint(answer.round_trip_ns);
+        out.close_map();
     }
 
-    /// The opening of a pairing object: `{` and the three keys that name the
-    /// request, unclosed so the caller adds its own.
-    fn push_request(
+    /// The opening of a pairing object: the map and the three keys that name
+    /// the request, unclosed so the caller adds its own.
+    fn push_request<W: DocOut>(
         &self,
         kind: crate::filter::RecordKind,
         request: &crate::payload::RowKey,
         request_record: usize,
-        out: &mut String,
+        out: &mut W,
     ) {
         let seq = self
             .requests
@@ -6335,23 +6428,13 @@ impl<'a> RowCloses<'a> {
                 let n = self.numbering?;
                 n.coordinates.row_seq(n.list?, produced)
             });
-        let _ = write!(
-            out,
-            "{{\"request_kind\":\"{}\",\"request_seq\":",
-            kind.word()
-        );
-        push_opt_u64(seq, out);
-        let _ = write!(out, ",\"request_record\":{request_record}");
-    }
-}
-
-/// An unsigned integer, or `null`.
-fn push_opt_u64(value: Option<u64>, out: &mut String) {
-    match value {
-        Some(v) => {
-            let _ = write!(out, "{v}");
-        }
-        None => out.push_str("null"),
+        out.open_map();
+        out.key("request_kind");
+        out.text(kind.word());
+        out.key("request_seq");
+        out.opt_uint(seq);
+        out.key("request_record");
+        out.uint(request_record as u64);
     }
 }
 
@@ -6372,16 +6455,20 @@ fn push_opt_u64(value: Option<u64>, out: &mut String) {
 /// A row whose message bytes a ceiling has since discarded reads `declined` when
 /// asked again, and that is not a correction (the row the consumer holds stays
 /// true), so such a row has NO digest and is never reported.
-pub(crate) struct RowSink {
+///
+/// The row's bytes are those of the document's own encoding, and `D` is what a
+/// row of that encoding is held as ([`DocOut::Done`]): a memory writes one
+/// encoding (see [`FieldsMemory`]), so the digests it compares are of one.
+pub(crate) struct RowSink<D> {
     /// `seq` to the row's digest, and the rows that read `declined` as such.
     digests: core::cell::RefCell<crate::digest_column::DigestColumn>,
     /// The earlier rows to write again.
     revised: alloc::collections::BTreeSet<u64>,
     /// Those rows as they read now, by `seq`.
-    kept: core::cell::RefCell<alloc::collections::BTreeMap<u64, String>>,
+    kept: core::cell::RefCell<alloc::collections::BTreeMap<u64, D>>,
 }
 
-impl RowSink {
+impl<D> RowSink<D> {
     pub(crate) fn new(revised: alloc::collections::BTreeSet<u64>) -> Self {
         Self {
             digests: core::cell::RefCell::new(crate::digest_column::DigestColumn::new()),
@@ -6392,15 +6479,15 @@ impl RowSink {
 
     /// FNV-1a over the row's bytes: not a security digest, a change detector, and
     /// the same on every build.
-    fn digest(text: &str) -> u64 {
-        fnv1a(0xcbf2_9ce4_8422_2325, text.as_bytes())
+    fn digest(row: &[u8]) -> u64 {
+        fnv1a(0xcbf2_9ce4_8422_2325, row)
     }
 
     pub(crate) fn into_parts(
         self,
     ) -> (
         crate::digest_column::DigestColumn,
-        alloc::collections::BTreeMap<u64, String>,
+        alloc::collections::BTreeMap<u64, D>,
     ) {
         (self.digests.into_inner(), self.kept.into_inner())
     }
@@ -6437,7 +6524,7 @@ struct RowNumbering<'a> {
     list: Option<usize>,
 }
 
-impl RowTags<'_> {
+impl<D> RowTags<'_, D> {
     /// Tell the declarations which list the rows written from here on are of: the
     /// caller's number for the pieces they join (a list this document does not
     /// number is told as one no other is), and the list's position in the
@@ -6591,17 +6678,17 @@ impl RowTags<'_> {
 
     /// Remember a row the document wrote (or wrote again): its digest, or none
     /// when it read `declined`.
-    fn record_row(&self, seq: Option<u64>, text: &str, declined: bool) {
+    fn record_row(&self, seq: Option<u64>, row: &[u8], declined: bool) {
         if let (Some(sink), Some(seq)) = (self.sink, seq) {
-            let digest = (!declined).then(|| RowSink::digest(text));
+            let digest = (!declined).then(|| RowSink::<D>::digest(row));
             sink.digests.borrow_mut().set(seq, digest);
         }
     }
 
-    /// Keep the text of an earlier row the document writes again.
-    fn keep_revised(&self, seq: Option<u64>, text: String) {
+    /// Keep an earlier row the document writes again, as it reads now.
+    fn keep_revised(&self, seq: Option<u64>, row: D) {
         if let (Some(sink), Some(seq)) = (self.sink, seq) {
-            sink.kept.borrow_mut().insert(seq, text);
+            sink.kept.borrow_mut().insert(seq, row);
         }
     }
 }
@@ -6641,26 +6728,30 @@ fn flow_number(coordinates: Option<&dyn RowCoordinates>, list: Option<usize>) ->
 
 /// The flow object's `list_id`: the number a selector's `flow` term names it
 /// by, and the one its rows carry as `list_id` where they carry coordinates.
-fn push_flow_number(flow_id: Option<u64>, out: &mut String) {
+fn push_flow_number<W: DocOut>(flow_id: Option<u64>, out: &mut W) {
     if let Some(id) = flow_id {
-        let _ = write!(out, ",\"list_id\":{id}");
+        out.key("list_id");
+        out.uint(id);
     }
 }
 
-fn push_coordinates(
+fn push_coordinates<W: DocOut>(
     list_id: Option<u64>,
     anchor: u64,
     batch_index: u64,
     seq: Option<u64>,
-    out: &mut String,
+    out: &mut W,
 ) {
     if let Some(list_id) = list_id {
-        let _ = write!(
-            out,
-            "\"list_id\":{list_id},\"anchor\":{anchor},\"batch_index\":{batch_index},"
-        );
+        out.key("list_id");
+        out.uint(list_id);
+        out.key("anchor");
+        out.uint(anchor);
+        out.key("batch_index");
+        out.uint(batch_index);
         if let Some(seq) = seq {
-            let _ = write!(out, "\"seq\":{seq},");
+            out.key("seq");
+            out.uint(seq);
         }
     }
 }
@@ -6690,10 +6781,10 @@ fn push_coordinates(
 /// ⚠ THE LAST TWO ARE THE POINT. Folding them into one null is what lets a
 /// reader mistake a gap in the capture for a measured exclusion, which is the
 /// failure this axis was asked for in the first place.
-fn push_selected(
+fn push_selected<W: DocOut>(
     selection: Option<RowSelection<'_>>,
     frame: &crate::messages::Row<'_>,
-    out: &mut String,
+    out: &mut W,
 ) {
     let Some(RowSelection { list, judged }) = selection else {
         return;
@@ -6961,8 +7052,9 @@ impl RowVerdict {
             .collect()
     }
 
-    fn push(self, out: &mut String) {
-        let _ = write!(out, "\"selected\":\"{}\",", self.word());
+    fn push<W: DocOut>(self, out: &mut W) {
+        out.key("selected");
+        out.text(self.word());
     }
 }
 
@@ -9147,6 +9239,22 @@ mod tests {
     /// and a fixture that stopped reaching one would take that word out of the
     /// pinned population in silence. Each walk is bound to an exhaustive
     /// match, so a variant added later joins here at `cargo build`.
+    /// What a writer of an object's members writes after a member, as the
+    /// text a document holds it: each key with the comma before it.
+    fn members(write: impl FnOnce(&mut JsonOut)) -> String {
+        let mut out = String::new();
+        JsonOut::members_onto(&mut out, write);
+        out
+    }
+
+    /// What a writer writes onto `opened`, which ends where a value or the
+    /// first member of an object belongs.
+    fn onto(opened: &str, write: impl FnOnce(&mut JsonOut)) -> String {
+        let mut out = String::from(opened);
+        JsonOut::value_onto(&mut out, write);
+        out
+    }
+
     fn session_arms() -> Vec<String> {
         use wz_session_core::passive::{FlowContext, SessionPhase};
         use wz_session_core::qos::Priority;
@@ -9166,93 +9274,75 @@ mod tests {
                 }),
                 chain: None,
             };
-            let mut out = String::new();
-            push_session_row(&row, &mut out);
-            arms.push(out);
+            arms.push(members(|out| push_session_row(&row, out)));
             band += 1;
             verdict = word.next();
         }
         while usize::from(band) < Priority::NUM {
-            let mut out = String::new();
-            push_session_row(
-                &SessionRow {
-                    sn: Some(SnRow {
-                        verdict: SnVerdictWord::Continuous,
-                        missing: None,
-                        direction: Direction::B,
-                        priority: Priority::from_wire(band),
-                        reliable: false,
-                    }),
-                    chain: None,
-                },
-                &mut out,
-            );
-            arms.push(out);
+            let row = SessionRow {
+                sn: Some(SnRow {
+                    verdict: SnVerdictWord::Continuous,
+                    missing: None,
+                    direction: Direction::B,
+                    priority: Priority::from_wire(band),
+                    reliable: false,
+                }),
+                chain: None,
+            };
+            arms.push(members(|out| push_session_row(&row, out)));
             band += 1;
         }
         let mut outcome = Some(ChainOutcome::Aborted);
         while let Some(word) = outcome {
-            let mut out = String::new();
-            push_session_row(
-                &SessionRow {
-                    sn: None,
-                    chain: Some(ChainRow {
-                        outcome: word,
-                        reason: None,
-                        chain_id: Some(0),
-                        placed: Some((0, 0, 4)),
-                        sns: None,
-                        held: None,
-                        displaced: None,
-                    }),
-                },
-                &mut out,
-            );
-            arms.push(out);
+            let row = SessionRow {
+                sn: None,
+                chain: Some(ChainRow {
+                    outcome: word,
+                    reason: None,
+                    chain_id: Some(0),
+                    placed: Some((0, 0, 4)),
+                    sns: None,
+                    held: None,
+                    displaced: None,
+                }),
+            };
+            arms.push(members(|out| push_session_row(&row, out)));
             outcome = word.next();
         }
         let mut reason = Some(ChainReason::CapacityOverflow);
         while let Some(word) = reason {
-            let mut out = String::new();
-            push_session_row(
-                &SessionRow {
-                    sn: None,
-                    chain: Some(ChainRow {
-                        outcome: ChainOutcome::Aborted,
-                        reason: Some(word),
-                        chain_id: None,
-                        placed: None,
-                        sns: Some((Some(1), 3)),
-                        held: Some((1, 4)),
-                        displaced: None,
-                    }),
-                },
-                &mut out,
-            );
-            arms.push(out);
+            let row = SessionRow {
+                sn: None,
+                chain: Some(ChainRow {
+                    outcome: ChainOutcome::Aborted,
+                    reason: Some(word),
+                    chain_id: None,
+                    placed: None,
+                    sns: Some((Some(1), 3)),
+                    held: Some((1, 4)),
+                    displaced: None,
+                }),
+            };
+            arms.push(members(|out| push_session_row(&row, out)));
             reason = word.next();
         }
         // Revision 69 — every `displaced` word, on the row whose fragment
         // began a chain in the place of the one it ended.
         let mut displaced = Some(DisplacedWord::Evicted);
         while let Some(word) = displaced {
-            let mut out = String::new();
-            push_session_row(
-                &SessionRow {
-                    sn: None,
-                    chain: Some(ChainRow {
-                        outcome: ChainOutcome::Begun,
-                        reason: None,
-                        chain_id: Some(1),
-                        placed: Some((0, 0, 4)),
-                        sns: None,
-                        held: None,
-                        displaced: Some(word),
-                    }),
-                },
-                &mut out,
-            );
-            arms.push(out);
+            let row = SessionRow {
+                sn: None,
+                chain: Some(ChainRow {
+                    outcome: ChainOutcome::Begun,
+                    reason: None,
+                    chain_id: Some(1),
+                    placed: Some((0, 0, 4)),
+                    sns: None,
+                    held: None,
+                    displaced: Some(word),
+                }),
+            };
+            arms.push(members(|out| push_session_row(&row, out)));
             displaced = word.next();
         }
         // The phases are the session's own enum, so they are listed here and
@@ -9285,9 +9375,7 @@ mod tests {
                 batch_header: header,
                 ..crate::HalfObservation::default()
             };
-            let mut out = String::new();
-            push_halves(&half, &half, &mut out);
-            arms.push(out);
+            arms.push(members(|out| push_halves(&half, &half, out)));
         }
         // Revision 70 — every `initial_sn_derivation` word, on a half.
         for derivation in [
@@ -9299,9 +9387,7 @@ mod tests {
                 initial_sn_derivation: Some(derivation),
                 ..crate::HalfObservation::default()
             };
-            let mut out = String::new();
-            push_halves(&half, &half, &mut out);
-            arms.push(out);
+            arms.push(members(|out| push_halves(&half, &half, out)));
         }
         // Every `basis` word, on a compression reading that carries evidence
         // wherever the word allows it, so the evidence keys are written too.
@@ -9321,16 +9407,13 @@ mod tests {
                 (None, Basis::Absent),
             ] {
                 words.insert(BasisWord::of(basis).name());
-                let mut out = String::from("{");
-                push_compression(
-                    &ParameterGrounds {
-                        reading: Reading { value, basis },
-                        evidence: [seen, seen],
-                        batch_size: FloorReading::of(None, None),
-                        sn_mask: FloorReading::of(None, None),
-                    },
-                    &mut out,
-                );
+                let grounds = ParameterGrounds {
+                    reading: Reading { value, basis },
+                    evidence: [seen, seen],
+                    batch_size: FloorReading::of(None, None),
+                    sn_mask: FloorReading::of(None, None),
+                };
+                let mut out = onto("{", |out| push_compression(&grounds, out));
                 out.push('}');
                 arms.push(out);
             }
@@ -9347,8 +9430,9 @@ mod tests {
                 (None, None),
                 (Some(1000), Some(70_000)),
             ] {
-                let mut out = String::from("{");
-                floored("batch_size", FloorReading::of(stated, floor), &mut out);
+                let mut out = onto("{", |out| {
+                    floored("batch_size", FloorReading::of(stated, floor), out)
+                });
                 out.push('}');
                 arms.push(out);
             }
@@ -9391,25 +9475,25 @@ mod tests {
                 AnnouncedVersion::names()
             );
         }
-        let mut out = String::new();
-        push_first_byte(
-            Some(FirstByte {
-                packet: 0,
-                payload_offset: 0,
-            }),
-            None,
-            &mut out,
-        );
-        push_l2(
-            Some(crate::link::EthernetHeader {
-                src: [2, 0, 0, 0, 0, 1],
-                dst: [2, 0, 0, 0, 0, 2],
-                frame_offset: 0,
-                length: crate::link::ETHERNET_HEADER_LEN,
-            }),
-            &mut out,
-        );
-        arms.push(out);
+        arms.push(members(|out| {
+            push_first_byte(
+                Some(FirstByte {
+                    packet: 0,
+                    payload_offset: 0,
+                }),
+                None,
+                out,
+            );
+            push_l2(
+                Some(crate::link::EthernetHeader {
+                    src: [2, 0, 0, 0, 0, 1],
+                    dst: [2, 0, 0, 0, 0, 2],
+                    frame_offset: 0,
+                    length: crate::link::ETHERNET_HEADER_LEN,
+                }),
+                out,
+            );
+        }));
         arms
     }
 

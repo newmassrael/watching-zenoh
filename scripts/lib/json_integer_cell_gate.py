@@ -63,8 +63,10 @@ from typing import Iterable, Mapping
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-#: The integer door and its allocating form.
-DOORS = ("u64_into", "u64_json")
+#: The integer door, its allocating form, and its form on a structured writer
+#: (`wz_session_core::doc_out::DocOut::uint_exact`, the same rule in either
+#: encoding). The trait's own signature is skipped as a definition.
+DOORS = ("u64_into", "u64_json", "uint_exact")
 #: Where each door is DEFINED: a call inside these bodies is the door, not a cell.
 DOOR_DEFINITIONS = frozenset(
     {
@@ -141,7 +143,7 @@ _E2E_BLOCK_FACTS_HEADER = "the `previous_counter`, `counter_step`, `max_gap` and
 
 #: (file, enclosing fn) -> the cells that function writes through a door, one per call.
 CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
-    ("crates/wz-session-core/src/dissect.rs", "push_json"): (
+    ("crates/wz-session-core/src/dissect.rs", "push_tree"): (
         Cell("fields", "a `bits` field's value", "a `uint` (and a `bits`) field's `value`", "`bits`"),
         Cell("fields", "a `uint` field's value", "a `uint` (and a `bits`) field's `value`", "`uint`"),
     ),
@@ -228,7 +230,7 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ("crates/wz-capture/src/retention_json.rs", "retention_json"): (
         Cell("retention", "oldest_ts_ns", "`oldest_ts_ns` in the retention document", "`oldest_ts_ns`"),
     ),
-    ("crates/wz-capture/src/e2e_row.rs", "push_opened"): (
+    ("crates/wz-capture/src/e2e_row.rs", "write_opened"): (
         Cell("fields", "an e2e block's crc_computed", _E2E_BLOCK_HEADER, "`crc_computed`", born=34),
         Cell("fields", "an e2e block's length_field", _E2E_BLOCK_HEADER, "`length_field`", born=34),
         Cell("fields", "an e2e block's length_expected", _E2E_BLOCK_HEADER, "`length_expected`", born=34),
@@ -303,10 +305,10 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             "every integer of a record's `segment`",
         ),
     ),
-    ("crates/wz-capture/src/e2e_row.rs", "push_optional"): (
+    ("crates/wz-capture/src/e2e_row.rs", "write_optional"): (
         Cell("fields", "an e2e block's silence_ms", _E2E_BLOCK_HEADER, "`silence_ms`", born=34),
     ),
-    ("crates/wz-capture/src/e2e_row.rs", "push_counter_fact"): (
+    ("crates/wz-capture/src/e2e_row.rs", "write_counter_fact"): (
         Cell(
             "fields",
             "an e2e block's previous_counter, counter_step, max_gap and timeout_ms",
@@ -315,7 +317,7 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=35,
         ),
     ),
-    ("crates/wz-capture/src/e2e_json.rs", "push_fields"): (
+    ("crates/wz-capture/src/e2e_json.rs", "write_fields"): (
         Cell("e2e_wrap", "a field's raw", _E2E_FIELD_HEADER, "a field's `raw`"),
         Cell("e2e_wrap", "a field's value", _E2E_FIELD_HEADER, "a field's `value`"),
         Cell("e2e_wrap", "a part's value", _E2E_FIELD_HEADER, "a part's `value`"),
@@ -357,7 +359,7 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     # ONE call writes every integer a field of a typed body listing holds (a
     # signed one mirrors the door at the same line on the negative side), so the
     # value is declared as the one cell the call is.
-    ("crates/wz-capture/src/proto_decode_json.rs", "push_integer"): (
+    ("crates/wz-capture/src/proto_decode_json.rs", "write_integer"): (
         Cell(
             "e2e_open",
             "a body field's integer value",
