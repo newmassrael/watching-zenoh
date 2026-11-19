@@ -333,6 +333,20 @@ e2e-receiver = [
 # `e2e-sender-demux`: the receiving judge keeps one stream per sender, chosen by the sender
 # identity the frame's header carries, in at most `E2E_SENDER_SLOTS` slots.
 e2e-sender-demux = ["e2e-receiver", "wz-capi-core?/e2e-sender-demux"]
+# `app-transport`: a transport the program supplies (`wz_ext_transport_*`, `wz_ext_config_transport`),
+# which carries every link of a session opened from the config that names it, over the program's
+# own network stack and over no socket of the system's. wz's own, which zenoh-pico has not, so off
+# as the reference build is, and part of the unstable surface as the other wz doors are. The
+# transport object is the session core's and its table is held under the port's lock, so it serves
+# either engine and selects neither: the tokio engine's links over the program's stack, or the
+# cooperative engine's, whichever the build has.
+app-transport = [
+    "std",
+    "unstable-api",
+    "wz-session-core/app-link",
+    "wz-capi-core?/app-transport",
+    "wz-capi-coop?/app-transport",
+]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
 # tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,
 # `wz_ext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.

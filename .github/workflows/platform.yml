@@ -829,6 +829,23 @@ jobs:
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_session_loopback.c "a pico C program that opens two sessions over loopback"
 
+      # A zenoh-pico C program whose sessions open NO socket, on this host: two sessions
+      # joined by an in-memory transport the program supplies through the wz extension
+      # doors (wz_ext_transport_*, wz_ext.h), over a stream pair with injected partial
+      # sends and would-blocks, a datagram pair and a two-member group, each carrying a
+      # put and a query. It is the Windows DLL's evidence that a host program can hand the
+      # library its own network stack. The cdylib is built with the app-transport
+      # capability for it, which the script takes as its third argument. Observed, not yet
+      # gated: `continue-on-error` reports success whatever it did, so the script's own
+      # verdict line in the job summary is the reading, until two consecutive hosted runs
+      # read it green on both hosts and it is made a gate as the steps above were.
+      - name: a zenoh-pico C program over a transport it supplies (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 25
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "a pico C program over a transport it supplies" app-transport
+
   # The superseded generations of this workflow's two saved classes, deleted as
   # soon as the savers finish. The why, the least-privilege argument and the
   # rule are written once, on the `evict-superseded` job of ci.yml, and

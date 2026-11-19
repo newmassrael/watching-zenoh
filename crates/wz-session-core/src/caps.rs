@@ -474,6 +474,12 @@ pub const SUPERVISION_CHECKPOINTS: usize = generated::SUPERVISION_CHECKPOINTS;
 /// `1`.
 pub const E2E_SUPERVISED_STREAMS: usize = generated::E2E_SUPERVISED_STREAMS;
 
+/// The most bytes one link of a transport the program supplies queues in either direction
+/// (`app_link_table::AppLinkTable`): what the program handed in that the session has not read, and
+/// what a writer that cannot wait handed over that the program has not taken. A quota: past it the
+/// program's bytes are refused and nothing is sized by it.
+pub const APP_LINK_QUEUE_BYTES: usize = generated::APP_LINK_QUEUE_BYTES;
+
 /// How many event records the node's event ring holds (`event_ring::EventRing`). A count of
 /// records of a fixed size, so it sizes the ring's memory. At least `1`.
 pub const EVENT_RING_SLOTS: usize = generated::EVENT_RING_SLOTS;

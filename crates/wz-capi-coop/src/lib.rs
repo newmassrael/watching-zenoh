@@ -77,6 +77,11 @@ pub mod scout;
 pub mod scout_datagram;
 #[cfg(feature = "tls-mbedtls")]
 pub mod tls;
+/// The session shell's links over a transport the program supplies, which an ABI opens this
+/// engine with in place of its host's sockets (`CoopEngine::open_with_policy` over
+/// `app_link::AppLinks`).
+#[cfg(feature = "app-transport")]
+pub use wz_runtime_coop::app_link;
 // The tests are a host's: they run a router stand-in on threads of `std`.
 #[cfg(all(test, feature = "std"))]
 mod tests;

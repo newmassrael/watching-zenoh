@@ -987,4 +987,211 @@ z_result_t wz_ext_redeclare(const z_loaned_session_t *session);
  * Present in every build. */
 const char *wz_ext_conformance_digest(void);
 
+/* ================================================ the program's transport
+ *
+ * A transport the program supplies: a program with a network stack of its
+ * own (its TCP/IP and UDP) gives the session that stack in place of the
+ * system's sockets. The session calls the program's open, send and close; the
+ * program calls wz_ext_transport_received, _event and _accepted when its stack
+ * has something to say. Part of the unstable surface, and present only in a
+ * build with the app-transport capability.
+ *
+ * WHAT IT CARRIES. A config given a transport (wz_ext_config_transport) opens
+ * every link of its session over it and none over the system's sockets:
+ *   tcp/ connect   a stream the session dials        WZ_EXT_LINK_STREAM_DIAL
+ *   tcp/ listen    a stream listener                 WZ_EXT_LINK_STREAM_LISTEN
+ *   udp/ connect   a unicast datagram link           WZ_EXT_LINK_DATAGRAM
+ *   udp/ listen    with #iface=, a multicast group   WZ_EXT_LINK_GROUP
+ *   udp/ listen    without, a datagram listener      WZ_EXT_LINK_DATAGRAM_LISTEN
+ * On a listener of either kind the program names each stream, or each
+ * source that sends datagrams to it, with wz_ext_transport_accepted, and
+ * hands in what arrives on the link that returns.
+ * Either engine of the library runs a session over it. z_open refuses a config
+ * whose transport cannot carry what it names: another scheme (tls/, serial/,
+ * ...), or a kind this build has no link of (a udp/ dial on the tokio engine
+ * without the udp link, a group without the multicast transport, which the
+ * cooperative engine has not, a datagram listener but on the tokio engine with
+ * the udp link), with _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
+ * (-92), as the same locator over the system's sockets is; a config with
+ * neither connect nor listen (it would scout on the system's sockets) with
+ * WZ_EXT_ERR_UNSUPPORTED (-3). A stream is framed by the session exactly as a
+ * TCP socket is (the two-byte length before each batch), so the program
+ * carries plain bytes. A datagram is one batch, taken whole or not at all: a
+ * send answered with fewer bytes than it was given fails it. A group's
+ * datagrams are handed in with the locator each came from
+ * ("udp/<address>:<port>"), which tells the members apart; leaving the group
+ * is the link's close.
+ *
+ * THE RECEIVE BOUND. A link queues at most APP_LINK_QUEUE_BYTES (a limit of
+ * the build) of bytes the session has not read. wz_ext_transport_received past
+ * it answers WZ_EXT_ERR_LINK_FULL and takes nothing; once the session has read
+ * the queue down to half, the transport calls the program's drained(context,
+ * link), from a session thread, and the program hands the same bytes in
+ * again. A program that gives no drained retries on its own. An empty queue
+ * takes any datagram, however large.
+ *
+ * WHO OWNS WHAT. The program makes the transport (wz_ext_transport_new) and
+ * names it in every call it makes, so it can hand in bytes while z_open is
+ * still running the handshake of a dial. A config given the transport holds
+ * a reference, and so does a session opened from it, for as long as it has a
+ * link; the program's own reference goes with wz_ext_transport_drop. The
+ * program's drop(context), when it is not NULL, runs once, after the last
+ * call of open, send and close, when the last reference goes.
+ *
+ * HANDLES. The session names every link. open is handed the handle of the
+ * link it opens, and the handle is valid before open is called, so the
+ * program may report it connected, or hand in its first bytes, from its own
+ * thread before open returns. A stream the program accepts on a listener is
+ * named by wz_ext_transport_accepted, which returns its handle. A handle is
+ * never 0 and never reused while the transport lives.
+ *
+ * BUFFERS. The bytes of send are valid only during the call: the program
+ * copies what it keeps. The bytes of wz_ext_transport_received are copied
+ * before it returns: the buffer is the program's again at once. Every string
+ * either side passes is NUL-terminated and valid only during the call.
+ *
+ * WHAT THE PROGRAM'S ANSWERS DO.
+ *   open  OK           the link is up now
+ *         WOULD_BLOCK  under way: report CONNECTED, or CLOSED if it fails
+ *         CLOSED, FAILED, anything else
+ *                      the open failed; the session reports it as a link that
+ *                      did not open (a dial is retried on its schedule)
+ *   send  OK, *written = n (0 < n <= len)
+ *                      n bytes taken; the session sends the rest from n
+ *         OK with *written = 0, or WOULD_BLOCK
+ *                      nothing taken; the session sends nothing more on the
+ *                      link until the program reports WRITABLE, then resumes
+ *                      with the same bytes
+ *         CLOSED       the link is closed; the session closes it as it closes
+ *                      a socket the peer closed, and a dialled session dials
+ *                      again on its reconnect schedule
+ *         FAILED, anything else, or *written > len
+ *                      the link has failed and is closed, as CLOSED
+ * The program's events:
+ *   CONNECTED          the link the session asked to open is up
+ *   CLOSED             the link is gone (or its open failed); bytes already
+ *                      handed in are still read, and every later call on it
+ *                      is refused
+ *   WRITABLE           a link whose send would block takes bytes again
+ * A WRITABLE that arrives between a send's WOULD_BLOCK and the session hearing
+ * it is not lost: that send is made again at once.
+ *
+ * THREADS. The session calls open, send, close and drained from its own
+ * threads (on the cooperative engine, the thread that steps the session), one
+ * call at a time per link, and never while it holds a lock of its own: a call
+ * may call back into the transport (report CLOSED from inside close, hand
+ * bytes to another link from inside send). The program's calls may come from
+ * any thread, including from inside open, send and close: each takes the
+ * transport's table for the length of one copy, never waits on the session,
+ * and wakes the session's tasks after letting go of it. open, send and close
+ * must not block for long: a send that cannot take the bytes now answers
+ * WOULD_BLOCK.
+ */
+
+typedef uint64_t wz_ext_link_t;
+
+typedef uint8_t wz_ext_link_kind_t;
+#define WZ_EXT_LINK_STREAM_DIAL 0
+#define WZ_EXT_LINK_STREAM_LISTEN 1
+#define WZ_EXT_LINK_DATAGRAM 2
+#define WZ_EXT_LINK_GROUP 3
+#define WZ_EXT_LINK_DATAGRAM_LISTEN 4
+
+typedef int8_t wz_ext_link_result_t;
+#define WZ_EXT_LINK_OK 0
+#define WZ_EXT_LINK_WOULD_BLOCK 1
+#define WZ_EXT_LINK_CLOSED 2
+#define WZ_EXT_LINK_FAILED 3
+
+typedef uint8_t wz_ext_link_event_t;
+#define WZ_EXT_LINK_EVENT_CONNECTED 0
+#define WZ_EXT_LINK_EVENT_CLOSED 1
+#define WZ_EXT_LINK_EVENT_WRITABLE 2
+
+/* What the program's calls into the transport return beyond Z_OK, Z_ERR_NULL
+ * and Z_EINVAL (-75). wz's own, as WZ_EXT_ERR_POLICY_OFF is. */
+#define WZ_EXT_ERR_LINK_UNKNOWN (-4)  /* the transport holds no such link: it
+                                         never did, or the session let it go */
+#define WZ_EXT_ERR_LINK_NOT_OPEN (-5) /* not up yet: bytes or an accept before
+                                         CONNECTED */
+#define WZ_EXT_ERR_LINK_CLOSED (-6)   /* closing or closed: nothing taken */
+#define WZ_EXT_ERR_LINK_KIND (-7)     /* not for this kind of link: bytes on a
+                                         listener, an accept on a stream */
+#define WZ_EXT_ERR_LINK_FULL (-8)     /* the link queues its bound: nothing
+                                         taken, hand it in again after
+                                         drained */
+
+/* The calls the program supplies. open, send and close are required; drained
+ * and drop may be NULL. */
+typedef struct wz_ext_transport_t {
+  void *context;
+  wz_ext_link_result_t (*open)(void *context, wz_ext_link_t link,
+                               wz_ext_link_kind_t kind, const char *locator);
+  wz_ext_link_result_t (*send)(void *context, wz_ext_link_t link,
+                               const uint8_t *data, size_t len,
+                               size_t *written);
+  void (*close)(void *context, wz_ext_link_t link);
+  void (*drained)(void *context, wz_ext_link_t link);
+  void (*drop)(void *context);
+} wz_ext_transport_t;
+
+typedef struct wz_ext_owned_transport_t {
+  void *_handle;
+} wz_ext_owned_transport_t;
+typedef struct wz_ext_loaned_transport_t {
+  void *_handle;
+} wz_ext_loaned_transport_t;
+typedef struct wz_ext_moved_transport_t {
+  wz_ext_owned_transport_t _this;
+} wz_ext_moved_transport_t;
+
+/* A transport over the calls in transport, which is copied. this_ holds the
+ * null state on every error. Z_OK; Z_ERR_NULL for a NULL this_ or transport,
+ * or a NULL open, send or close. */
+z_result_t wz_ext_transport_new(wz_ext_owned_transport_t *this_,
+                                const wz_ext_transport_t *transport);
+
+/* The session opened from config uses transport for every link its connect
+ * and listen locators name; a second call replaces the first. The config
+ * holds a reference of its own. Z_OK; Z_ERR_NULL for a NULL config, a NULL
+ * transport or the null state. */
+z_result_t wz_ext_config_transport(z_loaned_config_t *config,
+                                   const wz_ext_loaned_transport_t *transport);
+
+/* Bytes that arrived on link, copied before this returns; source is the
+ * locator a datagram came from, or NULL (a group's datagrams need one). Z_OK;
+ * Z_ERR_NULL for a NULL transport, NULL data with a length, or a group's
+ * datagram with no source; Z_EINVAL for a source that is not UTF-8;
+ * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN, _CLOSED or _KIND; WZ_EXT_ERR_LINK_FULL
+ * past the receive bound, nothing taken. */
+z_result_t wz_ext_transport_received(const wz_ext_loaned_transport_t *transport,
+                                     wz_ext_link_t link, const uint8_t *data,
+                                     size_t len, const char *source);
+
+/* What happened to link: WZ_EXT_LINK_EVENT_CONNECTED, _CLOSED or _WRITABLE.
+ * Z_OK; Z_ERR_NULL for a NULL transport; Z_EINVAL for another event;
+ * WZ_EXT_ERR_LINK_UNKNOWN, or WZ_EXT_ERR_LINK_CLOSED for a link already
+ * closed. */
+z_result_t wz_ext_transport_event(const wz_ext_loaned_transport_t *transport,
+                                  wz_ext_link_t link,
+                                  wz_ext_link_event_t event);
+
+/* A stream the program accepted on listener, whose remote end it names remote
+ * (a locator such as "tcp/<address>:<port>"); out_link receives the new
+ * link's handle, and 0 on every error. Z_OK; Z_ERR_NULL for a NULL transport,
+ * remote or out_link; Z_EINVAL for a remote that is not UTF-8;
+ * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN (not listening yet), _CLOSED or _KIND
+ * (not a listener). */
+z_result_t wz_ext_transport_accepted(const wz_ext_loaned_transport_t *transport,
+                                     wz_ext_link_t listener, const char *remote,
+                                     wz_ext_link_t *out_link);
+
+const wz_ext_loaned_transport_t *wz_ext_transport_loan(
+    const wz_ext_owned_transport_t *this_);
+wz_ext_moved_transport_t *wz_ext_transport_move(
+    wz_ext_owned_transport_t *this_);
+void wz_ext_transport_drop(wz_ext_moved_transport_t *this_);
+void wz_ext_internal_transport_null(wz_ext_owned_transport_t *this_);
+bool wz_ext_internal_transport_check(const wz_ext_owned_transport_t *this_);
+
 #endif /* WZ_EXT_H */

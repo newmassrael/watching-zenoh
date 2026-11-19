@@ -402,7 +402,7 @@ fn regen_codec_deployment(
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer,
 ///                      peer_connection, clock_quality, supervision,
-///                      stream_activation (statecharts);
+///                      stream_activation, app_link (statecharts);
 ///                      tick_elapsed, tick_until_due, key_facts (algorithms);
 ///                      key_facts_schema (the event-schema key_facts returns)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
@@ -442,6 +442,8 @@ fn regen_statecharts_and_pools(root: &Path) {
         "supervision",
         // Reception supervision per stream — when a receiver judges its periodic streams.
         "stream_activation",
+        // The lifecycle of one link over a transport the program supplies.
+        "app_link",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
     }

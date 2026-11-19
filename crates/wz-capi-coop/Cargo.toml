@@ -166,6 +166,9 @@ local-subscriber = []
 # The session machine compiles its accepting role only under `session-unicast-accept`, so the
 # feature asks the runtime for it: without that an acceptor would start on no event.
 listen = ["wz-runtime-coop/session-unicast-accept"]
+# A transport the program supplies: the session shell's links over the program's own network
+# stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
+app-transport = ["wz-runtime-coop/app-link"]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the

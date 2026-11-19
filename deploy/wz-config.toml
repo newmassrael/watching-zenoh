@@ -1355,6 +1355,21 @@ implies = ["unstable-api"]
 help = "Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors)."
 
 [[capability]]
+id = "app-transport"
+kconfig = "WZ_CAP_APP_TRANSPORT"
+# Off by default: zenoh-pico opens its links on the system's sockets, and so does a build made as it
+# is. A program whose network stack is its own turns it on and hands each config the transport its
+# session opens every link on. It asks nothing of the operating system: the program's stack carries
+# the links. The pico ABI's doors are wz_ext_* and part of its unstable surface; the model threads
+# the transport to each dial and listen of a session.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors)."
+
+[[capability]]
 id = "rx-callback-offload"
 kconfig = "WZ_CAP_RX_CALLBACK_OFFLOAD"
 # Off by default: zenoh-c runs a subscriber's callback where the sample arrives, and so does a build
@@ -2601,6 +2616,26 @@ How many periodic streams one reception supervisor holds. The table of streams
 is storage the application gives the supervisor when it makes it, one fixed row
 per stream, so this bounds how many rows of it are used and sizes nothing; a
 stream added past it is refused. At least 1.
+'''
+
+[[limit]]
+id = "APP_LINK_QUEUE_BYTES"
+kconfig = "WZ_LIMIT_APP_LINK_QUEUE_BYTES"
+default = 262144
+storage = "quota"
+scope = "link"
+binding_heap = "open"
+binding_fixed = "none"
+# `wire` is timing: past the bound the program's bytes are refused and handed in again once the
+# session has read the queue down, so a peer receives the same bytes later.
+wire = "timing"
+help = '''
+The most bytes one link of a transport the program supplies queues in either
+direction: what the program handed in and the session has not read, and what a
+session that cannot wait handed over and the program has not taken. Past it the
+program's bytes are refused with nothing taken, and the program is told when the
+session has read the queue down to half. Read only by a build with the
+app-transport capability.
 '''
 
 [[limit]]
