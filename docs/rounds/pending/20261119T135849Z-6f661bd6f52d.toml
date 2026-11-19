@@ -1,0 +1,18 @@
+impact = ["wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"]
+decision = '''
+What a TCP connection did under its zenoh session is read from every segment's header beside the reassembler, which reads no acknowledgement: per direction the spans of a zero window, the data segments that reached the edge of the peer's window under the scale both SYNs agreed and unstated without them, the duplicate acknowledgements, the retransmissions by kind as Wireshark's TCP analysis draws them (spurious, fast, timeout, a keep-alive none) with their events, and the gap from a small segment to its acknowledgement as a median and a maximum; and per connection attempt the SYNs it took and their gaps, what answered (a SYN/ACK, a RST or nothing), the two handshake intervals at the tap, which together say which side the tap stood on, and a reuse of the four-tuple. The retransmission counter the reassembler keeps is unchanged beside it. Each list is bounded with a count of the rest, counted at ingest. The field document moves to revision 78 and row_facts to 18; thirty keys and two families arrive, nothing retires.
+'''
+changes = '''
+The link layer's TCP strip reads the acknowledgement, the window and, on a SYN, the Window Scale and MSS options into the segment's TcpHeader.
+A capture module, tcp_facts, folds each segment of a TCP flow into its attempts and its two directions; the stream path feeds it beside the IP facts.
+The field document writes each flow's tcp, null for a flow that is not TCP; revision 78 and row_facts revision 18 rows and tables, the vocabulary gate's two families with a fixture that writes every word, the ABI header's section, tags and integer paragraph, the integer-cell gate's cell, and the C consumer's revision pin.
+'''
+verification = '''
+The capture crate's library tests with dissect and fixtures, 1860 passed and 6 ignored, among them an answered handshake with both intervals and each direction's scale, a refused attempt after a retried SYN and a lone unanswered one, a reuse of the four-tuple, a zero window's span, the three kinds of retransmission told apart after two duplicate acknowledgements, the window's edge under the scale and unstated without the SYNs, a small segment's acknowledgement gap, and a pcapng capture whose attempt reaches the flow. The dissection crate's tests, 259 and 4 passed.
+Red-first: with the stream path feeding the analysis nothing, the end-to-end test fails and the analysis's own tests pass.
+fmt; clippy with warnings denied of wz-capture; wz-capture with no default features builds; the rustdoc lane over the two touched crates; the upstream citation anchor gate; the integer-cell gate.
+'''
+carry = '''
+No real capture of a slow receiver or of a refused connection was read; the segments are built from the header layout. Selective acknowledgements are not read, so a retransmission the peer's SACK blocks asked for is classified by the duplicate acknowledgements alone.
+A connection whose SYN was never answered names no session; it is on its flow object in the field document and in no session-table row.
+'''
