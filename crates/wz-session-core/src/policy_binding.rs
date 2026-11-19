@@ -24,12 +24,17 @@
 //! Each policy's value type implements [`PolicyValue`] in the generated `policy_generated.rs`, and
 //! each limit's [`LimitBinding`] is a constant of the generated `caps_binding_generated.rs`
 //! (`crate::caps::binding`). The types here are written by hand, so the generator emits only one
-//! row per policy and per limit. The words of [`Scope`], [`Binding`], [`Mutability`], [`Wire`] and
-//! [`Storage`] are the declaration's (`deploy/wz-config.toml`, "Where a value is bound"), and
-//! `scripts/lib/wz_config.py --check` holds the variants here to them.
+//! row per policy and per limit. Each policy's value type also implements [`PolicyField`], and the
+//! generated `POLICIES` holds its [`PolicyEntry`], the row a reader that names the policy by its id
+//! (the open-stage document, `crate::policy_document`) dispatches on. The words of [`Scope`],
+//! [`Binding`], [`Mutability`], [`Wire`] and [`Storage`] are the declaration's
+//! (`deploy/wz-config.toml`, "Where a value is bound"), and `scripts/lib/wz_config.py --check`
+//! holds the variants here to them.
 
 use core::fmt;
 use core::marker::PhantomData;
+
+use crate::policy::SessionPolicy;
 
 /// What holds one value of a policy or a limit. Each scope lies inside the one before it, except
 /// that a link and an entity are both inside a session and neither inside the other.
@@ -438,6 +443,150 @@ impl<P: PolicyValue> fmt::Display for OutsideDomain<P> {
 }
 
 impl<P: PolicyValue + fmt::Debug> core::error::Error for OutsideDomain<P> {}
+
+/// A policy that is a field of [`SessionPolicy`]: how a reader that names a policy by its id
+/// reaches the field's `select_*` and the value the field holds. The generated module implements
+/// it for every policy's value type, and [`PolicyEntry::of`] makes the policy's row of the table
+/// the open-stage reader dispatches on.
+pub trait PolicyField: PolicyValue {
+    /// Selects `value` in `policy` through the field's `select_*`, which refuses a value the
+    /// build's domain leaves out and then leaves `policy` as it was.
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>>;
+
+    /// The value `policy` holds.
+    fn held_in(policy: &SessionPolicy) -> Self;
+}
+
+/// Some of the values of one policy, by their ids: the build's domain of the policy, or any other
+/// set over the positions of its values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValueSet {
+    ids: &'static [&'static str],
+    bits: u32,
+}
+
+impl ValueSet {
+    /// The ids of the values in the set, in the declaration's order.
+    pub fn iter(&self) -> impl Iterator<Item = &'static str> {
+        let (ids, bits) = (self.ids, self.bits);
+        ids.iter()
+            .enumerate()
+            .filter(move |(index, _)| *index < MAX_VALUES && bits & (1u32 << *index) != 0)
+            .map(|(_, id)| *id)
+    }
+
+    /// Whether the value whose id is `id` is in the set.
+    pub fn contains(&self, id: &str) -> bool {
+        self.iter().any(|held| held == id)
+    }
+}
+
+impl fmt::Display for ValueSet {
+    /// The ids, each in backticks and separated by commas, or `no value` for an empty set.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut values = self.iter();
+        match values.next() {
+            None => f.write_str("no value"),
+            Some(first) => {
+                write!(f, "`{first}`")?;
+                values.try_for_each(|id| write!(f, ", `{id}`"))
+            }
+        }
+    }
+}
+
+/// Why [`PolicyEntry::select`] did not select a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectError {
+    /// The policy has no value of that id.
+    NoSuchValue,
+    /// The build's domain of the policy leaves the value out: the field's `select_*` refused it
+    /// with [`OutsideDomain`]. Carries the domain, the values the build allows.
+    OutsideDomain(ValueSet),
+}
+
+/// One policy as a reader that names it by its id sees it: its id, the ids of its values, its
+/// binding, the build's domain, and the field of [`SessionPolicy`] it selects into. The generated
+/// `POLICIES` holds one for every policy, in the order of the snapshot's fields.
+#[derive(Clone, Copy, Debug)]
+pub struct PolicyEntry {
+    id: &'static str,
+    values: &'static [&'static str],
+    binding: Binding,
+    domain: u32,
+    select: fn(&mut SessionPolicy, usize) -> bool,
+    held: fn(&SessionPolicy) -> usize,
+}
+
+impl PolicyEntry {
+    /// The entry of the policy whose value type is `P`.
+    pub const fn of<P: PolicyField>() -> Self {
+        Self {
+            id: P::POLICY,
+            values: P::IDS,
+            binding: P::BINDING,
+            domain: P::DOMAIN.bits,
+            select: select_at::<P>,
+            held: held_at::<P>,
+        }
+    }
+
+    /// The policy's id, as the declaration spells it ([`PolicyValue::POLICY`]).
+    pub const fn id(&self) -> &'static str {
+        self.id
+    }
+
+    /// The ids of the policy's values, in the declaration's order ([`PolicyValue::IDS`]).
+    pub const fn values(&self) -> &'static [&'static str] {
+        self.values
+    }
+
+    /// The latest stage the policy's value may be decided at ([`PolicyValue::BINDING`]).
+    pub const fn binding(&self) -> Binding {
+        self.binding
+    }
+
+    /// The values the build allows a later stage to select ([`PolicyValue::DOMAIN`]).
+    pub const fn domain(&self) -> ValueSet {
+        ValueSet {
+            ids: self.values,
+            bits: self.domain,
+        }
+    }
+
+    /// Selects the value whose id is `value` in `policy`, through the field's `select_*`. A
+    /// refusal leaves `policy` as it was.
+    pub fn select(&self, policy: &mut SessionPolicy, value: &str) -> Result<(), SelectError> {
+        let Some(index) = self.values.iter().position(|id| *id == value) else {
+            return Err(SelectError::NoSuchValue);
+        };
+        if (self.select)(policy, index) {
+            Ok(())
+        } else {
+            Err(SelectError::OutsideDomain(self.domain()))
+        }
+    }
+
+    /// The id of the value `policy` holds.
+    pub fn value_in(&self, policy: &SessionPolicy) -> &'static str {
+        self.values[(self.held)(policy)]
+    }
+}
+
+/// The selection behind [`PolicyEntry::select`]: the value at `index` of [`PolicyValue::ALL`],
+/// through [`PolicyField::select_in`]; false where the build's domain refuses it or `index` is
+/// past the last value.
+fn select_at<P: PolicyField>(policy: &mut SessionPolicy, index: usize) -> bool {
+    match P::ALL.get(index) {
+        Some(&value) => P::select_in(policy, value).is_ok(),
+        None => false,
+    }
+}
+
+/// The position in [`PolicyValue::ALL`] of the value `policy` holds of `P`.
+fn held_at<P: PolicyField>(policy: &SessionPolicy) -> usize {
+    P::held_in(policy).index()
+}
 
 #[cfg(test)]
 mod tests {
