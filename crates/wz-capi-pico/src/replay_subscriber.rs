@@ -21,8 +21,9 @@
 //! that node when the session's `targeted-query` policy admits it, otherwise asked of every node
 //! that answers the key, whose replies the judge has passed are dropped as duplicates or stale. A
 //! get asks for every reply, unconsolidated, and ends at the latest after the round deadline. A
-//! publisher that declared its queryable before the watch was declared is not told again (the
-//! declaration watch's rule), so a subscriber is made before the links to its publishers come up.
+//! publisher whose queryable a link already held when the subscriber was made appears all the
+//! same: the declaration watch tells what each peer holds first, so the subscriber may be made
+//! before or after the links to its publishers come up.
 //!
 //! # Order
 //!

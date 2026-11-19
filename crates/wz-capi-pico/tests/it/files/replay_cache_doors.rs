@@ -149,7 +149,11 @@ struct Peer {
 
 impl Peer {
     unsafe fn dial(endpoint: &CStr) -> Self {
-        let session = open(Z_CONFIG_CONNECT_KEY, endpoint);
+        Self::on(open(Z_CONFIG_CONNECT_KEY, endpoint))
+    }
+
+    /// A publishing peer on `session`, which it closes when it finishes.
+    unsafe fn on(session: z_owned_session_t) -> Self {
         let ke = view(KEY);
         let mut publisher: z_owned_publisher_t = std::mem::zeroed();
         assert_eq!(
@@ -246,7 +250,11 @@ struct Listener {
 
 impl Listener {
     unsafe fn listen(endpoint: &CStr) -> Self {
-        let session = open(Z_CONFIG_LISTEN_KEY, endpoint);
+        Self::on(open(Z_CONFIG_LISTEN_KEY, endpoint))
+    }
+
+    /// The subscriber's side on `session`, which it closes when it finishes.
+    unsafe fn on(session: z_owned_session_t) -> Self {
         let profile = CString::new(PROFILE).unwrap();
         let mut receiver: wz_ext_owned_e2e_receiver_t = std::mem::zeroed();
         assert_eq!(
@@ -448,6 +456,37 @@ fn a_late_subscriber_is_answered_each_publishers_ring_and_then_its_live_frames()
         listener.finish();
         first.finish();
         second.finish();
+    }
+}
+
+/// The other order: the publisher serves first, the subscriber's session dials it, and the
+/// replay subscriber is made only once the link has been up long enough for the queryable's
+/// declaration to have arrived. The declaration watch tells what the link already holds, so the
+/// publisher is asked all the same.
+#[test]
+fn a_subscriber_made_after_its_publisher_appeared_still_asks_it() {
+    let port = free_port();
+    let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    // SAFETY: as the test above.
+    unsafe {
+        let early = Peer::on(open(Z_CONFIG_LISTEN_KEY, &endpoint));
+        early.record(7, 70);
+        early.record(8, 80);
+        early.serve();
+        let session = open(Z_CONFIG_CONNECT_KEY, &endpoint);
+        // Past the link's initial declarations: the queryable is held when the watch is made.
+        std::thread::sleep(Duration::from_millis(500));
+        let listener = Listener::on(session);
+        let got = listener.wait("the ring of a publisher that appeared first", |got| {
+            replays(got).len() >= 2
+        });
+        assert_eq!(replays(&got), vec![7, 8]);
+        assert_eq!(got[0].status, WZ_EXT_E2E_FIRST);
+        listener.wait("the round over", |_| {
+            listener.phase() == WZ_EXT_REPLAY_ROUND_LIVE
+        });
+        listener.finish();
+        early.finish();
     }
 }
 
