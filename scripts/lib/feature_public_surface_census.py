@@ -1288,9 +1288,13 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # crate root, which is the simple crate-root shape this axis names. It goes
     # in the same commit as the OFF_AXIS row above, so the row never states a
     # reach the axis does not have.
+    # `app-link` joins with its OFF_AXIS row: its one site, `pub mod app_link`, is at the crate
+    # root behind `all(app-link, alloc, not(session-slot))`, a compound the crate-root derivation
+    # cannot name, which is the second clause's subject.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
+            "app-link",
             "host-lock",
             "reassembly",
             "runtime",
@@ -1373,6 +1377,10 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "runtime-coop-fixed",
             "runtime-tokio",
             "session-lwip-fixed",
+            # `transport-unicast` joins with its OFF_AXIS row: its one site, `ext::redeclare`,
+            # is inside `pub mod ext` behind `all(runtime-tokio, transport-unicast)`, nested and
+            # compound, which the second clause reads off the site.
+            "transport-unicast",
         }
     ),
 }
