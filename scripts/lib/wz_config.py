@@ -2179,7 +2179,8 @@ def emit_config_schema(decl: dict) -> str:
     as an integer with the declared default. Each carries its help's first sentence and where it
     is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
     document is checked against when it is applied, not here. `profile` is the enum of the
-    declared profiles' ids, present only where the declaration states one."""
+    declared profiles' ids, present only where the declaration states one. `key-ids` is the shape
+    of the key ids every node shares, present where the declaration has `key-wire-form`."""
     policies = {}
     for pol in decl["policies"]:
         if pol["binding"] == "build":
@@ -2211,6 +2212,45 @@ def emit_config_schema(decl: dict) -> str:
         }
     members["policies"] = {"type": "object", "properties": policies, "additionalProperties": False}
     members["limits"] = {"type": "object", "properties": limits, "additionalProperties": False}
+    # `wz/key-ids`, read by a build with the `shared-key-ids` capability: its forms are the values
+    # of `key-wire-form`, and how many entries a dictionary may have is the build's
+    # MAX_SHARED_KEY_IDS, which a build sizes, so the schema states no bound of its own.
+    forms = next((policy_values(pol) for pol in decl["policies"] if pol["id"] == "key-wire-form"),
+                 None)
+    if forms is not None:
+        members["key-ids"] = {
+            "description": ("The key ids every node of a deployment shares (the shared-key-ids "
+                            "capability): a dictionary of key expressions by id, and the "
+                            "key-wire form of an endpoint stated apart from the session's."),
+            "type": "object",
+            "properties": {
+                "dictionary": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "minimum": 1, "maximum": 65535},
+                            "key": {"type": "string", "minLength": 1},
+                        },
+                        "required": ["id", "key"],
+                        "additionalProperties": False,
+                    },
+                },
+                "links": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "locator": {"type": "string", "minLength": 1},
+                            "form": {"enum": forms},
+                        },
+                        "required": ["locator", "form"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "additionalProperties": False,
+        }
     doc = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$comment": ("GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit "

@@ -1052,6 +1052,59 @@
             }
           },
           "additionalProperties": false
+        },
+        "key-ids": {
+          "description": "The key ids every node of a deployment shares (the shared-key-ids capability): a dictionary of key expressions by id, and the key-wire form of an endpoint stated apart from the session's.",
+          "type": "object",
+          "properties": {
+            "dictionary": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "links": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "locator": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "form": {
+                    "enum": [
+                      "declared",
+                      "shared",
+                      "literal"
+                    ]
+                  }
+                },
+                "required": [
+                  "locator",
+                  "form"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
