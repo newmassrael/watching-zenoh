@@ -144,7 +144,7 @@ mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
 // A transport the program supplies, in place of the system's sockets: wz doors (`wz_ext.h`) of the
-// unstable surface, over the tokio engine's links of the program's stack.
+// unstable surface, over the links of the program's stack of whichever engine the build has.
 #[cfg(feature = "app-transport")]
 pub mod app_transport;
 pub mod bytes;

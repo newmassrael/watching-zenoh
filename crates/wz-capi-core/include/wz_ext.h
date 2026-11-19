@@ -555,13 +555,28 @@ const char *wz_ext_conformance_digest(void);
  *   tcp/ listen    a stream listener                 WZ_EXT_LINK_STREAM_LISTEN
  *   udp/ connect   a unicast datagram link           WZ_EXT_LINK_DATAGRAM
  *   udp/ listen    with #iface=, a multicast group   WZ_EXT_LINK_GROUP
- * z_open refuses a config whose transport cannot carry what it names: another
- * scheme (tls/, serial/, ...) with _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN (-92);
- * a config with neither connect nor listen (it would scout on the system's
- * sockets), and a datagram or group locator, with WZ_EXT_ERR_UNSUPPORTED (-3):
- * this build's engine carries the two stream kinds over the transport. A
- * stream is framed by the session exactly as a TCP socket is (the two-byte
- * length before each batch), so the program carries plain bytes.
+ * Either engine of the library runs a session over it. z_open refuses a config
+ * whose transport cannot carry what it names: another scheme (tls/, serial/,
+ * ...), or a kind this build has no link of (a udp/ dial on the tokio engine
+ * without the udp link, a group without the multicast transport, which the
+ * cooperative engine has not), with _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
+ * (-92), as the same locator over the system's sockets is; a config with
+ * neither connect nor listen (it would scout on the system's sockets) with
+ * WZ_EXT_ERR_UNSUPPORTED (-3). A stream is framed by the session exactly as a
+ * TCP socket is (the two-byte length before each batch), so the program
+ * carries plain bytes. A datagram is one batch, taken whole or not at all: a
+ * send answered with fewer bytes than it was given fails it. A group's
+ * datagrams are handed in with the locator each came from
+ * ("udp/<address>:<port>"), which tells the members apart; leaving the group
+ * is the link's close.
+ *
+ * THE RECEIVE BOUND. A link queues at most APP_LINK_QUEUE_BYTES (a limit of
+ * the build) of bytes the session has not read. wz_ext_transport_received past
+ * it answers WZ_EXT_ERR_LINK_FULL and takes nothing; once the session has read
+ * the queue down to half, the transport calls the program's drained(context,
+ * link), from a session thread, and the program hands the same bytes in
+ * again. A program that gives no drained retries on its own. An empty queue
+ * takes any datagram, however large.
  *
  * WHO OWNS WHAT. The program makes the transport (wz_ext_transport_new) and
  * names it in every call it makes, so it can hand in bytes while z_open is
@@ -609,7 +624,8 @@ const char *wz_ext_conformance_digest(void);
  * A WRITABLE that arrives between a send's WOULD_BLOCK and the session hearing
  * it is not lost: that send is made again at once.
  *
- * THREADS. The session calls open, send and close from its own threads, one
+ * THREADS. The session calls open, send, close and drained from its own
+ * threads (on the cooperative engine, the thread that steps the session), one
  * call at a time per link, and never while it holds a lock of its own: a call
  * may call back into the transport (report CLOSED from inside close, hand
  * bytes to another link from inside send). The program's calls may come from
@@ -648,9 +664,12 @@ typedef uint8_t wz_ext_link_event_t;
 #define WZ_EXT_ERR_LINK_CLOSED (-6)   /* closing or closed: nothing taken */
 #define WZ_EXT_ERR_LINK_KIND (-7)     /* not for this kind of link: bytes on a
                                          listener, an accept on a stream */
+#define WZ_EXT_ERR_LINK_FULL (-8)     /* the link queues its bound: nothing
+                                         taken, hand it in again after
+                                         drained */
 
-/* The calls the program supplies. open, send and close are required; drop may
- * be NULL. */
+/* The calls the program supplies. open, send and close are required; drained
+ * and drop may be NULL. */
 typedef struct wz_ext_transport_t {
   void *context;
   wz_ext_link_result_t (*open)(void *context, wz_ext_link_t link,
@@ -659,6 +678,7 @@ typedef struct wz_ext_transport_t {
                                const uint8_t *data, size_t len,
                                size_t *written);
   void (*close)(void *context, wz_ext_link_t link);
+  void (*drained)(void *context, wz_ext_link_t link);
   void (*drop)(void *context);
 } wz_ext_transport_t;
 
@@ -686,9 +706,11 @@ z_result_t wz_ext_config_transport(z_loaned_config_t *config,
                                    const wz_ext_loaned_transport_t *transport);
 
 /* Bytes that arrived on link, copied before this returns; source is the
- * locator a datagram came from, or NULL. Z_OK; Z_ERR_NULL for a NULL
- * transport, or NULL data with a length; Z_EINVAL for a source that is not
- * UTF-8; WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN, _CLOSED or _KIND. */
+ * locator a datagram came from, or NULL (a group's datagrams need one). Z_OK;
+ * Z_ERR_NULL for a NULL transport, NULL data with a length, or a group's
+ * datagram with no source; Z_EINVAL for a source that is not UTF-8;
+ * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN, _CLOSED or _KIND; WZ_EXT_ERR_LINK_FULL
+ * past the receive bound, nothing taken. */
 z_result_t wz_ext_transport_received(const wz_ext_loaned_transport_t *transport,
                                      wz_ext_link_t link, const uint8_t *data,
                                      size_t len, const char *source);

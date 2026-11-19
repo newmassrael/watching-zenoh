@@ -901,7 +901,7 @@ struct OpenRequest {
     policy: SessionPolicy,
     /// The transport the program supplies, when the config carries one: every link goes over it.
     #[cfg(feature = "app-transport")]
-    app_transport: Option<std::sync::Arc<wz_capi_core::runtime::app_link::AppTransport>>,
+    app_transport: Option<alloc::sync::Arc<wz_session_core::app_transport::AppTransport>>,
 }
 
 /// Open `request` on the tokio engine and install the session in `zs`.
@@ -1185,59 +1185,83 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
+    let config = wz_capi_coop::CoopConfig {
+        endpoints: connect,
+        whatami: dial_whatami,
+        zid,
+        // The numbers of pico's value build switches, as this build states them: the
+        // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
+        // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
+        // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
+        // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
+        batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+        lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+        keep_alive: PICO_KEEP_ALIVE,
+        sn_resolution,
+        link_rx: PICO_LINK_RX,
+        tx_queue,
+        // How long an inbound link may take to complete its handshake is pico's
+        // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
+        // `PICO_ACCEPT` says; how long a dialled one may take is its
+        // `Z_TRANSPORT_CONNECT_TIMEOUT`, one deadline over both of its receives, so the
+        // session machine holds the handshake to the bound `open_timeout_ms` holds the
+        // endpoint to and to no shorter one.
+        timeouts: wz_session_core::session_timeouts::SessionTimeouts {
+            accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+            opening_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
+            ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
+        },
+        open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
+        // pico tries again every 1000 ms while the reopen fails
+        // (`vendor/zenoh-pico/src/net/session.c` @
+        // `return _z_fut_fn_result_wake_up_after(1000);`).
+        redial_ms: Some(1000),
+        // A read waits on the link as long as pico's socket receive times out, its
+        // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
+        idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
+        // The bounds of an accept are upstream's, as the tokio engine's are
+        // (`PICO_ACCEPT`): pico bounds no count of pending accepts or of sessions.
+        listen,
+        accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
+        max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
+    };
+    // A config that carries the program's transport opens the engine over its links, and over no
+    // socket of the host's; `z_open` has refused a locator the transport does not carry.
+    #[cfg(feature = "app-transport")]
+    let opened = match request.app_transport {
+        Some(transport) => wz_capi_coop::CoopEngine::open_with_policy(
+            wz_capi_coop::app_link::AppLinks::new(transport)
+                .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+            crate::coop_host::clock(),
+            crate::coop_host::entropy(),
+            config,
+            policy,
+        )
+        .map(wz_capi_coop::CoopEngine::into_drive),
+        None => wz_capi_coop::CoopEngine::open_with_policy(
+            links.waited_by_owner(),
+            crate::coop_host::clock(),
+            crate::coop_host::entropy(),
+            config,
+            policy,
+        )
+        .map(wz_capi_coop::CoopEngine::into_drive),
+    };
+    #[cfg(not(feature = "app-transport"))]
     let opened = wz_capi_coop::CoopEngine::open_with_policy(
         links.waited_by_owner(),
         crate::coop_host::clock(),
         crate::coop_host::entropy(),
-        wz_capi_coop::CoopConfig {
-            endpoints: connect,
-            whatami: dial_whatami,
-            zid,
-            // The numbers of pico's value build switches, as this build states them: the
-            // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
-            // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
-            // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
-            // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
-            batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
-            lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
-            keep_alive: PICO_KEEP_ALIVE,
-            sn_resolution,
-            link_rx: PICO_LINK_RX,
-            tx_queue,
-            // How long an inbound link may take to complete its handshake is pico's
-            // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
-            // `PICO_ACCEPT` says; how long a dialled one may take is its
-            // `Z_TRANSPORT_CONNECT_TIMEOUT`, one deadline over both of its receives, so the
-            // session machine holds the handshake to the bound `open_timeout_ms` holds the
-            // endpoint to and to no shorter one.
-            timeouts: wz_session_core::session_timeouts::SessionTimeouts {
-                accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
-                opening_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
-                ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
-            },
-            open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
-            // pico tries again every 1000 ms while the reopen fails
-            // (`vendor/zenoh-pico/src/net/session.c` @
-            // `return _z_fut_fn_result_wake_up_after(1000);`).
-            redial_ms: Some(1000),
-            // A read waits on the link as long as pico's socket receive times out, its
-            // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
-            idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
-            // The bounds of an accept are upstream's, as the tokio engine's are
-            // (`PICO_ACCEPT`): pico bounds no count of pending accepts or of sessions.
-            listen,
-            accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
-            max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
-        },
+        config,
         policy,
-    );
-    let engine = match opened {
-        Ok(engine) => engine,
+    )
+    .map(wz_capi_coop::CoopEngine::into_drive);
+    let drive = match opened {
+        Ok(drive) => drive,
         Err(wz_capi_coop::OpenError::EntropyUnavailable) => return crate::result::Z_ERR_GENERIC,
         Err(_) => return crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     };
-    let zid = wz_capi_port::SessionDrive::zid(&*engine);
-    let drive = wz_capi_coop::CoopEngine::into_drive(engine);
+    let zid = drive.zid();
     #[cfg(feature = "connectivity")]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, &drive.engine());
     #[cfg(not(feature = "connectivity"))]

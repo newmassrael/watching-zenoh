@@ -8,10 +8,11 @@
 //! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `app-transport` capability implies `unstable-api`.
 //!
-//! The links themselves are the engine's (`wz_runtime_tokio::app_link`, over the table of
-//! `wz_session_core::app_link_table`). This file is the pico ABI's names, result codes and
-//! ownership around them, and the port that turns the program's function pointers into the calls
-//! the engine makes.
+//! The transport object is engine-neutral (`wz_session_core::app_transport`), its table held
+//! under the port's lock, and the links over it are the engine's: the tokio engine's
+//! (`wz_runtime_tokio::app_link`) or the cooperative engine's (`wz_runtime_coop::app_link`),
+//! whichever the build has. This file is the pico ABI's names, result codes and ownership around
+//! them, and the port that turns the program's function pointers into the calls the engine makes.
 //!
 //! # Who owns the transport
 //!
@@ -33,10 +34,11 @@
 use core::ffi::{c_char, c_void, CStr};
 use std::sync::Arc;
 
-use wz_capi_core::runtime::app_link::{AppPort, AppTransport};
+use wz_session_core::app_link_table::AppLinkTable;
 use wz_session_core::app_link_table::{
     AppLinkKind, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
 };
+use wz_session_core::app_transport::{AppPort, AppTransport, TableLock};
 
 use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
@@ -99,16 +101,23 @@ pub type wz_ext_transport_send_fn = unsafe extern "C" fn(
 pub type wz_ext_transport_close_fn =
     unsafe extern "C" fn(context: *mut c_void, link: wz_ext_link_t);
 
+/// The program's `drained(context, link)`: `link`, which refused bytes with
+/// `WZ_EXT_ERR_LINK_FULL`, has been read down and takes bytes again.
+pub type wz_ext_transport_drained_fn =
+    unsafe extern "C" fn(context: *mut c_void, link: wz_ext_link_t);
+
 /// The program's `drop(context)`, run once when the transport is gone.
 pub type wz_ext_transport_drop_fn = unsafe extern "C" fn(context: *mut c_void);
 
-/// The calls the program supplies. `open`, `send` and `close` are required; `drop` may be NULL.
+/// The calls the program supplies. `open`, `send` and `close` are required; `drained` and `drop`
+/// may be NULL.
 #[repr(C)]
 pub struct wz_ext_transport_t {
     pub context: *mut c_void,
     pub open: Option<wz_ext_transport_open_fn>,
     pub send: Option<wz_ext_transport_send_fn>,
     pub close: Option<wz_ext_transport_close_fn>,
+    pub drained: Option<wz_ext_transport_drained_fn>,
     pub drop: Option<wz_ext_transport_drop_fn>,
 }
 
@@ -145,6 +154,7 @@ struct ProgramPort {
     open: wz_ext_transport_open_fn,
     send: wz_ext_transport_send_fn,
     close: wz_ext_transport_close_fn,
+    drained: Option<wz_ext_transport_drained_fn>,
     drop: Option<wz_ext_transport_drop_fn>,
 }
 
@@ -184,6 +194,23 @@ impl AppPort for ProgramPort {
         // SAFETY: the program's close, with its own context.
         unsafe { (self.close)(self.context, link) }
     }
+
+    fn drained(&self, link: LinkHandle) {
+        if let Some(drained) = self.drained {
+            // SAFETY: the program's drained, with its own context.
+            unsafe { drained(self.context, link) }
+        }
+    }
+}
+
+/// The lock a transport's table is held under: the port's, a host's mutex or an image's critical
+/// section, whichever the build has, so the same transport serves either engine.
+struct PortLock(wz_capi_port::sync::Lock<AppLinkTable>);
+
+impl TableLock for PortLock {
+    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
+        self.0.with(f);
+    }
 }
 
 impl Drop for ProgramPort {
@@ -222,6 +249,9 @@ fn refusal_code(refusal: InboundRefusal) -> ZResult {
         InboundRefusal::NotOpen => crate::result::WZ_EXT_ERR_LINK_NOT_OPEN,
         InboundRefusal::Closed => crate::result::WZ_EXT_ERR_LINK_CLOSED,
         InboundRefusal::WrongKind => crate::result::WZ_EXT_ERR_LINK_KIND,
+        InboundRefusal::Full => crate::result::WZ_EXT_ERR_LINK_FULL,
+        // A group's datagram must name the member it came from.
+        InboundRefusal::NoSource => Z_ERR_NULL,
     }
 }
 
@@ -265,9 +295,13 @@ pub unsafe extern "C" fn wz_ext_transport_new(
             open,
             send,
             close,
+            drained: calls.drained,
             drop: calls.drop,
         };
-        let transport = AppTransport::new(Box::new(port));
+        let transport = Arc::new(AppTransport::new(
+            Box::new(PortLock(wz_capi_port::sync::Lock::new(AppLinkTable::new()))),
+            Box::new(port),
+        ));
         *this_ = wz_ext_owned_transport_t {
             handle: Arc::into_raw(transport) as *mut c_void,
         };
@@ -494,9 +528,10 @@ pub unsafe extern "C" fn wz_ext_internal_transport_check(
 ///
 /// A config with neither a connect nor a listen locator would scout on the system's sockets, which
 /// the transport replaces, and is refused as a capability the engine lacks. A locator no kind
-/// carries (`tls/`, `serial/`, ...) is refused as an unknown scheme. A datagram or group locator
-/// is a kind the transport names and this engine does not carry over it yet, refused as one it
-/// lacks.
+/// carries (`tls/`, `serial/`, ...) is refused as an unknown scheme, and so is one of a kind this
+/// build carries no link of, as the same locator over the system's sockets is: a `udp/` dial
+/// without the udp link on the tokio engine, a group without the multicast transport (which the
+/// cooperative engine has not).
 pub(crate) fn refused_open(connect: Option<&str>, listen: Option<&str>) -> Option<ZResult> {
     use wz_session_core::app_link_table::kind_for_locator;
     if connect.is_none() && listen.is_none() {
@@ -506,14 +541,27 @@ pub(crate) fn refused_open(connect: Option<&str>, listen: Option<&str>) -> Optio
         let Some(locator) = locator else {
             continue;
         };
-        match kind_for_locator(locator, is_listen) {
-            None => return Some(crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN),
-            Some(AppLinkKind::StreamDial | AppLinkKind::StreamListen) => {}
-            Some(_) => return Some(crate::result::WZ_EXT_ERR_UNSUPPORTED),
+        let carried = match kind_for_locator(locator, is_listen) {
+            None => false,
+            Some(
+                AppLinkKind::StreamDial | AppLinkKind::StreamListen | AppLinkKind::StreamAccepted,
+            ) => true,
+            Some(AppLinkKind::Datagram) => DATAGRAMS_CARRIED,
+            Some(AppLinkKind::Group) => GROUPS_CARRIED,
+        };
+        if !carried {
+            return Some(crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN);
         }
     }
     None
 }
+
+/// Whether this build carries datagram links: the tokio engine with its udp link, or the
+/// cooperative engine, which dials `udp/` in every build.
+const DATAGRAMS_CARRIED: bool = cfg!(feature = "link-udp") || !cfg!(feature = "engine-tokio");
+
+/// Whether this build joins groups: the multicast transport, the tokio engine's.
+const GROUPS_CARRIED: bool = cfg!(feature = "multicast-transport");
 
 #[cfg(test)]
 mod tests {
@@ -567,13 +615,15 @@ mod tests {
             Some(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN),
             "a unicast datagram listener is no kind"
         );
+        let refused_unless =
+            |carried: bool| (!carried).then_some(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN);
         assert_eq!(
             refused_open(Some("udp/192.0.2.8:7447"), None),
-            Some(WZ_EXT_ERR_UNSUPPORTED)
+            refused_unless(DATAGRAMS_CARRIED)
         );
         assert_eq!(
             refused_open(None, Some("udp/239.4.5.6:7447#iface=lan7")),
-            Some(WZ_EXT_ERR_UNSUPPORTED)
+            refused_unless(GROUPS_CARRIED)
         );
     }
 }

@@ -165,6 +165,11 @@ pub const WZ_EXT_ERR_LINK_CLOSED: ZResult = -6;
 /// listener, an accept on a link that is not one.
 pub const WZ_EXT_ERR_LINK_KIND: ZResult = -7;
 
+/// A call of the program's into its transport handed bytes to a link that already queues its
+/// bound (`APP_LINK_QUEUE_BYTES`) of bytes the session has not read: nothing was taken. The
+/// program hands the same bytes in again after its `drained` call for the link.
+pub const WZ_EXT_ERR_LINK_FULL: ZResult = -8;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +204,7 @@ mod tests {
             WZ_EXT_ERR_LINK_NOT_OPEN,
             WZ_EXT_ERR_LINK_CLOSED,
             WZ_EXT_ERR_LINK_KIND,
+            WZ_EXT_ERR_LINK_FULL,
         ];
         for (at, code) in wz.iter().enumerate() {
             assert!(*code < 0, "{code} must read as a failure");

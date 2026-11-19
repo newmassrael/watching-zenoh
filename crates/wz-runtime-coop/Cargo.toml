@@ -254,6 +254,12 @@ keyexpr-includes = ["dep:wz-session-core", "wz-session-core/keyexpr-includes"]
 # split instead, so each profile sees exactly what it can have.
 switchboard = ["dep:wz-session-core", "wz-session-core/switchboard"]
 
+# Links over a transport the program supplies (`app_link`): the stream, datagram and group seams
+# of this engine over the program's own network stack, and the session shell's links over them.
+# The transport object and its table are the session core's (`app-link`); the links are the heap
+# profile's, so it takes `alloc` and the unicast session.
+app-link = ["session-unicast", "alloc", "wz-session-core/app-link"]
+
 # The runtime's critical sections on a HOST: a lock of the process, reentrant on its thread,
 # which `cs::with` takes itself, in place of the `critical-section` implementation an image links
 # (src/cs.rs). A host program built with it links no such implementation, and a C library built

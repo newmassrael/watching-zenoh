@@ -97,7 +97,7 @@ pub(crate) struct ConfigState {
     /// The transport the program supplies (`wz_ext_config_transport`), which the session opened
     /// from this config uses for every link in place of the system's sockets.
     #[cfg(feature = "app-transport")]
-    pub(crate) transport: Option<alloc::sync::Arc<wz_capi_core::runtime::app_link::AppTransport>>,
+    pub(crate) transport: Option<alloc::sync::Arc<wz_session_core::app_transport::AppTransport>>,
 }
 
 impl ConfigState {
