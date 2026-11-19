@@ -402,6 +402,35 @@ transport-link-unixpipe,transport-link-ws|"
     # by name. The doors have no unit tests of their own; the mechanism's are `wz-app-frame`'s.
     "wz-capi-pico|hook|e2e-sender,e2e-sender-demux|--test=e2e_doors"
     "wz-capi-pico|hook|e2e-sender,e2e-receiver|--test=e2e_doors"
+    # The replay cache driven from C (`wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*`):
+    # the unit tests of the two modules and the file that answers a late subscriber's asking over
+    # loopback, two publishers appearing at different times (`replay_cache_doors`, whose module is
+    # behind the feature). The round, the ring and the admission have model tests of their own in
+    # `wz-session-core` and `wz-app-frame`, each a leg below.
+    "wz-capi-pico|hook|replay-cache|"
+    # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
+    # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
+    "wz-app-frame|hook|replay|"
+    # The message catalog driven from C (`wz_ext_message_catalog_*`): the file that reads the
+    # reader's synthetic catalog, reads each entry back and refuses what the reader refuses
+    # (`message_catalog_doors`, whose module is behind the feature). With the e2e doors and
+    # supervision, where it holds the sender, receiver and supervision rows a catalog makes to
+    # those made by hand; with the receiver's sender slots, where a receiver of listed senders
+    # binds them, and without, where it is refused by name. The reader's own tests are
+    # `wz-app-frame`'s, in its default build.
+    "wz-capi-pico|hook|message-catalog|--test=message_catalog_doors"
+    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-receiver,e2e-supervision|--test=message_catalog_doors"
+    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-sender-demux|--test=message_catalog_doors"
+    # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
+    # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
+    # moved to this crate with the reader and compile only with `proto` (which this implies).
+    "wz-app-frame|hook|instance-key|"
+    # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
+    # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
+    # slots and the event log, where it also judges and protects in the stream of an instance,
+    # refuses a receiver kept per sender, and reads a report of drops back as an event.
+    "wz-capi-pico|hook|instance-key|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring|--test=instance_key_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
@@ -680,6 +709,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         query-source-info,\
         query-value,\
         reassembly,\
+        replay-cache,\
         reply-source-info,\
         resource-snapshot,\
         routing-namespace,\

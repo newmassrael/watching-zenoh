@@ -129,18 +129,17 @@ pub unsafe extern "C" fn z_mutex_move(m: *mut z_owned_mutex_t) -> *mut z_moved_m
 /// which for a SYSTEM type is `{ (void)obj; }` — a deliberate no-op, because a
 /// pthread object has no null value to write. So this is the struct copy and
 /// nothing else, which is what makes the source safe to leave untouched.
+///
+/// It returns nothing, as pico declares it (`api/olv_macros.h` @
+/// `attribute void prefix##_##name##_take(`): a status here would be a value
+/// pico's header gives a C caller no way to read. A NULL argument copies
+/// nothing.
 #[no_mangle]
-pub unsafe extern "C" fn z_mutex_take(
-    obj: *mut z_owned_mutex_t,
-    src: *mut z_moved_mutex_t,
-) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
-        if obj.is_null() || src.is_null() {
-            return Z_ERR_NULL;
-        }
-        core::ptr::copy_nonoverlapping(src, obj, 1);
-        Z_OK
-    })
+pub unsafe extern "C" fn z_mutex_take(obj: *mut z_owned_mutex_t, src: *mut z_moved_mutex_t) {
+    if obj.is_null() || src.is_null() {
+        return;
+    }
+    core::ptr::copy_nonoverlapping(src, obj, 1);
 }
 
 /// Lock, blocking (pico `z_mutex_lock`).
@@ -239,19 +238,13 @@ pub unsafe extern "C" fn z_condvar_move(cv: *mut z_owned_condvar_t) -> *mut z_mo
 }
 
 /// Take ownership out of a moved condvar (pico `z_condvar_take`); the struct
-/// copy, for the reason given on [`z_mutex_take`].
+/// copy, and no status, for the reasons given on [`z_mutex_take`].
 #[no_mangle]
-pub unsafe extern "C" fn z_condvar_take(
-    obj: *mut z_owned_condvar_t,
-    src: *mut z_moved_condvar_t,
-) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
-        if obj.is_null() || src.is_null() {
-            return Z_ERR_NULL;
-        }
-        core::ptr::copy_nonoverlapping(src, obj, 1);
-        Z_OK
-    })
+pub unsafe extern "C" fn z_condvar_take(obj: *mut z_owned_condvar_t, src: *mut z_moved_condvar_t) {
+    if obj.is_null() || src.is_null() {
+        return;
+    }
+    core::ptr::copy_nonoverlapping(src, obj, 1);
 }
 
 /// Wake one waiter (pico `z_condvar_signal`).
@@ -723,6 +716,55 @@ mod tests {
             assert_eq!(z_mutex_unlock(z_mutex_loan_mut(&mut m)), Z_OK);
             assert_eq!(z_condvar_drop(z_condvar_move(&mut cv)), Z_OK);
             assert_eq!(z_mutex_drop(z_mutex_move(&mut m)), Z_OK);
+        }
+    }
+
+    /// The bytes of `value`, for comparing two host objects without using a copy of one, which
+    /// the host's threading library does not promise to allow.
+    fn bytes_of<T>(value: &T) -> Vec<u8> {
+        // SAFETY: a live reference, read as the bytes it spans.
+        unsafe {
+            std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
+                .to_vec()
+        }
+    }
+
+    /// `take` is the struct copy pico's macro expands to, with no status: the destination holds
+    /// the source's bytes after it, and a NULL on either side copies nothing.
+    #[test]
+    fn take_copies_the_host_object_and_a_null_copies_nothing() {
+        unsafe {
+            let mut src: z_owned_mutex_t = std::mem::zeroed();
+            assert_eq!(z_mutex_init(&mut src), Z_OK);
+            let mut dst: z_owned_mutex_t = std::mem::zeroed();
+            core::ptr::write_bytes(&mut dst as *mut z_owned_mutex_t, 0xA5, 1);
+            let before = bytes_of(&dst);
+            z_mutex_take(&mut dst, std::ptr::null_mut());
+            z_mutex_take(std::ptr::null_mut(), z_mutex_move(&mut src));
+            assert_eq!(
+                bytes_of(&dst),
+                before,
+                "a NULL source copied into the mutex"
+            );
+            z_mutex_take(&mut dst, z_mutex_move(&mut src));
+            assert_eq!(bytes_of(&dst), bytes_of(&src));
+            assert_eq!(z_mutex_drop(z_mutex_move(&mut src)), Z_OK);
+
+            let mut csrc: z_owned_condvar_t = std::mem::zeroed();
+            assert_eq!(z_condvar_init(&mut csrc), Z_OK);
+            let mut cdst: z_owned_condvar_t = std::mem::zeroed();
+            core::ptr::write_bytes(&mut cdst as *mut z_owned_condvar_t, 0xA5, 1);
+            let cbefore = bytes_of(&cdst);
+            z_condvar_take(&mut cdst, std::ptr::null_mut());
+            z_condvar_take(std::ptr::null_mut(), z_condvar_move(&mut csrc));
+            assert_eq!(
+                bytes_of(&cdst),
+                cbefore,
+                "a NULL source copied into the condvar"
+            );
+            z_condvar_take(&mut cdst, z_condvar_move(&mut csrc));
+            assert_eq!(bytes_of(&cdst), bytes_of(&csrc));
+            assert_eq!(z_condvar_drop(z_condvar_move(&mut csrc)), Z_OK);
         }
     }
 }

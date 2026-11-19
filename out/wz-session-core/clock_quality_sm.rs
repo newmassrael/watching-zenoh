@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: bbd23c97f2927c8e507456393183c79bcc3c142142c24aa2750d76549f8c7370
+// source-hash: 386ee16bf1fd70868dfbadf7b072865cd93db7c99cd7edeb407f598e42af4b00
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -894,6 +894,8 @@ compile_error!("feature `session-unicast-accept` requires `rx-control`, which th
 compile_error!("feature `session-unicast-accept` requires `rx-push`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-unicast-accept", not(feature = "rx-response")))]
 compile_error!("feature `session-unicast-accept` requires `rx-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "shared-key-ids", not(feature = "alloc")))]
+compile_error!("feature `shared-key-ids` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "switchboard", not(feature = "codec-push")))]
 compile_error!("feature `switchboard` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "transport-compose", not(feature = "alloc")))]

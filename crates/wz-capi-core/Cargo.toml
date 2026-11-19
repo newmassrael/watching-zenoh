@@ -220,6 +220,10 @@ e2e-sender = []
 # the judge of `wz-app-frame`, so these features only carry the capabilities' names.
 e2e-receiver = []
 e2e-sender-demux = ["e2e-receiver"]
+# The instance a sample of a message is, read from fields of its payload. The model has nothing
+# behind it: the doors are the pico ABI's own (`wz-capi-pico/instance-key`) over the keyer of
+# `wz-app-frame`, so this feature only carries the capability's name, as `e2e-receiver`'s does.
+instance-key = []
 # A configuration judged, emitted and costed without opening it. In the model it is what an open of
 # a plan asks of the operating system (`open_facilities`), which only the zenoh-c ABI's door reads;
 # the validators and the emitter it reaches are the runtime's, used by those doors alone
@@ -242,6 +246,15 @@ segment-sender = []
 # (`wz-capi-pico/e2e-supervision`), so this feature only carries the capability's name, as
 # `e2e-sender`'s does.
 e2e-supervision = []
+# The replay cache. The model has nothing behind it: the ring, the serving gate and the
+# subscriber's round are `wz-session-core`'s (`replay_publisher`, `replay_round`) and the doors are
+# the pico ABI's own (`wz-capi-pico/replay-cache`), so this feature only carries the capability's
+# name, as `e2e-sender`'s does.
+replay-cache = []
+# The message catalog. The model has nothing behind it: the reader is `wz-app-frame`'s
+# (`message_catalog`) and the doors are the pico ABI's own (`wz-capi-pico/message-catalog`), so
+# this feature only carries the capability's name, as `e2e-sender`'s does.
+message-catalog = []
 # A transport the program supplies: every link a session opens goes over the program's own network
 # stack, through the calls of its port, and over no socket of the system's. The model threads the
 # transport from the stance to each dial and listen config (`OpenStance::app_transport`); the

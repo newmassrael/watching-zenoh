@@ -93,6 +93,11 @@ SRC_FILES = [
     # Open-debt item 924, D10 — the packed log the index entries and the TCP run map
     # moved to; its release is the same removal the file above watches.
     ROOT / "crates" / "wz-session-core" / "src" / "column_log.rs",
+    # The `.proto` reader moved to `wz-app-frame` with the instance keys that read payload fields
+    # through it; its parser and schema files keep the four removals this gate already watched
+    # there, and naming the two files keeps the subject the same across the move.
+    ROOT / "crates" / "wz-app-frame" / "src" / "proto_parse.rs",
+    ROOT / "crates" / "wz-app-frame" / "src" / "proto_schema.rs",
 ]
 
 REMOVAL = re.compile(r"\.(drain|remove|pop|pop_front|swap_remove|retain)\s*\(")
@@ -645,28 +650,28 @@ ALLOWED = [
     # holds no capture, so none of its four removals discards evidence. Each is
     # a work list that lives inside one call.
     (
-        "wz-capture/proto_parse.rs",
+        "wz-app-frame/proto_parse.rs",
         "match self.ahead.pop_front() {",
         "the `.proto` parser's token lookahead: a token leaving the buffer "
         "because the parser that peeked it now consumes it; built and drained "
         "inside one parse, and nothing captured is in it",
     ),
     (
-        "wz-capture/proto_schema.rs",
+        "wz-app-frame/proto_schema.rs",
         "chain.pop();",
         "the import chain of one schema load: a file leaving the chain because "
         "it is finished, which is what lets a later import see a cycle only "
         "when it is one; a work list inside one call",
     ),
     (
-        "wz-capture/proto_schema.rs",
+        "wz-app-frame/proto_schema.rs",
         "stack.pop();",
         "the expansion's stack of messages being walked: a message leaving it "
         "because its fields are written, which is what lets a cycle be told "
         "from a message used twice; a work list inside one call",
     ),
     (
-        "wz-capture/proto_schema.rs",
+        "wz-app-frame/proto_schema.rs",
         "while let Some(msg) = pending.pop() {",
         "the reach walk's work list: a message leaving it because it is now "
         "being visited, and it is recorded in the walk's result on the next "

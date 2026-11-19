@@ -47,6 +47,16 @@ pub const WZ_EXT_EVENT_TLS_DROP_STALLED: u64 = events::TLS_DROP_STALLED;
 pub const WZ_EXT_EVENT_TLS_DROP_NO_ROOM: u64 = events::TLS_DROP_NO_ROOM;
 /// The first integer of a dropped handshake: any other failure, or a peer the policy refused.
 pub const WZ_EXT_EVENT_TLS_DROP_OTHER: u64 = events::TLS_DROP_OTHER;
+/// An instance key reported the samples it dropped (`wz_ext_instance_keyer_*`). Three integers:
+/// why the latest of them was dropped (`WZ_EXT_EVENT_INSTANCE_KEY_*`), which key field, and how
+/// many were dropped since the last report.
+pub const WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED: u16 = events::SOURCE_INSTANCE_KEY_DROPPED;
+/// The first integer of an instance key's report: the payload is not a message of the schema.
+pub const WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE: u64 = events::INSTANCE_KEY_UNDECODABLE;
+/// The first integer of an instance key's report: a key field with presence is absent.
+pub const WZ_EXT_EVENT_INSTANCE_KEY_ABSENT: u64 = events::INSTANCE_KEY_ABSENT;
+/// The first integer of an instance key's report: a key value is in no list.
+pub const WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED: u64 = events::INSTANCE_KEY_NOT_LISTED;
 
 /// One event, as `wz_ext_event_read` gives it.
 #[repr(C)]

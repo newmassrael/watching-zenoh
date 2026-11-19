@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Replay round - a subscriber's asking of the publishers for what they last sent.
+
+  A subscriber of a message whose publishers keep a replay cache asks each publisher, as its
+  suffixed queryable appears, for the frames it holds. A ROUND is the time from the first such
+  appearance to the end of every query it started: the replies come in, each one moving the
+  round on, until every query has ended (the round is over and the subscriber is live) or a
+  deadline passes first (the round is abandoned, and the subscriber is live all the same). A
+  publisher that appears once the subscriber is live starts a round of its own.
+
+  Two deadlines bound a round, both data the application gives: the PROGRESS deadline, counted
+  again from every reply (a publisher that stops answering in the middle), and the ROUND deadline,
+  counted from the start of the round (a publisher that keeps answering forever). Before any
+  publisher appears the round deadline counts from the subscriber's creation, so a subscriber
+  whose publishers never appear still becomes live; that is the bound of the live samples a
+  subscriber holds back until its first round is over.
+
+  Division of labour with the host (the machine owns the round, the host owns the table and the
+  clock):
+    - The publishers, their queries and the quota of queries in flight are the host's table (one
+      row per publisher, a keyed table). The host asks every publisher that appears, as the quota
+      allows, in whatever state the round is, and raises `publisher.appeared` for each.
+    - The host raises `reply.arrived` for every reply of a query of the current round, and
+      `queries.done` once no query of the current round is waiting or in flight.
+    - Whether a deadline has passed is a comparison over the time source (`tick_elapsed`), the
+      host's, which raises `deadline.passed`. The host raises `hold.full` when the store of live
+      samples it holds back has no room for another: holding more would drop one.
+    - The live samples held back and the order they are handed on in are the host's; the machine
+      says WHEN they are released.
+
+  The states:
+    Idle      - no publisher has appeared yet.
+    Asking    - a round started: its queries are out and no reply has come yet.
+    Answering - at least one reply of the round came.
+    Abandoned - a deadline passed, or the held samples filled their store, before the round was
+                over. The replies its queries still bring are not judged.
+    Live      - the round is over, or no publisher appeared before the round deadline.
+
+  Engine-free: every effect is a no-arg `<sce:action>` host-trait call, so the generated
+  `ReplayRoundPolicy<A>` carries no `IScriptEngine` and compiles `no_std`.
+
+  Host actions (the generated `ReplayRoundActions` trait):
+    begin_round - entered Asking: count both deadlines from this moment.
+    progress    - entered Answering (a reply came): count the progress deadline from this moment.
+    abandon     - entered Abandoned: the queries of the round are no longer the round's; release
+                  the held live samples.
+    go_live     - entered Live: release the held live samples.
+
+  Events fed by the host:
+    publisher.appeared - a publisher's suffixed queryable was declared, and the host asks it.
+    reply.arrived      - a reply of a query of the current round arrived.
+    queries.done       - no query of the current round is waiting or in flight.
+    deadline.passed    - the progress or the round deadline passed.
+    hold.full          - the store of held live samples has no room for the next one.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="replay_round"
+       version="1.0"
+       initial="Idle">
+
+  <state id="Idle">
+    <transition event="publisher.appeared" target="Asking"/>
+    <transition event="deadline.passed" target="Live"/>
+    <transition event="hold.full" target="Live"/>
+  </state>
+
+  <state id="Asking">
+    <onentry>
+      <sce:action name="begin_round" effect="duty"/>
+    </onentry>
+    <transition event="reply.arrived" target="Answering"/>
+    <transition event="queries.done" target="Live"/>
+    <transition event="deadline.passed" target="Abandoned"/>
+    <transition event="hold.full" target="Abandoned"/>
+  </state>
+
+  <!-- Every reply re-enters Answering, so its entry counts the progress deadline again. -->
+  <state id="Answering">
+    <onentry>
+      <sce:action name="progress" effect="duty"/>
+    </onentry>
+    <transition event="reply.arrived" target="Answering"/>
+    <transition event="queries.done" target="Live"/>
+    <transition event="deadline.passed" target="Abandoned"/>
+    <transition event="hold.full" target="Abandoned"/>
+  </state>
+
+  <state id="Abandoned">
+    <onentry>
+      <sce:action name="abandon" effect="duty"/>
+    </onentry>
+    <transition event="publisher.appeared" target="Asking"/>
+  </state>
+
+  <state id="Live">
+    <onentry>
+      <sce:action name="go_live" effect="duty"/>
+    </onentry>
+    <transition event="publisher.appeared" target="Asking"/>
+  </state>
+
+</scxml>

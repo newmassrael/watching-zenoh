@@ -367,6 +367,46 @@ where
         }
     }
 
+    /// Stage onto `cell` a [`DeclEvent::Declared`] for each of `held`, what the peer holds now,
+    /// for a listener declared from what is held. Called under the observer lock the listener's
+    /// sinks are installed under, before they are, so each is staged ahead of every live event and
+    /// a declaration is told once: from the table when it came before, live when it comes after.
+    #[cfg(any(feature = "declare-subscriber", feature = "declare-queryable"))]
+    fn stage_held<'a>(
+        &self,
+        held: impl Iterator<Item = (u64, &'a str)>,
+        cell: &DeclListenerCell<R>,
+    ) {
+        let peer = self.peer_reading();
+        for (id, keyexpr) in held {
+            let event = DeclEvent::Declared {
+                id,
+                keyexpr: keyexpr.to_string(),
+                peer: peer(),
+            };
+            cell.stage(&self.fires, move |cb| cb(event));
+        }
+    }
+
+    /// [`Self::declare_remote_subscriber_listener`], told first of every subscriber the peer
+    /// holds now, as [`DeclEvent::Declared`] events staged ahead of every live one: for a listener
+    /// declared after the peer's declarations arrived, which the plain form is not told again.
+    pub fn declare_remote_subscriber_listener_from_held(
+        &self,
+        callback: impl FnMut(DeclEvent) + Send + 'static,
+    ) -> Result<DeclListener<R, T>, DeclListenerError> {
+        self.remote_subscriber_listener(callback, true)
+    }
+
+    /// [`Self::declare_remote_queryable_listener`], told first of every queryable the peer holds
+    /// now, as [`Self::declare_remote_subscriber_listener_from_held`] is of its subscribers.
+    pub fn declare_remote_queryable_listener_from_held(
+        &self,
+        callback: impl FnMut(DeclEvent) + Send + 'static,
+    ) -> Result<DeclListener<R, T>, DeclListenerError> {
+        self.remote_queryable_listener(callback, true)
+    }
+
     /// R311lc — observe peer SUBSCRIBER declaration activity: `callback`
     /// fires with [`DeclEvent::Declared`] on every inbound
     /// `Declare(DeclSubscriber)` whose keyexpr resolves, and with
@@ -393,10 +433,22 @@ where
         &self,
         callback: impl FnMut(DeclEvent) + Send + 'static,
     ) -> Result<DeclListener<R, T>, DeclListenerError> {
+        self.remote_subscriber_listener(callback, false)
+    }
+
+    /// The two forms of the subscriber listener: told of what is held first when `from_held`.
+    fn remote_subscriber_listener(
+        &self,
+        callback: impl FnMut(DeclEvent) + Send + 'static,
+        from_held: bool,
+    ) -> Result<DeclListener<R, T>, DeclListenerError> {
         #[cfg(feature = "declare-subscriber")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
+                if from_held {
+                    self.stage_held(obs.remote_subscribers.iter_declared(), &cell);
+                }
                 let d = obs
                     .remote_subscribers
                     .on_subscriber_declared_sink(decl_sink)
@@ -418,7 +470,7 @@ where
         }
         #[cfg(not(feature = "declare-subscriber"))]
         {
-            let _ = callback;
+            let _ = (callback, from_held);
             Err(DeclListenerError::FeatureDisabled)
         }
     }
@@ -432,10 +484,22 @@ where
         &self,
         callback: impl FnMut(DeclEvent) + Send + 'static,
     ) -> Result<DeclListener<R, T>, DeclListenerError> {
+        self.remote_queryable_listener(callback, false)
+    }
+
+    /// The two forms of the queryable listener: told of what is held first when `from_held`.
+    fn remote_queryable_listener(
+        &self,
+        callback: impl FnMut(DeclEvent) + Send + 'static,
+        from_held: bool,
+    ) -> Result<DeclListener<R, T>, DeclListenerError> {
         #[cfg(feature = "declare-queryable")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
+                if from_held {
+                    self.stage_held(obs.remote_queryables.iter_declared(), &cell);
+                }
                 let d = obs
                     .remote_queryables
                     .on_queryable_declared_sink(decl_sink)
@@ -457,7 +521,7 @@ where
         }
         #[cfg(not(feature = "declare-queryable"))]
         {
-            let _ = callback;
+            let _ = (callback, from_held);
             Err(DeclListenerError::FeatureDisabled)
         }
     }

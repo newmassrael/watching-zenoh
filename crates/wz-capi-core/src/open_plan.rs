@@ -791,6 +791,9 @@ pub struct StatedTxQueue {
     pub batching_time_limit_us: Option<u64>,
     /// `allocation/mode`.
     pub allocation: Option<wz_session_core::link::QueueAllocation>,
+    /// `size/<priority>`, by the priority's wire byte: the batches each priority's queue holds,
+    /// which an `init` queue allocates at the open and a `lazy` one allocates up to.
+    pub sizes: [Option<usize>; wz_session_core::qos::Priority::NUM],
 }
 
 impl StatedTxQueue {
@@ -804,11 +807,19 @@ impl StatedTxQueue {
                 != upstream.batching_time_limit_us)
                 .then_some(stated.batching_time_limit_us),
             allocation: (stated.allocation != upstream.allocation).then_some(stated.allocation),
+            sizes: core::array::from_fn(|lane| {
+                (stated.sizes[lane] != upstream.sizes[lane]).then_some(stated.sizes[lane])
+            }),
         }
     }
 
     /// `model` with each stated key laid over it.
     fn over(self, mut model: TxQueueConf) -> TxQueueConf {
+        for (size, stated) in model.sizes.iter_mut().zip(self.sizes) {
+            if let Some(stated) = stated {
+                *size = stated;
+            }
+        }
         if let Some(batching) = self.batching {
             model.batching = batching;
         }
@@ -2196,6 +2207,24 @@ mod tests {
         assert_eq!(
             stance(init, TxQueueConf::of_policy(&SessionPolicy::defaults())).allocation,
             wz_session_core::link::QueueAllocation::Init
+        );
+        // A queue's size is laid over the model too: an `init` queue makes its batches by it,
+        // so a document that widens the data queue widens what the open allocates (open-debt
+        // item 952). Upstream's own size (2) is no instruction.
+        // `size/data` is the DEFAULT priority's (wire byte 5).
+        let data = wz_session_core::qos::Priority::DEFAULT.wire_byte() as usize;
+        let wide =
+            r#"{ transport: { link: { tx: { queue: { size: { data: 6, control: 2 } } } } } }"#;
+        let sizes = stance(wide, TxQueueConf::of_policy(&SessionPolicy::defaults())).sizes;
+        assert_eq!(sizes[data], 6);
+        assert_eq!(
+            sizes,
+            {
+                let mut expected = TxQueueConf::of_policy(&SessionPolicy::defaults()).sizes;
+                expected[data] = 6;
+                expected
+            },
+            "only the stated size moves"
         );
         // Upstream's own value is no instruction, and silence is none either: the model keeps
         // its writer's bound rather than taking upstream's millisecond.

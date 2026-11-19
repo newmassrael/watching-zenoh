@@ -18,9 +18,11 @@
 //!   peer has sent everything it held when the link came up (`WZ_EXT_DECL_SYNCED`); without it
 //!   that event is never told.
 //!
-//! What a watch hears, and what it does not, is the port's ([`wz_capi_port::decl_watch`]): the
-//! peers' declarations from the moment it is declared, on every link the session holds and every
-//! link that comes up later, and no undeclaration for what a peer held on a link that was lost.
+//! What a watch hears, and what it does not, is the port's ([`wz_capi_port::decl_watch`]): of
+//! subscribers and queryables, what each peer holds when the watch is declared, told first as
+//! declarations, then the peers' declarations from then on, on every link the session holds and
+//! every link that comes up later; of tokens, what comes after; and no undeclaration for what a
+//! peer held on a link that was lost.
 //! The engine decides whether it watches at all: the tokio engine does, and the cooperative engine
 //! refuses with `WZ_EXT_ERR_UNSUPPORTED`.
 //!

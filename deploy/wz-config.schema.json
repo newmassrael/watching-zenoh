@@ -240,6 +240,42 @@
               "x-wz-mutability": "fixed",
               "x-wz-wire": "none"
             },
+            "replay-reply-shape": {
+              "description": "How a publisher's replay cache answers a query.",
+              "enum": [
+                "frame-per-sample",
+                "segmented"
+              ],
+              "default": "frame-per-sample",
+              "x-wz-scope": "message",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "replay-serve-holds-sends": {
+              "description": "Whether a publisher's sends of a message wait while its replay cache answers a query.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "message",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "timing"
+            },
+            "replay-live-before-answer": {
+              "description": "How a subscriber that asks for a replay orders its live samples against it.",
+              "enum": [
+                "deliver",
+                "hold-back"
+              ],
+              "default": "deliver",
+              "x-wz-scope": "message",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "none"
+            },
             "event-ring-full": {
               "description": "Which event a full event ring gives up.",
               "enum": [
@@ -799,6 +835,50 @@
               "type": "integer",
               "minimum": 0,
               "default": 8,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "REPLAY_DEPTH_MAX": {
+              "description": "The deepest replay a message may keep: how many of the frames it last sent, as they were sent, a publisher holds for a subscriber that arrives later and asks for them.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 32,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MESSAGE_CATALOG_ENTRIES": {
+              "description": "How many messages one message catalog declares, when the message-catalog capability is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 64,
+              "x-wz-storage": "both",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "INSTANCE_KEY_FIELDS": {
+              "description": "How many fields of a payload one message's instance key names, when the instance-key capability is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 2,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "INSTANCES_PER_MESSAGE": {
+              "description": "How many instances one message's instance key may tell apart, when the instance-key capability is on: the product of the lengths of the lists of values its key fields may take.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 32,
               "x-wz-storage": "both",
               "x-wz-scope": "entity",
               "x-wz-binding-heap": "open",

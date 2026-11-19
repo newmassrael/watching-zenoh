@@ -604,6 +604,16 @@ supervision = ["dep:sce-rust-runtime"]
 # machines, so it pulls the SCE runtime and nothing else.
 e2e-supervision = ["dep:sce-rust-runtime"]
 
+# replay-cache (what each publisher last sent, for a subscriber that arrives later) — the replay
+# serving statechart (`sources/session/replay_serving.scxml`: Idle / Serving / Releasing, whether a
+# publisher answers a query and so holds its message's sends) with the publisher's ring of sent
+# frames and its queue of held ones, and the replay round statechart
+# (`sources/session/replay_round.scxml`: Idle / Asking / Answering / Abandoned / Live) with the
+# subscriber's table of publishers, its two deadlines and its store of live samples held back.
+# Every table is the caller's storage, so neither allocates; the machines are engine-free, so it
+# pulls the SCE runtime and nothing else.
+replay-cache = ["dep:sce-rust-runtime"]
+
 # app-link (a transport the program supplies) — the app-link statechart
 # (`sources/session/app_link.scxml`): the lifecycle of one link over the program's own network
 # stack (Opening / Open / Blocked / Closing / Closed), and the table of a transport's links that

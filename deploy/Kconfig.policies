@@ -692,6 +692,110 @@ config WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_LAST_VALUE
 	  Whether `last-value` stays selectable after the build; the chosen default always does.
 	  A target with no operating system keeps only the default unless this is set here.
 
+choice WZ_POLICY_REPLAY_REPLY_SHAPE
+	prompt "replay-reply-shape"
+	default WZ_POLICY_REPLAY_REPLY_SHAPE_FRAME_PER_SAMPLE
+	help
+	  How a publisher's replay cache answers a query. `frame-per-sample` answers one
+	  reply per sample of the ring, each the frame exactly as it was sent, then the
+	  final. `segmented` answers each sample as the pieces of the message's declared
+	  segment profile, every sample under the next transfer number, for a message
+	  whose frames are larger than a deployment puts in one sample; the cache's live
+	  sends go out as pieces too, and a subscriber joins the pieces, live and
+	  replied, before it judges a frame, giving up only a frame a piece of which
+	  never came. Decided when the cache or the subscriber is made, and fixed for its
+	  life.
+	  Upstream: Keeps no ring of sent frames, so there is no replay to answer and no
+	  shape to give it; a queryable the application declares answers whatever it
+	  replies.
+
+config WZ_POLICY_REPLAY_REPLY_SHAPE_FRAME_PER_SAMPLE
+	bool "frame-per-sample"
+
+config WZ_POLICY_REPLAY_REPLY_SHAPE_SEGMENTED
+	bool "segmented"
+
+endchoice
+
+config WZ_POLICY_REPLAY_REPLY_SHAPE_ALLOWS_FRAME_PER_SAMPLE
+	bool "replay-reply-shape allows frame-per-sample" if !WZ_POLICY_REPLAY_REPLY_SHAPE_FRAME_PER_SAMPLE
+	default y
+	help
+	  Whether `frame-per-sample` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_REPLAY_REPLY_SHAPE_ALLOWS_SEGMENTED
+	bool "replay-reply-shape allows segmented" if !WZ_POLICY_REPLAY_REPLY_SHAPE_SEGMENTED
+	default y
+	help
+	  Whether `segmented` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS
+	bool "replay-serve-holds-sends"
+	default n
+	help
+	  Whether a publisher's sends of a message wait while its replay cache answers a
+	  query. Off, a send goes out at once, and a subscriber may see a newer frame
+	  before the replay that precedes it. On, a periodic send is held and only the
+	  latest of each instance goes out once the answer is over, and an event send is
+	  deferred to a queue of max(1, depth/2) frames that gives up the oldest when it
+	  is full; the held frames go out in the order they were sent, before any later
+	  send. Decided when the cache is made, and fixed for its life.
+	  Upstream: Keeps no ring of sent frames and answers no replay, so a send is
+	  never held back for one.
+
+config WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS_ALLOWS_OFF
+	bool "replay-serve-holds-sends allows off" if WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS
+	default y
+	help
+	  Whether `off` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS_ALLOWS_ON
+	bool "replay-serve-holds-sends allows on" if !WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS
+	default y
+	help
+	  Whether `on` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+choice WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER
+	prompt "replay-live-before-answer"
+	default WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_DELIVER
+	help
+	  How a subscriber that asks for a replay orders its live samples against it.
+	  `deliver` hands each live sample on as it arrives, so live samples and replies
+	  interleave and the receiving judge drops a reply that is behind what it has
+	  seen. `hold-back` holds the live samples, in a store the application sizes,
+	  until the first round of replies is over or abandoned by its deadline (or the
+	  store is full), then hands them on after every reply of that round, so the
+	  application never sees a newer sample before the replay that precedes it.
+	  Decided when the subscriber is made, and fixed for its life.
+	  Upstream: Asks no publisher for what it sent before, so a live sample is
+	  delivered as it arrives and there is no replay to order it against.
+
+config WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_DELIVER
+	bool "deliver"
+
+config WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_HOLD_BACK
+	bool "hold-back"
+
+endchoice
+
+config WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_ALLOWS_DELIVER
+	bool "replay-live-before-answer allows deliver" if !WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_DELIVER
+	default y
+	help
+	  Whether `deliver` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_ALLOWS_HOLD_BACK
+	bool "replay-live-before-answer allows hold-back" if !WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_HOLD_BACK
+	default y
+	help
+	  Whether `hold-back` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
 choice WZ_POLICY_EVENT_RING_FULL
 	prompt "event-ring-full"
 	default WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST

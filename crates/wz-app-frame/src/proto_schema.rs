@@ -1,0 +1,1328 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! The `.proto` schema READER: a list of files read, imports resolved, names
+//! linked, and the field tree of a root message walked.
+//!
+//! ## What this is for
+//!
+//! protobuf's wire format carries field numbers and no names and four wire
+//! types and no types. A reader that holds the schema knows both, and a program
+//! that reads a payload by its fields (the typed reader [`crate::proto_decode`],
+//! the instance keys of a message) must not parse `.proto` itself: a second
+//! reader of a language is a second opinion about which field is which, and the
+//! two disagree exactly at the unusual constructs. This module is the one
+//! reader. The capture crate's declaration door, which turns a schema into the
+//! declaration text its payload map installs, walks the same tree through
+//! [`Linker::expand_names`] and a [`NameSink`] of its own.
+//!
+//! ## The tree a walk names
+//!
+//! [`Linker::expand_names`] names every field of the root message, in
+//! declaration order, with its PATH: the field number for a field of the root,
+//! and for a field of a message held by a field, the holder's path, a dot, and
+//! the field number (`3.2`), which is the spelling a walk of the wire gives a
+//! nested field. A repeated field is the same path as a singular one, a field
+//! in a `oneof` is an ordinary field, and an enum-typed or scalar field names
+//! its own path and nothing under it. A `map<K, V>` field, which on the wire is
+//! a repeated field of an entry message whose key is field 1 and whose value is
+//! field 2 (`google/protobuf/descriptor.proto`, the comment on
+//! `MessageOptions.map_entry`), names `key` under `.1` and `value` under `.2`,
+//! the names `protoc` gives the entry message's two fields, and the value
+//! message's fields under `.2`.
+//!
+//! ## What goes in
+//!
+//! A list of files, each a name and its text, one of them the root file. The
+//! library reads no file and runs no callback: the caller read the bytes. An
+//! `import` is resolved BY NAME against the list, by exact string equality, so
+//! the caller chooses the names to match how the files import each other (the
+//! path `protoc` would be given after `-I`). Only the root file and what it
+//! imports, transitively, are read; a file in the list nothing imports is
+//! ignored, and so is any problem in it. The well-known types
+//! (`google/protobuf/timestamp.proto` and the rest) are NOT part of this
+//! library: a schema that imports one needs it in the list, like any other
+//! file.
+//!
+//! The root message is named by its full name including the package
+//! (`pkg.Outer`, or `Outer` when there is none). It is looked up among the
+//! messages of the files that were read.
+//!
+//! ## What is refused, and why
+//!
+//! Every refusal is a [`ProtoDiagnostic`] naming a file, a
+//! line and a column, except the ones that are not about a place in a file.
+//!
+//! * `import weak` and editions, stated at their keyword in any file that is
+//!   read: a weak import is a dependency a build may leave out, so the names it
+//!   would declare cannot be relied on, and an edition is a dialect this reader
+//!   does not have.
+//! * A `group` field or an `extend` block, but only where the root message
+//!   reaches it. The declarations come from the EXPANSION: the root message and
+//!   every message reachable from it through field types, a map's value type
+//!   included. A group is written with the deprecated group wire types, which
+//!   the payload reader stops at, and it names a field of the message that
+//!   holds it; an extension's fields are declared outside the message they
+//!   extend, so this reader could not attach their names to it. Either one is
+//!   therefore refused when the message it holds or extends is one the expansion
+//!   visits, stated at the `group` or `extend` keyword in the file it is written
+//!   in. Anywhere else it is read for its syntax and changes nothing, which is
+//!   what lets a schema import a public options file whose `extend` blocks add
+//!   options to `google.protobuf.FieldOptions`, a message no payload is. The
+//!   extended message is looked up the way `protoc` looks it up (innermost
+//!   scope first, no turning back, imports and public re-exports respected), and
+//!   one that cannot be found is an error here as it is there.
+//! * A recursive message: one whose tree contains itself. The declaration for a
+//!   field at path `1.1.1.1...` has no end, so the cycle is named and refused
+//!   rather than expanded to some depth nobody chose.
+//! * Everything `protoc` itself refuses that this reader needs to be sure of:
+//!   syntax errors, a type that is not defined, one defined in a file the
+//!   referencing file does not import, a field number that is zero, above
+//!   `2^29 - 1` or in `19000..=19999`, a repeated number, a reserved number or
+//!   name, a duplicate name, a map key that is not integral or `string`, a
+//!   label where the syntax forbids one.
+//!
+//! The first problem found is the only one reported, in the order `protoc`
+//! meets them: a syntax error before a semantic one, an imported file before
+//! the file that imports it. A `group` or an `extend` the root reaches comes
+//! AFTER all of those, because which messages the root reaches is known only
+//! once every file is read and linked and the root is found; and it comes
+//! BEFORE the refusals the expansion itself makes (a recursive message, a path
+//! too deep, a sink's own bound), because it is decided from the messages reached
+//! and not from the lines written, so a schema too large to expand is not
+//! allowed to hide it. When several are reached, the one in the message the
+//! expansion visits first is named, and within one message the first found
+//! while the files were read.
+//!
+//! ### What it does not check
+//!
+//! This is not a validator. Enum bodies are read for their names only, so an
+//! enum `protoc` would refuse for its numbering is accepted here; JSON name
+//! collisions, option values and `extensions` ranges are not judged. The fields
+//! of an `extend` block are read for their syntax and nothing else: their
+//! numbers, names and types are not judged, and neither is whether a number
+//! lies in an extension range of the message extended. A file accepted here can
+//! still fail `protoc`; a file refused here for one of the reasons above would
+//! be refused by it too.
+//!
+//! ## Bounds
+//!
+//! The work is linear in the text read, except the expansion, which is bounded
+//! and refuses past each bound: messages may be nested `MAX_MESSAGE_NESTING`
+//! (31, `protoc` 3.21's limit; older releases accept more) levels in the text,
+//! imports [`MAX_IMPORT_DEPTH`] files deep, and a field path [`MAX_PATH_DEPTH`]
+//! messages deep. A schema with no cycle can still expand exponentially (a
+//! message that holds two of a message that holds two of another, ten times
+//! over, is a thousand paths from a ten-line file), so a [`NameSink`] that
+//! writes its names somewhere bounds how many it takes and refuses past that.
+
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+
+use crate::proto_lex::{Pos, SyntaxError};
+use crate::proto_parse::{
+    parse_file, Docs, EnumDecl, ExtendDecl, FieldOption, FieldType, FileAst, ImportKind, Label,
+    MapValue, MessageDecl, ScalarKind, Syntax, TypeName, MAX_FIELD_NUMBER,
+};
+
+/// How many messages deep a field path may go.
+///
+/// This bounds the recursion that expands the tree, and it is the stack bound
+/// for a chain of distinct messages each holding the next, which no cycle check
+/// catches. The payload reader itself stops walking nested messages after
+/// eight levels, so a name declared deeper than that can never apply; the bound
+/// here is for this reader's own stack and is deliberately not that number.
+pub const MAX_PATH_DEPTH: usize = 64;
+
+/// How many files deep a chain of imports may go.
+pub const MAX_IMPORT_DEPTH: usize = 64;
+
+/// One file handed to the reader.
+#[derive(Clone, Copy, Debug)]
+pub struct ProtoFile<'a> {
+    /// The name other files import it by, and the name diagnostics carry.
+    pub name: &'a str,
+    /// The file's bytes, which must be UTF-8 (the language specification: source
+    /// files are UTF-8). They are checked when the file is READ, not when it is
+    /// handed over: a file nothing imports is never opened, so its bytes are
+    /// not judged.
+    pub text: &'a [u8],
+}
+
+/// Why a schema was refused, and where.
+///
+/// `file`, `line` and `column` are present together when the problem is at a
+/// place in a file. Lines and columns count from 1; a column counts bytes from
+/// the start of the line, so a tab is one column and a multi-byte character
+/// several. `file` alone means the problem is about the file as a whole (the
+/// root message is not in it); none of the three means it is about an argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtoDiagnostic {
+    /// The name the file was handed over under.
+    pub file: Option<String>,
+    /// 1-based line.
+    pub line: Option<usize>,
+    /// 1-based byte column.
+    pub column: Option<usize>,
+    /// What is wrong, in a sentence.
+    pub reason: String,
+}
+
+impl fmt::Display for ProtoDiagnostic {
+    /// `{file}: line {line}: {reason}` for a place in a file, `{file}: {reason}`
+    /// for a whole file, and the reason alone otherwise.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.file, self.line) {
+            (Some(file), Some(line)) => write!(f, "{file}: line {line}: {}", self.reason),
+            (Some(file), None) => write!(f, "{file}: {}", self.reason),
+            (None, _) => f.write_str(&self.reason),
+        }
+    }
+}
+
+impl ProtoDiagnostic {
+    /// A problem at `pos` in the file `file`.
+    pub fn at(file: &str, pos: Pos, reason: impl Into<String>) -> Self {
+        Self {
+            file: Some(String::from(file)),
+            line: Some(pos.line as usize),
+            column: Some(pos.col as usize),
+            reason: reason.into(),
+        }
+    }
+
+    /// A problem of the file `file` as a whole.
+    pub fn in_file(file: &str, reason: impl Into<String>) -> Self {
+        Self {
+            file: Some(String::from(file)),
+            line: None,
+            column: None,
+            reason: reason.into(),
+        }
+    }
+
+    /// A problem of an argument, at no place in a file.
+    pub fn argument(reason: impl Into<String>) -> Self {
+        Self {
+            file: None,
+            line: None,
+            column: None,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// What a walk of the field tree hands each field to ([`Linker::expand_names`]).
+pub trait NameSink {
+    /// The field at `path` is called `name`. An error stops the walk and is the
+    /// walk's error: a sink that keeps what it is told bounds how much it takes.
+    fn name(&mut self, path: &str, name: &str) -> Result<(), ProtoDiagnostic>;
+}
+
+/// Read `bytes` as the text of the file `name`, or say where it stops being
+/// UTF-8, with a position the way every other problem has one.
+///
+/// # Errors
+///
+/// The diagnostic, at the first byte that is not UTF-8.
+pub fn text_of<'a>(name: &str, bytes: &'a [u8]) -> Result<&'a str, ProtoDiagnostic> {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            let valid = e.valid_up_to();
+            let before = &bytes[..valid];
+            let line = before.iter().filter(|&&b| b == b'\n').count() + 1;
+            let line_start = before
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |p| p + 1);
+            Err(ProtoDiagnostic::at(
+                name,
+                Pos {
+                    line: line as u32,
+                    col: (valid - line_start + 1) as u32,
+                },
+                "the file is not valid UTF-8",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    Unvisited,
+    Loading,
+    Done,
+}
+
+/// What a name in the symbol table is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Package,
+    Message(usize),
+    Enum(usize),
+    EnumValue,
+    Field,
+    Oneof,
+    Service,
+}
+
+impl Kind {
+    /// Whether a field may have this as its type.
+    fn is_type(self) -> bool {
+        matches!(self, Kind::Message(_) | Kind::Enum(_))
+    }
+
+    /// Whether a dotted name may descend into this (`protoc`: messages,
+    /// packages, enums and services).
+    fn is_aggregate(self) -> bool {
+        matches!(
+            self,
+            Kind::Message(_) | Kind::Package | Kind::Enum(_) | Kind::Service
+        )
+    }
+}
+
+/// What a looked-up name may turn out to be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// A message or an enum, `protoc`'s LOOKUP_TYPES: a field's type. A symbol
+    /// of the right name that is not a type is stepped over.
+    Type,
+    /// Any symbol, `protoc`'s LOOKUP_ALL: an extendee. The first symbol of the
+    /// right name is the answer, and the caller says what is wrong with it.
+    Any,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Symbol {
+    kind: Kind,
+    file: usize,
+}
+
+/// A message as the expansion and the value door see it.
+pub struct Msg {
+    pub full_name: String,
+    pub file: usize,
+    /// The index in [`Linker::msgs`] of the message this one is written inside,
+    /// or `None` for a message at the top level of its file.
+    pub parent: Option<usize>,
+    /// The syntax of the file the message is written in: it decides whether a
+    /// singular field has presence and whether a repeated one is packed.
+    pub syntax: Syntax,
+    pub fields: Vec<Fld>,
+    /// The names of the message's oneofs, in the order written.
+    pub oneofs: Vec<String>,
+    /// The comments `protoc` attaches to the message.
+    pub docs: Docs,
+    /// The message's own `option` statements, in the order written.
+    pub options: Vec<FieldOption>,
+    /// What in the text keeps this message from being declared, should the
+    /// expansion visit it, in the order the linker met them.
+    blockers: Vec<Blocker>,
+}
+
+/// An extension field an `extend` block declares, as an option's name finds it.
+///
+/// Only what says WHERE it is declared is kept: nothing about the field's own
+/// type or number, because an option's value is not judged here.
+pub struct Extension {
+    /// The index of the file whose `extend` block declares it.
+    pub file: usize,
+    /// The package of that file, empty when it declares none.
+    pub package: String,
+}
+
+/// An enum, with the numbers its names stand for.
+pub struct EnumInfo {
+    pub full_name: String,
+    /// The enum's syntax decides whether a number that is none of its values is
+    /// a value anyway (proto3, an open enum) or an error (proto2, closed).
+    pub syntax: Syntax,
+    /// `(name, number)` in the order written.
+    pub values: Vec<(String, i128)>,
+}
+
+/// What a field holds, resolved.
+#[derive(Clone, Copy, Debug)]
+pub enum FieldKind {
+    Scalar(ScalarKind),
+    Enum(usize),
+    Message(usize),
+    /// A `group`. Declared here so the value door can say what it refuses; it
+    /// never writes one, so the group's body message is not kept.
+    Group,
+    Map {
+        key: ScalarKind,
+        value: MapValueKind,
+    },
+}
+
+/// What a map's values are.
+#[derive(Clone, Copy, Debug)]
+pub enum MapValueKind {
+    Scalar(ScalarKind),
+    Enum(usize),
+    Message(usize),
+}
+
+/// A `group` or an `extend` that makes a message undeclarable, and where it is.
+///
+/// Recorded when the schema is linked and judged only once the root is known:
+/// the same text is harmless to a root that never reaches the message and fatal
+/// to one that does.
+struct Blocker {
+    /// The file the keyword is written in.
+    file: usize,
+    /// The `group` or `extend` keyword.
+    pos: Pos,
+    kind: BlockerKind,
+}
+
+enum BlockerKind {
+    /// The message holds a group of this name, which is a field of it.
+    Group(String),
+    /// Some `extend` block extends the message.
+    Extend,
+}
+
+/// What the expansion does with a field after its own line.
+enum Target {
+    /// Nothing: a scalar or an enum.
+    Leaf,
+    Message(usize),
+    /// A map: `key` and `value` lines, and the value message's fields if any.
+    Map(Option<usize>),
+}
+
+pub struct Fld {
+    pub name: String,
+    pub number: u64,
+    target: Target,
+    /// Where the type was written, for the diagnostics that blame it.
+    ty_pos: Pos,
+    /// The same type as `target` reads it, with the scalar kind and the enum
+    /// kept: the declaration door needs only the tree, the value door needs
+    /// what each leaf is.
+    pub kind: FieldKind,
+    pub label: Label,
+    /// The index in the owning message's `oneofs`, if the field is a member.
+    pub oneof: Option<usize>,
+    /// Every `[...]` entry, in the order written.
+    pub options: Vec<FieldOption>,
+    /// The comments `protoc` attaches to the field.
+    pub docs: Docs,
+}
+
+pub struct Linker<'f, 'a> {
+    files: &'f [ProtoFile<'a>],
+    by_name: BTreeMap<&'a str, usize>,
+    state: Vec<State>,
+    /// Per file, the syntax it declared; read when a message or an enum is
+    /// registered.
+    syntaxes: Vec<Syntax>,
+    /// Per file, the package it declares, empty for none.
+    packages: Vec<String>,
+    /// Per file, each import's path and position, kept for the error that
+    /// names an import after the file's tree is gone.
+    import_sites: Vec<Vec<(String, Pos)>>,
+    /// Per file, the files whose symbols an importer of it can see: itself and
+    /// whatever it imports `public`, transitively.
+    exports: Vec<BTreeSet<usize>>,
+    /// Per file, the files whose symbols it can name: itself, its direct
+    /// imports, and what they export.
+    visible: Vec<BTreeSet<usize>>,
+    symbols: BTreeMap<String, Symbol>,
+    pub msgs: Vec<Msg>,
+    pub enums: Vec<EnumInfo>,
+    /// Every extension field of every file read, by full name. Kept beside
+    /// `symbols` and not in it: a clash between an extension and another symbol
+    /// is not diagnosed by this reader, which never needed the extension.
+    extensions: BTreeMap<String, Extension>,
+    /// Per file, its own `option` statements, in the order written.
+    pub file_options: Vec<Vec<FieldOption>>,
+}
+
+impl<'f, 'a> Linker<'f, 'a> {
+    /// Check the arguments both doors share and read the root file and
+    /// everything it imports: the first problem found is the one returned.
+    pub fn read(files: &'f [ProtoFile<'a>], root_file: usize) -> Result<Self, ProtoDiagnostic> {
+        if root_file >= files.len() {
+            return Err(ProtoDiagnostic::argument(format!(
+                "the root file index {root_file} is outside the {} file(s) given",
+                files.len()
+            )));
+        }
+        let mut linker = Self::new(files)?;
+        linker.load(root_file, &mut Vec::new())?;
+        Ok(linker)
+    }
+
+    /// Check the arguments and read EVERY file given, each with what it imports,
+    /// in the order the files are listed: the first problem found is the one
+    /// returned. For a question that has no root message (which messages the
+    /// files declare), so that a file nothing imports is read too.
+    pub fn read_all(files: &'f [ProtoFile<'a>]) -> Result<Self, ProtoDiagnostic> {
+        let mut linker = Self::new(files)?;
+        for file in 0..files.len() {
+            linker.load(file, &mut Vec::new())?;
+        }
+        Ok(linker)
+    }
+
+    /// The type tables a link produced, given up by the linker that borrows the
+    /// files: what the typed reader needs to read a message after the files are
+    /// gone ([`crate::proto_decode::SchemaSet`]).
+    pub fn into_types(self) -> (Vec<Msg>, Vec<EnumInfo>) {
+        (self.msgs, self.enums)
+    }
+
+    /// An empty linker over `files`, once the names are known to be distinct.
+    fn new(files: &'f [ProtoFile<'a>]) -> Result<Self, ProtoDiagnostic> {
+        let mut by_name = BTreeMap::new();
+        for (i, f) in files.iter().enumerate() {
+            if by_name.insert(f.name, i).is_some() {
+                return Err(ProtoDiagnostic::argument(format!(
+                    "two files are named `{}`: imports are resolved by name, so each name can \
+                     stand for one file",
+                    f.name
+                )));
+            }
+        }
+
+        Ok(Linker {
+            files,
+            by_name,
+            state: alloc::vec![State::Unvisited; files.len()],
+            syntaxes: alloc::vec![Syntax::Proto2; files.len()],
+            packages: alloc::vec![String::new(); files.len()],
+            import_sites: alloc::vec![Vec::new(); files.len()],
+            exports: alloc::vec![BTreeSet::new(); files.len()],
+            visible: alloc::vec![BTreeSet::new(); files.len()],
+            symbols: BTreeMap::new(),
+            msgs: Vec::new(),
+            enums: Vec::new(),
+            extensions: BTreeMap::new(),
+            file_options: alloc::vec![Vec::new(); files.len()],
+        })
+    }
+}
+
+impl<'a> Linker<'_, 'a> {
+    pub fn name_of(&self, file: usize) -> &'a str {
+        self.files[file].name
+    }
+
+    fn syntax_error(&self, file: usize, e: SyntaxError) -> ProtoDiagnostic {
+        ProtoDiagnostic::at(self.name_of(file), e.pos, e.reason)
+    }
+
+    /// Parse `idx`, load what it imports, then link it -- the order `protoc`
+    /// builds in, so the first problem found is the one it would report.
+    fn load(&mut self, idx: usize, chain: &mut Vec<usize>) -> Result<(), ProtoDiagnostic> {
+        if self.state[idx] == State::Done {
+            return Ok(());
+        }
+        self.state[idx] = State::Loading;
+        chain.push(idx);
+        let text = text_of(self.name_of(idx), self.files[idx].text)?;
+        let ast = parse_file(text).map_err(|e| self.syntax_error(idx, e))?;
+        self.import_sites[idx] = ast
+            .imports
+            .iter()
+            .map(|i| (i.path.clone(), i.pos))
+            .collect();
+
+        let mut deps: Vec<(usize, ImportKind)> = Vec::new();
+        for import in &ast.imports {
+            let blame = |reason: String| ProtoDiagnostic::at(self.name_of(idx), import.pos, reason);
+            let Some(&target) = self.by_name.get(import.path.as_str()) else {
+                return Err(blame(format!(
+                    "import \"{}\" is not among the files given: imports are matched by name \
+                     against that list",
+                    import.path
+                )));
+            };
+            if deps.iter().any(|(d, _)| *d == target) {
+                return Err(blame(format!("import \"{}\" is listed twice", import.path)));
+            }
+            if self.state[target] == State::Loading {
+                return Err(self.cycle(target, chain));
+            }
+            if chain.len() >= MAX_IMPORT_DEPTH {
+                return Err(blame(format!(
+                    "imports are nested more than {MAX_IMPORT_DEPTH} files deep"
+                )));
+            }
+            self.load(target, chain)?;
+            deps.push((target, import.kind));
+        }
+
+        self.link_file(idx, &ast, &deps)?;
+        self.state[idx] = State::Done;
+        chain.pop();
+        Ok(())
+    }
+
+    /// The diagnostic for an import that comes back to a file being loaded.
+    ///
+    /// Blamed, as `protoc` does, in the file where the cycle starts, at the
+    /// import that leads along it.
+    fn cycle(&self, start: usize, chain: &[usize]) -> ProtoDiagnostic {
+        let from = chain.iter().position(|&f| f == start).unwrap_or(0);
+        let mut names: Vec<&str> = chain[from..].iter().map(|&f| self.name_of(f)).collect();
+        names.push(self.name_of(start));
+        let next = chain.get(from + 1).copied().unwrap_or(start);
+        let wanted = self.name_of(next);
+        let site = self.import_sites[start]
+            .iter()
+            .find(|(path, _)| path == wanted)
+            .map(|(_, pos)| *pos)
+            .unwrap_or(Pos { line: 1, col: 1 });
+        ProtoDiagnostic::at(
+            self.name_of(start),
+            site,
+            format!("file recursively imports itself: {}", names.join(" -> ")),
+        )
+    }
+
+    // ---- symbols ----------------------------------------------------------
+
+    fn declare(
+        &mut self,
+        full: String,
+        kind: Kind,
+        file: usize,
+        pos: Pos,
+    ) -> Result<(), ProtoDiagnostic> {
+        if let Some(prev) = self.symbols.get(&full) {
+            if prev.kind == Kind::Package && kind == Kind::Package {
+                // Two files of one package, or a package and its parent.
+                return Ok(());
+            }
+            let (scope, short) = match full.rfind('.') {
+                Some(p) => (&full[..p], &full[p + 1..]),
+                None => ("", full.as_str()),
+            };
+            let mut reason = if prev.file != file {
+                format!(
+                    "\"{short}\" is already defined in file \"{}\"",
+                    self.name_of(prev.file)
+                )
+            } else if scope.is_empty() {
+                format!("\"{short}\" is already defined")
+            } else {
+                format!("\"{short}\" is already defined in \"{scope}\"")
+            };
+            if kind == Kind::EnumValue || prev.kind == Kind::EnumValue {
+                reason.push_str(
+                    " (enum values are siblings of their enum, not children of it, so a value \
+                     name must be unique in the enclosing scope)",
+                );
+            }
+            return Err(ProtoDiagnostic::at(self.name_of(file), pos, reason));
+        }
+        self.symbols.insert(full, Symbol { kind, file });
+        Ok(())
+    }
+
+    /// Register one enum: its own name, then its values as siblings.
+    fn declare_enum(
+        &mut self,
+        scope: &str,
+        e: &EnumDecl,
+        file: usize,
+    ) -> Result<(), ProtoDiagnostic> {
+        let full = join(scope, &e.name.name);
+        let idx = self.enums.len();
+        self.enums.push(EnumInfo {
+            full_name: full.clone(),
+            syntax: self.syntaxes[file],
+            values: e
+                .values
+                .iter()
+                .map(|v| (v.name.name.clone(), v.number))
+                .collect(),
+        });
+        self.declare(full, Kind::Enum(idx), file, e.name.pos)?;
+        for v in &e.values {
+            self.declare(join(scope, &v.name.name), Kind::EnumValue, file, v.name.pos)?;
+        }
+        Ok(())
+    }
+
+    /// Register one message and everything inside it, in the order `protoc`
+    /// does: the message, its oneofs, its fields, then its nested messages and
+    /// enums. The order decides which of two clashing names is blamed.
+    fn declare_message(
+        &mut self,
+        scope: &str,
+        parent: Option<usize>,
+        m: &MessageDecl,
+        file: usize,
+    ) -> Result<(), ProtoDiagnostic> {
+        let full = join(scope, &m.name.name);
+        let idx = self.msgs.len();
+        self.msgs.push(Msg {
+            full_name: full.clone(),
+            file,
+            parent,
+            syntax: self.syntaxes[file],
+            fields: Vec::new(),
+            oneofs: m.oneofs.iter().map(|o| o.name.clone()).collect(),
+            docs: m.docs.clone(),
+            options: m.options.clone(),
+            blockers: Vec::new(),
+        });
+        self.declare(full.clone(), Kind::Message(idx), file, m.name.pos)?;
+        for o in &m.oneofs {
+            self.declare(join(&full, &o.name), Kind::Oneof, file, o.pos)?;
+        }
+        for f in &m.fields {
+            self.declare(join(&full, &f.name.name), Kind::Field, file, f.name.pos)?;
+        }
+        for n in &m.nested {
+            self.declare_message(&full, Some(idx), n, file)?;
+        }
+        for e in &m.enums {
+            self.declare_enum(&full, e, file)?;
+        }
+        Ok(())
+    }
+
+    fn link_file(
+        &mut self,
+        file: usize,
+        ast: &FileAst,
+        deps: &[(usize, ImportKind)],
+    ) -> Result<(), ProtoDiagnostic> {
+        // What this file's importers will be able to see, and what this file
+        // itself can: `import public` re-exports, a plain `import` does not.
+        self.syntaxes[file] = ast.syntax;
+        self.file_options[file] = ast.options.clone();
+        let mut exports = BTreeSet::from([file]);
+        let mut visible = BTreeSet::from([file]);
+        for (dep, kind) in deps {
+            visible.extend(self.exports[*dep].iter().copied());
+            if *kind == ImportKind::Public {
+                exports.extend(self.exports[*dep].iter().copied());
+            }
+        }
+        self.exports[file] = exports;
+        self.visible[file] = visible;
+
+        let mut package = String::new();
+        if let Some(p) = &ast.package {
+            for part in p.name.split('.') {
+                package = join(&package, part);
+                self.declare(package.clone(), Kind::Package, file, p.pos)?;
+            }
+        }
+        self.packages[file] = package.clone();
+        for m in &ast.messages {
+            self.declare_message(&package, None, m, file)?;
+        }
+        for e in &ast.enums {
+            self.declare_enum(&package, e, file)?;
+        }
+        for s in &ast.services {
+            self.declare(join(&package, &s.name), Kind::Service, file, s.pos)?;
+        }
+
+        for m in &ast.messages {
+            self.link_message(&package, m, file)?;
+        }
+        // After the messages, as `protoc` cross-links a file's own extensions
+        // after its messages.
+        for e in &ast.extends {
+            self.link_extend(&package, e, file)?;
+        }
+        Ok(())
+    }
+
+    // ---- resolving field types -------------------------------------------
+
+    fn find(&self, name: &str) -> Option<Symbol> {
+        self.symbols.get(name).copied()
+    }
+
+    /// The symbol a name written inside `relative_to` refers to, with its full
+    /// name -- `protoc`'s own search (`DescriptorBuilder::LookupSymbol`):
+    /// the first part of the name is looked for in the enclosing scopes from
+    /// the innermost out, the first scope that has it wins, and the rest of a
+    /// dotted name is then looked for inside what was found, with no turning
+    /// back. A symbol of the right name that a name cannot descend into is
+    /// stepped over, and so, under [`Want::Type`], is one that is not a type.
+    fn lookup(&self, name: &str, relative_to: &str, want: Want) -> Option<(String, Symbol)> {
+        if let Some(absolute) = name.strip_prefix('.') {
+            return self.find(absolute).map(|s| (String::from(absolute), s));
+        }
+        let first_len = name.find('.').unwrap_or(name.len());
+        let first = &name[..first_len];
+        let mut scope = String::from(relative_to);
+        loop {
+            match scope.rfind('.') {
+                None => return self.find(name).map(|s| (String::from(name), s)),
+                Some(p) => scope.truncate(p),
+            }
+            let candidate = join(&scope, first);
+            let Some(sym) = self.find(&candidate) else {
+                continue;
+            };
+            if first_len < name.len() {
+                if sym.kind.is_aggregate() {
+                    let full = format!("{candidate}{}", &name[first_len..]);
+                    return self.find(&full).map(|s| (full, s));
+                }
+            } else if want == Want::Any || sym.kind.is_type() {
+                return Some((candidate, sym));
+            }
+        }
+    }
+
+    /// Resolve the type written at `pos` inside `field_full`, the full name of
+    /// the field that mentions it.
+    fn resolve(
+        &self,
+        file: usize,
+        field_full: &str,
+        text: &str,
+        pos: Pos,
+    ) -> Result<Symbol, ProtoDiagnostic> {
+        let here = self.name_of(file);
+        let Some((_, sym)) = self.lookup(text, field_full, Want::Type) else {
+            return Err(ProtoDiagnostic::at(
+                here,
+                pos,
+                format!("\"{text}\" is not defined"),
+            ));
+        };
+        if !sym.kind.is_type() {
+            return Err(ProtoDiagnostic::at(
+                here,
+                pos,
+                format!("\"{text}\" is not a type"),
+            ));
+        }
+        self.require_import(file, sym, text, pos)?;
+        Ok(sym)
+    }
+
+    /// Whether `file` may name `sym`: its own symbols, its direct imports' and
+    /// what they re-export. Otherwise the error `protoc` gives for a symbol
+    /// defined in a file that `file` does not import.
+    fn require_import(
+        &self,
+        file: usize,
+        sym: Symbol,
+        text: &str,
+        pos: Pos,
+    ) -> Result<(), ProtoDiagnostic> {
+        if self.visible[file].contains(&sym.file) {
+            return Ok(());
+        }
+        let here = self.name_of(file);
+        Err(ProtoDiagnostic::at(
+            here,
+            pos,
+            format!(
+                "\"{text}\" seems to be defined in \"{}\", which is not imported by \
+                 \"{here}\"; to use it here, add the import",
+                self.name_of(sym.file)
+            ),
+        ))
+    }
+
+    /// The message an `extend` block extends, looked up from `relative_to`, the
+    /// full name its first extension field would have.
+    ///
+    /// `protoc` looks an extendee up with LOOKUP_ALL, not the LOOKUP_TYPES a
+    /// field's type gets: the first symbol of the right name is the answer even
+    /// when it is not a type. MEASURED, protoc 3.21.12: an `extend Base` written
+    /// in a message that has a FIELD called `Base` says `"Base" is not a message
+    /// type`, where a field of type `Base` there would have found the message.
+    /// Nothing is checked about the extension fields themselves (see the module
+    /// documentation), so the answer is only the message.
+    fn resolve_extendee(
+        &self,
+        file: usize,
+        relative_to: &str,
+        extendee: &TypeName,
+    ) -> Result<usize, ProtoDiagnostic> {
+        let here = self.name_of(file);
+        let text = extendee.text.as_str();
+        let Some((_, sym)) = self.lookup(text, relative_to, Want::Any) else {
+            return Err(ProtoDiagnostic::at(
+                here,
+                extendee.pos,
+                format!("\"{text}\" is not defined"),
+            ));
+        };
+        let Kind::Message(message) = sym.kind else {
+            return Err(ProtoDiagnostic::at(
+                here,
+                extendee.pos,
+                format!("\"{text}\" is not a message type"),
+            ));
+        };
+        self.require_import(file, sym, text, extendee.pos)?;
+        Ok(message)
+    }
+
+    /// Record that `e` extends a message, so a root that reaches the message
+    /// can be refused, and refuse an extendee that does not resolve now.
+    fn link_extend(
+        &mut self,
+        scope: &str,
+        e: &ExtendDecl,
+        file: usize,
+    ) -> Result<(), ProtoDiagnostic> {
+        let target = self.resolve_extendee(file, &join(scope, e.first_field()), &e.extendee)?;
+        self.msgs[target].blockers.push(Blocker {
+            file,
+            pos: e.pos,
+            kind: BlockerKind::Extend,
+        });
+        // The block's fields are extensions declared in `scope`; an option that
+        // names one is told where it is declared by this record. The package is
+        // the one the file declares, which `scope` starts with when the block is
+        // at the top level and is not when it is inside a message.
+        let package = self.packages[file].clone();
+        for name in &e.fields {
+            self.extensions
+                .entry(join(scope, name))
+                .or_insert_with(|| Extension {
+                    file,
+                    package: package.clone(),
+                });
+        }
+        Ok(())
+    }
+
+    /// The extension field an option written inside the message `msg` names, if
+    /// a file read declares one of that name.
+    ///
+    /// `written` is the name as the file spelled it; only a name whose FIRST part
+    /// is parenthesised is an extension's (`(ext)`, `(.pkg.ext).field`), and the
+    /// answer is the declaration of that first part. The name inside the
+    /// parentheses is searched the way `protoc` searches a relative name: from
+    /// the message outwards, each enclosing scope in turn, then the package, then
+    /// the top; a leading `.` names the full name directly. Nothing is guessed: a
+    /// name no read file declares has no answer, and that is the caller's
+    /// "unresolved".
+    pub fn extension_named(&self, msg: usize, written: &str) -> Option<(String, &Extension)> {
+        let inner = written.strip_prefix('(')?;
+        let inner = &inner[..inner.find(')')?];
+        if let Some(absolute) = inner.strip_prefix('.') {
+            return self
+                .extensions
+                .get(absolute)
+                .map(|ext| (String::from(absolute), ext));
+        }
+        let mut scope = self.msgs[msg].full_name.as_str();
+        loop {
+            let candidate = join(scope, inner);
+            if let Some(ext) = self.extensions.get(&candidate) {
+                return Some((candidate, ext));
+            }
+            match scope.rfind('.') {
+                Some(cut) => scope = &scope[..cut],
+                None if scope.is_empty() => return None,
+                None => scope = "",
+            }
+        }
+    }
+
+    fn link_message(
+        &mut self,
+        scope: &str,
+        m: &MessageDecl,
+        file: usize,
+    ) -> Result<(), ProtoDiagnostic> {
+        let here = self.name_of(file);
+        let full = join(scope, &m.name.name);
+        let Some(Symbol {
+            kind: Kind::Message(idx),
+            ..
+        }) = self.find(&full)
+        else {
+            // `declare_message` just registered it; its absence would be a bug
+            // in this file, reported as a refusal rather than a panic.
+            return Err(ProtoDiagnostic::in_file(
+                here,
+                "internal: message not registered",
+            ));
+        };
+
+        let mut seen: BTreeMap<u64, &str> = BTreeMap::new();
+        let mut fields = Vec::with_capacity(m.fields.len());
+        for f in &m.fields {
+            let number = f.number;
+            let bad_number = if number == 0 {
+                Some(String::from("field numbers must be positive integers"))
+            } else if number > MAX_FIELD_NUMBER {
+                Some(format!(
+                    "field numbers cannot be greater than {MAX_FIELD_NUMBER}"
+                ))
+            } else if (19_000..=19_999).contains(&number) {
+                Some(String::from(
+                    "field numbers 19000 through 19999 are reserved for the protocol buffer \
+                     library implementation",
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = bad_number {
+                return Err(ProtoDiagnostic::at(here, f.number_pos, reason));
+            }
+            if m.reserved_ranges
+                .iter()
+                .any(|&(a, b)| (a..=b).contains(&number))
+            {
+                return Err(ProtoDiagnostic::at(
+                    here,
+                    f.number_pos,
+                    format!("field `{}` uses the reserved number {number}", f.name.name),
+                ));
+            }
+            if m.reserved_names.contains(&f.name.name) {
+                return Err(ProtoDiagnostic::at(
+                    here,
+                    f.name.pos,
+                    format!("the field name `{}` is reserved", f.name.name),
+                ));
+            }
+            if let Some(first) = seen.insert(number, f.name.name.as_str()) {
+                return Err(ProtoDiagnostic::at(
+                    here,
+                    f.number_pos,
+                    format!(
+                        "field number {number} is already used in \"{full}\" by field `{first}`"
+                    ),
+                ));
+            }
+
+            let field_full = join(&full, &f.name.name);
+            let (target, ty_pos, kind) = match &f.ty {
+                FieldType::Scalar(scalar) => (Target::Leaf, f.ty_pos, FieldKind::Scalar(*scalar)),
+                FieldType::Named(t) => {
+                    let sym = self.resolve(file, &field_full, &t.text, t.pos)?;
+                    match sym.kind {
+                        Kind::Message(target) => {
+                            (Target::Message(target), t.pos, FieldKind::Message(target))
+                        }
+                        Kind::Enum(e) => (Target::Leaf, t.pos, FieldKind::Enum(e)),
+                        // `resolve` returns a type, and only a message or an
+                        // enum is one.
+                        _ => {
+                            return Err(ProtoDiagnostic::at(
+                                here,
+                                t.pos,
+                                format!("\"{}\" is not a type", t.text),
+                            ))
+                        }
+                    }
+                }
+                FieldType::Group(group) => {
+                    // The parser put the group's message beside this field, so
+                    // it is the symbol of that name in this message's scope.
+                    let Some(Symbol {
+                        kind: Kind::Message(target),
+                        ..
+                    }) = self.find(&join(&full, group))
+                    else {
+                        return Err(ProtoDiagnostic::in_file(
+                            here,
+                            "internal: group message not registered",
+                        ));
+                    };
+                    self.msgs[idx].blockers.push(Blocker {
+                        file,
+                        pos: f.ty_pos,
+                        kind: BlockerKind::Group(group.clone()),
+                    });
+                    (Target::Message(target), f.ty_pos, FieldKind::Group)
+                }
+                FieldType::Map(map) => {
+                    let Some(key) = map.key else {
+                        let reason = map
+                            .key_error
+                            .clone()
+                            .unwrap_or_else(|| String::from("internal: a map key without a kind"));
+                        return Err(ProtoDiagnostic::at(here, f.ty_pos, reason));
+                    };
+                    match &map.value {
+                        MapValue::Scalar(scalar) => (
+                            Target::Map(None),
+                            f.ty_pos,
+                            FieldKind::Map {
+                                key,
+                                value: MapValueKind::Scalar(*scalar),
+                            },
+                        ),
+                        MapValue::Named(t) => {
+                            let sym = self.resolve(file, &field_full, &t.text, t.pos)?;
+                            match sym.kind {
+                                Kind::Message(target) => (
+                                    Target::Map(Some(target)),
+                                    t.pos,
+                                    FieldKind::Map {
+                                        key,
+                                        value: MapValueKind::Message(target),
+                                    },
+                                ),
+                                Kind::Enum(e) => (
+                                    Target::Map(None),
+                                    t.pos,
+                                    FieldKind::Map {
+                                        key,
+                                        value: MapValueKind::Enum(e),
+                                    },
+                                ),
+                                _ => {
+                                    return Err(ProtoDiagnostic::at(
+                                        here,
+                                        t.pos,
+                                        format!("\"{}\" is not a type", t.text),
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            fields.push(Fld {
+                name: f.name.name.clone(),
+                number,
+                target,
+                ty_pos,
+                kind,
+                label: f.label,
+                oneof: f.oneof,
+                options: f.options.clone(),
+                docs: f.docs.clone(),
+            });
+        }
+        self.msgs[idx].fields = fields;
+
+        for n in &m.nested {
+            self.link_message(&full, n, file)?;
+        }
+        // After the fields and the nested messages, as `protoc` cross-links a
+        // message's own extensions after both.
+        for e in &m.extends {
+            self.link_extend(&full, e, file)?;
+        }
+        Ok(())
+    }
+
+    // ---- the root and the expansion --------------------------------------
+
+    pub fn root_message(&self, name: &str, root_file: usize) -> Result<usize, ProtoDiagnostic> {
+        let here = self.name_of(root_file);
+        match self.find(name) {
+            Some(Symbol {
+                kind: Kind::Message(idx),
+                ..
+            }) => Ok(idx),
+            Some(Symbol { kind, .. }) => Err(ProtoDiagnostic::in_file(
+                here,
+                format!(
+                    "`{name}` is {}, not a message",
+                    match kind {
+                        Kind::Enum(_) => "an enum",
+                        Kind::Package => "a package",
+                        Kind::Service => "a service",
+                        Kind::Field | Kind::Oneof | Kind::EnumValue =>
+                            "a member of a message or enum",
+                        Kind::Message(_) => "a message",
+                    }
+                ),
+            )),
+            None => Err(ProtoDiagnostic::in_file(
+                here,
+                format!(
+                    "the message `{name}` is not defined in this file or in the files it imports \
+                     (the name is the full name, package included)"
+                ),
+            )),
+        }
+    }
+
+    /// The messages the expansion from `root` visits, each once, in the order
+    /// it first reaches them (a field's message before the next field's, the
+    /// way [`Self::expand_names`] names them).
+    ///
+    /// Found with a work list and not by recursion: a chain of distinct
+    /// messages can be as long as the schema, and this runs before the expansion
+    /// whose depth bound would stop a recursive walk.
+    pub fn reached_from(&self, root: usize) -> Vec<usize> {
+        let mut seen = alloc::vec![false; self.msgs.len()];
+        let mut order = Vec::new();
+        let mut pending = alloc::vec![root];
+        while let Some(msg) = pending.pop() {
+            if core::mem::replace(&mut seen[msg], true) {
+                continue;
+            }
+            order.push(msg);
+            // Reversed, so the first field's message is the next one popped.
+            for f in self.msgs[msg].fields.iter().rev() {
+                match f.target {
+                    Target::Message(inner) | Target::Map(Some(inner)) => pending.push(inner),
+                    Target::Leaf | Target::Map(None) => {}
+                }
+            }
+        }
+        order
+    }
+
+    /// Refuse a `group` or an `extend` that touches a message the expansion
+    /// from `root` visits.
+    ///
+    /// Both are read wherever they are written, because the reader cannot know
+    /// before it has the root whether they matter; this is where it finds out.
+    /// A group is a field of the message that holds it, and an extension is
+    /// declared outside the message it extends, so a declaration for either
+    /// message would have to leave a field out or invent a path for it.
+    pub fn refuse_what_the_root_reaches(&self, root: usize) -> Result<(), ProtoDiagnostic> {
+        let root_name = self.msgs[root].full_name.as_str();
+        for msg in self.reached_from(root) {
+            let held = &self.msgs[msg];
+            let Some(blocker) = held.blockers.first() else {
+                continue;
+            };
+            let reaches = if msg == root {
+                String::from("is the root message")
+            } else {
+                format!("the root message `{root_name}` reaches")
+            };
+            let reason = match &blocker.kind {
+                BlockerKind::Group(group) => format!(
+                    "group fields are not supported: the group `{group}` is a field of `{}`, \
+                     which {reaches}; a group is written on the wire with the deprecated \
+                     start-group / end-group markers, which the payload reader does not decode",
+                    held.full_name
+                ),
+                BlockerKind::Extend => format!(
+                    "`extend` is not supported: it extends `{}`, which {reaches}; an \
+                     extension's fields are declared outside the message they extend, so this \
+                     reader could not attach their names to it",
+                    held.full_name
+                ),
+            };
+            return Err(ProtoDiagnostic::at(
+                self.name_of(blocker.file),
+                blocker.pos,
+                reason,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether the file `file` indexes was read: the root file and what it
+    /// imports, transitively. A file nothing imports is not.
+    pub fn has_read(&self, file: usize) -> bool {
+        self.state.get(file) == Some(&State::Done)
+    }
+
+    /// Name every field of the message `root` to `sink`, with its path, in the
+    /// order the module documentation states, recursing into the messages its
+    /// fields hold.
+    ///
+    /// # Errors
+    ///
+    /// A message that contains itself, a path more than [`MAX_PATH_DEPTH`]
+    /// messages deep, or the first error `sink` gives.
+    pub fn expand_names(
+        &self,
+        root: usize,
+        sink: &mut impl NameSink,
+    ) -> Result<(), ProtoDiagnostic> {
+        self.expand(root, "", &mut Vec::new(), sink)
+    }
+
+    /// Name the fields of `msg` under `prefix`, recursing into message types.
+    /// `stack` is the messages being expanded, outermost first.
+    fn expand(
+        &self,
+        msg: usize,
+        prefix: &str,
+        stack: &mut Vec<usize>,
+        out: &mut impl NameSink,
+    ) -> Result<(), ProtoDiagnostic> {
+        stack.push(msg);
+        for f in &self.msgs[msg].fields {
+            let path = if prefix.is_empty() {
+                format!("{}", f.number)
+            } else {
+                format!("{prefix}.{}", f.number)
+            };
+            out.name(&path, &f.name)?;
+            match f.target {
+                Target::Leaf => {}
+                Target::Message(inner) => self.descend(inner, &path, f.ty_pos, stack, out)?,
+                Target::Map(value) => {
+                    out.name(&format!("{path}.1"), "key")?;
+                    let value_path = format!("{path}.2");
+                    out.name(&value_path, "value")?;
+                    if let Some(inner) = value {
+                        self.descend(inner, &value_path, f.ty_pos, stack, out)?;
+                    }
+                }
+            }
+        }
+        stack.pop();
+        Ok(())
+    }
+
+    /// Step into the message `inner` at `path`, refusing a message that is
+    /// already being expanded and a chain that is too long.
+    fn descend(
+        &self,
+        inner: usize,
+        path: &str,
+        ty_pos: Pos,
+        stack: &mut Vec<usize>,
+        out: &mut impl NameSink,
+    ) -> Result<(), ProtoDiagnostic> {
+        let holder = &self.msgs[stack.last().copied().unwrap_or(inner)];
+        let here = self.name_of(holder.file);
+        if let Some(from) = stack.iter().position(|&m| m == inner) {
+            let mut chain: Vec<&str> = stack[from..]
+                .iter()
+                .map(|&m| self.msgs[m].full_name.as_str())
+                .collect();
+            chain.push(self.msgs[inner].full_name.as_str());
+            return Err(ProtoDiagnostic::at(
+                here,
+                ty_pos,
+                format!(
+                    "the message `{}` contains itself ({}): its fields would need a declaration \
+                     at every depth, so a recursive message cannot be declared",
+                    self.msgs[inner].full_name,
+                    chain.join(" -> ")
+                ),
+            ));
+        }
+        if stack.len() >= MAX_PATH_DEPTH {
+            return Err(ProtoDiagnostic::at(
+                here,
+                ty_pos,
+                format!("messages are nested more than {MAX_PATH_DEPTH} levels deep at `{path}`"),
+            ));
+        }
+        self.expand(inner, path, stack, out)
+    }
+}
+
+/// `scope.name`, or `name` at the root.
+fn join(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        String::from(name)
+    } else {
+        format!("{scope}.{name}")
+    }
+}

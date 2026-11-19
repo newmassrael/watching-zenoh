@@ -455,6 +455,43 @@ config WZ_LIMIT_E2E_SENDER_SLOTS
 	  arrival order; a frame of a sender no slot holds is not judged and is counted.
 	  At least 1.
 
+config WZ_LIMIT_REPLAY_DEPTH_MAX
+	int "REPLAY_DEPTH_MAX"
+	default 32
+	help
+	  The deepest replay a message may keep: how many of the frames it last sent, as
+	  they were sent, a publisher holds for a subscriber that arrives later and asks
+	  for them. Each message states its own depth, from 1 to this; a depth above it
+	  is refused when the message is declared. At least 1.
+
+config WZ_LIMIT_MESSAGE_CATALOG_ENTRIES
+	int "MESSAGE_CATALOG_ENTRIES"
+	default 64
+	help
+	  How many messages one message catalog declares, when the message-catalog
+	  capability is on. A catalog that declares more is refused when it is read, and
+	  the generator of a fixed-memory image refuses to write its tables. At least 1.
+
+config WZ_LIMIT_INSTANCE_KEY_FIELDS
+	int "INSTANCE_KEY_FIELDS"
+	default 2
+	help
+	  How many fields of a payload one message's instance key names, when the
+	  instance-key capability is on. Each is an integer, an enumeration or a string
+	  field read through the message's schema; the instance is the position of their
+	  values in the product of the lists of values each may take. A description that
+	  names more fields is refused. At least 1.
+
+config WZ_LIMIT_INSTANCES_PER_MESSAGE
+	int "INSTANCES_PER_MESSAGE"
+	default 32
+	help
+	  How many instances one message's instance key may tell apart, when the
+	  instance-key capability is on: the product of the lengths of the lists of
+	  values its key fields may take. Each instance is a stream of the end-to-end
+	  doors and a last value, so this bounds the state kept per message. A
+	  description whose lists make more is refused. At least 1.
+
 config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
 	int "CLOCK_MAX_FORWARD_STEP_MS"
 	default 500

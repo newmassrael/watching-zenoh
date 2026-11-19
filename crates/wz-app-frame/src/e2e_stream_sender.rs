@@ -81,7 +81,7 @@ impl Default for SenderOptions {
     }
 }
 
-/// Why a sender was not made, or a frame not built.
+/// Why a sender, or a frame, was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError {
     /// The header values, or the payload, are refused as a build refuses them.

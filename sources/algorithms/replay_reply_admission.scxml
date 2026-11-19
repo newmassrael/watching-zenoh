@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether a reply of a replay reaches the receiving judge, from where its counter stands against
+  the baseline of the stream it is judged in.
+
+  A replay answers the frames a publisher holds, oldest first, and a subscriber that has already
+  judged some of them (live, or in an earlier answer) must not judge them again: a frame judged
+  twice reads as a repetition, and an old one as a counter that went backwards. How far a reply is
+  BEHIND the baseline is `(baseline - counter) mod 2^width`, in the counter field's own width,
+  which is given as its mask (`2^width - 1`, all ones for 8 bytes), as in `e2e_counter_step`.
+
+    0 - judge it: it is ahead of the baseline, or as far behind as a whole ring or more, which is
+        a publisher that started again (its counter began anew) and is taken as such; or it
+        carries the baseline's counter with another CRC, which the judge reports as it reports any
+        repetition.
+    1 - a duplicate: the baseline's counter with the same CRC, the frame the judge holds already.
+    2 - stale: behind the baseline by less than `depth`, a frame of the ring the judge has passed.
+
+  A stream with no baseline yet judges every reply, which its host decides before asking this.
+  `same_crc` is whether the reply's CRC, cut to its low 32 bits, equals the baseline frame's. The
+  predicate is total: the one integer operation wraps, so it cannot fail.
+
+  The receiving judge's replay admission (wz-app-frame `replay_admission`) asks it of every reply
+  of a stream that has a baseline.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="replay_reply_admission"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="counter" type="uint64"/>
+    <sce:param name="baseline" type="uint64"/>
+    <sce:param name="mask" type="uint64"/>
+    <sce:param name="depth" type="uint64"/>
+    <sce:param name="same_crc" type="bool"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="behind" type="uint64" init="wrappingSub(baseline, counter) &amp; mask"/>
+    <sce:if cond="behind === 0">
+      <sce:if cond="same_crc">
+        <sce:return expr="1"/>
+      </sce:if>
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="behind &lt; depth">
+      <sce:return expr="2"/>
+    </sce:if>
+    <sce:return expr="0"/>
+  </sce:body>
+</scxml>

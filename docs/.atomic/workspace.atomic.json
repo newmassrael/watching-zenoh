@@ -5484,6 +5484,109 @@
         "Z8 routing 7 of 8, red since Round 4506 for the same cause: `three_node_combination`'s recipe of a router, a client holding a token and a peer that gets the tokens alive times out (`zenoh/tests/routing.rs` @ `async fn three_node_combination(`). A node's liveliness get reads the node's own tables alone (`crates/wz-capi-core/src/drive/router_node/engine.rs` @ `fn liveliness_get_on_wire(`), and a router no longer tells a peer below it a token unasked; upstream's peer hat sends its session's `Current` interest to one gateway (`zenoh/src/net/routing/hat/peer/interests.rs` @ `if msg.mode == InterestMode::Current {`). Paid in the next round: the get asks a router, its answers reach the get, and the router's Final ends it.",
         "C1cc init-queue leg, open-debt item 952, carried as Round 4540 states."
       ]
+    },
+    "Round 4546": {
+      "decision_summary": "Hosted run 44572424670 found `zenoh-keyexpr`'s documentation failing to build: the module texts Round 4536 (W1) gave `include` and `intersect` link `LTRIncluder` and `ClassicIntersector`, and rustdoc reports no such item in scope. That reds Layer C1bzr (`all-without-std`) and the API-surface leg of the E lanes, and it fails the same way in the default build. The two items are defined in those very modules; the links fail because each module's documentation comes in two parts, the outer doc `mod.rs` keeps on `pub mod include` / `pub mod intersect` in upstream's form and the module file's own text, and rustdoc resolves the joined text from `key_expr`, where only `keyexpr::includes` and `keyexpr::intersects` of the four links are in scope. The links now name crate paths, which resolve from either module, and a comment beside them says why, so `mod.rs` keeps upstream's form. watching-zenoh-63 reported the red; the other two reds it reported in that run (an unused DNS helper and `wz-capture` without default features) come from Round 4538 and were passed to its session.",
+      "changes_bullets": [
+        "`crates/wz-zenoh-keyexpr/src/key_expr/include.rs`: the module text links `LTRIncluder` as `crate::key_expr::include::LTRIncluder`. `crates/wz-zenoh-keyexpr/src/key_expr/intersect.rs`: it links `ClassicIntersector` as `crate::key_expr::intersect::ClassicIntersector`. Each has a comment on why the path is a crate path. No code changed."
+      ],
+      "verification_bullets": [
+        "On the build machine, before the fix, `cargo doc -p zenoh-keyexpr --no-deps` with warnings denied fails with both unresolved links in the default build and without default features, as the hosted run did. After it, the default build, the build without default features, and the build with `unstable` and `internal` all document cleanly, and `cargo fmt --check` passes. Of the 151 round-fed static gates, 147 pass on this tree. The four that fail read files this round did not touch: the duplicate-module lint (`wz-runtime-coop` `app_link.rs`), the self-report lint (`wz-app-frame` `e2e_stream_sender.rs`), the layer-direction gate (`wz-session-core` `caps.rs`), and the reason-review pins of `session-close-ingress` (four files changed by the PoC integration rounds). They are on main as it stands and were reported to watching-zenoh-79, whose rounds they come from. The upstream citation gate passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "carry_forward_bullets": [
+        "The next hosted run settles C1bzr and the E lanes. The two other reds of run 44572424670 are Round 4538's (the DNS helper `every_word` unused, and `wz-capture` built without default features), passed to watching-zenoh-16, with watching-zenoh-63 standing in if it does not answer."
+      ]
+    },
+    "Round 4547": {
+      "decision_summary": "Pay the Z8 routing red Round 4545 carried (`three_node_combination`, 7 of 8 since Round 4506), at the cause Round 4545 named. A node's liveliness get read the node's own tables alone, and since Round 4506 a router tells a peer below it no token it was not asked for, so a peer node under a router got none of the tokens beyond it. The get now does what upstream's peer hat does with its session's `Current` interest: it is told the keys the node already knows, then sent to one gateway through the node's interest broker (`zenoh/src/net/routing/hat/peer/interests.rs` @ `if msg.mode == InterestMode::Current {`), whose answers reach the get under its id, each key once, and whose end (or the broker's deadline) ends it. The answers are the get's alone: they are not counted as tokens of the node's face, whose ids are the gateway's numbers and not the node's. A node that asks no router, or is built without the broker, ends the get at once with what it knows, as before.",
+      "changes_bullets": [
+        "`crates/wz-runtime-tokio/src/router_forward.rs`: `LocalFaceEvent::InterestFinal { interest }`, what a `DeclareFinal` with an interest id is to the `Local` face; `RouterForwarder::ask_routers_current_tokens(id, key)`, the node's own `Current` token interest to one gateway (0 without `routing-interest-pending-gc`).",
+        "`crates/wz-runtime-tokio/src/router_forward/brokered_interest.rs`: `propagate_current_kinds` takes an interest's kinds rather than a received body (`BrokeredKinds`), and `ask_gateways_current_tokens` brokers the node's own interest with the `Local` face as its source.",
+        "`crates/wz-capi-core/src/drive/router_node/local_face.rs`: `LocalLiveliness::{tokens_get_id, get_tokens, end_tokens_get}` and the face's held `TokensGet` (the keys told, the key handler, the end); a router's answer under a get's id goes to that get and not to the face's tokens; two tests.",
+        "`crates/wz-capi-core/src/drive/router_node/engine.rs`: `liveliness_get_on_wire` holds its leg's callback until the get ends, records the get's cancel under an id taken before it is asked, and asks through `get_tokens`."
+      ],
+      "verification_bullets": [
+        "On the build host: Z8 routing 8 of 8 (7 at Round 4545) and liveliness 46 of 46; `local_face` 15 (the two new tests among them); `router_forward` with the router hat 340, with token tables 402, with the interest broker 354; clippy `-D warnings` of wz-runtime-tokio (all features and its default lib) and wz-capi-core with all features; `router_interest_qos_gate.py`.",
+        "The default-feature lib of wz-capi-core does not pass clippy on main for a line this round does not touch (`router_node.rs` `&AppSlot::default()`, Round 4541's), which its owner repays with Round 4541's capability cost.",
+        "The guarded count gate over this round's range.",
+        "Locally: reason and store citations, upstream citation anchors, count guard lint, `cargo fmt --check`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Q footprint multicast-e2e text +360/+496 over its tolerance (hosted run 44572424670), to be attributed by symbol between the last green Layer Q and Round 4540; the table and the section 6.9 footprint caveats move together.",
+        "C1cc init-queue leg, open-debt item 952: the C ABI's stated queue lays no `queue/size/*` over the model and a lazy queue makes no batch-sized block on traffic; 51 C1cc legs are unreached behind it.",
+        "Runtime configuration step 5 (the config doors of the three ABIs) lands after Round 4541's capability cost repayment, its budgets that repayment's plus step 5's own growth."
+      ]
+    },
+    "Round 4548": {
+      "decision_summary": "Pay two MCU reds at their cause. Main does not build for thumbv7m since Round 4541: the declaration progress watch held its millisecond in core's `AtomicU64`, which an ARMv7-M target does not have, where every other field of `session_actions` takes the atomic the module imports (portable-atomic's under `no_std`); it now takes that one. And the multicast e2e image's text has stood past its footprint tolerance since Round 4506 (hosted Layer Q, +616 at f7ab3a770, +360 at 8593d2f86): by symbol on one host between 4050dd889, the last green Layer Q, and this tree, the growth was the formatter's struct writer and the `Debug` of `ZidError` and of `usize` (+486 together), which `zid_bytes` linked into every MCU image that names its zid by refusing a mistaken zid with `expect`. A mistaken zid is a construction mistake whose rule the panic message states, so the refusal is no longer formatted; the image is now 112 bytes under 4050dd889's on that host, and the footprint table does not move.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/session_actions.rs`: `peer_declaration_progress_ms` is the module's `AtomicU64` (portable-atomic's under `no_std`), not `core::sync::atomic::AtomicU64`.",
+        "`crates/wz-session-core/src/session_init_params.rs`: `zid_bytes` panics with its rule and does not format the `ZidError`.",
+        "`docs/reason-review-pins.md`: session-close-ingress re-pinned on `session_actions.rs`, its reason read again against the file and unchanged."
+      ],
+      "verification_bullets": [
+        "On the build host: `deploy/mcu-multicast-e2e` builds for thumbv7m-none-eabi (E0433 on main before) and thumbv7em-none-eabihf; the image's text read on one host is 79,824 at 4050dd889, 80,264 at main with the atomic fixed and 79,712 with the zid refusal unformatted, and its symbol diff names the formatter's struct writer (+292), `<&usize as Debug>::fmt` (+136) and `ZidError`'s `Debug` (+58) as what the refusal linked.",
+        "Hosted Layer Q read the image at 78,316 (+40 over its row) at 4050dd889 and +616 / +360 after it; this host reads 1,508 above hosted on the same tree, so the row is not moved from a host reading.",
+        "Clippy `-D warnings` of wz-session-core with all features and with its default lib; `session_init_params` 14 tests.",
+        "Locally: reason and store citations, count guard lint, `cargo fmt --check`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "C1cc init-queue leg, open-debt item 952: the C ABI's stated queue lays no `queue/size/*` over the model and a lazy queue makes no batch-sized block on traffic; 51 C1cc legs are unreached behind it.",
+        "Runtime configuration step 5 lands after Round 4541's capability cost repayment, its budgets that repayment's plus step 5's own growth."
+      ]
+    },
+    "Round 4549": {
+      "decision_summary": "Pay the first half of open-debt item 952. A zenoh-c open laid a document's batching and allocation mode over the transmit model its ABI chose but not its `transport/link/tx/queue/size/<priority>` keys, so a document that widened a queue opened one of upstream's size: an `init` queue made the same number of batches at the open whatever the document said, where libzenohc makes one per slot of the size it states. The stated sizes are now laid over the model as the other keys are, each only where it differs from upstream's default. The C1cc leg that witnesses item 952 now reads the same step as libzenohc (a data queue four slots wider makes four more batches at the open). Its second half stays open: a `lazy` queue makes no batch-sized block while a burst crosses, because wz's writer keeps one pool of spare buffers for every lane, so the buffers the handshake used carry the data lane's burst, where upstream's stages allocate per priority up to each lane's size.",
+      "changes_bullets": [
+        "`crates/wz-capi-core/src/open_plan.rs`: `StatedTxQueue::sizes`, a document's `size/<priority>` by the priority's wire byte where it differs from upstream's default, laid over the model's `sizes` by `over`; the stance test states a wider data queue and checks only that lane moves."
+      ],
+      "verification_bullets": [
+        "On the build host: `open_plan` 46 tests; the C1cc leg `an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_wz_and_libzenohc` reads wz's queue step 4 as libzenohc's (0 before), and still fails on its lazy half (wz 0 batch-sized blocks on traffic, libzenohc 2), which this round names and does not claim.",
+        "Locally: reason and store citations, reason review pins, count guard lint, `cargo fmt --check`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open-debt item 952, its lazy half: `OutboundTx` keeps one spare pool for every lane (`LaneState::spare`), so a lazy queue's data lane reuses the buffers the handshake's control lane made. Upstream's stage allocates a batch per priority only while fewer than that lane's size exist (`io/zenoh-transport/src/common/pipeline.rs` @ `None if self.batch_allocs < self.batch_config.0 => {`). The repayment keys the spare pool and a made-count by lane: `take_buffer` takes the priority `tx_slot_acquire` already has, and every give-back (`recycle`, `recycle_wire`, a joined write's frames, an abandoned lend) names the lane its buffer was lent for. The 51 C1cc legs after it stay unreached until then.",
+        "Runtime configuration step 5 lands after Round 4541's capability cost repayment, its budgets that repayment's plus step 5's own growth."
+      ]
+    },
+    "Round 4550": {
+      "decision_summary": "The second set of generic, default-off application-plane switches lands, with the debts Round 4541 left. A replay cache (`replay-cache`): a publisher keeps per instance the frames it sent, as sent, and answers them on a key suffix the caller states, one reply per sample in (time, instance, sequence) order from a snapshot then the final, segmented when the policy says so; a subscriber asks each publisher as it appears (a declaration watch now tells a new watch what each peer already holds), joins segmented answers, admits replies through the receiving judge (an SCE algorithm) and, under `replay-live-before-answer = hold-back`, holds live samples until the replay that precedes them. A message catalog (`message-catalog`): one JSON5 declaration of a deployment's messages, one validating reader whose rules the fixed-memory generator shares through a schema and a refusal corpus. Instance keys (`instance-key`): an instance index from up to two payload fields read through the `.proto` schema reader, which moves from `wz-capture` to `wz-app-frame` with its tokenizer and parser, and the joiner of segmented messages with it. C examples of profiles, transports, batching, protection, supervision and a program's own periodic task, and a stated call order of the periodic run API. Every pico C program now compiles against the `config.h` of its library's own arm (`wz_config.py --pico-config-h`), which ends the stack smashing a program with option structs met against the vendored default header. Three pure deadline and report computations become SCE algorithms. Paid from Round 4541: the capability cost lane (the zid derivation linked the session core's whole locator parser into every cooperative build; it now reads listeners with the engine's own reader, and the zenoh-c budgets move by the growth taken apart by symbol), four static gates the hook did not run, and a Cortex-M0 build that had no native `fetch_or`.",
+      "changes_bullets": [
+        "`deploy/wz-config.toml`: capabilities `replay-cache`, `message-catalog`, `instance-key`; policies `replay-reply-shape`, `replay-serve-holds-sends`, `replay-live-before-answer` (in the `upstream` profile at their defaults); limits `REPLAY_DEPTH_MAX`, `MESSAGE_CATALOG_ENTRIES`, `INSTANCE_KEY_FIELDS`, `INSTANCES_PER_MESSAGE`.",
+        "`sources/session/replay_round.scxml`, `replay_serving.scxml`; `sources/algorithms/replay_reply_admission.scxml`, `stream_deadline.scxml`, `declaration_stall_deadline.scxml`, `drop_report_due.scxml`; their `out/` emits.",
+        "`wz-app-frame`: `proto_lex`, `proto_parse`, `proto_schema`, `proto_decode` and `segment_chain` (moved from `wz-capture`, which re-exports them), `instance_key`, `message_catalog`, `replay_admission`, `replay_pieces`. `wz-session-core`: `replay_publisher`, `replay_subscriber`, `Quota::tighter`. `wz-runtime-tokio`: the declaration watch's held declarations. `wz-capi-pico`: `wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*`, `wz_ext_message_catalog_*`, `wz_ext_instance_keyer_*`, declared in `wz_ext.h`; `z_mutex_take` and `z_condvar_take` return nothing, as pico declares them.",
+        "`scripts/lib/wz_config.py --pico-config-h`; `scripts/pico-c-program.sh` reads cargo's build report and renders the arm's header; `scripts/lib/message_catalog.py`; `crates/wz-capi-pico/examples/c/`; `docs/periodic-run-api.md`; the Platform workflow's `capi-examples` job (observed).",
+        "`crates/wz-capi-coop/src/engine.rs` (the zid's listeners), `crates/wz-session-core/src/session_actions.rs` (portable-atomic sync bits), `crates/wz-runtime-coop/src/app_link.rs` (one wait module per build), `crates/wz-session-core/src/caps.rs` (no upper crate named), `scripts/lib/capability_cost_gate.py` (`capic-default` 11,323,300, `capic-default-lean` 9,569,600, `pico-default` 806 exports), `scripts/lib/discard_site_lint.py`, `scripts/lib/policy_read_gate.py`, census rows, `docs/reason-review-pins.md`."
+      ],
+      "verification_bullets": [
+        "On the build hosts at the integration tip, every run read from its own log: `wz-session-core` with the replay cache 1,082 and its wide feature set 1,280; `wz-capi-pico` with every new capability 282 (replay_cache_doors 4, instance_key_doors, message_catalog_doors, app_transport_doors 7), with the replay cache alone 249, its default build 229; `wz-app-frame` with `instance-key,replay` and its default build; `wz-capture` default and with `dissect`; `wz-runtime-tokio` default and `from_held`; `wz-runtime-coop` app_link; `wz-capi-coop`; `wz-capi-core`; `wz-capi-c`. Clippy `--all-targets -D warnings` per crate on each of those feature sets. Every pico C program on Linux through the script, each against its arm's rendered header: the host layer, the session loopback, the platform surface, the program transport (a stream pair, a datagram pair and a two-member group), and the six examples, `profiles` again under `WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN=on`.",
+        "Layer G (every per-triple build, the thumbv6m and thumbv7m legs included) and Layer C2m. The guarded count oracle over the range on pc2: 34 guards reached, 34 agree. All 152 round-fed static gates of the pre-push hook run locally, whatever the range feeds, each passing.",
+        "The capability cost lane measured on pc2 at `8593d2f86` and at the tip for every case; the zenoh-c default build's growth taken apart by symbol (`nm -C -S`) as `capic-default`'s note records; `capability_cost_gate.py --selftest` 25 of 25; `wz_config.py --selftest` 380 of 380."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The declaration watch tells a new watch the subscribers and queryables a peer holds, not its tokens: the runtime keeps no table of a peer's tokens. The `wz/key-ids` member of a config document waits for the runtime-configuration document reader. The oracle lane that exchanges protected frames and replay answers with a deployed peer's build, byte for byte, is not built; the repository holds synthetic profiles only. The C examples and the program-transport program run observed in the Platform workflow until two green runs. The per-stream, per-instance and per-publisher tables stay sans-I/O Rust until SCE's keyed table reaches the pin."
+      ]
     }
   },
   "inventory_entries": {

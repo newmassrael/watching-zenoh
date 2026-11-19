@@ -2186,7 +2186,8 @@ pub mod peer_connection {
     feature = "clock-quality",
     feature = "supervision",
     feature = "e2e-supervision",
-    feature = "app-link"
+    feature = "app-link",
+    feature = "replay-cache"
 ))]
 pub mod duty_outbox;
 
@@ -2284,6 +2285,67 @@ pub mod stream_activation {
 // Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "e2e-supervision")]
 pub mod stream_supervisor;
+
+/// SCE-generated replay serving statechart (the replay cache's publisher: whether it answers a
+/// query and so holds its message's sends), from `sources/session/replay_serving.scxml`, COMMITTED
+/// at `out/wz-session-core/replay_serving_sm.rs` and `include!`-ed from there. Exposes
+/// `ReplayServingState` / `ReplayServingEvent`, the `ReplayServingActions` host trait and the
+/// `ReplayServingPolicy<A>` policy, one machine per publisher cache. Engine-free and
+/// allocation-free; gated on `replay-cache`, which brings the SCE runtime in. The lint allows are
+/// restored as outer attributes, as for the other generated machines.
+#[cfg(feature = "replay-cache")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod replay_serving {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/replay_serving_sm.rs"
+    ));
+}
+
+/// SCE-generated replay round statechart (the replay cache's subscriber: its asking of the
+/// publishers for what they last sent), from `sources/session/replay_round.scxml`, COMMITTED at
+/// `out/wz-session-core/replay_round_sm.rs` and `include!`-ed from there. Exposes
+/// `ReplayRoundState` / `ReplayRoundEvent`, the `ReplayRoundActions` host trait and the
+/// `ReplayRoundPolicy<A>` policy, one machine per replay subscriber. Engine-free and
+/// allocation-free; gated on `replay-cache`, as the serving machine is.
+#[cfg(feature = "replay-cache")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod replay_round {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/replay_round_sm.rs"
+    ));
+}
+
+// The replay cache's publisher: the ring of the frames it sent per instance, the order an answer
+// gives them in, the sends it holds while it answers, and the `replay_serving` machine that says
+// when. Gated as the machine is. Documented in its own `//!`; see the note at `event_ring`.
+#[cfg(feature = "replay-cache")]
+pub mod replay_publisher;
+
+// The replay cache's subscriber: the publishers it asks, the queries in flight, the two deadlines
+// of a round, the live samples it holds back, and the `replay_round` machine that says when the
+// round ends. Gated as the machine is. Documented in its own `//!`; see the note at `event_ring`.
+#[cfg(feature = "replay-cache")]
+pub mod replay_subscriber;
 
 /// SCE-generated lifecycle of one link over a transport the program supplies, from
 /// `sources/session/app_link.scxml`, COMMITTED at `out/wz-session-core/app_link_sm.rs` and

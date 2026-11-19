@@ -70,10 +70,15 @@ pub enum AppLinkError {
     NotCarried,
 }
 
-/// Waiting on a link: parking the host's thread, or looking for a bounded number of turns on an
-/// image.
+/// Waiting on a link: parking the host's thread (`wait_parked`), or looking for a bounded number
+/// of turns on an image (`wait_turns`). The build names one of them `wait`.
 #[cfg(feature = "host-lock")]
-mod wait {
+use wait_parked as wait;
+#[cfg(not(feature = "host-lock"))]
+use wait_turns as wait;
+
+#[cfg(feature = "host-lock")]
+mod wait_parked {
     extern crate std;
 
     use alloc::sync::Arc;
@@ -110,7 +115,7 @@ mod wait {
 }
 
 #[cfg(not(feature = "host-lock"))]
-mod wait {
+mod wait_turns {
     use core::task::Waker;
 
     /// How many times a wait looks at the table before it returns to the engine's loop.

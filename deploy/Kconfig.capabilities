@@ -320,6 +320,14 @@ config WZ_CAP_E2E_SENDER_DEMUX
 	  Judging state per sender for the receiving judge, keyed by a header field, in slots bound by a list or taken in arrival order (E2E_SENDER_SLOTS).
 	  Exported by: pico.
 
+config WZ_CAP_INSTANCE_KEY
+	bool "instance-key"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  The instance of a message a sample is, read from fields of its payload: a stream of the end-to-end doors and a last value per instance, samples of no instance dropped and counted (wz_ext_instance_keyer_*, wz-own doors; INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE).
+	  Exported by: pico.
+
 config WZ_CAP_CONFIG_VERDICT
 	bool "config-verdict"
 	default y
@@ -356,6 +364,26 @@ config WZ_CAP_E2E_SUPERVISION
 	select WZ_CAP_UNSTABLE_API
 	help
 	  Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors).
+	  Exported by: pico.
+
+config WZ_CAP_REPLAY_CACHE
+	bool "replay-cache"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	select WZ_CAP_QUERY
+	select WZ_CAP_QUERYABLE
+	select WZ_CAP_REMOTE_DECLARATION_WATCH
+	select WZ_CAP_E2E_RECEIVER
+	help
+	  Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (wz_ext_replay_*, wz-own doors).
+	  Exported by: pico.
+
+config WZ_CAP_MESSAGE_CATALOG
+	bool "message-catalog"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (wz_ext_message_catalog_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_APP_TRANSPORT

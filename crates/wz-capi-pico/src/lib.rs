@@ -183,8 +183,12 @@ pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
 // End-to-end protection of an application's payload: what the sending and the receiving doors
-// share, in a build with either capability.
-#[cfg(any(feature = "e2e-sender", feature = "e2e-receiver"))]
+// share, and the instance keys' doors with them, in a build with any of the three capabilities.
+#[cfg(any(
+    feature = "e2e-sender",
+    feature = "e2e-receiver",
+    feature = "instance-key"
+))]
 mod e2e;
 // The receiving judge of end-to-end protected frames: wz doors (`wz_ext.h`) of the unstable
 // surface.
@@ -212,6 +216,10 @@ pub mod get;
 #[cfg(feature = "query")]
 pub mod get_to_peer;
 pub mod handlers;
+// The instance of a message a sample is, read from fields of its payload: wz doors (`wz_ext.h`)
+// of the unstable surface.
+#[cfg(feature = "instance-key")]
+pub mod instance_key;
 // The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
 // with the capability, and in every build the open's judgement of the key-wire form.
 pub mod key_ids;
@@ -223,6 +231,10 @@ mod link_properties;
 pub mod liveliness;
 pub mod locality;
 pub mod matching;
+// A deployment's message catalog, read from one JSON5 declaration: wz doors (`wz_ext.h`) of the
+// unstable surface, over the reader of `wz-app-frame`.
+#[cfg(feature = "message-catalog")]
+pub mod message_catalog;
 mod option_fields;
 mod os;
 pub mod platform;
@@ -232,6 +244,12 @@ pub mod qos;
 pub mod querier;
 #[cfg(feature = "queryable")]
 pub mod query;
+// The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
+// doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+#[cfg(feature = "replay-cache")]
+pub mod replay_publisher;
+#[cfg(feature = "replay-cache")]
+pub mod replay_subscriber;
 #[cfg(any(feature = "query", feature = "queryable"))]
 pub mod reply_keyexpr;
 pub mod result;

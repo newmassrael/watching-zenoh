@@ -11,9 +11,13 @@
 //! `remote-declaration-watch` capability every event names the peer it came from, as the zenoh
 //! id the link's handshake gave.
 //!
-//! A watch hears what the peers declare from the moment it is declared, on every link the
-//! session holds and every link that comes up later; what a peer had declared before the watch
-//! was declared is not told again. A link that is lost tells no undeclaration for what its peer
+//! A watch of subscribers or queryables is told first what each peer holds when the watch is
+//! declared, as [`DeclWatchEvent::Declared`] events ahead of every live event of that link, then
+//! what the peers declare from then on, on every link the session holds and every link that comes
+//! up later; each declaration is told once. A watch of tokens hears only what comes after it: the
+//! tokio engine keeps no table of the tokens a peer holds. A watch declared after a peer finished
+//! its initial declarations is not told [`DeclWatchEvent::Synced`] for that link. A link that is
+//! lost tells no undeclaration for what its peer
 //! held: the declarations went with the link, and the next establishment is told from its start.
 //! The members of a multicast group are not watched: a group carries no declaration of a peer
 //! that the session's links hold.

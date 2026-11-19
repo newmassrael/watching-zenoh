@@ -31,15 +31,33 @@ path = "src/lib.rs"
 [features]
 default = ["alloc"]
 
-# The profile, frame, segment-profile and segment-sender modules. Each reads a profile from the
-# workspace's JSON reader (`wz_session_core::json5`, behind the core's own `alloc`) and holds its
-# fields in a `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link no allocator.
+# The profile, frame, segment-profile, segment-chain and segment-sender modules. Each reads a
+# profile from the workspace's JSON reader (`wz_session_core::json5`, behind the core's own
+# `alloc`) and holds its fields in a `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link
+# no allocator.
 alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
+
+# The `.proto` schema reader and the typed reader of a payload (`proto_lex`, `proto_parse`,
+# `proto_schema`, `proto_decode`): what a node that reads a payload by its fields needs, and what the
+# capture crate's schema documents and payload formats read, re-exported there at the paths they had.
+# Off, a node that only frames its payloads links none of it.
+proto = ["alloc"]
+
+# `instance_key`: which instance of a message a sample is, read from fields of its payload through
+# the schema reader, and the receiver's and the sender's streams and the last values kept per
+# instance. Off, a node whose messages have one instance each links none of it.
+instance-key = ["proto"]
 
 # `segment_profile::synthetic`: a synthetic segment profile and a builder of its pieces, for the
 # tests of crates above this one. A `#[cfg(test)]` module cannot cross a crate boundary, so the
 # capture crate turns this on for its own tests and forwards it from its `fixtures` feature.
 fixtures = ["alloc"]
+
+# `replay_admission`: whether a reply of a replay reaches the receiving judge (judged, a duplicate
+# of its baseline, or a frame it has passed), and the CRC of each stream's baseline frame the
+# receiver keeps for it; and `replay_pieces`, the pieces of a segmented message joined into the
+# frames they cut. The replay cache's subscriber turns it on; off, a receiver keeps no CRC.
+replay = ["alloc"]
 
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }

@@ -427,6 +427,96 @@ fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it()
     }
 }
 
+/// A watch of subscribers or queryables declared after the peer's declarations arrived is told
+/// them first, as declarations of the peer that holds them, each once, and then the peer's
+/// retraction of the same id: the order a watch declared before the link would have heard.
+#[test]
+fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() {
+    let peer_built = cfg!(feature = "remote-declaration-watch");
+    let port = free_port();
+    let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    // SAFETY: as the test above.
+    unsafe {
+        let mut watcher = open(&[(Z_CONFIG_LISTEN_KEY, endpoint.as_c_str())]);
+        // The witness: a watch declared before the link, which says when the declarations have
+        // arrived, so the watches declared after are declared after them.
+        let witness = Log::default();
+        let (mut witness_watch, rc) = watch(&watcher, WZ_EXT_DECL_QUERYABLE, &witness);
+        assert_eq!(rc, Z_OK);
+        let mut declarer = open_declarer(&endpoint);
+        let declarer_zid = z_info_zid(z_session_loan(&declarer)).id;
+        let mut declared = declare_all(&declarer);
+        until("the witness hears the queryable", || {
+            witness.declared("demo/watch/qbl").is_some()
+        });
+        // The subscriber travels the same link ahead of the queryable, so it has arrived too.
+
+        let late = [
+            (WZ_EXT_DECL_SUBSCRIBER, "demo/watch/sub", Log::default()),
+            (WZ_EXT_DECL_QUERYABLE, "demo/watch/qbl", Log::default()),
+        ];
+        let mut watches = Vec::new();
+        for (entity, _, log) in &late {
+            let (handle, rc) = watch(&watcher, *entity, log);
+            assert_eq!(rc, Z_OK);
+            watches.push(handle);
+        }
+        for (entity, key, log) in &late {
+            until(&format!("the late watch of {key} is told it"), || {
+                log.declared(key).is_some()
+            });
+            let seen = log.declared(key).unwrap();
+            assert_eq!(seen.entity, *entity);
+            if peer_built {
+                assert_eq!(seen.zid, declarer_zid, "named by the peer that holds it");
+            }
+        }
+        let held_id = late[1].2.declared("demo/watch/qbl").unwrap().id;
+        assert_eq!(
+            held_id,
+            witness.declared("demo/watch/qbl").unwrap().id,
+            "the id the peer declared it under, as the live watch heard it"
+        );
+
+        z_undeclare_subscriber(z_subscriber_move(&mut declared.subscriber));
+        z_undeclare_queryable(z_queryable_move(&mut declared.queryable));
+        z_liveliness_undeclare_token(z_liveliness_token_move(&mut declared.token));
+        for (_, key, log) in &late {
+            let id = log.declared(key).unwrap().id;
+            until(
+                &format!("the late watch of {key} is told its retraction"),
+                || log.undeclared(id).is_some(),
+            );
+            let events = log.events();
+            let at_declared = events
+                .iter()
+                .position(|e| e.kind == WZ_EXT_DECL_DECLARED && e.id == id);
+            let at_undeclared = events
+                .iter()
+                .position(|e| e.kind == WZ_EXT_DECL_UNDECLARED && e.id == id);
+            assert!(
+                at_declared < at_undeclared,
+                "held first, then live: {events:?}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e.kind == WZ_EXT_DECL_DECLARED && e.id == id)
+                    .count(),
+                1,
+                "told once"
+            );
+        }
+
+        for handle in &mut watches {
+            wz_ext_decl_watch_drop(handle);
+        }
+        wz_ext_decl_watch_drop(&mut witness_watch);
+        close(&mut declarer);
+        close(&mut watcher);
+    }
+}
+
 /// A watch of no kind is refused before anything is held, a closed session refuses one, and a
 /// watch the session's close released runs its drop at the close; each runs the program's drop
 /// once.

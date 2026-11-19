@@ -382,6 +382,94 @@ impl Default for E2eSupervisionNotify {
     }
 }
 
+/// `replay-reply-shape`: How a publisher's replay cache answers a query. `frame-per-sample`
+/// answers one reply per sample of the ring, each the frame exactly as it was sent, then
+/// the final. `segmented` answers each sample as the pieces of the message's declared
+/// segment profile, every sample under the next transfer number, for a message whose frames
+/// are larger than a deployment puts in one sample; the cache's live sends go out as pieces
+/// too, and a subscriber joins the pieces, live and replied, before it judges a frame,
+/// giving up only a frame a piece of which never came. Decided when the cache or the
+/// subscriber is made, and fixed for its life.
+/// Upstream: Keeps no ring of sent frames, so there is no replay to answer and no shape to
+/// give it; a queryable the application declares answers whatever it replies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayReplyShape {
+    /// `frame-per-sample`.
+    FramePerSample,
+    /// `segmented`.
+    Segmented,
+}
+
+impl ReplayReplyShape {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::FramePerSample => "frame-per-sample",
+            Self::Segmented => "segmented",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["frame-per-sample", "segmented"];
+    const ALL: [Self; 2] = [Self::FramePerSample, Self::Segmented];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_REPLAY_REPLY_SHAPE");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for ReplayReplyShape {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
+/// `replay-live-before-answer`: How a subscriber that asks for a replay orders its live
+/// samples against it. `deliver` hands each live sample on as it arrives, so live samples
+/// and replies interleave and the receiving judge drops a reply that is behind what it has
+/// seen. `hold-back` holds the live samples, in a store the application sizes, until the
+/// first round of replies is over or abandoned by its deadline (or the store is full), then
+/// hands them on after every reply of that round, so the application never sees a newer
+/// sample before the replay that precedes it. Decided when the subscriber is made, and
+/// fixed for its life.
+/// Upstream: Asks no publisher for what it sent before, so a live sample is delivered as it
+/// arrives and there is no replay to order it against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayLiveBeforeAnswer {
+    /// `deliver`.
+    Deliver,
+    /// `hold-back`.
+    HoldBack,
+}
+
+impl ReplayLiveBeforeAnswer {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Deliver => "deliver",
+            Self::HoldBack => "hold-back",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["deliver", "hold-back"];
+    const ALL: [Self; 2] = [Self::Deliver, Self::HoldBack];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for ReplayLiveBeforeAnswer {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// `event-ring-full`: Which event a full event ring gives up. `overwrite-oldest` writes the
 /// new event over the oldest, so the ring always holds the latest: it is what a post-mortem
 /// wants, and needs no reader at all. `drop-newest` refuses the new event and counts the
@@ -941,6 +1029,16 @@ pub struct SessionPolicy {
     /// message that stops arriving is not noticed by the library, so there is no loss to
     /// tell and no value to tell it with.
     e2e_supervision_notify: E2eSupervisionNotifyBound,
+    /// `replay-reply-shape`. Upstream: Keeps no ring of sent frames, so there is no replay
+    /// to answer and no shape to give it; a queryable the application declares answers
+    /// whatever it replies.
+    replay_reply_shape: ReplayReplyShapeBound,
+    /// `replay-serve-holds-sends`. Upstream: Keeps no ring of sent frames and answers no
+    /// replay, so a send is never held back for one.
+    replay_serve_holds_sends: ReplayServeHoldsSendsBound,
+    /// `replay-live-before-answer`. Upstream: Asks no publisher for what it sent before, so
+    /// a live sample is delivered as it arrives and there is no replay to order it against.
+    replay_live_before_answer: ReplayLiveBeforeAnswerBound,
     /// `event-ring-full`. Upstream: Keeps no record of the events a node has: a log call
     /// with no logger installed is dropped, so neither the oldest nor the newest of them
     /// survives.
@@ -1009,6 +1107,9 @@ impl SessionPolicy {
             sn_resolution: Bound::build_default(),
             supervision_after_expiry: Bound::build_default(),
             e2e_supervision_notify: Bound::build_default(),
+            replay_reply_shape: Bound::build_default(),
+            replay_serve_holds_sends: Bound::build_default(),
+            replay_live_before_answer: Bound::build_default(),
             event_ring_full: Bound::build_default(),
             clock_quality_stamping: Bound::build_default(),
             routing_face_drive: Bound::build_default(),
@@ -1274,6 +1375,48 @@ impl SessionPolicy {
         value: E2eSupervisionNotify,
     ) -> Result<(), OutsideDomain<E2eSupervisionNotify>> {
         self.e2e_supervision_notify = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `replay-reply-shape` as this snapshot holds it.
+    pub const fn replay_reply_shape(&self) -> ReplayReplyShape {
+        self.replay_reply_shape.get()
+    }
+
+    /// Selects `replay-reply-shape`, when the build's domain holds `value`.
+    pub fn select_replay_reply_shape(
+        &mut self,
+        value: ReplayReplyShape,
+    ) -> Result<(), OutsideDomain<ReplayReplyShape>> {
+        self.replay_reply_shape = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `replay-serve-holds-sends` as this snapshot holds it: `true` for `on`.
+    pub const fn replay_serve_holds_sends(&self) -> bool {
+        self.replay_serve_holds_sends.get().is_on()
+    }
+
+    /// Selects `replay-serve-holds-sends`, when the build's domain holds `value`.
+    pub fn select_replay_serve_holds_sends(
+        &mut self,
+        value: ReplayServeHoldsSends,
+    ) -> Result<(), OutsideDomain<ReplayServeHoldsSends>> {
+        self.replay_serve_holds_sends = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `replay-live-before-answer` as this snapshot holds it.
+    pub const fn replay_live_before_answer(&self) -> ReplayLiveBeforeAnswer {
+        self.replay_live_before_answer.get()
+    }
+
+    /// Selects `replay-live-before-answer`, when the build's domain holds `value`.
+    pub fn select_replay_live_before_answer(
+        &mut self,
+        value: ReplayLiveBeforeAnswer,
+    ) -> Result<(), OutsideDomain<ReplayLiveBeforeAnswer>> {
+        self.replay_live_before_answer = Bound::select(value)?;
         Ok(())
     }
 
@@ -2816,6 +2959,188 @@ impl PolicyField for E2eSupervisionNotify {
     }
 }
 
+/// How `replay-reply-shape` is held: in no byte when its domain is one value.
+type ReplayReplyShapeBound = Bound<ReplayReplyShape, { ReplayReplyShape::HELD }>;
+
+impl PolicyValue for ReplayReplyShape {
+    const POLICY: &'static str = "replay-reply-shape";
+    const ALL: &'static [Self] = &[Self::FramePerSample, Self::Segmented];
+    const IDS: &'static [&'static str] = &["frame-per-sample", "segmented"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_REPLAY_REPLY_SHAPE_ALLOWS_FRAME_PER_SAMPLE"),
+            option_env!("WZ_POLICY_REPLAY_REPLY_SHAPE_ALLOWS_SEGMENTED"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Message;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ReplayReplyShape>(ReplayReplyShape::DEFAULT as usize),
+    "the default of replay-reply-shape is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for ReplayReplyShape {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_replay_reply_shape(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.replay_reply_shape.get()
+    }
+}
+
+/// `replay-serve-holds-sends` as a value; [`SessionPolicy`] reads it as a `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayServeHoldsSends {
+    /// `off`, upstream's behaviour.
+    Off,
+    /// `on`.
+    On,
+}
+
+impl ReplayServeHoldsSends {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The value as the `bool` the accessor of [`SessionPolicy`] reads.
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    const fn from_bool(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS");
+        Self::from_bool(policy_bool(stated))
+    }
+}
+
+impl From<bool> for ReplayServeHoldsSends {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
+impl From<ReplayServeHoldsSends> for bool {
+    fn from(value: ReplayServeHoldsSends) -> Self {
+        value.is_on()
+    }
+}
+
+impl Default for ReplayServeHoldsSends {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// How `replay-serve-holds-sends` is held: in no byte when its domain is one value.
+type ReplayServeHoldsSendsBound = Bound<ReplayServeHoldsSends, { ReplayServeHoldsSends::HELD }>;
+
+impl PolicyValue for ReplayServeHoldsSends {
+    const POLICY: &'static str = "replay-serve-holds-sends";
+    const ALL: &'static [Self] = &[Self::Off, Self::On];
+    const IDS: &'static [&'static str] = &["off", "on"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS_ALLOWS_OFF"),
+            option_env!("WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS_ALLOWS_ON"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Message;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Timing;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ReplayServeHoldsSends>(ReplayServeHoldsSends::DEFAULT as usize),
+    "the default of replay-serve-holds-sends is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for ReplayServeHoldsSends {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_replay_serve_holds_sends(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.replay_serve_holds_sends.get()
+    }
+}
+
+/// How `replay-live-before-answer` is held: in no byte when its domain is one value.
+type ReplayLiveBeforeAnswerBound = Bound<ReplayLiveBeforeAnswer, { ReplayLiveBeforeAnswer::HELD }>;
+
+impl PolicyValue for ReplayLiveBeforeAnswer {
+    const POLICY: &'static str = "replay-live-before-answer";
+    const ALL: &'static [Self] = &[Self::Deliver, Self::HoldBack];
+    const IDS: &'static [&'static str] = &["deliver", "hold-back"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_ALLOWS_DELIVER"),
+            option_env!("WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_ALLOWS_HOLD_BACK"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Message;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ReplayLiveBeforeAnswer>(ReplayLiveBeforeAnswer::DEFAULT as usize),
+    "the default of replay-live-before-answer is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for ReplayLiveBeforeAnswer {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_replay_live_before_answer(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.replay_live_before_answer.get()
+    }
+}
+
 /// How `event-ring-full` is held: in no byte when its domain is one value.
 type EventRingFullBound = Bound<EventRingFull, { EventRingFull::HELD }>;
 
@@ -3241,7 +3566,7 @@ impl PolicyField for KeyWireForm {
 
 /// How many policies the declaration states: the length of [`POLICIES`] and of every table kept
 /// per policy.
-pub const POLICY_COUNT: usize = 28;
+pub const POLICY_COUNT: usize = 31;
 
 /// Every policy as a reader that names it by its id sees it, in the order of the fields of
 /// [`SessionPolicy`].
@@ -3264,6 +3589,9 @@ pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
     PolicyEntry::of::<SnResolution>(),
     PolicyEntry::of::<SupervisionAfterExpiry>(),
     PolicyEntry::of::<E2eSupervisionNotify>(),
+    PolicyEntry::of::<ReplayReplyShape>(),
+    PolicyEntry::of::<ReplayServeHoldsSends>(),
+    PolicyEntry::of::<ReplayLiveBeforeAnswer>(),
     PolicyEntry::of::<EventRingFull>(),
     PolicyEntry::of::<ClockQualityStamping>(),
     PolicyEntry::of::<RoutingFaceDrive>(),
@@ -3301,6 +3629,9 @@ const PROFILE_UPSTREAM: Profile = Profile {
         Statement::new("sn-resolution", "bits-32"),
         Statement::new("supervision-after-expiry", "latch"),
         Statement::new("e2e-supervision-notify", "status-only"),
+        Statement::new("replay-reply-shape", "frame-per-sample"),
+        Statement::new("replay-serve-holds-sends", "off"),
+        Statement::new("replay-live-before-answer", "deliver"),
         Statement::new("event-ring-full", "overwrite-oldest"),
         Statement::new("clock-quality-stamping", "always"),
         Statement::new("routing-face-drive", "task-per-face"),

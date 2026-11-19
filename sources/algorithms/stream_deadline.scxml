@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The reception deadline of a periodic stream that may miss `factor` periods of `period` ticks:
+  their product, or absent when either is 0 or the product is longer than the longest deadline
+  a stream can have.
+
+  The product is taken in 64 bits, where a 32-bit period times a 16-bit factor always fits, so
+  the multiplication is exact; `saturatingMul` says so without a proof the analysis would have
+  to make of two operands' ranges. The longest deadline, 2147483646, is
+  `wz_session_core::stream_supervisor::MAX_DEADLINE_TICKS`: one tick below the longest span
+  `tick_elapsed` can tell from a counter that went round, because a deadline is passed when MORE
+  than it has elapsed. The test of that module holds the two to each other at the bound.
+
+  The reception supervisor (wz-session-core `stream_supervisor`) asks it when a stream is
+  added, and refuses the stream by name when it is absent.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="stream_deadline"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="period" type="uint32"/>
+    <sce:param name="factor" type="uint16"/>
+    <sce:return type="optional&lt;uint32&gt;"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="wide_period" type="uint64" init="period"/>
+    <sce:var name="wide_factor" type="uint64" init="factor"/>
+    <sce:var name="product" type="uint64" init="saturatingMul(wide_period, wide_factor)"/>
+    <sce:if cond="product &gt;= 1 &amp;&amp; product &lt;= 2147483646">
+      <sce:return expr="product"/>
+    </sce:if>
+    <sce:return expr="null"/>
+  </sce:body>
+</scxml>

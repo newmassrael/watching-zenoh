@@ -149,6 +149,16 @@ z_result_t wz_ext_clock_report(wz_ext_clock_event_t event);
 #define WZ_EXT_EVENT_TLS_DROP_OTHER 2   /* any other failure, or a peer the
                                            policy refused; the code is the
                                            channel's, 0 where it has none */
+/* An instance key reported the samples it dropped (a build with the
+ * instance-key capability too; see wz_ext_instance_keyer_new). Three integers:
+ * why the latest of them was dropped, which key field, and how many were
+ * dropped since the last report. */
+#define WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED 0xFF02
+#define WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE 0 /* the payload is not a message
+                                                   of the schema */
+#define WZ_EXT_EVENT_INSTANCE_KEY_ABSENT 1      /* a key field with presence is
+                                                   absent */
+#define WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED 2  /* a key value is in no list */
 
 typedef struct wz_ext_event_t {
   uint8_t kind;      /* WZ_EXT_EVENT_RECORD, _EMPTY or _LOST */
@@ -874,6 +884,162 @@ void wz_ext_internal_e2e_receiver_null(wz_ext_owned_e2e_receiver_t *this_);
 bool wz_ext_internal_e2e_receiver_check(
     const wz_ext_owned_e2e_receiver_t *this_);
 
+/* ---- Instance keys (instance-key) --------------------------------------- */
+
+/* Which instance of a message a sample is, read from fields of its payload.
+ * A message is published on one key expression whatever its instance; a
+ * KEYER names up to the build's INSTANCE_KEY_FIELDS fields of the payload's
+ * protobuf message (integers, enumerations by their numbers, or strings), read
+ * through the program's .proto files, and the values each may take. The
+ * instance of a sample is the position of its values in the product of those
+ * lists, row-major (the last field varies fastest), at most
+ * INSTANCES_PER_MESSAGE of them; it is never on the wire. A node makes one
+ * keyer per message and direction, with the values it sends or receives.
+ *
+ * A sample of no instance is DROPPED and counted: its payload is not a message
+ * of the schema, a key field that has presence is absent (a field without
+ * presence reads as 0 or the empty string), or a value is in no list. Drops are
+ * reported at the rate the description states: the first after a quiet
+ * interval carries the count since the last report, and with the event-ring
+ * capability each report is also an event of WZ_EXT_EVENT_SOURCE_
+ * INSTANCE_KEY_DROPPED.
+ *
+ * The instance is the STREAM of the end-to-end doors: with e2e-receiver,
+ * wz_ext_instance_keyer_judge judges a frame in the receiver's stream of the
+ * instance its payload is; with e2e-sender, wz_ext_instance_keyer_protect
+ * protects a payload on the sender's counter stream of its instance. A receiver
+ * that keeps its streams per sender (e2e-sender-demux) is refused: instance
+ * keys and sender slots are exclusive on one message. The last value of each
+ * instance is kept in storage the program gives.
+ *
+ * OWNERSHIP AND THREADS. As for the end-to-end doors. The judging and
+ * protecting doors hold the keyer's lock, then the receiver's or the
+ * sender's. Part of the unstable surface. */
+
+/* One .proto file: the name other files import it by, and its text, both
+ * NUL-terminated UTF-8, borrowed for the call. */
+typedef struct wz_ext_proto_file_t {
+  const char *name;
+  const char *text;
+} wz_ext_proto_file_t;
+
+typedef struct wz_ext_owned_instance_keyer_t {
+  void *_handle;
+} wz_ext_owned_instance_keyer_t;
+typedef struct wz_ext_loaned_instance_keyer_t {
+  void *_handle;
+} wz_ext_loaned_instance_keyer_t;
+typedef struct wz_ext_moved_instance_keyer_t {
+  wz_ext_owned_instance_keyer_t _this;
+} wz_ext_moved_instance_keyer_t;
+
+typedef struct wz_ext_instance_keyer_options_t {
+  uint8_t *storage;      /* the last values, value_capacity bytes per
+                            instance; the program's, valid and untouched until
+                            the keyer is dropped */
+  size_t storage_len;
+  size_t value_capacity; /* 0 keeps no last values */
+} wz_ext_instance_keyer_options_t;
+
+/* What became of one sample. */
+#define WZ_EXT_INSTANCE_KEY_INDEXED 0     /* instance is its index */
+#define WZ_EXT_INSTANCE_KEY_UNDECODABLE 1 /* not a message of the schema, or a
+                                             frame shorter than its header */
+#define WZ_EXT_INSTANCE_KEY_ABSENT 2      /* field names the absent key field */
+#define WZ_EXT_INSTANCE_KEY_NOT_LISTED 3  /* field names the key field whose
+                                             value is in no list */
+
+/* What became of the instance's last value. */
+#define WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT 0   /* none kept, or dropped */
+#define WZ_EXT_INSTANCE_KEY_LAST_RECORDED 1   /* the payload is now its last */
+#define WZ_EXT_INSTANCE_KEY_LAST_NOT_INTACT 2 /* the frame is not intact */
+#define WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG 3   /* longer than an instance's room */
+
+typedef struct wz_ext_instance_key_t {
+  uint8_t status;   /* WZ_EXT_INSTANCE_KEY_* */
+  uint8_t reported; /* 1 when this drop carries the report of the drops since
+                       the last one */
+  uint8_t last;     /* WZ_EXT_INSTANCE_KEY_LAST_* */
+  uint8_t reserved;
+  uint32_t field;   /* for _ABSENT and _NOT_LISTED, in the description's order */
+  uint64_t dropped; /* when reported, the drops since the last report */
+  size_t instance;  /* for _INDEXED */
+} wz_ext_instance_key_t;
+
+void wz_ext_instance_keyer_options_default(
+    wz_ext_instance_keyer_options_t *this_);
+
+/* A keyer of the message description names, over the file_count files
+ * (every one is read, with what it imports). description is JSON:
+ *   {"message": "<full name, package included>",
+ *    "fields": [{"path": "<field>" or "<holder>.<field>",
+ *                "values": [<integer>, {"range": [<low>, <high>]}, ...]
+ *                          or ["<string>", ...]}, ...],
+ *    "report_interval_ms": <n>}
+ * options may be NULL (no last values). On _Z_ERR_CONFIG_INVALID_VALUE (-89),
+ * for schema files, a description or storage that is refused, refusal (which
+ * may be NULL) holds the reason. Z_ERR_NULL (-127) for a NULL argument the
+ * call needs; Z_EINVAL (-75) for text that is not UTF-8. */
+z_result_t wz_ext_instance_keyer_new(
+    wz_ext_owned_instance_keyer_t *this_, const wz_ext_proto_file_t *files,
+    size_t file_count, const char *description,
+    const wz_ext_instance_keyer_options_t *options,
+    z_owned_string_t *refusal);
+z_result_t wz_ext_instance_keyer_instances(
+    const wz_ext_loaned_instance_keyer_t *this_, size_t *out);
+/* The instance payload, received or about to be sent at now_ms, is; an
+ * indexed payload becomes the instance's last value. Z_OK whatever out says. */
+z_result_t wz_ext_instance_keyer_index(
+    const wz_ext_loaned_instance_keyer_t *this_, const uint8_t *payload,
+    size_t len, uint64_t now_ms, wz_ext_instance_key_t *out);
+/* The report of the drops held since the last one, when the interval has
+ * passed: true, out naming the latest drop's reason and the count. */
+bool wz_ext_instance_keyer_flush(const wz_ext_loaned_instance_keyer_t *this_,
+                                 uint64_t now_ms, wz_ext_instance_key_t *out);
+z_result_t wz_ext_instance_keyer_counts(
+    const wz_ext_loaned_instance_keyer_t *this_, uint64_t *undecodable,
+    uint64_t *absent, uint64_t *not_listed);
+/* Copy an instance's last value: Z_OK; Z_CHANNEL_NODATA (2) before its first;
+ * Z_ERR_OVERFLOW (-74) when capacity is short (len is the value's length);
+ * Z_EINVAL for an instance the keyer has not or a keyer without storage. */
+z_result_t wz_ext_instance_keyer_last(
+    const wz_ext_loaned_instance_keyer_t *this_, size_t instance, uint8_t *out,
+    size_t capacity, size_t *len);
+/* Make value an instance's last value (what a publisher sends before its
+ * first, say). Z_ERR_OVERFLOW for a value longer than an instance's room. */
+z_result_t wz_ext_instance_keyer_set_last(
+    const wz_ext_loaned_instance_keyer_t *this_, size_t instance,
+    const uint8_t *value, size_t len);
+/* With e2e-receiver: judge frame in receiver's stream of the instance its
+ * payload (what follows the receiver's header) is. Z_OK whatever key and
+ * verdict say; verdict is zeroed for a dropped frame, which moves nothing.
+ * _Z_ERR_CONFIG_INVALID_VALUE for a receiver kept per sender or with fewer
+ * streams than the keyer has instances. */
+z_result_t wz_ext_instance_keyer_judge(
+    const wz_ext_loaned_instance_keyer_t *this_,
+    const wz_ext_loaned_e2e_receiver_t *receiver, const uint8_t *frame,
+    size_t len, uint64_t now_ms, wz_ext_instance_key_t *key,
+    wz_ext_e2e_verdict_t *verdict);
+/* With e2e-sender: protect payload on sender's counter stream of its
+ * instance. Z_EINVAL when the payload is no instance (key says why; nothing is
+ * built and no counter value consumed); Z_ERR_OVERFLOW when capacity is
+ * short; _Z_ERR_CONFIG_INVALID_VALUE for a sender with fewer streams than the
+ * keyer has instances. */
+z_result_t wz_ext_instance_keyer_protect(
+    const wz_ext_loaned_instance_keyer_t *this_,
+    const wz_ext_loaned_e2e_sender_t *sender, const uint8_t *payload,
+    size_t len, uint64_t now_ms, uint8_t *out, size_t capacity,
+    size_t *written, uint64_t *counter, wz_ext_instance_key_t *key);
+const wz_ext_loaned_instance_keyer_t *wz_ext_instance_keyer_loan(
+    const wz_ext_owned_instance_keyer_t *this_);
+wz_ext_moved_instance_keyer_t *wz_ext_instance_keyer_move(
+    wz_ext_owned_instance_keyer_t *this_);
+/* The storage of the last values is the program's again once it returns. */
+void wz_ext_instance_keyer_drop(wz_ext_moved_instance_keyer_t *this_);
+void wz_ext_internal_instance_keyer_null(wz_ext_owned_instance_keyer_t *this_);
+bool wz_ext_internal_instance_keyer_check(
+    const wz_ext_owned_instance_keyer_t *this_);
+
 /* wz's own result codes of the doors below, outside zenoh-pico's own codes
  * (-128 to -65), so a later zenoh-pico code cannot take them. */
 #define WZ_EXT_ERR_POLICY_OFF (-2)  /* the build's policy does not allow what
@@ -895,10 +1061,15 @@ bool wz_ext_internal_e2e_receiver_check(
  * link that the peer has sent everything it held when the link came up
  * (WZ_EXT_DECL_SYNCED); without it that event is never told.
  *
- * A watch hears the peers from the moment it is declared, on every link the
- * session holds and every link that comes up later; what a peer declared
- * before is not told again. A link that is lost tells no undeclaration for
- * what its peer held, and the members of a multicast group are not watched. */
+ * A watch of subscribers or queryables is told first what each peer holds
+ * when it is declared, as WZ_EXT_DECL_DECLARED events ahead of every live
+ * event of that link, then what the peers declare and retract from then on,
+ * on every link the session holds and every link that comes up later; each
+ * declaration is told once. A watch of tokens hears only what comes after it
+ * is declared. A watch declared after a link's peer finished its initial
+ * declarations is not told WZ_EXT_DECL_SYNCED for that link. A link that is
+ * lost tells no undeclaration for what its peer held, and the members of a
+ * multicast group are not watched. */
 
 /* What an event says. */
 #define WZ_EXT_DECL_DECLARED 0
@@ -992,6 +1163,288 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
                               z_get_options_t *options, const z_id_t *peer);
 #endif
 
+/* ---- The replay cache (replay-cache) ----------------------------------- */
+
+/* What each publisher of a message last sent, for a subscriber that arrives
+ * later. Part of the unstable surface, and present only in a build with the
+ * replay-cache capability.
+ *
+ * THE PUBLISHER keeps a ring of depth frames per instance of the message, in
+ * the program's storage, each frame exactly as it was sent (a protection
+ * header included), recorded before it is put and whether or not the put
+ * succeeds. Serving declares a queryable on the message's key followed by the
+ * program's suffix, which answers a query with every frame of every ring in
+ * ascending (time, instance, sequence) order, from a snapshot taken when the
+ * answer begins, then the final; an empty cache answers the final only. Under
+ * the session's replay-reply-shape policy segmented, each frame is answered as
+ * the pieces of a segment profile, every frame under the next transfer number.
+ * Under replay-serve-holds-sends on, a put while an answer is served is held:
+ * a periodic one as its instance's latest, an event in a queue of
+ * max(1, depth/2) that gives up its oldest; they go out once the last answer
+ * is over, oldest first, before any later put.
+ *
+ * THE SUBSCRIBER subscribes to the key, watches the session's peers for a
+ * queryable declared on the suffixed key, and asks each such publisher once,
+ * as it appears (addressed to it under the targeted-query policy, otherwise of
+ * every node answering the key), at most max_in_flight at once. The replies
+ * enter the receive path of the live samples: one receiving judge, which the
+ * subscriber takes, judges both, and a reply that repeats the judge's baseline
+ * frame, or is behind it by less than depth, is dropped. A round ends when
+ * every query ended, or is abandoned when the progress deadline (from the last
+ * reply) or the round deadline passes. Under replay-live-before-answer
+ * hold-back, the live samples that arrive before the first round is over are
+ * held in the program's store and handed on after its replies; under deliver,
+ * as they arrive. A publisher whose queryable a link held before the
+ * subscriber was made is asked all the same: the declaration watch tells
+ * what each peer holds first.
+ *
+ * TIME is milliseconds: the program's own for a publisher's frames (it orders
+ * an answer), and for a subscriber its clock in 32 bits that wrap, given in
+ * the options, or the library's monotonic clock when it gives none; the
+ * deadlines are judged by wz_ext_replay_subscriber_poll.
+ *
+ * THREADS. Each door runs under the object's lock. A subscriber's callback
+ * runs inside that lock, one sample at a time in the order the judge saw them,
+ * on the thread the session hands the sample to or the one that polls, so it
+ * must not call a door of its own subscriber. Keep the session (and a
+ * publisher's publisher) until the object is dropped. */
+
+#define WZ_EXT_REPLAY_SEND_PERIODIC 0
+#define WZ_EXT_REPLAY_SEND_EVENT 1
+
+/* What a put did. */
+#define WZ_EXT_REPLAY_SENT 0
+#define WZ_EXT_REPLAY_HELD 1
+#define WZ_EXT_REPLAY_HELD_REPLACED 2      /* the instance's earlier held frame
+                                              will not go out */
+#define WZ_EXT_REPLAY_DEFERRED 3
+#define WZ_EXT_REPLAY_DEFERRED_OVERWROTE 4 /* the queue gave up its oldest */
+
+/* Where a publisher's cache stands. */
+#define WZ_EXT_REPLAY_SERVING_IDLE 0
+#define WZ_EXT_REPLAY_SERVING_ANSWERING 1
+#define WZ_EXT_REPLAY_SERVING_RELEASING 2
+#define WZ_EXT_REPLAY_NO_CACHE 255
+
+/* Where a subscriber's round stands. */
+#define WZ_EXT_REPLAY_ROUND_IDLE 0
+#define WZ_EXT_REPLAY_ROUND_ASKING 1
+#define WZ_EXT_REPLAY_ROUND_ANSWERING 2
+#define WZ_EXT_REPLAY_ROUND_ABANDONED 3
+#define WZ_EXT_REPLAY_ROUND_LIVE 4
+#define WZ_EXT_REPLAY_NO_SUBSCRIBER 255
+
+typedef struct wz_ext_replay_shape_t {
+  size_t frame_max;   /* the longest frame kept, at least 1 */
+  uint32_t depth;     /* frames per instance, 1 to REPLAY_DEPTH_MAX */
+  uint32_t instances; /* at least 1 */
+} wz_ext_replay_shape_t;
+
+typedef struct wz_ext_replay_publisher_counts_t {
+  uint64_t recorded;
+  uint64_t deferred_overwritten;
+  uint64_t periodic_replaced;
+  uint64_t answers;
+} wz_ext_replay_publisher_counts_t;
+
+/* Under segmented: the segment profile and the program's values of its
+ * fields (JSON, BORROWED for the call), the first transfer number and the
+ * size of a piece's chunk. Not read under frame-per-sample. */
+typedef struct wz_ext_replay_serve_options_t {
+  const char *segment_profile;
+  const char *segment_values;
+  uint64_t first_transfer;
+  size_t chunk_bytes;
+} wz_ext_replay_serve_options_t;
+
+typedef struct wz_ext_owned_replay_publisher_t {
+  void *_handle;
+} wz_ext_owned_replay_publisher_t;
+typedef struct wz_ext_loaned_replay_publisher_t {
+  void *_handle;
+} wz_ext_loaned_replay_publisher_t;
+typedef struct wz_ext_moved_replay_publisher_t {
+  wz_ext_owned_replay_publisher_t _this;
+} wz_ext_moved_replay_publisher_t;
+
+/* The storage a cache of shape takes; 0 for a NULL shape, one with no depth,
+ * instance or frame room, or one whose size overflows. */
+size_t wz_ext_replay_publisher_storage_size(const wz_ext_replay_shape_t *shape);
+
+/* A cache of shape over storage, on session (whose policies it reads once),
+ * putting the message on publisher. this_ holds the null state on every
+ * error; refusal may be NULL. Z_OK; Z_ERR_NULL for a NULL argument;
+ * Z_ERR_SESSION_CLOSED; _Z_ERR_CONFIG_INVALID_VALUE (-89) for a shape out of
+ * range or storage too short, refusal saying why. */
+z_result_t wz_ext_replay_publisher_new(wz_ext_owned_replay_publisher_t *this_,
+                                       const z_loaned_session_t *session,
+                                       const z_loaned_publisher_t *publisher,
+                                       uint8_t *storage, size_t storage_len,
+                                       const wz_ext_replay_shape_t *shape,
+                                       z_owned_string_t *refusal);
+
+/* Record a frame sent at time_ms on instance, without putting it. Z_OK;
+ * Z_EINVAL (-75) for no such instance or a frame past frame_max (nothing
+ * recorded); Z_ERR_NULL. */
+z_result_t wz_ext_replay_publisher_record(
+    const wz_ext_loaned_replay_publisher_t *this_, size_t instance,
+    uint64_t time_ms, const uint8_t *frame, size_t len);
+
+/* Record a frame and put it, or hold it while an answer is served under
+ * replay-serve-holds-sends; dispatch (may be NULL) says which. Under
+ * segmented the frame goes out as the pieces of the serve door's profile, so
+ * such a cache puts nothing before it serves. Z_OK when put or held; the
+ * put's code when it failed (the frame is recorded); Z_EINVAL for no such
+ * instance, a frame past frame_max, an unknown kind, or a segmented cache that
+ * does not serve yet (nothing recorded); Z_ERR_NULL. */
+z_result_t wz_ext_replay_publisher_put(
+    const wz_ext_loaned_replay_publisher_t *this_, size_t instance,
+    uint64_t time_ms, const uint8_t *frame, size_t len, uint8_t kind,
+    uint8_t *dispatch);
+
+/* No segment profile, chunks of 0 bytes. */
+void wz_ext_replay_serve_options_default(wz_ext_replay_serve_options_t *this_);
+
+/* Declare the cache's queryable on keyexpr followed by suffix. options may be
+ * NULL under frame-per-sample. Z_OK; Z_ERR_NULL; Z_EINVAL for text that is not
+ * UTF-8, a cache that serves already, or a chunk of 0 under segmented;
+ * Z_ERR_INVALID for a suffixed key that is no key expression;
+ * _Z_ERR_CONFIG_INVALID_VALUE for a segment profile or values refused;
+ * otherwise what z_declare_queryable answers. */
+z_result_t wz_ext_replay_publisher_serve(
+    const wz_ext_loaned_replay_publisher_t *this_,
+    const z_loaned_keyexpr_t *keyexpr, const char *suffix,
+    const wz_ext_replay_serve_options_t *options, z_owned_string_t *refusal);
+
+/* WZ_EXT_REPLAY_SERVING_*, or WZ_EXT_REPLAY_NO_CACHE. */
+uint8_t wz_ext_replay_publisher_phase(
+    const wz_ext_loaned_replay_publisher_t *this_);
+z_result_t wz_ext_replay_publisher_counts(
+    const wz_ext_loaned_replay_publisher_t *this_,
+    wz_ext_replay_publisher_counts_t *out);
+
+const wz_ext_loaned_replay_publisher_t *wz_ext_replay_publisher_loan(
+    const wz_ext_owned_replay_publisher_t *this_);
+wz_ext_moved_replay_publisher_t *wz_ext_replay_publisher_move(
+    wz_ext_owned_replay_publisher_t *this_);
+/* Undeclares the queryable; the storage is the program's again on return. */
+void wz_ext_replay_publisher_drop(wz_ext_moved_replay_publisher_t *this_);
+void wz_ext_internal_replay_publisher_null(
+    wz_ext_owned_replay_publisher_t *this_);
+bool wz_ext_internal_replay_publisher_check(
+    const wz_ext_owned_replay_publisher_t *this_);
+
+/* One row of a subscriber's table of publishers. */
+typedef struct wz_ext_replay_publisher_slot_t {
+  uint64_t _opaque[4];
+} wz_ext_replay_publisher_slot_t;
+
+/* The program's clock: writes the milliseconds of a monotonic source and
+ * returns 0, or returns anything else when it cannot say what time it is. */
+typedef int8_t wz_ext_replay_clock_fn(void *context, uint32_t *now_ms);
+
+/* One sample handed to the program: 120 bytes on a 64-bit target. It and the
+ * frame it points to are valid only for the call. */
+typedef struct wz_ext_replay_sample_t {
+  const uint8_t *frame;
+  size_t len;
+  wz_ext_e2e_verdict_t verdict; /* zero when judged is 0 */
+  uint8_t from_replay;          /* 1 for a reply, 0 for a live sample */
+  uint8_t judged;               /* 0 when stream is none the receiver has */
+  uint8_t zid_len;              /* the replying publisher; 0 when live */
+  uint8_t reserved;
+  uint8_t zid[16];
+} wz_ext_replay_sample_t;
+
+typedef void wz_ext_replay_deliver_fn(void *context,
+                                      const wz_ext_replay_sample_t *sample);
+typedef void wz_ext_replay_drop_fn(void *context);
+
+typedef struct wz_ext_replay_subscriber_options_t {
+  wz_ext_replay_publisher_slot_t *slots; /* at least one row */
+  size_t slot_count;
+  uint8_t *held;    /* under hold-back: cells of 4 + held_cell bytes */
+  size_t held_len;
+  size_t held_cell; /* the longest live sample held */
+  size_t depth;     /* the publishers' ring depth, at least 1 */
+  size_t max_in_flight; /* 0: no bound of its own; never above
+                           QUERIER_MAX_PENDING_QUERIES (0: none) */
+  size_t stream;    /* the receiver's stream (0 under sender keying) */
+  uint32_t progress_ms; /* 1 to 2147483647, no default */
+  uint32_t round_ms;    /* 1 to 2147483647, no default */
+  wz_ext_replay_clock_fn *clock; /* NULL: the library's clock */
+  void *clock_context;
+  const char *segment_profile; /* under segmented: the pieces' profile (JSON,
+                                  BORROWED); not read otherwise */
+} wz_ext_replay_subscriber_options_t;
+
+typedef struct wz_ext_replay_subscriber_counts_t {
+  uint64_t late_replies;
+  uint64_t unknown_replies;
+  uint64_t duplicates;
+  uint64_t stale;
+  uint64_t held;
+  uint64_t table_full;
+  uint64_t abandoned;
+  uint64_t frames_given_up; /* segmented: a piece never came */
+  uint64_t unjoined_pieces; /* segmented: not a piece, bad CRC, no place */
+} wz_ext_replay_subscriber_counts_t;
+
+typedef struct wz_ext_owned_replay_subscriber_t {
+  void *_handle;
+} wz_ext_owned_replay_subscriber_t;
+typedef struct wz_ext_loaned_replay_subscriber_t {
+  void *_handle;
+} wz_ext_loaned_replay_subscriber_t;
+typedef struct wz_ext_moved_replay_subscriber_t {
+  wz_ext_owned_replay_subscriber_t _this;
+} wz_ext_moved_replay_subscriber_t;
+
+/* No storage, a depth of 1, the querier's bound, stream 0, the library's
+ * clock, and no deadlines. */
+void wz_ext_replay_subscriber_options_default(
+    wz_ext_replay_subscriber_options_t *this_);
+
+/* A replay subscriber of keyexpr on session, watching for keyexpr followed by
+ * suffix, judging by receiver (taken), handing each sample to deliver. The
+ * receiver and context are taken on every path: on a refusal the receiver is
+ * dropped and drop(context) runs before this returns. Z_OK; Z_ERR_NULL;
+ * Z_ERR_SESSION_CLOSED; Z_EINVAL (-75) for an option out of range;
+ * Z_ERR_INVALID for a suffixed key that is no key expression; under
+ * replay-reply-shape segmented, Z_ERR_NULL for no segment_profile and
+ * _Z_ERR_CONFIG_INVALID_VALUE for one refused; otherwise what declaring the
+ * subscription or the watch answers. Under segmented every payload, live or
+ * replied, is joined from its pieces before it is judged; a frame with a
+ * piece missing is given up and counted. */
+z_result_t wz_ext_replay_subscriber_new(
+    wz_ext_owned_replay_subscriber_t *this_, const z_loaned_session_t *session,
+    const z_loaned_keyexpr_t *keyexpr, const char *suffix,
+    wz_ext_moved_e2e_receiver_t *receiver,
+    const wz_ext_replay_subscriber_options_t *options,
+    wz_ext_replay_deliver_fn *deliver, wz_ext_replay_drop_fn *drop,
+    void *context);
+
+/* Judge the deadlines now and hand on what an ended round released. */
+z_result_t wz_ext_replay_subscriber_poll(
+    const wz_ext_loaned_replay_subscriber_t *this_);
+/* WZ_EXT_REPLAY_ROUND_*, or WZ_EXT_REPLAY_NO_SUBSCRIBER. */
+uint8_t wz_ext_replay_subscriber_phase(
+    const wz_ext_loaned_replay_subscriber_t *this_);
+z_result_t wz_ext_replay_subscriber_counts(
+    const wz_ext_loaned_replay_subscriber_t *this_,
+    wz_ext_replay_subscriber_counts_t *out);
+
+const wz_ext_loaned_replay_subscriber_t *wz_ext_replay_subscriber_loan(
+    const wz_ext_owned_replay_subscriber_t *this_);
+wz_ext_moved_replay_subscriber_t *wz_ext_replay_subscriber_move(
+    wz_ext_owned_replay_subscriber_t *this_);
+/* Nothing is handed on after this returns; drop(context) has run. */
+void wz_ext_replay_subscriber_drop(wz_ext_moved_replay_subscriber_t *this_);
+void wz_ext_internal_replay_subscriber_null(
+    wz_ext_owned_replay_subscriber_t *this_);
+bool wz_ext_internal_replay_subscriber_check(
+    const wz_ext_owned_replay_subscriber_t *this_);
+
 /* ---- Declarations told again ------------------------------------------- */
 
 /* Tell the peer of every link of the session that is up everything the
@@ -1059,6 +1512,43 @@ z_result_t wz_ext_config_key_ids(z_loaned_config_t *config,
 z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
                                            const char *locator,
                                            const char *form);
+
+/* ================================================ the periodic run API
+ *
+ * No door of wz's own: this section states the order in which a program that
+ * runs its own scheduler calls zenoh-pico's run API on the pico C ABI, and
+ * what each call does on each engine (docs/periodic-run-api.md has the table;
+ * crates/wz-capi-pico/examples/c/periodic.c runs it).
+ *
+ *   1 open       z_open. Multi-threaded arm: the read task starts with the
+ *                session unless the open options say not to.
+ *   2 tasks      Multi-threaded: zp_start_read_task if the open did not; a
+ *                program may open without it, declare, then start it.
+ *                zp_start_lease_task / zp_stop_lease_task answer Z_OK and do
+ *                nothing, as in zenoh-pico 1.10. Single-threaded: no task.
+ *   3 declare    A subscriber the program reads on its own thread hands its
+ *                samples to a ring or fifo channel; the program pulls with
+ *                the channel's try_recv until Z_CHANNEL_NODATA.
+ *   4 each cycle zp_batch_start, the cycle's puts, zp_batch_flush: the puts
+ *                leave together at the flush, and the window stays open.
+ *                Single-threaded: then zp_spin_once. Then pull the channels.
+ *                Then wait for the cycle's absolute deadline (z_clock_now,
+ *                z_clock_advance_ms) with z_condvar_wait_until or a sleep.
+ *   5 end        zp_batch_stop, the undeclarations, zp_stop_read_task if
+ *                wanted, z_close.
+ *
+ * THE TWO ENGINES. The cooperative engine does the single-threaded arm's work
+ * in the calls: zp_read and zp_spin_once read and run the callbacks on the
+ * caller's thread, zp_send_keep_alive sends one. The tokio engine reads,
+ * keeps the lease and runs the callbacks on a thread of its own in either arm:
+ * its zp_read, zp_send_keep_alive and zp_spin_once answer for a live session
+ * and do no work, and its zp_send_join asks a joined group for a Join. A
+ * program built for the single-threaded arm's promise that callbacks run only
+ * inside its own calls therefore locks what its callbacks share, or reads
+ * through channels, when its library runs the tokio engine (on Windows, the
+ * only engine). In the multi-threaded arm neither engine, nor zenoh-pico, has
+ * a call that steps the session on the program's thread: the program sends
+ * and pulls, the read task does the rest. */
 
 /* ================================================ the program's transport
  *
@@ -1266,5 +1756,168 @@ wz_ext_moved_transport_t *wz_ext_transport_move(
 void wz_ext_transport_drop(wz_ext_moved_transport_t *this_);
 void wz_ext_internal_transport_null(wz_ext_owned_transport_t *this_);
 bool wz_ext_internal_transport_check(const wz_ext_owned_transport_t *this_);
+
+/* ================================================ the message catalog
+ *
+ * A deployment's messages, declared once as data: one JSON5 text names the
+ * nodes, the e2e and segment profiles, and for each message its key
+ * expression, its id, the nodes that publish and subscribe to it, its period
+ * (none for an event message), its protection (a profile and the header
+ * values), the senders a receiver binds its slots to, its instance key, its
+ * replay depth, its supervision and its segment profile. The library reads
+ * and judges it once; the program then asks, per message, for its entry and
+ * for the pieces the other doors take, so one library serves every deployment
+ * whose catalog it is given. The shape is deploy/message-catalog.schema.json.
+ * Part of the unstable surface, and present only in a build with the
+ * message-catalog capability; the doors that make a sender, a receiver or
+ * supervision rows also need e2e-sender, e2e-receiver or e2e-supervision.
+ *
+ * A message and a node are named by their index: the place of the message in
+ * the catalog's messages and of the node in its nodes. A catalog does not
+ * change once read, so several threads may read one at once; a key expression
+ * an entry points at lives as long as the catalog. */
+
+#define WZ_EXT_MESSAGE_PUBLISHES 1  /* the node publishes the message */
+#define WZ_EXT_MESSAGE_SUBSCRIBES 2 /* the node subscribes to it */
+
+/* The bits of has: what an entry states. */
+#define WZ_EXT_MESSAGE_HAS_PERIOD 1
+#define WZ_EXT_MESSAGE_HAS_PROTECTION 2
+#define WZ_EXT_MESSAGE_HAS_SENDERS 4
+#define WZ_EXT_MESSAGE_HAS_INSTANCE_KEY 8
+#define WZ_EXT_MESSAGE_HAS_REPLAY 16
+#define WZ_EXT_MESSAGE_HAS_SUPERVISION 32
+#define WZ_EXT_MESSAGE_HAS_SEGMENT_PROFILE 64
+
+typedef struct wz_ext_owned_message_catalog_t {
+  void *_handle;
+} wz_ext_owned_message_catalog_t;
+typedef struct wz_ext_loaned_message_catalog_t {
+  void *_handle;
+} wz_ext_loaned_message_catalog_t;
+typedef struct wz_ext_moved_message_catalog_t {
+  wz_ext_owned_message_catalog_t _this;
+} wz_ext_moved_message_catalog_t;
+
+/* One message's entry. A number whose has bit is clear is 0. */
+typedef struct wz_ext_message_entry_t {
+  const char *key_expr;   /* the literal key it is put on, valid while the
+                             catalog lives */
+  uint32_t id;
+  uint32_t period_ms;     /* 0 for an event message */
+  uint32_t replay_depth;  /* 0 for no replay */
+  uint16_t supervision_factor; /* 0 when its reception is not supervised */
+  uint8_t has;            /* WZ_EXT_MESSAGE_HAS_* */
+  uint8_t supervision_awaited; /* 1 when a stream can be lost before its
+                                  first reception */
+  uint32_t senders;       /* how many senders its receivers bind slots to */
+  uint32_t reserved;
+} wz_ext_message_entry_t;
+
+/* Read and judge the catalog text, against the build's
+ * MESSAGE_CATALOG_ENTRIES, REPLAY_DEPTH_MAX and E2E_SENDER_SLOTS. this_ holds
+ * the null state on every error; refusal may be NULL and, on
+ * _Z_ERR_CONFIG_INVALID_VALUE (-89), holds why: the refusal's word (the
+ * schema's x-wz-refusals, such as duplicate_id or replay_depth_out_of_range),
+ * the JSON pointer to the place, and a sentence.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_ or text; Z_EINVAL (-75) for text that is
+ * not UTF-8; _Z_ERR_CONFIG_INVALID_VALUE for a catalog refused. */
+z_result_t wz_ext_message_catalog_new(wz_ext_owned_message_catalog_t *this_,
+                                      const char *text,
+                                      z_owned_string_t *refusal);
+
+/* How many messages it declares; 0 for a NULL catalog. */
+size_t wz_ext_message_catalog_len(const wz_ext_loaned_message_catalog_t *this_);
+
+/* The index of the message put on key_expr, of the message of id, and of the
+ * node called name. Z_OK; Z_ERR_INVALID (-1) when there is none; Z_EINVAL for
+ * text that is not UTF-8; Z_ERR_NULL for a NULL argument. */
+z_result_t wz_ext_message_catalog_find(
+    const wz_ext_loaned_message_catalog_t *this_, const char *key_expr,
+    size_t *out_index);
+z_result_t wz_ext_message_catalog_find_id(
+    const wz_ext_loaned_message_catalog_t *this_, uint32_t id,
+    size_t *out_index);
+z_result_t wz_ext_message_catalog_node(
+    const wz_ext_loaned_message_catalog_t *this_, const char *name,
+    size_t *out_node);
+
+/* The entry of message index, written to out (zeroed on every error). Z_OK;
+ * Z_ERR_INVALID for no such message; Z_ERR_NULL for a NULL argument. */
+z_result_t wz_ext_message_catalog_entry(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index,
+    wz_ext_message_entry_t *out);
+
+/* Whether node publishes or subscribes to message index: the
+ * WZ_EXT_MESSAGE_PUBLISHES and _SUBSCRIBES bits, 0 for neither or no such
+ * message or node. */
+uint8_t wz_ext_message_catalog_direction(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node);
+
+/* The start delay every reception supervisor of the deployment is made with,
+ * in milliseconds; 0 when the catalog states none. */
+uint32_t wz_ext_message_catalog_supervision_start_delay(
+    const wz_ext_loaned_message_catalog_t *this_);
+
+/* With e2e-sender: the sender node protects message index with, from the
+ * message's profile and header values and the node's address, made as
+ * options says (NULL: the defaults); the handle wz_ext_e2e_sender_new makes.
+ * out holds the null state on every error; refusal may be NULL.
+ *
+ * Z_OK; Z_ERR_INVALID for no such message or node; Z_EINVAL for an unknown
+ * rollover; _Z_ERR_CONFIG_INVALID_VALUE when the node does not publish the
+ * message, the message is not protected or an option is refused, refusal
+ * saying why; Z_ERR_NULL for a NULL catalog or out. */
+z_result_t wz_ext_message_catalog_e2e_sender_new(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    const wz_ext_e2e_sender_options_t *options, wz_ext_owned_e2e_sender_t *out,
+    z_owned_string_t *refusal);
+
+/* With e2e-receiver: the receiver node judges message index with, from the
+ * message's profile and header values, with one slot per sender the entry
+ * lists, bound to its identity, or one stream when it lists none; the handle
+ * wz_ext_e2e_receiver_new makes. out holds the null state on every error.
+ *
+ * Z_OK; Z_ERR_INVALID for no such message or node; WZ_EXT_ERR_UNSUPPORTED for
+ * a message that lists senders in a build without e2e-sender-demux;
+ * _Z_ERR_CONFIG_INVALID_VALUE when the node does not subscribe to the message
+ * or it is not protected, refusal saying why; Z_ERR_NULL for a NULL catalog
+ * or out. */
+z_result_t wz_ext_message_catalog_e2e_receiver_new(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    wz_ext_owned_e2e_receiver_t *out, z_owned_string_t *refusal);
+
+/* With e2e-supervision: how many rows a reception supervisor of node takes
+ * for message index (one per sender the entry lists, else one), and the door
+ * that adds them to supervisor: the message's period and factor, each row's
+ * sender the index of the node that sends the stream (the number
+ * wz_ext_stream_supervisor_set_sender_present takes). The stream numbers are
+ * written to out_streams in the order of the receiver's slots, and how many
+ * to written.
+ *
+ * Z_OK; Z_ERR_OVERFLOW (-74) when capacity is less than the rows, before any
+ * is added; Z_ERR_INVALID for no such message or node;
+ * _Z_ERR_CONFIG_INVALID_VALUE when the node does not subscribe to the message
+ * or its reception is not supervised; the code of
+ * wz_ext_stream_supervisor_add when the supervisor refuses a row, the rows
+ * before it added and counted in written; Z_ERR_NULL for a NULL argument. */
+z_result_t wz_ext_message_catalog_supervision_rows(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    size_t *out_rows, z_owned_string_t *refusal);
+z_result_t wz_ext_message_catalog_supervise(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    const wz_ext_loaned_stream_supervisor_t *supervisor, uint32_t *out_streams,
+    size_t capacity, size_t *written, z_owned_string_t *refusal);
+
+const wz_ext_loaned_message_catalog_t *wz_ext_message_catalog_loan(
+    const wz_ext_owned_message_catalog_t *this_);
+wz_ext_moved_message_catalog_t *wz_ext_message_catalog_move(
+    wz_ext_owned_message_catalog_t *this_);
+void wz_ext_message_catalog_drop(wz_ext_moved_message_catalog_t *this_);
+void wz_ext_internal_message_catalog_null(
+    wz_ext_owned_message_catalog_t *this_);
+bool wz_ext_internal_message_catalog_check(
+    const wz_ext_owned_message_catalog_t *this_);
 
 #endif /* WZ_EXT_H */

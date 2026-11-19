@@ -500,9 +500,39 @@ pub const EVENT_RECORD_ARGS: usize = generated::EVENT_RECORD_ARGS;
 pub const CLOCK_SOURCES: usize = generated::CLOCK_SOURCES;
 
 /// How many senders one receiving judge of end-to-end protected frames keeps a counter for, when
-/// `e2e-sender-demux` is on (`wz_app_frame::e2e_receiver`). The program sizes each judge's slots
+/// `e2e-sender-demux` is on (the application frame plane's receiver reads it). The program sizes each judge's slots
 /// when it makes it, at most this many. At least `1`.
 pub const E2E_SENDER_SLOTS: usize = generated::E2E_SENDER_SLOTS;
+
+/// The deepest replay one message, or one instance of it, keeps: how many of the frames it last
+/// sent a publisher holds for a subscriber that arrives later. Each message states its own depth,
+/// from `1` to this, and the message catalog's reader refuses one above
+/// it. At least `1`.
+pub const REPLAY_DEPTH_MAX: usize = generated::REPLAY_DEPTH_MAX;
+
+const _: () = assert!(
+    REPLAY_DEPTH_MAX >= 1,
+    "a message that keeps a replay keeps at least one frame"
+);
+
+/// How many messages one message catalog declares, when the
+/// `message-catalog` capability is on: a catalog with more is refused when it is read, and the
+/// generator of a fixed-memory image refuses to write its tables. At least `1`.
+pub const MESSAGE_CATALOG_ENTRIES: usize = generated::MESSAGE_CATALOG_ENTRIES;
+
+const _: () = assert!(
+    MESSAGE_CATALOG_ENTRIES >= 1,
+    "a message catalog holds at least one message"
+);
+
+/// How many payload fields one message's instance key names, when `instance-key` is on. A keyer
+/// whose description names more is refused. At least `1`.
+pub const INSTANCE_KEY_FIELDS: usize = generated::INSTANCE_KEY_FIELDS;
+
+/// How many instances one message's instance key tells apart, the product of its value lists'
+/// lengths, when `instance-key` is on. It bounds the streams and
+/// the last values kept for the message; a keyer whose lists make more is refused. At least `1`.
+pub const INSTANCES_PER_MESSAGE: usize = generated::INSTANCES_PER_MESSAGE;
 
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
 /// the hybrid logical clock (`hlc::HlcCore`) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which

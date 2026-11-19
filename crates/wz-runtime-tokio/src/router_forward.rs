@@ -2889,6 +2889,10 @@ pub enum LocalFaceEvent {
     /// was never told of a token that it is gone, by a retraction that names the key and no id
     /// (upstream's `maybe_unpropagate_token`, its second arm): `keyexpr` is then the key.
     TokenDown { id: u64, keyexpr: Option<String> },
+    /// The answers to the interest the face asked under `interest` are all told: the router
+    /// relayed a gateway's end of a current interest the face asked beyond the node
+    /// ([`RouterForwarder::ask_routers_current_tokens`]), or ended it unanswered.
+    InterestFinal { interest: u64 },
     /// A reply to a query the face asked, carrying the request id the face gave it.
     Reply(Box<ResponseOwned>),
     /// A reply to a query the face asked whose value went through shared memory, read already by
@@ -2938,7 +2942,7 @@ pub fn local_face_aliases() -> hashbrown::HashMap<u64, String> {
 }
 
 /// The event a message for the `Local` face is, or `None` for one the face does not act on (a
-/// final of an interest, a declaration of another plane).
+/// declaration of another plane, a final that names no interest).
 fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
     match msg {
         NetworkMessage::Response(response) => Some(LocalFaceEvent::Reply(response)),
@@ -2963,6 +2967,9 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
                     &hashbrown::HashMap::new(),
                 ),
             }),
+            DeclareOwnedVariant::CodecZenohDeclFinal(_) => declare
+                .interest_id
+                .map(|interest| LocalFaceEvent::InterestFinal { interest }),
             _ => None,
         },
         _ => None,
@@ -4425,6 +4432,8 @@ router_entry_points! { on_tables:
     ) -> bool;
     #[cfg(feature = "routing-token-tables")]
     fn local_tokens_alive(&self, keyexpr: &str) -> Vec<String>;
+    #[cfg(feature = "routing-token-tables")]
+    fn ask_routers_current_tokens(&self, interest_id: u64, keyexpr: &str) -> usize;
     fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut));
     fn release_held(&self, record: &HeldRecord);
     fn north_net_node_count(&self) -> usize;
@@ -8298,6 +8307,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Whether a token interest of `face` is answered with the tokens the router knows of at the
     /// time. A client's is; so is a peer's of the peer hat, which asks as any session does (a
     /// liveliness get, a subscriber with its history) and which the pin's peer hat answers.
+    /// Ask a router above the node for the liveliness tokens alive on `keyexpr`, for the `Local`
+    /// face under `interest_id`, as a liveliness get of the node's own session: the answers and
+    /// then their end reach the face ([`LocalFaceEvent::TokenUp`] under that interest,
+    /// [`LocalFaceEvent::InterestFinal`]). How many routers were asked: none for a node that asks
+    /// no router, or one built without the interest broker, whose get reads its own tables alone.
+    /// `keyexpr` is the session's: under its namespace, if it has one, the router names it.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn ask_routers_current_tokens(&self, interest_id: u64, keyexpr: &str) -> usize {
+        #[cfg(feature = "routing-interest-pending-gc")]
+        {
+            let target = self.fwd.wire_key(keyexpr);
+            self.ask_gateways_current_tokens(interest_id, &target)
+        }
+        #[cfg(not(feature = "routing-interest-pending-gc"))]
+        {
+            let _ = (interest_id, keyexpr);
+            0
+        }
+    }
+
     #[cfg(feature = "routing-token-tables")]
     fn asks_for_tokens(&self, face: FaceId) -> bool {
         self.tables.faces.get(&face).is_some_and(|s| {
