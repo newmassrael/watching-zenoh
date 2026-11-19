@@ -2373,6 +2373,7 @@ fn push_stream_flow<W: DocOut>(
         (flow.flow.link() == crate::link::LinkKind::Tcp).then(|| flow.ingest.tcp_facts()),
         out,
     );
+    write_handshake(Handshakes::of_stream(flow), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -2757,6 +2758,7 @@ fn push_datagram_flow<W: DocOut>(
         (flow.flow.link() == crate::link::LinkKind::Tcp).then(|| flow.ingest.tcp_facts()),
         out,
     );
+    write_handshake(Handshakes::of_datagram(flow), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -5894,6 +5896,185 @@ fn write_tcp<W: DocOut>(facts: Option<&crate::tcp_facts::TcpFacts>, out: &mut W)
         out.close_map();
     }
     out.close_array();
+    out.close_map();
+}
+
+/// What a flow's handshake said in the clear, for each layer it carried.
+#[derive(Clone, Copy, Default)]
+struct Handshakes<'f> {
+    tls: Option<&'f crate::tls_handshake::TlsHandshake>,
+    websocket: Option<[&'f crate::ws::WsDeframer; 2]>,
+    quic: Option<&'f crate::quic::QuicCensus>,
+}
+
+impl<'f> Handshakes<'f> {
+    /// A stream flow's: its TLS records or its WebSocket opening.
+    fn of_stream(flow: &'f crate::FlowDissection) -> Self {
+        match flow.framing() {
+            crate::Framing::Encrypted(state) => Handshakes {
+                tls: Some(state.handshake()),
+                ..Self::default()
+            },
+            crate::Framing::WebSocket { a, b } => Handshakes {
+                websocket: Some([a, b]),
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+
+    /// A datagram flow's: its QUIC packets.
+    fn of_datagram(flow: &'f crate::DatagramDissection) -> Self {
+        Handshakes {
+            quic: flow.quic.as_ref(),
+            ..Self::default()
+        }
+    }
+}
+
+/// The flow's `handshake` member (revision 79), `null` for a flow that carried
+/// no TLS, WebSocket or QUIC.
+///
+/// `tls`: `sni` the server name the ClientHello asked for; `version` the
+/// version number the ServerHello chose (771 is TLS 1.2, 772 TLS 1.3);
+/// `client` the direction of the ClientHello; `completed` `yes` when
+/// application data flowed both ways after it, `no` when a fatal alert was
+/// read, `undecided` otherwise; `alerts` those sent in the clear, before their
+/// sender changed cipher spec, each with its `direction`, `level` (1 warning,
+/// 2 fatal) and `description` (the alert number: 42 `bad_certificate`, 48
+/// `unknown_ca`), the first 8 and `alerts_more` past them; `certificate` the
+/// server's first, `subject`, `issuer`, `not_before` and `not_after`, when it
+/// was sent in the clear (TLS 1.2 and below), `null` otherwise.
+///
+/// `websocket`: per direction, `opening_seen` whether its HTTP opening was in
+/// the capture, its `status` (a response's code, `null` for a request) and
+/// `subprotocols` (what a request offered or a response chose), and its Ping
+/// and Pong frames as `controls`, each its `control`, `packet` and `at_ns`, the
+/// first 64 and `more` past them.
+///
+/// `quic`: `client` the direction of the first Initial, `answered` whether the
+/// other direction sent a packet after it, `initial_resends` the client's
+/// Initials before the answer (or in all, unanswered) less the first.
+fn write_handshake<W: DocOut>(found: Handshakes<'_>, out: &mut W) {
+    out.key("handshake");
+    if found.tls.is_none() && found.websocket.is_none() && found.quic.is_none() {
+        out.null();
+        return;
+    }
+    let side = |d: Option<usize>, out: &mut W| match d {
+        Some(0) => out.text(dir_name(Direction::A)),
+        Some(_) => out.text(dir_name(Direction::B)),
+        None => out.null(),
+    };
+    out.open_map();
+    out.key("tls");
+    match found.tls {
+        None => out.null(),
+        Some(tls) => {
+            out.open_map();
+            out.key("sni");
+            out.opt_text(tls.sni.as_deref());
+            out.key("version");
+            out.opt_uint(tls.version.map(u64::from));
+            out.key("client");
+            side(tls.client, out);
+            out.key("completed");
+            out.text(tls.completion().name());
+            out.key("alerts");
+            out.open_array();
+            for alert in &tls.alerts {
+                out.open_map();
+                out.key("direction");
+                side(Some(alert.direction), out);
+                out.key("level");
+                out.uint(u64::from(alert.level));
+                out.key("description");
+                out.uint(u64::from(alert.description));
+                out.close_map();
+            }
+            out.close_array();
+            out.key("alerts_more");
+            out.uint(tls.alerts_more);
+            out.key("certificate");
+            match &tls.certificate {
+                None => out.null(),
+                Some(cert) => {
+                    out.open_map();
+                    out.key("subject");
+                    out.text(&cert.subject);
+                    out.key("issuer");
+                    out.text(&cert.issuer);
+                    out.key("not_before");
+                    out.text(&cert.not_before);
+                    out.key("not_after");
+                    out.text(&cert.not_after);
+                    out.close_map();
+                }
+            }
+            out.close_map();
+        }
+    }
+    out.key("websocket");
+    match found.websocket {
+        None => out.null(),
+        Some(halves) => {
+            out.open_map();
+            out.key("halves");
+            out.open_array();
+            for (d, deframer) in halves.iter().enumerate() {
+                out.open_map();
+                out.key("direction");
+                side(Some(d), out);
+                let opening = deframer.opening();
+                out.key("opening_seen");
+                out.bool(opening.is_some());
+                out.key("status");
+                out.opt_uint(opening.and_then(|o| o.status).map(u64::from));
+                out.key("subprotocols");
+                out.open_array();
+                for protocol in opening.map(|o| o.subprotocols.as_slice()).unwrap_or(&[]) {
+                    out.text(protocol);
+                }
+                out.close_array();
+                let (frames, more) = deframer.pings_pongs();
+                out.key("controls");
+                out.open_array();
+                for frame in frames {
+                    out.open_map();
+                    out.key("control");
+                    out.text(if frame.ping { "ping" } else { "pong" });
+                    out.key("packet");
+                    out.opt_uint(frame.packet.map(|p| p as u64));
+                    out.key("at_ns");
+                    match frame.at_ns {
+                        Some(ns) => out.uint_exact(ns),
+                        None => out.null(),
+                    }
+                    out.close_map();
+                }
+                out.close_array();
+                out.key("more");
+                out.uint(more);
+                out.close_map();
+            }
+            out.close_array();
+            out.close_map();
+        }
+    }
+    out.key("quic");
+    match found.quic {
+        None => out.null(),
+        Some(quic) => {
+            out.open_map();
+            out.key("client");
+            side(quic.opener, out);
+            out.key("answered");
+            out.bool(quic.answered);
+            out.key("initial_resends");
+            out.uint(quic.initials_before_answer.saturating_sub(1) as u64);
+            out.close_map();
+        }
+    }
     out.close_map();
 }
 
@@ -9937,6 +10118,49 @@ mod tests {
                 arms.push(members(|out| write_tcp(Some(&facts), out)));
             }
         }
+        // Revision 79 — a flow's `handshake`: TLS with every word, WebSocket
+        // with a Ping and a Pong, QUIC answered and not, and `null`.
+        {
+            arms.push(members(|out| write_handshake(Handshakes::default(), out)));
+            for tls in crate::tls_handshake::tests::every_word() {
+                arms.push(members(|out| {
+                    write_handshake(
+                        Handshakes {
+                            tls: Some(&tls),
+                            ..Handshakes::default()
+                        },
+                        out,
+                    )
+                }));
+            }
+            let [client, server] = crate::ws::tests::a_subprotocol_mismatch();
+            arms.push(members(|out| {
+                write_handshake(
+                    Handshakes {
+                        websocket: Some([&client, &server]),
+                        ..Handshakes::default()
+                    },
+                    out,
+                )
+            }));
+            for opener in [0usize, 1] {
+                let quic = crate::quic::QuicCensus {
+                    opener: Some(opener),
+                    answered: opener == 1,
+                    initials_before_answer: 2,
+                    ..Default::default()
+                };
+                arms.push(members(|out| {
+                    write_handshake(
+                        Handshakes {
+                            quic: Some(&quic),
+                            ..Handshakes::default()
+                        },
+                        out,
+                    )
+                }));
+            }
+        }
         // Revision 77 — a pcapng capture's interfaces, which a classic pcap
         // fixture leaves an empty list.
         {
@@ -11863,7 +12087,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 108] = [
+        let live: [(&str, &str, Vec<&'static str>); 111] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11924,6 +12148,19 @@ mod tests {
                 "retransmit",
                 crate::tcp_facts::Retransmit::names(),
             ),
+            // A handshake's completion, the side that opened it, and a
+            // WebSocket control frame's kind (revision 79).
+            (
+                rev::FIELDS,
+                "completed",
+                crate::tls_handshake::Completion::names(),
+            ),
+            (
+                rev::FIELDS,
+                "client",
+                alloc::vec![dir_name(Direction::A), dir_name(Direction::B)],
+            ),
+            (rev::FIELDS, "control", alloc::vec!["ping", "pong"]),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the

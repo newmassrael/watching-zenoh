@@ -182,6 +182,17 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=78,
         ),
     ),
+    # Field document 79: the one capture instant of a flow's `handshake`, a
+    # WebSocket control frame's `at_ns`.
+    ("crates/wz-capture/src/fields_json.rs", "write_handshake"): (
+        Cell(
+            "fields",
+            "a handshake instant",
+            "the instants of a flow's `handshake`",
+            "the `handshake` instants are nanoseconds since 1970",
+            born=79,
+        ),
+    ),
     ("crates/wz-capture/src/fields_json.rs", "push_parameters"): (
         Cell("fields", "a context parameters entry's integer value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
     ),

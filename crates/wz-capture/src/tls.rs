@@ -1022,6 +1022,9 @@ pub const MAX_KEPT_RECORDS_PER_DIRECTION: usize = 4096;
 #[derive(Debug, Default)]
 pub struct TlsFlowState {
     pub(crate) per_direction: [RecordCensus; 2],
+    /// What the handshake said in the clear: server name, version, alerts,
+    /// certificate. See [`crate::tls_handshake`].
+    pub(crate) handshake: crate::tls_handshake::TlsHandshake,
     /// Bytes held for a direction whose last record was incomplete.
     pub(crate) pending: [Vec<u8>; 2],
     /// R311y660 (§1.2a) — the encrypted records this flow kept, per direction,
@@ -1255,7 +1258,9 @@ impl TlsFlowState {
         let run_base = self.stream_at[index];
         let mut kept = Vec::new();
         let mut walked = 0usize;
+        let handshake = &mut self.handshake;
         let Some(census) = walk_records(&run, &mut self.suite, &mut |record, content_type| {
+            handshake.observe(index, record);
             // Only the protected ones. A `ChangeCipherSpec` is plaintext and
             // consumes no sequence number, so keeping it would put every later
             // record one place too far along.
@@ -1339,6 +1344,11 @@ impl TlsFlowState {
         self.pending_gap_bytes[index] = self.pending_gap_bytes[index]
             .saturating_add(bytes_missing)
             .saturating_add(held as u64);
+    }
+
+    /// What the handshake said in the clear.
+    pub fn handshake(&self) -> &crate::tls_handshake::TlsHandshake {
+        &self.handshake
     }
 
     /// The per-direction census, `[A, B]`, with each direction's unwalked tail

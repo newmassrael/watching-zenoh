@@ -1275,7 +1275,10 @@
  * the session's ring); to the instants of a flow's `tcp` (`start_ns`,
  * `end_ns`, `last_ack_ns` and an event's `at_ns`, keys that exist from field
  * document 78 and take the rule from their first appearance: nanoseconds since
- * 1970 are past the line); to every integer of a
+ * 1970 are past the line); to the instants of a flow's `handshake` (a
+ * WebSocket control frame's `at_ns`, a key that exists there from field
+ * document 79 and takes the rule from its first appearance, for the same
+ * reason); to every integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1780,7 +1783,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":78,"key":"kind","values":[...],
+ *     {"name":"fields","revision":79,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1819,6 +1822,9 @@
  * @carries fields body passenger
  * @carries fields carried_state discriminant
  * @carries fields check passenger
+ * @carries fields client passenger
+ * @carries fields completed passenger
+ * @carries fields control passenger
  * @carries fields counter_reason passenger
  * @carries fields direction passenger
  * @carries fields displaced passenger
@@ -3188,6 +3194,57 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * @values fields unreachable
  * @values fields what
+ *
+ * WHAT A HANDSHAKE SAID (field-document revision 79, row_facts 19). Every flow
+ * object carries, after `tcp`, `handshake`: `null` for a flow that carried no
+ * TLS, WebSocket or QUIC, and otherwise an object whose three members are each
+ * `null` but the one the flow carried:
+ *
+ *   "handshake":{"tls":{"sni":"router.local","version":771,"client":"a",
+ *                       "completed":"no",
+ *                       "alerts":[{"direction":"a","level":2,
+ *                                  "description":48}],"alerts_more":0,
+ *                       "certificate":{"subject":"CN=router,O=Acme",
+ *                                      "issuer":"CN=Acme CA",
+ *                                      "not_before":"2026-01-01T00:00:00Z",
+ *                                      "not_after":"2027-01-01T00:00:00Z"}},
+ *                "websocket":null,"quic":null}
+ *
+ * TLS: `sni` the server name the ClientHello asked for; `version` the number
+ * the ServerHello chose (771 is TLS 1.2, 772 TLS 1.3, from its
+ * `supported_versions` when it carries one); `client` the direction of the
+ * ClientHello; `completed` `yes` when application data flowed both ways after
+ * the handshake, `no` when a fatal alert was read, `undecided` otherwise
+ * (and for a capture without the ServerHello). `alerts` each with the
+ * `direction` that sent it, its `level` (1 warning, 2 fatal) and its
+ * `description`, the alert number (RFC 8446 section 6: a client that does not
+ * trust the server's CA sends 48 `unknown_ca` or 42 `bad_certificate`); the
+ * first 8, `alerts_more` past them. `certificate` the server's first
+ * certificate: its `subject` and `issuer` as `KEY=value` pairs in the order
+ * the certificate writes them (CN, O, OU, C, ST, L by name, any other
+ * attribute by its dotted OID), its validity as `YYYY-MM-DDTHH:MM:SSZ`; `null`
+ * when it was not read. Under TLS 1.2 these are all in the clear. TLS 1.3
+ * encrypts its certificate and every alert after the ServerHello: they are
+ * read only out of the records a key log opened (`wz_dissect_set_keylog`), so
+ * without one a TLS 1.3 refusal reads `completed` `undecided` and no alert.
+ *
+ * WebSocket: `halves`, one per direction, `a` then `b`, each with
+ * `opening_seen` whether its HTTP opening was in the capture, `status` the
+ * response's status code (`null` for the request's half), `subprotocols` the
+ * `Sec-WebSocket-Protocol` values in order (what the request offered, what
+ * the response chose), and `controls` its Ping and Pong frames, each with its
+ * `control` word (`ping` or `pong`), the `packet` that carried its first byte
+ * and that packet's `at_ns`; the first 64, `more` past them. `client` is a
+ * direction word, `a` or `b`, as `direction` is.
+ *
+ * QUIC: `client` the direction of the first Initial; `answered` whether the
+ * other direction sent a packet after it; `initial_resends` how many more
+ * Initials the client sent before that answer (in all, when none came). Why a
+ * QUIC connection closed is inside its protected packets and is not read.
+ *
+ * @values fields completed
+ * @values fields client
+ * @values fields control
  *
  * WHAT A TCP CONNECTION DID (field-document revision 78, row_facts 18). Every
  * flow object carries, after `network`, `tcp`: `null` for a flow that is not
@@ -6408,7 +6465,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":78,"key":"state",
+ *     "value_families":[{"name":"fields","revision":79,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -8153,6 +8210,9 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts body
  * @values row_facts carried_state
  * @values row_facts check
+ * @values row_facts client
+ * @values row_facts completed
+ * @values row_facts control
  * @values row_facts counter_reason
  * @values row_facts direction
  * @values row_facts displaced
@@ -8200,6 +8260,9 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts body passenger
  * @carries row_facts carried_state discriminant
  * @carries row_facts check passenger
+ * @carries row_facts client passenger
+ * @carries row_facts completed passenger
+ * @carries row_facts control passenger
  * @carries row_facts counter_reason passenger
  * @carries row_facts direction passenger
  * @carries row_facts displaced passenger
