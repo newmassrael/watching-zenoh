@@ -283,6 +283,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "runtime-coop-fixed",
                 "runtime-tokio",
                 "session-lwip-fixed",
+                # `transport-unicast` gates `ext::redeclare`, the door that tells a session's
+                # peers its declarations again; it is a forward of the tokio runtime's unicast
+                # transport, whose own row is where its surface is probed.
+                "transport-unicast",
             }
         ),
     ),
@@ -419,8 +423,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "(`tests/tls_provider.rs` for the last, and again through the pico ABI's "
         "`tls_coop_roundtrip`); `shared-key-ids` gates `OpenKeyIds::shared` and "
         "`OpenKeyIds::new`, the dictionary and the endpoints' key-wire forms an open hands the "
-        "session, which `tests/shared_key_ids.rs` runs over loopback",
-        frozenset({"listen", "scout", "scout-datagram", "shared-key-ids", "tls-mbedtls"}),
+        "session, which `tests/shared_key_ids.rs` runs over loopback; `app-transport` gates the "
+        "`app_link` re-export of the runtime's links over a transport the program supplies, "
+        "which the pico ABI's `app_transport_doors` opens a session over",
+        frozenset(
+            {"app-transport", "listen", "scout", "scout-datagram", "shared-key-ids", "tls-mbedtls"}
+        ),
     ),
     "wz-tls-mbedtls": (
         "the secure channel over Mbed TLS that the cooperative engine's `tls/` link runs (its "
@@ -680,9 +688,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # host's critical section and the lock of each value the runtime lends the
         # session. It gates `cs::HostMutex`, a `pub use` inside `pub mod cs` and so
         # not at the crate root, the shape `rx-in-place`'s sites have.
+        # `app-link` joins: the cooperative engine's links over a transport the program supplies
+        # (`pub mod app_link`: the stream, datagram and group sockets and `AppLinks`), selected
+        # by the pico ABI's `app-transport` through `wz-capi-coop`, which is where a consumer
+        # reaches it; the shape `host-lock`'s site has.
         frozenset(
             {
                 "alloc",
+                "app-link",
                 "host-lock",
                 "reassembly",
                 "runtime",

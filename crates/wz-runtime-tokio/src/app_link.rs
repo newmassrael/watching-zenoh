@@ -889,7 +889,7 @@ mod tests {
         let mut rest = Vec::new();
         read.read_to_end(&mut rest).await.expect("ends");
         assert_eq!(rest, b"x", "what came before the close is read");
-        let error = write.write_all(b"y").await.err().expect("closed");
+        let error = write.write_all(b"y").await.expect_err("closed");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
@@ -990,8 +990,7 @@ mod tests {
             .unwrap();
         let error = send_datagram(&link.guard, b"abcdef")
             .await
-            .err()
-            .expect("cut");
+            .expect_err("cut");
         assert_eq!(error.kind(), io::ErrorKind::Other);
     }
 

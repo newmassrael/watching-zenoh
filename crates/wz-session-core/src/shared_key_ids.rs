@@ -514,9 +514,9 @@ pub fn key_wire_form_named(text: &str) -> Option<KeyWireForm> {
 
 /// Whether the build's domain of `key-wire-form` allows `form`: what a statement of the value
 /// for one link is held to, as a statement for the session is.
+/// It reads the domain the build narrowed the policy to, not the build's default value.
 pub fn form_in_domain(form: KeyWireForm) -> bool {
-    let mut policy = crate::policy::SessionPolicy::defaults();
-    policy.select_key_wire_form(form).is_ok()
+    <KeyWireForm as crate::policy_binding::PolicyValue>::DOMAIN.contains(form)
 }
 
 /// How many queries of a link a node remembers the key form of at once, for the replies that

@@ -28,12 +28,6 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
 
-#[cfg(feature = "e2e-sender")]
-pub use sender::*;
-
-#[cfg(feature = "e2e-receiver")]
-pub use receiver::*;
-
 /// Write the gravestone into the caller's refusal slot, when it gave one.
 ///
 /// # Safety
@@ -117,8 +111,9 @@ unsafe fn release<T>(handle: *mut *mut c_void) {
     }
 }
 
+/// The sending doors (`wz_ext_e2e_sender_*`), a module of their own as each capability's doors are.
 #[cfg(feature = "e2e-sender")]
-mod sender {
+pub mod sender {
     use super::*;
 
     use wz_app_frame::e2e_frame::Values;
@@ -482,8 +477,10 @@ mod sender {
     }
 }
 
+/// The receiving doors (`wz_ext_e2e_receiver_*`), a module of their own as each capability's doors
+/// are.
 #[cfg(feature = "e2e-receiver")]
-mod receiver {
+pub mod receiver {
     use super::*;
 
     use wz_app_frame::e2e_frame::Values;
