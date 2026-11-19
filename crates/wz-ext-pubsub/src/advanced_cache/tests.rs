@@ -423,7 +423,7 @@ fn sn_filter_includes_and_excludes() {
 fn the_cache_filter_resolves_every_form_the_grammar_accepts() {
     let now = 1_000u64 << 32; // NTP64 = 1000 wall-clock seconds
     let filter = |selector: &str| {
-        TimeRange::parse(selector).map(|r| r.resolve_at(ntp64_to_system_time(now)))
+        time_range::parse(selector).map(|r| time_range::resolve(r, ntp64_to_system_time(now)))
     };
     let at = |secs: u64| secs << 32;
     // `[now(-30s)..]` keeps 970s and later: the wz history-query form.
@@ -462,12 +462,12 @@ fn time_filter_includes_and_excludes() {
                                  // No range -> all.
     assert!(sample_matches_time(60u64 << 32, None));
     // [70s, unbounded): 80s in, 60s out, 70s in (inclusive).
-    let r = TimeRange::parse("[now(-30s)..]").map(|r| r.resolve_at(now));
+    let r = time_range::parse("[now(-30s)..]").map(|r| time_range::resolve(r, now));
     assert!(sample_matches_time(80u64 << 32, r));
     assert!(sample_matches_time(threshold, r));
     assert!(!sample_matches_time(60u64 << 32, r));
     // Exclusive lower bound drops the boundary sample.
-    let rex = TimeRange::parse("]now(-30s)..]").map(|r| r.resolve_at(now));
+    let rex = time_range::parse("]now(-30s)..]").map(|r| time_range::resolve(r, now));
     assert!(!sample_matches_time(threshold, rex));
 }
 

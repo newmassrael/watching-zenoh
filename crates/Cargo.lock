@@ -4960,6 +4960,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winapi",
+ "wz-session-core",
  "zenoh-core",
  "zenoh-result",
 ]

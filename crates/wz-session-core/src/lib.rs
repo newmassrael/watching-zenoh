@@ -362,6 +362,11 @@ pub mod decl_sink;
 // and what left the same bug live in the REST bridge one crate away.
 pub mod selector_params;
 
+// The grammar of the `_time` selector parameter, its resolution against "now" and its
+// membership test: the one reading wz-zenoh-util's upstream-shaped `TimeRange` and
+// wz-ext-pubsub's cache filter both go through. No clock here; the caller names its instant type.
+pub mod time_range;
+
 /// R311y833 — the requester-side reply-keyexpr contract
 /// ([`reply_acceptance::ReplyKeyExpr`] + the acceptance policy a pending z_get
 /// registers with). zenoh states it as a GUARANTEE of `get()` itself and both

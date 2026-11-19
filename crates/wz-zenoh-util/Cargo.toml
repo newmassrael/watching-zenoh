@@ -57,6 +57,9 @@ tokio = { version = "1.47.1", default-features = false, features = ["net", "time
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 zenoh-core = { path = "../wz-zenoh-core" }
+# The `_time` grammar `TimeRange` and `TimeExpr` parse through (`time_range`): the one reading of
+# the parameter every wz crate makes. `alloc` is the heap profile; the module itself needs none.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 zenoh-result = { path = "../wz-zenoh-result", features = ["default"] }
 
 # The log setup is tested against the `log` crate, which the engine records through.

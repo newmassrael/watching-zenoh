@@ -525,11 +525,11 @@ pub use wz_session_core::region_partition;
 // external consumer: wz-capi-pico's `z_query_reply`, which enforces zenoh's
 // `reply ⊆ query` contract the way zenoh-pico does
 // (`_z_declared_keyexpr_intersects`, `~/zenoh-pico/src/net/primitives.c:438`).
-/// The `_time` selector's grammar, resolution and membership test (zenoh-util
-/// `TimeRange`). Unconditional: it is the base `zenoh` crate's own selector
-/// parameter, read by the advanced cache and by the C ABI's publication cache
-/// alike, and neither can be the one that owns it. It lives in `wz-ext-pubsub`, which no runtime
-/// owns, and is re-exported at the path it has always had.
+/// The `_time` selector in wall-clock time (zenoh-util `TimeRange`). Unconditional: it is the base
+/// `zenoh` crate's own selector parameter, read by the advanced cache and by the C ABI's
+/// publication cache alike, and neither can be the one that owns it. The grammar, resolution and
+/// membership test are `wz_session_core::time_range`; the wall-clock reading of them lives in
+/// `wz-ext-pubsub`, which no runtime owns, and is re-exported at the path it has always had.
 pub use wz_ext_pubsub::time_range;
 pub use wz_session_core::keyexpr_match;
 /// R311y369 — re-exported for the `--namespace` demo affordance
