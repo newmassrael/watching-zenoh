@@ -121,6 +121,16 @@ z_result_t wz_ext_clock_report(wz_ext_clock_event_t event);
 #define WZ_EXT_EVENT_TLS_DROP_OTHER 2   /* any other failure, or a peer the
                                            policy refused; the code is the
                                            channel's, 0 where it has none */
+/* An instance key reported the samples it dropped (a build with the
+ * instance-key capability too; see wz_ext_instance_keyer_new). Three integers:
+ * why the latest of them was dropped, which key field, and how many were
+ * dropped since the last report. */
+#define WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED 0xFF02
+#define WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE 0 /* the payload is not a message
+                                                   of the schema */
+#define WZ_EXT_EVENT_INSTANCE_KEY_ABSENT 1      /* a key field with presence is
+                                                   absent */
+#define WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED 2  /* a key value is in no list */
 
 typedef struct wz_ext_event_t {
   uint8_t kind;      /* WZ_EXT_EVENT_RECORD, _EMPTY or _LOST */
@@ -845,6 +855,162 @@ void wz_ext_e2e_receiver_drop(wz_ext_moved_e2e_receiver_t *this_);
 void wz_ext_internal_e2e_receiver_null(wz_ext_owned_e2e_receiver_t *this_);
 bool wz_ext_internal_e2e_receiver_check(
     const wz_ext_owned_e2e_receiver_t *this_);
+
+/* ---- Instance keys (instance-key) --------------------------------------- */
+
+/* Which instance of a message a sample is, read from fields of its payload.
+ * A message is published on one key expression whatever its instance; a
+ * KEYER names up to the build's INSTANCE_KEY_FIELDS fields of the payload's
+ * protobuf message (integers, enumerations by their numbers, or strings), read
+ * through the program's .proto files, and the values each may take. The
+ * instance of a sample is the position of its values in the product of those
+ * lists, row-major (the last field varies fastest), at most
+ * INSTANCES_PER_MESSAGE of them; it is never on the wire. A node makes one
+ * keyer per message and direction, with the values it sends or receives.
+ *
+ * A sample of no instance is DROPPED and counted: its payload is not a message
+ * of the schema, a key field that has presence is absent (a field without
+ * presence reads as 0 or the empty string), or a value is in no list. Drops are
+ * reported at the rate the description states: the first after a quiet
+ * interval carries the count since the last report, and with the event-ring
+ * capability each report is also an event of WZ_EXT_EVENT_SOURCE_
+ * INSTANCE_KEY_DROPPED.
+ *
+ * The instance is the STREAM of the end-to-end doors: with e2e-receiver,
+ * wz_ext_instance_keyer_judge judges a frame in the receiver's stream of the
+ * instance its payload is; with e2e-sender, wz_ext_instance_keyer_protect
+ * protects a payload on the sender's counter stream of its instance. A receiver
+ * that keeps its streams per sender (e2e-sender-demux) is refused: instance
+ * keys and sender slots are exclusive on one message. The last value of each
+ * instance is kept in storage the program gives.
+ *
+ * OWNERSHIP AND THREADS. As for the end-to-end doors. The judging and
+ * protecting doors hold the keyer's lock, then the receiver's or the
+ * sender's. Part of the unstable surface. */
+
+/* One .proto file: the name other files import it by, and its text, both
+ * NUL-terminated UTF-8, borrowed for the call. */
+typedef struct wz_ext_proto_file_t {
+  const char *name;
+  const char *text;
+} wz_ext_proto_file_t;
+
+typedef struct wz_ext_owned_instance_keyer_t {
+  void *_handle;
+} wz_ext_owned_instance_keyer_t;
+typedef struct wz_ext_loaned_instance_keyer_t {
+  void *_handle;
+} wz_ext_loaned_instance_keyer_t;
+typedef struct wz_ext_moved_instance_keyer_t {
+  wz_ext_owned_instance_keyer_t _this;
+} wz_ext_moved_instance_keyer_t;
+
+typedef struct wz_ext_instance_keyer_options_t {
+  uint8_t *storage;      /* the last values, value_capacity bytes per
+                            instance; the program's, valid and untouched until
+                            the keyer is dropped */
+  size_t storage_len;
+  size_t value_capacity; /* 0 keeps no last values */
+} wz_ext_instance_keyer_options_t;
+
+/* What became of one sample. */
+#define WZ_EXT_INSTANCE_KEY_INDEXED 0     /* instance is its index */
+#define WZ_EXT_INSTANCE_KEY_UNDECODABLE 1 /* not a message of the schema, or a
+                                             frame shorter than its header */
+#define WZ_EXT_INSTANCE_KEY_ABSENT 2      /* field names the absent key field */
+#define WZ_EXT_INSTANCE_KEY_NOT_LISTED 3  /* field names the key field whose
+                                             value is in no list */
+
+/* What became of the instance's last value. */
+#define WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT 0   /* none kept, or dropped */
+#define WZ_EXT_INSTANCE_KEY_LAST_RECORDED 1   /* the payload is now its last */
+#define WZ_EXT_INSTANCE_KEY_LAST_NOT_INTACT 2 /* the frame is not intact */
+#define WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG 3   /* longer than an instance's room */
+
+typedef struct wz_ext_instance_key_t {
+  uint8_t status;   /* WZ_EXT_INSTANCE_KEY_* */
+  uint8_t reported; /* 1 when this drop carries the report of the drops since
+                       the last one */
+  uint8_t last;     /* WZ_EXT_INSTANCE_KEY_LAST_* */
+  uint8_t reserved;
+  uint32_t field;   /* for _ABSENT and _NOT_LISTED, in the description's order */
+  uint64_t dropped; /* when reported, the drops since the last report */
+  size_t instance;  /* for _INDEXED */
+} wz_ext_instance_key_t;
+
+void wz_ext_instance_keyer_options_default(
+    wz_ext_instance_keyer_options_t *this_);
+
+/* A keyer of the message description names, over the file_count files
+ * (every one is read, with what it imports). description is JSON:
+ *   {"message": "<full name, package included>",
+ *    "fields": [{"path": "<field>" or "<holder>.<field>",
+ *                "values": [<integer>, {"range": [<low>, <high>]}, ...]
+ *                          or ["<string>", ...]}, ...],
+ *    "report_interval_ms": <n>}
+ * options may be NULL (no last values). On _Z_ERR_CONFIG_INVALID_VALUE (-89),
+ * for schema files, a description or storage that is refused, refusal (which
+ * may be NULL) holds the reason. Z_ERR_NULL (-127) for a NULL argument the
+ * call needs; Z_EINVAL (-75) for text that is not UTF-8. */
+z_result_t wz_ext_instance_keyer_new(
+    wz_ext_owned_instance_keyer_t *this_, const wz_ext_proto_file_t *files,
+    size_t file_count, const char *description,
+    const wz_ext_instance_keyer_options_t *options,
+    z_owned_string_t *refusal);
+z_result_t wz_ext_instance_keyer_instances(
+    const wz_ext_loaned_instance_keyer_t *this_, size_t *out);
+/* The instance payload, received or about to be sent at now_ms, is; an
+ * indexed payload becomes the instance's last value. Z_OK whatever out says. */
+z_result_t wz_ext_instance_keyer_index(
+    const wz_ext_loaned_instance_keyer_t *this_, const uint8_t *payload,
+    size_t len, uint64_t now_ms, wz_ext_instance_key_t *out);
+/* The report of the drops held since the last one, when the interval has
+ * passed: true, out naming the latest drop's reason and the count. */
+bool wz_ext_instance_keyer_flush(const wz_ext_loaned_instance_keyer_t *this_,
+                                 uint64_t now_ms, wz_ext_instance_key_t *out);
+z_result_t wz_ext_instance_keyer_counts(
+    const wz_ext_loaned_instance_keyer_t *this_, uint64_t *undecodable,
+    uint64_t *absent, uint64_t *not_listed);
+/* Copy an instance's last value: Z_OK; Z_CHANNEL_NODATA (2) before its first;
+ * Z_ERR_OVERFLOW (-74) when capacity is short (len is the value's length);
+ * Z_EINVAL for an instance the keyer has not or a keyer without storage. */
+z_result_t wz_ext_instance_keyer_last(
+    const wz_ext_loaned_instance_keyer_t *this_, size_t instance, uint8_t *out,
+    size_t capacity, size_t *len);
+/* Make value an instance's last value (what a publisher sends before its
+ * first, say). Z_ERR_OVERFLOW for a value longer than an instance's room. */
+z_result_t wz_ext_instance_keyer_set_last(
+    const wz_ext_loaned_instance_keyer_t *this_, size_t instance,
+    const uint8_t *value, size_t len);
+/* With e2e-receiver: judge frame in receiver's stream of the instance its
+ * payload (what follows the receiver's header) is. Z_OK whatever key and
+ * verdict say; verdict is zeroed for a dropped frame, which moves nothing.
+ * _Z_ERR_CONFIG_INVALID_VALUE for a receiver kept per sender or with fewer
+ * streams than the keyer has instances. */
+z_result_t wz_ext_instance_keyer_judge(
+    const wz_ext_loaned_instance_keyer_t *this_,
+    const wz_ext_loaned_e2e_receiver_t *receiver, const uint8_t *frame,
+    size_t len, uint64_t now_ms, wz_ext_instance_key_t *key,
+    wz_ext_e2e_verdict_t *verdict);
+/* With e2e-sender: protect payload on sender's counter stream of its
+ * instance. Z_EINVAL when the payload is no instance (key says why; nothing is
+ * built and no counter value consumed); Z_ERR_OVERFLOW when capacity is
+ * short; _Z_ERR_CONFIG_INVALID_VALUE for a sender with fewer streams than the
+ * keyer has instances. */
+z_result_t wz_ext_instance_keyer_protect(
+    const wz_ext_loaned_instance_keyer_t *this_,
+    const wz_ext_loaned_e2e_sender_t *sender, const uint8_t *payload,
+    size_t len, uint64_t now_ms, uint8_t *out, size_t capacity,
+    size_t *written, uint64_t *counter, wz_ext_instance_key_t *key);
+const wz_ext_loaned_instance_keyer_t *wz_ext_instance_keyer_loan(
+    const wz_ext_owned_instance_keyer_t *this_);
+wz_ext_moved_instance_keyer_t *wz_ext_instance_keyer_move(
+    wz_ext_owned_instance_keyer_t *this_);
+/* The storage of the last values is the program's again once it returns. */
+void wz_ext_instance_keyer_drop(wz_ext_moved_instance_keyer_t *this_);
+void wz_ext_internal_instance_keyer_null(wz_ext_owned_instance_keyer_t *this_);
+bool wz_ext_internal_instance_keyer_check(
+    const wz_ext_owned_instance_keyer_t *this_);
 
 /* wz's own result codes of the doors below, outside zenoh-pico's own codes
  * (-128 to -65), so a later zenoh-pico code cannot take them. */

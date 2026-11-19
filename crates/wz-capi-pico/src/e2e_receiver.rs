@@ -296,8 +296,8 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_new(
     })
 }
 
-/// The C form of a verdict.
-fn to_c(verdict: &Verdict) -> wz_ext_e2e_verdict_t {
+/// The C form of a verdict; the instance keys' judging door writes it too.
+pub(crate) fn to_c(verdict: &Verdict) -> wz_ext_e2e_verdict_t {
     let mut out = wz_ext_e2e_verdict_t {
         status: match verdict.status {
             Status::Ok => WZ_EXT_E2E_OK,
