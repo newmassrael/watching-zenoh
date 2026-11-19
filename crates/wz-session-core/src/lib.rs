@@ -180,6 +180,11 @@ pub mod policy;
 // sees. Unconditional, no_std and no_alloc, like `policy`. Documented from inside.
 pub mod policy_binding;
 
+// The open stage of the policies: a document's statements composed in layers over a base into one
+// snapshot and the origin of each value, or every refusal found. The core is no_std and no_alloc;
+// the reader of a JSON5 tree needs `alloc`. Documented from inside.
+pub mod policy_document;
+
 /// How fast the fragments of one message leave a datagram link: the rule of the
 /// `datagram-fragment-pacing` policy, over a clock the engine hands it. Unconditional, no_std
 /// and no_alloc.

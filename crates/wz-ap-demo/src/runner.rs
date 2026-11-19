@@ -950,6 +950,7 @@ pub(crate) async fn scout_for_peer_locator(
     zid: Vec<u8>,
     budget_ms: u64,
     socket: &crate::args::ScoutSocketArgs,
+    policy: &wz::runtime_tokio::policy::SessionPolicy,
 ) -> io::Result<String> {
     use wz::runtime_tokio::scouting_glue::{
         drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams,
@@ -972,7 +973,7 @@ pub(crate) async fn scout_for_peer_locator(
     // segment was beaconing wherever the routing table chose, with no way to
     // say otherwise. `--multicast-locator` still narrows the DATA-plane group;
     // this narrows the DISCOVERY one.
-    let mut driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config())
+    let mut driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config(policy))
         .await
         .map_err(|e| {
             io::Error::new(
@@ -1115,6 +1116,7 @@ pub(crate) async fn scout_for_peer_locator(
 #[cfg(feature = "scouting-responder")]
 pub(crate) async fn spawn_scouting_responder(
     socket: &crate::args::ScoutSocketArgs,
+    policy: &wz::runtime_tokio::policy::SessionPolicy,
     whatami: wz::runtime_tokio::session_glue::WhatAmI,
     zid: &[u8],
     locators: Vec<String>,
@@ -1125,7 +1127,7 @@ pub(crate) async fn spawn_scouting_responder(
     use wz::runtime_tokio::UdpDriver;
 
     let (group, port) = socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config())
+    let driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config(policy))
         .await
         .map_err(|e| {
             io::Error::new(
@@ -1277,6 +1279,7 @@ pub(crate) async fn spawn_scouting_responder(
 #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
 async fn spawn_scouting_autoconnect(
     args: &ScoutAutoconnectArgs,
+    snapshot: &wz::runtime_tokio::policy::SessionPolicy,
     zid: &[u8],
     dial_tx: wz::runtime_tokio::accept_loop::DialIntentSender,
 ) -> io::Result<()> {
@@ -1288,17 +1291,18 @@ async fn spawn_scouting_autoconnect(
     use wz::runtime_tokio::UdpDriver;
 
     let (group, port) = args.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let mut driver = UdpDriver::bind_multicast_tx(group, port, args.socket.as_socket_config())
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "wz-ap-demo: --scout-autoconnect could not open a scouting sender \
+    let mut driver =
+        UdpDriver::bind_multicast_tx(group, port, args.socket.as_socket_config(snapshot))
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "wz-ap-demo: --scout-autoconnect could not open a scouting sender \
                  for {group}:{port}: {e}"
-                ),
-            )
-        })?;
+                    ),
+                )
+            })?;
 
     let policy = AutoConnect::with_strategies(Zid::from_slice(zid), args.matcher, args.strategy);
     let actions = ScoutingActions::new(ScoutParams {
@@ -2847,6 +2851,7 @@ async fn supervise_reconnect(
 async fn install_rescout_plan(
     recon: &mut ReconnectingSession,
     rescout: Option<&crate::args::RescoutPlan>,
+    policy: &wz::runtime_tokio::policy::SessionPolicy,
     clock: TokioTime,
 ) -> io::Result<()> {
     use wz::runtime_tokio::reconnect_scout::ScoutedGroup;
@@ -2856,18 +2861,21 @@ async fn install_rescout_plan(
         return Ok(());
     };
     let (group, port) = plan.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let driver =
-        wz::runtime_tokio::UdpDriver::bind_multicast(group, port, plan.socket.as_socket_config())
-            .await
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "wz-ap-demo: --scout --reconnect could not hold the scouting \
+    let driver = wz::runtime_tokio::UdpDriver::bind_multicast(
+        group,
+        port,
+        plan.socket.as_socket_config(policy),
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "wz-ap-demo: --scout --reconnect could not hold the scouting \
                  group {group}:{port} for re-scouting: {e}"
-                    ),
-                )
-            })?;
+            ),
+        )
+    })?;
     recon.set_targets(std::sync::Arc::new(ScoutedGroup::new(
         driver,
         ScoutParams {
@@ -2906,6 +2914,7 @@ async fn install_rescout_plan(
 async fn install_rescout_plan(
     _recon: &mut ReconnectingSession,
     rescout: Option<&crate::args::RescoutPlan>,
+    _policy: &wz::runtime_tokio::policy::SessionPolicy,
     _clock: TokioTime,
 ) -> io::Result<()> {
     let Some(plan) = rescout else {
@@ -3182,7 +3191,8 @@ pub(crate) async fn run_demo(
             // AFTER the open on purpose: the first session is brought up by the
             // address `--scout` already resolved (pico opens the scouted
             // locator too), and only the REOPEN differs.
-            install_rescout_plan(&mut recon, rescout.as_ref(), session_clock).await?;
+            install_rescout_plan(&mut recon, rescout.as_ref(), &tuning.policy, session_clock)
+                .await?;
             log::info!(
                 "wz-ap-demo: reconnect-supervised session Established (--reconnect); \
                  link loss re-dials + replays declarations"
@@ -3370,7 +3380,14 @@ pub(crate) async fn run_demo(
     // `--scout-listen` does on the peer.
     #[cfg(feature = "scouting-responder")]
     if let Some(scout_socket) = scout_listen.as_ref() {
-        spawn_scouting_responder(scout_socket, node_whatami, &scout_zid, Vec::new()).await?;
+        spawn_scouting_responder(
+            scout_socket,
+            &tuning.policy,
+            node_whatami,
+            &scout_zid,
+            Vec::new(),
+        )
+        .await?;
     }
 
     // ── Step 3: observer-side registry callbacks. The handshake exchanged no
@@ -4735,7 +4752,14 @@ async fn run_peer_until(
     // a locator list it did not have yet.
     #[cfg(feature = "scouting-responder")]
     if let Some(scout_socket) = opts.scout_listen.as_ref() {
-        spawn_scouting_responder(scout_socket, role, &params.zid, self_locators.clone()).await?;
+        spawn_scouting_responder(
+            scout_socket,
+            &params.policy,
+            role,
+            &params.zid,
+            self_locators.clone(),
+        )
+        .await?;
     }
 
     // §5.16 interceptor pipeline — assemble ONE InterceptorConfig from the
@@ -5431,6 +5455,7 @@ async fn run_peer_until(
     if let Some(policy_args) = opts.scout_autoconnect.as_ref() {
         spawn_scouting_autoconnect(
             policy_args,
+            &params.policy,
             &params.zid,
             dial_tx
                 .clone()
@@ -7002,6 +7027,7 @@ async fn run_router_hat_until(
     if let Some(scout_socket) = scout_listen {
         spawn_scouting_responder(
             scout_socket,
+            &params.policy,
             wz::runtime_tokio::session_glue::WhatAmI::Router,
             &params.zid,
             self_locators.clone(),

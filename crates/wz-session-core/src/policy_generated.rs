@@ -9,6 +9,10 @@
 //! the values the build's environment states as `WZ_POLICY_<NAME>`, or upstream's behaviour where
 //! it states none, and a test names another value with the field's `select_*`.
 //!
+//! A reader that names a policy by its id, as the open-stage document does, dispatches on the
+//! policy's row of [`POLICIES`]; [`PROFILES`] holds the named sets of policy values the
+//! declaration states (`[[profile]]`), which a document starts from.
+//!
 //! Each policy's value type, an `Off` and `On` enum of its own for a bool policy, implements
 //! [`PolicyValue`]: the domain the build allows (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`, an unset name
 //! taking the rule of `DEFAULTS_ONLY`), the build's default, which the domain must hold, and
@@ -18,8 +22,10 @@
 use super::{policy_bool, policy_choice, policy_defaults_only};
 
 use crate::policy_binding::{
-    default_is_allowed, Binding, Bound, Domain, Mutability, OutsideDomain, PolicyValue, Scope, Wire,
+    default_is_allowed, Binding, Bound, Domain, Mutability, OutsideDomain, PolicyEntry,
+    PolicyField, PolicyValue, Scope, Wire,
 };
+use crate::policy_document::{Profile, Statement};
 
 /// Whether an allowance the build does not state keeps only the build default: what
 /// `WZ_POLICY_DOMAINS` states, else whether the target has no operating system.
@@ -1093,6 +1099,16 @@ const _: () = assert!(
     "the default of multicast-loopback is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for MulticastLoopback {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_multicast_loopback(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.multicast_loopback.get()
+    }
+}
+
 /// `tx-no-progress-deadline` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxNoProgressDeadline {
@@ -1180,6 +1196,16 @@ const _: () = assert!(
     default_is_allowed::<TxNoProgressDeadline>(TxNoProgressDeadline::DEFAULT as usize),
     "the default of tx-no-progress-deadline is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for TxNoProgressDeadline {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_tx_no_progress_deadline(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.tx_no_progress_deadline.get()
+    }
+}
 
 /// `tx-expiry-keeps-session` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1269,6 +1295,16 @@ const _: () = assert!(
     "the default of tx-expiry-keeps-session is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for TxExpiryKeepsSession {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_tx_expiry_keeps_session(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.tx_expiry_keeps_session.get()
+    }
+}
+
 /// `declaration-sync-pacing` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeclarationSyncPacing {
@@ -1357,6 +1393,16 @@ const _: () = assert!(
     "the default of declaration-sync-pacing is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for DeclarationSyncPacing {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_declaration_sync_pacing(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.declaration_sync_pacing.get()
+    }
+}
+
 /// `datagram-fragment-pacing` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatagramFragmentPacing {
@@ -1444,6 +1490,16 @@ const _: () = assert!(
     default_is_allowed::<DatagramFragmentPacing>(DatagramFragmentPacing::DEFAULT as usize),
     "the default of datagram-fragment-pacing is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for DatagramFragmentPacing {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_datagram_fragment_pacing(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.datagram_fragment_pacing.get()
+    }
+}
 
 /// `multicast-link-requires-iface` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1534,6 +1590,16 @@ const _: () = assert!(
     "the default of multicast-link-requires-iface is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for MulticastLinkRequiresIface {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_multicast_link_requires_iface(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.multicast_link_requires_iface.get()
+    }
+}
+
 /// How `reliable-gap-reconnect` is held: in no byte when its domain is one value.
 type ReliableGapReconnectBound = Bound<ReliableGapReconnect, { ReliableGapReconnect::HELD }>;
 
@@ -1566,6 +1632,16 @@ const _: () = assert!(
     default_is_allowed::<ReliableGapReconnect>(ReliableGapReconnect::DEFAULT as usize),
     "the default of reliable-gap-reconnect is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for ReliableGapReconnect {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_reliable_gap_reconnect(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.reliable_gap_reconnect.get()
+    }
+}
 
 /// `entity-link-restriction` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1655,6 +1731,16 @@ const _: () = assert!(
     "the default of entity-link-restriction is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for EntityLinkRestriction {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_entity_link_restriction(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.entity_link_restriction.get()
+    }
+}
+
 /// `targeted-query` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetedQuery {
@@ -1742,6 +1828,16 @@ const _: () = assert!(
     default_is_allowed::<TargetedQuery>(TargetedQuery::DEFAULT as usize),
     "the default of targeted-query is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for TargetedQuery {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_targeted_query(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.targeted_query.get()
+    }
+}
 
 /// `publisher-admission-retry` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1832,6 +1928,16 @@ const _: () = assert!(
     "the default of publisher-admission-retry is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for PublisherAdmissionRetry {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_publisher_admission_retry(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.publisher_admission_retry.get()
+    }
+}
+
 /// `multi-route-atomic-tx` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MultiRouteAtomicTx {
@@ -1919,6 +2025,16 @@ const _: () = assert!(
     default_is_allowed::<MultiRouteAtomicTx>(MultiRouteAtomicTx::DEFAULT as usize),
     "the default of multi-route-atomic-tx is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for MultiRouteAtomicTx {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_multi_route_atomic_tx(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.multi_route_atomic_tx.get()
+    }
+}
 
 /// `entity-timestamp-opt-in` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2008,6 +2124,16 @@ const _: () = assert!(
     "the default of entity-timestamp-opt-in is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for EntityTimestampOptIn {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_entity_timestamp_opt_in(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.entity_timestamp_opt_in.get()
+    }
+}
+
 /// `reply-auto-timestamp` as a value; [`SessionPolicy`] reads it as a `bool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplyAutoTimestamp {
@@ -2096,6 +2222,16 @@ const _: () = assert!(
     "the default of reply-auto-timestamp is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for ReplyAutoTimestamp {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_reply_auto_timestamp(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.reply_auto_timestamp.get()
+    }
+}
+
 /// How `subscriber-overload` is held: in no byte when its domain is one value.
 type SubscriberOverloadBound = Bound<SubscriberOverload, { SubscriberOverload::HELD }>;
 
@@ -2129,6 +2265,16 @@ const _: () = assert!(
     "the default of subscriber-overload is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for SubscriberOverload {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_subscriber_overload(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.subscriber_overload.get()
+    }
+}
+
 /// How `key-set` is held: in no byte when its domain is one value.
 type KeySetBound = Bound<KeySet, { KeySet::HELD }>;
 
@@ -2160,6 +2306,16 @@ const _: () = assert!(
     default_is_allowed::<KeySet>(KeySet::DEFAULT as usize),
     "the default of key-set is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for KeySet {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_key_set(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.key_set.get()
+    }
+}
 
 /// How `sn-resolution` is held: in no byte when its domain is one value.
 type SnResolutionBound = Bound<SnResolution, { SnResolution::HELD }>;
@@ -2195,6 +2351,16 @@ const _: () = assert!(
     "the default of sn-resolution is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for SnResolution {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_sn_resolution(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.sn_resolution.get()
+    }
+}
+
 /// How `supervision-after-expiry` is held: in no byte when its domain is one value.
 type SupervisionAfterExpiryBound = Bound<SupervisionAfterExpiry, { SupervisionAfterExpiry::HELD }>;
 
@@ -2226,6 +2392,16 @@ const _: () = assert!(
     default_is_allowed::<SupervisionAfterExpiry>(SupervisionAfterExpiry::DEFAULT as usize),
     "the default of supervision-after-expiry is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for SupervisionAfterExpiry {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_supervision_after_expiry(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.supervision_after_expiry.get()
+    }
+}
 
 /// How `event-ring-full` is held: in no byte when its domain is one value.
 type EventRingFullBound = Bound<EventRingFull, { EventRingFull::HELD }>;
@@ -2259,6 +2435,16 @@ const _: () = assert!(
     "the default of event-ring-full is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for EventRingFull {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_event_ring_full(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.event_ring_full.get()
+    }
+}
+
 /// How `clock-quality-stamping` is held: in no byte when its domain is one value.
 type ClockQualityStampingBound = Bound<ClockQualityStamping, { ClockQualityStamping::HELD }>;
 
@@ -2290,6 +2476,16 @@ const _: () = assert!(
     default_is_allowed::<ClockQualityStamping>(ClockQualityStamping::DEFAULT as usize),
     "the default of clock-quality-stamping is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for ClockQualityStamping {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_clock_quality_stamping(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.clock_quality_stamping.get()
+    }
+}
 
 /// How `routing-face-drive` is held: in no byte when its domain is one value.
 type RoutingFaceDriveBound = Bound<RoutingFaceDrive, { RoutingFaceDrive::HELD }>;
@@ -2323,6 +2519,16 @@ const _: () = assert!(
     "the default of routing-face-drive is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for RoutingFaceDrive {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_routing_face_drive(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.routing_face_drive.get()
+    }
+}
+
 /// How `routing-table-sharing` is held: in no byte when its domain is one value.
 type RoutingTableSharingBound = Bound<RoutingTableSharing, { RoutingTableSharing::HELD }>;
 
@@ -2354,6 +2560,16 @@ const _: () = assert!(
     default_is_allowed::<RoutingTableSharing>(RoutingTableSharing::DEFAULT as usize),
     "the default of routing-table-sharing is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for RoutingTableSharing {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_routing_table_sharing(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.routing_table_sharing.get()
+    }
+}
 
 /// How `reassembly-pool-overflow` is held: in no byte when its domain is one value.
 type ReassemblyPoolOverflowBound = Bound<ReassemblyPoolOverflow, { ReassemblyPoolOverflow::HELD }>;
@@ -2388,6 +2604,16 @@ const _: () = assert!(
     "the default of reassembly-pool-overflow is outside its WZ_POLICY_*_ALLOWS_*"
 );
 
+impl PolicyField for ReassemblyPoolOverflow {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_reassembly_pool_overflow(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.reassembly_pool_overflow.get()
+    }
+}
+
 /// How `link-tie-order` is held: in no byte when its domain is one value.
 type LinkTieOrderBound = Bound<LinkTieOrder, { LinkTieOrder::HELD }>;
 
@@ -2419,3 +2645,81 @@ const _: () = assert!(
     default_is_allowed::<LinkTieOrder>(LinkTieOrder::DEFAULT as usize),
     "the default of link-tie-order is outside its WZ_POLICY_*_ALLOWS_*"
 );
+
+impl PolicyField for LinkTieOrder {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_link_tie_order(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.link_tie_order.get()
+    }
+}
+
+/// How many policies the declaration states: the length of [`POLICIES`] and of every table kept
+/// per policy.
+pub const POLICY_COUNT: usize = 23;
+
+/// Every policy as a reader that names it by its id sees it, in the order of the fields of
+/// [`SessionPolicy`].
+pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
+    PolicyEntry::of::<MulticastLoopback>(),
+    PolicyEntry::of::<TxNoProgressDeadline>(),
+    PolicyEntry::of::<TxExpiryKeepsSession>(),
+    PolicyEntry::of::<DeclarationSyncPacing>(),
+    PolicyEntry::of::<DatagramFragmentPacing>(),
+    PolicyEntry::of::<MulticastLinkRequiresIface>(),
+    PolicyEntry::of::<ReliableGapReconnect>(),
+    PolicyEntry::of::<EntityLinkRestriction>(),
+    PolicyEntry::of::<TargetedQuery>(),
+    PolicyEntry::of::<PublisherAdmissionRetry>(),
+    PolicyEntry::of::<MultiRouteAtomicTx>(),
+    PolicyEntry::of::<EntityTimestampOptIn>(),
+    PolicyEntry::of::<ReplyAutoTimestamp>(),
+    PolicyEntry::of::<SubscriberOverload>(),
+    PolicyEntry::of::<KeySet>(),
+    PolicyEntry::of::<SnResolution>(),
+    PolicyEntry::of::<SupervisionAfterExpiry>(),
+    PolicyEntry::of::<EventRingFull>(),
+    PolicyEntry::of::<ClockQualityStamping>(),
+    PolicyEntry::of::<RoutingFaceDrive>(),
+    PolicyEntry::of::<RoutingTableSharing>(),
+    PolicyEntry::of::<ReassemblyPoolOverflow>(),
+    PolicyEntry::of::<LinkTieOrder>(),
+];
+
+/// The profile `upstream`: Every policy at upstream's behaviour, stated explicitly, so a
+/// document that names it behaves as the original whatever the build states as its
+/// defaults. Where upstream has no such behaviour, the value is the one wz had before the
+/// policy existed.
+const PROFILE_UPSTREAM: Profile = Profile {
+    id: "upstream",
+    statements: &[
+        Statement::new("multicast-loopback", "os-default"),
+        Statement::new("tx-no-progress-deadline", "off"),
+        Statement::new("tx-expiry-keeps-session", "off"),
+        Statement::new("declaration-sync-pacing", "off"),
+        Statement::new("datagram-fragment-pacing", "off"),
+        Statement::new("multicast-link-requires-iface", "off"),
+        Statement::new("reliable-gap-reconnect", "off"),
+        Statement::new("entity-link-restriction", "off"),
+        Statement::new("targeted-query", "off"),
+        Statement::new("publisher-admission-retry", "off"),
+        Statement::new("multi-route-atomic-tx", "off"),
+        Statement::new("entity-timestamp-opt-in", "off"),
+        Statement::new("reply-auto-timestamp", "off"),
+        Statement::new("subscriber-overload", "block"),
+        Statement::new("key-set", "open"),
+        Statement::new("sn-resolution", "bits-32"),
+        Statement::new("supervision-after-expiry", "latch"),
+        Statement::new("event-ring-full", "overwrite-oldest"),
+        Statement::new("clock-quality-stamping", "always"),
+        Statement::new("routing-face-drive", "task-per-face"),
+        Statement::new("routing-table-sharing", "rwlock"),
+        Statement::new("reassembly-pool-overflow", "reject"),
+        Statement::new("link-tie-order", "zid-number"),
+    ],
+};
+
+/// Every profile the declaration states, which a document names by its id (`wz/profile`).
+pub static PROFILES: [Profile; 1] = [PROFILE_UPSTREAM];

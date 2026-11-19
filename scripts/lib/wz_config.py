@@ -253,8 +253,10 @@ def read_decl_toml(text: str) -> dict:
 
     `tomllib` is stdlib from python 3.11 and the hosted floor is 3.10, so importing it died in
     Layer C0 on the first hosted run of the reader this one grew from. The declaration uses one
-    small shape and this reads exactly that: `[table]` and `[[array of tables]]` headers;
-    `key = value` on ONE line, the value a string, an integer, a boolean or an array of strings; a `'''`
+    small shape and this reads exactly that: `[table]` and `[[array of tables]]` headers, and
+    `[array.table]`, a table of the last element of an array of tables opened before it (a
+    profile's `[profile.policies]`), or of a table; `key = value` on ONE line, the value a string,
+    an integer, a boolean or an array of strings; a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
     delimiter is not part of it, as TOML says), or one closed on the line it opens (`'''text'''`,
     with no `'''` inside); `#` comments on lines of their own. Anything else is refused by line
@@ -281,6 +283,17 @@ def read_decl_toml(text: str) -> dict:
                 root.setdefault(header.group(1), []).append(table)
             else:
                 table = root.setdefault(header.group(2), {})
+            continue
+        sub = re.fullmatch(r"\[([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\]", line)
+        if sub:
+            parent = root.get(sub.group(1))
+            owner = parent[-1] if isinstance(parent, list) and parent else parent
+            if not isinstance(owner, dict):
+                raise ValueError(f"line {number}: `[{sub.group(1)}.{sub.group(2)}]` names no table "
+                                 f"or array of tables opened before it")
+            if sub.group(2) in owner:
+                raise ValueError(f"line {number}: `{sub.group(2)}` of `{sub.group(1)}` is set twice")
+            table = owner[sub.group(2)] = {}
             continue
         pair = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.+)", line)
         if not pair:
@@ -337,6 +350,7 @@ def decl_of(data: dict) -> dict:
         "order": [c["id"] for c in data["capability"]],
         "limits": list(data["limit"]),
         "policies": list(data.get("policy", [])),
+        "profiles": list(data.get("profile", [])),
         "facts": list(data.get("protocol_fact", [])),
         "policy_images": list(data.get("policy_image", [])),
         "images": [i["id"] for i in data.get("image", [])],
@@ -377,6 +391,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_artifacts(data)
     out += validate_limits(data["limit"])
     out += validate_policies(data.get("policy", []), data["catalog_version"])
+    out += validate_profiles(data.get("profile", []), data.get("policy", []))
     out += validate_facts(data.get("protocol_fact", []))
     out += validate_images(data)
     out += validate_policy_images(data)
@@ -1631,6 +1646,68 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
     return out
 
 
+PROFILE_KEYS = {"id", "help", "policies"}
+# The profile that states every policy at upstream's behaviour, which each policy's `default` is.
+UPSTREAM_PROFILE = "upstream"
+
+
+def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
+    """A profile is a named set of policy values a run-time document starts from (`wz/profile`):
+    each value is one the declaration gives its policy, and no policy the build alone decides is
+    in it. Whether the build's domain allows a value is the open's question, not this one. The
+    profile `upstream` states every policy a document may state, each at its `default`."""
+    out: list[str] = []
+    ids = [p.get("id") for p in profiles]
+    if len(ids) != len(set(ids)):
+        out.append("a profile id is declared twice")
+    by_id = {p.get("id"): p for p in policies}
+    for prof in profiles:
+        name = prof.get("id", "?")
+        where = f"profile `{name}`"
+        for key in sorted(set(prof) - PROFILE_KEYS):
+            out.append(f"{where}: `{key}` is not a key a profile has")
+        if not POLICY_ID_RE.fullmatch(str(name)):
+            out.append(f"{where}: an id is lowercase words joined by `-`")
+        help_text = prof.get("help")
+        if not isinstance(help_text, str) or not help_text.strip():
+            out.append(f"{where}: it has no help")
+        elif "\n\n" in help_text.strip():
+            out.append(f"{where}: its help is more than one paragraph")
+        elif re.search(r"\[`|crate::", help_text):
+            out.append(f"{where}: its help names Rust items; it is written for a deployer")
+        stated = prof.get("policies")
+        if not isinstance(stated, dict):
+            out.append(f"{where}: states its values in a `[profile.policies]` table")
+            continue
+        for pid, value in stated.items():
+            pol = by_id.get(pid)
+            if pol is None:
+                out.append(f"{where}: `{pid}` is not a declared policy")
+                continue
+            if pol.get("binding") == "build":
+                out.append(f"{where}: `{pid}` is decided by the build alone, so no profile states it")
+            if pol.get("kind") == "bool":
+                values = ["off", "on"]
+            elif isinstance(pol.get("choices"), list):
+                values = list(pol["choices"])
+            else:
+                continue
+            if not isinstance(value, str) or value not in values:
+                out.append(f"{where}: {value!r} is not a value of `{pid}` ({', '.join(values)})")
+        if name == UPSTREAM_PROFILE:
+            missing = [p.get("id") for p in policies
+                       if p.get("binding") != "build" and p.get("id") not in stated]
+            if missing:
+                out.append(f"{where}: states every policy a document may state, and leaves out "
+                           f"{', '.join(str(m) for m in missing)}")
+            for pid, value in stated.items():
+                pol = by_id.get(pid)
+                if pol is not None and value != pol.get("default"):
+                    out.append(f"{where}: states `{pid}` = {value!r}, and its default, upstream's "
+                               f"behaviour, is {pol.get('default')!r}")
+    return out
+
+
 # ---------------------------------------------------------------------------------------------
 # the capability graph
 # ---------------------------------------------------------------------------------------------
@@ -2007,7 +2084,8 @@ def emit_config_schema(decl: dict) -> str:
     values, and `limits` each limit the heap storage profile decides at the open or while running,
     as an integer with the declared default. Each carries its help's first sentence and where it
     is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
-    document is checked against when it is applied, not here."""
+    document is checked against when it is applied, not here. `profile` is the enum of the
+    declared profiles' ids, present only where the declaration states one."""
     policies = {}
     for pol in decl["policies"]:
         if pol["binding"] == "build":
@@ -2029,6 +2107,16 @@ def emit_config_schema(decl: dict) -> str:
             "default": lim["default"],
             **schema_annotations(lim, ("storage", "scope", "binding_heap", "binding_fixed", "wire")),
         }
+    members: dict = {}
+    profiles = decl.get("profiles", [])
+    if profiles:
+        members["profile"] = {
+            "description": ("The profile the document starts from: a named set of policy values "
+                            "the build declares, which the document's own policies override."),
+            "enum": [prof["id"] for prof in profiles],
+        }
+    members["policies"] = {"type": "object", "properties": policies, "additionalProperties": False}
+    members["limits"] = {"type": "object", "properties": limits, "additionalProperties": False}
     doc = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$comment": ("GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit "
@@ -2042,12 +2130,7 @@ def emit_config_schema(decl: dict) -> str:
         "properties": {
             "wz": {
                 "type": "object",
-                "properties": {
-                    "policies": {"type": "object", "properties": policies,
-                                 "additionalProperties": False},
-                    "limits": {"type": "object", "properties": limits,
-                               "additionalProperties": False},
-                },
+                "properties": members,
                 "additionalProperties": False,
             },
         },
@@ -2068,6 +2151,15 @@ def _refuses_word(text: str) -> bool:
     """Whether `rust_word` refuses `text` (the selftest's probe of the refusal)."""
     try:
         rust_word(text)
+    except ValueError:
+        return True
+    return False
+
+
+def _refuses_toml(text: str) -> bool:
+    """Whether `read_decl_toml` refuses `text` (the selftest's probe of the refusal)."""
+    try:
+        read_decl_toml(text)
     except ValueError:
         return True
     return False
@@ -2430,9 +2522,11 @@ def emit_rust_policies(decl: dict) -> str:
     snapshot of every policy's value a creator hands a machine. Each field is the policy's value
     bound inside the build's domain, read through an accessor and set through a `select_*` that
     refuses a value outside it; `SessionPolicy::defaults` is what the build's environment
-    (`WZ_POLICY_<NAME>`) states, or upstream's behaviour when it states nothing. Laid out so
-    rustfmt leaves it alone: every call fits on a line, a struct literal is one line only when
-    rustfmt would make it one, and a signature is one line only when it fits the width."""
+    (`WZ_POLICY_<NAME>`) states, or upstream's behaviour when it states nothing. `POLICIES` holds
+    the row a reader that names a policy by its id dispatches on, and `PROFILES` the declared
+    profiles (`[[profile]]`). Laid out so rustfmt leaves it alone: every call fits on a line, a
+    struct literal is one line only when rustfmt would make it one, and a signature is one line
+    only when it fits the width."""
     pols = decl["policies"]
     choices = [p for p in pols if p["kind"] == "choice"]
     bools = [p for p in pols if p["kind"] == "bool"]
@@ -2442,6 +2536,10 @@ def emit_rust_policies(decl: dict) -> str:
         "//! snapshot a creator hands each machine. Its build defaults ([`SessionPolicy::defaults`]) are",
         "//! the values the build's environment states as `WZ_POLICY_<NAME>`, or upstream's behaviour where",
         "//! it states none, and a test names another value with the field's `select_*`.",
+        "//!",
+        "//! A reader that names a policy by its id, as the open-stage document does, dispatches on the",
+        "//! policy's row of [`POLICIES`]; [`PROFILES`] holds the named sets of policy values the",
+        "//! declaration states (`[[profile]]`), which a document starts from.",
     ]
     if pols:
         out += [
@@ -2459,12 +2557,23 @@ def emit_rust_policies(decl: dict) -> str:
         out += [f"use super::{helpers[0]};", ""]
     elif helpers:
         out += ["use super::{" + ", ".join(helpers) + "};", ""]
+    profiles = decl.get("profiles", [])
+    # The type `POLICIES` holds is named whether or not a policy is declared, and `Statement` only
+    # where a profile states a value. A group of its own, so rustfmt keeps it after the `super`
+    # import as written.
     if pols:
-        # A group of its own, so rustfmt keeps it after the `super` import as written.
         out += ["use crate::policy_binding::{",
-                "    default_is_allowed, Binding, Bound, Domain, Mutability, OutsideDomain, PolicyValue, Scope, Wire,",
-                "};", "",
-                "/// Whether an allowance the build does not state keeps only the build default: what",
+                "    default_is_allowed, Binding, Bound, Domain, Mutability, OutsideDomain, PolicyEntry,",
+                "    PolicyField, PolicyValue, Scope, Wire,",
+                "};"]
+    else:
+        out.append("use crate::policy_binding::PolicyEntry;")
+    if any(prof["policies"] for prof in profiles):
+        out += ["use crate::policy_document::{Profile, Statement};", ""]
+    else:
+        out += ["use crate::policy_document::Profile;", ""]
+    if pols:
+        out += ["/// Whether an allowance the build does not state keeps only the build default: what",
                 f"/// `{POLICY_DOMAINS_ENV}` states, else whether the target has no operating system.",
                 f'const DEFAULTS_ONLY: bool = policy_defaults_only(option_env!("{POLICY_DOMAINS_ENV}"));',
                 ""]
@@ -2528,7 +2637,76 @@ def emit_rust_policies(decl: dict) -> str:
             "        Self::from_build()", "    }", "}"]
     for pol in pols:
         out += [""] + policy_value_rust(pol)
+    out += [""] + policy_table_rust(pols) + profiles_rust(pols, profiles)
     return "\n".join(out) + "\n"
+
+
+def rust_static_array(head: str, items: list[str]) -> list[str]:
+    """`<head> [<items>];` at the top level, as rustfmt lays it out: on one line when the items fit
+    its array width and the line fits, else one item a line."""
+    inner = ", ".join(items)
+    one = f"{head} [{inner}];"
+    if len(inner) <= RUST_ARRAY_WIDTH and len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return [f"{head} ["] + [f"    {item}," for item in items] + ["];"]
+
+
+def policy_field_rust(pol: dict) -> list[str]:
+    """How a reader that names `pol` by its id reaches its field of `SessionPolicy`: the
+    `PolicyField` impl of its value type, through the field's `select_*` and its `Bound`;
+    preceded by a blank line."""
+    name, field = camel(pol["id"]), snake(pol["id"])
+    return ["", f"impl PolicyField for {name} {{",
+            "    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {",
+            f"        policy.select_{field}(value)", "    }", "",
+            "    fn held_in(policy: &SessionPolicy) -> Self {",
+            f"        policy.{field}.get()", "    }", "}"]
+
+
+def policy_table_rust(pols: list[dict]) -> list[str]:
+    """`POLICY_COUNT` and `POLICIES`, the row of every policy a reader that names it by its id
+    dispatches on, in the order of the fields of `SessionPolicy`."""
+    out = ["/// How many policies the declaration states: the length of [`POLICIES`] and of every table kept",
+           "/// per policy.",
+           f"pub const POLICY_COUNT: usize = {len(pols)};", "",
+           "/// Every policy as a reader that names it by its id sees it, in the order of the fields of",
+           "/// [`SessionPolicy`]."]
+    rows = [f"PolicyEntry::of::<{camel(pol['id'])}>()" for pol in pols]
+    return out + rust_static_array("pub static POLICIES: [PolicyEntry; POLICY_COUNT] =", rows)
+
+
+def rust_statement(pid: str, value: str) -> list[str]:
+    """One statement of a profile's table, `Statement::new(<policy>, <value>),`, as rustfmt lays
+    the call out: on one line when its arguments fit the call width and the line fits, else one
+    argument a line."""
+    policy, word = rust_word(pid), rust_word(value)
+    args = f"{policy}, {word}"
+    one = f"        Statement::new({args}),"
+    if len(args) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return ["        Statement::new(", f"            {policy},", f"            {word},", "        ),"]
+
+
+def profile_const(prof: dict) -> str:
+    return f"PROFILE_{snake(prof['id']).upper()}"
+
+
+def profiles_rust(pols: list[dict], profiles: list[dict]) -> list[str]:
+    """Each profile as a constant, its statements in the order of the declaration's policies,
+    and `PROFILES`, every one of them; each preceded by a blank line."""
+    out: list[str] = []
+    for prof in profiles:
+        stated = prof["policies"]
+        lines = [line for pol in pols if pol["id"] in stated
+                 for line in rust_statement(pol["id"], stated[pol["id"]])]
+        out += [""] + rust_doc(f"The profile `{prof['id']}`: {' '.join(prof['help'].split())}", "")
+        out += [f"const {profile_const(prof)}: Profile = Profile {{",
+                f"    id: {rust_word(prof['id'])},"]
+        out += ["    statements: &["] + lines + ["    ],"] if lines else ["    statements: &[],"]
+        out.append("};")
+    out += ["", "/// Every profile the declaration states, which a document names by its id (`wz/profile`)."]
+    head = f"pub static PROFILES: [Profile; {len(profiles)}] ="
+    return out + rust_static_array(head, [profile_const(prof) for prof in profiles])
 
 
 # The doc of a policy value type's `Default`: the value of the build, which only the build
@@ -2653,8 +2831,8 @@ def bool_value_rust(pol: dict) -> list[str]:
 def policy_value_rust(pol: dict) -> list[str]:
     """One policy's `PolicyValue` impl, after its value type when it is a bool policy (a choice's
     enum is the one above): its values, the domain the build's environment allows, the build's
-    default and where it is bound; and the constant that refuses a build whose domain leaves out
-    its default."""
+    default and where it is bound; the constant that refuses a build whose domain leaves out its
+    default; and its `PolicyField` impl."""
     name = camel(pol["id"])
     values = policy_values(pol)
     out = bool_value_rust(pol) if pol["kind"] == "bool" else []
@@ -2680,7 +2858,7 @@ def policy_value_rust(pol: dict) -> list[str]:
     else:
         out.append("    const BOUNDARY: Option<&'static str> = None;")
     out += ["", "    fn index(self) -> usize {", "        self as usize", "    }", "}", ""]
-    return out + rust_default_assert(name, pol["id"])
+    return out + rust_default_assert(name, pol["id"]) + policy_field_rust(pol)
 
 
 def global_axes(decl: dict) -> list[dict]:
@@ -3863,6 +4041,31 @@ Flush early.
 """
 
 
+# Two profiles over POLICY_SAMPLE; the upstream one lists its values out of the declaration's
+# order, which the generated table does not follow.
+PROFILE_SAMPLE = """\
+
+[[profile]]
+id = "upstream"
+help = '''
+Every policy at upstream's behaviour.
+'''
+
+[profile.policies]
+eager-flush = "off"
+wire-mode = "os-default"
+
+[[profile]]
+id = "quiet"
+help = '''
+Flush early, wire left alone.
+'''
+
+[profile.policies]
+eager-flush = "on"
+"""
+
+
 def cmd_selftest() -> int:
     ok = bad = 0
 
@@ -4423,10 +4626,33 @@ def cmd_selftest() -> int:
     expect("a boundary with a quote or a backslash is escaped, and one that is not ASCII refused",
            rust_text('say "now" \\ then') == '"say \\"now\\" \\\\ then"' and _refuses_text("café"))
     nothing = emit_rust_policies({"policies": []})
-    expect("no policy is an empty struct and no import",
+    expect("no policy is an empty struct, an empty table and no import of a policy's trait",
            "pub struct SessionPolicy {}\n" in nothing and "        Self {}\n" in nothing
-           and "use super::" not in nothing and "policy_binding" not in nothing
-           and "PolicyValue" not in nothing)
+           and "use super::" not in nothing and "PolicyValue" not in nothing
+           and "PolicyField" not in nothing and "Statement" not in nothing
+           and "use crate::policy_binding::PolicyEntry;\nuse crate::policy_document::Profile;\n"
+               in nothing
+           and "pub const POLICY_COUNT: usize = 0;\n" in nothing
+           and "pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [];\n" in nothing
+           and "pub static PROFILES: [Profile; 0] = [];\n" in nothing)
+    expect("each policy is reached by its id through its field and has a row of the table",
+           "impl PolicyField for WireMode {\n"
+           "    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {\n"
+           "        policy.select_wire_mode(value)\n    }\n\n"
+           "    fn held_in(policy: &SessionPolicy) -> Self {\n        policy.wire_mode.get()\n    }\n}\n"
+           in rpolicies
+           and rpolicies.count("impl PolicyField for ") == len(pdecl["policies"])
+           and "pub const POLICY_COUNT: usize = 2;\n" in rpolicies
+           and "pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [\n"
+               "    PolicyEntry::of::<WireMode>(),\n    PolicyEntry::of::<EagerFlush>(),\n];\n"
+               in rpolicies)
+    expect("a table of one policy fits a line, as the formatter leaves it",
+           "pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [PolicyEntry::of::<EagerFlush>()];\n"
+           in emit_rust_policies({"policies": [p for p in pdecl["policies"] if p["kind"] == "bool"]}))
+    expect("a declaration without a profile has an empty PROFILES and no Statement",
+           "pub static PROFILES: [Profile; 0] = [];\n" in rpolicies
+           and "use crate::policy_document::Profile;\n" in rpolicies
+           and "Statement" not in rpolicies)
     one = emit_rust_policies({"policies": [p for p in pdecl["policies"] if p["kind"] == "bool"]})
     expect("one policy's literal is past rustfmt's struct width and goes one field a line",
            "        Self {\n            eager_flush: Bound::build_default(),\n        }\n" in one
@@ -4481,6 +4707,90 @@ def cmd_selftest() -> int:
     expect("every generated file includes the limit bindings and the schema",
            GENERATED.get("rust-limit-bindings", (None,))[0] == RUST_LIMIT_BINDINGS
            and GENERATED.get("config-schema", (None,))[0] == CONFIG_SCHEMA)
+    # The profiles: named sets of policy values a run-time document starts from.
+    with_profile = with_policy + PROFILE_SAMPLE
+    expect("a sample profile declaration validates", validate_decl(read_decl_toml(with_profile)) == [])
+
+    def profile_refused(old: str, new: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(with_profile.replace(old, new))))
+
+    expect("a profile that names no declared policy is refused",
+           profile_refused('eager-flush = "on"', 'eager-burst = "on"',
+                           "profile `quiet`: `eager-burst` is not a declared policy"))
+    expect("a profile value that is not one of its policy's is refused",
+           profile_refused('eager-flush = "on"', 'eager-flush = "sometimes"',
+                           "profile `quiet`: 'sometimes' is not a value of `eager-flush` (off, on)"))
+    expect("a profile value that is not a string is refused",
+           profile_refused('eager-flush = "on"', "eager-flush = 1",
+                           "profile `quiet`: 1 is not a value of `eager-flush`"))
+    expect("a profile that states a policy only the build decides is refused",
+           profile_refused('binding = "open"\nmutability = "fixed"\n',
+                           'binding = "build"\nmutability = "fixed"\n',
+                           "profile `quiet`: `eager-flush` is decided by the build alone"))
+    expect("the upstream profile that leaves out a policy a document may state is refused",
+           profile_refused('wire-mode = "os-default"\n', "",
+                           "profile `upstream`: states every policy a document may state, and "
+                           "leaves out wire-mode"))
+    expect("the upstream profile that states a policy off its default is refused",
+           profile_refused('wire-mode = "os-default"', 'wire-mode = "on"',
+                           "profile `upstream`: states `wire-mode` = 'on', and its default, "
+                           "upstream's behaviour, is 'os-default'"))
+    expect("the upstream profile leaves out a policy only the build decides, and validates",
+           validate_decl(read_decl_toml(with_profile.replace(
+               'binding = "open"\nmutability = "fixed"\n', 'binding = "build"\nmutability = "fixed"\n')
+               .replace('eager-flush = "off"\n', "").replace('eager-flush = "on"\n', ""))) == [])
+    expect("a profile declared twice is refused",
+           any("a profile id is declared twice" in p
+               for p in validate_decl(read_decl_toml(with_profile + PROFILE_SAMPLE))))
+    expect("a key a profile does not have is refused",
+           profile_refused('id = "quiet"\n', 'id = "quiet"\nspare = 1\n',
+                           "profile `quiet`: `spare` is not a key a profile has"))
+    expect("a profile with no table of values is refused",
+           profile_refused('\n[profile.policies]\neager-flush = "on"\n', "",
+                           "profile `quiet`: states its values in a `[profile.policies]` table"))
+    expect("a profile id that is not lowercase words is refused",
+           profile_refused('id = "quiet"', 'id = "Quiet_One"', "an id is lowercase words"))
+    expect("a profile with no help is refused",
+           profile_refused("help = '''\nFlush early, wire left alone.\n'''\n", "", "it has no help"))
+    expect("the reader puts a profile's values in the last profile opened",
+           [p["policies"] for p in read_decl_toml(PROFILE_SAMPLE)["profile"]]
+           == [{"eager-flush": "off", "wire-mode": "os-default"}, {"eager-flush": "on"}])
+    expect("a `[a.b]` table of a plain table is read as TOML reads it",
+           read_decl_toml('[t]\nk = "v"\n[t.u]\nw = 1\n') == {"t": {"k": "v", "u": {"w": 1}}})
+    expect("a `[a.b]` table before any `a` is refused",
+           _refuses_toml('[p.q]\nk = "v"\n') and _refuses_toml('n = 3\n[n.q]\n'))
+    expect("a `[a.b]` table set twice on one element is refused",
+           _refuses_toml('[[p]]\n[p.q]\nk = "v"\n[p.q]\n')
+           and not _refuses_toml('[[p]]\n[p.q]\nk = "v"\n[[p]]\n[p.q]\nk = "w"\n'))
+    profile_decl = decl_of(read_decl_toml(with_profile))
+    rprofiles = emit_rust_policies(profile_decl)
+    expect("a profile is a constant whose statements follow the declaration's order of policies",
+           "use crate::policy_document::{Profile, Statement};\n" in rprofiles
+           and "const PROFILE_UPSTREAM: Profile = Profile {\n    id: \"upstream\",\n"
+               "    statements: &[\n        Statement::new(\"wire-mode\", \"os-default\"),\n"
+               "        Statement::new(\"eager-flush\", \"off\"),\n    ],\n};\n" in rprofiles
+           and "const PROFILE_QUIET: Profile = Profile {\n    id: \"quiet\",\n    statements: &[\n"
+               "        Statement::new(\"eager-flush\", \"on\"),\n    ],\n};\n" in rprofiles)
+    expect("a profile's doc is its help, and PROFILES holds every profile",
+           "/// The profile `quiet`: Flush early, wire left alone.\nconst PROFILE_QUIET" in rprofiles
+           and "pub static PROFILES: [Profile; 2] = [PROFILE_UPSTREAM, PROFILE_QUIET];\n" in rprofiles)
+    expect("a statement past rustfmt's call width goes one argument a line",
+           rust_statement("p" * 50, "v" * 20)
+           == ["        Statement::new(", '            "' + "p" * 50 + '",',
+               '            "' + "v" * 20 + '",', "        ),"]
+           and rust_statement("p", "v") == ['        Statement::new("p", "v"),'])
+    empty_profile = emit_rust_policies(dict(pdecl, profiles=[{"id": "none", "help": "None.",
+                                                              "policies": {}}]))
+    expect("a profile that states nothing has an empty table and no Statement import",
+           "    id: \"none\",\n    statements: &[],\n};\n" in empty_profile
+           and "use crate::policy_document::Profile;\n" in empty_profile
+           and "Statement" not in empty_profile)
+    pschema = json.loads(emit_config_schema(dict(profile_decl, limits=sdecl["limits"])))
+    expect("the schema names the profiles a document may start from, before its policies",
+           list(pschema["properties"]["wz"]["properties"]) == ["profile", "policies", "limits"]
+           and pschema["properties"]["wz"]["properties"]["profile"]["enum"] == ["upstream", "quiet"])
+    expect("a declaration without a profile has no `profile` in the schema",
+           "profile" not in schema["properties"]["wz"]["properties"])
     # The domain a build allows each policy.
     weager = next(p for p in pdecl["policies"] if p["id"] == "eager-flush")
     wmode = next(p for p in pdecl["policies"] if p["id"] == "wire-mode")

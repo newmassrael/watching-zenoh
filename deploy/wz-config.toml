@@ -15,10 +15,11 @@
 #   * `crates/wz-session-core/src/caps_binding_generated.rs`
 #                                     where each limit is bound (generated);
 #   * `deploy/Kconfig.policies` and `crates/wz-session-core/src/policy_generated.rs`
-#                                     the policies, the domain a build allows each, and where
-#                                     each is bound (generated);
+#                                     the policies, the domain a build allows each, where each
+#                                     is bound, and the profiles (generated);
 #   * `deploy/wz-config.schema.json`  the JSON Schema of the run-time document: each policy and
-#                                     limit a stage after the build decides (generated);
+#                                     limit a stage after the build decides, and the profiles
+#                                     a document may name (generated);
 #   * `<image dir>/Kconfig.axes` and `<image dir>/wz_axes.cmake`
 #                                     each image's axes as Kconfig choices, and what they build
 #                                     its crate with (generated);
@@ -31,8 +32,8 @@
 #
 # The file is read by a reader of one small TOML shape (the hosted Python floor has no `tomllib`):
 # `key = value` on one line, the value a string, an integer or an array of strings, or a `'''`
-# literal string across lines; `[table]` and `[[array of tables]]` headers; `#` comments on lines
-# of their own.
+# literal string across lines; `[table]` and `[[array of tables]]` headers, and `[array.table]`
+# for a table of the last element of an array of tables; `#` comments on lines of their own.
 #
 # ## Capabilities
 #
@@ -3358,6 +3359,51 @@ byte, as zenoh-pico compares ids. The two orders disagree on most pairs of zids,
 so both ends of a link must state the same value: a peer that keeps one link by
 the other order closes the link this node kept, and neither link survives.
 '''
+
+# A profile is a named set of policy values a run-time document starts from: the document names it
+# by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
+# values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
+# no policy that only the build decides is in a profile. Whether the build's domain allows a value
+# is decided when a document is applied: a profile whose value a build leaves out is refused by
+# that build. Each is generated into `PROFILES` (crates/wz-session-core/src/policy_generated.rs)
+# and into the enum of `wz/profile` in the schema.
+#
+# `upstream` states every policy a document may state at its `default`, upstream's behaviour, so a
+# document that names it behaves as the original even where the build states other defaults
+# (`WZ_POLICY_<NAME>`); `wz_config.py --check` holds it to every policy's default.
+[[profile]]
+id = "upstream"
+help = '''
+Every policy at upstream's behaviour, stated explicitly, so a document that names
+it behaves as the original whatever the build states as its defaults. Where
+upstream has no such behaviour, the value is the one wz had before the policy
+existed.
+'''
+
+[profile.policies]
+multicast-loopback = "os-default"
+tx-no-progress-deadline = "off"
+tx-expiry-keeps-session = "off"
+declaration-sync-pacing = "off"
+datagram-fragment-pacing = "off"
+multicast-link-requires-iface = "off"
+reliable-gap-reconnect = "off"
+entity-link-restriction = "off"
+targeted-query = "off"
+publisher-admission-retry = "off"
+multi-route-atomic-tx = "off"
+entity-timestamp-opt-in = "off"
+reply-auto-timestamp = "off"
+subscriber-overload = "block"
+key-set = "open"
+sn-resolution = "bits-32"
+supervision-after-expiry = "latch"
+event-ring-full = "overwrite-oldest"
+clock-quality-stamping = "always"
+routing-face-drive = "task-per-face"
+routing-table-sharing = "rwlock"
+reassembly-pool-overflow = "reject"
+link-tie-order = "zid-number"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

@@ -103,8 +103,13 @@ impl SessionHandle {
     }
 
     /// The policies the session runs under, as its open resolved them: the registry's or the
-    /// node's. What a door admits a statement a policy governs by; compiled where such a door is.
-    #[cfg(any(feature = "rx-callback-offload", feature = "switch-doors"))]
+    /// node's. What a door admits a statement a policy governs by; compiled where such a door is,
+    /// and for the tests that read what an open handed the session.
+    #[cfg(any(
+        all(test, feature = "peer"),
+        feature = "rx-callback-offload",
+        feature = "switch-doors"
+    ))]
     pub(crate) fn session_policy(&self) -> &SessionPolicy {
         match self {
             Self::Registry(state) => state.shared.session_policy(),
@@ -333,7 +338,8 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::LinkNotInBuild
         | OpenRefusal::PluginHostNotInBuild
         | OpenRefusal::Aggregation
-        | OpenRefusal::StatsNotInBuild => Z_EINVAL,
+        | OpenRefusal::StatsNotInBuild
+        | OpenRefusal::Policies => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial
@@ -980,5 +986,87 @@ mod device_requires_tests {
         let rc =
             unsafe { wz_capi_c_config_device_requires(std::ptr::null(), std::ptr::null_mut()) };
         assert_eq!(rc, Z_ENULL);
+    }
+}
+
+/// A document's `wz` member through this ABI as a C program writes it: the session the open makes
+/// runs under the policies the member states, and a member the reader refuses fails the open with
+/// the code of a configuration refused for what it states. The session is a peer, which a build
+/// without `peer` refuses before the document's policies are looked at.
+#[cfg(all(test, feature = "peer"))]
+mod policy_document_tests {
+    use std::ffi::CString;
+
+    use super::*;
+    use crate::abi::z_owned_config_t;
+    use crate::config::zc_config_from_str;
+    use wz_runtime_tokio::policy::SubscriberOverload;
+    use wz_runtime_tokio_test_support::free_port;
+    use wz_session_core::policy_binding::PolicyValue;
+
+    /// A value of `subscriber-overload` other than the build default that the build's domain
+    /// allows, by its id; the build default itself where the build allows one value.
+    fn a_chosen_overload() -> &'static str {
+        <SubscriberOverload as PolicyValue>::ALL
+            .iter()
+            .copied()
+            .find(|value| {
+                *value != <SubscriberOverload as PolicyValue>::DEFAULT
+                    && <SubscriberOverload as PolicyValue>::DOMAIN.contains(*value)
+            })
+            .unwrap_or(<SubscriberOverload as PolicyValue>::DEFAULT)
+            .id()
+    }
+
+    /// Open a peer that listens on the loopback and scouts for nobody, read by
+    /// `zc_config_from_str` from a document whose `wz` member is `wz`: the code of the open, and
+    /// the session it made, a gravestone when it made none.
+    unsafe fn open_with(wz: &str) -> (ZResult, z_owned_session_t) {
+        let document = CString::new(format!(
+            r#"{{ mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:{}"] }},
+                  scouting: {{ multicast: {{ enabled: false }} }}, wz: {wz} }}"#,
+            free_port()
+        ))
+        .unwrap();
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(zc_config_from_str(&mut cfg, document.as_ptr()), Z_OK);
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        let code = z_open(
+            &mut session,
+            (&mut cfg as *mut z_owned_config_t).cast::<z_moved_config_t>(),
+            std::ptr::null(),
+        );
+        (code, session)
+    }
+
+    #[test]
+    fn a_session_runs_under_the_policies_its_document_states() {
+        let value = a_chosen_overload();
+        // SAFETY: a session this test opens, reads through its loan and closes; the config is a
+        // local the open consumes.
+        unsafe {
+            let (code, mut session) = open_with(&format!(
+                r#"{{ policies: {{ "subscriber-overload": "{value}" }} }}"#
+            ));
+            assert_eq!(code, Z_OK);
+            let handle = session_handle(z_session_loan(&session)).expect("the open made a session");
+            assert_eq!(handle.session_policy().subscriber_overload().id(), value);
+            let _ = z_close(z_session_loan_mut(&mut session), std::ptr::null_mut());
+            z_session_drop((&mut session as *mut z_owned_session_t).cast::<z_moved_session_t>());
+        }
+    }
+
+    #[test]
+    fn a_refused_wz_member_fails_the_open_as_a_refused_configuration() {
+        // SAFETY: as above; the open makes no session, so there is none to close.
+        unsafe {
+            let (code, session) =
+                open_with(r#"{ policies: { "subscriber-overload": "sometimes" } }"#);
+            assert_eq!(code, Z_EINVAL);
+            assert!(
+                session_handle(z_session_loan(&session)).is_none(),
+                "a refused open leaves the gravestone"
+            );
+        }
     }
 }

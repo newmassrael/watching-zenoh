@@ -2796,6 +2796,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         stated_for_other_modes: ingest.stated_for_other_modes,
         mode: ingest.config.mode,
         mode_unstated,
+        policies: ingest.config.policies,
     }))
 }
 
@@ -2835,6 +2836,12 @@ pub(crate) struct StockConfigExpansion {
     /// know to read. Carried out as a value rather than printed inside the
     /// expansion for the reason `ignored` is: a test can assert on a value.
     pub(crate) mode_unstated: Option<wz::runtime_tokio::zenoh_config::UnstatedMode>,
+    /// The node's policies as the file's `wz` member resolved them over the build defaults, and
+    /// where each value came from: the node's snapshot, which `main` hands its tuning
+    /// ([`TransportTuning::from_argv_under`]) and through it every session, router and socket of
+    /// the node. Every value from the build defaults when the file has no
+    /// such member; a member the reader refused is the expansion's error, never this.
+    pub(crate) policies: wz::runtime_tokio::policy_document::Resolved,
 }
 
 #[cfg(feature = "zenoh-config")]
@@ -2894,6 +2901,12 @@ impl StockConfigExpansion {
                 ),
             ));
         }
+        // The policies the file's `wz` member chose, each with the layer it came from; none is
+        // printed when every value is the build's own.
+        let chosen = self.chosen_policies();
+        if !chosen.is_empty() {
+            out.push(("POLICIES", format!("{chosen:?}")));
+        }
         // Said out loud rather than swallowed: a reader that applies what it
         // knows in silence lets a TLS root-CA path look like it took effect.
         for key in &self.ignored {
@@ -2901,6 +2914,25 @@ impl StockConfigExpansion {
         }
         out.push(("argv +=", format!("{:?}", self.added)));
         out
+    }
+
+    /// Each policy the file's `wz` member chose, as `<policy> = <value> (<layer>)`, in the order
+    /// of the build's policies; a policy left at the build default is not one of them.
+    pub(crate) fn chosen_policies(&self) -> Vec<String> {
+        use wz::runtime_tokio::policy_document::Origin;
+
+        self.policies
+            .provenance
+            .iter()
+            .filter(|(_, origin)| *origin != Origin::BuildDefault)
+            .map(|(entry, origin)| {
+                format!(
+                    "{} = {} ({origin})",
+                    entry.id(),
+                    entry.value_in(&self.policies.policy)
+                )
+            })
+            .collect()
     }
 
     /// The honoured keys that reach a flag in THIS build.
@@ -5877,16 +5909,24 @@ mod stock_config_tests {
         // A file that lights up every axis at once: honoured keys that reach a
         // flag and ones that do not, an unhonoured key, a key stated only for
         // other modes, and no `mode` at all so the silence axis fires too.
+        // The `wz` member chooses a policy at the build's own value, which every
+        // build's domain allows, so the policies axis has a line in every build.
+        let overload = wz::runtime_tokio::policy::SessionPolicy::defaults()
+            .subscriber_overload()
+            .id();
         let out = expand(
             &["--config", "z.json5"],
             // No `mode`, so the silence axis fires and this node reads as
             // `router`, as zenohd reads it; `timestamping/enabled` then names a
             // row for PEER only, which is the axis that is neither
             // honoured-here nor unreadable.
-            r#"{ connect: { endpoints: ["tcp/r:7447"] },
-                 timestamping: { enabled: { peer: true } },
-                 transport: { link: { tx: { threads: 8 } } },
-                 plugins: {} }"#,
+            &format!(
+                r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
+                     timestamping: {{ enabled: {{ peer: true }} }},
+                     transport: {{ link: {{ tx: {{ threads: 8 }} }} }},
+                     plugins: {{}},
+                     wz: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
+            ),
         )
         .unwrap();
 
@@ -5912,6 +5952,9 @@ mod stock_config_tests {
             ("added", "argv +=", |e| e.added.first().cloned()),
             ("mode", "STATED FOR OTHER MODES", |e| {
                 Some(e.mode.to_str().to_string())
+            }),
+            ("policies", "POLICIES", |e| {
+                e.chosen_policies().first().cloned()
             }),
         ];
 
@@ -5988,7 +6031,56 @@ mod stock_config_tests {
             stated_for_other_modes: _,
             mode: _,
             mode_unstated: _,
+            policies: _,
         } = out;
+    }
+
+    /// The file's `wz` member is the node's snapshot, each chosen value reported with its layer;
+    /// a file without it leaves the build defaults and prints no policies line, and a member the
+    /// reader refuses fails the expansion naming the refusal, so the node never starts on it.
+    #[test]
+    fn the_wz_member_of_the_file_is_the_node_policies_and_a_refused_one_fails_the_run() {
+        let defaults = wz::runtime_tokio::policy::SessionPolicy::defaults();
+        let silent = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#,
+        )
+        .unwrap();
+        assert_eq!(silent.policies.policy, defaults);
+        assert!(silent.chosen_policies().is_empty());
+        assert!(
+            !silent
+                .report_lines()
+                .iter()
+                .any(|(label, _)| *label == "POLICIES"),
+            "a file that chooses no policy prints no policies line"
+        );
+
+        let overload = defaults.subscriber_overload().id();
+        let chosen = expand(
+            &["--config", "z.json5"],
+            &format!(
+                r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
+                     wz: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            chosen.chosen_policies(),
+            [format!("subscriber-overload = {overload} (the document)")]
+        );
+
+        let refused = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] },
+                 wz: { policies: { "key-set": "ajar" } } }"#,
+        )
+        .unwrap_err();
+        assert!(
+            refused.starts_with("--config: z.json5: the `wz` member is refused: "),
+            "{refused}"
+        );
+        assert!(refused.contains("`key-set` = `ajar`"), "{refused}");
     }
 
     /// R311y843 — every key wz REPORTS as honoured, paired with whether the
@@ -8897,7 +8989,8 @@ mod stock_config_tests {
     /// binary does not parse would satisfy it while the wire stayed exactly
     /// where it was — a green that measures the expansion talking to itself.
     /// This is the other half: the expanded argv is read back through
-    /// [`TransportTuning::from_argv`], which is the same call `main` makes, and
+    /// [`TransportTuning::from_argv`], the read `main` makes (`from_argv_under`) under the
+    /// demo's own snapshot, and
     /// the params [`demo_session_init_params`] builds from it carry the
     /// operator's numbers rather than the demo's.
     ///
@@ -10382,11 +10475,14 @@ impl ScoutSocketArgs {
     /// rather than copied from `group_and_port` above: that one also carries an
     /// `all(test, zenoh-config)` arm, for a test this method has no counterpart
     /// to, and matching it would leave this dead code in exactly that build.
+    ///
+    /// `policy` is the node's snapshot: the joined scouting socket is bound as a link's joined
+    /// half is, so the loopback and the interface rule reach it too.
     #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
-    pub(crate) fn as_socket_config(&self) -> wz::runtime_tokio::McastSocketConfig<'_> {
-        // The node's snapshot: the joined scouting socket is bound as a link's joined half is,
-        // so the interface rule reaches it too.
-        let policy = resolve_policy();
+    pub(crate) fn as_socket_config(
+        &self,
+        policy: &wz::runtime_tokio::policy::SessionPolicy,
+    ) -> wz::runtime_tokio::McastSocketConfig<'_> {
         wz::runtime_tokio::McastSocketConfig {
             iface: self.interface.as_deref(),
             ttl: self.ttl,
@@ -10773,9 +10869,11 @@ pub(crate) struct TransportTuning {
     pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
 }
 
-/// The snapshot of a demo node's policies: the one place the demo resolves the values its
-/// sessions, routers and sockets read. The build defaults, until a run-time document is read
-/// here.
+/// The snapshot of the policies of a demo node no `--config` file describes, and of the sessions
+/// a sessions document runs, which has no `wz` member: the build defaults. A node a file
+/// describes runs under the snapshot the file's `wz` member resolved
+/// (`StockConfigExpansion::policies`), which `main` hands its tuning
+/// ([`TransportTuning::from_argv_under`]) and its scouting sockets.
 pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
     wz::runtime_tokio::policy::SessionPolicy::defaults()
 }
@@ -10828,8 +10926,23 @@ impl TransportTuning {
     /// default: the operator asked for a specific wire announcement, and
     /// announcing a different one because their digits were unparseable is the
     /// failure this whole round exists to remove.
+    ///
+    /// The node's snapshot is the demo's own ([`resolve_policy`]); `main` reads the tuning
+    /// through [`Self::from_argv_under`] with the snapshot its `--config` file resolved, so only
+    /// the tests read the tuning this way.
+    #[cfg(test)]
     pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
-        let mut out = Self::default();
+        Self::from_argv_under(rest, resolve_policy())
+    }
+
+    /// `from_argv` under `policy`, the node's snapshot: the tuning starts from
+    /// [`Self::of_policy`], so the defaults a policy decides and [`Self::policy`] are the
+    /// snapshot's, and every session the node opens is handed it.
+    pub(crate) fn from_argv_under(
+        rest: &[String],
+        policy: wz::runtime_tokio::policy::SessionPolicy,
+    ) -> Result<Self, String> {
+        let mut out = Self::of_policy(policy);
         if let Some(v) = parse_pair(rest, "--batch-size") {
             out.batch_size = v
                 .parse::<u16>()
@@ -11022,7 +11135,7 @@ impl NodeTimestamping {
     /// Read `--timestamping <true|false>` off the command line.
     ///
     /// A malformed value is an ERROR rather than a silent fallback, for
-    /// [`TransportTuning::from_argv`]'s reason: the operator asked for a
+    /// [`TransportTuning::from_argv_under`]'s reason: the operator asked for a
     /// specific stamping policy, and quietly running the other one is exactly
     /// the failure the config expansion exists to remove. `true` / `false` are
     /// the only spellings, because they are the two json5 spellings the key
@@ -12634,5 +12747,56 @@ mod multicast_max_sessions_flag_tests {
                 "{bad}: {err}"
             );
         }
+    }
+}
+
+/// The tuning a node runs with is read under the snapshot `main` hands it, not under the demo's
+/// own: the snapshot is what every session the node opens is given.
+#[cfg(test)]
+mod transport_tuning_policy_tests {
+    use super::*;
+    use wz::runtime_tokio::policy::SessionPolicy;
+    use wz::runtime_tokio::policy_document::{resolve, Layer, Origin, Statement};
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// The build defaults with `sn-resolution` at another width the build's domain allows; the
+    /// build defaults themselves where it allows one width.
+    fn a_chosen_snapshot() -> SessionPolicy {
+        let defaults = SessionPolicy::defaults();
+        ["bits-8", "bits-16", "bits-32", "bits-64"]
+            .into_iter()
+            .filter_map(|width| {
+                let statements = [Statement::new("sn-resolution", width)];
+                let layer = Layer {
+                    origin: Origin::Document,
+                    statements: &statements,
+                };
+                resolve(defaults, &[layer]).ok()
+            })
+            .map(|resolved| resolved.policy)
+            .find(|policy| *policy != defaults)
+            .unwrap_or(defaults)
+    }
+
+    #[test]
+    fn the_tuning_carries_the_snapshot_it_is_read_under() {
+        let chosen = a_chosen_snapshot();
+        let tuning = TransportTuning::from_argv_under(&argv(&["--lease-ms", "2000"]), chosen)
+            .expect("the flags read");
+        assert_eq!(tuning.policy, chosen);
+        // The width a node offers when no flag states one is the snapshot's.
+        assert_eq!(tuning.sn_resolution, chosen.sn_resolution());
+        assert_eq!(tuning.lease_ms, 2000);
+        // A flag still states over the snapshot's default.
+        let stated = TransportTuning::from_argv_under(&argv(&["--sn-resolution", "16bit"]), chosen)
+            .expect("the flags read");
+        assert_eq!(
+            stated.sn_resolution,
+            wz::runtime_tokio::policy::SnResolution::Bits16
+        );
+        assert_eq!(stated.policy, chosen);
     }
 }

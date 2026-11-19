@@ -8,6 +8,12 @@
     "wz": {
       "type": "object",
       "properties": {
+        "profile": {
+          "description": "The profile the document starts from: a named set of policy values the build declares, which the document's own policies override.",
+          "enum": [
+            "upstream"
+          ]
+        },
         "policies": {
           "type": "object",
           "properties": {

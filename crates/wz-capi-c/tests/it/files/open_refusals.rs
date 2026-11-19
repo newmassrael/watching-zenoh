@@ -162,6 +162,37 @@ fn a_config_the_open_cannot_carry_out_is_refused_with_its_code() {
             ],
             Z_EINVAL,
         ),
+        (
+            "a wz member naming a value the policy does not have",
+            &[
+                NO_SCOUTING,
+                ("mode", "\"client\""),
+                ("connect/endpoints", r#"["tcp/127.0.0.1:1"]"#),
+                ("wz/policies", r#"{ "key-set": "ajar" }"#),
+            ],
+            Z_EINVAL,
+        ),
+        (
+            "a wz member naming a profile the build does not have",
+            &[
+                NO_SCOUTING,
+                ("mode", "\"client\""),
+                ("connect/endpoints", r#"["tcp/127.0.0.1:1"]"#),
+                ("wz", r#"{ profile: "no-such-profile" }"#),
+            ],
+            Z_EINVAL,
+        ),
+        (
+            // The member is refused before the endpoints are looked at: without it this row is
+            // the first one, nothing to dial.
+            "a wz member stating limits, on a client with nothing to dial",
+            &[
+                NO_SCOUTING,
+                ("mode", "\"client\""),
+                ("wz", "{ limits: {} }"),
+            ],
+            Z_EINVAL,
+        ),
     ];
     for (label, entries, expected) in rows {
         // SAFETY: a fresh zeroed owned config and session per row, as the C API is called.

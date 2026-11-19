@@ -178,18 +178,20 @@ async fn bind_window(
     } else {
         scout_interface_addresses().unwrap_or_default()
     };
-    // The node's snapshot, which `as_socket_config` opens the other sockets under too.
+    // The snapshot of a sessions document's node, which has no `wz` member: every socket of the
+    // window is opened under it.
     let policy = crate::args::resolve_policy();
     let (mut ask, refused) = bind_scout_sockets(group_ip, port, &locals, socket.ttl, &policy).await;
     if ask.is_empty() {
-        let one = UdpDriver::bind_multicast_tx(group_ip, port, socket.as_socket_config())
+        let one = UdpDriver::bind_multicast_tx(group_ip, port, socket.as_socket_config(&policy))
             .await
             .map_err(|e| format!("could not open a scouting socket: {e}"))?;
         ask.push(one);
     }
-    let listening = UdpDriver::bind_scouting_group(group_ip, port, socket.as_socket_config())
-        .await
-        .ok();
+    let listening =
+        UdpDriver::bind_scouting_group(group_ip, port, socket.as_socket_config(&policy))
+            .await
+            .ok();
     ScoutFanOut::over_optional(listening, ask, refused)
         .map(|(driver, _shape)| driver)
         .ok_or_else(|| "no socket to scout with".to_string())
