@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The facts of a key expression's text that `key_facts.scxml` returns: the
+  record type of that algorithm. No machine sends it as an event; the
+  event-schema kind is how SCE declares a record (SCE_FORGE.md, "Records").
+
+  wild - the text holds a `*` (a wildcard chunk or a `$*` glob).
+  key  - the text splits into chunks the matchers accept: not empty, no
+         leading or trailing `/`, no `//`, and on a build whose key buffer
+         is fixed no more chunks than it holds.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       version="1.0"
+       sce:kind="event-schema"
+       name="key_facts_schema"
+       sce:event-name="key.facts">
+  <datamodel>
+    <data id="wild" sce:type="bool" sce:direction="in"/>
+    <data id="key" sce:type="bool" sce:direction="in"/>
+  </datamodel>
+</scxml>

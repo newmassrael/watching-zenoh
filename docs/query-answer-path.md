@@ -79,6 +79,15 @@ decode of a Request returns a `CheckedKey<'_>`; `Queryable::matches` and `admit`
 `from_utf8` calls, the `has_star` scans and the `text_is_a_key` scans of section 2 item 1 go.
 Switch: `CONFIG_WZ_KEY_FACTS` selects cargo feature `key-facts`; off, the matcher is today's.
 
+As built (1836935b5, section 5a): `KeyFacts { wild, key }`, where `key` is the validity rule of
+`text_is_a_key` (not empty, no leading, trailing or doubled `/`, and on a fixed backing no deeper
+than it holds); there is no `CheckedKey` type, the length is read from the text where two keys are
+compared, and no switch was added, because the step measured better and is on in every build. The
+scan was written by hand in `wz-session-core` `keyexpr_match.rs` until 2026-11-19, and the
+document this paragraph names did not exist; since then it is `sources/algorithms/key_facts.scxml`,
+which returns the record of `key_facts_schema.scxml`, and `KeyFacts::of` calls the generated
+function (`out/wz-session-core/key_facts.rs`).
+
 **L1. One fold of the extensions (P3).** `RequestFacts { sliced_value, target, qos, .. }` is built
 by one walk during decode. The right place is the codec generator: an SCXML codec declares the
 fields of a list that a fold keeps, and SCE emits the fold beside the view. That is a request to

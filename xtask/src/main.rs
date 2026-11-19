@@ -402,7 +402,8 @@ fn regen_codec_deployment(
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer,
 ///                      peer_connection, clock_quality, supervision (statecharts);
-///                      tick_elapsed, tick_until_due (algorithms)
+///                      tick_elapsed, tick_until_due, key_facts (algorithms);
+///                      key_facts_schema (the event-schema key_facts returns)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
@@ -451,9 +452,14 @@ fn regen_statecharts_and_pools(root: &Path) {
         "tick_elapsed",
         // The resource snapshot's sampler — how long until a period is over.
         "tick_until_due",
+        // The keyexpr matcher's facts of a key's text, read once (docs/query-answer-path.md L0).
+        "key_facts",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }
+    // The record type key_facts returns, emitted beside it: an algorithm names its
+    // record's schema as the sibling module `super::<schema>`.
+    codegen.emit_event_schema("key_facts_schema", &algorithms, &sc_out);
 
     // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
     let pools: &[(&str, &str)] = &[

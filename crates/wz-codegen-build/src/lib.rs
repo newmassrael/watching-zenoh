@@ -543,6 +543,15 @@ impl Codegen {
         strip_inner_attrs_file(&out_dir.join(format!("{stem}.rs")));
     }
 
+    /// Codegen one `sce:kind="event-schema"` document into `$OUT_DIR/{stem}.rs`, stripping
+    /// inner attributes. An algorithm that takes or returns a `record:<alias>` names the
+    /// schema's module as `super::{stem}`, so the consumer `include!`s the two as sibling
+    /// modules and the schema is emitted beside the algorithm.
+    pub fn emit_event_schema(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.run_generate(stem, resource_dir, out_dir);
+        strip_inner_attrs_file(&out_dir.join(format!("{stem}.rs")));
+    }
+
     /// Allocator-free emit (`--no-std`): the buffer-pool / statechart
     /// templates use only `core::` types under this flag, so one emit
     /// serves both the std (AP) and heapless (MCU) runtimes.

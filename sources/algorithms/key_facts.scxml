@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The facts of a key expression's text, read in one pass: whether it holds a
+  wildcard and whether it is a key the matchers accept. `KeyFacts::of` in
+  wz-session-core's keyexpr_match is this function; a queryable's pattern is
+  read once at its declaration and a query's key once at its decode, and every
+  match between them reads the facts instead of the text
+  (docs/query-answer-path.md, section 4, L0).
+
+  `*` (0x2A, 42) and `/` (0x2F, 47) are ASCII, so neither can occur inside a
+  multi-byte UTF-8 sequence (lead and continuation bytes are all 0x80 or
+  above): a byte scan is correct on any UTF-8 text.
+
+  A key is accepted when it is not empty, does not begin or end with `/`,
+  holds no `//`, and, when `bounded` is true, has fewer than `chunk_bound`
+  slashes, that is at most `chunk_bound` chunks: the refusal of a build whose
+  key buffer is fixed (wz-session-core `bounded::ENFORCES_CAPACITY` and
+  `MAX_KEYEXPR_CHUNKS`). The slash count stops at the bound, since nothing
+  past it changes the answer. The first and the last byte are kept as the
+  scan passes them, so the body indexes nothing.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="key_facts"
+       version="1.0">
+  <sce:import kind="event-schema" src="key_facts_schema.scxml" as="KeyFacts"/>
+  <sce:signature>
+    <sce:param name="text" type="bytes"/>
+    <sce:param name="bounded" type="bool"/>
+    <sce:param name="chunk_bound" type="uint32"/>
+    <sce:return type="record:KeyFacts"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="wild" type="bool" init="false"/>
+    <sce:var name="doubled" type="bool" init="false"/>
+    <sce:var name="slashes" type="uint32" init="0"/>
+    <sce:var name="seen" type="bool" init="false"/>
+    <sce:var name="first" type="uint8" init="0"/>
+    <sce:var name="previous" type="uint8" init="0"/>
+    <sce:foreach item="b" in="text">
+      <sce:if cond="!seen">
+        <sce:assign target="first" expr="b"/>
+        <sce:assign target="seen" expr="true"/>
+      </sce:if>
+      <sce:if cond="b === 42">
+        <sce:assign target="wild" expr="true"/>
+      </sce:if>
+      <sce:if cond="b === 47">
+        <sce:if cond="previous === 47">
+          <sce:assign target="doubled" expr="true"/>
+        </sce:if>
+        <sce:if cond="slashes &lt; chunk_bound">
+          <sce:assign target="slashes" expr="slashes + 1"/>
+        </sce:if>
+      </sce:if>
+      <sce:assign target="previous" expr="b"/>
+    </sce:foreach>
+    <sce:var name="facts" type="record:KeyFacts">
+      <sce:set name="wild" expr="wild"/>
+      <sce:set name="key" expr="seen &amp;&amp; first !== 47 &amp;&amp; previous !== 47 &amp;&amp; !doubled &amp;&amp; (!bounded || slashes &lt; chunk_bound)"/>
+    </sce:var>
+    <sce:return expr="facts"/>
+  </sce:body>
+</scxml>
