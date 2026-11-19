@@ -414,8 +414,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "(`tls::HostTls`), and all four are run by this crate's own tests: the second by "
         "`scout_datagram`'s unit tests, the others over loopback sockets "
         "(`tests/tls_provider.rs` for the last, and again through the pico ABI's "
-        "`tls_coop_roundtrip`)",
-        frozenset({"scout", "scout-datagram", "listen", "tls-mbedtls"}),
+        "`tls_coop_roundtrip`); `shared-key-ids` gates `OpenKeyIds::shared`, the dictionary "
+        "an open hands the session, which `tests/shared_key_ids.rs` runs over loopback",
+        frozenset({"scout", "scout-datagram", "listen", "tls-mbedtls", "shared-key-ids"}),
     ),
     "wz-tls-mbedtls": (
         "the secure channel over Mbed TLS that the cooperative engine's `tls/` link runs (its "
@@ -509,6 +510,8 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`, the event struct, the owned
         # watch and the constants they take, declared in `wz_ext.h`, off by default as the
         # observation plane's doors are.
+        # `shared-key-ids` gates the door `wz_ext_config_key_ids` of `pub mod key_ids`, declared
+        # in `wz_ext.h`; off by default, as upstream has no such door.
         frozenset(
             {
                 "admin-space",
@@ -519,6 +522,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "resource-snapshot",
                 "scout-mcu",
                 "segment-sender",
+                "shared-key-ids",
                 "supervision",
             }
         ),
