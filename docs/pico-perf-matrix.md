@@ -64,6 +64,19 @@ unicast batch of 2048 bytes, so no message is fragmented):
   warm-up, then reads its count and its CPU at the start and at the end of a 5 s window. `pub` puts
   for the warm-up, the window and 3 s more, and both print the monotonic times of their spans.
 
+**Before the first counted put.** The client side (`ping`, `pub`) declares its publisher one second
+after its open, as upstream's `z_pub_thr` does, then waits for a peer, and on tcp, udp and the
+program transport until its publisher matches the server side's subscriber
+(`z_publisher_get_matching_status`, `perf_probe -M`). The reason is the reference: a zenoh-pico
+publisher sends a put only while its write filter knows of a subscriber, and returns success for a
+put it did not send, so a loop that starts before the subscriber's declaration arrives counts puts
+that went nowhere. The put path that skips the send:
+
+`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`
+
+A group of the pico preset carries no declarations and sends every put, so on multicast the client
+waits for the peer's JOIN only. Both arms run the same arguments.
+
 **Batching.** With batching off every put leaves as the session sends it. With batching on, `pub`
 opens one batch window (`zp_batch_start`) for its whole loop and closes it at the end, as upstream's
 `z_pub_thr` does; `ping` and `pong` open and close one around each put, the close flushing it. A
@@ -118,6 +131,29 @@ mode builds everything it runs: the reference (cached by the cost gate's key und
 
 The pinning defaults to the parity matrix's (`docs/upstream-parity.md` section 5b). On the host a
 run is made on, name CPUs that are idle and that do not share a physical core across the two sides.
+
+**Picking idle CPUs on a shared host such as pc2.** Other jobs run there, and a cell whose pinned CPUs
+were busy is run again and finally lost ("the pinned CPUs were used by something else in 6 runs").
+Ask the host which CPUs are idle now, right before the run, and pass what it suggests:
+
+```sh
+bx --host pc2 -- python3 scripts/host-bench/perf_matrix.py idle-cpus 10 4
+```
+
+It samples `/proc/stat` for 10 seconds, prints each CPU's busy share and its physical core
+(`/sys/devices/system/cpu/cpu<N>/topology`), and ends with one line of the two variables: at least
+four CPUs a side, whole cores only, the least busy cores first, so the two sides never share a core.
+Copy that line in front of the run in the same `bx` call:
+
+```sh
+bx --host pc2 -- env PICO_CMP_CLIENT_CPUS=<...> PICO_CMP_SERVER_CPUS=<...> bash scripts/pico-compare.sh perf 3
+```
+
+What was idle for ten seconds may not stay idle for the run; the run's own check of every cell is
+what decides, and `foreign_share` in each measured cell says what it saw. When many cells are still
+lost that way, run at a quieter time, or narrow the run so it ends sooner. On a hybrid CPU the busy
+share does not tell a performance core from an efficiency core; both arms run on the same CPUs, so
+the comparison stays fair, but the absolute figures belong to the cores named in the record.
 
 A full run is every transport, both batching settings, both workloads and three sizes, for both arms,
 three times: 288 cells, of which the 36 of arm P on the program transport are not applicable. Narrow
