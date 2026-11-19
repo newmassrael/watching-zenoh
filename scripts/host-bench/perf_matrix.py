@@ -20,8 +20,13 @@ as the same build (arm P), per transport and with batching off and on.
                        [--pings 20000] [--warmup-ms 3000] [--window-s 5] [--timeout-ms 100]
                        [--reference-record FILE]
         the matrix; DIR (--bin-dir) holds perf_probe_P, perf_probe_W and perf_probe_Wapp
+    perf_matrix.py idle-cpus [SECONDS] [PER_SIDE]
+        each CPU's busy share over SECONDS (default 5) and its physical core, and a pinning of two sides of
+        at least PER_SIDE (default 4) CPUs of whole cores, the least busy first, printed as the words
+        `pico-compare.sh perf` reads; on a shared host a moment's idle CPUs are a guess the run's own
+        validity check then grades
     perf_matrix.py --selftest
-        the readers and the figures on synthetic program output
+        the readers, the figures and the pinning on synthetic input
 
 A CELL is one arm, transport, batching, workload and payload size in one repetition. Its two programs are
 started afresh, the server side (pong, sub) pinned to --server-cpus and the client side (ping, pub) to
@@ -33,6 +38,11 @@ started afresh, the server side (pong, sub) pinned to --server-cpus and the clie
   * program    wz only (perf_probe_Wapp, built with the `app-transport` capability): every link goes
                over a transport the program supplies, an AF_UNIX stream of its own (perf_probe.c, -T);
                zenoh-pico has no such door, so arm P records the cell as not applicable.
+
+The client side of every cell declares its publisher a second after its open, as upstream's z_pub_thr
+does, and on tcp, udp and the program transport puts nothing it counts until that publisher matches the
+server side's subscriber (perf_probe.c -M): a zenoh-pico publisher that knows of no subscriber sends
+nothing and still counts the put. Both arms run the same arguments.
 
   * rtt  pong, then ping: --pings round trips of the size after --warmup-ms, each waited for up to
          --timeout-ms. Figures: the percentiles p50, p90 and p99 and the mean and extremes (microseconds),
@@ -90,8 +100,12 @@ ARMS = ("P", "W")
 SETTLE_S = 1.5
 #: The seconds the publisher goes on putting after the subscriber's window should have ended.
 PUB_TAIL_S = 3
-#: The seconds a program waits for a peer before it gives up (perf_probe.c).
+#: The seconds a program waits for a peer before it gives up, and again for a match (perf_probe.c).
 PEER_WAIT_S = 10
+#: The seconds the client side waits after its open before it declares its publisher (perf_probe.c).
+PREPARE_S = 1
+#: The longest a client side can take before its first counted put.
+READY_S = PREPARE_S + 2 * PEER_WAIT_S
 GROUP = "224.0.0.224"
 #: What a session of the program transport is told to listen on and to dial: the transport carries it,
 #: no socket of the system's is opened for it (TEST-NET-1).
@@ -207,18 +221,21 @@ def thr_figures(pub: dict[str, str], sub: dict[str, str], client: Usage, server:
 
 
 def endpoint_args(transport: str, port: int, name: str) -> tuple[list[str], list[str]]:
-    """The arguments of the server side and of the client side of `transport`."""
+    """The arguments of the server side and of the client side of `transport`. On a transport that carries
+    declarations the client side waits until its publisher matches a subscriber (perf_probe.c -M): a
+    zenoh-pico publisher sends nothing, and still counts the put, while it knows of no subscriber. A
+    group of the pico preset carries no declarations and sends every put, so it has nothing to wait for."""
     if transport == "tcp":
         where = f"tcp/127.0.0.1:{port}"
-        return ["-l", where], ["-e", where]
+        return ["-l", where], ["-e", where, "-M"]
     if transport == "udp":
         where = f"udp/127.0.0.1:{port}"
-        return ["-l", where], ["-e", where]
+        return ["-l", where], ["-e", where, "-M"]
     if transport == "multicast":
         where = f"udp/{GROUP}:{port}#iface=lo"
         return ["-l", where], ["-l", where]
     if transport == "program":
-        return ["-l", PROGRAM_LOCATOR, "-T", name], ["-e", PROGRAM_LOCATOR, "-T", name]
+        return ["-l", PROGRAM_LOCATOR, "-T", name], ["-e", PROGRAM_LOCATOR, "-T", name, "-M"]
     raise ValueError(f"no transport {transport}")
 
 
@@ -243,6 +260,74 @@ def pico_sys_include(lines: list[str]) -> str:
     if len(found) != 1:
         raise ValueError(f"cargo reported {len(found)} zenoh-pico-sys build(s) for this feature list, not one")
     return found.pop()
+
+
+def suggest_pinning(busy: dict[int, float], core_of: dict[int, tuple[int, int]],
+                    per_side: int) -> tuple[list[int], list[int]] | None:
+    """The client side's CPUs and the server side's, each at least `per_side` CPUs made of whole physical
+    cores (every CPU of a core on one side, so the two sides share no core), the least busy cores first:
+    a core is as busy as its busiest CPU. None when the host has too few cores for both."""
+    cores: dict[tuple[int, int], list[int]] = {}
+    for cpu, core in core_of.items():
+        cores.setdefault(core, []).append(cpu)
+    ranked = sorted(cores.values(), key=lambda cpus: (max(busy.get(c, 1.0) for c in cpus), min(cpus)))
+    sides = []
+    for _ in range(2):
+        side: list[int] = []
+        while ranked and len(side) < per_side:
+            side.extend(ranked.pop(0))
+        if len(side) < per_side:
+            return None
+        sides.append(sorted(side))
+    return sides[0], sides[1]
+
+
+def cpu_busy_shares(seconds: float) -> dict[int, float]:
+    """Each CPU's busy share over `seconds` (/proc/stat: user, nice, system and steal over every column)."""
+
+    def sample() -> dict[int, tuple[int, int]]:
+        out = {}
+        with open("/proc/stat", encoding="ascii") as stat:
+            for line in stat:
+                words = line.split()
+                if words and words[0].startswith("cpu") and words[0] != "cpu":
+                    ticks = [int(x) for x in words[1:9]]
+                    out[int(words[0][3:])] = (ticks[0] + ticks[1] + ticks[2] + ticks[7], sum(ticks))
+        return out
+
+    first = sample()
+    time.sleep(seconds)
+    second = sample()
+    return {cpu: (second[cpu][0] - first[cpu][0]) / max(1, second[cpu][1] - first[cpu][1])
+            for cpu in second if cpu in first}
+
+
+def cpu_cores() -> dict[int, tuple[int, int]]:
+    """Each online CPU's physical core, as (package, core id) from sysfs."""
+    out = {}
+    for topology in sorted(pathlib.Path("/sys/devices/system/cpu").glob("cpu[0-9]*/topology")):
+        cpu = int(topology.parent.name[3:])
+        try:
+            out[cpu] = (int((topology / "physical_package_id").read_text()),
+                        int((topology / "core_id").read_text()))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def cmd_idle_cpus(seconds: float, per_side: int) -> int:
+    busy = cpu_busy_shares(seconds)
+    core_of = {cpu: core for cpu, core in cpu_cores().items() if cpu in busy}
+    for cpu in sorted(busy):
+        print(f"  cpu{cpu:<3} core {core_of.get(cpu, ('?', '?'))}  busy {busy[cpu] * 100:5.1f}%")
+    pinning = suggest_pinning(busy, core_of, per_side)
+    if pinning is None:
+        print(f"perf-matrix: this host has too few cores for two sides of {per_side} CPUs", flush=True)
+        return 1
+    client, server = pinning
+    print(f"PICO_CMP_CLIENT_CPUS={','.join(map(str, client))} PICO_CMP_SERVER_CPUS={','.join(map(str, server))}",
+          flush=True)
+    return 0
 
 
 def numbers(figures: dict) -> dict[str, float]:
@@ -346,7 +431,7 @@ class Matrix:
     def rtt(self, binary: str, transport: str, batching: bool, size: int, tag: str) -> tuple[dict, float]:
         args = self.args
         flags = ["-b"] if batching else []
-        deadline = (args.warmup_ms / 1e3 + PEER_WAIT_S + args.pings * 1e-3
+        deadline = (args.warmup_ms / 1e3 + READY_S + args.pings * 1e-3
                     + (args.pings // 10 + 1) * args.timeout_ms / 1e3 + 30)
 
         def body():
@@ -390,7 +475,7 @@ class Matrix:
                 time.sleep(SETTLE_S)
                 pub = self.start(binary, "pub", ["-m", "peer", *client, "-s", str(size), "-t", str(pub_s), *flags],
                                  "client", tag)
-                done = pub.reap(pub_s + PEER_WAIT_S + 30)
+                done = pub.reap(pub_s + READY_S + 30)
             finally:
                 if pub is not None:
                     pub.stop()
@@ -619,14 +704,17 @@ def cmd_selftest() -> int:
            and set(METRICS.values()) == {"lower", "higher"})
 
     expect("tcp and udp listen on one side and dial from the other",
-           endpoint_args("tcp", 7447, "n") == (["-l", "tcp/127.0.0.1:7447"], ["-e", "tcp/127.0.0.1:7447"])
-           and endpoint_args("udp", 7447, "n")[1] == ["-e", "udp/127.0.0.1:7447"])
-    expect("both members of a group listen on it",
+           endpoint_args("tcp", 7447, "n") == (["-l", "tcp/127.0.0.1:7447"], ["-e", "tcp/127.0.0.1:7447", "-M"])
+           and endpoint_args("udp", 7447, "n")[1] == ["-e", "udp/127.0.0.1:7447", "-M"])
+    expect("both members of a group listen on it, and the client waits for no match there",
            endpoint_args("multicast", 7447, "n")[0] == endpoint_args("multicast", 7447, "n")[1]
            == ["-l", f"udp/{GROUP}:7447#iface=lo"])
     expect("the program transport names its stream on both sides",
            endpoint_args("program", 7447, "n") == (["-l", PROGRAM_LOCATOR, "-T", "n"],
-                                                   ["-e", PROGRAM_LOCATOR, "-T", "n"]))
+                                                   ["-e", PROGRAM_LOCATOR, "-T", "n", "-M"]))
+    expect("on every transport that carries declarations the client side alone waits for a match",
+           all("-M" in endpoint_args(t, 1, "n")[1] and "-M" not in endpoint_args(t, 1, "n")[0]
+               for t in ("tcp", "udp", "program")))
     expect("an unknown transport is refused", lost_value(lambda: endpoint_args("serial", 1, "n")))
     expect("arm P has no program transport and arm W runs it from its own build",
            binary_name("P", "program") is None and binary_name("W", "program") == "perf_probe_Wapp"
@@ -664,6 +752,16 @@ def cmd_selftest() -> int:
            all(r["w_over_p"] == {} for r in only_w)
            and any(r["arms"].get("P", {}).get("not_applicable") for r in only_w))
     expect("the report names every figure of a row", any("msgs_per_s" in line for line in report_lines(rows)))
+
+    # Four cores of two threads (core i holds CPUs i and i + 4); core 2 idle, core 1 nearly, core 3
+    # half busy on one thread, core 0 busy.
+    core_of = {cpu: (0, cpu % 4) for cpu in range(8)}
+    busy = {0: 0.9, 4: 0.8, 1: 0.1, 5: 0.0, 2: 0.0, 6: 0.0, 3: 0.0, 7: 0.5}
+    expect("the least busy whole cores go to the client side first, then the server side",
+           suggest_pinning(busy, core_of, 2) == ([2, 6], [1, 5]))
+    expect("a side is filled with whole cores until it has enough CPUs, and the sides share no core",
+           suggest_pinning(busy, core_of, 3) == ([1, 2, 5, 6], [0, 3, 4, 7]))
+    expect("a host with too few cores for both sides is refused", suggest_pinning(busy, core_of, 5) is None)
     print(f"  perf-matrix selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
@@ -689,6 +787,14 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 4 and argv[1] == "reference" and argv[2] == "--out":
         return cmd_reference(pathlib.Path(argv[3]))
+    if 2 <= len(argv) <= 4 and argv[1] == "idle-cpus":
+        try:
+            seconds = float(argv[2]) if len(argv) > 2 else 5.0
+            per_side = int(argv[3]) if len(argv) > 3 else 4
+        except ValueError:
+            print(__doc__, file=sys.stderr)
+            return 64
+        return cmd_idle_cpus(seconds, per_side)
     if len(argv) < 2 or argv[1] != "run":
         print(__doc__, file=sys.stderr)
         return 64
