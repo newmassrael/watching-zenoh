@@ -70,7 +70,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("replay-cache", &["core", "pico"]),
     ("message-catalog", &["core", "pico"]),
     ("app-transport", &["core", "pico"]),
-    ("shared-key-ids", &["core", "pico"]),
+    ("shared-key-ids", &["core", "pico", "c"]),
     ("rx-callback-offload", &["core", "c"]),
     ("switch-doors", &["core", "c"]),
     ("config-document", &["core", "pico"]),
@@ -480,6 +480,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "WZ_POLICY_HANDSHAKE_STRAY_MESSAGE",
         &["fail", "ignore", "ignore-and-replay"],
         "fail",
+    ),
+    (
+        "handshake-cookie",
+        "WZ_POLICY_HANDSHAKE_COOKIE",
+        &["stateless", "fixed"],
+        "stateless",
     ),
     (
         "key-wire-form",

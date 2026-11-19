@@ -387,6 +387,18 @@
               "x-wz-mutability": "fixed",
               "x-wz-wire": "visible"
             },
+            "handshake-cookie": {
+              "description": "What cookie a node puts in the InitAck of a link it accepts, and what it takes back.",
+              "enum": [
+                "stateless",
+                "fixed"
+              ],
+              "default": "stateless",
+              "x-wz-scope": "link",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
             "key-wire-form": {
               "description": "How a node names a key on the wire to the peer of a link.",
               "enum": [

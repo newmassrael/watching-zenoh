@@ -893,6 +893,54 @@ impl Default for HandshakeStrayMessage {
     }
 }
 
+/// `handshake-cookie`: What cookie a node puts in the InitAck of a link it accepts, and
+/// what it takes back. `stateless` is upstream's: the cookie carries what the acceptor
+/// negotiated, sealed, the acceptor holds nothing of the accept until the OpenSyn, and only
+/// an OpenSyn that echoes that cookie is admitted. `fixed` sends the session's configured
+/// cookie (the session parameters' cookie, empty unless the configuration states one),
+/// admits an OpenSyn only when its cookie is exactly that value (an empty cookie for an
+/// empty value), and holds what it negotiated on its own side until the OpenSyn, so a peer
+/// that echoes no cookie can open. A held accept is one handshake in flight, so it is
+/// bounded by the bound on accepts in their handshake and is let go when the OpenAck goes
+/// out or the accept times out. Under `fixed` the cookie binds nothing to the handshake: a
+/// peer that knows the value can open, as one that echoes the cookie can under `stateless`.
+/// Upstream: Puts what an acceptor negotiated into its InitAck cookie, sealed and bound to
+/// the handshake, keeps nothing of the accept until the OpenSyn, and admits an OpenSyn only
+/// when it echoes that cookie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandshakeCookie {
+    /// `stateless`.
+    Stateless,
+    /// `fixed`.
+    Fixed,
+}
+
+impl HandshakeCookie {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Stateless => "stateless",
+            Self::Fixed => "fixed",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["stateless", "fixed"];
+    const ALL: [Self; 2] = [Self::Stateless, Self::Fixed];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_HANDSHAKE_COOKIE");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for HandshakeCookie {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// `key-wire-form`: How a node names a key on the wire to the peer of a link. `declared` is
 /// upstream's: the id of a key expression the node declared to that peer, or the whole key.
 /// `literal` sends the whole key every time and declares nothing for it. `shared` uses the
@@ -906,11 +954,12 @@ impl Default for HandshakeStrayMessage {
 /// hold the same dictionary cannot read what `shared` sends, so both ends of the link must
 /// hold it. Every node that holds the dictionary reads an id only the dictionary names,
 /// whatever its own value. The value is the session's, and an endpoint the configuration
-/// dials or listens on may be stated a value of its own (wz_ext_config_key_wire_form_for),
-/// which every link to or from that endpoint takes. A session opened with `shared`, for
-/// itself or an endpoint, and no dictionary is refused, and so is one whose value is not
-/// `declared` in a build without the capability. Interests and liveliness interests name
-/// their keys as under `declared`.
+/// dials or listens on may be stated a value of its own (wz/key-ids/links,
+/// wz_ext_config_key_wire_form_for), which every link to or from that endpoint takes. A
+/// session opened with `shared`, for itself or an endpoint, and no dictionary is refused,
+/// and so is one whose value is not `declared` in a build without the capability, and a
+/// router node, whose faces read no id of a dictionary, with any value but `declared`.
+/// Interests and liveliness interests name their keys as under `declared`.
 /// Upstream: Names a key on the wire by the id of a key expression it declared to that peer
 /// first, or by the whole key; a peer reads an id only when it was declared to it, and
 /// refuses one it never was.
@@ -1078,6 +1127,10 @@ pub struct SessionPolicy {
     /// Init or Open that reaches an established session while counting it as traffic for
     /// the lease.
     handshake_stray_message: HandshakeStrayMessageBound,
+    /// `handshake-cookie`. Upstream: Puts what an acceptor negotiated into its InitAck
+    /// cookie, sealed and bound to the handshake, keeps nothing of the accept until the
+    /// OpenSyn, and admits an OpenSyn only when it echoes that cookie.
+    handshake_cookie: HandshakeCookieBound,
     /// `key-wire-form`. Upstream: Names a key on the wire by the id of a key expression it
     /// declared to that peer first, or by the whole key; a peer reads an id only when it
     /// was declared to it, and refuses one it never was.
@@ -1119,6 +1172,7 @@ impl SessionPolicy {
             query_unanswerable_final: Bound::build_default(),
             zid_derivation: Bound::build_default(),
             handshake_stray_message: Bound::build_default(),
+            handshake_cookie: Bound::build_default(),
             key_wire_form: Bound::build_default(),
         }
     }
@@ -1543,6 +1597,20 @@ impl SessionPolicy {
         value: HandshakeStrayMessage,
     ) -> Result<(), OutsideDomain<HandshakeStrayMessage>> {
         self.handshake_stray_message = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `handshake-cookie` as this snapshot holds it.
+    pub const fn handshake_cookie(&self) -> HandshakeCookie {
+        self.handshake_cookie.get()
+    }
+
+    /// Selects `handshake-cookie`, when the build's domain holds `value`.
+    pub fn select_handshake_cookie(
+        &mut self,
+        value: HandshakeCookie,
+    ) -> Result<(), OutsideDomain<HandshakeCookie>> {
+        self.handshake_cookie = Bound::select(value)?;
         Ok(())
     }
 
@@ -3521,6 +3589,48 @@ impl PolicyField for HandshakeStrayMessage {
     }
 }
 
+/// How `handshake-cookie` is held: in no byte when its domain is one value.
+type HandshakeCookieBound = Bound<HandshakeCookie, { HandshakeCookie::HELD }>;
+
+impl PolicyValue for HandshakeCookie {
+    const POLICY: &'static str = "handshake-cookie";
+    const ALL: &'static [Self] = &[Self::Stateless, Self::Fixed];
+    const IDS: &'static [&'static str] = &["stateless", "fixed"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_HANDSHAKE_COOKIE_ALLOWS_STATELESS"),
+            option_env!("WZ_POLICY_HANDSHAKE_COOKIE_ALLOWS_FIXED"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Link;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<HandshakeCookie>(HandshakeCookie::DEFAULT as usize),
+    "the default of handshake-cookie is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for HandshakeCookie {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_handshake_cookie(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.handshake_cookie.get()
+    }
+}
+
 /// How `key-wire-form` is held: in no byte when its domain is one value.
 type KeyWireFormBound = Bound<KeyWireForm, { KeyWireForm::HELD }>;
 
@@ -3566,7 +3676,7 @@ impl PolicyField for KeyWireForm {
 
 /// How many policies the declaration states: the length of [`POLICIES`] and of every table kept
 /// per policy.
-pub const POLICY_COUNT: usize = 31;
+pub const POLICY_COUNT: usize = 32;
 
 /// Every policy as a reader that names it by its id sees it, in the order of the fields of
 /// [`SessionPolicy`].
@@ -3601,6 +3711,7 @@ pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
     PolicyEntry::of::<QueryUnanswerableFinal>(),
     PolicyEntry::of::<ZidDerivation>(),
     PolicyEntry::of::<HandshakeStrayMessage>(),
+    PolicyEntry::of::<HandshakeCookie>(),
     PolicyEntry::of::<KeyWireForm>(),
 ];
 
@@ -3641,6 +3752,7 @@ const PROFILE_UPSTREAM: Profile = Profile {
         Statement::new("query-unanswerable-final", "none"),
         Statement::new("zid-derivation", "random"),
         Statement::new("handshake-stray-message", "fail"),
+        Statement::new("handshake-cookie", "stateless"),
         Statement::new("key-wire-form", "declared"),
     ],
 };

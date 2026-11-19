@@ -1178,6 +1178,49 @@ config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE_AND_REPLAY
 	  Whether `ignore-and-replay` stays selectable after the build; the chosen default always does.
 	  A target with no operating system keeps only the default unless this is set here.
 
+choice WZ_POLICY_HANDSHAKE_COOKIE
+	prompt "handshake-cookie"
+	default WZ_POLICY_HANDSHAKE_COOKIE_STATELESS
+	help
+	  What cookie a node puts in the InitAck of a link it accepts, and what it takes
+	  back. `stateless` is upstream's: the cookie carries what the acceptor
+	  negotiated, sealed, the acceptor holds nothing of the accept until the OpenSyn,
+	  and only an OpenSyn that echoes that cookie is admitted. `fixed` sends the
+	  session's configured cookie (the session parameters' cookie, empty unless the
+	  configuration states one), admits an OpenSyn only when its cookie is exactly
+	  that value (an empty cookie for an empty value), and holds what it negotiated
+	  on its own side until the OpenSyn, so a peer that echoes no cookie can open. A
+	  held accept is one handshake in flight, so it is bounded by the bound on
+	  accepts in their handshake and is let go when the OpenAck goes out or the
+	  accept times out. Under `fixed` the cookie binds nothing to the handshake: a
+	  peer that knows the value can open, as one that echoes the cookie can under
+	  `stateless`.
+	  Upstream: Puts what an acceptor negotiated into its InitAck cookie, sealed and
+	  bound to the handshake, keeps nothing of the accept until the OpenSyn, and
+	  admits an OpenSyn only when it echoes that cookie.
+
+config WZ_POLICY_HANDSHAKE_COOKIE_STATELESS
+	bool "stateless"
+
+config WZ_POLICY_HANDSHAKE_COOKIE_FIXED
+	bool "fixed"
+
+endchoice
+
+config WZ_POLICY_HANDSHAKE_COOKIE_ALLOWS_STATELESS
+	bool "handshake-cookie allows stateless" if !WZ_POLICY_HANDSHAKE_COOKIE_STATELESS
+	default y
+	help
+	  Whether `stateless` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_HANDSHAKE_COOKIE_ALLOWS_FIXED
+	bool "handshake-cookie allows fixed" if !WZ_POLICY_HANDSHAKE_COOKIE_FIXED
+	default y
+	help
+	  Whether `fixed` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
 choice WZ_POLICY_KEY_WIRE_FORM
 	prompt "key-wire-form"
 	default WZ_POLICY_KEY_WIRE_FORM_DECLARED
@@ -1197,11 +1240,12 @@ choice WZ_POLICY_KEY_WIRE_FORM
 	  ends of the link must hold it. Every node that holds the dictionary reads an id
 	  only the dictionary names, whatever its own value. The value is the session's,
 	  and an endpoint the configuration dials or listens on may be stated a value of
-	  its own (wz_ext_config_key_wire_form_for), which every link to or from that
-	  endpoint takes. A session opened with `shared`, for itself or an endpoint, and
-	  no dictionary is refused, and so is one whose value is not `declared` in a build
-	  without the capability. Interests and liveliness interests name their keys as
-	  under `declared`.
+	  its own (wz/key-ids/links, wz_ext_config_key_wire_form_for), which every link
+	  to or from that endpoint takes. A session opened with `shared`, for itself or an
+	  endpoint, and no dictionary is refused, and so is one whose value is not
+	  `declared` in a build without the capability, and a router node, whose faces
+	  read no id of a dictionary, with any value but `declared`. Interests and
+	  liveliness interests name their keys as under `declared`.
 	  Upstream: Names a key on the wire by the id of a key expression it declared to
 	  that peer first, or by the whole key; a peer reads an id only when it was
 	  declared to it, and refuses one it never was.
