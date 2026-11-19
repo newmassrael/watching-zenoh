@@ -346,6 +346,18 @@ e2e-receiver = [
 # `e2e-sender-demux`: the receiving judge keeps one stream per sender, chosen by the sender
 # identity the frame's header carries, in at most `E2E_SENDER_SLOTS` slots.
 e2e-sender-demux = ["e2e-receiver", "wz-capi-core?/e2e-sender-demux"]
+# `message-catalog`: a deployment's messages read from one JSON5 declaration
+# (`wz_ext_message_catalog_*`): each message's entry, and the sender, the receiver and the
+# supervision rows made from it in a build that has those doors too. wz's own, off as the reference
+# build is, part of the unstable surface. The reader is `wz-app-frame`'s; a catalog is immutable
+# once read, so it needs no lock, but its text and refusals are the host's strings: it selects
+# `std`, and neither engine.
+message-catalog = [
+    "std",
+    "unstable-api",
+    "dep:wz-app-frame",
+    "wz-capi-core?/message-catalog",
+]
 # `app-transport`: a transport the program supplies (`wz_ext_transport_*`, `wz_ext_config_transport`),
 # which carries every link of a session opened from the config that names it, over the program's
 # own network stack and over no socket of the system's. wz's own, which zenoh-pico has not, so off

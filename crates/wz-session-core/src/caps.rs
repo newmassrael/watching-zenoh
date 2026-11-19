@@ -515,6 +515,16 @@ const _: () = assert!(
     "a message that keeps a replay keeps at least one frame"
 );
 
+/// How many messages one message catalog declares (`wz_app_frame::message_catalog`), when the
+/// `message-catalog` capability is on: a catalog with more is refused when it is read, and the
+/// generator of a fixed-memory image refuses to write its tables. At least `1`.
+pub const MESSAGE_CATALOG_ENTRIES: usize = generated::MESSAGE_CATALOG_ENTRIES;
+
+const _: () = assert!(
+    MESSAGE_CATALOG_ENTRIES >= 1,
+    "a message catalog holds at least one message"
+);
+
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
 /// the hybrid logical clock (`hlc::HlcCore`) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
 /// is 500 unless the host states otherwise. A time and not a table size: it sizes no memory.

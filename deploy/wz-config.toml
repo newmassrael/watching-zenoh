@@ -1354,6 +1354,24 @@ abis = ["core", "pico"]
 implies = ["unstable-api"]
 help = "Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors)."
 
+# The message catalog: one JSON5 declaration of a deployment's messages (key expression, id, the
+# nodes that publish and subscribe, period, protection profile and values, senders, instance keys,
+# replay depth, supervision, segment profile), read and judged at run time by one reader, which
+# hands the other doors what they are made from: a sender, a receiver, supervision rows. A
+# fixed-memory image runs the generator over the same file (scripts/lib/message_catalog.py) and
+# links static tables instead. How many messages one catalog holds is `MESSAGE_CATALOG_ENTRIES`.
+# Off by default: neither zenoh-pico nor zenoh-c has such doors. The pico ABI's doors are wz_ext_*
+# and part of its unstable surface; the reader is wz-app-frame's.
+[[capability]]
+id = "message-catalog"
+kconfig = "WZ_CAP_MESSAGE_CATALOG"
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (wz_ext_message_catalog_*, wz-own doors)."
+
 [[capability]]
 id = "app-transport"
 kconfig = "WZ_CAP_APP_TRANSPORT"
@@ -2756,6 +2774,23 @@ The deepest replay a message may keep: how many of the frames it last sent, as
 they were sent, a publisher holds for a subscriber that arrives later and asks
 for them. Each message states its own depth, from 1 to this; a depth above it
 is refused when the message is declared. At least 1.
+'''
+
+[[limit]]
+id = "MESSAGE_CATALOG_ENTRIES"
+kconfig = "WZ_LIMIT_MESSAGE_CATALOG_ENTRIES"
+default = 64
+storage = "both"
+# A host reads a catalog at run time and allocates its entries then, refusing one with more; the
+# generator of a fixed-memory image refuses to write a table longer than this.
+scope = "runtime"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How many messages one message catalog declares, when the message-catalog
+capability is on. A catalog that declares more is refused when it is read, and
+the generator of a fixed-memory image refuses to write its tables. At least 1.
 '''
 
 [[limit]]
