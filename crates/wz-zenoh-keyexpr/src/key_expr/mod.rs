@@ -17,7 +17,6 @@
 
 //! The Key Expression Language, as explained in [`keyexpr`]'s documentation.
 
-pub(crate) const DELIMITER: u8 = b'/';
 pub(crate) const SINGLE_WILD: u8 = b'*';
 
 pub(crate) mod owned;
@@ -35,6 +34,15 @@ pub mod include;
 /// The tools to implement algorithms to detect key expression intersection.
 /// The average user doesn't need to bother with it.
 pub mod intersect;
+
+/// The texts of the two byte strings a default algorithm of [`include`] or [`intersect`] is
+/// asked about, or `None` when either is not UTF-8: the matcher reads key expressions as `str`.
+pub(crate) fn key_texts<'a>(left: &'a [u8], right: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    Some((
+        core::str::from_utf8(left).ok()?,
+        core::str::from_utf8(right).ok()?,
+    ))
+}
 
 pub mod format;
 

@@ -83,14 +83,12 @@ impl keyexpr {
 
     /// Returns `true` if the `keyexpr`s intersect, i.e. there exists at least one key which is contained in both of the sets defined by `self` and `other`.
     pub fn intersects(&self, other: &Self) -> bool {
-        use super::intersect::Intersector;
-        super::intersect::DEFAULT_INTERSECTOR.intersect(self, other)
+        wz_session_core::keyexpr_match::keyexpr_intersects(self.as_str(), other.as_str())
     }
 
     /// Returns `true` if `self` includes `other`, i.e. the set defined by `self` contains every key belonging to the set defined by `other`.
     pub fn includes(&self, other: &Self) -> bool {
-        use super::include::Includer;
-        super::include::DEFAULT_INCLUDER.includes(self, other)
+        wz_session_core::keyexpr_match::keyexpr_includes(self.as_str(), other.as_str())
     }
 
     /// Returns the relation between `self` and `other` from `self`'s point of view ([`SetIntersectionLevel::Includes`] signifies that `self` includes `other`).
