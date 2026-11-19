@@ -159,6 +159,10 @@ LEGS=(
     # `zenoh_config::` is the module the two instruments live in; the filter is
     # the module path so a test ADDED there is covered without touching this row.
     "wz-runtime-tokio|hook|zenoh-config|zenoh_config::"
+    # The document's `wz/key-ids`, read with the member's policies and written back by the export
+    # (`zenoh_config::wz_member_tests`, its key-id tests built with `shared-key-ids`); the twin a
+    # build without the capability runs is on the row above.
+    "wz-runtime-tokio|hook|zenoh-config,shared-key-ids|zenoh_config::wz_member_tests::"
     # ── the empty endpoint and locator ──
     #
     # Two tests of `zenoh-protocol` (`core::endpoint::empty_endpoint_address` and
@@ -452,6 +456,15 @@ transport-link-unixpipe,transport-link-ws|"
     # filter is the integration target, so a test added to it under the feature is claimed without
     # touching the row; the `cfg(not(..))` twin it replaces runs in the default build.
     "wz-capi-c|hook|router-node|--test=session_roles"
+    # The config's `wz/key-ids` through this ABI's doors, read into what the open hands its
+    # session (`config::tests::wz_member`, its key-id tests built with `shared-key-ids`).
+    "wz-capi-c|hook|shared-key-ids|config::tests::wz_member::"
+    # The same document through the pico ABI's document door, over which its key-id doors go,
+    # and against the reader the zenoh-c ABI's open reads it with (`key_ids::tests`, built with
+    # `shared-key-ids` and `config-document`); and the twin of a build with the document door and
+    # without the capability, which refuses the member.
+    "wz-capi-pico|hook|shared-key-ids,config-document|key_ids::tests::"
+    "wz-capi-pico|hook|config-document|config_policy::tests::the_document_door_refuses_key_ids_without_the_capability"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the
@@ -484,6 +497,11 @@ transport-link-unixpipe,transport-link-ws|"
     # which no leg named, so the census reported it as claimed by nothing. The filter is the module
     # path, so a test added there is covered.
     "wz-capi-core|hook|router-node,scout|open_plan::"
+    # The key ids a document's `wz/key-ids` hands the session the plan opens, and the node that
+    # refuses them by name (`open_plan::`, built with `shared-key-ids`, the node's test with
+    # `router-node` too). The same module path, so the row's build adds one feature to the row
+    # above and a test added there under the feature is claimed.
+    "wz-capi-core|hook|router-node,scout,shared-key-ids|open_plan::"
     # The span of the code that opens a session, carried onto the engine's tasks and threads
     # (`caller_span`, built with `tracing-instrument`), and the copy a session promotes a large
     # payload into (`session_defaults`, whose copy test is built with `transport-shm`). No leg
@@ -1210,6 +1228,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # module later is claimed without touching the rows.
     "wz-session-core|hook|pool-monitor|pool_gauge::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
+    # The key ids every node of a deployment shares and the reader of a document's `wz/key-ids`
+    # (`shared_key_ids`, a module built with `shared-key-ids` alone). Pure functions over a
+    # dictionary and a parsed document; the filter is the module path.
+    "wz-session-core|hook|shared-key-ids|shared_key_ids::"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
     # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),
@@ -1550,6 +1572,9 @@ wz-session-core/query-reply-err|"
         internal,\
         unstable|"
     "zenoh|hook|shared-memory,unstable|"
+    # The configuration's `wz/key-ids`, which an open hands its session (`shared-key-ids`, no item
+    # of the surface): the one test of the reader behind it.
+    "zenoh|hook|shared-key-ids|api::config::tests::the_members_key_ids_are_read_as_a_documents"
 )
 
 # package|test-path|reason
