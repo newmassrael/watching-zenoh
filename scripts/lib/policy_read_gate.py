@@ -92,7 +92,6 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     # Session-core: the build-default wrappers, each beside the call that takes a snapshot.
     ("crates/wz-session-core/src/session_init_params.rs", "default", WRAPPER + " (TxQueueConf::of_policy)"),
     ("crates/wz-session-core/src/session_init_params.rs", "pico", WRAPPER + " (TxQueueConf::pico_of_policy)"),
-    ("crates/wz-session-core/src/timestamp_visibility.rs", "default_exposed", WRAPPER + " (exposed_by)"),
     ("crates/wz-session-core/src/key_gate.rs", "of_build", "the gate a registry starts from; the session hands its own in step 3b"),
     ("crates/wz-session-core/src/key_gate_open.rs", "of_build", "the build-time refusal of a closed default without the feature"),
     # Outside session-core: every site that still reads the build.

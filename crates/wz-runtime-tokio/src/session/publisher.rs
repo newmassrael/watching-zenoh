@@ -79,6 +79,11 @@ pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
     pub(super) options: PublishOptions,
+    /// Whether this publisher stamps the messages it is given a time for: the declaration's
+    /// choice, or the session's `entity-timestamp-opt-in` when it states none, resolved by the
+    /// session at declare ([`PublishOptions::stamp_timestamp_by`]).
+    #[cfg(feature = "pubsub-timestamp")]
+    pub(super) stamps: bool,
     /// The key this publisher's subscribers interest stands on: [`Self::keyexpr`], or the
     /// `aggregation/publishers` aggregate that includes it, as the session decided at declare.
     /// Kept so the clone and the drop take and release the reference the declare took, whatever
@@ -105,6 +110,8 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
             options: self.options.clone(),
+            #[cfg(feature = "pubsub-timestamp")]
+            stamps: self.stamps,
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
             interest_key: self.interest_key.clone(),
         }
@@ -191,7 +198,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// publisher that does not stamp.
     #[cfg(feature = "pubsub-timestamp")]
     fn stamped_options(&self, time: u64) -> Result<PublishOptions, StampedPutError> {
-        if !self.options.stamp_timestamp() {
+        if !self.stamps {
             return Err(StampedPutError::NotStamping);
         }
         Ok(self

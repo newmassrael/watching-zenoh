@@ -161,16 +161,23 @@ impl QueryableOptions {
     /// session's node identity beside the caller's time, so a caller cannot sign a reply as another
     /// node. When it does not stamp, the stamped reply is refused rather than sent without the stamp.
     ///
-    /// What a declaration that does not say gets is the build's `entity-timestamp-opt-in` policy:
-    /// it stamps when the policy is off, which is upstream's behaviour of attaching what it is given.
+    /// What a declaration that does not say gets is the `entity-timestamp-opt-in` policy of the
+    /// session it is declared on ([`Self::stamp_timestamp_by`]): it stamps when the policy is off,
+    /// which is upstream's behaviour of attaching what it is given.
     pub fn with_stamp_timestamp(mut self, stamp: bool) -> Self {
-        self.stamp_timestamp = wz_session_core::timestamp_visibility::StampTimestamp(stamp);
+        self.stamp_timestamp = wz_session_core::timestamp_visibility::StampTimestamp::Chosen(stamp);
         self
     }
 
-    /// See [`Self::with_stamp_timestamp`].
-    pub fn stamp_timestamp(&self) -> bool {
-        self.stamp_timestamp.0
+    /// What the declaration says about stamping, or `None` when it leaves it to the session.
+    pub fn stamp_timestamp(&self) -> Option<bool> {
+        self.stamp_timestamp.chosen()
+    }
+
+    /// Whether a queryable declared with these options stamps, on a session whose snapshot is
+    /// `policy`: the session resolves it when the queryable is declared.
+    pub fn stamp_timestamp_by(&self, policy: &wz_session_core::policy::SessionPolicy) -> bool {
+        self.stamp_timestamp.resolve(policy)
     }
 
     /// Default options — `allowed_origin = Locality::Any`, `complete = false`,
@@ -417,11 +424,12 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// multicast session had no deferred queryable; the route is the only part that differs, and
     /// both transports now build this one sink (open-debt item 913).
     ///
-    /// `stamps` is the declaration's choice about stamping
-    /// ([`QueryableOptions::stamp_timestamp`]). Under the `reply-auto-timestamp` policy a
-    /// queryable that stamps has its plain replies stamped with this node's clock as they are
-    /// staged ([`wz_session_core::query::QueryResponder::with_reply_clock`]); one that does not
-    /// stamp, and every queryable with the policy off, has none stamped.
+    /// `stamps` is whether the queryable stamps, as the session resolved the declaration's option
+    /// from its snapshot ([`QueryableOptions::stamp_timestamp_by`]). Under the
+    /// `reply-auto-timestamp` policy a queryable that stamps has its plain replies stamped with
+    /// this node's clock as they are staged
+    /// ([`wz_session_core::query::QueryResponder::with_reply_clock`]); one that does not stamp,
+    /// and every queryable with the policy off, has none stamped.
     #[cfg(feature = "query-queryable")]
     pub(super) fn deferred_query_sink(
         &self,

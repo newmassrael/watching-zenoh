@@ -9,9 +9,10 @@
 //! A timestamp rides on a sample whether or not the entity that receives it cares. Upstream hands
 //! it to every subscriber and every querier. An image that cares about the work a callback does
 //! may want the opposite: the entity sees a timestamp only if it was declared to. That is a
-//! decision of the declaration, so each entity states it ([`crate::timestamp_visibility::default_exposed`] is what an entity
-//! that states nothing gets), and the rule is applied at one place per engine: the point where a
-//! sample or a reply is handed to the entity's callback.
+//! decision of the declaration, so each entity states it, or takes what the snapshot of its
+//! session says ([`crate::timestamp_visibility::exposed_by`]) when it states nothing, and the
+//! rule is applied at one place per engine: the point where a sample or a reply is handed to the
+//! entity's callback.
 //!
 //! # What hiding means
 //!
@@ -35,32 +36,68 @@ pub const fn exposed_by(policy: &crate::policy::SessionPolicy) -> bool {
     !policy.entity_timestamp_opt_in()
 }
 
-/// [`exposed_by`] under the build defaults: what an entity gets whose declaration path does not
-/// yet hold its session's snapshot, and what an options struct's `Default` holds.
-pub const fn default_exposed() -> bool {
-    exposed_by(&crate::policy::SessionPolicy::defaults())
+/// What an entity's declaration says about seeing the timestamps it is handed: the choice it
+/// made, or that it takes the `entity-timestamp-opt-in` value of the session it is declared on.
+///
+/// The second is the `Default`, so an options struct that derives `Default` states nothing of its
+/// own and reads nothing from the build; the session resolves it from its own snapshot when the
+/// entity is declared ([`Self::resolve`]), since the policy is bound per entity at its
+/// declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExposeTimestamp {
+    /// The declaration states nothing: the entity takes its session's value ([`exposed_by`]).
+    #[default]
+    OfSession,
+    /// The declaration states it: `true` sees the timestamp, `false` sees none.
+    Chosen(bool),
 }
 
-/// An entity's choice about the timestamps it is handed, as a value whose `Default` is the
-/// build's ([`default_exposed`]), so an options struct that derives `Default` holds the right
-/// default without writing one by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExposeTimestamp(pub bool);
+impl ExposeTimestamp {
+    /// What the declaration states, or `None` when it leaves it to the session.
+    pub const fn chosen(self) -> Option<bool> {
+        match self {
+            Self::OfSession => None,
+            Self::Chosen(expose) => Some(expose),
+        }
+    }
 
-impl Default for ExposeTimestamp {
-    fn default() -> Self {
-        Self(default_exposed())
+    /// Whether the entity sees the timestamp, declared on a session whose snapshot is `policy`.
+    pub const fn resolve(self, policy: &crate::policy::SessionPolicy) -> bool {
+        match self {
+            Self::OfSession => exposed_by(policy),
+            Self::Chosen(expose) => expose,
+        }
     }
 }
 
-/// A publisher's choice about stamping the messages it is given a time for, as
-/// [`ExposeTimestamp`] is an entity's about seeing one: `Default` is the build's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StampTimestamp(pub bool);
+/// What a publishing or answering entity's declaration says about stamping the messages it is
+/// given a time for, as [`ExposeTimestamp`] says about seeing one: the choice it made, or that it
+/// takes its session's value, which is the `Default` and which the session resolves when the
+/// entity is declared ([`Self::resolve`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StampTimestamp {
+    /// The declaration states nothing: the entity takes its session's value ([`exposed_by`]).
+    #[default]
+    OfSession,
+    /// The declaration states it: `true` stamps, `false` refuses a stamped message.
+    Chosen(bool),
+}
 
-impl Default for StampTimestamp {
-    fn default() -> Self {
-        Self(default_exposed())
+impl StampTimestamp {
+    /// What the declaration states, or `None` when it leaves it to the session.
+    pub const fn chosen(self) -> Option<bool> {
+        match self {
+            Self::OfSession => None,
+            Self::Chosen(stamp) => Some(stamp),
+        }
+    }
+
+    /// Whether the entity stamps, declared on a session whose snapshot is `policy`.
+    pub const fn resolve(self, policy: &crate::policy::SessionPolicy) -> bool {
+        match self {
+            Self::OfSession => exposed_by(policy),
+            Self::Chosen(stamp) => stamp,
+        }
     }
 }
 
@@ -233,20 +270,43 @@ mod tests {
     }
 
     #[test]
-    fn the_default_follows_the_build_policy() {
+    fn the_build_defaults_expose_as_their_policy_says() {
+        let defaults = crate::policy::SessionPolicy::defaults();
+        assert_eq!(exposed_by(&defaults), !defaults.entity_timestamp_opt_in());
+    }
+
+    /// An option that states nothing is the default and reads nothing until a session resolves
+    /// it; one that states a choice keeps it whatever the session says.
+    #[test]
+    fn an_option_that_states_nothing_takes_the_session_value_and_a_choice_stays() {
+        let defaults = crate::policy::SessionPolicy::defaults();
+        assert_eq!(ExposeTimestamp::default(), ExposeTimestamp::OfSession);
+        assert_eq!(StampTimestamp::default(), StampTimestamp::OfSession);
+        assert_eq!(ExposeTimestamp::OfSession.chosen(), None);
+        assert_eq!(StampTimestamp::OfSession.chosen(), None);
         assert_eq!(
-            default_exposed(),
-            !crate::policy::SessionPolicy::defaults().entity_timestamp_opt_in()
+            ExposeTimestamp::OfSession.resolve(&defaults),
+            exposed_by(&defaults)
         );
+        assert_eq!(
+            StampTimestamp::OfSession.resolve(&defaults),
+            exposed_by(&defaults)
+        );
+        for choice in [true, false] {
+            assert_eq!(ExposeTimestamp::Chosen(choice).chosen(), Some(choice));
+            assert_eq!(StampTimestamp::Chosen(choice).chosen(), Some(choice));
+            assert_eq!(ExposeTimestamp::Chosen(choice).resolve(&defaults), choice);
+            assert_eq!(StampTimestamp::Chosen(choice).resolve(&defaults), choice);
+        }
     }
 
     /// The snapshot an entity is declared under decides, not the build: opt-in hides the
-    /// timestamp from an entity that states nothing, and off shows it.
+    /// timestamp from an entity that states nothing, and off shows it. A stated choice is the
+    /// entity's under either.
     #[test]
     fn an_entity_is_exposed_by_the_snapshot_it_is_declared_under() {
         use crate::policy::{EntityTimestampOptIn, SessionPolicy};
         use crate::policy_binding::PolicyValue;
-        assert_eq!(exposed_by(&SessionPolicy::defaults()), default_exposed());
         if EntityTimestampOptIn::DOMAIN.is_singleton() {
             return;
         }
@@ -260,6 +320,12 @@ mod tests {
             .expect("the domain holds both values");
         assert!(!exposed_by(&opt_in));
         assert!(exposed_by(&upstream));
+        assert!(!ExposeTimestamp::OfSession.resolve(&opt_in));
+        assert!(ExposeTimestamp::OfSession.resolve(&upstream));
+        assert!(!StampTimestamp::OfSession.resolve(&opt_in));
+        assert!(StampTimestamp::OfSession.resolve(&upstream));
+        assert!(ExposeTimestamp::Chosen(true).resolve(&opt_in));
+        assert!(!StampTimestamp::Chosen(false).resolve(&upstream));
     }
 
     #[cfg(feature = "alloc")]
