@@ -231,6 +231,11 @@ lifecycle-doors = []
 # writer of `wz-app-frame`, so this feature only carries the capability's name, as `e2e-sender`'s
 # does.
 segment-sender = []
+# Reception supervision per stream. The model has nothing behind it: the supervisor is
+# `wz-session-core`'s (`stream_supervisor`) and the doors are the pico ABI's own
+# (`wz-capi-pico/e2e-supervision`), so this feature only carries the capability's name, as
+# `e2e-sender`'s does.
+e2e-supervision = []
 # A subscriber whose callback runs off the receive path. The model has nothing behind it: the lane
 # is the runtime's (`wz_runtime_tokio::session::DetachedOffload`), fed through the subscriber
 # factory every face already takes, and the doors are the zenoh-c ABI's own

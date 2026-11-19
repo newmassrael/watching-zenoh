@@ -294,6 +294,20 @@ segment-sender = [
     "dep:wz-app-frame",
     "wz-capi-core?/segment-sender",
 ]
+# `e2e-supervision`: reception supervision per stream and the doors that drive it
+# (`wz_ext_stream_supervisor_*`): a deadline per periodic stream over the program's storage, a loss
+# told once, saturating error counts, a start delay, a condition the program supplies and senders
+# it marks absent. wz's own, which zenoh-pico has not, so off as the reference build is, and part
+# of the unstable surface: it implies `unstable-api`. The supervisor and its activation machine are
+# `wz-session-core`'s. Each supervisor is held under the host's lock, and a poll task is a thread of
+# the host, so it selects `std`. Both engines can host it (it touches no session), so it selects
+# neither and forwards weakly.
+e2e-supervision = [
+    "std",
+    "unstable-api",
+    "wz-session-core/e2e-supervision",
+    "wz-capi-core?/e2e-supervision",
+]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
 # tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,
 # `wz_ext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.

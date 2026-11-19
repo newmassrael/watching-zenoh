@@ -297,6 +297,7 @@ mod tests {
             KeySet::HELD,
             SnResolution::HELD,
             SupervisionAfterExpiry::HELD,
+            E2eSupervisionNotify::HELD,
             EventRingFull::HELD,
             ClockQualityStamping::HELD,
             RoutingFaceDrive::HELD,

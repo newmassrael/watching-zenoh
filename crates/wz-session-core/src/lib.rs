@@ -2173,7 +2173,8 @@ pub mod peer_connection {
     feature = "session-unicast",
     feature = "session-multicast",
     feature = "clock-quality",
-    feature = "supervision"
+    feature = "supervision",
+    feature = "e2e-supervision"
 ))]
 pub mod duty_outbox;
 
@@ -2239,6 +2240,38 @@ pub mod supervision {
 // `event_ring`.
 #[cfg(feature = "supervision")]
 pub mod supervisor;
+
+/// SCE-generated stream activation statechart (reception supervision per stream: when a receiver
+/// judges whether its periodic streams keep arriving), from
+/// `sources/session/stream_activation.scxml`, COMMITTED at
+/// `out/wz-session-core/stream_activation_sm.rs` and `include!`-ed from there. Exposes
+/// `StreamActivationState` / `StreamActivationEvent`, the `StreamActivationActions` host trait and
+/// the `StreamActivationPolicy<A>` policy, one machine per stream supervisor. Engine-free and
+/// allocation-free; gated on `e2e-supervision`, which brings the SCE runtime in. The lint allows
+/// are restored as outer attributes, as for the other generated machines.
+#[cfg(feature = "e2e-supervision")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod stream_activation {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/stream_activation_sm.rs"
+    ));
+}
+
+// The reception supervisor: the streams a receiver watches, the deadline of each, and the
+// `stream_activation` machine that says when they are judged. Gated as the machine is.
+// Documented in its own `//!`; see the note at `event_ring`.
+#[cfg(feature = "e2e-supervision")]
+pub mod stream_supervisor;
 
 /// The peers a node is told to hold, each with its [`peer_connection`]
 /// machine, in a table of fixed capacity (decision D5). Gated as the machine

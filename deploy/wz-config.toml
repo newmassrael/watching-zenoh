@@ -1301,6 +1301,24 @@ abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors)."
 
+# Reception supervision per stream: a receiver gives each periodic stream a deadline of its period
+# times a factor, and is told once when a stream stops arriving, with saturating error counts per
+# stream and per node. Judged only after a start delay and while a condition the application
+# supplies holds; a sender the application marks absent is not judged. Off by default: neither
+# zenoh-c nor zenoh-pico has such doors. The pico ABI's doors are wz_ext_* and part of its unstable
+# surface; the model is wz-session-core's `stream_supervisor`. How many streams one supervisor holds
+# is the `E2E_SUPERVISED_STREAMS` limit, and whether a loss carries the stream's last payload is the
+# `e2e-supervision-notify` policy.
+[[capability]]
+id = "e2e-supervision"
+kconfig = "WZ_CAP_E2E_SUPERVISION"
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors)."
+
 [[capability]]
 id = "rx-callback-offload"
 kconfig = "WZ_CAP_RX_CALLBACK_OFFLOAD"
@@ -2535,6 +2553,22 @@ supervised has been fed in time. At least 1 and at most 64.
 '''
 
 [[limit]]
+id = "E2E_SUPERVISED_STREAMS"
+kconfig = "WZ_LIMIT_E2E_SUPERVISED_STREAMS"
+default = 32
+storage = "quota"
+scope = "runtime"
+binding_heap = "open"
+binding_fixed = "open"
+wire = "none"
+help = '''
+How many periodic streams one reception supervisor holds. The table of streams
+is storage the application gives the supervisor when it makes it, one fixed row
+per stream, so this bounds how many rows of it are used and sizes nothing; a
+stream added past it is refused. At least 1.
+'''
+
+[[limit]]
 id = "EVENT_RING_SLOTS"
 kconfig = "WZ_LIMIT_EVENT_RING_SLOTS"
 default = 64
@@ -3212,6 +3246,27 @@ per expiry either way.
 '''
 
 [[policy]]
+id = "e2e-supervision-notify"
+kind = "choice"
+kconfig = "WZ_POLICY_E2E_SUPERVISION_NOTIFY"
+choices = ["status-only", "last-value"]
+default = "status-only"
+upstream = "Supervises no stream's reception: a periodic message that stops arriving is not noticed by the library, so there is no loss to tell and no value to tell it with."
+scope = "runtime"
+binding = "open"
+mutability = "fixed"
+wire = "none"
+since = 2
+help = '''
+What a reception supervisor tells the application when a stream stops
+arriving. `status-only` tells the stream, its sender and the error counts, and
+keeps no payload. `last-value` also hands back the payload the stream last
+carried, which the supervisor keeps in a cell of the application's storage per
+stream, for an application that delivers a value with every loss as it does
+with every sample. Decided when the supervisor is made, and fixed for its life.
+'''
+
+[[policy]]
 id = "event-ring-full"
 kind = "choice"
 kconfig = "WZ_POLICY_EVENT_RING_FULL"
@@ -3398,6 +3453,7 @@ subscriber-overload = "block"
 key-set = "open"
 sn-resolution = "bits-32"
 supervision-after-expiry = "latch"
+e2e-supervision-notify = "status-only"
 event-ring-full = "overwrite-oldest"
 clock-quality-stamping = "always"
 routing-face-drive = "task-per-face"

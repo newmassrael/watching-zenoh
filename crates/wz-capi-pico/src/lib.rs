@@ -222,6 +222,10 @@ pub mod session;
 mod session_ext;
 #[cfg(feature = "resource-snapshot")]
 pub mod snapshot;
+// Reception supervision per stream: wz doors (`wz_ext.h`) of the unstable surface, over the
+// supervisor of `wz-session-core`.
+#[cfg(feature = "e2e-supervision")]
+pub mod stream_supervision;
 pub mod string_array;
 #[cfg(feature = "supervision")]
 pub mod supervision;
