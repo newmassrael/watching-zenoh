@@ -7370,7 +7370,8 @@ layer_c1ax_cargo_test_routing_namespace() {
     # by its own run; the sum is derived. The label moves with the value.
     # 38 -> 39, open-debt item 913's ungated group face case (see C1q), printed.
     # 39 -> 45, the six cases C1q's note names, printed by hosted run 43914611055 and pc5.
-    _runci_guarded_test "C1AX multicast_glue 45" 45 \
+    # 45 -> 46, step 3c's router group face snapshot test, printed on a build host.
+    _runci_guarded_test "C1AX multicast_glue 46" 46 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     # Item 900 follow-up — the `--sessions` group session's RE-JOIN loop, which
     # shares the router face's schedule and wait above. The demo compiles it
@@ -7385,7 +7386,8 @@ layer_c1ax_cargo_test_routing_namespace() {
     # (the first join's bind now runs in the session). Derived, not printed.
     # 6 -> 7, `a_member_that_stops_is_reported_closed_by_the_other` (the stopping
     # member's Close reaches the one that stays). Derived, not printed.
-    _runci_guarded_test "C1AX sessions_run group 7" 7 \
+    # 7 -> 8, step 3c's group queue snapshot test, printed on a build host.
+    _runci_guarded_test "C1AX sessions_run group 8" 8 \
         cargo test -p wz-ap-demo --features transport-multicast --bin wz-ap-demo sessions_run --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
@@ -7715,12 +7717,14 @@ layer_c1ay_cargo_test_router_hat() {
     # +2 on every router_forward guard below (+3 with the token tables), counted from the source:
     # a late future asker told what a second holder declares, one ungated test per subscriber and
     # queryable plane and one for tokens.
-    _runci_guarded_test "C1AY router_forward 338" 338 \
+    # Every C1AY router_forward guard +2 with step 3c of the staged policy binding (the forwarder
+    # clock snapshot test among them), the number each command printed on a build host.
+    _runci_guarded_test "C1AY router_forward 340" 340 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 329 -> 335, printed on pc2 (the six of the first guard's note).
     # 335 -> 343: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward qos 343" 343 \
+    _runci_guarded_test "C1AY router_forward qos 345" 345 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -7760,7 +7764,7 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 338 -> 353. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 353 -> 359, printed on a build host (the six of `router_forward 330`).
     # 359 -> 367: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward mcast-faces 367" 367 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 369" 369 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -7788,7 +7792,7 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 318 -> 332. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 332 -> 338, printed on pc2 (the six of `router_forward 330`).
     # 338 -> 346: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward 346" 346 \
+    _runci_guarded_test "C1AY router_forward 348" 348 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -7811,7 +7815,7 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 321 -> 335. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 335 -> 341, printed on pc2 (the six of `router_forward 330`).
     # 341 -> 349: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward hotreload 349" 349 \
+    _runci_guarded_test "C1AY router_forward hotreload 351" 351 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -7835,7 +7839,7 @@ layer_c1ay_cargo_test_router_hat() {
     # 388 -> 389, counted from the source: the late peer of a router told no token until it asks.
     # 389 -> 390, counted from the source: a router's peer told a later token for its interest.
     # 390 -> 399: the five, the one and the three (token tables) of the first guard's note.
-    _runci_guarded_test "C1AY router_forward 399" 399 \
+    _runci_guarded_test "C1AY router_forward 401" 401 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -7845,7 +7849,7 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 310 -> 324. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 324 -> 330, printed on pc2 (the six of `router_forward 330`).
     # 330 -> 338: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward multicast 338" 338 \
+    _runci_guarded_test "C1AY router_forward multicast 340" 340 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -7864,7 +7868,7 @@ layer_c1ay_cargo_test_router_hat() {
     # 334 -> 335, counted from the source: the `adminspace-core`-gated test of the region a
     # partitioning node reports for each face, which only this arm's features reach.
     # 335 -> 343: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward linkstate 343" 343 \
+    _runci_guarded_test "C1AY router_forward linkstate 345" 345 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -7889,7 +7893,7 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 323 -> 338. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 338 -> 344, printed on pc2 (the six of `router_forward 330`).
     # 344 -> 352: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward interest broker 352" 352 \
+    _runci_guarded_test "C1AY router_forward interest broker 354" 354 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -8810,7 +8814,8 @@ layer_c1ah_cargo_test_time_hlc() {
     # 31 -> 35: the four tests of a relayed Put stamped only once its route has a destination
     # (647a2a812a): no route leaves the clock alone, later routes get the first stamp, a dropped
     # Put is refused to every route, a settled push routes as it is. The pc5 run printed 35.
-    _runci_guarded_test "C1ah node_clock" 35 \
+    # 35 -> 36, step 3c's node clock snapshot test, printed on a build host.
+    _runci_guarded_test "C1ah node_clock" 36 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
@@ -12915,7 +12920,8 @@ layer_c1i_cargo_test_scouting() {
     # leave by the default route. Those two arms are `#[cfg]`-gated on it and
     # this count is what stops them going missing quietly: a build that dropped
     # the feature runs 3 here, not 5, and the guard reds.
-    _runci_guarded_test "C1i scout fan-out" 6 \
+    # 6 -> 7, step 3c's ask socket loopback snapshot test, printed on a build host.
+    _runci_guarded_test "C1i scout fan-out" 7 \
         cargo test -p wz-runtime-tokio --features scouting-active,locator-iface \
         --lib scouting_fanout --quiet
 }
