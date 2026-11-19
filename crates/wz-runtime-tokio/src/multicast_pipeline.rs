@@ -964,7 +964,7 @@ mod tests {
                 sizes: [1; Priority::NUM],
                 wait_before_drop_us: 1_000,
                 wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-                ..TxQueueConf::default()
+                ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
             link_rx: LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,

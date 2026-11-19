@@ -321,16 +321,23 @@ impl QueryOptions {
     /// the consolidation of the replies still orders them by the timestamp, which is hidden only
     /// from the callback that is handed the result.
     ///
-    /// What a query that does not say gets is the build's `entity-timestamp-opt-in` policy: they
-    /// show it when the policy is off, which is upstream's behaviour.
+    /// What a query that does not say gets is the `entity-timestamp-opt-in` policy of the session
+    /// it is made on ([`Self::expose_timestamp_by`]): they show it when the policy is off, which is
+    /// upstream's behaviour.
     pub fn with_expose_timestamp(mut self, expose: bool) -> Self {
-        self.expose_timestamp = crate::timestamp_visibility::ExposeTimestamp(expose);
+        self.expose_timestamp = crate::timestamp_visibility::ExposeTimestamp::Chosen(expose);
         self
     }
 
-    /// See [`Self::with_expose_timestamp`].
-    pub fn expose_timestamp(&self) -> bool {
-        self.expose_timestamp.0
+    /// What the query says about the timestamp, or `None` when it leaves it to the session.
+    pub fn expose_timestamp(&self) -> Option<bool> {
+        self.expose_timestamp.chosen()
+    }
+
+    /// Whether the callback sees the timestamp of the replies, for a query made on a session
+    /// whose snapshot is `policy`: the session resolves it when the query is made.
+    pub fn expose_timestamp_by(&self, policy: &crate::policy::SessionPolicy) -> bool {
+        self.expose_timestamp.resolve(policy)
     }
 
     /// Count a queryable a PEER declared toward the matching status of a querier made with these

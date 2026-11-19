@@ -2182,11 +2182,48 @@ fn a_publisher_declared_not_to_stamp_refuses_a_timestamped_put_and_sends_nothing
 
 #[cfg(feature = "pubsub-timestamp")]
 #[test]
-fn a_publisher_that_says_nothing_gets_the_builds_default() {
+fn a_publisher_that_says_nothing_leaves_stamping_to_its_session() {
+    assert_eq!(PublishOptions::put().stamp_timestamp(), None);
     assert_eq!(
-        PublishOptions::put().stamp_timestamp(),
-        wz_session_core::timestamp_visibility::default_exposed()
+        PublishOptions::put()
+            .with_stamp_timestamp(false)
+            .stamp_timestamp(),
+        Some(false)
     );
+}
+
+/// A publisher that says nothing is given the `entity-timestamp-opt-in` value of the session it
+/// is declared on, not the build's: each value the domain allows is selected in the params the
+/// session opens with, and the publisher stamps a given time exactly when that value is off.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_publisher_that_says_nothing_stamps_as_its_sessions_snapshot_says() {
+    use wz_session_core::policy::EntityTimestampOptIn;
+    for (value, stamps) in [
+        (EntityTimestampOptIn::On, false),
+        (EntityTimestampOptIn::Off, true),
+    ] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_entity_timestamp_opt_in(value).is_err() {
+            continue;
+        }
+        let (actions, _driver) = recording_actions_with_params(params);
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+        let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+        let publisher = session.declare_publisher(
+            "home/temp",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        let stamped = publisher.put_at(1, b"x");
+        assert_eq!(
+            stamped.is_ok(),
+            stamps,
+            "{value:?}: {stamped:?} from a publisher that stated nothing"
+        );
+        if !stamps {
+            assert_eq!(stamped, Err(StampedPutError::NotStamping));
+        }
+    }
 }
 
 /// What a subscriber declared with `options` sees of the timestamp of one stamped sample, and of
@@ -2246,7 +2283,9 @@ fn a_subscriber_declared_not_to_expose_the_timestamp_sees_none_and_the_rest_unch
 #[test]
 fn a_subscriber_that_says_nothing_gets_the_builds_default() {
     let (time, _payload) = timestamp_seen_by(SubscribeOptions::new());
-    let build_exposes = wz_session_core::timestamp_visibility::default_exposed();
+    let build_exposes = wz_session_core::timestamp_visibility::exposed_by(
+        &wz_session_core::policy::SessionPolicy::defaults(),
+    );
     assert_eq!(time.is_some(), build_exposes);
     assert_eq!(SubscribeOptions::new().expose_timestamp(), None);
 }
@@ -7369,7 +7408,24 @@ fn reply_timestamps_seen_by(
     options: QueryOptions,
     versions: &'static [(&'static [u8], u64)],
 ) -> Vec<(Option<u64>, Vec<u8>)> {
-    let (session, _driver) = build_session();
+    reply_timestamps_seen_on(fixture_session_init_params(), options, versions)
+}
+
+/// [`reply_timestamps_seen_by`] on a session opened with `params`, whose snapshot the query's
+/// default is read from.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+fn reply_timestamps_seen_on(
+    params: wz_session_core::session_init_params::SessionInitParams,
+    options: QueryOptions,
+    versions: &'static [(&'static [u8], u64)],
+) -> Vec<(Option<u64>, Vec<u8>)> {
+    let (actions, _driver) = recording_actions_with_params(params);
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
     session
         .observer()
         .lock()
@@ -7607,21 +7663,82 @@ fn a_plain_reply_of_a_queryable_declared_not_to_stamp_is_never_stamped_by_the_no
 
 #[cfg(feature = "pubsub-timestamp")]
 #[test]
-fn a_queryable_that_says_nothing_gets_the_builds_default() {
+fn a_queryable_that_says_nothing_leaves_stamping_to_its_session() {
+    assert_eq!(QueryableOptions::new().stamp_timestamp(), None);
     assert_eq!(
-        QueryableOptions::new().stamp_timestamp(),
-        wz_session_core::timestamp_visibility::default_exposed()
+        QueryableOptions::new()
+            .with_stamp_timestamp(true)
+            .stamp_timestamp(),
+        Some(true)
     );
 }
 
-/// A query that says nothing gets the build's default.
+/// A queryable that says nothing is given the `entity-timestamp-opt-in` value of the session it
+/// is declared on, not the build's: the stamp the session makes for it stamps exactly when that
+/// value is off, and a stated choice is the queryable's under either value.
+#[cfg(all(feature = "query-queryable", feature = "pubsub-timestamp"))]
+#[test]
+fn a_queryable_that_says_nothing_stamps_as_its_sessions_snapshot_says() {
+    use wz_session_core::policy::EntityTimestampOptIn;
+    for (value, stamps) in [
+        (EntityTimestampOptIn::On, false),
+        (EntityTimestampOptIn::Off, true),
+    ] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_entity_timestamp_opt_in(value).is_err() {
+            continue;
+        }
+        let (actions, _driver) = recording_actions_with_params(params);
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+        let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+        assert_eq!(
+            session.queryable_stamp(&QueryableOptions::new()).stamps(),
+            stamps,
+            "{value:?}"
+        );
+        for chosen in [true, false] {
+            let options = QueryableOptions::new().with_stamp_timestamp(chosen);
+            assert_eq!(session.queryable_stamp(&options).stamps(), chosen);
+        }
+    }
+}
+
+/// A query that says nothing leaves the timestamp to its session.
 #[cfg(feature = "query-get")]
 #[test]
-fn a_query_that_says_nothing_gets_the_builds_default() {
+fn a_query_that_says_nothing_leaves_the_timestamp_to_its_session() {
+    assert_eq!(QueryOptions::get().expose_timestamp(), None);
     assert_eq!(
-        QueryOptions::get().expose_timestamp(),
-        wz_session_core::timestamp_visibility::default_exposed()
+        QueryOptions::get()
+            .with_expose_timestamp(false)
+            .expose_timestamp(),
+        Some(false)
     );
+}
+
+/// A query that says nothing is given the `entity-timestamp-opt-in` value of the session it is
+/// made on, not the build's: its callback sees the reply's timestamp exactly when that value is
+/// off.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_query_that_says_nothing_shows_the_timestamp_as_its_sessions_snapshot_says() {
+    use wz_session_core::policy::EntityTimestampOptIn;
+    for (value, exposed) in [
+        (EntityTimestampOptIn::On, false),
+        (EntityTimestampOptIn::Off, true),
+    ] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_entity_timestamp_opt_in(value).is_err() {
+            continue;
+        }
+        let seen = reply_timestamps_seen_on(params, get_opts_in_arrival_order(), &[(b"v1", 10)]);
+        let time = exposed.then_some(10);
+        assert_eq!(seen, [(time, b"v1".to_vec())], "{value:?}");
+    }
 }
 
 /// A query that awaits a wire Final: `Locality::Remote`, so nothing answers it locally.
@@ -13582,7 +13699,9 @@ fn tapped_qos_group_session() -> (
         batch_size: 2_048,
         is_qos: true,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,

@@ -60,7 +60,7 @@ fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::default(),
         initial_sn: 77,
         cookie: cookie_bytes(cookie),
-        tx_queue: TxQueueConf::default(),
+        tx_queue: TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
         link_rx: LinkRxConf::default(),
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
         policy: wz_session_core::policy::SessionPolicy::defaults(),

@@ -2838,7 +2838,9 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+            ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
@@ -3029,9 +3031,12 @@ mod tests {
             wait_before_drop_us: 7,
             max_wait_before_drop_fragments_us: 13,
             wait_before_close_us: 11,
-            ..TxQueueConf::default()
+            ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
         };
-        assert_ne!(operator, TxQueueConf::default());
+        assert_ne!(
+            operator,
+            TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+        );
         let group = router_group_params(RouterGroupProfile {
             zid: [0x0A].into(),
             qos: true,
@@ -3072,7 +3077,9 @@ mod tests {
             zid: [0x0B].into(),
             qos: false,
             compression: false,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+            ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             beacon,
             join_rule: GroupJoinRule::Zenoh,

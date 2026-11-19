@@ -63,12 +63,6 @@ impl BuildSupervisor {
     pub fn for_policy(policy: &crate::policy::SessionPolicy) -> Self {
         Self::new(policy.supervision_after_expiry())
     }
-
-    /// [`Self::for_policy`] under the build defaults: the supervisor of a host that does not yet
-    /// hold its runtime's snapshot.
-    pub fn for_build() -> Self {
-        Self::for_policy(&crate::policy::SessionPolicy::defaults())
-    }
 }
 
 /// Why a checkpoint could not be started.
@@ -294,7 +288,7 @@ mod tests {
 
     #[test]
     fn the_build_supervisor_has_the_builds_checkpoints_and_none_supervised() {
-        let supervisor = BuildSupervisor::for_build();
+        let supervisor = BuildSupervisor::for_policy(&crate::policy::SessionPolicy::defaults());
         assert!(supervisor
             .state(crate::caps::SUPERVISION_CHECKPOINTS - 1)
             .is_some());
@@ -311,7 +305,7 @@ mod tests {
         use crate::policy::SessionPolicy;
         use crate::policy_binding::PolicyValue;
         assert_eq!(
-            BuildSupervisor::for_build().after_expiry,
+            BuildSupervisor::for_policy(&SessionPolicy::defaults()).after_expiry,
             AfterExpiry::DEFAULT
         );
         for &rule in <AfterExpiry as PolicyValue>::ALL {

@@ -25,8 +25,8 @@
 //! # The default is no atomicity
 //!
 //! A publish that states nothing is sent as upstream's is, to each link on its own terms, and it
-//! is the only publish a build without the policy has. A call that states the atomic form in such
-//! a build is refused by [`admit_in_build`] with a reason, not ignored.
+//! is the only publish a session without the policy has. A call that states the atomic form on
+//! such a session is refused by [`admit_by`] with a reason, not ignored.
 
 /// What the reserving phase found for one link of a publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,12 +102,6 @@ pub const fn admit_by(
     admit(stated, policy.multi_route_atomic_tx())
 }
 
-/// [`admit_by`] under the build defaults: the call of an entry point that does not yet hold its
-/// session's snapshot.
-pub const fn admit_in_build(stated: bool) -> Result<(), AtomicTxError> {
-    admit_by(stated, &crate::policy::SessionPolicy::defaults())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,15 +145,21 @@ mod tests {
     fn a_publish_that_does_not_state_it_is_admitted_whatever_the_policy() {
         assert_eq!(admit(false, false), Ok(()));
         assert_eq!(admit(false, true), Ok(()));
-        assert_eq!(admit_in_build(false), Ok(()));
+        assert_eq!(
+            admit_by(false, &crate::policy::SessionPolicy::defaults()),
+            Ok(())
+        );
     }
 
     #[test]
     fn the_atomic_form_needs_the_policy_on() {
         assert_eq!(admit(true, false), Err(AtomicTxError::PolicyOff));
         assert_eq!(admit(true, true), Ok(()));
-        let in_build = crate::policy::SessionPolicy::defaults().multi_route_atomic_tx();
-        assert_eq!(admit_in_build(true).is_ok(), in_build);
+        let defaults = crate::policy::SessionPolicy::defaults();
+        assert_eq!(
+            admit_by(true, &defaults).is_ok(),
+            defaults.multi_route_atomic_tx()
+        );
     }
 
     /// The snapshot the atomic form is asked with decides, not the build.
@@ -167,10 +167,6 @@ mod tests {
     fn the_atomic_form_is_admitted_by_the_snapshot_it_is_asked_with() {
         use crate::policy::{MultiRouteAtomicTx, SessionPolicy};
         use crate::policy_binding::PolicyValue;
-        assert_eq!(
-            admit_by(true, &SessionPolicy::defaults()),
-            admit_in_build(true)
-        );
         assert_eq!(admit_by(false, &SessionPolicy::defaults()), Ok(()));
         if MultiRouteAtomicTx::DOMAIN.is_singleton() {
             return;

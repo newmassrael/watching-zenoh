@@ -249,7 +249,7 @@ mod tests {
     /// neither the ordinary nor the probing deadline carries.
     #[test]
     fn a_covered_deadline_is_the_ordinary_one_marked() {
-        let conf = TxQueueConf::default();
+        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
         for droppable in [true, false] {
             let covered = PushDeadline::covered(droppable, &conf);
             let ordinary = PushDeadline::new(droppable, &conf);
@@ -316,7 +316,7 @@ mod tests {
     /// drops only on a contended TX mutex, never for a full socket.
     #[test]
     fn a_pico_droppable_message_waits_as_long_as_a_blocking_one() {
-        let pico = TxQueueConf::pico();
+        let pico = TxQueueConf::pico_of_policy(&crate::policy::SessionPolicy::defaults());
         let mut drop = PushDeadline::new(true, &pico);
         let block = PushDeadline::new(false, &pico);
         assert_eq!(
@@ -346,7 +346,7 @@ mod tests {
         TxQueueConf {
             wait_before_close_us: 1_000,
             no_progress_us,
-            ..TxQueueConf::default()
+            ..TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
         }
     }
 
@@ -429,7 +429,7 @@ mod tests {
                 wait_before_drop_us: 100,
                 max_wait_before_drop_fragments_us: 1_000,
                 no_progress_us,
-                ..TxQueueConf::default()
+                ..TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
             };
             let mut drop = PushDeadline::new(true, &conf);
             let mut seen = [drop.ask(); 5];
@@ -454,7 +454,12 @@ mod tests {
     /// The default is upstream's: an expired blocking message closes the session.
     #[test]
     fn an_expired_blocking_message_closes_the_session_by_default() {
-        assert_eq!(TxExpiry::of(&TxQueueConf::default()), TxExpiry::Closing);
+        assert_eq!(
+            TxExpiry::of(&TxQueueConf::of_policy(
+                &crate::policy::SessionPolicy::defaults()
+            )),
+            TxExpiry::Closing
+        );
     }
 
     /// The policy keeps the session; the control above is its pair.
@@ -462,7 +467,7 @@ mod tests {
     fn with_the_policy_on_an_expired_blocking_message_keeps_the_session() {
         let conf = TxQueueConf {
             expiry_keeps_session: true,
-            ..TxQueueConf::default()
+            ..TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
         };
         assert_eq!(TxExpiry::of(&conf), TxExpiry::Kept);
     }
@@ -470,7 +475,7 @@ mod tests {
     /// The control: zenoh's default still drops after `wait_before_drop`.
     #[test]
     fn a_zenoh_droppable_message_still_waits_only_wait_before_drop() {
-        let zenoh = TxQueueConf::default();
+        let zenoh = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
         let drop = PushDeadline::new(true, &zenoh);
         assert_eq!(
             drop.ask(),

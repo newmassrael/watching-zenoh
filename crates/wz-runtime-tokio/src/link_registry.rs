@@ -21,6 +21,7 @@ mod tests {
     use std::sync::Arc;
 
     use wz_session_core::link_admission::LinkAdmission;
+    use wz_session_core::policy::SessionPolicy;
 
     use super::LinkRegistry;
 
@@ -33,7 +34,10 @@ mod tests {
     #[test]
     fn links_to_one_node_that_race_for_it_admit_exactly_one() {
         for _ in 0..200 {
-            let node = Arc::new(LinkRegistry::new(&LOW));
+            let node = Arc::new(LinkRegistry::with_order(
+                &LOW,
+                SessionPolicy::defaults().link_tie_order(),
+            ));
             let racers: Vec<_> = (0..4)
                 .map(|_| {
                     let node = Arc::clone(&node);

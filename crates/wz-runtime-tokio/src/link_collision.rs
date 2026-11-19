@@ -126,7 +126,8 @@ impl<P> LinkCollisions<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_session_core::link_admission::judge_second_link;
+    use wz_session_core::link_admission::judge_second_link_by;
+    use wz_session_core::policy::SessionPolicy;
 
     const NODE: [u8; 4] = [0x42, 0, 0, 0];
 
@@ -324,7 +325,13 @@ mod tests {
             remote,
             second_dialled,
             |held_dialled, new_dialled| {
-                Some(judge_second_link(held_dialled, new_dialled, local, remote))
+                Some(judge_second_link_by(
+                    SessionPolicy::defaults().link_tie_order(),
+                    held_dialled,
+                    new_dialled,
+                    local,
+                    remote,
+                ))
             },
             |_| true,
         );

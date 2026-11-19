@@ -4084,8 +4084,9 @@ pub struct OpenStance {
     /// The transmit model of the ABI calling this. The two ABIs this core serves
     /// transmit differently: a zenoh-c session puts onto zenoh's bounded queue
     /// and drops a droppable message after `wait_before_drop`
-    /// ([`TxQueueConf::default`]), while pico writes on the caller's thread and
-    /// never drops for a full socket ([`TxQueueConf::pico`]).
+    /// ([`TxQueueConf::of_policy`]), while pico writes on the caller's thread and
+    /// never drops for a full socket ([`TxQueueConf::pico_of_policy`]); either is
+    /// built under [`Self::session_policy`].
     pub tx_queue: TxQueueConf,
     /// The batch size the session advertises at its handshake, dialled and accepted alike; see
     /// [`LinkTx`]. A zenoh-c session reads it from `transport/link/tx/batch_size` and a session
@@ -6191,7 +6192,7 @@ mod multicast_face_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: Default::default(),
+            tx_queue: super::TxQueueConf::of_policy(&super::SessionPolicy::defaults()),
             link_rx: Default::default(),
             join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
             max_sessions: None,

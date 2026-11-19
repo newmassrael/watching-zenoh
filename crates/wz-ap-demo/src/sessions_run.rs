@@ -608,7 +608,7 @@ async fn run_group(
     };
     serve_group(
         endpoint,
-        &group_params(zid, join_interval_ms, lease_ms),
+        &group_params(zid, join_interval_ms, lease_ms, &snapshot),
         bind,
         access.map(|access| GroupPolicy {
             access,
@@ -622,12 +622,14 @@ async fn run_group(
 
 /// The group profile a router's face advertises (`router_group_params`), as a
 /// peer: version 0x09, 2-bit resolutions, a 2048-byte batch, no per-priority
-/// offer, the default queue. The two intervals are the document's.
+/// offer, upstream's queue under the node's snapshot `policy`. The two
+/// intervals are the document's.
 #[cfg(feature = "transport-multicast")]
 fn group_params(
     zid: SessionZid,
     join_interval_ms: u64,
     lease_ms: u64,
+    policy: &wz::runtime_tokio::policy::SessionPolicy,
 ) -> wz::runtime_tokio::multicast_glue::MulticastParams {
     wz::runtime_tokio::multicast_glue::MulticastParams {
         whatami: WhatAmI::Peer,
@@ -639,7 +641,7 @@ fn group_params(
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: Default::default(),
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(policy),
         link_rx: Default::default(),
         // The demo's group is zenoh-pico's, as its batch is.
         join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,
@@ -939,6 +941,31 @@ mod group_rejoin_tests {
 
     const ENDPOINT: &str = "udp/224.0.0.224:7446";
 
+    /// The snapshot of a node that resolved the build defaults.
+    fn defaults() -> wz::runtime_tokio::policy::SessionPolicy {
+        wz::runtime_tokio::policy::SessionPolicy::defaults()
+    }
+
+    /// A group's queue carries the queue policies of the snapshot the node hands it, not the
+    /// build's: each value of `tx-no-progress-deadline` the domain allows is selected, and the
+    /// queue has its window exactly when the value is on.
+    #[test]
+    fn a_groups_queue_carries_the_policies_of_the_nodes_snapshot() {
+        use wz::runtime_tokio::policy::TxNoProgressDeadline;
+        for value in [TxNoProgressDeadline::On, TxNoProgressDeadline::Off] {
+            let mut policy = defaults();
+            if policy.select_tx_no_progress_deadline(value).is_err() {
+                continue;
+            }
+            let params = group_params(SessionZid::from([0xE5]), 100, 1_000, &policy);
+            assert_eq!(
+                params.tx_queue.no_progress_us.is_some(),
+                bool::from(value),
+                "{value:?}"
+            );
+        }
+    }
+
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
     }
@@ -997,7 +1024,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_a, 100, 1_000),
+                    &group_params(zid_a, 100, 1_000, &defaults()),
                     bind_a,
                     None,
                     &mut stop,
@@ -1021,7 +1048,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_b, 100, 1_000),
+                    &group_params(zid_b, 100, 1_000, &defaults()),
                     bind_b,
                     None,
                     &mut stop,
@@ -1104,7 +1131,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_a, 100, 1_000),
+                    &group_params(zid_a, 100, 1_000, &defaults()),
                     bind_a,
                     None,
                     &mut stop,
@@ -1127,7 +1154,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_b, 100, 1_000),
+                    &group_params(zid_b, 100, 1_000, &defaults()),
                     bind_b,
                     None,
                     &mut stop,
@@ -1188,7 +1215,7 @@ mod group_rejoin_tests {
             async move {
                 let end = serve_group(
                     ENDPOINT,
-                    &group_params(SessionZid::from([0xC3]), 100, 1_000),
+                    &group_params(SessionZid::from([0xC3]), 100, 1_000, &defaults()),
                     bind,
                     None,
                     &mut stop,
@@ -1232,7 +1259,7 @@ mod group_rejoin_tests {
         let binds = Cell::new(0u16);
         let end = serve_group(
             ENDPOINT,
-            &group_params(SessionZid::from([0xD4]), 100, 1_000),
+            &group_params(SessionZid::from([0xD4]), 100, 1_000, &defaults()),
             || {
                 binds.set(binds.get() + 1);
                 std::future::ready(Err::<GroupBusLink, _>(io::Error::other(
@@ -1272,6 +1299,7 @@ mod group_access_tests {
             SessionZid::from([0xAA, 0xBB, 0xCC, 0xDD]),
             100,
             1_000,
+            &wz::runtime_tokio::policy::SessionPolicy::defaults(),
         ));
         let session = TokioMulticastSession::new_multicast(
             Arc::new(wz::runtime_tokio::sync::PlainMutex::new(

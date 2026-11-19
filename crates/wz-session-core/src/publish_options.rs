@@ -147,17 +147,23 @@ impl PublishOptions {
     /// the caller's time, so a caller cannot sign a message as another node. When it does not stamp,
     /// those calls are refused rather than sent without the stamp.
     ///
-    /// What a declaration that does not say gets is the build's `entity-timestamp-opt-in` policy:
-    /// it stamps when the policy is off, which is upstream's behaviour of attaching what it is
-    /// given.
+    /// What a declaration that does not say gets is the `entity-timestamp-opt-in` policy of the
+    /// session it is declared on ([`Self::stamp_timestamp_by`]): it stamps when the policy is off,
+    /// which is upstream's behaviour of attaching what it is given.
     pub fn with_stamp_timestamp(mut self, stamp: bool) -> Self {
-        self.stamp_timestamp = crate::timestamp_visibility::StampTimestamp(stamp);
+        self.stamp_timestamp = crate::timestamp_visibility::StampTimestamp::Chosen(stamp);
         self
     }
 
-    /// See [`Self::with_stamp_timestamp`].
-    pub fn stamp_timestamp(&self) -> bool {
-        self.stamp_timestamp.0
+    /// What the declaration says about stamping, or `None` when it leaves it to the session.
+    pub fn stamp_timestamp(&self) -> Option<bool> {
+        self.stamp_timestamp.chosen()
+    }
+
+    /// Whether a publisher declared with these options stamps, on a session whose snapshot is
+    /// `policy`: the session resolves it when the publisher is declared.
+    pub fn stamp_timestamp_by(&self, policy: &crate::policy::SessionPolicy) -> bool {
+        self.stamp_timestamp.resolve(policy)
     }
 
     /// Default Put-kind options: `allowed_destination = Any`, `reliability = Reliable`.
@@ -187,17 +193,17 @@ impl PublishOptions {
         self
     }
 
-    /// Make the publish retry as `retry` says when no link had room. A build whose
+    /// Make the publish retry as `retry` says when no link had room. A session whose
     /// `publisher-admission-retry` policy is off refuses it where the engine reads it
-    /// ([`crate::admission_retry::admit_in_build`]).
+    /// ([`crate::admission_retry::admit_by`]).
     pub fn with_admission_retry(mut self, retry: AdmissionRetry) -> Self {
         self.admission_retry = Some(retry);
         self
     }
 
-    /// Make the publish reach all of its links or none. A build whose `multi-route-atomic-tx`
+    /// Make the publish reach all of its links or none. A session whose `multi-route-atomic-tx`
     /// policy is off refuses it where the engine reads it
-    /// ([`crate::atomic_tx::admit_in_build`]).
+    /// ([`crate::atomic_tx::admit_by`]).
     pub fn with_atomic_tx(mut self) -> Self {
         self.atomic_tx = true;
         self

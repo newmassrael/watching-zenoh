@@ -52,7 +52,7 @@ fn params(zid: &[u8]) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: TxQueueConf::default(),
+        tx_queue: TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
         link_rx: LinkRxConf::default(),
         join_rule: GroupJoinRule::Pico,
         max_sessions: None,

@@ -89,18 +89,7 @@ WRAPPER = "the build-default wrapper of a call that takes a snapshot; it goes wh
 ALLOWED: tuple[tuple[str, str, str], ...] = (
     # The policy plane itself.
     ("crates/wz-session-core/src/policy*.rs", "*", "the policy plane, which defines the build defaults"),
-    # Session-core: the build-default wrappers, each beside the call that takes a snapshot.
-    ("crates/wz-session-core/src/admission_retry.rs", "admit_in_build", WRAPPER + " (admit_by)"),
-    ("crates/wz-session-core/src/atomic_tx.rs", "admit_in_build", WRAPPER + " (admit_by)"),
-    ("crates/wz-session-core/src/peer_target.rs", "admit_in_build", WRAPPER + " (admit_by)"),
-    ("crates/wz-session-core/src/link_restriction.rs", "admit_in_build", WRAPPER + " (admit_by)"),
-    ("crates/wz-session-core/src/link_admission.rs", "judge_second_link", WRAPPER + " (judge_second_link_by)"),
-    ("crates/wz-session-core/src/link_admission.rs", "new", WRAPPER + " (LinkBook and LinkRegistry::with_order)"),
-    ("crates/wz-session-core/src/replay_pacing.rs", "from_build", WRAPPER + " (ReplayPacing::of_policy)"),
-    ("crates/wz-session-core/src/session_init_params.rs", "default", WRAPPER + " (TxQueueConf::of_policy)"),
-    ("crates/wz-session-core/src/session_init_params.rs", "pico", WRAPPER + " (TxQueueConf::pico_of_policy)"),
-    ("crates/wz-session-core/src/supervisor.rs", "for_build", WRAPPER + " (BuildSupervisor::for_policy)"),
-    ("crates/wz-session-core/src/timestamp_visibility.rs", "default_exposed", WRAPPER + " (exposed_by)"),
+    # Session-core: the key gate's reads of the build.
     ("crates/wz-session-core/src/key_gate.rs", "of_build", "the gate a registry starts from; the session hands its own in step 3b"),
     ("crates/wz-session-core/src/key_gate_open.rs", "of_build", "the build-time refusal of a closed default without the feature"),
     # Outside session-core: every site that still reads the build.

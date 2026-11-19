@@ -266,7 +266,9 @@ mod tests {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: vec![0u8; 16],
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+            ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
             cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),

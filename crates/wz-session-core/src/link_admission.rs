@@ -35,7 +35,7 @@ use wz_runtime_core::Runtime;
 #[cfg(feature = "alloc")]
 use crate::credential_identity::canonical_zid;
 use crate::credential_identity::zid_from_wire;
-use crate::policy::{LinkTieOrder, SessionPolicy};
+use crate::policy::LinkTieOrder;
 
 /// What a session does with a link to a node it already holds a link to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,31 +60,13 @@ fn zid_order_key(order: LinkTieOrder, zid: &[u8]) -> u128 {
     })
 }
 
-/// [`judge_second_link_by`] under the build default of the `link-tie-order` policy: the rule for
-/// a caller that does not yet hold the snapshot of its node. A node's own tables order the zids
-/// by the snapshot they were built with (`LinkBook::with_order`, the heap profile's), and a
-/// caller that holds one passes its order to [`judge_second_link_by`].
-pub fn judge_second_link(
-    held_dialled: bool,
-    new_dialled: bool,
-    local_zid: &[u8],
-    remote_zid: &[u8],
-) -> SecondLink {
-    judge_second_link_by(
-        SessionPolicy::defaults().link_tie_order(),
-        held_dialled,
-        new_dialled,
-        local_zid,
-        remote_zid,
-    )
-}
-
 /// The fate of a NEW link to a node the session already holds a link to, the zids ordered by
 /// `order`, the `link-tie-order` policy of the node's snapshot.
 ///
 /// `held_dialled` and `new_dialled` say whether this session dialled each link (as opposed to
 /// taking it off its port); `local_zid` is this session's own zid and `remote_zid` the node's.
-/// The caller has established that both links reach `remote_zid`.
+/// The caller has established that both links reach `remote_zid`. A node's own tables order the
+/// zids by the snapshot they were built with (`LinkBook::with_order`, the heap profile's).
 pub fn judge_second_link_by(
     order: LinkTieOrder,
     held_dialled: bool,
@@ -107,11 +89,12 @@ pub fn judge_second_link_by(
 
 /// The node's say, DURING a link's handshake, on whether the link may become a face.
 ///
-/// [`judge_second_link`] decides which of two links to one node is kept. WHEN it is asked decides
-/// what the application sees. Asked after both ends of a link have completed the handshake, each
-/// end admits the link that came up first on its side, exchanges declarations over it, and only
-/// then, when the rival comes up, closes the one the zid rule rejects: the declarations that crossed
-/// the closed link were delivered and are delivered again over the kept one.
+/// [`judge_second_link_by`] decides which of two links to one node is kept. WHEN it is asked
+/// decides what the application sees. Asked after both ends of a link have completed the
+/// handshake, each end admits the link that came up first on its side, exchanges declarations
+/// over it, and only then, when the rival comes up, closes the one the zid rule rejects: the
+/// declarations that crossed the closed link were delivered and are delivered again over the kept
+/// one.
 ///
 /// Upstream asks while the link is still being established, and so does this: the acceptor before
 /// it sends the OpenAck, the initiator before it sends the OpenSyn and again before it takes the
@@ -132,9 +115,10 @@ pub fn judge_second_link_by(
 ///    has nothing to confirm: its reservation is its admission.
 /// 4. [`LinkAdmission::release`]: the link is gone, or never got further than it did.
 ///
-/// What an implementation decides, with the rule above, is [`judge_second_link`]'s for two links
-/// still in the handshake and the established one's for a link that has come up: a link that has
-/// is kept, as BGP keeps its Established one, which both ends read alike once both have it.
+/// What an implementation decides, with the rule above, is [`judge_second_link_by`]'s for two
+/// links still in the handshake and the established one's for a link that has come up: a link
+/// that has is kept, as BGP keeps its Established one, which both ends read alike once both have
+/// it.
 #[cfg(feature = "alloc")]
 pub trait LinkAdmission: Send + Sync {
     /// A link `dialled` (or taken off a port) begins its handshake. The token names it in the
@@ -250,7 +234,7 @@ struct LinkRow {
 ///   the first reservation is kept.
 /// - One that is still in its handshake and went the other way is two nodes that dialled each
 ///   other at the same moment. Each end sees the two reservations in an order of its own, so the
-///   rule reads only what both ends read alike, the zids ([`judge_second_link`]): the link the
+///   rule reads only what both ends read alike, the zids ([`judge_second_link_by`]): the link the
 ///   lower zid dialled is kept, and the other is SUPERSEDED, which its initiator learns at
 ///   [`LinkBook::confirm`] and closes on before it has declared anything.
 ///
@@ -276,13 +260,6 @@ pub struct LinkBook {
 
 #[cfg(feature = "alloc")]
 impl LinkBook {
-    /// The table of the node `local_zid`, under the build default of `link-tie-order`: the table
-    /// of a creator that does not yet hold the node's snapshot. A creator that does builds it with
-    /// [`Self::with_order`].
-    pub fn new(local_zid: &[u8]) -> Self {
-        Self::with_order(local_zid, SessionPolicy::defaults().link_tie_order())
-    }
-
     /// The table of the node `local_zid`, whose two crossing links are judged by `order`, the
     /// `link-tie-order` of the node's snapshot.
     pub fn with_order(local_zid: &[u8], order: LinkTieOrder) -> Self {
@@ -408,12 +385,6 @@ pub struct LinkRegistry<R: Runtime> {
 
 #[cfg(feature = "alloc")]
 impl<R: Runtime> LinkRegistry<R> {
-    /// The admission of the node `local_zid`, under the build default of `link-tie-order`
-    /// ([`LinkBook::new`]). A creator that holds the node's snapshot uses [`Self::with_order`].
-    pub fn new(local_zid: &[u8]) -> Self {
-        Self::with_order(local_zid, SessionPolicy::defaults().link_tie_order())
-    }
-
     /// The admission of the node `local_zid`, judging crossing links by `order`, the
     /// `link-tie-order` of the node's snapshot.
     pub fn with_order(local_zid: &[u8], order: LinkTieOrder) -> Self {
@@ -464,6 +435,10 @@ impl<R: Runtime> LinkAdmission for LinkRegistry<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::SessionPolicy;
+
+    /// The order of the build defaults, which is what a node that selected none judges by.
+    const DEFAULT_ORDER: LinkTieOrder = SessionPolicy::defaults().link_tie_order();
 
     /// Two nodes `a` and `b` and two links between them, `x` dialled by `a` and `y` by `b`. Each
     /// end decides when its second link comes up; `first_at_a` and `first_at_b` say which of the
@@ -476,7 +451,7 @@ mod tests {
         } else {
             (!x_dialled_here, x_dialled_here)
         };
-        match judge_second_link(held_dialled, new_dialled, local, remote) {
+        match judge_second_link_by(DEFAULT_ORDER, held_dialled, new_dialled, local, remote) {
             // The new link is `y` when the first was `x`.
             SecondLink::Replace => !first_is_x,
             SecondLink::Refuse => first_is_x,
@@ -488,7 +463,7 @@ mod tests {
         for dialled in [true, false] {
             for (local, remote) in [([1u8], [2u8]), ([2], [1])] {
                 assert_eq!(
-                    judge_second_link(dialled, dialled, &local, &remote),
+                    judge_second_link_by(DEFAULT_ORDER, dialled, dialled, &local, &remote),
                     SecondLink::Refuse,
                     "the first up stays whichever zid is lower"
                 );
@@ -593,20 +568,6 @@ mod tests {
             keeps_its_own_dial(LinkTieOrder::ZidNumber, BY_NUMBER_LOWER, BY_NUMBER_HIGHER);
         assert!(a_by_bytes && b_by_number);
     }
-
-    #[test]
-    fn the_build_reads_the_order_its_policy_states() {
-        assert_eq!(
-            judge_second_link(true, false, BY_NUMBER_LOWER, BY_NUMBER_HIGHER),
-            judge_second_link_by(
-                SessionPolicy::defaults().link_tie_order(),
-                true,
-                false,
-                BY_NUMBER_LOWER,
-                BY_NUMBER_HIGHER
-            )
-        );
-    }
 }
 
 /// The table's own rules, one node's table at a time, and the two nodes' tables together over every
@@ -614,13 +575,20 @@ mod tests {
 #[cfg(all(test, feature = "alloc"))]
 mod book_tests {
     use super::*;
+    use crate::policy::SessionPolicy;
 
     const LOW: [u8; 2] = [0x01, 0x00];
     const HIGH: [u8; 2] = [0x02, 0x00];
 
+    /// The table of the node `local_zid` under the order of the build defaults, which is what a
+    /// node that selected none holds.
+    fn book(local_zid: &[u8]) -> LinkBook {
+        LinkBook::with_order(local_zid, SessionPolicy::defaults().link_tie_order())
+    }
+
     #[test]
     fn a_link_with_no_rival_is_admitted_and_confirmed() {
-        let mut node = LinkBook::new(&LOW);
+        let mut node = book(&LOW);
         let link = node.open(true);
         assert!(node.reserve(link, &HIGH));
         assert!(node.confirm(link));
@@ -628,7 +596,7 @@ mod book_tests {
 
     #[test]
     fn a_link_that_names_no_node_is_admitted() {
-        let mut node = LinkBook::new(&LOW);
+        let mut node = book(&LOW);
         let link = node.open(false);
         assert!(node.reserve(link, &[]));
         assert!(node.confirm(link));
@@ -638,7 +606,7 @@ mod book_tests {
     fn an_established_link_keeps_its_place_whichever_way_the_new_one_went() {
         for new_dialled in [true, false] {
             for held_dialled in [true, false] {
-                let mut node = LinkBook::new(&LOW);
+                let mut node = book(&LOW);
                 let held = node.open(held_dialled);
                 assert!(node.reserve(held, &HIGH));
                 assert!(node.confirm(held));
@@ -654,7 +622,7 @@ mod book_tests {
     #[test]
     fn two_links_in_handshake_that_went_the_same_way_keep_the_first() {
         for dialled in [true, false] {
-            let mut node = LinkBook::new(&LOW);
+            let mut node = book(&LOW);
             let first = node.open(dialled);
             assert!(node.reserve(first, &HIGH));
             let second = node.open(dialled);
@@ -695,20 +663,12 @@ mod book_tests {
             !crossing(LinkTieOrder::ZidNumber),
             "by number this node is the higher: the inbound link is kept"
         );
-        // The table of the build default is the table of the default order.
-        let defaults = SessionPolicy::defaults().link_tie_order();
-        let mut node = LinkBook::new(LOCAL);
-        assert_eq!(node.order, defaults);
-        let own_dial = node.open(true);
-        assert!(node.reserve(own_dial, REMOTE));
-        let inbound = node.open(false);
-        assert_eq!(node.reserve(inbound, REMOTE), !crossing(defaults));
     }
 
     #[test]
     fn the_link_the_lower_zid_dialled_supersedes_one_in_handshake_that_the_higher_dialled() {
         // This node is the lower: its own dial is the one to keep.
-        let mut node = LinkBook::new(&LOW);
+        let mut node = book(&LOW);
         let taken_off_the_port = node.open(false);
         // An acceptor's reservation is established at once, so make the held link the
         // initiator's: this node dialled `held` and the node it dialled dialled it back.
@@ -721,7 +681,7 @@ mod book_tests {
         assert!(node.confirm(held));
 
         // This node is the higher: the inbound link, which the lower dialled, wins.
-        let mut node = LinkBook::new(&HIGH);
+        let mut node = book(&HIGH);
         let held = node.open(true);
         assert!(node.reserve(held, &LOW));
         let inbound = node.open(false);
@@ -737,7 +697,7 @@ mod book_tests {
 
     #[test]
     fn a_released_link_leaves_room() {
-        let mut node = LinkBook::new(&LOW);
+        let mut node = book(&LOW);
         let held = node.open(false);
         assert!(node.reserve(held, &HIGH));
         let new = node.open(true);
@@ -750,7 +710,7 @@ mod book_tests {
 
     #[test]
     fn a_zid_is_the_same_node_trimmed_or_padded() {
-        let mut node = LinkBook::new(&LOW);
+        let mut node = book(&LOW);
         let held = node.open(false);
         assert!(node.reserve(held, &[0x02]));
         let new = node.open(false);
@@ -807,8 +767,8 @@ mod book_tests {
             orders += 1;
             let a_zid = LOW;
             let b_zid = HIGH;
-            let mut a = LinkBook::new(&a_zid);
-            let mut b = LinkBook::new(&b_zid);
+            let mut a = book(&a_zid);
+            let mut b = book(&b_zid);
             // link 0: A initiates, B accepts. link 1: B initiates, A accepts.
             let tokens = [(a.open(true), b.open(false)), (a.open(false), b.open(true))];
             // A link that either end refused takes no further step.

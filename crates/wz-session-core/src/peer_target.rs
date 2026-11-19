@@ -23,9 +23,9 @@
 //!
 //! # The default is no target
 //!
-//! `None` is upstream's query, and it is the only one a build without the policy has. A call
-//! that names a node in such a build is refused by [`crate::peer_target::admit_in_build`] with
-//! a reason, not ignored.
+//! `None` is upstream's query, and it is the only one a session without the policy has. A call
+//! that names a node on such a session is refused by [`crate::peer_target::admit_by`] with a
+//! reason, not ignored.
 
 /// The longest node identity, in bytes. A session identity is 1 to 16 bytes on the wire.
 pub const MAX_PEER_ID_BYTES: usize = 16;
@@ -94,12 +94,6 @@ pub const fn admit_by(
     admit(target, policy.targeted_query())
 }
 
-/// [`admit_by`] under the build defaults: the call of an entry point that does not yet hold its
-/// session's snapshot.
-pub const fn admit_in_build(target: Option<&[u8]>) -> Result<(), PeerTargetError> {
-    admit_by(target, &crate::policy::SessionPolicy::defaults())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,7 +102,10 @@ mod tests {
     fn no_target_is_admitted_whatever_the_policy() {
         assert_eq!(admit(None, false), Ok(()));
         assert_eq!(admit(None, true), Ok(()));
-        assert_eq!(admit_in_build(None), Ok(()));
+        assert_eq!(
+            admit_by(None, &crate::policy::SessionPolicy::defaults()),
+            Ok(())
+        );
     }
 
     #[test]
@@ -116,8 +113,11 @@ mod tests {
         let zid = [7u8; 16];
         assert_eq!(admit(Some(&zid), false), Err(PeerTargetError::PolicyOff));
         assert_eq!(admit(Some(&zid), true), Ok(()));
-        let in_build = crate::policy::SessionPolicy::defaults().targeted_query();
-        assert_eq!(admit_in_build(Some(&zid)).is_ok(), in_build);
+        let defaults = crate::policy::SessionPolicy::defaults();
+        assert_eq!(
+            admit_by(Some(&zid), &defaults).is_ok(),
+            defaults.targeted_query()
+        );
     }
 
     /// The snapshot a target is asked with decides, not the build.
@@ -126,10 +126,6 @@ mod tests {
         use crate::policy::{SessionPolicy, TargetedQuery};
         use crate::policy_binding::PolicyValue;
         let zid = [7u8; 16];
-        assert_eq!(
-            admit_by(Some(&zid), &SessionPolicy::defaults()),
-            admit_in_build(Some(&zid))
-        );
         assert_eq!(admit_by(None, &SessionPolicy::defaults()), Ok(()));
         if TargetedQuery::DOMAIN.is_singleton() {
             return;

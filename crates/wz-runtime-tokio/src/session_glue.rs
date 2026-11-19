@@ -5468,7 +5468,7 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::default()
+                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
         );
         let meta = super::PushMetadata {
@@ -5514,7 +5514,8 @@ mod link_congestion_tests {
             link.block_first_asked(),
             [(
                 Priority::InteractiveHigh,
-                super::TxQueueConf::default().wait_before_drop_us
+                super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                    .wait_before_drop_us
             )],
             "keyed by the reply's own priority"
         );
@@ -5575,7 +5576,10 @@ mod link_congestion_tests {
     /// A session over `link` whose first frame carries SN 7, so a frame's SN
     /// is its second byte.
     fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
-        session_with_queue(link, super::TxQueueConf::default())
+        session_with_queue(
+            link,
+            super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+        )
     }
 
     /// [`session`] with the given outbound queue configuration.
@@ -5729,7 +5733,7 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::default()
+                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
         );
         actions
@@ -5757,7 +5761,7 @@ mod link_congestion_tests {
         params.batch_size = 1_024;
         params.tx_queue = super::TxQueueConf {
             sizes,
-            ..super::TxQueueConf::default()
+            ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
         };
         let actions =
             super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
@@ -5805,7 +5809,10 @@ mod link_congestion_tests {
         }
         assert_eq!(
             *link.shapes.lock().expect("shapes"),
-            [super::TxQueueConf::default().shape(true, 65_535, 65_535)]
+            [
+                super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                    .shape(true, 65_535, 65_535)
+            ]
         );
     }
 
@@ -5945,7 +5952,7 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::default()
+                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
         );
         link.set_room(LinkRoom::Congested);
@@ -5973,7 +5980,7 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 expiry_keeps_session: true,
                 expiry_close_after: 3,
-                ..super::TxQueueConf::default()
+                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
         );
         link.set_room(LinkRoom::Congested);
@@ -6004,7 +6011,7 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 expiry_keeps_session: true,
                 expiry_close_after: 2,
-                ..super::TxQueueConf::default()
+                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
         );
         for _ in 0..4 {
@@ -6030,7 +6037,7 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 expiry_keeps_session: true,
                 expiry_close_after: 0,
-                ..super::TxQueueConf::default()
+                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
         );
         link.set_room(LinkRoom::Congested);
@@ -6064,7 +6071,7 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::default()
+                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
             },
         );
         link.set_room(LinkRoom::Congested);

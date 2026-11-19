@@ -1152,8 +1152,9 @@ pub trait FaceForwarder {
     /// Two nodes that dialled each other make two links between them, and "the first up" is
     /// decided differently at the two ends (each keeps the link that completed first on its side
     /// and closes the one the other kept), which leaves none. A forwarder that answers with
-    /// [`wz_session_core::link_admission::judge_second_link`] keeps, at both ends, the link the
-    /// node with the lower zid dialled. Default `None`: the loop keeps the first up.
+    /// [`wz_session_core::link_admission::judge_second_link_by`], under the `link-tie-order` of
+    /// the node's snapshot, keeps at both ends the link the node with the lower zid dialled.
+    /// Default `None`: the loop keeps the first up.
     fn judge_second_link(
         &self,
         _held_dialled: bool,
