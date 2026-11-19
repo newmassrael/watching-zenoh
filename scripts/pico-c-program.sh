@@ -15,9 +15,13 @@
 #
 # macOS compiles with `cc`. Windows compiles with MSVC's `cl` through the Visual Studio
 # environment, the compiler pico's own build uses: pico's Windows header names an inline
-# function `__asm__`, which a GNU-mode compiler reads as a keyword. Linux is accepted so
-# that the script can be exercised where it is written; the hosted runners are macOS and
-# Windows.
+# function `__asm__`, which a GNU-mode compiler reads as a keyword. Linux compiles with
+# `cc`: the hosted runners of the `capi` job are macOS and Windows, and the C examples'
+# job (`capi-examples`) runs on Linux and Windows.
+#
+# The library is built in the caller's environment, so a build default the caller states
+# there (a `WZ_POLICY_<NAME>`, a `WZ_LIMIT_<NAME>`) is the library's; a source file given
+# with a feature list is linked against the library with those features.
 #
 # Reads RUNNER_OS and RUNNER_TEMP, which the Actions runner sets, and appends its verdict
 # to GITHUB_STEP_SUMMARY when that is set. Exit status 0 means the program built, ran and
