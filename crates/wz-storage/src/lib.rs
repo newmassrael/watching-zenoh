@@ -52,7 +52,7 @@ pub mod storage_backend;
 // applying zenoh's `guard_cache_if_latest` newer-wins gate (older
 // Put/Delete -> Outdated; Delete leaves a tombstone timestamp) and
 // resolving a (wildcard) query into the matching stored entries via the
-// core's shared `keyexpr_match::keyexpr_intersects_target` scan. The
+// core's shared `keyexpr_match::keyexpr_intersects` scan. The
 // wz-runtime-tokio StorageService driver (Subscriber + complete Queryable +
 // select loop) wraps a `StorageState` (atom 3).
 pub mod storage_state;
