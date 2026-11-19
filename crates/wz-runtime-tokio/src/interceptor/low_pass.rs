@@ -86,7 +86,7 @@ use wz_session_core::attachment::{
 };
 use wz_session_core::ext_view::{query_value_payload_len, ExtEntryView};
 use wz_session_core::held_list::HeldList;
-use wz_session_core::keyexpr_match::keyexpr_includes_target;
+use wz_session_core::keyexpr_match::keyexpr_includes;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::put_payload::payload_len as put_payload_len;
 
@@ -233,7 +233,6 @@ impl LowPassInterceptor {
         keyexpr: &str,
         link: Option<&LinkSubject>,
     ) -> Option<usize> {
-        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
         self.rules
             .iter()
             .filter(|rule| rule.messages.contains(&message))
@@ -242,7 +241,7 @@ impl LowPassInterceptor {
             .filter(|rule| {
                 rule.key_exprs
                     .iter()
-                    .any(|ke| keyexpr_includes_target(ke, &target_chunks))
+                    .any(|ke| keyexpr_includes(ke, keyexpr))
             })
             .map(|rule| rule.max_payload_size)
             .min()

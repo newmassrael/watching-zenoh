@@ -52,14 +52,14 @@
 //!
 //! Wildcard matching (c3c-3 B2): a lookup is the key-expression INTERSECTION of
 //! the published key against every registered declaration keyexpr, via the
-//! shared [`keyexpr_intersects_target`] scan SSOT. Still deferred (performance,
+//! shared [`keyexpr_intersects`] scan SSOT. Still deferred (performance,
 //! not correctness): zenoh folds declarations into a prefix RESOURCE TREE for
 //! sublinear matching; wz does an O(declarations) scan per lookup.
 
 use std::collections::{HashMap, HashSet};
 
 use wz_routing_graph::{Versioned, Zid};
-use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::keyexpr_match::keyexpr_intersects;
 
 /// Per-key-expression map of interested PEER zid -> the per-peer value `V` they
 /// declared — the linkstate-peer interest table, instantiated once per interest
@@ -199,19 +199,18 @@ impl<V> LinkstatepeerInterest<V> {
 
     /// The distinct peers whose declaration keyexpr INTERSECTS `target`,
     /// optionally excluding `exclude` (this node's own zid). Wildcard-aware via
-    /// the shared [`keyexpr_intersects_target`] scan SSOT — an O(declarations)
+    /// the shared [`keyexpr_intersects`] scan SSOT — an O(declarations)
     /// scan (the resource-tree fold for sublinear matching is a tracked
     /// deferral). Value-agnostic — returns the zids; the per-peer `V` is read via
     /// the value-aware accessors when BestMatching needs it.
     fn matching_peers(&self, target: &str, exclude: Option<&Zid>) -> Vec<Zid> {
         // A malformed target (an empty chunk, e.g. a trailing '/') matches no
-        // peer: the shared `keyexpr_intersects_target` rejects it at the matcher.
-        let target_chunks: Vec<&str> = target.split('/').collect();
+        // peer: the shared `keyexpr_intersects` rejects it at the matcher.
         // Dedup peers across multiple matching keys via a `HashSet` (`Zid` is
         // `Copy + Hash`), not an O(matches^2) linear membership scan.
         let mut out: HashSet<Zid> = HashSet::new();
         for (decl, peers) in self.by_key.iter() {
-            if keyexpr_intersects_target(decl, &target_chunks) {
+            if keyexpr_intersects(decl, target) {
                 out.extend(peers.keys().filter(|p| exclude != Some(*p)).copied());
             }
         }
@@ -279,12 +278,11 @@ impl<V> LinkstatepeerInterest<V> {
         target: Option<&str>,
         exclude: Option<&Zid>,
     ) -> Vec<(&str, Zid, &V)> {
-        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut out: Vec<(&str, Zid, &V)> = Vec::new();
         for (decl, peers) in self.by_key.iter() {
-            let matched = match target_chunks.as_deref() {
+            let matched = match target {
                 None => true,
-                Some(chunks) => keyexpr_intersects_target(decl, chunks),
+                Some(target) => keyexpr_intersects(decl, target),
             };
             if matched {
                 out.extend(

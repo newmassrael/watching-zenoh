@@ -15,7 +15,7 @@
 //! The index is the FILTER half of filter and refine (the shape spatial indexes take, Orenstein
 //! 1986; Guttman 1984): [`KeyexprIndex::intersecting`] yields every member whose keyexpr can
 //! intersect the query, and may yield more; the caller refines each with the exact matcher it used
-//! before (`wz_session_core::keyexpr_match::keyexpr_intersects_target`). The walk prunes only by
+//! before (`wz_session_core::keyexpr_match::keyexpr_intersects`). The walk prunes only by
 //! what holds under every keyexpr feature: a chunk with no `*` meets only the same chunk, and a
 //! `**` on either side may stand for any number of chunks. The exact rules (verbatim `@` chunks,
 //! `$*` within a chunk, a feature turned off that makes `*` a literal) stay in the matcher, so the
@@ -406,7 +406,7 @@ impl<'i, M> Walk<'i, '_, M> {
 mod tests {
     use super::*;
     use std::collections::{BTreeSet, HashMap};
-    use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+    use wz_session_core::keyexpr_match::keyexpr_intersects;
 
     /// A small deterministic generator (xorshift64*), so that a failing sequence replays.
     struct Draw(u64);
@@ -432,8 +432,7 @@ mod tests {
     }
 
     fn exact(query: &str, target: &str) -> bool {
-        let chunks: Vec<&str> = target.split('/').collect();
-        keyexpr_intersects_target(query, &chunks)
+        keyexpr_intersects(query, target)
     }
 
     /// The nodes from `node` down, `node` included.
