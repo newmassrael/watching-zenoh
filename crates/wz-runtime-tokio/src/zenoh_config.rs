@@ -1765,9 +1765,7 @@ impl Default for ZenohNodeConfig {
             aggregation_subscribers: Vec::new(),
             aggregation_publishers: Vec::new(),
             stats_filters: Vec::new(),
-            policies: crate::policy_document::Resolved::unchanged(
-                crate::policy::SessionPolicy::defaults(),
-            ),
+            policies: build_policies(),
         }
     }
 }
@@ -5004,17 +5002,26 @@ fn take_wz_member(members: &mut Vec<(String, Json5Value)>) -> Json5Value {
     )
 }
 
+/// The node's policies before a document's `wz` member is read: the build defaults, every value
+/// from the build. The one read of the build in this reader: what a document with no such member
+/// leaves (the `Default` of [`ZenohNodeConfig`]) and what a member is resolved over
+/// ([`policies_of`]).
+fn build_policies() -> crate::policy_document::Resolved {
+    crate::policy_document::Resolved::unchanged(crate::policy::SessionPolicy::defaults())
+}
+
 /// The snapshot the `wz` member of a document resolves to over the build defaults, the profile it
 /// names and then its own policies ([`crate::policy_document::resolve_document`]), or every
 /// refusal found, as the sentences [`ConfigIngestError::PoliciesRefused`] carries.
 fn policies_of(
     wz_member: &Json5Value,
 ) -> Result<crate::policy_document::Resolved, ConfigIngestError> {
-    crate::policy_document::resolve_document(crate::policy::SessionPolicy::defaults(), wz_member)
-        .map_err(|refusals| ConfigIngestError::PoliciesRefused {
+    crate::policy_document::resolve_document(build_policies().policy, wz_member).map_err(
+        |refusals| ConfigIngestError::PoliciesRefused {
             refusals: refusals.iter().map(ToString::to_string).collect(),
             unreported: refusals.unreported(),
-        })
+        },
+    )
 }
 
 /// A honoured key's value, with zenoh's "null means default" already applied.

@@ -10873,10 +10873,10 @@ static NODE_POLICY: std::sync::OnceLock<wz::runtime_tokio::policy::SessionPolicy
 /// `main` holds before any of them is made (`hold_node_policy`); the build defaults for a node
 /// no file describes, and for one whose file has no such member.
 pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
-    NODE_POLICY
-        .get()
-        .copied()
-        .unwrap_or_else(wz::runtime_tokio::policy::SessionPolicy::defaults)
+    match NODE_POLICY.get() {
+        Some(held) => *held,
+        None => wz::runtime_tokio::policy::SessionPolicy::defaults(),
+    }
 }
 
 /// Hold `policy`, the snapshot the `--config` file resolved

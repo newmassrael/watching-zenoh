@@ -918,7 +918,10 @@ pub struct OpenPlan {
 /// document was read. A member the reader refused never reaches here: the open is refused with
 /// [`OpenRefusal::Policies`].
 pub fn resolve_policy(node: Option<&ZenohNodeConfig>) -> SessionPolicy {
-    node.map_or_else(SessionPolicy::defaults, |node| node.policies.policy)
+    match node {
+        Some(node) => node.policies.policy,
+        None => SessionPolicy::defaults(),
+    }
 }
 
 impl OpenPlan {
