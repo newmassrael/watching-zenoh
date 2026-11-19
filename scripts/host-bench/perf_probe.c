@@ -33,7 +33,7 @@
 // (congestion control BLOCK, or DROP with -d) and prints
 //
 //   perf_probe pub sent=<puts that returned 0> failed=<n> elapsed_ns=<..> cpu_ns=<process CPU over the loop>
-//     start_ns=<..> end_ns=<..>
+//     start_ns=<..> end_ns=<..> batch_cycles=<windows opened, 0 without -b>
 //
 // sub counts what it is handed; from its first sample it waits WARMUP_MS, then reads the count, the payload
 // bytes and its process CPU at the start and the end of a WINDOW_S window, and prints
@@ -48,9 +48,14 @@
 // `perf_probe sub total=<n>` on its way out. The count is taken by the callback alone (two relaxed atomic
 // additions); the window is read by the main thread, so no clock is read per sample.
 //
-// With -b the batching of zenoh-pico (zp_batch_start / zp_batch_stop) is on: pub opens one batch window
-// for its whole loop, as upstream's z_pub_thr does; ping and pong open and close one around each put, the
-// close flushing it, so a round trip with batching on is the cost of the window on the path, not a delay.
+// With -b the batching of zenoh-pico (zp_batch_start / zp_batch_stop) is on. pub puts in cycles of one
+// millisecond, each cycle one batch window that is closed, and so flushed, at its end; a batch that fills
+// inside a cycle leaves when it fills, as both libraries' transmit paths do. It does not hold one window for
+// its whole loop, as upstream's z_pub_thr does: the reference built that way delivered nothing to its
+// subscriber after the first moments of a run, with a full batch left on overflow by its own code, and the
+// cause is not known; the cycle is the shape scripts/host-bench/paced_pub.c measured both libraries in. ping
+// and pong open and close one window around each put, the close flushing it, so a round trip with batching
+// on is the cost of the window on the path, not a delay. pub's line then also says batch_cycles=<n>.
 //
 // The active side (ping, pub) prepares its publisher as upstream's z_pub_thr does: it waits a second after
 // the open before declaring it, then up to ten seconds until z_info_peers_zid lists a peer (a group member
@@ -102,6 +107,7 @@
 #define SEQ_BYTES 8
 #define PEER_WAIT_MS 10000
 #define SUB_PREPARE_MS 1000
+#define BATCH_CYCLE_NS 1000000ULL
 
 static volatile sig_atomic_t terminated = 0;
 
@@ -799,9 +805,21 @@ static int run_pub(const z_loaned_session_t *session, const struct options *o) {
     unsigned long long sent = 0, failed = 0;
     const uint64_t t0 = now_ns(), c0 = cpu_ns(), end = t0 + (uint64_t)o->seconds * 1000000000ULL;
     uint64_t t1 = t0;
+    // With batching, one window per cycle of BATCH_CYCLE_NS, closed (and so flushed) at the cycle's end
+    // and opened again: the puts of a cycle are one batch, and a full batch leaves inside it.
+    uint64_t cycle_end = t0 + BATCH_CYCLE_NS;
+    unsigned long long cycles = 0;
     if (o->batching) batch_start(session);
     for (unsigned i = 0; !terminated; i++) {
-        if ((i & 63U) == 0 && (t1 = now_ns()) >= end) break;
+        if ((i & 63U) == 0) {
+            if ((t1 = now_ns()) >= end) break;
+            if (o->batching && t1 >= cycle_end) {
+                batch_stop(session);
+                batch_start(session);
+                cycles++;
+                cycle_end = t1 + BATCH_CYCLE_NS;
+            }
+        }
         z_owned_bytes_t p;
         z_bytes_clone(&p, z_bytes_loan(&payload));
         if (z_publisher_put(loaned, z_bytes_move(&p), NULL) == Z_OK) {
@@ -813,9 +831,10 @@ static int run_pub(const z_loaned_session_t *session, const struct options *o) {
     if (o->batching) batch_stop(session);
     const uint64_t c1 = cpu_ns();
     t1 = now_ns();
-    printf("perf_probe pub sent=%llu failed=%llu elapsed_ns=%llu cpu_ns=%llu start_ns=%llu end_ns=%llu\n", sent,
-           failed, (unsigned long long)(t1 - t0), (unsigned long long)(c1 - c0), (unsigned long long)t0,
-           (unsigned long long)t1);
+    printf("perf_probe pub sent=%llu failed=%llu elapsed_ns=%llu cpu_ns=%llu start_ns=%llu end_ns=%llu "
+           "batch_cycles=%llu\n",
+           sent, failed, (unsigned long long)(t1 - t0), (unsigned long long)(c1 - c0), (unsigned long long)t0,
+           (unsigned long long)t1, o->batching ? cycles + 1 : 0ULL);
     fflush(stdout);
     z_bytes_drop(z_bytes_move(&payload));
     free(buf);
