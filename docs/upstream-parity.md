@@ -35,7 +35,10 @@ cell without a same-condition measurement makes no claim.
   reference.
 - **Performance.** No gate. `scripts/pico-compare.sh` builds the upstream pico examples
   against pico and against `libwz_capi_pico` on a host and prints round trip and
-  throughput, by hand. On the MCU, `scripts/kit-lane.sh` runs wz images on the T2G kit and
+  throughput, by hand. Its `perf` mode runs one probe program against `libwz_capi_pico`
+  and against zenoh-pico built as the same build, per transport (tcp, udp, multicast, a
+  transport the program supplies) and with batching off and on, and writes the result as
+  a file (`docs/pico-perf-matrix.md`). On the MCU, `scripts/kit-lane.sh` runs wz images on the T2G kit and
   holds each to its own row. The pico image (`deploy/zephyr-pico-compare`) is not in the
   lane. The alternating-boot and wire-turnaround method of the 2026-10-21 to 10-23
   comparisons on the T2G kit was run with scripts that live on the bench host and not in

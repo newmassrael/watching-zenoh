@@ -28,6 +28,16 @@
 #                                             is what deploy/upstream_parity.json holds. The run is left under
 #                                             target/pico-compare/parity-runs/host-<family>-<time>/ (its verdict.txt,
 #                                             rows.json and record.txt beside the boots)
+#   scripts/pico-compare.sh perf [reps] [sizes]
+#                                             the performance matrix of the pico ABI (docs/pico-perf-matrix.md):
+#                                             round trip p50/p90/p99, throughput in messages and bytes a second,
+#                                             CPU and peak RSS, per transport (tcp, udp, multicast, a transport
+#                                             the program supplies) and with batching off and on, of one program
+#                                             (scripts/host-bench/perf_probe.c) built against wz-capi-pico and
+#                                             against zenoh-pico built as the same build (the capability cost
+#                                             gate's reference); run by scripts/host-bench/perf_matrix.py, left
+#                                             under target/pico-compare/perf-runs/host-<time>/ (perf.json,
+#                                             report.txt, cells.jsonl)
 #
 # Both sides of every pair are built from the SAME example source: once against the vendored zenoh-pico
 # library and once against `libwz_capi_pico`, in place of it. A number printed here is therefore the
@@ -74,7 +84,7 @@ wz_lib="$WZ_ARTIFACTS/crates/target/release"
 out="$WZ_ARTIFACTS/target/pico-compare"
 mkdir -p "$out/bin"
 
-if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ]; then
+if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ] && [ "${1:-}" != perf ]; then
     bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
     (cd crates && cargo build --release -p wz-capi-pico) >"$out/build-wz.log" 2>&1 \
@@ -156,8 +166,8 @@ build_zenoh_c_family() {
 }
 
 case "${1:-}" in
-    parity)
-        # builds its own arms, for the family it is given (parity below)
+    parity | perf)
+        # each builds its own arms (parity and perf below)
         ;;
     nodrop-c)
         build_zenoh_c_family
@@ -523,6 +533,87 @@ parity() {
     return "$rc"
 }
 
+# ── perf: the performance matrix of the pico ABI (docs/pico-perf-matrix.md) ──────────────────────────────
+#
+# One program, scripts/host-bench/perf_probe.c, built three times into $out/perf/bin: perf_probe_P against
+# zenoh-pico built as the same build as wz-capi-pico's default features (the capability cost gate's
+# reference, which perf_matrix.py reference builds or finds), perf_probe_W against wz-capi-pico's default
+# build and perf_probe_Wapp against the default build with the `app-transport` capability, the one arm that
+# carries the program transport cell. Each arm's library is copied beside it (lib-<arm>), so a later build of
+# the same crate does not change what a run measured. PICO_CMP_NO_BUILD=1 runs the programs already there.
+
+perf_fail() {
+    echo "pico-compare: NOT-MEASURED, $*"
+    exit 2
+}
+
+# perf_wz_arm <dir> <arm> <features>: wz-capi-pico in release for its default features and <features> (a comma
+# list, empty for none), its library copied to <dir>/lib-<arm> and the pico headers of its own arm to
+# <dir>/include-<arm>: the headers its zenoh-pico-sys build installs, with the config.h of the same feature list
+# (wz_config.py --pico-config-h) in place of the vendored default one, as scripts/pico-c-program.sh compiles a
+# program. Against the vendored header a program allocates the option structs of another arm.
+perf_wz_arm() {
+    local dir="$1" arm="$2" features="$3" report inc
+    local feature_args=()
+    if [ -n "$features" ]; then
+        feature_args=(--features "wz-capi-pico/${features//,/,wz-capi-pico/}")
+    fi
+    report="$dir/build-wz-$arm.json"
+    (cd crates && cargo build --release --message-format=json-render-diagnostics -p zenoh-pico-sys \
+        -p wz-capi-pico "${feature_args[@]}") >"$report" 2>"$dir/build-wz-$arm.log" \
+        || perf_fail "wz-capi-pico for arm $arm did not build (see $dir/build-wz-$arm.log)"
+    inc="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" pico-sys-include "$report")" \
+        || perf_fail "the build of arm $arm named no single pico header arm"
+    rm -rf "$dir/include-$arm" "$dir/lib-$arm"
+    mkdir -p "$dir/include-$arm" "$dir/lib-$arm"
+    cp -R "$inc"/. "$dir/include-$arm"/ || perf_fail "the pico headers of arm $arm did not copy"
+    python3 -I scripts/lib/wz_config.py --pico-config-h "$features" >"$dir/include-$arm/zenoh-pico/config.h" \
+        || perf_fail "the config.h of arm $arm did not render (wz_config.py --pico-config-h '$features')"
+    cp "$wz_lib/libwz_capi_pico.so" "$dir/lib-$arm/" || perf_fail "the library of arm $arm did not copy"
+}
+
+# perf_probe_build <dir> <arm> <library name> [compiler words...]
+perf_probe_build() {
+    local dir="$1" arm="$2" name="$3"
+    shift 3
+    cc -std=gnu11 -O2 "$root/scripts/host-bench/perf_probe.c" -DZENOH_LINUX -I"$dir/include-$arm" "$@" \
+        -o "$dir/bin/perf_probe_$arm" -L"$dir/lib-$arm" "-l$name" "-Wl,-rpath,$dir/lib-$arm" -lpthread \
+        2>"$dir/build-probe-$arm.log" \
+        || perf_fail "perf_probe against arm $arm did not build (see $dir/build-probe-$arm.log)"
+}
+
+# perf_matrix [reps] [sizes]: build the arms (unless PICO_CMP_NO_BUILD=1) and run the matrix. The cells can be
+# narrowed with PICO_CMP_PERF_TRANSPORTS, PICO_CMP_PERF_BATCHING and PICO_CMP_PERF_WORKLOADS (comma lists of
+# perf_matrix.py's words); the pinning is parity's, PICO_CMP_CLIENT_CPUS and PICO_CMP_SERVER_CPUS.
+perf_matrix() {
+    local reps="${1:-3}" sizes="${2:-8,64,1024}" dir="$out/perf" run rc
+    if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
+        rm -rf "${dir:?}/bin"
+        mkdir -p "$dir/bin"
+        bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
+            || perf_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
+        python3 -I "$root/scripts/host-bench/perf_matrix.py" reference --out "$dir" >"$dir/build-reference.log" 2>&1 \
+            || perf_fail "the zenoh-pico reference did not build (see $dir/build-reference.log)"
+        cat "$dir/build-reference.log"
+        perf_wz_arm "$dir" W ""
+        perf_wz_arm "$dir" Wapp app-transport
+        perf_probe_build "$dir" P zenohpico
+        perf_probe_build "$dir" W wz_capi_pico
+        perf_probe_build "$dir" Wapp wz_capi_pico -DPERF_PROGRAM_TRANSPORT -I"$root/crates/wz-capi-core/include"
+    fi
+    run="$out/perf-runs/host-$(date -u +%Y%m%dT%H%M%S)"
+    python3 -I "$root/scripts/host-bench/perf_matrix.py" run --bin-dir "$dir/bin" --run "$run" --reps "$reps" \
+        --sizes "$sizes" --transports "${PICO_CMP_PERF_TRANSPORTS:-tcp,udp,multicast,program}" \
+        --batching "${PICO_CMP_PERF_BATCHING:-off,on}" --workloads "${PICO_CMP_PERF_WORKLOADS:-rtt,thr}" \
+        --client-cpus "${PICO_CMP_CLIENT_CPUS:-4-7}" --server-cpus "${PICO_CMP_SERVER_CPUS:-8-11}" \
+        --pings "${PICO_CMP_PINGS:-20000}" --reference-record "$dir/reference.json"
+    rc=$?
+    if [ -f "$run/report.txt" ]; then
+        cat "$run/report.txt"
+    fi
+    return "$rc"
+}
+
 mode="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$mode" in
@@ -533,8 +624,9 @@ case "$mode" in
     nodrop-c) nodrop_c "$@" ;;
     profile) profile "$@" ;;
     parity) parity "$@" ;;
+    perf) perf_matrix "$@" ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes]" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated]" >&2
         exit 2
         ;;
 esac
