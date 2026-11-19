@@ -356,6 +356,13 @@ mod tests {
         assert_eq!(b.rst_ttl, Some(Range { min: 250, max: 250 }));
         assert_eq!(b.interfaces.held, alloc::vec![1]);
         assert_eq!(b.transport_checksum[0], 2, "both verify");
+        // The same segments reach the connection's analysis.
+        let tcp = d.flows()[0].ingest.tcp_facts();
+        assert_eq!(tcp.attempts().len(), 1);
+        assert_eq!(
+            tcp.attempts()[0].answer,
+            crate::tcp_facts::SynAnswer::SynAck
+        );
 
         #[cfg(feature = "dissect")]
         {

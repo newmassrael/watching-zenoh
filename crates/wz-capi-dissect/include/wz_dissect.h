@@ -1272,7 +1272,10 @@
  * date after 1900, and an id and a sequence number are wire values); to the
  * `initial_sn` of a flow's `halves` (a key that exists from field document 70
  * and takes the rule from its first appearance: a ring origin is as wide as
- * the session's ring); to every integer of a
+ * the session's ring); to the instants of a flow's `tcp` (`start_ns`,
+ * `end_ns`, `last_ack_ns` and an event's `at_ns`, keys that exist from field
+ * document 78 and take the rule from their first appearance: nanoseconds since
+ * 1970 are past the line); to every integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1777,7 +1780,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":77,"key":"kind","values":[...],
+ *     {"name":"fields","revision":78,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1810,6 +1813,7 @@
  * @carries census offset_space passenger
  * @carries census sender_end passenger
  * @carries fields announced_version passenger
+ * @carries fields answer passenger
  * @carries fields basis passenger
  * @carries fields batch_header passenger
  * @carries fields body passenger
@@ -1840,6 +1844,7 @@
  * @carries fields reason passenger
  * @carries fields recognized_by passenger
  * @carries fields request_kind passenger
+ * @carries fields retransmit passenger
  * @carries fields selected passenger
  * @carries fields size_verdict passenger
  * @carries fields span_of passenger
@@ -3183,6 +3188,62 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * @values fields unreachable
  * @values fields what
+ *
+ * WHAT A TCP CONNECTION DID (field-document revision 78, row_facts 18). Every
+ * flow object carries, after `network`, `tcp`: `null` for a flow that is not
+ * TCP, and otherwise
+ *
+ *   "tcp":{"attempts":[{"syn_packet":0,"syns":1,"syn_gaps_ns":[],
+ *                       "answer":"syn_ack","answer_packet":1,
+ *                       "syn_to_answer_ns":180000,"answer_to_ack_ns":40000,
+ *                       "port_reuse":false}],"attempts_more":0,
+ *          "halves":[{"direction":"a","window_scale":7,"mss":1460,
+ *                     "zero_window":{"spans":[{"start_packet":9,"start_ns":T,
+ *                                              "end_packet":12,"end_ns":T}],
+ *                                    "count":1},
+ *                     "window_full":0,"dup_acks":0,"last_ack_ns":T,
+ *                     "retransmits":{"timeout":0,"fast":0,"spurious":0,
+ *                                    "events":[{"retransmit":"fast",
+ *                                               "packet":15,"at_ns":T}]},
+ *                     "ack_gap_ns":{"samples":1,"median":40000000,
+ *                                   "max":40000000},"more":0},
+ *                    {"direction":"b",...}]}
+ *
+ * Each ATTEMPT to connect: `syn_packet` its first SYN, `syns` how many it took
+ * and `syn_gaps_ns` the gaps between them (the first eight); `answer` is
+ * `syn_ack`, `rst` (no listener, or a filter) or `none` (nothing the capture
+ * saw), with its `answer_packet`; `syn_to_answer_ns` from the last SYN to the
+ * answer and `answer_to_ack_ns` from the SYN/ACK to the opener's ACK, both at
+ * the tap: a tap beside the opener shows the round trip in the first and
+ * almost nothing in the second, one beside the acceptor the reverse.
+ * `port_reuse` marks an attempt on a four-tuple an earlier attempt of the
+ * capture used (a new SYN of another initial sequence number). Eight
+ * attempts are listed; `attempts_more` counts the rest.
+ *
+ * Each DIRECTION: `window_scale` the shift its windows are read under (its
+ * SYN's Window Scale when both SYNs offered one, 0 when either did not) and
+ * `null` when a SYN was not seen, `window_full` then `null` too ("unstated",
+ * not zero): otherwise the data segments that reached the edge of the window
+ * the peer last advertised. `mss` its SYN's. `zero_window` the spans from a
+ * segment advertising a window of 0 to the next advertising more (`end_*`
+ * `null` while it stayed 0) and their `count`. `dup_acks` the segments with no
+ * data and no SYN, FIN or RST that repeated the previous acknowledgement and
+ * window while the peer had data outstanding. `last_ack_ns` the last
+ * acknowledgement. `retransmits` by kind, as Wireshark's TCP analysis draws
+ * them: `spurious` when the peer had already acknowledged the data, `fast`
+ * when the peer sent two or more duplicate acknowledgements of its start, the
+ * last within 20 ms, `timeout` otherwise; a keep-alive is none of them. Its
+ * `events` list each with its `packet` and `at_ns`. `ack_gap_ns` the gap from
+ * a small segment (shorter than the receiver's stated MSS, 536 without its
+ * SYN) to the acknowledgement covering it, over `samples`: Nagle's algorithm
+ * meeting a delayed acknowledgement shows as gaps near 40 or 200 ms. `more`
+ * counts the events and spans past the lists' bound of 64. Instants are the
+ * capture's nanoseconds, `null` for a packet with no clock. A connection that
+ * never got its SYN/ACK has no zenoh session and so no session-table row; its
+ * flow object here is where it is.
+ *
+ * @values fields answer
+ * @values fields retransmit
  *
  * WHAT THE IP HEADERS AND THE FRAMES SAID (field-document revision 77,
  * row_facts 17). Every flow object carries, after `icmp_errors`, one entry per
@@ -6347,7 +6408,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":77,"key":"state",
+ *     "value_families":[{"name":"fields","revision":78,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -8086,6 +8147,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * document. `h` is not const, for wz_dissect_live_fields_since's reason.
  *
  * @values row_facts announced_version
+ * @values row_facts answer
  * @values row_facts basis
  * @values row_facts batch_header
  * @values row_facts body
@@ -8115,6 +8177,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts reason
  * @values row_facts recognized_by
  * @values row_facts request_kind
+ * @values row_facts retransmit
  * @values row_facts selected
  * @values row_facts size_verdict
  * @values row_facts span_of
@@ -8131,6 +8194,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts wrong
  * @values row_facts zenoh
  * @carries row_facts announced_version passenger
+ * @carries row_facts answer passenger
  * @carries row_facts basis passenger
  * @carries row_facts batch_header passenger
  * @carries row_facts body passenger
@@ -8160,6 +8224,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts reason passenger
  * @carries row_facts recognized_by passenger
  * @carries row_facts request_kind passenger
+ * @carries row_facts retransmit passenger
  * @carries row_facts selected passenger
  * @carries row_facts size_verdict passenger
  * @carries row_facts span_of passenger

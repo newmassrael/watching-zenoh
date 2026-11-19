@@ -171,6 +171,17 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=70,
         ),
     ),
+    # Field document 78: every capture instant of a flow's `tcp` goes through
+    # one closure, so the function writes one cell.
+    ("crates/wz-capture/src/fields_json.rs", "write_tcp"): (
+        Cell(
+            "fields",
+            "a tcp instant",
+            "the instants of a flow's `tcp`",
+            "the `tcp` instants are nanoseconds since 1970",
+            born=78,
+        ),
+    ),
     ("crates/wz-capture/src/fields_json.rs", "push_parameters"): (
         Cell("fields", "a context parameters entry's integer value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
     ),

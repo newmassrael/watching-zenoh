@@ -318,10 +318,13 @@ pub mod control;
 // What a flow's IP headers and frames said, per direction, taken at ingest
 // beside the other per-flow facts and as ungated.
 pub mod ip_facts;
+// What a TCP flow's connection did under its session, taken at ingest the same
+// way.
 #[cfg(feature = "dissect")]
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
+pub mod tcp_facts;
 /// Captures of upstream software outside the calibration corpus
 /// (`captures/upstream/`), each read for the behaviour it was taken to hold,
 /// through the field document a consumer reads.
@@ -9264,6 +9267,10 @@ impl Dissection {
             &segment.checksums,
             segment.rst,
         );
+        // A vsock record rides this path too, with no TCP header to read.
+        if segment.flow.link() == link::LinkKind::Tcp {
+            self.flows[idx].ingest.observe_tcp(&segment, ts_nanos);
+        }
         self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
         // Item 252 — recorded for every segment, a pure ACK included: a
@@ -9606,6 +9613,8 @@ impl Dissection {
             tunnel: link::Tunnel::none(),
             // AF_VSOCK has no IP header.
             ip: link::IpFacts::default(),
+            // Nor a TCP one: no acknowledgement and no window.
+            tcp: link::TcpHeader::default(),
         };
         let at_ns = flow.session.observed_at_nanos();
         let before = flow.assembler(direction).len();

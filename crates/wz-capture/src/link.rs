@@ -1091,6 +1091,71 @@ pub struct Segment<'a> {
     /// What its IP header and its frame said beside the transport. Reported,
     /// never acted on.
     pub ip: IpFacts,
+    /// The rest of its TCP header: acknowledgement, window, SYN options.
+    /// Reported, never acted on.
+    pub tcp: TcpHeader,
+}
+
+/// The TCP header fields a reassembler does not need and an analysis of the
+/// connection does (`crate::tcp_facts`): the acknowledgement, the window and
+/// the two SYN options the window and the segment size are read under.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpHeader {
+    /// The acknowledgement number, when the ACK flag is set.
+    pub ack: Option<u32>,
+    /// The window field as written, before any scaling.
+    pub window: u16,
+    /// The Window Scale option's shift (RFC 7323), on a SYN that carried one.
+    pub window_scale: Option<u8>,
+    /// The Maximum Segment Size option (RFC 9293), on a SYN that carried one.
+    pub mss: Option<u16>,
+}
+
+impl TcpHeader {
+    /// The fields of the TCP header at the front of `bytes`, whose options run
+    /// to `data_off`. The two options are read on a SYN only, which is the
+    /// only segment that may carry them; a malformed option list ends the scan
+    /// with what it read.
+    fn read(bytes: &[u8], data_off: usize) -> Self {
+        let flags = bytes[13];
+        let mut header = TcpHeader {
+            ack: (flags & 0x10 != 0)
+                .then(|| u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]])),
+            window: u16::from_be_bytes([bytes[14], bytes[15]]),
+            window_scale: None,
+            mss: None,
+        };
+        if flags & 0x02 == 0 {
+            return header;
+        }
+        let options = &bytes[20..data_off];
+        let mut at = 0;
+        while at < options.len() {
+            match options[at] {
+                0 => break,
+                1 => at += 1,
+                kind => {
+                    let Some(&len) = options.get(at + 1) else {
+                        break;
+                    };
+                    let len = usize::from(len);
+                    if len < 2 || at + len > options.len() {
+                        break;
+                    }
+                    match (kind, len) {
+                        (2, 4) => {
+                            header.mss =
+                                Some(u16::from_be_bytes([options[at + 2], options[at + 3]]));
+                        }
+                        (3, 3) => header.window_scale = Some(options[at + 2]),
+                        _ => {}
+                    }
+                    at += len;
+                }
+            }
+        }
+        header
+    }
 }
 
 /// Why a captured packet yielded no TCP segment.
@@ -2972,10 +3037,12 @@ fn strip_tcp(
     let dst_port = u16::from_be_bytes([bytes[2], bytes[3]]);
     let seq = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let flags = bytes[13];
+    let header = TcpHeader::read(bytes, data_off);
     let src = Endpoint::new(src.addr(), src_port as u32);
     let dst = Endpoint::new(dst.addr(), dst_port as u32);
     let (flow, from_low) = FlowKey::new(src, dst, LinkKind::Tcp);
     Ok(Segment {
+        tcp: header,
         flow,
         from_low,
         seq,
