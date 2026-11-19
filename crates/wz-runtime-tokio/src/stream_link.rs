@@ -708,10 +708,11 @@ struct LentFrames {
     free: Vec<u32>,
 }
 
-/// One lent buffer: a vector of the heap queue's spare list, or (R3239) a part
-/// of a slot of the link's transmit pool.
+/// One lent buffer: a vector of the heap queue's spare list with the priority it was lent
+/// for, whose lane it goes back to when the lend is abandoned (open-debt item 952), or
+/// (R3239) a part of a slot of the link's transmit pool.
 enum Lent {
-    Heap(Vec<u8>),
+    Heap(Vec<u8>, Priority),
     #[cfg(feature = "runtime-zero-copy")]
     Slot(crate::writer_queue::TxLend),
 }
@@ -1104,10 +1105,9 @@ impl BoxedLinkDriver for StreamWriteDriver {
                 headroom,
             });
         }
-        let _ = priority;
-        let buf = self.tx.take_buffer(need);
+        let buf = self.tx.take_buffer(priority, need);
         Some(TxSlotGrant {
-            slot: self.hold_lent(Lent::Heap(buf)),
+            slot: self.hold_lent(Lent::Heap(buf, priority)),
             headroom,
         })
     }
@@ -1120,7 +1120,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
         {
             // The buffer's heap block does not move while the session writes into
             // it: nothing here touches the `Vec` between the grant and the send.
-            Lent::Heap(buf) => (buf.as_mut_ptr(), buf.capacity()),
+            Lent::Heap(buf, _) => (buf.as_mut_ptr(), buf.capacity()),
             // The pool is boxed inside the queue the driver holds, so the slot
             // does not move either, and the lend is the session's alone.
             #[cfg(feature = "runtime-zero-copy")]
@@ -1141,8 +1141,9 @@ impl BoxedLinkDriver for StreamWriteDriver {
             not(feature = "runtime-zero-copy"),
             allow(clippy::infallible_destructuring_match)
         )]
-        let mut wire = match self.take_lent(slot) {
-            Lent::Heap(wire) => wire,
+        // A buffer not sent goes back to the lane it was lent for.
+        let (mut wire, lent_for) = match self.take_lent(slot) {
+            Lent::Heap(wire, lent_for) => (wire, lent_for),
             #[cfg(feature = "runtime-zero-copy")]
             Lent::Slot(lend) => {
                 return self.send_slot_lent(lend, start, len, reliability, priority)
@@ -1154,7 +1155,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
         // REPORTS, so the length field's range is checked here and not assumed.
         if len > u16::MAX as usize {
             log::warn!("wz-runtime-tokio: outbound frame {len} bytes > 65535; dropping");
-            self.tx.return_buffer(wire);
+            self.tx.return_buffer(lent_for, wire);
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
         let prefix_len = self.frame_prefix_len();
@@ -1168,7 +1169,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
             let payload = unsafe { std::slice::from_raw_parts(wire.as_ptr().add(start), len) };
             let outcome = self.send_prioritized(payload, reliability, priority);
             // The byte door copied the payload into a frame of its own.
-            self.tx.return_buffer(wire);
+            self.tx.return_buffer(lent_for, wire);
             return outcome;
         }
         let prefix_bytes = (len as u32).to_le_bytes();
@@ -1195,7 +1196,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
     fn tx_slot_abort(&self, slot: TxSlot) {
         match self.take_lent(slot) {
             // Never sent, so nothing else holds it: it is lent again, not freed.
-            Lent::Heap(buf) => self.tx.return_buffer(buf),
+            Lent::Heap(buf, priority) => self.tx.return_buffer(priority, buf),
             // The bytes are not a frame; a slot holding no frame goes home.
             #[cfg(feature = "runtime-zero-copy")]
             Lent::Slot(lend) => self.tx.abort_lend(lend),
