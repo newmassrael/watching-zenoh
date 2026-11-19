@@ -13,6 +13,7 @@ mod client_only_dials_a_listener;
 mod client_only_refuses_a_listener;
 mod connectivity_events;
 mod decl_watch_doors;
+mod e2e_doors;
 mod fragmentation_roundtrip;
 mod get_roundtrip;
 mod get_to_peer_door;

@@ -368,6 +368,7 @@ impl StreamSender {
 pub fn describe(error: &SendError) -> String {
     match error {
         SendError::Build(e) => format!("values: {e}"),
+        stated @ SendError::CounterStated { .. } => format!("values: {stated}"),
         other => format!("{other}"),
     }
 }
