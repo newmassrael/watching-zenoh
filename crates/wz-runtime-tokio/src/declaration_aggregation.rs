@@ -133,16 +133,9 @@ impl DeclarationAggregation {
 fn first_including<'a>(aggregates: &'a [String], key: &str) -> Option<&'a str> {
     #[cfg(feature = "keyexpr-includes")]
     {
-        // Every declare asks, and most sessions hold no aggregate: they pay no split.
-        if aggregates.is_empty() {
-            return None;
-        }
-        let chunks: Vec<&str> = key.split('/').collect();
         aggregates
             .iter()
-            .find(|aggregate| {
-                wz_session_core::keyexpr_match::keyexpr_includes_target(aggregate, &chunks)
-            })
+            .find(|aggregate| wz_session_core::keyexpr_match::keyexpr_includes(aggregate, key))
             .map(String::as_str)
     }
     // `new` refuses every aggregate in this build, so there is none to find.

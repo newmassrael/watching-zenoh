@@ -299,7 +299,7 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
         mut self,
         since: u64,
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
-        reaches: impl Fn(&str, &[&str]) -> bool,
+        reaches: impl Fn(&str, &str) -> bool,
         form: RetireForm,
     ) -> Option<Self> {
         let held = self.routes.len();
@@ -308,10 +308,8 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
         // Whether one changed key reached every route. A walk of the index finds each member once
         // and the scan each route once, so as many found as routes held is every route.
         let mut every = false;
-        // One buffer for the chunks of every kept keyexpr asked about, in turn.
-        let mut chunks: Vec<&str> = Vec::new();
         let complete = match &self.by_keyexpr {
-            // The index's candidates for each key that moved, each split to be asked.
+            // The index's candidates for each key that moved, each asked as its text.
             Some(index) => changes(since, &mut |changed| {
                 // Every route goes already: nothing a later key reaches can add to that.
                 if every && form.drops_whole {
@@ -327,31 +325,20 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
                     Some(candidates) => reached.extend(
                         candidates
                             .into_iter()
-                            .filter(|cached| {
-                                // The key as the index lends it, which outlives the buffer.
-                                let cached: &RouteKey<S> = cached;
-                                chunks.clear();
-                                chunks.extend(cached.keyexpr.split('/'));
-                                reaches(changed, &chunks)
-                            })
+                            .filter(|cached| reaches(changed, &cached.keyexpr))
                             .cloned(),
                     ),
                     // The walk passed its bound: every kept keyexpr is asked of this key.
                     None => reached.extend(
                         routes
                             .keys()
-                            .filter(|cached| {
-                                let cached: &RouteKey<S> = cached;
-                                chunks.clear();
-                                chunks.extend(cached.keyexpr.split('/'));
-                                reaches(changed, &chunks)
-                            })
+                            .filter(|cached| reaches(changed, &cached.keyexpr))
                             .cloned(),
                     ),
                 }
                 every |= held > 0 && reached.len() - before == held;
             }),
-            // Every kept keyexpr, split once and asked of every key that moved.
+            // Every kept keyexpr, asked of every key that moved.
             None => {
                 let mut moved: Vec<String> = Vec::new();
                 let complete = changes(since, &mut |changed| moved.push(changed.to_owned()));
@@ -360,10 +347,9 @@ impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
                         routes
                             .keys()
                             .filter(|cached| {
-                                let cached: &RouteKey<S> = cached;
-                                chunks.clear();
-                                chunks.extend(cached.keyexpr.split('/'));
-                                moved.iter().any(|changed| reaches(changed, &chunks))
+                                moved
+                                    .iter()
+                                    .any(|changed| reaches(changed, &cached.keyexpr))
                             })
                             .cloned(),
                     );
@@ -676,10 +662,10 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     /// `changes(since, visit)` is asked, when only the declaration table's version moved, to call
     /// `visit` with every key declared or withdrawn after `since` (the table version `memo` is
     /// at), and to answer `false` when it can no longer say. `reaches(changed, cached)` is whether
-    /// a change of `changed` can alter the route kept for the keyexpr whose chunks are `cached`, and
+    /// a change of `changed` can alter the route kept for the keyexpr `cached`, both as text, and
     /// must imply that the two keyexprs intersect: an indexed memo ([`indexed`](Self::indexed))
     /// asks it only of the routes whose keyexpr the index finds may intersect `changed`, and an
-    /// unindexed one splits each kept keyexpr once and asks it of every key that moved. A topology
+    /// unindexed one asks it of each kept keyexpr for every key that moved. A topology
     /// move (`net`), a memo brought to no version yet, or a table that cannot answer starts the new
     /// memo empty; a table that answers that nothing moved keeps every route. A change that reaches
     /// every route starts the new memo empty too, and one that reaches more than half of them starts
@@ -698,7 +684,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         memo: &mut Arc<Self>,
         inputs: RouteInputs,
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
-        reaches: impl Fn(&str, &[&str]) -> bool,
+        reaches: impl Fn(&str, &str) -> bool,
     ) {
         let drafted = Self::close_draft(memo);
         if memo.inputs == Some(inputs) {
@@ -770,7 +756,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use wz_session_core::keyexpr_match::{keyexpr_intersects_target, keyexpr_intersects_text};
+    use wz_session_core::keyexpr_match::{keyexpr_intersects, keyexpr_intersects_text};
 
     fn zid(b: u8) -> Zid {
         Zid::from_slice(&[b, b, b, b])
@@ -946,7 +932,7 @@ mod tests {
                     None => false,
                 }
             },
-            |changed, cached| changed.split('/').eq(cached.iter().copied()),
+            |changed, cached| changed == cached,
         );
         (memo, moved)
     }
@@ -965,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reach_is_asked_with_the_chunks_of_the_kept_keyexpr() {
+    fn the_reach_is_asked_with_the_text_of_the_kept_keyexpr() {
         let mut memo: Arc<RouteCache<Vec<Zid>>> = at(AT);
         memo.get_or_compute(AT, &zid(1), "demo/a/b", || true, || vec![zid(9)]);
         let asked = std::cell::RefCell::new(Vec::new());
@@ -980,17 +966,17 @@ mod tests {
             |changed, cached| {
                 asked
                     .borrow_mut()
-                    .push((changed.to_owned(), cached.join("|")));
+                    .push((changed.to_owned(), cached.to_owned()));
                 false
             },
         );
         assert_eq!(
             *asked.borrow(),
             [
-                ("other/x".to_owned(), "demo|a|b".to_owned()),
-                ("other/y".to_owned(), "demo|a|b".to_owned())
+                ("other/x".to_owned(), "demo/a/b".to_owned()),
+                ("other/y".to_owned(), "demo/a/b".to_owned())
             ],
-            "each moved key is asked of the kept keyexpr's chunks"
+            "each moved key is asked of the kept keyexpr's text"
         );
         assert_eq!(memo.len(), 1, "a route no moved key reaches is kept");
     }
@@ -1147,7 +1133,7 @@ mod tests {
                             changed.iter().for_each(|key| visit(key));
                             true
                         },
-                        keyexpr_intersects_target,
+                        keyexpr_intersects,
                     );
                 }
                 inputs = moved;
@@ -1208,7 +1194,7 @@ mod tests {
                 changed.iter().for_each(|key| visit(key));
                 true
             },
-            keyexpr_intersects_target,
+            keyexpr_intersects,
         );
         (memo, moved)
     }
@@ -1269,7 +1255,7 @@ mod tests {
                     visit("demo/*");
                     true
                 },
-                keyexpr_intersects_target,
+                keyexpr_intersects,
                 RetireForm {
                     drops_whole: true,
                     bounds_walk: false,
@@ -1360,7 +1346,7 @@ mod tests {
                 visit("demo/b");
                 true
             },
-            |changed, cached| changed.split('/').eq(cached.iter().copied()),
+            |changed, cached| changed == cached,
         );
         assert!(draft.draft.is_none(), "a published memo is no draft's");
         let computes = draft.computes();
@@ -1475,7 +1461,7 @@ mod tests {
                 visit("demo/*");
                 true
             },
-            keyexpr_intersects_target,
+            keyexpr_intersects,
         );
         assert!(
             memo.is_empty(),

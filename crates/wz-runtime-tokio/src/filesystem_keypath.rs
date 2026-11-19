@@ -57,7 +57,7 @@
 
 use std::borrow::Cow;
 
-use wz_session_core::keyexpr_match::keyexpr_intersect_patterns;
+use wz_session_core::keyexpr_match::keyexpr_intersects;
 
 /// The file that holds the `None` key -- the value a strip-configured storage
 /// keeps AT its mount point. Byte-for-byte upstream's `ROOT_KEY`, and a
@@ -218,14 +218,13 @@ pub fn is_keyexpr(value: &str) -> bool {
 /// Whether a directory walk reads `zkey` back as a stored key: it must be a
 /// key expression AND intersect `**`, which is upstream's listing filter (see
 /// the module note). The intersection is wz's own
-/// [`keyexpr_intersect_patterns`], so "`**` does not reach a verbatim chunk" is
+/// [`keyexpr_intersects`], so "`**` does not reach a verbatim chunk" is
 /// answered by the rule the query path uses rather than restated here.
 pub fn is_listable_key(zkey: &str) -> bool {
     if !is_keyexpr(zkey) {
         return false;
     }
-    let chunks: Vec<&str> = zkey.split('/').collect();
-    keyexpr_intersect_patterns(&["**"], &chunks)
+    keyexpr_intersects("**", zkey)
 }
 
 #[cfg(test)]

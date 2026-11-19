@@ -948,7 +948,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+    use wz_session_core::keyexpr_match::keyexpr_intersects;
 
     fn face(n: u64) -> FaceId {
         FaceId(n)
@@ -1623,8 +1623,7 @@ mod tests {
     }
 
     fn meets(keyexpr: &str, target: &str) -> bool {
-        let chunks: Vec<&str> = target.split('/').collect();
-        keyexpr_intersects_target(keyexpr, &chunks)
+        keyexpr_intersects(keyexpr, target)
     }
 
     /// The pushes a declaration of `new_ke` makes, found by trying every face, in face order.

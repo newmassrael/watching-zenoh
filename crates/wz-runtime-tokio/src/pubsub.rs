@@ -9,6 +9,5 @@
 //! registry (gated on `codec-push` in wz-session-core, since every test
 //! drives the registry with `wz_codecs::push::Push` records).
 
-pub use wz_session_core::pubsub::{
-    keyexpr_intersect_patterns, keyexpr_pattern_matches, SubscriberRegistry, SubscriptionId,
-};
+pub use wz_session_core::keyexpr_match::{keyexpr_intersects, keyexpr_matches};
+pub use wz_session_core::pubsub::{SubscriberRegistry, SubscriptionId};

@@ -35,7 +35,7 @@ use std::sync::Arc;
 use sce_forge_runtime::codec::CodecError;
 use wz_session_core::declare_build::{build_declare_queryable, set_declare_queryable_info};
 use wz_session_core::declare_routing_context::set_declare_source;
-use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
+use wz_session_core::keyexpr_match::{keyexpr_includes, keyexpr_intersects};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::set_push_keyexpr_literal;
 use wz_session_core::push_routing_context::{
@@ -624,7 +624,7 @@ pub(crate) fn bring_mesh_routes<T: Clone, V>(
 /// route is: a queryable's key can make a client a candidate, or complete, only for a query whose
 /// keyexpr it intersects. The memos of the client legs are indexed, so the routes a changed key
 /// may meet are found by the index and each is then asked the exact question, of the changed key
-/// and the route's keyexpr split into its chunks (`docs/router-table-snapshots.md`, section 6.9).
+/// and the route's keyexpr, both as text (`docs/router-table-snapshots.md`, section 6.9).
 /// Called by the writer before it publishes.
 pub(crate) fn bring_client_routes<T: Clone, V: Held>(
     routes: &mut Arc<RouteCache<T, ()>>,
@@ -634,7 +634,7 @@ pub(crate) fn bring_client_routes<T: Clone, V: Held>(
         routes,
         client_inputs(store),
         |since, visit| store.changed_since(since, visit),
-        keyexpr_intersects_target,
+        keyexpr_intersects,
     );
 }
 
@@ -681,10 +681,9 @@ pub(crate) fn client_query_route(
         .get_or_compute(client_inputs(store), &(), keyexpr, resource, || {
             // The keys the query meets, from the store's index; a face is complete for the query
             // when one of its complete queryables is on a key that includes the whole of it.
-            let query_chunks: Vec<&str> = keyexpr.split('/').collect();
             let mut faces: BTreeMap<FaceId, bool> = BTreeMap::new();
             for (key, holders) in store.keys_intersecting(keyexpr) {
-                let includes = keyexpr_includes_target(key, &query_chunks);
+                let includes = keyexpr_includes(key, keyexpr);
                 for (face, ids) in holders {
                     let complete = includes && ids.values().any(|info| info.complete);
                     *faces.entry(*face).or_default() |= complete;
@@ -968,10 +967,9 @@ pub(crate) fn query_candidates(
         .routes
         .get_or_compute(inputs, source, keyexpr, resource, || {
             let self_zid = net.self_zid();
-            let query_chunks: Vec<&str> = keyexpr.split('/').collect();
             let mut complete: HashSet<Zid> = HashSet::new();
             for (decl, peer, info) in qabls.matching_entries(keyexpr, Some(self_zid)) {
-                if info.complete && keyexpr_includes_target(decl, &query_chunks) {
+                if info.complete && keyexpr_includes(decl, keyexpr) {
                     complete.insert(peer);
                 }
             }

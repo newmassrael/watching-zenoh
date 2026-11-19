@@ -38,7 +38,7 @@ use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::keyexpr_match::keyexpr_intersects;
 use wz_session_core::queryable_info::QueryableInfo;
 
 use crate::accept_loop::FaceId;
@@ -346,11 +346,10 @@ impl<V: Held> ClientStore<V> {
     /// The index finds the keys that may intersect and the intersection test the scan always used
     /// decides each, so the answer is the set a scan of every key gives.
     pub(crate) fn keys_intersecting(&self, keyexpr: &str) -> Vec<(&str, &Holders<V>)> {
-        let target: Vec<&str> = keyexpr.split('/').collect();
         self.keys
             .intersecting(keyexpr)
             .into_iter()
-            .filter(|key| keyexpr_intersects_target(key, &target))
+            .filter(|key| keyexpr_intersects(key, keyexpr))
             .map(|key| {
                 let holders = self.by_key.get(&**key).expect("an indexed key has holders");
                 (&**key, holders)
@@ -360,11 +359,10 @@ impl<V: Held> ClientStore<V> {
 
     /// Whether some client declares a key that intersects `keyexpr`.
     fn any_intersecting(&self, keyexpr: &str) -> bool {
-        let target: Vec<&str> = keyexpr.split('/').collect();
         self.keys
             .intersecting(keyexpr)
             .into_iter()
-            .any(|key| keyexpr_intersects_target(key, &target))
+            .any(|key| keyexpr_intersects(key, keyexpr))
     }
 
     /// Whether some client declaration backs a reply for `keyexpr`: one that intersects it when the
@@ -489,13 +487,9 @@ mod tests {
 
     /// The scan the store replaces, as the reference its index must agree with.
     fn scanned<V: Held>(store: &ClientStore<V>, keyexpr: &str) -> Vec<FaceId> {
-        let target: Vec<&str> = keyexpr.split('/').collect();
         let mut faces: Vec<FaceId> = store
             .iter()
-            .filter(|(_, ids)| {
-                ids.values()
-                    .any(|sub| keyexpr_intersects_target(sub, &target))
-            })
+            .filter(|(_, ids)| ids.values().any(|sub| keyexpr_intersects(sub, keyexpr)))
             .map(|(f, _)| *f)
             .collect();
         faces.sort_unstable();
@@ -504,11 +498,10 @@ mod tests {
 
     /// The keys a scan of every declaration finds intersecting `keyexpr`, in order.
     fn scanned_keys<V: Held>(store: &ClientStore<V>, keyexpr: &str) -> Vec<String> {
-        let target: Vec<&str> = keyexpr.split('/').collect();
         let mut keys: Vec<String> = store
             .values()
             .flat_map(|ids| ids.values())
-            .filter(|sub| keyexpr_intersects_target(sub, &target))
+            .filter(|sub| keyexpr_intersects(sub, keyexpr))
             .map(|sub| sub.to_string())
             .collect();
         keys.sort_unstable();
