@@ -222,8 +222,8 @@ pub mod key_allowance;
 pub mod key_gate;
 
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
-/// interval between turns, and the pace a build states through the `declaration-sync-pacing`
-/// policy. A value and not a clock, so the heap runtime and the slot node hold the same type.
+/// interval between turns, and the pace a session's snapshot states through the
+/// `declaration-sync-pacing` policy. A value and not a clock, so the heap runtime and the slot node hold the same type.
 /// Unconditional, no_std and no_alloc.
 pub mod replay_pacing;
 

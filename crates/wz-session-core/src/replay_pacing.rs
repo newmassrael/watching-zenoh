@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The pace of a paced declaration replay (`declaration-sync-pacing`): how many declarations a
-//! turn sends and how long to wait between turns, and the pace a build states.
+//! turn sends and how long to wait between turns, and the pace a session's snapshot states.
 //!
 //! The pace is a value and not a clock: it holds two numbers, reads no time and does no I/O, so
 //! every host that replays in turns (the heap runtime's supervisor, the slot node) holds the same
@@ -10,8 +10,8 @@
 //! which entries a turn sends, and this says how many and how often.
 
 /// A pace of `burst` declarations a turn and `interval_ms` between turns. A host holds it as an
-/// `Option`, so a test, or a caller that wants pacing on regardless of the build, can state it,
-/// and the build states it through [`Self::from_build`].
+/// `Option`, so a test, or a caller that wants pacing on whatever its snapshot says, can state it,
+/// and the snapshot of the session that replays states it through [`Self::of_policy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplayPacing {
     burst: usize,
@@ -49,17 +49,6 @@ impl ReplayPacing {
         }
     }
 
-    /// [`Self::of_policy`] under the build defaults: the pace of a host that does not yet hold
-    /// its session's snapshot.
-    pub const fn from_build() -> Option<Self> {
-        Self::of_policy(&crate::policy::SessionPolicy::defaults())
-    }
-
-    /// The pace of the build defaults ([`Self::from_build`]), evaluated when the crate is built:
-    /// a `WZ_POLICY_*` value that is neither `on` nor `off` stops the build here, where a call to
-    /// `from_build` at run time would take the node down when it started.
-    pub const BUILD: Option<Self> = Self::from_build();
-
     /// Declarations sent in one turn.
     pub const fn burst(&self) -> usize {
         self.burst
@@ -85,14 +74,14 @@ mod tests {
         assert_eq!((pace.burst(), pace.interval_ms()), (8, 10));
     }
 
-    /// The build states the pace through the policy: off is upstream's one call, on is the two
-    /// limits. The test build states nothing, so this asserts the default and that the two agree.
+    /// The build defaults state the pace through the policy: off is upstream's one call, on is the
+    /// two limits. The test build states nothing, so this asserts the default.
     #[test]
-    fn the_build_states_a_pace_exactly_when_the_policy_is_on() {
-        let on = crate::policy::SessionPolicy::defaults().declaration_sync_pacing();
-        assert_eq!(ReplayPacing::from_build().is_some(), on);
-        assert_eq!(ReplayPacing::BUILD, ReplayPacing::from_build());
-        if let Some(pace) = ReplayPacing::from_build() {
+    fn the_build_defaults_state_a_pace_exactly_when_the_policy_is_on() {
+        let defaults = crate::policy::SessionPolicy::defaults();
+        let pace = ReplayPacing::of_policy(&defaults);
+        assert_eq!(pace.is_some(), defaults.declaration_sync_pacing());
+        if let Some(pace) = pace {
             assert_eq!(pace.burst(), crate::caps::DECLARATION_SYNC_BURST_MESSAGES);
             assert_eq!(
                 pace.interval_ms(),
@@ -107,10 +96,6 @@ mod tests {
     fn a_session_is_paced_by_the_snapshot_it_holds() {
         use crate::policy::{DeclarationSyncPacing, SessionPolicy};
         use crate::policy_binding::PolicyValue;
-        assert_eq!(
-            ReplayPacing::of_policy(&SessionPolicy::defaults()),
-            ReplayPacing::from_build()
-        );
         if DeclarationSyncPacing::DOMAIN.is_singleton() {
             return;
         }
