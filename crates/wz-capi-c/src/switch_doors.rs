@@ -1004,16 +1004,12 @@ mod tests {
             },
             query_statement(Some(&query)),
         );
-        // An identity of no byte names no node.
+        // An identity of no byte names no node, whatever the policy: it is refused in the
+        // statement's shape, as `wz_capi_c.h` says of a target of no byte.
         query.target = z_id_t {
             id: [0u8; Z_ID_SIZE],
         };
-        let got = query_statement(Some(&query));
-        if target_on() {
-            assert_eq!(got, Err(Z_EINVAL));
-        } else {
-            assert_eq!(got, Err(WZ_CAPI_C_E_POLICY_OFF));
-        }
+        assert_eq!(query_statement(Some(&query)), Err(Z_EINVAL));
     }
 
     #[test]
