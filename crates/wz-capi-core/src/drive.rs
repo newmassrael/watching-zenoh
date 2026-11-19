@@ -1282,6 +1282,15 @@ enum DerivedZidError {
     Entropy,
 }
 
+impl core::fmt::Display for DerivedZidError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Address(refused) => core::fmt::Display::fmt(refused, f),
+            Self::Entropy => f.write_str("the random source gave no bytes for the zid"),
+        }
+    }
+}
+
 /// The two forms of an id the session minted for itself, see [`session_zids`]. `None` for
 /// sixteen zero bytes, which trim to no zid at all.
 fn minted_zids(minted: [u8; ZID_LENGTH]) -> Option<([u8; ZID_LENGTH], SessionZid)> {
@@ -4635,7 +4644,7 @@ pub fn open_blocking(
     let (zid, wire_zid) = match (zid, session_policy.zid_derivation()) {
         (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zids(&listen)
             .map_err(|refused| {
-                log_open_failure("zid", &refused);
+                log_open_failure("zid", &refused.to_string());
                 OpenError::DriveFailed
             })?,
         (configured, _) => session_zids(configured).ok_or(OpenError::DriveFailed)?,
