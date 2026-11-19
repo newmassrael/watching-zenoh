@@ -401,7 +401,8 @@ fn regen_codec_deployment(
 /// directory per consuming crate, mirroring each build.rs's emits:
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer,
-///                      peer_connection, clock_quality, supervision (statecharts);
+///                      peer_connection, clock_quality, supervision,
+///                      app_link (statecharts);
 ///                      tick_elapsed, tick_until_due, key_facts (algorithms);
 ///                      key_facts_schema (the event-schema key_facts returns)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
@@ -439,6 +440,8 @@ fn regen_statecharts_and_pools(root: &Path) {
         "clock_quality",
         // The observation plane's supervision — a deadline the application feeds.
         "supervision",
+        // The lifecycle of one link over a transport the program supplies.
+        "app_link",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
     }
@@ -522,7 +525,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     }
 
     println!(
-        "xtask: regenerated 8 statecharts + 2 algorithms + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
+        "xtask: regenerated 9 statecharts + 2 algorithms + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
         pools.len()
     );
 }

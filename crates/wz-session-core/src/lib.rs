@@ -2173,7 +2173,8 @@ pub mod peer_connection {
     feature = "session-unicast",
     feature = "session-multicast",
     feature = "clock-quality",
-    feature = "supervision"
+    feature = "supervision",
+    feature = "app-link"
 ))]
 pub mod duty_outbox;
 
@@ -2239,6 +2240,36 @@ pub mod supervision {
 // `event_ring`.
 #[cfg(feature = "supervision")]
 pub mod supervisor;
+
+/// SCE-generated lifecycle of one link over a transport the program supplies, from
+/// `sources/session/app_link.scxml`, COMMITTED at `out/wz-session-core/app_link_sm.rs` and
+/// `include!`-ed from there. Exposes `AppLinkState` / `AppLinkEvent`, the `AppLinkActions` host
+/// trait and the `AppLinkPolicy<A>` policy, one machine per link, driven by [`app_link_table`].
+/// Engine-free and allocation-free; gated on `app-link`, which brings the SCE runtime in. The
+/// lint allows are restored as outer attributes, as for the other generated machines.
+#[cfg(feature = "app-link")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod app_link {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/app_link_sm.rs"
+    ));
+}
+
+// The links of one transport a program supplies, each an `app_link` machine with its queued bytes
+// and its waiters. Gated as the machine is. Documented in its own `//!`; see the note at
+// `event_ring`.
+#[cfg(feature = "app-link")]
+pub mod app_link_table;
 
 /// The peers a node is told to hold, each with its [`peer_connection`]
 /// machine, in a table of fixed capacity (decision D5). Gated as the machine

@@ -589,6 +589,13 @@ clock-source = ["clock-quality"]
 # the SCE runtime and nothing else.
 supervision = ["dep:sce-rust-runtime"]
 
+# app-link (a transport the program supplies) — the app-link statechart
+# (`sources/session/app_link.scxml`): the lifecycle of one link over the program's own network
+# stack (Opening / Open / Blocked / Closing / Closed), and the table of a transport's links that
+# holds one machine per link with the bytes the program handed in. The table queues owned bytes,
+# so it needs `alloc`; it performs no I/O, so it is the same for every engine that adapts it.
+app-link = ["alloc", "dep:sce-rust-runtime"]
+
 # resource-snapshot (the observation plane's sampled record of a node's resources) — the session
 # counts the spacing of the transport messages it receives (`SessionCore::rx_intervals`,
 # `message_reading`), fed at the receive path's one counting seam on the session's microsecond
