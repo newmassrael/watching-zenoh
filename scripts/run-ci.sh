@@ -328,6 +328,12 @@
 #              group. The deterministic FSM + encode/decode logic is
 #              covered socket-free by Layer C1i, so opt-out loses only
 #              the real-socket leg.
+#   Layer S  — the pico C ABI under load: threads calling while sessions
+#              close and reopen over a transport that injects faults, a
+#              stall watchdog, the lock-order checker, closure and
+#              allocation counts, and a sequential run under valgrind.
+#              Opt-in via `--layer S` or `WZ_RUN_LAYER_S=1`; the build
+#              host runs it long (docs/pico-stability-lane.md).
 #
 # Exit codes:
 #   0  every required layer passed
@@ -346,6 +352,7 @@
 #                                      # the default sweep runs all (R311y417:
 #                                      # not the pre-push hook — see the header).
 #   WZ_RUN_LAYER_M=1 scripts/run-ci.sh # add the opt-in environment-flaky M lane
+#   WZ_RUN_LAYER_S=1 scripts/run-ci.sh # add the opt-in stress lane of the pico C ABI
 #
 # Time cost (warm cache):
 #   Layer 0: ~20s  A: <1s   B: ~30s   C1: ~10s   C2: ~5s   D: <1s
@@ -20719,6 +20726,82 @@ layer_p_throughput_differential() {
         || return 1
 }
 
+# ─── Layer S — the pico C ABI under load, faults, close and reopen ──
+#
+# Opt-in via `--layer S` or `WZ_RUN_LAYER_S=1`; `WZ_S_REQUIRE=1` arms it (a machine without
+# valgrind then fails the lane instead of reporting the leak checker's leg as not measured). The
+# build host runs it long: `WZ_STABILITY_SECONDS` per storm, `WZ_STABILITY_WORKERS` threads,
+# `WZ_STABILITY_CYCLES` pairs in sequence. With none of them set it is bounded at a few minutes.
+# What it covers and how to read a red: docs/pico-stability-lane.md.
+#
+# Two legs over the stress executable of wz-capi-pico (`tests/stability.rs`, whose three tests are
+# `#[ignore]`d so that no default sweep runs them):
+#
+#   1. The three tests in a debug build. Worker threads put, get and declare while a chaos thread
+#      closes and reopens the sessions under them, over a transport the program supplies that
+#      blocks, splits, loses and cuts what it is handed (seeded). A watchdog aborts the run with
+#      every thread's state when one stops; the runtime's lock-order checker stops a thread that
+#      takes two locks in both orders; every closure's drop is counted, and the process's
+#      allocations are held to what they were before the storm.
+#   2. The sequential test again, a few pairs, under valgrind's memcheck: a definitely lost block
+#      or an invalid access is an error. Its waits are stretched by the time scale, valgrind being
+#      that much slower.
+#
+# The seed is printed; `WZ_STABILITY_SEED` set to it runs the same mix again. With none set the lane
+# takes one from the clock, so successive runs explore different mixes.
+layer_s_pico_stability() {
+    local s_required=0
+    [[ "${WZ_S_REQUIRE:-0}" == "1" ]] && s_required=1
+    if (( ! s_required )) && [[ "$ONLY_LAYER" != "S" && "${WZ_RUN_LAYER_S:-0}" -ne 1 ]]; then
+        echo "Layer S SKIP (opt-in stress lane; --layer S or WZ_RUN_LAYER_S=1)"
+        return 0
+    fi
+    local features="app-transport" seed="${WZ_STABILITY_SEED:-}"
+    [[ -n "$seed" ]] || seed="$(date +%s)"
+    local -x WZ_STABILITY_SEED="$seed"
+    # The checker's own default, stated: `log` or `off` left in the caller's environment would let a
+    # thread that closed a cycle go on, and stopping it is what this lane is for.
+    local -x WZ_LOCK_ORDER=panic
+    echo "Layer S: seed ${WZ_STABILITY_SEED} (WZ_STABILITY_SEED=${WZ_STABILITY_SEED} runs this mix again)"
+    wz_test_args wz-capi-pico stability
+    _runci_guarded_test S 3 cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+
+    if ! command -v valgrind >/dev/null 2>&1; then
+        if (( s_required )); then
+            echo "  Layer S FAIL: valgrind is not on PATH, and WZ_S_REQUIRE is set" >&2
+            return 1
+        fi
+        echo "  Layer S: valgrind is not on PATH, so the leak checker's leg is NOT-MEASURED" \
+             "(WZ_S_REQUIRE=1 makes that a failure)"
+        return 0
+    fi
+    # The executable the leg above built. Cargo prints it relative to the workspace or absolute
+    # under an artifact root; the suffix is the same in both, and the prefix is ours (Layer C1bs).
+    local bin
+    wz_test_args wz-capi-pico stability
+    bin="$(cd crates && cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_TARGET[@]}" --no-run --message-format=short 2>&1 \
+        | grep -oE 'target/debug/deps/stability-[a-f0-9]+' | tail -1)"
+    if [[ -z "$bin" ]]; then
+        echo "  Layer S FAIL: could not locate the built stress executable" >&2
+        return 1
+    fi
+    bin="$WZ_ARTIFACTS/crates/$bin"
+    local out
+    if ! out="$(WZ_STABILITY_CYCLES="${WZ_STABILITY_VALGRIND_CYCLES:-6}" WZ_STABILITY_TIME_SCALE=20 \
+        valgrind --error-exitcode=97 --leak-check=full --errors-for-leak-kinds=definite \
+        --show-leak-kinds=definite "$bin" --ignored --nocapture --test-threads=1 --exact \
+        sessions_opened_and_closed_in_sequence_leave_no_allocation_behind 2>&1 | tee /dev/stderr)"; then
+        echo "  Layer S FAIL: the sequential run under valgrind failed (97 is memcheck's own exit)" >&2
+        return 1
+    fi
+    if ! grep -qE '^test result: ok\. 1 passed' <<< "$out"; then
+        echo "  Layer S FAIL: the run under valgrind passed no test" >&2
+        return 1
+    fi
+}
+
 # ─── Layer M — active-scouting multicast loopback e2e ──────────────
 #
 # R311ep: opt-in via `--layer M` or `WZ_RUN_LAYER_M=1`. Runs the
@@ -28652,6 +28735,7 @@ run_layer Z layer_z_zenohd_interop || overall=1
 # examples build-zenohd.sh provisions, so it belongs wherever zenohd does.
 run_layer E5z layer_e5z_router_query_target || overall=1
 run_layer P layer_p_throughput_differential || overall=1
+run_layer S layer_s_pico_stability || overall=1
 
 echo ""
 # R311y414 — a `--layer <name>` that matches NO lane used to run nothing and

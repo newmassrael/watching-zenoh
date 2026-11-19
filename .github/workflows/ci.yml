@@ -2350,6 +2350,16 @@ jobs:
       - name: Layer C1co — the pico client-only build dials a listener
         run: bash scripts/run-ci.sh --layer C1co
 
+      - name: Layer S — the pico C ABI under load, faults, close and reopen
+        # The short bound of the stress lane: each storm for ten seconds, which shows the suite
+        # still builds and that its threads, its faults and its counts still hold. The long run
+        # is the build host's, with valgrind for the leak checker's leg; this runner has none, so
+        # that leg is reported not measured here and WZ_S_REQUIRE is not set
+        # (docs/pico-stability-lane.md).
+        env:
+          WZ_STABILITY_SECONDS: "10"
+        run: bash scripts/run-ci.sh --layer S
+
   # Layer Z8, in a job of its own: upstream's integration tests (`zenoh/tests`, at the pin) run
   # against the patched family, a file at a time, and the report is held to `docs/z8-expected.tsv`
   # (what each file must still do). A repair that breaks a file passes every gate that does not
