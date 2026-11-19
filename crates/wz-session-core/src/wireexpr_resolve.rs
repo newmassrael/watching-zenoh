@@ -470,6 +470,7 @@ impl<'a> MappingSpaces<'a> {
 
     /// No dictionary in a build without the shared key ids.
     #[cfg(not(feature = "shared-key-ids"))]
+    #[inline(always)]
     fn shared_literal(&self, _id: crate::wire_id::ExprId) -> Option<&'a str> {
         None
     }

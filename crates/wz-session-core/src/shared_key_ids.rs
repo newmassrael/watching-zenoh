@@ -35,16 +35,19 @@
 //!   pattern, and is never cut into an id and a rest: a pattern is matched as a whole by whoever
 //!   reads it, and the dictionary numbers the patterns a deployment uses as entries of their own.
 //!   Without its exact entry it goes as the literal.
-//! * Under `shared` a reply on the query's own key may mirror the request ([`reply_key`]): the
-//!   same id and rest, the `M` bit flipped, since the id is in the requester's space and the
-//!   requester is the receiver of the reply. The engines' reply path carries the reply's key as
-//!   text and so sends it whole; a requester that holds the dictionary reads either form.
+//! * Under `shared` a reply on the key of a query that came by an id of the dictionary mirrors
+//!   the query ([`reply_key`]): the same id and rest, the `M` bit flipped, since the id is in the
+//!   requester's space and the requester is the receiver of the reply. A link keeps the key form
+//!   of such a query until its `Final` ([`LinkKeys`]); every other reply names its key whole.
+//! * The form is the session's, and an endpoint the configuration dials or listens on may be
+//!   stated a form of its own ([`LinkKeyForms`]): each link names its keys in the form of the
+//!   endpoint it was dialled to or taken on.
 //!
 //! # Where it lives
 //!
-//! The dictionary is data an open is handed, held on the heap and shared by every link of the
-//! session ([`SharedKeyIds`]); [`crate::caps::MAX_SHARED_KEY_IDS`] bounds how many entries an
-//! open may hand it. An image with no allocator has no dictionary yet.
+//! The dictionary is data an open is handed ([`KeyIdsAtOpen`]), held on the heap and shared by
+//! every link of the session ([`SharedKeyIds`]); [`crate::caps::MAX_SHARED_KEY_IDS`] bounds how
+//! many entries an open may hand it. An image with no allocator has no dictionary yet.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -446,6 +449,198 @@ impl LinkKeyForms {
                     .map(|(_, form)| *form)
             })
             .unwrap_or(self.session)
+    }
+
+    /// Every link at `session`, no link stated apart and nothing checked: the forms of a session
+    /// opened with no key ids, whose open refuses `shared` before any link exists.
+    pub fn session_only(session: KeyWireForm) -> Self {
+        Self {
+            session,
+            links: Vec::new(),
+        }
+    }
+
+    /// The session's form, which a link no statement names takes.
+    pub fn session(&self) -> KeyWireForm {
+        self.session
+    }
+
+    /// Whether any link of the session may name a key otherwise than upstream does: a form other
+    /// than `declared`, for the session or for a link.
+    pub fn departs_from_declared(&self) -> bool {
+        self.session != KeyWireForm::Declared
+            || self
+                .links
+                .iter()
+                .any(|(_, form)| *form != KeyWireForm::Declared)
+    }
+}
+
+/// What a session is opened with: the dictionary, when it is given one, and the links whose
+/// key-wire form a deployment states apart from the session's (`wz_ext_config_key_wire_form_for`),
+/// each named by the locator the configuration dials or listens on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyIdsAtOpen {
+    /// The dictionary.
+    pub ids: Option<SharedKeyIds>,
+    /// The links' own forms, by locator.
+    pub links: Vec<(String, KeyWireForm)>,
+}
+
+impl KeyIdsAtOpen {
+    /// The forms of the session's links when the session's own form is `session`: refused as
+    /// [`LinkKeyForms::new`] refuses.
+    pub fn forms(&self, session: KeyWireForm) -> Result<LinkKeyForms, KeyIdsRefused> {
+        LinkKeyForms::new(session, self.links.clone(), self.ids.as_deref())
+    }
+
+    /// State `form` for the link to `locator`, in place of a form stated for it before.
+    pub fn set_link(&mut self, locator: &str, form: KeyWireForm) {
+        self.links.retain(|(stated, _)| stated != locator);
+        self.links.push((String::from(locator), form));
+    }
+}
+
+/// The value of `key-wire-form` the text names, as the declaration spells it.
+pub fn key_wire_form_named(text: &str) -> Option<KeyWireForm> {
+    [
+        KeyWireForm::Declared,
+        KeyWireForm::Shared,
+        KeyWireForm::Literal,
+    ]
+    .into_iter()
+    .find(|form| form.id() == text)
+}
+
+/// Whether the build's domain of `key-wire-form` allows `form`: what a statement of the value
+/// for one link is held to, as a statement for the session is.
+pub fn form_in_domain(form: KeyWireForm) -> bool {
+    let mut policy = crate::policy::SessionPolicy::defaults();
+    policy.select_key_wire_form(form).is_ok()
+}
+
+/// How many queries of a link a node remembers the key form of at once, for the replies that
+/// mirror it: a query that is never ended gives way to the newest, so a peer cannot grow the
+/// table.
+const NOTED_REQUESTS: usize = crate::caps::MAX_PENDING_QUERIES;
+
+/// The key form a request arrived under, kept until its `Final` for the replies that mirror it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotedRequest {
+    id: ExprId,
+    suffix: Option<String>,
+    sender_mapping: bool,
+}
+
+/// What one link knows of the key ids: the dictionary, the link's key-wire form, and the key form
+/// of the queries it is answering. Held by the link's session, installed by the engine that opened
+/// it before the link carries anything.
+#[derive(Debug, Clone)]
+pub struct LinkKeys {
+    ids: Option<SharedKeyIds>,
+    form: KeyWireForm,
+    requests: Vec<(crate::wire_id::RequestId, NotedRequest)>,
+}
+
+impl LinkKeys {
+    /// A link that holds `ids` and names keys as `form` says.
+    pub fn new(ids: Option<SharedKeyIds>, form: KeyWireForm) -> Self {
+        Self {
+            ids,
+            form,
+            requests: Vec::new(),
+        }
+    }
+
+    /// The dictionary, when the link holds one.
+    pub fn ids(&self) -> Option<&KeyIds> {
+        self.ids.as_deref()
+    }
+
+    /// The dictionary as the session's links share it, when the link holds one.
+    pub fn shared_ids(&self) -> Option<&SharedKeyIds> {
+        self.ids.as_ref()
+    }
+
+    /// The link's key-wire form.
+    pub fn form(&self) -> KeyWireForm {
+        self.form
+    }
+
+    /// How the link names `key` to its peer, which `peer_is_router` says it announced itself as.
+    /// With no dictionary the shared form cannot be the link's (its open refused it), so the
+    /// answer is the literal or the declared form.
+    pub fn key_wire<'k>(&self, key: &'k str, peer_is_router: bool) -> KeyWire<'k> {
+        match self.ids.as_deref() {
+            Some(ids) => key_wire(self.form, ids, key, peer_is_router),
+            None if self.form == KeyWireForm::Literal => KeyWire::Literal,
+            None => KeyWire::Declared,
+        }
+    }
+
+    /// Keep the key form of the request `rid` that arrived as `(id, suffix)` with the mapping bit
+    /// `sender_mapping`, when a reply to it may mirror it: the link's form is `shared`, the peer
+    /// is no router and the id is one of the dictionary's. The oldest kept gives way once the
+    /// link keeps as many as the session tracks pending queries (`MAX_PENDING_QUERIES`).
+    pub fn note_request(
+        &mut self,
+        rid: crate::wire_id::RequestId,
+        id: ExprId,
+        suffix: Option<&str>,
+        sender_mapping: bool,
+        peer_is_router: bool,
+    ) {
+        if self.form != KeyWireForm::Shared || peer_is_router || id == 0 {
+            return;
+        }
+        if !self.ids.as_deref().is_some_and(|ids| ids.reserves(id)) {
+            return;
+        }
+        self.requests.retain(|(noted, _)| *noted != rid);
+        if self.requests.len() >= NOTED_REQUESTS.max(1) {
+            self.requests.remove(0);
+        }
+        self.requests.push((
+            rid,
+            NotedRequest {
+                id,
+                suffix: suffix.map(String::from),
+                sender_mapping,
+            },
+        ));
+    }
+
+    /// How a reply on `reply` to the request `rid` names its key: mirrored ([`reply_key`]) when
+    /// the request was kept and `reply` is the key it named, the dictionary's entry followed by
+    /// its rest; the literal otherwise.
+    pub fn reply_key<'r>(&self, rid: crate::wire_id::RequestId, reply: &'r str) -> ReplyKey<'r> {
+        let Some(ids) = self.ids.as_deref() else {
+            return ReplyKey::Literal;
+        };
+        let Some((_, noted)) = self.requests.iter().find(|(kept, _)| *kept == rid) else {
+            return ReplyKey::Literal;
+        };
+        let Some(base) = ids.key_of(noted.id) else {
+            return ReplyKey::Literal;
+        };
+        let rest = noted.suffix.as_deref().unwrap_or("");
+        let named = reply.len() == base.len() + rest.len()
+            && reply.starts_with(base)
+            && reply.ends_with(rest);
+        if !named {
+            return ReplyKey::Literal;
+        }
+        let request = RequestKey {
+            id: noted.id,
+            suffix: noted.suffix.as_deref(),
+            sender_mapping: noted.sender_mapping,
+        };
+        reply_key(self.form, request, reply, reply)
+    }
+
+    /// The request `rid` is ended: its key form is not kept any more.
+    pub fn forget_request(&mut self, rid: crate::wire_id::RequestId) {
+        self.requests.retain(|(noted, _)| *noted != rid);
     }
 }
 
@@ -987,6 +1182,182 @@ mod resolve_tests {
             None,
             "CONTROL: without the dictionary the scope names nothing"
         );
+    }
+}
+
+/// One link's knowledge of the key ids: the form it names keys in, and the queries it keeps for
+/// the replies that mirror them.
+#[cfg(test)]
+mod link_keys_tests {
+    use super::*;
+    use alloc::string::ToString;
+    use alloc::sync::Arc;
+    use alloc::vec;
+
+    fn dictionary() -> SharedKeyIds {
+        Arc::new(KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("valid"))
+    }
+
+    #[test]
+    fn a_link_names_a_key_by_its_own_form() {
+        let shared = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
+        assert_eq!(
+            shared.key_wire("lab/rig/alpha", false),
+            KeyWire::Shared {
+                id: 41,
+                suffix: None
+            }
+        );
+        assert_eq!(
+            shared.key_wire("lab/rig/alpha", true),
+            KeyWire::Declared,
+            "a router is told the declared form"
+        );
+        let literal = LinkKeys::new(None, KeyWireForm::Literal);
+        assert_eq!(literal.key_wire("lab/rig/alpha", false), KeyWire::Literal);
+        let declared = LinkKeys::new(Some(dictionary()), KeyWireForm::Declared);
+        assert_eq!(declared.key_wire("lab/rig/alpha", false), KeyWire::Declared);
+    }
+
+    #[test]
+    fn a_kept_query_is_mirrored_on_its_own_key_until_it_ends() {
+        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
+        keys.note_request(7, 40, Some("/gamma"), true, false);
+        assert_eq!(
+            keys.reply_key(7, "lab/rig/gamma"),
+            ReplyKey::Mirrored {
+                id: 40,
+                suffix: Some("/gamma"),
+                sender_mapping: false
+            }
+        );
+        assert_eq!(
+            keys.reply_key(7, "lab/rig/delta"),
+            ReplyKey::Literal,
+            "a reply on another key"
+        );
+        assert_eq!(
+            keys.reply_key(8, "lab/rig/gamma"),
+            ReplyKey::Literal,
+            "another query"
+        );
+        keys.forget_request(7);
+        assert_eq!(
+            keys.reply_key(7, "lab/rig/gamma"),
+            ReplyKey::Literal,
+            "an ended query is not kept"
+        );
+    }
+
+    #[test]
+    fn only_a_query_by_a_dictionary_id_on_a_shared_link_from_no_router_is_kept() {
+        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
+        keys.note_request(1, 0, Some("lab/rig/alpha"), true, false);
+        keys.note_request(2, 99, None, true, false);
+        keys.note_request(3, 41, None, true, true);
+        for rid in [1, 2, 3] {
+            assert_eq!(keys.reply_key(rid, "lab/rig/alpha"), ReplyKey::Literal);
+        }
+        let mut literal = LinkKeys::new(Some(dictionary()), KeyWireForm::Literal);
+        literal.note_request(4, 41, None, true, false);
+        assert_eq!(literal.reply_key(4, "lab/rig/alpha"), ReplyKey::Literal);
+        keys.note_request(5, 41, None, false, false);
+        assert_eq!(
+            keys.reply_key(5, "lab/rig/alpha"),
+            ReplyKey::Mirrored {
+                id: 41,
+                suffix: None,
+                sender_mapping: true
+            },
+            "CONTROL: a query by a dictionary id is kept, its bit turned"
+        );
+    }
+
+    #[test]
+    fn the_queries_kept_are_bounded_by_the_oldest_giving_way() {
+        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
+        let bound = crate::caps::MAX_PENDING_QUERIES.max(1);
+        for rid in 0..=bound as u32 {
+            keys.note_request(rid, 41, None, true, false);
+        }
+        assert_eq!(keys.reply_key(0, "lab/rig/alpha"), ReplyKey::Literal);
+        assert_ne!(
+            keys.reply_key(bound as u32, "lab/rig/alpha"),
+            ReplyKey::Literal
+        );
+    }
+
+    #[test]
+    fn the_forms_stated_for_links_replace_one_another_and_a_name_reads_as_its_value() {
+        let mut at_open = KeyIdsAtOpen {
+            ids: Some(dictionary()),
+            links: vec![],
+        };
+        at_open.set_link("tcp/192.0.2.7:7447", KeyWireForm::Literal);
+        at_open.set_link("tcp/192.0.2.7:7447", KeyWireForm::Shared);
+        assert_eq!(
+            at_open.links,
+            [("tcp/192.0.2.7:7447".to_string(), KeyWireForm::Shared)]
+        );
+        let forms = at_open.forms(KeyWireForm::Declared).expect("valid");
+        assert!(forms.departs_from_declared());
+        assert_eq!(
+            forms.form_of(Some("tcp/192.0.2.7:7447")),
+            KeyWireForm::Shared
+        );
+        assert!(!LinkKeyForms::session_only(KeyWireForm::Declared).departs_from_declared());
+        assert_eq!(key_wire_form_named("literal"), Some(KeyWireForm::Literal));
+        assert_eq!(key_wire_form_named("shared"), Some(KeyWireForm::Shared));
+        assert_eq!(key_wire_form_named("declared"), Some(KeyWireForm::Declared));
+        assert_eq!(key_wire_form_named("Shared"), None);
+        assert!(form_in_domain(KeyWireForm::Declared));
+    }
+}
+
+/// A reply that mirrors its query, as the bytes the link carries: the id and the rest, and the
+/// header bits the decoder reads the space and the rest's presence from.
+#[cfg(all(test, feature = "codec-response"))]
+mod reply_frame_tests {
+    use crate::network_message::{parse_frame_payload, NetworkMessage};
+    use crate::response_build::{build_response_reply_literal, set_response_keyexpr_aliased};
+    use crate::wireexpr_resolve::id_and_suffix;
+    use wz_codecs::wireexpr::WireexprOwnedVariant;
+    use wz_codecs_test_support::TestWire;
+
+    fn decoded(bytes: &[u8]) -> crate::wire::ResponseOwned {
+        let mut parsed = parse_frame_payload(bytes).expect("the response parses");
+        match parsed.pop() {
+            Some(NetworkMessage::Response(response)) => *response,
+            _ => panic!("one response"),
+        }
+    }
+
+    #[test]
+    fn a_mirrored_reply_carries_the_id_and_the_rest_in_the_receivers_space() {
+        let mut response = build_response_reply_literal(7, "lab/rig/gamma", b"answer").unwrap();
+        set_response_keyexpr_aliased(&mut response, 40, Some("/gamma"), false).unwrap();
+        let bytes = response.wire();
+        assert_eq!(bytes[0] & 0x60, 0x20, "N set and M clear");
+        let back = decoded(&bytes);
+        assert!(matches!(
+            back.keyexpr.body,
+            WireexprOwnedVariant::WireexprNonlocal(_)
+        ));
+        assert_eq!(id_and_suffix(&back.keyexpr.body), (40, Some("/gamma")));
+    }
+
+    #[test]
+    fn a_mirrored_reply_by_the_id_alone_in_the_senders_space_has_no_rest() {
+        let mut response = build_response_reply_literal(7, "lab/rig/alpha", b"answer").unwrap();
+        set_response_keyexpr_aliased(&mut response, 41, None, true).unwrap();
+        let bytes = response.wire();
+        assert_eq!(bytes[0] & 0x60, 0x40, "N clear and M set");
+        let back = decoded(&bytes);
+        assert!(matches!(
+            back.keyexpr.body,
+            WireexprOwnedVariant::WireexprLocal(_)
+        ));
+        assert_eq!(id_and_suffix(&back.keyexpr.body), (41, None));
     }
 }
 

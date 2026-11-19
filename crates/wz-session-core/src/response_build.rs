@@ -104,6 +104,26 @@ pub fn set_response_keyexpr_literal(
     )
 }
 
+/// Name a Response's key by `id` and `suffix` in the space `sender_mapping` says, as a reply that
+/// mirrors its query does (`shared-key-ids`): the keyexpr field and the header's `N` bit, which is
+/// set exactly when a suffix follows the id. The response is left as it was when the suffix does
+/// not fit its field.
+#[cfg(all(feature = "codec-response", feature = "shared-key-ids"))]
+pub fn set_response_keyexpr_aliased(
+    response: &mut ResponseOwned,
+    id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    sender_mapping: bool,
+) -> Result<(), CodecError> {
+    response.keyexpr = crate::wireexpr_build::aliased_wireexpr(id, suffix, sender_mapping)?;
+    if suffix.is_some() {
+        response.header |= crate::wireexpr_build::NAMED_FLAG;
+    } else {
+        response.header &= !crate::wireexpr_build::NAMED_FLAG;
+    }
+    Ok(())
+}
+
 /// R2906 — the ONE relay step for a `Response` travelling back toward the
 /// face that asked: upstream's `route_send_response`
 /// (`zenoh/src/net/routing/dispatcher/queries.rs` @

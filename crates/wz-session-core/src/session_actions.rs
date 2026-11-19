@@ -1971,13 +1971,15 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// access pattern.
     #[cfg(feature = "alloc")]
     pub outbound_mappings: R::Mutex<HashMap<crate::wire_id::ExprId, String>>,
-    /// The key ids every node of the deployment shares (`shared-key-ids`), installed by the
-    /// engine that opened the link ([`Self::install_shared_key_ids`]). An id the dictionary holds
-    /// names its key in this node's space as well as the peer's, so
-    /// [`Self::resolve_outbound_mapping`] answers it when no declaration of ours does, and a
-    /// declaration or a message this node sends by such an id needs no `DeclareKeyExpr` first.
+    /// What this link knows of the key ids every node of the deployment shares
+    /// (`shared-key-ids`), installed by the engine that opened the link
+    /// ([`Self::install_link_keys`]): the dictionary, the link's key-wire form and the key form of
+    /// the queries it is answering. An id the dictionary holds names its key in this node's space
+    /// as well as the peer's, so [`Self::resolve_outbound_mapping`] answers it when no
+    /// declaration of ours does, and a declaration or a message this node sends by such an id
+    /// needs no `DeclareKeyExpr` first.
     #[cfg(feature = "shared-key-ids")]
-    shared_key_ids: R::Mutex<Option<crate::shared_key_ids::SharedKeyIds>>,
+    link_keys: R::Mutex<crate::shared_key_ids::LinkKeys>,
     /// The egress admission of a REPLY: the §5.16 verdict the session that owns this bundle
     /// installs when it holds an egress policy, asked of every `Response`, and of every
     /// `Declare` that answers a peer's Interest, before it is sent.
@@ -3268,6 +3270,15 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     // [`Self::send_response`].
     #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        // A reply whose key mirrors its query's form (`shared-key-ids`) is not a literal the
+        // writer from parts can describe: it goes as an owned reply does, which names it.
+        #[cfg(feature = "shared-key-ids")]
+        if self.reply_is_mirrored(parts.rid, parts.keyexpr) {
+            if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
+                self.send_response(response);
+            }
+            return;
+        }
         #[cfg(feature = "alloc")]
         let writer = match crate::lent_response::ResponseWriter::new(parts) {
             Ok(writer) if self.reply_can_be_written_from_parts() => writer,
@@ -3848,7 +3859,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
                 #[cfg(feature = "shared-key-ids")]
-                shared_key_ids: R::new_mutex(None::<crate::shared_key_ids::SharedKeyIds>),
+                // Upstream's form until the engine that opened the link says otherwise.
+                link_keys: R::new_mutex(crate::shared_key_ids::LinkKeys::new(
+                    None,
+                    crate::policy::KeyWireForm::Declared,
+                )),
                 #[cfg(all(
                     feature = "alloc",
                     any(
@@ -14005,28 +14020,105 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         .or_else(|| self.shared_key_literal(mapping_id))
     }
 
-    /// Hand this link the key ids every node of the deployment shares: an id the dictionary
-    /// holds is then one this node may name a key by with no declaration of its own, and the
-    /// node declares no key expression under it (the engine allocates its ids past the
-    /// dictionary's). Installed before the link carries anything; a second install replaces the
-    /// first.
+    /// Hand this link what it knows of the key ids every node of the deployment shares: the
+    /// dictionary, when there is one, and the link's key-wire form. An id the dictionary holds is
+    /// then one this node may name a key by with no declaration of its own, and the node
+    /// declares no key expression under it (the engine allocates its ids past the dictionary's).
+    /// Installed before the link carries anything; a second install replaces the first and
+    /// forgets the queries the first kept.
     #[cfg(feature = "shared-key-ids")]
-    pub fn install_shared_key_ids(&self, ids: crate::shared_key_ids::SharedKeyIds) {
-        R::with_mutex_mut(&self.shared_key_ids, |held| *held = Some(ids));
+    pub fn install_link_keys(&self, keys: crate::shared_key_ids::LinkKeys) {
+        R::with_mutex_mut(&self.link_keys, |held| *held = keys);
+    }
+
+    /// How this link names `keyexpr` to its peer, by its key-wire form: as the caller would
+    /// without the key ids ([`KeyWire::Declared`](crate::shared_key_ids::KeyWire::Declared)), as
+    /// the literal, or by an id of the dictionary. A peer that announced itself a router is told
+    /// the declared form under `shared`.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn key_wire_on_link<'k>(&self, keyexpr: &'k str) -> crate::shared_key_ids::KeyWire<'k> {
+        let to_router = self.peer_whatami_wire() == Some(0);
+        R::with_mutex_mut(&self.link_keys, |keys| keys.key_wire(keyexpr, to_router))
+    }
+
+    /// Keep the key form of each query of `event` that arrived by an id of the dictionary, so a
+    /// reply on its key mirrors it (`try_send_response`). The heap profile's owned
+    /// frames: a record read where its frame lies has no allocator to keep it with.
+    #[cfg(all(feature = "shared-key-ids", feature = "codec-request"))]
+    pub fn note_requests(&self, event: &crate::driver_loop::IterationEvent<'_, '_>) {
+        let crate::driver_loop::IterationEvent::Poll(
+            crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. },
+        ) = event
+        else {
+            return;
+        };
+        let from_router = self.peer_whatami_wire() == Some(0);
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            for message in messages {
+                if let crate::network_message::NetworkMessage::Request(request) = message {
+                    let body = &request.keyexpr.body;
+                    let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(body);
+                    let sender_mapping = matches!(
+                        body,
+                        wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(_)
+                    );
+                    keys.note_request(request.rid, id, suffix, sender_mapping, from_router);
+                }
+            }
+        });
+    }
+
+    /// `response` with its key as the link's key ids say a reply names it: the request's id and
+    /// rest with the mapping bit turned, when it answers a query kept by `note_requests`
+    /// on the key that query named; unchanged otherwise.
+    #[cfg(all(feature = "shared-key-ids", feature = "codec-response"))]
+    fn mirror_reply_key(&self, mut response: ResponseOwned) -> ResponseOwned {
+        let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(&response.keyexpr.body);
+        let (0, Some(reply)) = (id, suffix) else {
+            return response;
+        };
+        let mirrored = R::with_mutex_mut(&self.link_keys, |keys| {
+            match keys.reply_key(response.request_id, reply) {
+                crate::shared_key_ids::ReplyKey::Mirrored {
+                    id,
+                    suffix,
+                    sender_mapping,
+                } => Some((id, suffix.map(String::from), sender_mapping)),
+                crate::shared_key_ids::ReplyKey::Literal => None,
+            }
+        });
+        if let Some((id, suffix, sender_mapping)) = mirrored {
+            // A key the codec cannot hold as an id and a rest still goes as the literal it is.
+            let _ = crate::response_build::set_response_keyexpr_aliased(
+                &mut response,
+                id,
+                suffix.as_deref(),
+                sender_mapping,
+            );
+        }
+        response
+    }
+
+    /// Whether a reply on `keyexpr` to the request `rid` names its key otherwise than as the
+    /// literal, which the writer of a reply from its parts cannot do.
+    #[cfg(all(feature = "shared-key-ids", feature = "codec-response"))]
+    fn reply_is_mirrored(&self, rid: crate::wire_id::RequestId, keyexpr: &str) -> bool {
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            keys.reply_key(rid, keyexpr) != crate::shared_key_ids::ReplyKey::Literal
+        })
     }
 
     /// The key the installed dictionary names `id`, when one is installed and holds it.
     #[cfg(feature = "shared-key-ids")]
     fn shared_key_literal(&self, id: crate::wire_id::ExprId) -> Option<String> {
-        R::with_mutex_mut(&self.shared_key_ids, |held| {
-            held.as_ref()
-                .and_then(|ids| ids.key_of(id))
-                .map(String::from)
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            keys.ids().and_then(|ids| ids.key_of(id)).map(String::from)
         })
     }
 
     /// A build without the shared key ids has no dictionary to answer from.
     #[cfg(all(feature = "alloc", not(feature = "shared-key-ids")))]
+    #[inline(always)]
     fn shared_key_literal(&self, _id: crate::wire_id::ExprId) -> Option<String> {
         None
     }
@@ -15088,6 +15180,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "codec-response-final"))]
         let _ = (request_id, qos);
+        // The query is ended: no reply follows, and its key form is not kept.
+        #[cfg(feature = "shared-key-ids")]
+        R::with_mutex_mut(&self.link_keys, |keys| keys.forget_request(request_id));
     }
 
     /// R121j-5c-e2e — encode + dispatch an already-constructed
@@ -15141,6 +15236,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // policy governs the keyexpr a user knows). A denied reply is consumed, as a denied put
         // is: the handler replied and nothing was sent.
         match self.reply_egress_verdict(response) {
+            // A reply to a query kept by its key form names its key as the query did
+            // (`shared-key-ids`); the policy above judged it by its literal.
+            #[cfg(feature = "shared-key-ids")]
+            Some(response) => self.send_response_admitted(self.mirror_reply_key(response)),
+            #[cfg(not(feature = "shared-key-ids"))]
             Some(response) => self.send_response_admitted(response),
             None => Ok(()),
         }

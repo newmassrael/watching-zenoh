@@ -39,6 +39,43 @@ pub fn literal_wireexpr<S: for<'x> WireexprFrom<'x>>(
     })
 }
 
+/// A `Wireexpr` naming `id` and, when there is one, `suffix` after it: in the sender's space
+/// (`M=1`, `WireexprLocal`) when `sender_mapping`, in the receiver's (`M=0`, `WireexprNonlocal`)
+/// otherwise. Refused by the suffix's bound as [`literal_wireexpr`] is.
+#[cfg(feature = "shared-key-ids")]
+pub fn aliased_wireexpr<S: for<'x> WireexprFrom<'x>>(
+    id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    sender_mapping: bool,
+) -> Result<WireexprOwned<S>, CodecError> {
+    let text = suffix
+        .map(|s| Bounded::new(s).ok_or(CodecError::LengthOutOfRange))
+        .transpose()?;
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let body = if sender_mapping {
+        WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+            id,
+            suffix_len,
+            suffix: text
+                .map(|t| t.store::<S, WireexprLocalSuffixField>())
+                .transpose()?,
+        })
+    } else {
+        WireexprOwnedVariant::WireexprNonlocal(
+            wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned {
+                id,
+                suffix_len,
+                suffix: text
+                    .map(|t| {
+                        t.store::<S, wz_codecs::wireexpr_nonlocal::WireexprNonlocalSuffixField>()
+                    })
+                    .transpose()?,
+            },
+        )
+    };
+    Ok(WireexprOwned { body })
+}
+
 /// The network-message header `N` (Named — suffix present) bit, uniform across
 /// Push / Request / Response (zenoh `{push,request,response}::flag::N = 1 << 5`).
 /// A literal keyexpr (a suffix) always carries it.
