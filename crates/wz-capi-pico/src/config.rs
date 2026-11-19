@@ -94,6 +94,9 @@ pub const Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY: u8 = 0x56;
 #[derive(Clone, Default)]
 pub(crate) struct ConfigState {
     pub(crate) entries: BTreeMap<u8, String>,
+    /// What wz's own doors state about the session's policies, which no numbered key carries
+    /// (`wz_ext_config_policy`, `wz_ext_config_profile`, `wz_ext_config_document`).
+    pub(crate) policies: crate::config_policy::PolicyStatements,
 }
 
 impl ConfigState {
