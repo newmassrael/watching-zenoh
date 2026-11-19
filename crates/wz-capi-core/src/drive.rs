@@ -4376,11 +4376,12 @@ type AppSlot = Option<Arc<wz_runtime_tokio::app_link::AppTransport>>;
 struct AppSlot;
 
 /// The slot of a role that carries no program transport, in either build: the one spelling a
-/// role written for both uses, so neither build constructs the other's shape.
-#[cfg(feature = "app-transport")]
+/// role written for both uses, so neither build constructs the other's shape. Its readers are the
+/// router node, which binds over the system's sockets alone, and the tests.
+#[cfg(all(feature = "app-transport", any(feature = "router-node", test)))]
 const NO_APP: AppSlot = None;
 /// See the constant of the same name.
-#[cfg(not(feature = "app-transport"))]
+#[cfg(all(not(feature = "app-transport"), any(feature = "router-node", test)))]
 const NO_APP: AppSlot = AppSlot;
 
 /// `cfg` dialling over the program's transport when the session has one.
