@@ -56,3 +56,32 @@ fn a_second_link_is_judged_by_the_tie_order_of_the_snapshot() {
         );
     }
 }
+
+/// The node's clock stamps by the `clock-quality-stamping` value of the snapshot: no reference is
+/// reported for its clock, so it withholds the stamp of the data it relays exactly when the value
+/// is `trusted-only`.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_forwarder_stamps_by_the_clock_quality_of_the_snapshot() {
+    use crate::node_clock::DataStamp;
+    use wz_session_core::policy::ClockQualityStamping;
+    let mut built = 0;
+    for value in [
+        ClockQualityStamping::Always,
+        ClockQualityStamping::TrustedOnly,
+    ] {
+        let mut policy = SessionPolicy::defaults();
+        if policy.select_clock_quality_stamping(value).is_err() {
+            continue;
+        }
+        let fwd = router(&[0x05], &policy);
+        assert_eq!(
+            fwd.node_hlc().data_stamp() == DataStamp::Withheld,
+            value == ClockQualityStamping::TrustedOnly,
+            "{}",
+            value.id()
+        );
+        built += 1;
+    }
+    assert!(built >= 1, "the build's domain holds at least its default");
+}

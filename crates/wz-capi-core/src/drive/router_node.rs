@@ -608,15 +608,13 @@ pub(crate) fn open_router_blocking(
     // Built here and shared, so that the program holding the node can reach the forwarder's
     // entry points (they take `&self`) while the node's thread runs the face loop over it.
     let own_zid = Zid::from_slice(&wire_zid);
-    let forwarder = match role {
-        NodeRole::Router => RouterForwarder::with_timestamping(own_zid, timestamping),
-        NodeRole::Peer => RouterForwarder::peer_with_timestamping(own_zid, timestamping),
-        // A client node's north is the pin's client hat: its one face is the router it dialled,
-        // which tells a client only what the client asked for, so the hat sends that face every
-        // interest and every declaration of its south and every message whose source is south
-        // (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
-        NodeRole::Client => RouterForwarder::client_with_timestamping(own_zid, timestamping),
-    };
+    // The role picks the node's hats. A client node's north is the pin's client hat: its one face
+    // is the router it dialled, which tells a client only what the client asked for, so the hat
+    // sends that face every interest and every declaration of its south and every message whose
+    // source is south (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
+    // The node's machines read the snapshot the open resolved, as its links do.
+    let forwarder =
+        RouterForwarder::for_node(role.whatami(), own_zid, timestamping, &session_policy);
     #[cfg(feature = "routing-namespace")]
     let forwarder = match namespace {
         Some(prefix) => forwarder.with_local_namespace(prefix),

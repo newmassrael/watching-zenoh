@@ -169,7 +169,8 @@ fn pair() -> (Arc<RouterState>, Client) {
 }
 
 /// A node runs under the snapshot its open hands it and not under the build's: it holds the
-/// handed one, whose `routing-face-drive` is not the build's, and opens under it.
+/// handed one, whose `routing-face-drive` is not the build's, opens under it and makes its
+/// forwarder under it.
 #[test]
 fn a_node_holds_the_snapshot_its_open_hands_it() {
     use wz_session_core::policy::{RoutingFaceDrive, SessionPolicy};
@@ -204,6 +205,8 @@ fn a_node_holds_the_snapshot_its_open_hands_it() {
     assert_eq!(*node.session_policy(), handed);
     assert_eq!(node.session_policy().routing_face_drive(), other);
     assert_ne!(*node.session_policy(), build);
+    // The forwarder whose machines serve the faces is made under the same snapshot.
+    assert_eq!(*node.forwarder().policy(), handed);
     node.close();
 }
 

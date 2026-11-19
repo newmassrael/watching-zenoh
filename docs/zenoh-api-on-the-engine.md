@@ -1058,7 +1058,7 @@ Each lands whole with its surface lines, tests and faults in one round.
       `clientviapeer` tests of `liveliness`). `OpenPlan::peer_fits_node` says when a peer is a
       node: it listens, joins no multicast group, scouts to dial nothing, and binds its listeners
       at the open (`listen/exit_on_failure`); any other peer stays on the registry. The node
-      runs `RouterForwarder::peer_with_timestamping`, advertises its locators, and dials the
+      runs `RouterForwarder::for_node` at node mode Peer, advertises its locators, and dials the
       nodes its gossip admits (`enable_autoconnect`). Measured with it, `liveliness` is 45 of
       46 and runs in 220 s where it took 676 s. What the node had to carry for a peer, found by
       the upstream files and by this crate's own unit tests: all that a message says is shown to

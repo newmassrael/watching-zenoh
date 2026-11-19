@@ -9,7 +9,7 @@
 //! of that kind:
 //!
 //! - The router that holds this node as a CLIENT, the one face of its client hat
-//!   ([`RouterForwarder::client_with_timestamping`]), keeps a client's declarations by the id the
+//!   ([`RouterForwarder::for_node`] at Client), keeps a client's declarations by the id the
 //!   client numbered them with
 //!   (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `.remote_subs.remove(&id)`). A node that
 //!   sends them all as id 0 has each replace the one before: of every key it declares, the

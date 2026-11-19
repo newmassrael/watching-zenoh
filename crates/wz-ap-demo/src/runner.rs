@@ -4629,7 +4629,7 @@ async fn run_peer_until(
     // Peer (`docs/peer-region-hats.md`), the forwarder the router host runs, with
     // the peer hat in `North` and a broker hat for the clients south of it.
     // A client node runs the pin's client hat in `North`, as the node engine opens one
-    // (`RouterForwarder::client_with_timestamping`); a peer runs the peer hat.
+    // (`RouterForwarder::for_node` at Client); a peer runs the peer hat.
     // The forwarder's machines read the node's snapshot, the one its sessions are handed.
     let forwarder = RouterForwarder::for_node(
         role,
