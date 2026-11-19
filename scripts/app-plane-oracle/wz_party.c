@@ -16,11 +16,16 @@
  * creates. What the party did is its standard output, one transcript line at a time; the
  * lane, not the party, judges it against the other implementation's transcript.
  *
+ * When the check directory holds key-ids, the session is opened with that dictionary of key
+ * ids every node of the deployment shares, and with the key-wire form params states for this
+ * party's endpoint. When params says segmented, an e2e sender cuts every frame it puts into
+ * the pieces of the segment profile, and the receiver joins them before it judges.
+ *
  * Exit status: 0 when the role ran to its end, 1 when it timed out waiting, 2 when it was
  * refused before anything was exchanged (a missing file, a profile the library refused).
  *
  * Built by scripts/pico-c-program.sh against the library with the e2e-sender, e2e-receiver,
- * segment-sender and replay-cache capabilities.
+ * segment-sender and replay-cache capabilities, and shared-key-ids for a dictionary.
  */
 
 #include <stdint.h>
@@ -31,6 +36,11 @@
 #include <zenoh-pico.h>
 
 #include "wz_ext.h"
+
+/* The key-id doors are in a build with shared-key-ids only. Weak, so the party links against
+ * every build and refuses a dictionary by name where the library has none. */
+#pragma weak wz_ext_config_key_ids
+#pragma weak wz_ext_config_key_wire_form_for
 
 #define MAX_FRAMES 256
 #define MAX_PARAMS 32
@@ -235,24 +245,86 @@ static void print_seen(void) {
 
 /* ---- Session --------------------------------------------------------------------------- */
 
-static z_result_t open_session(z_owned_session_t *session, const char *how, const char *locator,
-                               const char *mode) {
-    if (strcmp(how, "listen") == 0) {
-        z_owned_config_t config;
-        z_config_default(&config);
-        zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_LISTEN_KEY, locator);
-        return z_open(session, z_config_move(&config), NULL);
+/* The shared key ids, read once: "<id> <key>" per line. The keys point into the text, which
+ * is kept for the life of the program. */
+static uint16_t *key_ids;
+static const char **key_names;
+static size_t key_count;
+static int key_ids_read;
+
+static int read_key_ids(void) {
+    if (key_ids_read) return 0;
+    key_ids_read = 1;
+    char *text = read_file("key-ids");
+    if (text == NULL) return 0;
+    size_t lines = 0;
+    for (const char *c = text; *c != '\0'; c++) lines += *c == '\n';
+    key_ids = malloc((lines + 1) * sizeof *key_ids);
+    key_names = malloc((lines + 1) * sizeof *key_names);
+    if (key_ids == NULL || key_names == NULL) return refused("key-ids storage", _Z_ERR_GENERIC, NULL);
+    for (char *line = strtok(text, "\n"); line != NULL; line = strtok(NULL, "\n")) {
+        char *space = strchr(line, ' ');
+        if (space == NULL) return refused("key-ids line", _Z_ERR_GENERIC, NULL);
+        *space = '\0';
+        unsigned long id = strtoul(line, NULL, 10);
+        if (id == 0 || id > 0xFFFFu) return refused("key-ids id", _Z_ERR_GENERIC, NULL);
+        key_ids[key_count] = (uint16_t)id;
+        key_names[key_count] = space + 1;
+        key_count++;
     }
+    return 0;
+}
+
+/* Hand the config the dictionary, and the form params states for this party's endpoint. */
+static int configure_keys(z_owned_config_t *config, const char *how, const char *locator) {
+    int status = read_key_ids();
+    if (status != 0) return status;
+    char form_param[32];
+    snprintf(form_param, sizeof form_param, "key_form_%s", how);
+    const char *form = param(form_param);
+    if (key_count > 0) {
+        if (wz_ext_config_key_ids == NULL) {
+            printf("refused key ids: the library was built without shared-key-ids\n");
+            return 2;
+        }
+        z_result_t rc = wz_ext_config_key_ids(z_config_loan_mut(config), key_ids, key_names, key_count);
+        if (rc != Z_OK) return refused("key ids", rc, NULL);
+    }
+    if (form != NULL) {
+        if (wz_ext_config_key_wire_form_for == NULL) {
+            printf("refused key wire form: the library was built without shared-key-ids\n");
+            return 2;
+        }
+        z_result_t rc = wz_ext_config_key_wire_form_for(z_config_loan_mut(config), locator, form);
+        if (rc != Z_OK) return refused("key wire form", rc, NULL);
+    }
+    return 0;
+}
+
+/* 0 with the session open, or the refused status. A dialling end retries while the listener
+ * binds. */
+static int open_session(z_owned_session_t *session, const char *how, const char *locator, const char *mode) {
+    int listening = strcmp(how, "listen") == 0;
+    int attempts = listening ? 1 : 100;
     z_result_t rc = -1;
-    for (int attempt = 0; attempt < 100 && rc != Z_OK; attempt++) {
+    for (int attempt = 0; attempt < attempts && rc != Z_OK; attempt++) {
+        if (attempt > 0) z_sleep_ms(100);
         z_owned_config_t config;
         z_config_default(&config);
-        zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, mode);
-        zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, locator);
+        if (listening) {
+            zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_LISTEN_KEY, locator);
+        } else {
+            zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, mode);
+            zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, locator);
+        }
+        int status = configure_keys(&config, how, locator);
+        if (status != 0) {
+            z_config_drop(z_config_move(&config));
+            return status;
+        }
         rc = z_open(session, z_config_move(&config), NULL);
-        if (rc != Z_OK) z_sleep_ms(100);
     }
-    return rc;
+    return rc == Z_OK ? 0 : refused("session", rc, NULL);
 }
 
 /* Protect every payload of the plan in order: the frames, their lengths, the longest. */
@@ -308,10 +380,61 @@ static int make_receiver(wz_ext_owned_e2e_receiver_t *receiver) {
 
 /* ---- send ------------------------------------------------------------------------------ */
 
-static void put_frame(const z_loaned_publisher_t *publisher, const uint8_t *frame, size_t len) {
+/* Under segmented, every frame put goes out as the pieces this cutter writes, each under the
+ * next transfer number; puts_done numbers the puts in the transcript. */
+static wz_ext_owned_segment_sender_t live_cutter;
+static int live_cut;
+static size_t live_chunk;
+static size_t puts_done;
+
+typedef struct {
+    const z_loaned_publisher_t *publisher;
+    size_t put;
+    size_t piece;
+} live_piece_t;
+
+static z_result_t put_piece(void *context, const uint8_t *piece, size_t len) {
+    live_piece_t *at = context;
+    printf("piece %zu %zu ", at->put, at->piece);
+    print_hex(piece, len);
+    printf("\n");
+    at->piece++;
     z_owned_bytes_t payload;
-    z_bytes_copy_from_buf(&payload, frame, len);
-    z_publisher_put(publisher, z_bytes_move(&payload), NULL);
+    z_bytes_copy_from_buf(&payload, piece, len);
+    return z_publisher_put(at->publisher, z_bytes_move(&payload), NULL);
+}
+
+static int make_live_cutter(void) {
+    char *profile = read_file("segment-profile.json");
+    char *values = read_file("segment-values.json");
+    live_chunk = (size_t)param_u64("chunk_bytes", 0);
+    if (profile == NULL || values == NULL || live_chunk == 0) {
+        return refused("segment-profile.json, segment-values.json or chunk_bytes", _Z_ERR_GENERIC, NULL);
+    }
+    z_owned_string_t reason;
+    z_result_t rc = wz_ext_segment_sender_new(&live_cutter, profile, values, param_u64("first_transfer", 0),
+                                              WZ_EXT_SEGMENT_ROLLOVER_REFUSE, &reason);
+    free(profile);
+    free(values);
+    if (rc != Z_OK) return refused("segment sender", rc, &reason);
+    live_cut = 1;
+    return 0;
+}
+
+static void put_frame(const z_loaned_publisher_t *publisher, const uint8_t *frame, size_t len) {
+    if (live_cut) {
+        live_piece_t at = {publisher, puts_done, 0};
+        wz_ext_segment_result_t result;
+        z_owned_string_t reason;
+        z_result_t rc = wz_ext_segment_sender_split(wz_ext_segment_sender_loan(&live_cutter), frame, len, live_chunk,
+                                                    put_piece, &at, &result, &reason);
+        if (rc != Z_OK) refused("split", rc, &reason);
+    } else {
+        z_owned_bytes_t payload;
+        z_bytes_copy_from_buf(&payload, frame, len);
+        z_publisher_put(publisher, z_bytes_move(&payload), NULL);
+    }
+    puts_done++;
 }
 
 static int role_send(const z_loaned_session_t *session, const char *key) {
@@ -322,6 +445,10 @@ static int role_send(const z_loaned_session_t *session, const char *key) {
     status = protect_plan(wz_ext_e2e_sender_loan(&sender), &longest);
     wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&sender));
     if (status != 0) return status;
+    if (param_u64("segmented", 0) != 0) {
+        status = make_live_cutter();
+        if (status != 0) return status;
+    }
 
     z_view_keyexpr_t ke;
     if (z_view_keyexpr_from_str(&ke, key) != Z_OK) return refused("key", _Z_ERR_GENERIC, NULL);
@@ -376,6 +503,7 @@ static int role_send(const z_loaned_session_t *session, const char *key) {
     printf("sent\n");
     int stopped = wait_for_file("stop");
     z_undeclare_publisher(z_publisher_move(&publisher));
+    if (live_cut) wz_ext_segment_sender_drop(wz_ext_segment_sender_move(&live_cutter));
     printf(stopped ? "done\n" : "timeout stop\n");
     return stopped ? 0 : 1;
 }
@@ -418,11 +546,68 @@ static int probe_seen(void) {
     return probe;
 }
 
+/* What a replay subscriber hands on: its replies for the ask role, its live samples (joined
+ * from their pieces under segmented) for a receiver of pieces. */
+static int record_live;
+
+static void on_replay(void *context, const wz_ext_replay_sample_t *sample) {
+    (void)context;
+    int wanted = record_live ? sample->from_replay == 0 : sample->from_replay == 1;
+    if (!wanted) return;
+    if (sample->judged == 1 && sample->verdict.payload_offset + sample->verdict.payload_len <= sample->len) {
+        seen_add(class_of(sample->verdict.status), sample->frame + sample->verdict.payload_offset,
+                 sample->verdict.payload_len);
+    } else {
+        seen_add("other", sample->frame, 0);
+    }
+}
+
+static void on_replay_drop(void *context) { (void)context; }
+
+static wz_ext_replay_publisher_slot_t replay_slots[4];
+static uint8_t *held_store;
+
+/* A replay subscriber of keyexpr judging by the receiver, which it takes: the ask role's,
+ * and, with record_live, the receiver of pieces, which is the one wz door that joins them. */
+static int make_replay_subscriber(const z_loaned_session_t *session, const z_loaned_keyexpr_t *keyexpr, int live,
+                                  wz_ext_owned_replay_subscriber_t *subscriber) {
+    const char *suffix = param("suffix");
+    if (suffix == NULL) return refused("suffix", _Z_ERR_GENERIC, NULL);
+    char *segment_profile = NULL;
+    if (param_u64("segmented", 0) != 0) {
+        segment_profile = read_file("segment-profile.json");
+        if (segment_profile == NULL) return refused("segment-profile.json", _Z_ERR_GENERIC, NULL);
+    }
+    size_t held_cell = (size_t)param_u64("frame_max", 65536);
+    size_t held_len = 8 * (4 + held_cell);
+    held_store = malloc(held_len);
+    if (held_store == NULL) return refused("held store", _Z_ERR_GENERIC, NULL);
+    wz_ext_replay_subscriber_options_t options;
+    wz_ext_replay_subscriber_options_default(&options);
+    options.slots = replay_slots;
+    options.slot_count = sizeof replay_slots / sizeof replay_slots[0];
+    options.held = held_store;
+    options.held_len = held_len;
+    options.held_cell = held_cell;
+    options.depth = (size_t)param_u64("depth", 1);
+    options.progress_ms = 3000;
+    options.round_ms = 20000;
+    options.segment_profile = segment_profile;
+    record_live = live;
+    z_result_t rc = wz_ext_replay_subscriber_new(subscriber, session, keyexpr, suffix,
+                                                 wz_ext_e2e_receiver_move(&receiver), &options, on_replay,
+                                                 on_replay_drop, NULL);
+    free(segment_profile);
+    if (rc != Z_OK) return refused("replay subscriber", rc, NULL);
+    return 0;
+}
+
 static int role_receive(const z_loaned_session_t *session, const char *key) {
     int status = make_receiver(&receiver);
     if (status != 0) return status;
     size_t expect = (size_t)param_u64("expect", 0);
     if (expect == 0 || expect > MAX_FRAMES) return refused("expect", _Z_ERR_GENERIC, NULL);
+    int pieces = param_u64("segmented", 0) != 0;
 
     z_view_keyexpr_t ke;
     if (z_view_keyexpr_from_str(&ke, key) != Z_OK) return refused("key", _Z_ERR_GENERIC, NULL);
@@ -431,19 +616,32 @@ static int role_receive(const z_loaned_session_t *session, const char *key) {
     z_view_keyexpr_t probe_ke;
     if (z_view_keyexpr_from_str(&probe_ke, probe_key) != Z_OK) return refused("probe key", _Z_ERR_GENERIC, NULL);
 
-    z_owned_closure_sample_t frame_closure;
-    z_closure_sample(&frame_closure, on_frame, NULL, NULL);
+    /* Whole frames are judged as they arrive; pieces are joined first, by the replay
+     * subscriber, on a suffix no cache serves, so it asks nobody and hands on live frames. */
     z_owned_subscriber_t frame_subscriber;
-    z_result_t rc = z_declare_subscriber(session, &frame_subscriber, z_view_keyexpr_loan(&ke),
-                                         z_closure_sample_move(&frame_closure), NULL);
-    if (rc != Z_OK) return refused("subscriber", rc, NULL);
+    wz_ext_owned_replay_subscriber_t joiner;
+    z_result_t rc;
+    if (pieces) {
+        status = make_replay_subscriber(session, z_view_keyexpr_loan(&ke), 1, &joiner);
+        if (status != 0) return status;
+    } else {
+        z_owned_closure_sample_t frame_closure;
+        z_closure_sample(&frame_closure, on_frame, NULL, NULL);
+        rc = z_declare_subscriber(session, &frame_subscriber, z_view_keyexpr_loan(&ke),
+                                  z_closure_sample_move(&frame_closure), NULL);
+        if (rc != Z_OK) return refused("subscriber", rc, NULL);
+    }
     z_owned_closure_sample_t probe_closure;
     z_closure_sample(&probe_closure, on_probe, NULL, NULL);
     z_owned_subscriber_t probe_subscriber;
     rc = z_declare_subscriber(session, &probe_subscriber, z_view_keyexpr_loan(&probe_ke),
                               z_closure_sample_move(&probe_closure), NULL);
     if (rc != Z_OK) {
-        z_subscriber_drop(z_subscriber_move(&frame_subscriber));
+        if (pieces) {
+            wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&joiner));
+        } else {
+            z_subscriber_drop(z_subscriber_move(&frame_subscriber));
+        }
         return refused("probe subscriber", rc, NULL);
     }
     printf("ready\n");
@@ -455,12 +653,23 @@ static int role_receive(const z_loaned_session_t *session, const char *key) {
             printf("probe\n");
             probe_told = 1;
         }
+        if (pieces) wz_ext_replay_subscriber_poll(wz_ext_replay_subscriber_loan(&joiner));
         z_sleep_ms(STEP_MS);
     }
     z_subscriber_drop(z_subscriber_move(&probe_subscriber));
-    z_subscriber_drop(z_subscriber_move(&frame_subscriber));
+    if (pieces) {
+        wz_ext_replay_subscriber_counts_t counts;
+        memset(&counts, 0, sizeof counts);
+        wz_ext_replay_subscriber_counts(wz_ext_replay_subscriber_loan(&joiner), &counts);
+        wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&joiner));
+        free(held_store);
+        printf("counts given_up=%llu unjoined=%llu\n", (unsigned long long)counts.frames_given_up,
+               (unsigned long long)counts.unjoined_pieces);
+    } else {
+        z_subscriber_drop(z_subscriber_move(&frame_subscriber));
+        wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&receiver));
+    }
     print_seen();
-    wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&receiver));
     if (seen_count() < expect) {
         printf("timeout %zu of %zu\n", seen_count(), expect);
         return 1;
@@ -595,19 +804,6 @@ static int role_serve(const z_loaned_session_t *session, const char *key) {
 
 /* ---- ask ------------------------------------------------------------------------------- */
 
-static void on_replay(void *context, const wz_ext_replay_sample_t *sample) {
-    (void)context;
-    if (sample->from_replay != 1) return;
-    if (sample->judged == 1 && sample->verdict.payload_offset + sample->verdict.payload_len <= sample->len) {
-        seen_add(class_of(sample->verdict.status), sample->frame + sample->verdict.payload_offset,
-                 sample->verdict.payload_len);
-    } else {
-        seen_add("other", sample->frame, 0);
-    }
-}
-
-static void on_replay_drop(void *context) { (void)context; }
-
 static const char *round_name(uint8_t phase) {
     switch (phase) {
         case WZ_EXT_REPLAY_ROUND_IDLE:
@@ -626,44 +822,13 @@ static const char *round_name(uint8_t phase) {
 }
 
 static int role_ask(const z_loaned_session_t *session, const char *key) {
-    const char *suffix = param("suffix");
-    if (suffix == NULL) return refused("suffix", _Z_ERR_GENERIC, NULL);
-    int segmented = param_u64("segmented", 0) != 0;
-    char *segment_profile = NULL;
-    if (segmented) {
-        segment_profile = read_file("segment-profile.json");
-        if (segment_profile == NULL) return refused("segment-profile.json", _Z_ERR_GENERIC, NULL);
-    }
     int status = make_receiver(&receiver);
     if (status != 0) return status;
-
     z_view_keyexpr_t ke;
     if (z_view_keyexpr_from_str(&ke, key) != Z_OK) return refused("key", _Z_ERR_GENERIC, NULL);
-    static wz_ext_replay_publisher_slot_t slots[4];
-    size_t held_cell = (size_t)param_u64("frame_max", 65536);
-    size_t held_len = 8 * (4 + held_cell);
-    uint8_t *held = malloc(held_len);
-    if (held == NULL) return refused("held store", _Z_ERR_GENERIC, NULL);
-    wz_ext_replay_subscriber_options_t options;
-    wz_ext_replay_subscriber_options_default(&options);
-    options.slots = slots;
-    options.slot_count = sizeof slots / sizeof slots[0];
-    options.held = held;
-    options.held_len = held_len;
-    options.held_cell = held_cell;
-    options.depth = (size_t)param_u64("depth", 1);
-    options.progress_ms = 3000;
-    options.round_ms = 20000;
-    options.segment_profile = segment_profile;
     wz_ext_owned_replay_subscriber_t subscriber;
-    z_result_t rc = wz_ext_replay_subscriber_new(&subscriber, session, z_view_keyexpr_loan(&ke), suffix,
-                                                 wz_ext_e2e_receiver_move(&receiver), &options, on_replay,
-                                                 on_replay_drop, NULL);
-    if (rc != Z_OK) {
-        free(held);
-        free(segment_profile);
-        return refused("replay subscriber", rc, NULL);
-    }
+    status = make_replay_subscriber(session, z_view_keyexpr_loan(&ke), 0, &subscriber);
+    if (status != 0) return status;
     printf("ready\n");
 
     const wz_ext_loaned_replay_subscriber_t *loaned = wz_ext_replay_subscriber_loan(&subscriber);
@@ -684,8 +849,7 @@ static int role_ask(const z_loaned_session_t *session, const char *key) {
            (unsigned long long)counts.duplicates, (unsigned long long)counts.stale,
            (unsigned long long)counts.abandoned, (unsigned long long)counts.frames_given_up,
            (unsigned long long)counts.unjoined_pieces);
-    free(held);
-    free(segment_profile);
+    free(held_store);
     if (phase != WZ_EXT_REPLAY_ROUND_LIVE && phase != WZ_EXT_REPLAY_ROUND_ABANDONED) {
         printf("timeout round\n");
         return 1;
@@ -722,10 +886,9 @@ int main(int argc, char **argv) {
     z_mutex_init(&seen.lock);
 
     z_owned_session_t session;
-    z_result_t rc = open_session(&session, how, locator, mode);
-    if (rc != Z_OK) return refused("session", rc, NULL);
+    int status = open_session(&session, how, locator, mode);
+    if (status != 0) return status;
     const z_loaned_session_t *s = z_session_loan(&session);
-    int status;
     if (strcmp(role, "send") == 0) {
         status = role_send(s, key);
     } else if (strcmp(role, "receive") == 0) {
