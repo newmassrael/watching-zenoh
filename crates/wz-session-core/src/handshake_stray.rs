@@ -44,8 +44,24 @@ pub enum StrayVerdict {
     Pass,
     /// The message is out of its step and the attempt ends (`fail`).
     Reject,
-    /// The message is out of its step and is dropped (`ignore`).
+    /// The message is out of its step and is dropped (`ignore`, and `ignore-and-replay` for a
+    /// message that repeats no step this side answered).
     Drop,
+    /// The message repeats the step this side's last answer answered (an InitSyn after the
+    /// acceptor's InitAck, an InitAck after the initiator's OpenSyn) and that answer is sent again,
+    /// as it went out (`ignore-and-replay`).
+    Replay,
+}
+
+/// Whether `got`, arriving in the step that awaits `awaited`, is the peer repeating the step this
+/// side's last answer answered: the peer's answer to it was lost or late, and the same answer
+/// sent again lets the establishment go on.
+pub const fn repeats_answered_step(awaited: HandshakeMessage, got: HandshakeMessage) -> bool {
+    matches!(
+        (awaited, got),
+        (HandshakeMessage::OpenSyn, HandshakeMessage::InitSyn)
+            | (HandshakeMessage::OpenAck, HandshakeMessage::InitAck)
+    )
 }
 
 /// The verdict on `got` in a step that awaits `awaited` (`None` outside the establishment, where
@@ -64,6 +80,13 @@ pub const fn judge(
     match policy {
         HandshakeStrayMessage::Fail => StrayVerdict::Reject,
         HandshakeStrayMessage::Ignore => StrayVerdict::Drop,
+        HandshakeStrayMessage::IgnoreAndReplay => {
+            if repeats_answered_step(awaited, got) {
+                StrayVerdict::Replay
+            } else {
+                StrayVerdict::Drop
+            }
+        }
     }
 }
 
@@ -73,7 +96,10 @@ pub const fn judge(
 /// Init or Open is not taken as a sign of life and records nothing, since it belongs to an
 /// establishment that is over.
 pub const fn established_drops_silently(policy: HandshakeStrayMessage) -> bool {
-    matches!(policy, HandshakeStrayMessage::Ignore)
+    matches!(
+        policy,
+        HandshakeStrayMessage::Ignore | HandshakeStrayMessage::IgnoreAndReplay
+    )
 }
 
 #[cfg(test)]
@@ -116,10 +142,46 @@ mod tests {
         }
     }
 
-    /// Only `ignore` keeps a late Init or Open out of an established session's lease.
+    /// Only the ignoring values keep a late Init or Open out of an established session's lease.
     #[test]
     fn only_ignore_keeps_a_late_handshake_message_out_of_the_lease() {
         assert!(!established_drops_silently(HandshakeStrayMessage::Fail));
         assert!(established_drops_silently(HandshakeStrayMessage::Ignore));
+        assert!(established_drops_silently(
+            HandshakeStrayMessage::IgnoreAndReplay
+        ));
+    }
+
+    /// `ignore-and-replay` answers again exactly the two repeats of an answered step (an InitSyn
+    /// where the acceptor awaits the OpenSyn, an InitAck where the initiator awaits the OpenAck),
+    /// drops every other message out of its step, and passes the awaited one.
+    #[test]
+    fn ignore_and_replay_answers_only_a_repeat_of_the_answered_step() {
+        let policy = HandshakeStrayMessage::IgnoreAndReplay;
+        assert_eq!(judge(Some(OpenSyn), InitSyn, policy), StrayVerdict::Replay);
+        assert_eq!(judge(Some(OpenAck), InitAck, policy), StrayVerdict::Replay);
+        for awaited in ALL {
+            assert_eq!(judge(Some(awaited), awaited, policy), StrayVerdict::Pass);
+            for got in ALL.into_iter().filter(|got| *got != awaited) {
+                let expected = if repeats_answered_step(awaited, got) {
+                    StrayVerdict::Replay
+                } else {
+                    StrayVerdict::Drop
+                };
+                assert_eq!(
+                    judge(Some(awaited), got, policy),
+                    expected,
+                    "{awaited:?} {got:?}"
+                );
+            }
+        }
+        assert!(
+            !repeats_answered_step(InitAck, InitSyn),
+            "no answer went out yet"
+        );
+        assert!(
+            !repeats_answered_step(OpenAck, OpenSyn),
+            "the peer's own message"
+        );
     }
 }

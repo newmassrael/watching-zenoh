@@ -28,10 +28,19 @@ use wz_runtime_tokio::session_glue::{
     DriverLoopOutcome, SessionActionsBinding, SessionLinkActions,
 };
 use wz_runtime_tokio::{LinkEvent, RxFrame};
-use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver, QueueDriver};
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, LifecycleRecordingDriver, NoopOutboundDriver, QueueDriver,
+};
 use wz_session_wire_fixtures::{craft_initack_wire, craft_openack_wire};
 
 type TestEngine = Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>;
+
+/// Every value of the policy, for a test whose message no value replays.
+const ALL_VALUES: [HandshakeStrayMessage; 3] = [
+    HandshakeStrayMessage::Fail,
+    HandshakeStrayMessage::Ignore,
+    HandshakeStrayMessage::IgnoreAndReplay,
+];
 
 /// A session whose snapshot holds `value`, or `None` when the build's domain leaves it out.
 fn session_under(value: HandshakeStrayMessage) -> Option<(Arc<SessionLinkActions>, TestEngine)> {
@@ -102,6 +111,9 @@ async fn a_repeated_init_ack_after_the_open_syn_fails_or_is_dropped_by_the_polic
                     "ignore: the awaited OpenAck completes the establishment"
                 );
             }
+            HandshakeStrayMessage::IgnoreAndReplay => {
+                unreachable!("the replay of this repeat has its own test")
+            }
         }
     }
 }
@@ -109,7 +121,7 @@ async fn a_repeated_init_ack_after_the_open_syn_fails_or_is_dropped_by_the_polic
 /// An OpenAck that reaches an initiator still waiting for its InitAck is out of its step too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_open_ack_before_the_init_ack_fails_or_is_dropped_by_the_policy() {
-    for value in [HandshakeStrayMessage::Fail, HandshakeStrayMessage::Ignore] {
+    for value in ALL_VALUES {
         let Some((actions, mut engine)) = session_under(value) else {
             continue;
         };
@@ -118,7 +130,8 @@ async fn an_open_ack_before_the_init_ack_fails_or_is_dropped_by_the_policy() {
         let outcome = deliver(&actions, &mut engine, craft_openack_wire(0)).await;
         let (expected, state) = match value {
             HandshakeStrayMessage::Fail => (DriverLoopOutcome::HandshakeStrayRejected, S::Closing),
-            HandshakeStrayMessage::Ignore => {
+            // An OpenAck repeats no step the initiator answered, so the replay drops it too.
+            HandshakeStrayMessage::Ignore | HandshakeStrayMessage::IgnoreAndReplay => {
                 (DriverLoopOutcome::HandshakeStrayIgnored, S::SentInitSyn)
             }
         };
@@ -136,7 +149,7 @@ async fn an_open_ack_before_the_init_ack_fails_or_is_dropped_by_the_policy() {
 /// session keeps upstream's rule, where every message the peer sends counts for the lease.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_late_init_ack_keeps_out_of_the_lease_only_under_ignore() {
-    for value in [HandshakeStrayMessage::Fail, HandshakeStrayMessage::Ignore] {
+    for value in ALL_VALUES {
         let Some((actions, mut engine)) = session_under(value) else {
             continue;
         };
@@ -162,7 +175,7 @@ async fn a_late_init_ack_keeps_out_of_the_lease_only_under_ignore() {
                     "fail: the establishment is over, so no step judges it: {outcome:?}"
                 );
             }
-            HandshakeStrayMessage::Ignore => {
+            HandshakeStrayMessage::Ignore | HandshakeStrayMessage::IgnoreAndReplay => {
                 assert!(
                     !stamped,
                     "ignore: a late handshake message is no sign of life"
@@ -205,6 +218,9 @@ async fn an_acceptor_judges_a_message_out_of_its_step_by_the_policy() {
                 );
                 assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
             }
+            HandshakeStrayMessage::IgnoreAndReplay => {
+                unreachable!("the replay of this repeat has its own test")
+            }
         }
         let _ = deliver(&actions, &mut engine, craft_initsyn_wire()).await;
         assert_eq!(
@@ -223,4 +239,109 @@ async fn an_acceptor_judges_a_message_out_of_its_step_by_the_policy() {
             "ignore: the acceptor still awaits the OpenSyn"
         );
     }
+}
+
+/// A session under `value` whose sends are recorded, or `None` when the build leaves it out.
+fn recording_session_under(
+    value: HandshakeStrayMessage,
+) -> Option<(
+    Arc<LifecycleRecordingDriver>,
+    Arc<SessionLinkActions>,
+    TestEngine,
+)> {
+    let mut params = fixture_session_init_params();
+    params.policy.select_handshake_stray_message(value).ok()?;
+    let driver = Arc::new(LifecycleRecordingDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
+    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize().unwrap_or_else(|never| match never {});
+    Some((driver, actions, engine))
+}
+
+/// `ignore-and-replay`, initiator: the InitAck repeated after the OpenSyn went out is answered
+/// with the very OpenSyn bytes sent first, the step keeps waiting, the OpenAck still completes
+/// the establishment, and the establishment lets go of the held answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeated_init_ack_is_answered_with_the_open_syn_sent_first() {
+    let Some((driver, actions, mut engine)) =
+        recording_session_under(HandshakeStrayMessage::IgnoreAndReplay)
+    else {
+        return;
+    };
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkOpened);
+    let _ = deliver(&actions, &mut engine, craft_initack_wire(&[0x44; 8])).await;
+    assert_eq!(engine.get_current_state(), S::GotInitAck);
+    let sent = driver.snapshot().sends;
+    let open_syn = sent.last().expect("the OpenSyn went out").0.clone();
+    assert!(actions.held_answer_len() > 0, "the OpenSyn is held");
+
+    let outcome = deliver(&actions, &mut engine, craft_initack_wire(&[0x44; 8])).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::HandshakeStrayReplayed),
+        "{outcome:?}"
+    );
+    let resent = driver.snapshot().sends;
+    assert_eq!(resent.len(), sent.len() + 1, "one message more, the replay");
+    assert_eq!(
+        resent.last().expect("the replay").0,
+        open_syn,
+        "the same bytes"
+    );
+    assert_eq!(engine.get_current_state(), S::GotInitAck, "still waiting");
+
+    let _ = deliver(&actions, &mut engine, craft_openack_wire(0)).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+    assert_eq!(actions.held_answer_len(), 0, "the establishment is over");
+}
+
+/// `ignore-and-replay`, acceptor: an InitSyn repeated after the InitAck went out is answered
+/// with the very InitAck bytes sent first (the cookie in it is the one already issued), and the
+/// acceptor still awaits the OpenSyn.
+#[cfg(feature = "session-unicast-accept")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeated_init_syn_is_answered_with_the_init_ack_sent_first() {
+    use wz_session_wire_fixtures::craft_initsyn_wire;
+    let Some((driver, actions, mut engine)) =
+        recording_session_under(HandshakeStrayMessage::IgnoreAndReplay)
+    else {
+        return;
+    };
+    engine.process_event(E::InboundStart);
+    let _ = deliver(&actions, &mut engine, craft_initsyn_wire()).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+    let sent = driver.snapshot().sends;
+    let init_ack = sent.last().expect("the InitAck went out").0.clone();
+
+    let outcome = deliver(&actions, &mut engine, craft_initsyn_wire()).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::HandshakeStrayReplayed),
+        "{outcome:?}"
+    );
+    let resent = driver.snapshot().sends;
+    assert_eq!(resent.len(), sent.len() + 1);
+    assert_eq!(
+        resent.last().expect("the replay").0,
+        init_ack,
+        "not a new cookie"
+    );
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+}
+
+/// Under `ignore` nothing is held, so the same repeat sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn under_ignore_no_answer_is_held_or_sent_again() {
+    let Some((driver, actions, mut engine)) =
+        recording_session_under(HandshakeStrayMessage::Ignore)
+    else {
+        return;
+    };
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkOpened);
+    let _ = deliver(&actions, &mut engine, craft_initack_wire(&[0x55; 8])).await;
+    assert_eq!(actions.held_answer_len(), 0);
+    let before = driver.snapshot().sends.len();
+    let _ = deliver(&actions, &mut engine, craft_initack_wire(&[0x55; 8])).await;
+    assert_eq!(driver.snapshot().sends.len(), before);
 }

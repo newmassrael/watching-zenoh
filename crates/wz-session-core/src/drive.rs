@@ -1510,7 +1510,28 @@ fn judge_handshake_step<R: SessionRuntime, T: TimeSource>(
             Some(DriverLoopOutcome::HandshakeStrayRejected)
         }
         StrayVerdict::Drop => Some(DriverLoopOutcome::HandshakeStrayIgnored),
+        StrayVerdict::Replay => Some(replay_held_answer(actions)),
     }
+}
+
+/// Send the held establishment answer again, for a peer that repeated the step it answers.
+#[cfg(all(
+    any(
+        feature = "alloc",
+        all(feature = "codec-frame", feature = "session-slot")
+    ),
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+fn replay_held_answer<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> DriverLoopOutcome {
+    #[cfg(any(feature = "session-unicast-open", feature = "session-unicast-accept"))]
+    if actions.resend_held_answer() {
+        return DriverLoopOutcome::HandshakeStrayReplayed;
+    }
+    #[cfg(not(any(feature = "session-unicast-open", feature = "session-unicast-accept")))]
+    let _ = actions;
+    DriverLoopOutcome::HandshakeStrayNotReplayed
 }
 
 /// The establishment message `frame` is, if it is one.

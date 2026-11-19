@@ -3436,7 +3436,7 @@ value. Only the C ABIs' open reads this policy.
 id = "handshake-stray-message"
 kind = "choice"
 kconfig = "WZ_POLICY_HANDSHAKE_STRAY_MESSAGE"
-choices = ["fail", "ignore"]
+choices = ["fail", "ignore", "ignore-and-replay"]
 default = "fail"
 upstream = "Ends a unicast establishment, closing the link with INVALID, on any message but the one its current step reads next, and drops an Init or Open that reaches an established session while counting it as traffic for the lease."
 scope = "session"
@@ -3454,8 +3454,13 @@ an InitSyn repeated after the InitAck went out, or any other out of its step.
 on waiting, under the deadline it already had: nothing a peer sends extends an
 establishment. Under `ignore` an Init or Open that reaches an established
 session is dropped as well, and is not counted as a sign of the peer's life for
-the lease, nor does it change anything the session negotiated. A peer that
-repeats an earlier step is not answered again under either value.
+the lease, nor does it change anything the session negotiated.
+`ignore-and-replay` is `ignore`, and in addition a peer that repeats the step
+this node last answered (an InitSyn after the InitAck went out, an InitAck
+after the OpenSyn went out) is sent that answer again, the very bytes first
+sent, so its cookie is the one already issued. A build whose domain allows this
+value holds one answer per establishment in flight, released when the
+establishment ends; an answer longer than the hold is not sent again.
 '''
 
 # A profile is a named set of policy values a run-time document starts from: the document names it

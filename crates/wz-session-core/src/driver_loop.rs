@@ -256,6 +256,16 @@ pub enum DriverLoopOutcome {
     /// or merged, and the step goes on waiting for its own message under the deadline it had.
     #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     HandshakeStrayIgnored,
+    /// Under `handshake-stray-message = ignore-and-replay`, the peer repeated the step this
+    /// side's last establishment answer answered, and the held answer went out again as it was
+    /// first sent; the step goes on waiting under the deadline it had.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayReplayed,
+    /// The same repeat, with no answer held to send again (it was longer than
+    /// `HELD_ANSWER_MAX`, or the link took no slot for it): the message is dropped as under
+    /// `ignore`, and this names that the replay did not happen.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayNotReplayed,
     /// An InitSyn announced a protocol version other than
     /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], carried here.
     ///

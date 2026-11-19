@@ -890,7 +890,8 @@ async fn r311kj_acceptor_ignores_enlarging_init_ack() {
             );
             assert_eq!(engine.get_current_state(), S::Closing);
         }
-        HandshakeStrayMessage::Ignore => {
+        // An InitAck repeats no step the acceptor answered, so the replay drops it too.
+        HandshakeStrayMessage::Ignore | HandshakeStrayMessage::IgnoreAndReplay => {
             assert_eq!(
                 engine.get_current_state(),
                 pre_state,

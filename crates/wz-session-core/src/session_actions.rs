@@ -755,6 +755,32 @@ const TX_CONDUITS: usize = 1;
 ))]
 const HANDSHAKE_LANE: Priority = Priority::Control;
 
+/// The longest establishment answer a session holds for `handshake-stray-message =
+/// ignore-and-replay`: an InitAck with the widest cookie this node issues and room for its
+/// extension chain, or an OpenSyn echoing a cookie of that width. An answer longer than this is
+/// not held, and the step it answers is then not replayed (`HandshakeStrayNotReplayed`).
+pub const HELD_ANSWER_MAX: usize = 256 + crate::session_init_params::COOKIE_MAX;
+
+/// One held establishment answer.
+#[cfg(all(
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+type HeldAnswer = crate::bounded::BoundedVec<u8, HELD_ANSWER_MAX>;
+
+/// How many establishment answers a session holds: one where the build's domain of
+/// `handshake-stray-message` allows `ignore-and-replay`, and none where it leaves it out, so a
+/// build that fixes the policy (an image with no operating system states only the default) holds
+/// no byte for it.
+pub const HELD_ANSWER_SLOTS: usize =
+    if <crate::policy::HandshakeStrayMessage as crate::policy_binding::PolicyValue>::DOMAIN
+        .contains_index(crate::policy::HandshakeStrayMessage::IgnoreAndReplay as usize)
+    {
+        1
+    } else {
+        0
+    };
+
 /// R2923 / R2924 — the outbound queue configuration and its upstream
 /// defaults live with the per-session parameters that carry them
 /// ([`crate::session_init_params::TxQueueConf`]).
@@ -1549,6 +1575,17 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// session had already delivered. Set by the OpenSyn send, read by the
     /// admission predicate, cleared by the admission it grants.
     pub awaiting_open_ack: R::Mutex<bool>,
+    /// The last answer this session sent in its establishment (the acceptor's InitAck, the
+    /// initiator's OpenSyn), as the bytes that went out, for `handshake-stray-message =
+    /// ignore-and-replay` to send again when the peer repeats the step it answers. The bytes and
+    /// not the parameters, because the acceptor lets go of what it negotiated once its cookie
+    /// carries it: an InitAck encoded again would carry another cookie. No slot at all in a build
+    /// whose domain of the policy leaves the value out ([`HELD_ANSWER_SLOTS`]).
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    held_answer: [R::Mutex<HeldAnswer>; HELD_ANSWER_SLOTS],
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
     /// every field that needs a `now_monotonic_ms()` read holds a
@@ -3785,6 +3822,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 inbound_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
                 awaiting_open_ack: R::new_mutex(false),
+                #[cfg(all(
+                    any(feature = "codec-init-body", feature = "codec-open-body"),
+                    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                ))]
+                held_answer: core::array::from_fn(|_| R::new_mutex(HeldAnswer::default())),
                 clock: clock,
                 inbound_peer_zid: R::new_mutex(None::<SessionZid>),
                 remote_peer_zid: R::new_mutex(None::<SessionZid>),
@@ -5668,6 +5710,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             )
         });
         self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+            let start = buf.len();
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 crate::handshake_encode::encode_init_into(
                     buf,
@@ -5677,7 +5720,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     chain,
                     cookie_override,
                 )
-            })
+            })?;
+            // The acceptor's InitAck is the answer a replay sends again, as written.
+            if role == ExtChainRole::InitAck {
+                self.hold_handshake_answer(&buf.as_slice()[start..]);
+            }
+            Ok(())
         })
     }
 
@@ -5723,6 +5771,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         let want = head_len + chain_len;
         self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+            let start = buf.len();
             if echo_inbound_cookie {
                 R::with_mutex_mut(&self.inbound_cookie, |cookie| {
                     encode_open_head_into(
@@ -5739,7 +5788,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 crate::ext_chain::encode_ext_chain_into(buf, chain)
-            })
+            })?;
+            // The initiator's OpenSyn is the answer a replay sends again, as written.
+            if role == ExtChainRole::OpenSyn {
+                self.hold_handshake_answer(&buf.as_slice()[start..]);
+            }
+            Ok(())
         })
     }
 
@@ -9195,6 +9249,93 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// code span rather than a link) is the answer's side effect.
     pub fn open_ack_awaited(&self) -> bool {
         R::with_mutex_mut(&self.awaiting_open_ack, |s| *s)
+    }
+
+    /// Hold `bytes`, the establishment answer this session just sent, for a replay
+    /// ([`Self::resend_held_answer`]). Nothing is held in a build whose domain leaves
+    /// `ignore-and-replay` out, nor for a session that runs under another value; an answer
+    /// past [`HELD_ANSWER_MAX`] leaves the hold empty.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn hold_handshake_answer(&self, bytes: &[u8]) {
+        if !matches!(
+            self.params.policy.handshake_stray_message(),
+            crate::policy::HandshakeStrayMessage::IgnoreAndReplay
+        ) {
+            return;
+        }
+        for slot in &self.held_answer {
+            R::with_mutex_mut(slot, |held| {
+                held.clear();
+                if bytes.len() > HELD_ANSWER_MAX || held.extend_from_slice(bytes).is_err() {
+                    held.clear();
+                }
+            });
+        }
+    }
+
+    /// Let go of the held answer: the establishment it belongs to is over.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn release_handshake_answer(&self) {
+        for slot in &self.held_answer {
+            R::with_mutex_mut(slot, |held| held.clear());
+        }
+    }
+
+    /// The bytes of the held establishment answer, if one is held: what a replay sends.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    pub fn held_answer_len(&self) -> usize {
+        self.held_answer
+            .iter()
+            .map(|slot| R::with_mutex_mut(slot, |held| held.len()))
+            .sum()
+    }
+
+    /// Send the held establishment answer again, the very bytes that went out: `false` when
+    /// none is held (the build holds none, the answer was too long to hold, or the link took no
+    /// slot for it). The bytes are copied out of the hold before the send, which takes locks of
+    /// its own.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    pub(crate) fn resend_held_answer(&self) -> bool {
+        // A constant of the build: where the domain holds no slot, nothing below is reached.
+        if HELD_ANSWER_SLOTS == 0 {
+            return false;
+        }
+        let Some(slot) = self.held_answer.first() else {
+            return false;
+        };
+        let mut copy = [0u8; HELD_ANSWER_MAX];
+        let len = R::with_mutex_mut(slot, |held| {
+            let len = held.len().min(HELD_ANSWER_MAX);
+            copy[..len].copy_from_slice(&held[..len]);
+            len
+        });
+        if len == 0 {
+            return false;
+        }
+        #[cfg(not(feature = "tx-lend-only"))]
+        {
+            self.send_wire(&copy[..len], Reliability::Reliable, HANDSHAKE_LANE);
+            true
+        }
+        #[cfg(feature = "tx-lend-only")]
+        {
+            self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
+                buf.append(&copy[..len])
+            })
+            .is_ok()
+        }
     }
 
     /// R2782 — everything an ADMITTED OpenAck does to the initiator: stop
@@ -15717,6 +15858,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // one left standing would admit a stray OpenAck into the new
             // handshake.
             R::with_mutex_mut(&self.awaiting_open_ack, |slot| *slot = false);
+            #[cfg(all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ))]
+            self.release_handshake_answer();
             R::with_mutex_mut(&self.link.last_inbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.link.established_at, |slot| *slot = None);
             // The liveness duties belong to the transport that was
@@ -16551,6 +16697,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         "OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)",
                     );
                 a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                a.hold_handshake_answer(&bytes);
             }
             // Fixed-memory step S4 — the peer's cookie is echoed from the slot
             // that holds it, read where it lies, and the message is written into
@@ -16728,6 +16875,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                          accept_cookie::the_widest_cookie_fits_the_generated_field",
                     );
                 a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                a.hold_handshake_answer(&bytes);
                 cookie_bytes.is_some()
             };
             // Fixed-memory step S4 — the same InitAck with no heap in it: the
@@ -16898,6 +17046,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         let now = a.clock.now_monotonic_ms();
         // R311y205 (IMPL-2a) — the established stamp + F2 gate are per-link.
         R::with_mutex_mut(&self.link().established_at, |slot| *slot = Some(now));
+        // The establishment is over, so no step of it is answered again.
+        #[cfg(all(
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ))]
+        a.release_handshake_answer();
         // F2 — Established (re-)entry re-opens the data-send gate (the
         // supervisor replays cached declarations right after this fires).
         R::with_mutex_mut(&self.link().transport_available, |g| *g = true);
