@@ -999,7 +999,9 @@ mod policy_document_tests {
 
     use super::*;
     use crate::abi::z_owned_config_t;
-    use crate::config::zc_config_from_str;
+    use crate::config::{
+        z_config_default, z_config_loan_mut, zc_config_from_str, zc_config_insert_json5,
+    };
     use wz_runtime_tokio::policy::SubscriberOverload;
     use wz_runtime_tokio_test_support::free_port;
     use wz_session_core::policy_binding::PolicyValue;
@@ -1067,6 +1069,77 @@ mod policy_document_tests {
                 session_handle(z_session_loan(&session)).is_none(),
                 "a refused open leaves the gravestone"
             );
+        }
+    }
+
+    /// Open the same peer as [`open_with`], its config made by `z_config_default` and one
+    /// `zc_config_insert_json5` per key, the keys of `wz` after the peer's own, each insert
+    /// answering `Z_OK`: the code of the open, and the session it made.
+    unsafe fn open_inserting(wz: &[(&str, &str)]) -> (ZResult, z_owned_session_t) {
+        let listen = format!(r#"["tcp/127.0.0.1:{}"]"#, free_port());
+        let peer = [
+            ("mode", r#""peer""#),
+            ("listen/endpoints", listen.as_str()),
+            ("scouting/multicast/enabled", "false"),
+        ];
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        for (key, value) in peer.iter().chain(wz) {
+            let (k, v) = (CString::new(*key).unwrap(), CString::new(*value).unwrap());
+            assert_eq!(
+                zc_config_insert_json5(z_config_loan_mut(&mut cfg), k.as_ptr(), v.as_ptr()),
+                Z_OK,
+                "{key} = {value}"
+            );
+        }
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        let code = z_open(
+            &mut session,
+            (&mut cfg as *mut z_owned_config_t).cast::<z_moved_config_t>(),
+            std::ptr::null(),
+        );
+        (code, session)
+    }
+
+    /// A policy stated by inserting under `wz/policies` reaches the session the open makes, as
+    /// the same statement in a document does.
+    #[test]
+    fn a_session_runs_under_the_policies_its_inserts_state() {
+        let value = a_chosen_overload();
+        let quoted = format!(r#""{value}""#);
+        // SAFETY: as above.
+        unsafe {
+            let (code, mut session) =
+                open_inserting(&[("wz/policies/subscriber-overload", quoted.as_str())]);
+            assert_eq!(code, Z_OK);
+            let handle = session_handle(z_session_loan(&session)).expect("the open made a session");
+            assert_eq!(handle.session_policy().subscriber_overload().id(), value);
+            let _ = z_close(z_session_loan_mut(&mut session), std::ptr::null_mut());
+            z_session_drop((&mut session as *mut z_owned_session_t).cast::<z_moved_session_t>());
+        }
+    }
+
+    /// An insert the member stores and the resolution refuses fails the open with the code of a
+    /// configuration refused for what it states: a value the policy does not have, a policy the
+    /// build does not have, a profile it does not have, and a member that is no object.
+    #[test]
+    fn a_refused_insert_fails_the_open_as_a_refused_configuration() {
+        for refused in [
+            ("wz/policies/subscriber-overload", r#""sometimes""#),
+            ("wz/policies/no-such-policy", r#""on""#),
+            ("wz/profile", r#""no-such-profile""#),
+            ("wz", r#""upstream""#),
+            ("wz/limits", "{}"),
+        ] {
+            // SAFETY: as above; the open makes no session, so there is none to close.
+            unsafe {
+                let (code, session) = open_inserting(&[refused]);
+                assert_eq!(code, Z_EINVAL, "{refused:?}");
+                assert!(
+                    session_handle(z_session_loan(&session)).is_none(),
+                    "{refused:?}: a refused open leaves the gravestone"
+                );
+            }
         }
     }
 }
