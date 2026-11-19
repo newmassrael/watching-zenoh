@@ -85,6 +85,11 @@ atomic-publish = ["engine-tokio"]
 # snapshot an open resolved with the layer each value came from (`Origin`, in `config`). It is off
 # by default for the reason `link-restriction` is; `wz::ext::policies` turns it on.
 open-policies = ["engine-tokio"]
+# The key ids every node of a deployment shares, stated in the configuration's `wz/key-ids` member:
+# the dictionary and the key-wire form of one endpoint apart from the session's, which the open
+# hands its session. No item of the surface; off by default because a stock peer cannot read a key
+# named by an id it never saw declared, and a build without it refuses the member at the open.
+shared-key-ids = ["engine-tokio", "wz-capi-core?/shared-key-ids", "wz-session-core?/shared-key-ids"]
 # `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
 # for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
 transport_tcp = ["zenoh-config/transport_tcp"]

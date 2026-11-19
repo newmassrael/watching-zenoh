@@ -685,6 +685,14 @@ impl Engine {
         // open's own layer before this, and the plan runs under that snapshot.
         let plan = OpenPlan::resolve_under(role, stated, Some(&document.to_string()), |_| policy)
             .map_err(tokio_engine::refusal_error)?;
+        // The key ids the `wz` member states, which the plan's document, zenoh's keys alone, does
+        // not hold: the session holds them as it holds what the plan read.
+        #[cfg(feature = "shared-key-ids")]
+        let plan = {
+            let mut plan = plan;
+            plan.session.key_ids = config.resolve_key_ids()?;
+            plan
+        };
         // Subregions of `gateway/south` are placed by a node alone: a shape that fits none is
         // refused by the key's name and not opened as the registry of faces, which has no south.
         plan.refuse_uncarried_south(role, true)

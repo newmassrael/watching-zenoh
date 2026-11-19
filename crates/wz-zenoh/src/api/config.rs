@@ -151,6 +151,14 @@ impl Config {
     pub(crate) fn resolve_policies(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
         self.1.resolve()
     }
+
+    /// The key ids an open of the configuration hands its session: what the `wz` member's
+    /// `wz/key-ids` states, read by the reader that resolves its policies
+    /// ([`Self::resolve_policies`]), which refuses the member first when it refuses any of it.
+    #[cfg(feature = "shared-key-ids")]
+    pub(crate) fn resolve_key_ids(&self) -> ZResult<wz_session_core::shared_key_ids::KeyIdsAtOpen> {
+        self.1.key_ids()
+    }
 }
 
 /// The door of the open's own layer of policies, wz's beyond upstream's surface.
@@ -327,20 +335,35 @@ impl WzStatements {
         }
     }
 
+    /// Each `wz` member, gathered in its order as the members of a document of its own, which is
+    /// what the reader of the member reads.
     #[cfg(feature = "engine-tokio")]
-    fn resolve(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
-        use wz_session_core::{
-            json5::Json5Value,
-            policy::SessionPolicy,
-            policy_document::{resolve_document_under, Overrides, Statement},
-        };
-
-        let tree = Json5Value::Object(
+    fn tree(&self) -> wz_session_core::json5::Json5Value {
+        wz_session_core::json5::Json5Value::Object(
             self.member
                 .iter()
                 .map(|member| (WZ_MEMBER.to_owned(), member.to_json5()))
                 .collect(),
-        );
+        )
+    }
+
+    /// The key ids the member states (`wz/key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    fn key_ids(&self) -> ZResult<wz_session_core::shared_key_ids::KeyIdsAtOpen> {
+        let tree = self.tree();
+        wz_session_core::policy_document::statements_from_json5(&tree)
+            .map(|read| read.key_ids)
+            .map_err(|refusals| zerror!("the `wz` member is refused: {refusals}").into())
+    }
+
+    #[cfg(feature = "engine-tokio")]
+    fn resolve(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
+        use wz_session_core::{
+            policy::SessionPolicy,
+            policy_document::{resolve_document_under, Overrides, Statement},
+        };
+
+        let tree = self.tree();
         let statements: Vec<Statement<'_>> = self
             .policies
             .iter()
@@ -1056,6 +1079,66 @@ mod tests {
         assert!(error.starts_with("the `wz` member is refused: "), "{error}");
         assert!(error.contains("`wz/colour`"), "{error}");
         assert!(error.contains("`no-such-profile`"), "{error}");
+    }
+
+    /// The key ids the member states are read as a document's are on every ABI: the member read
+    /// whole and its `wz/key-ids` inserted give the same key ids, and a refused part of it
+    /// refuses the policies of the member with it.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn the_members_key_ids_are_read_as_a_documents() {
+        use wz_session_core::policy::KeyWireForm;
+        use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen};
+
+        let member = r#"{ dictionary: [ { id: 40, key: "lab/rig" }, { id: 41, key: "lab/rig/alpha" } ],
+                          links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" } ] }"#;
+        let expected = KeyIdsAtOpen {
+            ids: Some(std::sync::Arc::new(
+                KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("valid"),
+            )),
+            links: vec![("tcp/192.0.2.7:7447".to_owned(), KeyWireForm::Literal)],
+        };
+        let read = Config::from_json5(&format!(
+            r#"{{ mode: "peer", wz: {{ "key-ids": {member} }} }}"#
+        ))
+        .expect("zenoh's reader does not see the member");
+        assert_eq!(read.resolve_key_ids().ok(), Some(expected.clone()));
+        assert!(read.resolve_policies().is_ok());
+        let mut inserted = Config::default();
+        inserted
+            .insert_json5("wz/key-ids", member)
+            .expect("the member takes an object");
+        assert_eq!(inserted.resolve_key_ids().ok(), Some(expected));
+        assert_eq!(
+            Config::default().resolve_key_ids().ok(),
+            Some(KeyIdsAtOpen::default())
+        );
+        let refused = Config::from_json5(
+            r#"{ wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#,
+        )
+        .unwrap();
+        let error = refused.resolve_policies().unwrap_err().to_string();
+        assert!(
+            error.contains("id 0 in entry 0 of `wz/key-ids/dictionary`"),
+            "{error}"
+        );
+        assert!(refused.resolve_key_ids().is_err());
+    }
+
+    /// A build without the capability refuses `wz/key-ids` with the policies of the member, by
+    /// name, and opens nothing on it.
+    #[cfg(all(feature = "engine-tokio", not(feature = "shared-key-ids")))]
+    #[test]
+    fn the_members_key_ids_are_refused_without_the_capability() {
+        let config = Config::from_json5(
+            r#"{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
+        )
+        .unwrap();
+        let error = config.resolve_policies().unwrap_err().to_string();
+        assert!(
+            error.contains("a build without the `shared-key-ids` capability"),
+            "{error}"
+        );
     }
 
     /// A statement of the open's own layer that the build refuses is refused at once and changes
