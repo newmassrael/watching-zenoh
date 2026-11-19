@@ -222,6 +222,47 @@ Recorded here, not changed: this document changes no code.
   it refuses every codec with an unbounded `tlv-chain`. A measurement must name
   the binary's revision (`sce-codegen --version`).
 
+### 7.1 What has been done about them (2026-11-19)
+
+The list above is the census as taken. This list records what changed since.
+
+- **W2, fixed.** The scan is `sources/algorithms/key_facts.scxml`, returning the
+  record of `key_facts_schema.scxml`; `KeyFacts::of` calls the generated
+  function, held to the hand-written rule by the existing oracle test on both
+  backings. `docs/query-answer-path.md` L0 says what was built.
+- **W6, fixed in the prose.** The three places that said SCE has no
+  `<parallel>` (`multicast_glue.rs`, `multicast_dispatch.rs`,
+  `session_fsm_multicast.scxml`) now say that the document keeps Running a leaf
+  by choice. Moving the regions into it is S5 row 47, a K row.
+- **W8, a hand run, and a defect found beside it.** No wz script runs
+  `sce-codegen` without its provenance check, so the census ran the stale binary
+  by hand. Reading the check found that the shell gate
+  (`scripts/lib/sce-codegen-oracle.sh`) and `scripts/verify-codegen.sh` named
+  the binary at `vendor/sce/target/release` while `scripts/build-sce.sh` and the
+  Rust door place it by the artifact-root rule: under a `WZ_ARTIFACT_ROOT` the
+  gate read a binary the build never wrote. The library now states the place
+  once and the two scripts read it. A hand run uses the binary
+  `scripts/build-sce.sh` leaves and names its `--version`.
+- **W7, open.** One implementation of the grammar belongs with the other
+  selector parameters in `wz-session-core` (`selector_params.rs` holds the
+  `_time` name), which is `no_std`, so the instant is held as seconds and
+  nanoseconds and resolved against a `now` the caller gives;
+  `wz-ext-pubsub` and the upstream-shaped `wz-zenoh-util` type read through it.
+  The two differ today on a fixed start with a negative `;` duration
+  (`wz-zenoh-util` accepts it with an end before the start, `wz-ext-pubsub`
+  refuses it, upstream panics).
+- **W1, open.** S2 row 1 and S6 row 1 are K: the matcher becomes an algorithm
+  over chunk offsets with a bottom-up table. Its frames are under the stack gate
+  and it is on the query path the kit measures, so it lands with those readings.
+- **W4 and W5, gaps of SCE, not wz edits.** The lend book needs of a pool what
+  the `buffer-pool` kind does not state: a slot count fixed at run time, a
+  headroom the lender writes before the slot (the stream length prefix), a
+  handle rebuilt from the slot index that crosses the link trait, and shared
+  (`&self`) access. The `link` kind's Rust form sends a frame by copy
+  (`TxFrame<&[u8]>`), where wz's links lend the transmit slot in place. Both are
+  candidates for the catalogue of section 4, for the SCE session to judge.
+- **W3, open.** Not yet scoped beyond the census row.
+
 ## 8. Open points
 
 - U4 rests on the absence of any text that lets an algorithm call a codec. If
