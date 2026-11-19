@@ -4585,8 +4585,8 @@ pub fn open_blocking(
     // session plays, and handed to the registry, which installs a clone on its plane and on every
     // face session it makes. `None` inside when the config does not enable timestamping for this
     // role, which is zenoh's own answer (`enabled().get(whatami)`) and the shipped one for a peer
-    // or client.
-    let node_hlc = NodeHlc::for_node(&wire_zid, dial_whatami, timestamping);
+    // or client. Its `clock-quality-stamping` policy is the snapshot the open resolved.
+    let node_hlc = NodeHlc::for_node_by(&wire_zid, dial_whatami, timestamping, &session_policy);
     // R311y820 — one line below the mint, and fallible for the same reason:
     // both need OS entropy and neither has an honest constant to fall back to.
     let shared = Arc::new(
@@ -5927,6 +5927,50 @@ mod tests {
         assert_eq!(*state.shared.session_policy(), handed);
         assert_ne!(*state.shared.session_policy(), SessionPolicy::defaults());
         state.close();
+    }
+
+    /// The node clock an open makes stamps by the `clock-quality-stamping` value of its stance's
+    /// snapshot: no reference is reported for it, so it withholds the stamp of data exactly when
+    /// the value is `trusted-only`.
+    #[cfg(feature = "peer")]
+    #[test]
+    fn the_clock_an_open_makes_stamps_by_the_snapshot_of_its_stance() {
+        use wz_runtime_tokio::node_clock::DataStamp;
+        use wz_runtime_tokio::policy::ClockQualityStamping;
+        let mut opened = 0;
+        for value in [
+            ClockQualityStamping::Always,
+            ClockQualityStamping::TrustedOnly,
+        ] {
+            let mut handed = SessionPolicy::defaults();
+            if handed.select_clock_quality_stamping(value).is_err() {
+                continue;
+            }
+            let state = open_blocking(
+                Vec::new(),
+                Vec::new(),
+                CapiTlsConfig::default(),
+                WhatAmI::Peer,
+                DialPhase::ONCE,
+                OpenStance {
+                    // A peer holds a clock only when its map says so.
+                    timestamping: TimestampingEnabled::all(true),
+                    session_policy: handed,
+                    ..peer_stance()
+                },
+            )
+            .expect("a peer with nothing to dial or bind opens alone");
+            assert!(state.shared.node_hlc().is_stamping());
+            assert_eq!(
+                state.shared.node_hlc().data_stamp() == DataStamp::Withheld,
+                value == ClockQualityStamping::TrustedOnly,
+                "{}",
+                value.id()
+            );
+            state.close();
+            opened += 1;
+        }
+        assert!(opened >= 1, "the build's domain holds at least its default");
     }
 
     /// The `seq_num_res` code of the first InitSyn a session dialling `stance` puts on the wire,
