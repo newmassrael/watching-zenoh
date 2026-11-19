@@ -62,8 +62,10 @@ pub struct wz_ext_proto_file_t {
     pub text: *const c_char,
 }
 
-/// An owned keyer: the handle in its one word, null for the gravestone.
+/// An owned keyer: the handle in its one word, null for the gravestone. `Debug` shows the word,
+/// so a test can unwrap the refusal of a door that answers one or the other.
 #[repr(C)]
+#[derive(Debug)]
 pub struct wz_ext_owned_instance_keyer_t {
     pub(crate) handle: *mut c_void,
 }

@@ -54,8 +54,10 @@ pub const WZ_EXT_MESSAGE_HAS_REPLAY: u8 = 16;
 pub const WZ_EXT_MESSAGE_HAS_SUPERVISION: u8 = 32;
 pub const WZ_EXT_MESSAGE_HAS_SEGMENT_PROFILE: u8 = 64;
 
-/// An owned catalog: the handle in its one word, null for the gravestone.
+/// An owned catalog: the handle in its one word, null for the gravestone. `Debug` shows the word,
+/// so a test can unwrap the refusal of a door that answers one or the other.
 #[repr(C)]
+#[derive(Debug)]
 pub struct wz_ext_owned_message_catalog_t {
     pub(crate) handle: *mut c_void,
 }
