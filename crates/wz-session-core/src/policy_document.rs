@@ -1515,8 +1515,8 @@ mod tests {
                     "{overrides:?}"
                 );
                 assert_eq!(
-                    through_reader.err().map(|refused| refused.to_string()),
-                    without.err().map(|refused| refused.to_string()),
+                    through_reader.err().map(|refused| format!("{refused}")),
+                    without.err().map(|refused| format!("{refused}")),
                     "{overrides:?}"
                 );
             }
