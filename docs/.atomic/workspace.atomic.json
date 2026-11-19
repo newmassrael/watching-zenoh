@@ -5457,6 +5457,33 @@
       "carry_forward_bullets": [
         "The rounds that added these fixtures ran clippy with all features only; a test fixture used by a feature-gated caller needs the arm without that feature as well."
       ]
+    },
+    "Round 4545": {
+      "decision_summary": "Pay the Z8 liveliness red Round 4540 carried (13 of 46 since Round 4506), at its cause. Round 4506 made a router tell a peer south of it only the tokens the peer asked for, as upstream's peer hat does (`zenoh/src/net/routing/hat/peer/token.rs` @ `New south-bound peer remote; not propagating tokens`); a wz peer node did not ask. Its liveliness subscriber's interest stayed in the node's own tables, the interest a client of the node sends when it subscribes was only answered from them, and the router's withdrawal of a token the node was answered but never held, or never told, was dropped. Each now goes as upstream's: the node sends its liveliness subscriber's interest to the routers it is linked to, `Future` or `CurrentFuture` as the session's history asks, again to a router that comes up later, and a Final at its end (`zenoh/src/api/session.rs` @ `InterestMode::CurrentFuture`); a client's `Future` interest is routed to the gateways in its own mode (`zenoh/src/net/routing/hat/peer/interests.rs` @ `mode: msg.mode,`); a token a gateway answers to a client's `CurrentFuture` interest is held by the node as well as relayed (`zenoh/src/net/routing/dispatcher/token.rs` @ `if interest.mode.is_future() {`); and a withdrawal that names its key is passed on to the faces that asked although the node never held the token (the same file, `.or(res)`). The interests a node sends a router take their ids from one counter, so a publisher's and a liveliness subscriber's the session numbered alike no longer meet on the wire.",
+      "changes_bullets": [
+        "`crates/wz-runtime-tokio/src/router_forward.rs`: `OwnInterest` (`id`, `wire_id`, `keyexpr`, `plane`) replaces the `(id, keyexpr, queryables)` row, with `OwnInterestPlane::{Subscribers, Queryables, Tokens { history }}`; `hold_own_interest` and `drop_own_interest` send and end it on every router face; `ask_local_tokens(id, key, current, history)` holds a token interest on a node that asks north and `forget_local_tokens` ends it; `send_own_interest` builds a token interest as the session does (`build_interest_liveliness_subscriber`).",
+        "`RouterForwarder::interest_ids`, one counter for every interest the node sends a router or a gateway, which the broker's copies take their ids from too; `interest_broker::PendingCurrentInterests::allocate_id` is its tests' id source alone.",
+        "`crates/wz-runtime-tokio/src/router_forward/brokered_interest.rs`: `broker_future_interest` routes a client's `Future` interest to the gateways and keeps the copy for its Final; `holds_brokered_token_answer` and `OnTables::hold_answered_token` register a token answered to a `CurrentFuture` interest, unpropagated; `undeclare_token` passes a keyed withdrawal of a token the node never held to `undeclare_push_token`.",
+        "`crates/wz-session-core/src/interest_build.rs`: `build_interest_propagated_as`, the propagated builder in the downstream interest's own mode, stamping `ext_qos` as `build_interest_propagated` does.",
+        "`crates/wz-capi-core/src/drive/router_node/local_face.rs` passes the subscriber's history to `ask_local_tokens`; `scripts/run-ci.sh` C1AY router_forward with token tables 401 -> 402.",
+        "Round 4540's own reds in hosted run 44572424670: two switch door tests hold half a retry and a target of no byte `Z_EINVAL` whatever the policy, as Round 4540 made them; C1m slot node with tokens 31 -> 32 (Round 4521's snapshot test, which the lattice gate read as two equal-feature guards disagreeing).",
+        "`docs/hosted-red-acks.md`: a row for run 44572424670."
+      ],
+      "verification_bullets": [
+        "On the build host: Z8 liveliness 46 of 46 (33 at Round 4540), the cause found by tracing `test_liveliness_subget_peer_middle` (the router never received a token interest from the peer face) and `test_liveliness_subscriber_double_clientviapeer_history_before` (a withdrawal by an id the peer never held); bisection of Round 4506 placed the red on `48b4c61dc` (3) and `cba059eed` (13).",
+        "`router_forward` with the router hat 340, with token tables 402 (the new `a_peer_nodes_liveliness_subscriber_asks_its_routers_for_tokens` among them), with the interest broker 354; `interest_broker` 8; `interest_build` 10; `local_face` 13; clippy `-D warnings` of wz-runtime-tokio (all features and its default lib), wz-capi-core and wz-session-core; `router_interest_qos_gate.py` (8 router-plane calls, all through a stamping builder).",
+        "The Z8 layer: every other file at its expectation but `routing` (7 of 8, carried); the guarded count gate over the range, 88 guards measured, the one it moved here.",
+        "The switch door tests of wz-capi-c with `switch-doors`, 16 of 16 with the four policies off and with them on; the guarded count gate over this round's range (30 guards measured) and the guarded count lattice gate.",
+        "Locally: reason and store citations, upstream citation anchors, count guard lint, prose name gate, `cargo fmt --check`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Z8 routing 7 of 8, red since Round 4506 for the same cause: `three_node_combination`'s recipe of a router, a client holding a token and a peer that gets the tokens alive times out (`zenoh/tests/routing.rs` @ `async fn three_node_combination(`). A node's liveliness get reads the node's own tables alone (`crates/wz-capi-core/src/drive/router_node/engine.rs` @ `fn liveliness_get_on_wire(`), and a router no longer tells a peer below it a token unasked; upstream's peer hat sends its session's `Current` interest to one gateway (`zenoh/src/net/routing/hat/peer/interests.rs` @ `if msg.mode == InterestMode::Current {`). Paid in the next round: the get asks a router, its answers reach the get, and the router's Final ends it.",
+        "C1cc init-queue leg, open-debt item 952, carried as Round 4540 states."
+      ]
     }
   },
   "inventory_entries": {
