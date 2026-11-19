@@ -27,6 +27,11 @@
 //! can hold (a retry of zero passes, a target of no bytes, more passes or milliseconds than a
 //! retry carries) is `Z_EINVAL`. Nothing stated is never refused, whatever the policy.
 //!
+//! The order: what can be judged from the statement alone (more passes or milliseconds than a
+//! retry carries) is judged first and answers `Z_EINVAL` whatever the session; then a session that
+//! is not there answers `Z_ENULL`; then the session's snapshot admits what the statement asks of
+//! its policies.
+//!
 //! The closure a declaration or a get is given, the payload of a put and the owned fields of its
 //! options are consumed on a refusal as on a success, which is what the `z_*` twins do on every
 //! path.
@@ -186,13 +191,6 @@ fn link_refusal(refusal: LinkRestrictionError) -> ZResult {
     }
 }
 
-/// The restriction a mask states, admitted by the `entity-link-restriction` policy of `policy`.
-fn admit_links(mask: u64, policy: &SessionPolicy) -> Result<LinkRestriction, ZResult> {
-    restriction_of(mask)
-        .and_then(|links| links.admit_by(policy))
-        .map_err(link_refusal)
-}
-
 /// The retry two numbers state: none when both are zero. The value is built as stated, so that
 /// the model refuses a retry of no passes or of no delay itself; one that does not fit what a
 /// retry holds cannot be built and is `Z_EINVAL`.
@@ -252,73 +250,109 @@ fn admit_target(target: Option<&[u8]>, policy: &SessionPolicy) -> Result<(), ZRe
     peer_target::admit_by(target, policy).map_err(target_refusal)
 }
 
-/// What a declaration of an entity states, admitted by `policy`: no pointer states nothing.
-fn entity_links(
-    ext: Option<&wz_capi_c_entity_ext_t>,
-    policy: &SessionPolicy,
-) -> Result<LinkRestriction, ZResult> {
-    match ext {
-        None => Ok(LinkRestriction::Any),
-        Some(ext) => admit_links(ext.link_mask, policy),
+/// A statement a door takes, read in two steps. Its SHAPE is the statement's own business (a mask
+/// naming a slot there is not, a retry no engine can hold) and is checked first, with or without
+/// a session; what it ASKS of the session's policies is admitted after, under the snapshot of the
+/// session the call is made on. So a statement that is not one answers `Z_EINVAL` whatever the
+/// session, and only a well-formed one meets the question a missing session cannot answer.
+trait Stated {
+    /// The statement as read, before its policies are asked.
+    type Shape;
+    /// What the door's body is handed once the policies admitted the statement.
+    type Admitted;
+    /// The shape of `ext`; no pointer states nothing.
+    fn shape(ext: Option<&Self>) -> Result<Self::Shape, ZResult>;
+    /// `shape`, admitted by the policies of `policy`.
+    fn admit(shape: Self::Shape, policy: &SessionPolicy) -> Result<Self::Admitted, ZResult>;
+}
+
+impl Stated for wz_capi_c_entity_ext_t {
+    type Shape = LinkRestriction;
+    type Admitted = LinkRestriction;
+
+    fn shape(ext: Option<&Self>) -> Result<LinkRestriction, ZResult> {
+        ext.map_or(Ok(LinkRestriction::Any), |ext| {
+            restriction_of(ext.link_mask).map_err(link_refusal)
+        })
+    }
+
+    fn admit(links: LinkRestriction, policy: &SessionPolicy) -> Result<LinkRestriction, ZResult> {
+        links.admit_by(policy).map_err(link_refusal)
     }
 }
 
-/// What a publish states, admitted by `policy`: the links, then the retry, then the all-or-none
-/// form, the first refusal answering.
-fn publish_statement(
-    ext: Option<&wz_capi_c_publish_ext_t>,
-    policy: &SessionPolicy,
-) -> Result<PublishStatement, ZResult> {
-    let Some(ext) = ext else {
-        return Ok(PublishStatement::default());
-    };
-    let links = admit_links(ext.link_mask, policy)?;
-    let retry = retry_value(ext.attempts, ext.delay_ms)?;
-    admit_retry(retry, policy)?;
-    let atomic = ext.all_or_none != 0;
-    admit_atomic(atomic, policy)?;
-    Ok(PublishStatement {
-        links,
-        retry,
-        atomic,
-    })
+impl Stated for wz_capi_c_publish_ext_t {
+    type Shape = PublishStatement;
+    type Admitted = PublishStatement;
+
+    fn shape(ext: Option<&Self>) -> Result<PublishStatement, ZResult> {
+        let Some(ext) = ext else {
+            return Ok(PublishStatement::default());
+        };
+        Ok(PublishStatement {
+            links: restriction_of(ext.link_mask).map_err(link_refusal)?,
+            retry: retry_value(ext.attempts, ext.delay_ms)?,
+            atomic: ext.all_or_none != 0,
+        })
+    }
+
+    /// The links, then the retry, then the all-or-none form, the first refusal answering.
+    fn admit(
+        stated: PublishStatement,
+        policy: &SessionPolicy,
+    ) -> Result<PublishStatement, ZResult> {
+        let links = stated.links.admit_by(policy).map_err(link_refusal)?;
+        admit_retry(stated.retry, policy)?;
+        admit_atomic(stated.atomic, policy)?;
+        Ok(PublishStatement { links, ..stated })
+    }
 }
 
-/// What a query states, admitted by `policy`: the links, then the target, the first refusal
-/// answering.
-fn query_statement(
-    ext: Option<&wz_capi_c_query_ext_t>,
-    policy: &SessionPolicy,
-) -> Result<QueryStatement, ZResult> {
-    let Some(ext) = ext else {
-        return Ok(QueryStatement::default());
-    };
-    let links = admit_links(ext.link_mask, policy)?;
-    let target_peer = if ext.has_target != 0 {
-        let zid = target_bytes(&ext.target.id);
-        admit_target(Some(zid.as_slice()), policy)?;
-        Some(zid)
-    } else {
-        None
-    };
-    Ok(QueryStatement { links, target_peer })
+impl Stated for wz_capi_c_query_ext_t {
+    type Shape = QueryStatement;
+    type Admitted = QueryStatement;
+
+    fn shape(ext: Option<&Self>) -> Result<QueryStatement, ZResult> {
+        let Some(ext) = ext else {
+            return Ok(QueryStatement::default());
+        };
+        Ok(QueryStatement {
+            links: restriction_of(ext.link_mask).map_err(link_refusal)?,
+            target_peer: (ext.has_target != 0).then(|| target_bytes(&ext.target.id)),
+        })
+    }
+
+    /// The links, then the target, the first refusal answering.
+    fn admit(stated: QueryStatement, policy: &SessionPolicy) -> Result<QueryStatement, ZResult> {
+        let links = stated.links.admit_by(policy).map_err(link_refusal)?;
+        if let Some(zid) = &stated.target_peer {
+            admit_target(Some(zid.as_slice()), policy)?;
+        }
+        Ok(QueryStatement { links, ..stated })
+    }
 }
 
-/// What `ext` states, admitted by `admit` under the snapshot of the session `session` names, or
-/// `Z_ENULL` for a session that is not there: with no session there is no policy to admit by,
-/// and the `z_*` twin answers a missing session the same.
+/// What `ext` states, admitted under `policy`: its shape, then its policies.
+fn admitted_by<E: Stated>(ext: Option<&E>, policy: &SessionPolicy) -> Result<E::Admitted, ZResult> {
+    E::admit(E::shape(ext)?, policy)
+}
+
+/// What `ext` states, admitted under the snapshot of the session `session` names: its shape
+/// first (`Z_EINVAL` for one that is not a statement, whatever the session), then `Z_ENULL` for a
+/// session that is not there, since with no session there is no policy to admit by and the `z_*`
+/// twin answers a missing session the same, then its policies.
 ///
 /// # Safety
 /// `session` must be null or a valid loaned session, and `ext` null or a valid statement.
-unsafe fn admitted_on<E, T>(
+unsafe fn admitted_on<E: Stated>(
     session: *const z_loaned_session_t,
     ext: *const E,
-    admit: impl FnOnce(Option<&E>, &SessionPolicy) -> Result<T, ZResult>,
-) -> Result<T, ZResult> {
+) -> Result<E::Admitted, ZResult> {
+    // SAFETY: the caller's contract for `ext`.
+    let shape = E::shape(unsafe { ext.as_ref() })?;
     // SAFETY: the caller's contract for `session`.
     match unsafe { session_handle(session) } {
-        // SAFETY: the caller's contract for `ext`.
-        Some(held) => admit(unsafe { ext.as_ref() }, held.session_policy()),
+        Some(held) => E::admit(shape, held.session_policy()),
         None => Err(Z_ENULL),
     }
 }
@@ -338,7 +372,7 @@ pub unsafe extern "C" fn wz_capi_c_put_ext(
     ext: *const wz_capi_c_publish_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let statement = unsafe { admitted_on(session, ext, publish_statement) };
+    let statement = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe { crate::put::put_stated(session, key_expr, payload, options, statement) }
 }
@@ -356,7 +390,7 @@ pub unsafe extern "C" fn wz_capi_c_delete_ext(
     ext: *const wz_capi_c_publish_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let statement = unsafe { admitted_on(session, ext, publish_statement) };
+    let statement = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe { crate::put::delete_stated(session, key_expr, options, statement) }
 }
@@ -376,7 +410,7 @@ pub unsafe extern "C" fn wz_capi_c_declare_publisher_ext(
     ext: *const wz_capi_c_publish_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let statement = unsafe { admitted_on(session, ext, publish_statement) };
+    let statement = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe {
         crate::publisher::declare_publisher_stated(session, publisher, key_expr, options, statement)
@@ -398,7 +432,7 @@ pub unsafe extern "C" fn wz_capi_c_get_ext(
     ext: *const wz_capi_c_query_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let stated = unsafe { admitted_on(session, ext, query_statement) };
+    let stated = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated; the selector is read as `z_get` reads it.
     unsafe {
         crate::get::get_with_selector(
@@ -427,7 +461,7 @@ pub unsafe extern "C" fn wz_capi_c_declare_querier_ext(
     ext: *const wz_capi_c_query_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let stated = unsafe { admitted_on(session, ext, query_statement) };
+    let stated = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe { crate::querier::declare_querier_stated(session, querier, key_expr, options, stated) }
 }
@@ -449,7 +483,7 @@ pub unsafe extern "C" fn wz_capi_c_declare_subscriber_ext(
     ext: *const wz_capi_c_entity_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let links = unsafe { admitted_on(session, ext, entity_links) };
+    let links = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe {
         crate::sub::declare_subscriber_on(session, subscriber, key_expr, callback, options, links)
@@ -471,7 +505,7 @@ pub unsafe extern "C" fn wz_capi_c_declare_queryable_ext(
     ext: *const wz_capi_c_entity_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let links = unsafe { admitted_on(session, ext, entity_links) };
+    let links = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe {
         crate::query::declare_queryable_on(session, queryable, key_expr, callback, options, links)
@@ -495,7 +529,7 @@ pub unsafe extern "C" fn wz_capi_c_liveliness_declare_token_ext(
     ext: *const wz_capi_c_entity_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let links = unsafe { admitted_on(session, ext, entity_links) };
+    let links = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe { crate::liveliness::declare_token_on(session, token, key_expr, links) }
 }
@@ -517,7 +551,7 @@ pub unsafe extern "C" fn wz_capi_c_liveliness_declare_subscriber_ext(
     ext: *const wz_capi_c_entity_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let links = unsafe { admitted_on(session, ext, entity_links) };
+    let links = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe {
         crate::liveliness::declare_subscriber_on(
@@ -544,7 +578,7 @@ pub unsafe extern "C" fn wz_capi_c_liveliness_get_ext(
     ext: *const wz_capi_c_entity_ext_t,
 ) -> ZResult {
     // SAFETY: the caller's contract for `session` and `ext`.
-    let links = unsafe { admitted_on(session, ext, entity_links) };
+    let links = unsafe { admitted_on(session, ext) };
     // SAFETY: the caller's contract, delegated.
     unsafe { crate::liveliness::liveliness_get_on(session, key_expr, callback, options, links) }
 }
@@ -556,19 +590,19 @@ mod tests {
     /// What a declaration states, admitted under the build defaults: the snapshot an open
     /// resolves until a document states a policy.
     fn entity_links(ext: Option<&wz_capi_c_entity_ext_t>) -> Result<LinkRestriction, ZResult> {
-        super::entity_links(ext, &SessionPolicy::defaults())
+        super::admitted_by(ext, &SessionPolicy::defaults())
     }
 
     /// What a publish states, admitted under the build defaults.
     fn publish_statement(
         ext: Option<&wz_capi_c_publish_ext_t>,
     ) -> Result<PublishStatement, ZResult> {
-        super::publish_statement(ext, &SessionPolicy::defaults())
+        super::admitted_by(ext, &SessionPolicy::defaults())
     }
 
     /// What a query states, admitted under the build defaults.
     fn query_statement(ext: Option<&wz_capi_c_query_ext_t>) -> Result<QueryStatement, ZResult> {
-        super::query_statement(ext, &SessionPolicy::defaults())
+        super::admitted_by(ext, &SessionPolicy::defaults())
     }
 
     /// Each statement is admitted by the snapshot it is handed and not by the build: a snapshot
@@ -607,7 +641,7 @@ mod tests {
         publish.delay_ms = 10;
         publish.all_or_none = 1;
         assert_eq!(
-            super::publish_statement(Some(&publish), &on),
+            super::admitted_by(Some(&publish), &on),
             Ok(PublishStatement {
                 links: LinkRestriction::only([0]).expect("one slot"),
                 retry: Some(AdmissionRetry {
@@ -618,30 +652,30 @@ mod tests {
             })
         );
         assert_eq!(
-            super::publish_statement(Some(&publish), &off),
+            super::admitted_by(Some(&publish), &off),
             Err(WZ_CAPI_C_E_POLICY_OFF)
         );
         let mut query = wz_capi_c_query_ext_t::OFF;
         query.has_target = 1;
         query.target = some_id();
         assert_eq!(
-            super::query_statement(Some(&query), &on),
+            super::admitted_by(Some(&query), &on),
             Ok(QueryStatement {
                 links: LinkRestriction::Any,
                 target_peer: Some(vec![0xc7, 0xd1]),
             })
         );
         assert_eq!(
-            super::query_statement(Some(&query), &off),
+            super::admitted_by(Some(&query), &off),
             Err(WZ_CAPI_C_E_POLICY_OFF)
         );
         let entity = wz_capi_c_entity_ext_t { link_mask: 0b110 };
         assert_eq!(
-            super::entity_links(Some(&entity), &on),
+            super::admitted_by(Some(&entity), &on),
             Ok(LinkRestriction::only([1, 2]).expect("two slots"))
         );
         assert_eq!(
-            super::entity_links(Some(&entity), &off),
+            super::admitted_by(Some(&entity), &off),
             Err(WZ_CAPI_C_E_POLICY_OFF)
         );
     }
@@ -1013,11 +1047,32 @@ mod tests {
     }
 
     /// The doors on handles that are not there: a session that is not there has no snapshot to
-    /// admit a statement by, so a stated value is `Z_ENULL` as a statement of nothing is and as
-    /// the `z_*` twin answers, whether the build's default of its policy is on or off.
+    /// admit a statement by, so a well-formed stated value is `Z_ENULL` as a statement of nothing
+    /// is and as the `z_*` twin answers, whether the build's default of its policy is on or off.
+    /// A statement that is not one (a retry of more passes than a retry holds) is `Z_EINVAL`
+    /// before the session is read: its shape is the statement's own. Reading the session first
+    /// turns that assertion red.
     #[test]
     fn the_doors_on_no_session_answer_the_twin_whatever_is_stated() {
         let refused_or_null = |_policy_on: bool| Z_ENULL;
+
+        let mut no_retry = wz_capi_c_publish_ext_t::OFF;
+        no_retry.attempts = 256;
+        no_retry.delay_ms = 1;
+        // SAFETY: every handle is null and the statement is a local.
+        unsafe {
+            assert_eq!(
+                wz_capi_c_put_ext(
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &no_retry
+                ),
+                Z_EINVAL,
+                "256 passes is no retry, whatever the session"
+            );
+        }
 
         let mut retry = wz_capi_c_publish_ext_t::OFF;
         retry.attempts = 2;
@@ -1234,17 +1289,13 @@ mod tests {
     }
 
     /// The liveliness get's door on handles that are not there, as the other doors are: nothing
-    /// stated is `Z_ENULL` as `z_liveliness_get` answers, a stated mask is refused by the build's
-    /// policy before the handles are read when it is off, and a null closure is `Z_ENULL` before
-    /// the statement is read.
+    /// stated is `Z_ENULL` as `z_liveliness_get` answers; a stated mask is `Z_ENULL` too,
+    /// whether the build's policy is on or off, since a session that is not there has no
+    /// snapshot to admit it by; and a null closure is `Z_ENULL` before the statement is read.
     #[cfg(feature = "liveliness-get")]
     #[test]
     fn the_liveliness_get_door_refuses_a_statement_before_the_handles() {
-        let refused_or_null = if links_on() {
-            Z_ENULL
-        } else {
-            WZ_CAPI_C_E_POLICY_OFF
-        };
+        let refused_or_null = Z_ENULL;
         let mut mask = wz_capi_c_entity_ext_t::OFF;
         mask.link_mask = 1;
 
