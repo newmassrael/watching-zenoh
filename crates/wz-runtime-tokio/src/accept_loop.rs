@@ -1855,7 +1855,8 @@ fn node_dial_target(
 /// (`LinkRedialKey`), so links to one address keep a wait each. The loop's peers
 /// ([`crate::loop_peers`], `routing-peer`) key their own instance
 /// by [`crate::loop_peers::PeerKey`]: a configured endpoint's outage is its
-/// address's, a node's is the node's and not one of its addresses'. The
+/// listing's (an address listed twice waits twice), a node's is the node's and not
+/// one of its addresses'. The
 /// instances are schedules of their own, one per substrate, and a dial belongs to
 /// one substrate (the planner's are its own; the others are the re-add's).
 pub(crate) struct RedialSchedule<K> {

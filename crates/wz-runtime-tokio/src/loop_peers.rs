@@ -51,8 +51,39 @@ pub const LOOP_PEER_DIALS: usize = 2 * LOOP_PEER_ROWS;
 pub enum PeerKey {
     /// A node a lifecycle `open` named, by its zid in its sixteen-byte form.
     Node(DirectoryZid),
-    /// A configured connect endpoint, by its pre-handshake identity.
-    Endpoint(MeshDialKey),
+    /// A member of the configured connect list.
+    Endpoint(EndpointKey),
+}
+
+/// A member of the configured connect list: the endpoint's pre-handshake identity and which
+/// listing of it the member is. Upstream starts a connector for every listed endpoint, the same
+/// one listed twice included (`zenoh/src/net/runtime/orchestrator.rs` @
+/// `async fn connect_peers_multiply_links(`), and a session that holds more than one link is
+/// reached by listing its endpoint as many times; so each listing is a peer of its own, with its
+/// own machine, dial and wait, and not one peer per address.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EndpointKey {
+    /// The endpoint's pre-handshake identity.
+    pub at: MeshDialKey,
+    /// How many members before this one name the same endpoint: 0 for its first listing.
+    pub listing: u16,
+}
+
+impl EndpointKey {
+    /// The first listing of `at`.
+    pub fn first(at: MeshDialKey) -> Self {
+        Self { at, listing: 0 }
+    }
+}
+
+impl std::fmt::Display for EndpointKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.at)?;
+        if self.listing > 0 {
+            write!(f, " (listing {})", u32::from(self.listing) + 1)?;
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for PeerKey {
@@ -86,7 +117,7 @@ pub struct PeerContext<'a> {
 struct LoopPorts<'a> {
     cx: &'a PeerContext<'a>,
     /// How to dial each configured endpoint the loop holds.
-    endpoints: &'a BTreeMap<MeshDialKey, MeshDialTarget>,
+    endpoints: &'a BTreeMap<EndpointKey, MeshDialTarget>,
     /// Each peer's retry schedule while it is down.
     retry: &'a mut RedialSchedule<PeerKey>,
 }
@@ -128,8 +159,8 @@ type LoopPlanner = PeerPlanner<PeerKey, FaceId, LOOP_PEER_ROWS, LOOP_PEER_DIALS>
 pub struct LoopPeers {
     planner: Box<LoopPlanner>,
     /// How to dial each configured endpoint the planner holds: the scheme and
-    /// the `#` retry overrides the operator wrote, by the endpoint's key.
-    endpoints: BTreeMap<MeshDialKey, MeshDialTarget>,
+    /// the `#` retry overrides the operator wrote, by the member's key.
+    endpoints: BTreeMap<EndpointKey, MeshDialTarget>,
     /// Each peer's retry schedule while it is down.
     retry: RedialSchedule<PeerKey>,
 }
@@ -216,6 +247,10 @@ impl LoopPeers {
     /// refused tries again (decision D6). A member's dial plan is taken from
     /// `targets`, so a member listed again with another scheme or another `#`
     /// retry span is dialled that way from its next dial.
+    ///
+    /// An endpoint `targets` names more than once is that many members, told apart by
+    /// [`EndpointKey::listing`] in the order `targets` names them, so a list that names one
+    /// endpoint twice holds two machines and dials it twice.
     pub fn set_endpoints(
         &mut self,
         targets: Vec<MeshDialTarget>,
@@ -223,9 +258,10 @@ impl LoopPeers {
         cx: &PeerContext<'_>,
         next_id: &mut u64,
     ) -> Vec<PeerAction> {
+        let members = Self::members(targets);
         if replace {
-            let listed: BTreeSet<&MeshDialKey> = targets.iter().map(|t| &t.key).collect();
-            let gone: Vec<MeshDialKey> = self
+            let listed: BTreeSet<&EndpointKey> = members.iter().map(|(key, _)| key).collect();
+            let gone: Vec<EndpointKey> = self
                 .endpoints
                 .keys()
                 .filter(|key| !listed.contains(key))
@@ -236,12 +272,29 @@ impl LoopPeers {
             }
         }
         let mut actions = Vec::new();
-        for target in targets {
-            let key = target.key.clone();
+        for (key, target) in members {
             self.endpoints.insert(key.clone(), target);
             actions.extend(self.open(PeerKey::Endpoint(key), cx, next_id));
         }
         actions
+    }
+
+    /// `targets` as members of the connect list: each with its listing among the members
+    /// before it that name the same endpoint.
+    fn members(targets: Vec<MeshDialTarget>) -> Vec<(EndpointKey, MeshDialTarget)> {
+        let mut seen: BTreeMap<MeshDialKey, u16> = BTreeMap::new();
+        targets
+            .into_iter()
+            .map(|target| {
+                let listing = seen.entry(target.key.clone()).or_insert(0);
+                let key = EndpointKey {
+                    at: target.key.clone(),
+                    listing: *listing,
+                };
+                *listing = listing.saturating_add(1);
+                (key, target)
+            })
+            .collect()
     }
 
     /// The configured endpoints the loop holds.
@@ -758,7 +811,7 @@ mod tests {
         let mut peers = LoopPeers::new(RetryPolicy::constant(1000));
         let mut next_id = 0;
         let plan = endpoint("tcp/127.0.0.1:7207#retry_period_init_ms=250;retry_period_max_ms=250");
-        let key = PeerKey::Endpoint(plan.key.clone());
+        let key = PeerKey::Endpoint(EndpointKey::first(plan.key.clone()));
         let actions = peers.set_endpoints(vec![plan.clone()], false, &cx, &mut next_id);
         let (id, target) = the_dial(&actions);
         assert_eq!(
@@ -795,7 +848,7 @@ mod tests {
         let mut next_id = 0;
         let kept = endpoint("tcp/127.0.0.1:7208");
         let gone = endpoint("tcp/127.0.0.1:7209");
-        let gone_key = PeerKey::Endpoint(gone.key.clone());
+        let gone_key = PeerKey::Endpoint(EndpointKey::first(gone.key.clone()));
         let mut dials =
             peers.set_endpoints(vec![kept.clone(), gone.clone()], true, &cx, &mut next_id);
         assert_eq!(dials.len(), 2);
@@ -856,6 +909,62 @@ mod tests {
             "the old arming is not the new outage's"
         );
         the_dial(&peers.retry_due(gone_key, fresh, &cx, &mut next_id));
+    }
+
+    /// An endpoint listed twice is two members, as upstream starts a connector for each
+    /// listing: both are dialled, each is held by its own machine, and a replace that lists it
+    /// once keeps the first listing and forgets the second. Keying a member by its address
+    /// alone turns the first assertion red: the second listing is the first one again and
+    /// dials nothing.
+    #[test]
+    fn an_endpoint_listed_twice_is_dialled_twice() {
+        let directory = directory_with(&[]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy::constant(500));
+        let mut next_id = 0;
+        let plan = endpoint("tcp/127.0.0.1:7219");
+        let first = PeerKey::Endpoint(EndpointKey::first(plan.key.clone()));
+        let second = PeerKey::Endpoint(EndpointKey {
+            at: plan.key.clone(),
+            listing: 1,
+        });
+        let actions =
+            peers.set_endpoints(vec![plan.clone(), plan.clone()], true, &cx, &mut next_id);
+        let dials: Vec<(FaceId, PeerKey)> = actions
+            .iter()
+            .filter_map(|action| match action {
+                PeerAction::Dial { id, key, .. } => Some((*id, key.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dials.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>(),
+            vec![first.clone(), second.clone()],
+            "one dial per listing: {actions:?}"
+        );
+        assert_eq!(peers.endpoints().count(), 2);
+        for (id, _) in &dials {
+            peers.dial_ended(*id, UP, &cx, &mut next_id);
+        }
+        assert_eq!(peers.state(&first), Some(S::Established));
+        assert_eq!(peers.state(&second), Some(S::Established));
+
+        assert!(
+            peers
+                .set_endpoints(vec![plan], true, &cx, &mut next_id)
+                .is_empty(),
+            "the first listing is already held"
+        );
+        assert_eq!(peers.state(&first), Some(S::Established));
+        assert_eq!(
+            peers.state(&second),
+            None,
+            "the second listing is forgotten"
+        );
+        assert_eq!(second.to_string(), "endpoint 127.0.0.1:7219 (listing 2)");
     }
 
     /// A dial whose endpoint a replace dropped while it ran opens a session the
@@ -972,7 +1081,7 @@ mod tests {
         let mut peers = LoopPeers::new(RetryPolicy::constant(500));
         let mut next_id = 0;
         let plan = endpoint("tcp/127.0.0.1:7214");
-        let key = PeerKey::Endpoint(plan.key.clone());
+        let key = PeerKey::Endpoint(EndpointKey::first(plan.key.clone()));
         let (id, _) = the_dial(&peers.set_endpoints(vec![plan.clone()], false, &cx, &mut next_id));
         peers.dial_ended(
             id,
