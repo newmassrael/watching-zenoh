@@ -1894,8 +1894,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// How the dial role's face replays its declarations now, and the snapshot the session opened
-    /// under: what a test reads to tell the session's policies from the build's.
-    #[cfg(test)]
+    /// under: what a test reads to tell the session's policies from the build's. Compiled where
+    /// its readers are: the tests module is a host's (`all(test, feature = "std")`).
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn policy_in_force(&self) -> Option<(Option<ReplayPacing>, SessionPolicy)> {
         self.live()
             .map(|core| (core.0.dial().replay.pacing(), core.0.policy))

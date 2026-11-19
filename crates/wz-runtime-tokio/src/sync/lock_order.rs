@@ -200,12 +200,42 @@ struct Process {
     nested: Map<(Class, u64, u64), Witness>,
 }
 
-static PROCESS: OnceLock<parking_lot::Mutex<Process>> = OnceLock::new();
+/// The lock over [`Process`]: the standard library's mutex, which waits on a futex and allocates
+/// nothing, and not `parking_lot`'s. A `parking_lot` lock a thread finds held parks the thread,
+/// and the first park of a thread can grow `parking_lot`'s table of parked threads on the GLOBAL
+/// allocator, two allocations counted on the thread that took the lock; the allocation suites
+/// read that as the checker's cost whenever a second thread happened to hold the process's lock,
+/// one run in about forty (`tests/lock_order_allocations.rs`). A panic while it is held leaves
+/// the tables as they were, which are still the tables, so a poisoned lock is taken as it is.
+struct ProcessLock(std::sync::Mutex<Process>);
 
-fn process() -> &'static parking_lot::Mutex<Process> {
+impl ProcessLock {
+    fn new(process: Process) -> Self {
+        Self(std::sync::Mutex::new(process))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Process> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(any(unix, test))]
+    fn try_lock(&self) -> Option<std::sync::MutexGuard<'_, Process>> {
+        match self.0.try_lock() {
+            Ok(held) => Some(held),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+}
+
+static PROCESS: OnceLock<ProcessLock> = OnceLock::new();
+
+fn process() -> &'static ProcessLock {
     PROCESS.get_or_init(|| {
         arm_release_at_exit();
-        parking_lot::Mutex::new(Process::default())
+        ProcessLock::new(Process::default())
     })
 }
 
@@ -217,7 +247,7 @@ fn process() -> &'static parking_lot::Mutex<Process> {
 /// linking a debug build would count each stack as lost; freed at exit, they are what the
 /// process returned.
 #[cfg(any(unix, test))]
-fn release(process: &parking_lot::Mutex<Process>) -> bool {
+fn release(process: &ProcessLock) -> bool {
     match process.try_lock() {
         Some(mut held) => {
             *held = Process::default();
@@ -872,7 +902,7 @@ mod tests {
             stack: Some(stack.clone()),
             ..witness()
         };
-        let process = parking_lot::Mutex::new(Process::default());
+        let process = ProcessLock::new(Process::default());
         {
             let mut filling = process.lock();
             filling
