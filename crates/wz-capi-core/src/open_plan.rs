@@ -252,6 +252,9 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, Op
             },
         },
         aggregation,
+        // A zenoh document states no key ids; an ABI that holds them hands them over itself.
+        #[cfg(feature = "shared-key-ids")]
+        key_ids: Default::default(),
     })
 }
 

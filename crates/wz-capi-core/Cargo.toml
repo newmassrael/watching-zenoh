@@ -388,9 +388,13 @@ unstable-api = []
 connectivity = ["unstable-api"]
 # The key ids every node of a deployment shares (`deploy/wz-config.toml`, off by default: a stock
 # peer cannot read a key named by an id it was never declared). The dictionary and the rule are
-# `wz-session-core`'s; the tokio engine holds none, and the pico ABI refuses a session on it that
-# asks for one, so this forwards only the model.
-shared-key-ids = ["wz-session-core/shared-key-ids"]
+# `wz-session-core`'s; the registry hands each face session the dictionary and the key-wire form
+# stated for its endpoint, which the runtime's session installs on its link.
+shared-key-ids = [
+    "wz-session-core/shared-key-ids",
+    "wz-runtime-tokio/shared-key-ids",
+    "wz-capi-port/shared-key-ids",
+]
 # pico's admin space and its session-local delivery (`deploy/wz-config.toml`, off by default
 # as upstream's are). The model behind them is here either way: the local plane, and a write
 # filter or matching listener told whether to count the session's own entities. Features here

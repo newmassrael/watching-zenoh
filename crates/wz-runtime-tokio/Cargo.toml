@@ -219,6 +219,10 @@ declarations-synced-event = ["declare-subscriber", "wz-session-core/declarations
 # A declaration event names the peer it came from. The identity is the session's own, read when
 # the event is staged, so nothing else is needed.
 remote-declaration-watch = []
+# The key ids every node of a deployment shares (`Session::install_link_keys`): the session's
+# inbound registries read an id only the dictionary names, and its link names keys as its
+# key-wire form says. The dictionary and the rules are session-core's.
+shared-key-ids = ["wz-session-core/shared-key-ids"]
 # `query-get` implies `query-reply` (the get-side ReplyRegistry tracks
 # pending entries) + `codec-request` (R311j — the wire-emit path
 # `send_request_query` builds on Request/Query types gated by

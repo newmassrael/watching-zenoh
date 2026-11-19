@@ -4300,6 +4300,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self.transport
     }
 
+    /// Install what this session's link knows of the key ids every node of the deployment shares
+    /// (`shared-key-ids`): the dictionary on the inbound registries, so an id the peer never
+    /// declared and the dictionary holds resolves, and the dictionary with the link's key-wire
+    /// form on the link's actions, so what is sent over it names its keys in that form. Called by
+    /// the engine that made the session, before its link carries anything.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn install_link_keys(&self, keys: wz_session_core::shared_key_ids::LinkKeys) {
+        if let Some(ids) = keys.shared_ids().cloned() {
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer.subscribers.set_shared_key_ids(ids);
+            });
+        }
+        self.actions().install_link_keys(keys);
+    }
+
     /// R3073 -- end the declarations this session just replayed to a NEW face with the
     /// `DeclareFinal` of the initial interest, when the peer hat does: upstream's peer acts as if
     /// a face it meets as a north-bound peer had asked for everything with an interest of id 0,

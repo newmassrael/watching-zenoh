@@ -4615,6 +4615,22 @@ pub fn open_blocking(
     // role, which is zenoh's own answer (`enabled().get(whatami)`) and the shipped one for a peer
     // or client. Its `clock-quality-stamping` policy is the snapshot the open resolved.
     let node_hlc = NodeHlc::for_node_by(&wire_zid, dial_whatami, timestamping, &session_policy);
+    // The key ids every node shares and the form of each face, from the endpoints in the order
+    // the faces are numbered by. A form the session cannot honour (`shared` with no dictionary,
+    // an endpoint stated twice) fails the open before any thread or socket exists.
+    #[cfg(feature = "shared-key-ids")]
+    let key_ids = match crate::faces::KeyIdPlan::new(
+        &session_defaults.key_ids,
+        session_policy.key_wire_form(),
+        &connect,
+        &listen,
+    ) {
+        Ok(plan) => plan,
+        Err(refused) => {
+            log_open_failure("key-wire form", &refused);
+            return Err(OpenError::DriveFailed);
+        }
+    };
     // R311y820 — one line below the mint, and fallible for the same reason:
     // both need OS entropy and neither has an honest constant to fall back to.
     let shared = Arc::new(
@@ -4639,6 +4655,8 @@ pub fn open_blocking(
                 namespace,
                 aggregation: session_defaults.aggregation.clone(),
                 session_policy,
+                #[cfg(feature = "shared-key-ids")]
+                key_ids,
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,

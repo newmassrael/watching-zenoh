@@ -47,6 +47,10 @@ pub struct SessionDefaults {
     pub shm_promotion: ShmPromotion,
     /// `aggregation/{subscribers,publishers}`.
     pub aggregation: DeclarationAggregation,
+    /// The key ids every node of the deployment shares, and the endpoints whose key-wire form is
+    /// stated apart from the session's (`shared-key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    pub key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
 }
 
 /// What a `qos/publication` rule sets on a publication: each field stated replaces what the
