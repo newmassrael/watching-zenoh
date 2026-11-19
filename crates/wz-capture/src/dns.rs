@@ -549,7 +549,9 @@ pub(crate) mod tests {
     }
 
     /// A plane holding every word a document writes: an answered A query, an
-    /// NXDOMAIN AAAA one, an unanswered SRV one, and every rcode.
+    /// NXDOMAIN AAAA one, an unanswered SRV one, and every rcode. For the
+    /// field document's vocabulary gate, which only a `dissect` build has.
+    #[cfg(feature = "dissect")]
     pub(crate) fn every_word() -> DnsPlane {
         let (c, s) = ends();
         let mut p = DnsPlane::default();
