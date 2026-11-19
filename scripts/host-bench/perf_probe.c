@@ -8,9 +8,9 @@
 // which exists only in wz, and is built only against it.
 //
 //   perf_probe pong -m peer (-l|-e) ENDPOINT [-b] [-T NAME]
-//   perf_probe ping -m peer (-l|-e) ENDPOINT -s SIZE -n PINGS -w WARMUP_MS [-o TIMEOUT_MS] [-b] [-T NAME]
+//   perf_probe ping -m peer (-l|-e) ENDPOINT -s SIZE -n PINGS -w WARMUP_MS [-o TIMEOUT_MS] [-b] [-M] [-T NAME]
 //   perf_probe sub  -m peer (-l|-e) ENDPOINT -w WARMUP_MS -t WINDOW_S [-T NAME]
-//   perf_probe pub  -m peer (-l|-e) ENDPOINT -s SIZE -t SECONDS [-b] [-d] [-T NAME]
+//   perf_probe pub  -m peer (-l|-e) ENDPOINT -s SIZE -t SECONDS [-b] [-d] [-M] [-T NAME]
 //
 // -l and -e may each be given once and both may be given (a multicast group is a listen on both sides).
 //
@@ -52,8 +52,13 @@
 // for its whole loop, as upstream's z_pub_thr does; ping and pong open and close one around each put, the
 // close flushing it, so a round trip with batching on is the cost of the window on the path, not a delay.
 //
-// The active side (ping, pub) waits up to ten seconds until z_info_peers_zid lists a peer before it starts:
-// a group member learns another only from its JOIN.
+// The active side (ping, pub) prepares its publisher as upstream's z_pub_thr does: it waits a second after
+// the open before declaring it, then up to ten seconds until z_info_peers_zid lists a peer (a group member
+// learns another only from its JOIN), and with -M up to ten seconds more until the publisher matches a
+// subscriber (z_publisher_get_matching_status). A zenoh-pico publisher sends no put while it knows of no
+// subscriber and still returns success, so without the match a throughput loop that starts before the
+// subscriber's declaration arrived counts puts that went nowhere. -M is for the transports that carry
+// declarations; a group of the pico preset carries none and sends every put.
 //
 // -T NAME (PERF_PROGRAM_TRANSPORT only): every link of the session goes over the program's transport, here an
 // AF_UNIX stream in the abstract namespace under NAME. A tcp/ listen locator is a listening socket of that
@@ -96,6 +101,7 @@
 #define KEY_THR "perf/thr"
 #define SEQ_BYTES 8
 #define PEER_WAIT_MS 10000
+#define SUB_PREPARE_MS 1000
 
 static volatile sig_atomic_t terminated = 0;
 
@@ -430,13 +436,14 @@ struct options {
     unsigned seconds;
     int batching;
     int drop;
+    int match;
     const char *transport_name;
 };
 
 static int usage(void) {
     fprintf(stderr,
             "usage: perf_probe ping|pong|pub|sub -m MODE [-l ENDPOINT] [-e ENDPOINT] [-s SIZE] [-n PINGS]\n"
-            "                  [-w WARMUP_MS] [-o TIMEOUT_MS] [-t SECONDS] [-b] [-d] [-T NAME]\n");
+            "                  [-w WARMUP_MS] [-o TIMEOUT_MS] [-t SECONDS] [-b] [-d] [-M] [-T NAME]\n");
     return 2;
 }
 
@@ -494,6 +501,47 @@ static const z_loaned_publisher_t *declare_publisher(const z_loaned_session_t *s
     if (z_declare_publisher(session, pub, z_view_keyexpr_loan(&ke), &opts) != Z_OK) return NULL;
     publisher_count++;
     return z_publisher_loan(pub);
+}
+
+// 1 once `pub` matches a subscriber, 0 when none did in PEER_WAIT_MS. main refuses -M in a build without
+// Z_FEATURE_MATCHING, so the second arm is never reached there.
+static int wait_for_match(const z_loaned_publisher_t *pub) {
+#if Z_FEATURE_MATCHING == 1
+    for (unsigned waited = 0; waited < PEER_WAIT_MS && !terminated; waited += 10) {
+        z_matching_status_t status;
+        if (z_publisher_get_matching_status(pub, &status) == Z_OK && status.matching) return 1;
+        sleep_ms(10);
+    }
+    return 0;
+#else
+    (void)pub;
+    return 0;
+#endif
+}
+
+// The client side's publisher on `key`, ready for its first counted put, the same in both arms. As
+// upstream's z_pub_thr does ("Timer for sub to prepare"), the server side's declarations are given
+// SUB_PREPARE_MS after the open before the publisher is declared; then a peer is waited for, and with -M
+// a matching subscriber. A zenoh-pico publisher does not send a put while it knows of no subscriber (its
+// write filter), and returns success for it, so a loop started before the declaration arrived counts puts
+// that went nowhere. NULL, with the reason printed, when the publisher is not ready.
+static const z_loaned_publisher_t *client_publisher(const z_loaned_session_t *session, const struct options *o,
+                                                    const char *key) {
+    sleep_ms(SUB_PREPARE_MS);
+    const z_loaned_publisher_t *pub = declare_publisher(session, key, o->drop);
+    if (pub == NULL) {
+        printf("perf_probe %s: unable to declare the publisher\n", o->role);
+        return NULL;
+    }
+    if (!wait_for_peer(session)) {
+        printf("perf_probe %s: no peer in %d ms\n", o->role, PEER_WAIT_MS);
+        return NULL;
+    }
+    if (o->match && !wait_for_match(pub)) {
+        printf("perf_probe %s: no subscriber matched the publisher in %d ms\n", o->role, PEER_WAIT_MS);
+        return NULL;
+    }
+    return pub;
 }
 
 static int declare_subscriber(const z_loaned_session_t *session, const char *key,
@@ -620,18 +668,16 @@ static uint64_t round_trip(const z_loaned_session_t *session, const z_loaned_pub
 }
 
 static int run_ping(const z_loaned_session_t *session, const struct options *o) {
-    const z_loaned_publisher_t *pub = declare_publisher(session, KEY_PING, o->drop);
-    const z_loaned_publisher_t *stop = declare_publisher(session, KEY_STOP, 0);
-    if (pub == NULL || stop == NULL) {
-        printf("perf_probe ping: unable to declare the publishers\n");
-        return 1;
-    }
+    // The answers' subscriber first, so its declaration is on its way while the publisher is prepared.
     if (declare_subscriber(session, KEY_PONG, on_pong, NULL) != 0) {
         printf("perf_probe ping: unable to declare the subscriber\n");
         return 1;
     }
-    if (!wait_for_peer(session)) {
-        printf("perf_probe ping: no peer in %d ms\n", PEER_WAIT_MS);
+    const z_loaned_publisher_t *pub = client_publisher(session, o, KEY_PING);
+    if (pub == NULL) return 1;
+    const z_loaned_publisher_t *stop = declare_publisher(session, KEY_STOP, 0);
+    if (stop == NULL) {
+        printf("perf_probe ping: unable to declare the stop publisher\n");
         return 1;
     }
     uint8_t *buf = malloc(o->size);
@@ -737,15 +783,8 @@ static int run_sub(const z_loaned_session_t *session, const struct options *o) {
 // ---------------------------------------------------------------------------------------------------------
 
 static int run_pub(const z_loaned_session_t *session, const struct options *o) {
-    const z_loaned_publisher_t *loaned = declare_publisher(session, KEY_THR, o->drop);
-    if (loaned == NULL) {
-        printf("perf_probe pub: unable to declare the publisher\n");
-        return 1;
-    }
-    if (!wait_for_peer(session)) {
-        printf("perf_probe pub: no peer in %d ms\n", PEER_WAIT_MS);
-        return 1;
-    }
+    const z_loaned_publisher_t *loaned = client_publisher(session, o, KEY_THR);
+    if (loaned == NULL) return 1;
     uint8_t *buf = malloc(o->size);
     if (buf == NULL) {
         printf("perf_probe pub: out of memory\n");
@@ -787,12 +826,12 @@ static int run_pub(const z_loaned_session_t *session, const struct options *o) {
 
 int main(int argc, char **argv) {
     if (argc < 2) return usage();
-    struct options o = {argv[1], 8, 20000, 3000, 100, 5, 0, 0, NULL};
+    struct options o = {argv[1], 8, 20000, 3000, 100, 5, 0, 0, 0, NULL};
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
     // The role is the first word; the options follow it, read as a command line of their own.
-    while ((opt = getopt(argc - 1, argv + 1, "m:l:e:s:n:w:o:t:bdT:")) != -1) {
+    while ((opt = getopt(argc - 1, argv + 1, "m:l:e:s:n:w:o:t:bdMT:")) != -1) {
         switch (opt) {
             case 'm':
                 zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, optarg);
@@ -824,6 +863,9 @@ int main(int argc, char **argv) {
             case 'd':
                 o.drop = 1;
                 break;
+            case 'M':
+                o.match = 1;
+                break;
             case 'T':
                 o.transport_name = optarg;
                 break;
@@ -841,6 +883,12 @@ int main(int argc, char **argv) {
 #if Z_FEATURE_BATCHING != 1
     if (o.batching) {
         fprintf(stderr, "perf_probe: this library is built without Z_FEATURE_BATCHING, so -b has no window\n");
+        return 2;
+    }
+#endif
+#if Z_FEATURE_MATCHING != 1
+    if (o.match) {
+        fprintf(stderr, "perf_probe: this library is built without Z_FEATURE_MATCHING, so -M cannot be asked\n");
         return 2;
     }
 #endif
