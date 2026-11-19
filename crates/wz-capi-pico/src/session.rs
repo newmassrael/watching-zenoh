@@ -199,7 +199,8 @@ const fn pico_group(sn_resolution: SnResolution) -> wz_capi_core::drive::GroupPr
 
 /// The policies a session [`z_open`] opens from `config` runs under: the one place this ABI's open
 /// decides them, resolved once and handed to the engine and to the session's handle. The build
-/// defaults, until pico's configuration has a key for a policy.
+/// defaults: pico's configuration is a set of keys and values, not a zenoh document with a `wz`
+/// member, and its door for a policy is a key of its own, which it does not have yet.
 pub(crate) fn resolve_policy(_config: &ConfigState) -> SessionPolicy {
     SessionPolicy::defaults()
 }

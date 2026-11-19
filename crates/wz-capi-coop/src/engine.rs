@@ -214,7 +214,9 @@ pub const DEFAULT_ACCEPT_PENDING: usize = 100;
 pub const DEFAULT_MAX_FACES: usize = 1000;
 
 /// The policies a session [`CoopEngine::open`] opens from `config` runs under: the one place that
-/// open decides them. The build defaults, until the config carries a value for a policy.
+/// open decides them. The build defaults: the config is what the ABI read from its own keys and
+/// values, not a zenoh document with a `wz` member, and it has no field for a policy yet; the
+/// ABI's door for one is a key of its own.
 fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
     SessionPolicy::defaults()
 }
