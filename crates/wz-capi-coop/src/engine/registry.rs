@@ -198,6 +198,21 @@ impl Registry {
         }
     }
 
+    /// Hand the tables of face `id` the key ids every node of the deployment shares: an id the
+    /// peer never declared, and that no declaration of this session holds, is read in them on
+    /// every plane. The dictionary is the session's, so each link the face is opened over
+    /// installs the same one again.
+    #[cfg(feature = "shared-key-ids")]
+    pub(super) fn install_shared_key_ids(
+        &mut self,
+        id: FaceId,
+        ids: wz_session_core::shared_key_ids::SharedKeyIds,
+    ) {
+        if let Some(face) = self.faces.iter_mut().find(|face| face.id == id) {
+            face.peer.subscribers.set_shared_key_ids(ids);
+        }
+    }
+
     /// The application's part, the tables of face `id` and those of the others, apart so each can
     /// be used as its call needs: what every dispatch and drain takes.
     fn split(&mut self, id: FaceId) -> Option<Split<'_>> {

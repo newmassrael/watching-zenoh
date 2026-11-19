@@ -1114,6 +1114,13 @@ mod one_face;
 #[cfg(feature = "queryable")]
 mod queryable;
 mod replay;
+#[cfg(all(
+    feature = "shared-key-ids",
+    feature = "listen",
+    feature = "query",
+    feature = "queryable"
+))]
+mod shared_key_ids;
 #[cfg(feature = "liveliness-get")]
 mod snapshot;
 #[cfg(feature = "ticker")]

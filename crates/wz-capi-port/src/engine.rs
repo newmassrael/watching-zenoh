@@ -123,6 +123,17 @@ pub trait SessionEngine: Send + Sync + 'static {
         false
     }
 
+    /// How `keyexpr` goes on the wire under the session's key-wire form, when that form names
+    /// it otherwise than the ABI would: by an id of the key ids every node of the deployment
+    /// shares (and the rest of the key), or as the literal. `None` leaves the key to the ABI (the
+    /// key expression it declared, or the literal), which is the provided answer of an engine that
+    /// holds no dictionary; a session on such an engine is not opened with a form but `declared`.
+    #[cfg(feature = "shared-key-ids")]
+    fn key_wire_by_form(&self, keyexpr: &str) -> Option<WireKey> {
+        let _ = keyexpr;
+        None
+    }
+
     /// The graph of each region the node's admin space answers a `linkstate` query for, as text
     /// by the region's name. An engine that holds no such graph lists none, which is the
     /// provided answer.

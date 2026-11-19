@@ -73,7 +73,7 @@ use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::policy::{SessionPolicy, SnResolution};
+use wz_session_core::policy::{KeyWireForm, SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
@@ -83,6 +83,8 @@ use wz_session_core::session_init_params::{
     KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
 };
 use wz_session_core::session_timeouts::SessionTimeouts;
+#[cfg(feature = "shared-key-ids")]
+use wz_session_core::shared_key_ids::{self, KeyWire, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
@@ -237,6 +239,45 @@ pub enum OpenError {
     EntropyUnavailable,
     /// The configured zid is not one: it is not one to sixteen bytes, or its bytes are all zero.
     InvalidZid(ZidError),
+    /// The session's `key-wire-form` cannot be honoured: see [`KeyWireFormRefused`].
+    KeyWireForm(KeyWireFormRefused),
+}
+
+/// Why the `key-wire-form` a session was opened under cannot be honoured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyWireFormRefused {
+    /// The form is not `declared`, and the build has no key ids every node shares to name a key
+    /// by (the `shared-key-ids` feature).
+    NotInBuild,
+    /// The form is `shared`, and the open was given no dictionary.
+    NoDictionary,
+}
+
+/// The key ids an open hands the session, which a build without `shared-key-ids` has none of.
+#[derive(Default)]
+struct OpenKeyIds {
+    #[cfg(feature = "shared-key-ids")]
+    ids: Option<SharedKeyIds>,
+}
+
+impl OpenKeyIds {
+    /// Whether a session may open under `policy`'s key-wire form with these key ids: `shared`
+    /// needs a dictionary, `declared` and `literal` do not.
+    #[cfg(feature = "shared-key-ids")]
+    fn admit(&self, policy: &SessionPolicy) -> Result<(), OpenError> {
+        shared_key_ids::check_open(policy.key_wire_form(), self.ids.as_deref())
+            .map_err(|_| OpenError::KeyWireForm(KeyWireFormRefused::NoDictionary))
+    }
+
+    /// Whether a session may open under `policy`'s key-wire form: only `declared`, which names a
+    /// key as upstream does, in a build that has no other.
+    #[cfg(not(feature = "shared-key-ids"))]
+    fn admit(&self, policy: &SessionPolicy) -> Result<(), OpenError> {
+        match policy.key_wire_form() {
+            KeyWireForm::Declared => Ok(()),
+            _ => Err(OpenError::KeyWireForm(KeyWireFormRefused::NotInBuild)),
+        }
+    }
 }
 
 /// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id. Refused
@@ -462,6 +503,11 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     subscribers: Vec<SubEntry>,
     keyexprs: Vec<KexprEntry>,
     next_mapping: ExprId,
+    /// The key ids every node of the deployment shares, which the session was opened with: each
+    /// link it opens is handed them, its key expressions are declared under ids past theirs, and
+    /// a key goes on the wire as the session's key-wire form says (`shared-key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    key_ids: Option<SharedKeyIds>,
     /// The next request id of a get's leg to the session's own queryables, counted apart from
     /// the ids the links hand out (`local-queryable`).
     #[cfg(feature = "local-queryable")]
@@ -879,6 +925,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.registry
             .borrow_mut()
             .install_own_mapping_space(face, own_space);
+        // The key ids every node shares, on both sides of the link before it carries anything:
+        // the link's actions, so a declaration or a message by such an id is sent with no
+        // declaration of its own, and the face's tables, so one the peer sends is read.
+        #[cfg(feature = "shared-key-ids")]
+        if let Some(ids) = &self.key_ids {
+            actions.install_shared_key_ids(ids.clone());
+            self.registry
+                .borrow_mut()
+                .install_shared_key_ids(face, ids.clone());
+        }
         let readiness = pump.readiness().map(Arc::from);
         // The link gives the session nothing between its handshake and the face table's decision
         // (`admit`), so a link that is refused has put nothing in the tables.
@@ -1507,6 +1563,44 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         config: CoopConfig,
         policy: SessionPolicy,
     ) -> Result<Arc<Self>, OpenError> {
+        Self::open_parts(links, clock, entropy, config, policy, OpenKeyIds::default())
+    }
+
+    /// [`Self::open_with_policy`], the session holding `key_ids`, the key ids every node of the
+    /// deployment shares: every link of it reads an id only the dictionary names, the session
+    /// declares no key expression under one of its ids, and a key goes on the wire as the
+    /// policy's `key-wire-form` says ([`SessionEngine::key_wire_by_form`]). `None` is the session
+    /// without a dictionary, which may not be opened under `shared`.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn open_with_key_ids(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        config: CoopConfig,
+        policy: SessionPolicy,
+        key_ids: Option<SharedKeyIds>,
+    ) -> Result<Arc<Self>, OpenError> {
+        Self::open_parts(
+            links,
+            clock,
+            entropy,
+            config,
+            policy,
+            OpenKeyIds { ids: key_ids },
+        )
+    }
+
+    /// The one open both doors above make. The key-wire form is judged first, so a session that
+    /// cannot honour it dials and binds nothing.
+    fn open_parts(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        config: CoopConfig,
+        policy: SessionPolicy,
+        key_ids: OpenKeyIds,
+    ) -> Result<Arc<Self>, OpenError> {
+        key_ids.admit(&policy)?;
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match &config.zid {
             Some(zid) => wire_zid(zid)?,
@@ -1542,6 +1636,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             subscribers: Vec::new(),
             keyexprs: Vec::new(),
             next_mapping: 1,
+            #[cfg(feature = "shared-key-ids")]
+            key_ids: key_ids.ids,
             #[cfg(feature = "local-queryable")]
             next_local_request: 0,
             filters: Vec::new(),
@@ -2362,6 +2458,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         })
     }
 
+    // One form for the session: a key is named the same way on every link, and while one of the
+    // links reaches a router every link is told the declared form, which a router reads.
+    #[cfg(feature = "shared-key-ids")]
+    fn key_wire_by_form(&self, keyexpr: &str) -> Option<WireKey> {
+        let core = self.live()?;
+        let core = &core.0;
+        let form = core.policy.key_wire_form();
+        let to_router = core
+            .ups()
+            .any(|actions| actions.peer_whatami_wire() == Some(0));
+        let wire = match core.key_ids.as_deref() {
+            Some(ids) => shared_key_ids::key_wire(form, ids, keyexpr, to_router),
+            // `shared` was refused at the open without a dictionary.
+            None if form == KeyWireForm::Literal => KeyWire::Literal,
+            None => KeyWire::Declared,
+        };
+        match wire {
+            KeyWire::Declared => None,
+            KeyWire::Literal => Some(WireKey::literal()),
+            KeyWire::Shared { id, suffix } => Some(WireKey::aliased(id, suffix.map(String::from))),
+        }
+    }
+
     fn publish_on_wire_all(
         &self,
         keyexpr: &str,
@@ -2496,6 +2615,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // literal's id, and every further declaration is refused rather than re-issuing a live
         // id.
         let id = core.next_mapping;
+        // An id of the shared dictionary names its key in this session's space too, so no key
+        // expression is declared under one: the next id past them, or none when none is left.
+        #[cfg(feature = "shared-key-ids")]
+        let id = match &core.key_ids {
+            Some(ids) => ids.next_free_id(id).unwrap_or(0),
+            None => id,
+        };
         if id == 0 {
             return None;
         }

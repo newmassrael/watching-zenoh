@@ -81,5 +81,8 @@ pub mod tls;
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
-pub use engine::{CoopConfig, CoopEngine, OpenError, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES};
+pub use engine::{
+    CoopConfig, CoopEngine, KeyWireFormRefused, OpenError, DEFAULT_ACCEPT_PENDING,
+    DEFAULT_MAX_FACES,
+};
 }
