@@ -76,7 +76,7 @@
 //! reader's documentation (`wz_app_frame::proto_schema`). This module adds two
 //! refusals of its own: a key pattern or a file name that holds a line break,
 //! which would end its declaration, and an expansion of more than
-//! [`MAX_DECLARATIONS`] lines. The last matters because a schema with no cycle
+//! [`MAX_DECLARATIONS`](crate::proto_schema::MAX_DECLARATIONS) lines. The last matters because a schema with no cycle
 //! can still expand exponentially: a message that holds two of a message that
 //! holds two of another, ten times over, is a thousand paths from a ten-line
 //! file.
