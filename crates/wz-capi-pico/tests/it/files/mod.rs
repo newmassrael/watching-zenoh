@@ -24,6 +24,7 @@ mod listener_multipeer;
 mod liveliness_face_death;
 mod local_delivery;
 mod matching_multiface;
+mod message_catalog_doors;
 mod mutual_dial;
 mod open_scouts_for_a_locator;
 mod payload_release;

@@ -546,6 +546,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
         # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
+        # `message-catalog` gates `pub mod message_catalog`, whose public items are wz's own doors
+        # `wz_ext_message_catalog_new`, `_len`, `_find`, `_find_id`, `_node`, `_entry`,
+        # `_direction`, `_supervision_start_delay`, `_loan`, `_move`, `_drop`, the two
+        # `wz_ext_internal_message_catalog_*` doors, and, beside `e2e-sender`, `e2e-receiver` and
+        # `e2e-supervision`, `_e2e_sender_new`, `_e2e_receiver_new`, `_supervision_rows` and
+        # `_supervise`, with the types and constants they take, declared in `wz_ext.h`; off by
+        # default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",
@@ -557,6 +564,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "e2e-sender-demux",
                 "e2e-supervision",
                 "event-ring",
+                "message-catalog",
                 "remote-declaration-watch",
                 "resource-snapshot",
                 "scout-mcu",
