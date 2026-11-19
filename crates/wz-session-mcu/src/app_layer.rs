@@ -282,6 +282,7 @@ where
             // The observer is the process's and this session is one link: the queries of this
             // dispatch are asked by whom the link's key proved, or by nobody shown (decision D12).
             observer.set_requester(self.handle.verified_peer_zid());
+            observer.set_unanswerable_final(self.handle.params.policy.query_unanswerable_final());
             observer.dispatch(&mut peers, &mut self.requesters, event, &*self.handle);
             observer.set_requester(None);
         }

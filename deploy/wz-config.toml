@@ -3360,6 +3360,31 @@ so both ends of a link must state the same value: a peer that keeps one link by
 the other order closes the link this node kept, and neither link survives.
 '''
 
+[[policy]]
+id = "query-unanswerable-final"
+kind = "choice"
+kconfig = "WZ_POLICY_QUERY_UNANSWERABLE_FINAL"
+choices = ["none", "empty-final"]
+default = "none"
+upstream = "Drops a query from a peer whose key it cannot resolve (an id the peer never declared to it) before the query reaches any queryable, and sends nothing back, so the asker waits out its own timeout."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `empty-final` sends a RESPONSE_FINAL the peer reads.
+wire = "visible"
+since = 2
+help = '''
+How a node answers a query from a peer that it cannot run at all because the
+query's key names an id the peer never declared to this node. `none` sends
+nothing, as upstream does, and the asker's query ends only at its own timeout.
+`empty-final` answers it at once with a RESPONSE_FINAL and no reply, the answer
+a query that matched no queryable gets, so the asker learns now that nothing
+will come. A query whose parameters or attachment are longer than the build
+allows is answered with that final under either value, and a query that
+arrives while the node has no room left to hold another final is refused and
+counted under either value, since the final it would owe has nowhere to wait.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -3404,6 +3429,7 @@ routing-face-drive = "task-per-face"
 routing-table-sharing = "rwlock"
 reassembly-pool-overflow = "reject"
 link-tie-order = "zid-number"
+query-unanswerable-final = "none"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

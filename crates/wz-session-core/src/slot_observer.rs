@@ -493,6 +493,16 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         let _ = requester;
     }
 
+    /// State the `query-unanswerable-final` value of the session about to be dispatched, from
+    /// the snapshot that session holds: the observer is the process's, so the session says it
+    /// before every dispatch, as it says who its link proved.
+    pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
+        #[cfg(feature = "query-queryable")]
+        self.queryables.set_unanswerable_final(value);
+        #[cfg(not(feature = "query-queryable"))]
+        let _ = value;
+    }
+
     /// Fan an [`IterationEvent`] of one session into every registry, against that
     /// session's `peers`. The subscriber side runs first so its alias absorb
     /// binds a `DeclKexpr` BEFORE the planes that resolve keyexprs through it.

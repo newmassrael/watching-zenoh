@@ -740,6 +740,11 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
         let mut registry = registry.borrow_mut();
         // The queries this frame carries arrive on this face's link, whichever was dialled last.
         plane.arriving.store(generation, Ordering::Release);
+        // The application's queryables serve every face, so this face's session states its own
+        // answer to a query it cannot resolve before its frame is dispatched.
+        registry
+            .app
+            .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
         registry.dispatch_event(face, event);
         registry.flush_pending_replies(face, &*actions);
         for (rid, qos) in registry.take_pending_final_rids(face) {
