@@ -948,17 +948,17 @@ mod tests {
             },
             publish_statement(Some(&publish)),
         );
-        // The policy answers before the numbers do: a build without it says so for half a retry.
+        // Half a retry is no retry, whatever the policy: it is refused in the statement's shape,
+        // as `wz_capi_c.h` says of a retry of no pass or no delay.
         for (attempts, delay_ms) in [(0, 5), (5, 0)] {
             let mut half = wz_capi_c_publish_ext_t::OFF;
             half.attempts = attempts;
             half.delay_ms = delay_ms;
-            let got = publish_statement(Some(&half));
-            if retry_on() {
-                assert_eq!(got, Err(Z_EINVAL), "{attempts} passes, {delay_ms} ms");
-            } else {
-                assert_eq!(got, Err(WZ_CAPI_C_E_POLICY_OFF));
-            }
+            assert_eq!(
+                publish_statement(Some(&half)),
+                Err(Z_EINVAL),
+                "{attempts} passes, {delay_ms} ms"
+            );
         }
         // A number past what a retry holds is no retry, whatever the policy.
         let mut wide = wz_capi_c_publish_ext_t::OFF;

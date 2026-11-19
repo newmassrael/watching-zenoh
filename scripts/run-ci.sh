@@ -13636,8 +13636,9 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m mcu slot node" 32 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
-    # them assert is the other half (a token is declared, and is not refused).
-    _runci_guarded_test "C1m mcu slot node with tokens" 31 \
+    # them assert is the other half (a token is declared, and is not refused). 31 -> 32: Round
+    # 4521's snapshot test, as the first arm; hosted run 44572424670 printed 32.
+    _runci_guarded_test "C1m mcu slot node with tokens" 32 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The same tests of a node that binds the lifecycle verbs in band (`client-verbs`, what a
     # declaration that names a commander builds), and one more: the verbs are declared under the
