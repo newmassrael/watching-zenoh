@@ -47,6 +47,7 @@ mod tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
         };
         let (producer, tap) = MulticastTxTap::attach(&params);
         let session = TokioMulticastSession::new_multicast(
@@ -54,6 +55,7 @@ mod tests {
                 ApplicationLayerObserver::new(),
             )),
             Arc::new(TokioTime::new()),
+            params.policy,
             producer,
         );
         (session, tap)
@@ -176,6 +178,7 @@ mod tests {
                 ApplicationLayerObserver::new(),
             )),
             Arc::new(TokioTime::new()),
+            wz_session_core::policy::SessionPolicy::defaults(),
             wz_runtime_tokio::multicast_glue::MulticastTxProducer::new(),
         );
 

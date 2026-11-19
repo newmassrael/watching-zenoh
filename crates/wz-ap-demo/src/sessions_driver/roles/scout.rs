@@ -178,7 +178,9 @@ async fn bind_window(
     } else {
         scout_interface_addresses().unwrap_or_default()
     };
-    let (mut ask, refused) = bind_scout_sockets(group_ip, port, &locals, socket.ttl).await;
+    // The node's snapshot, which `as_socket_config` opens the other sockets under too.
+    let policy = crate::args::resolve_policy();
+    let (mut ask, refused) = bind_scout_sockets(group_ip, port, &locals, socket.ttl, &policy).await;
     if ask.is_empty() {
         let one = UdpDriver::bind_multicast_tx(group_ip, port, socket.as_socket_config())
             .await

@@ -9171,6 +9171,7 @@ mod tests {
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: crate::policy::SessionPolicy::defaults(),
         };
 
         // BOTH configurations, because the extension is `is_qos`-gated and a

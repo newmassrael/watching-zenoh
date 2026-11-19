@@ -1074,8 +1074,8 @@ where
     /// rather than forking it.
     node_hlc: crate::node_clock::NodeHlc,
     /// The value of every policy this session's machines read: on a unicast session the snapshot
-    /// its creator put in its `SessionInitParams`, on a multicast session the one
-    /// [`Session::with_policy`] installs. A declaration that states no choice of its own takes
+    /// its creator put in its `SessionInitParams`, on a multicast session the one its creator
+    /// made it with (`Session::new_multicast`). A declaration that states no choice of its own takes
     /// the session's from here, never from the build.
     policy: wz_session_core::policy::SessionPolicy,
     /// R311y531 — requests whose `ResponseFinal` a queryable handler has taken
@@ -3355,19 +3355,6 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
 // error rather than a runtime guard.
 #[cfg(feature = "transport-multicast")]
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
-    /// Install `policy`, the snapshot the creator of this group session resolved, in place of the
-    /// build defaults [`Self::new_multicast`] starts from. Chain it onto the constructor, before
-    /// anything is declared: a declaration takes the session's value when it is made.
-    #[must_use]
-    pub fn with_policy(mut self, policy: wz_session_core::policy::SessionPolicy) -> Self
-    where
-        <Multicast as TransportState<R, T>>::Payload: Clone,
-    {
-        // `make_mut` for the reason `with_local_delivery_drain` gives.
-        Arc::make_mut(&mut self.0).policy = policy;
-        self
-    }
-
     /// R311mn (Level B, B2) / R311nf — construct a multicast `Session` from the
     /// shared observer + clock (the handshake-free multicast transport has no
     /// `SessionLinkActions` bundle). R311mo (B3) adds the `codec-push`-gated
@@ -3377,9 +3364,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// bare multicast build with no data plane omits `tx` and gets an RX-only
     /// session). R311nf — returns the `Multicast` typestate; the `transport`
     /// field IS the `MulticastPayload` (no enum-variant wrap, no `PhantomData`).
+    ///
+    /// `policy` is the snapshot the group's creator resolved, the one its
+    /// [`MulticastParams::policy`](wz_session_core::multicast_params::MulticastParams::policy)
+    /// carries to the drive loop: the session's declarations read it, as a
+    /// unicast session's read the snapshot of its params.
     pub fn new_multicast(
         observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
+        policy: wz_session_core::policy::SessionPolicy,
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
@@ -3495,9 +3488,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             // multicast transport, and no auto-stamp consumer takes a multicast
             // session (both take `Session<R, T, Unicast>`).
             node_hlc: crate::node_clock::NodeHlc::disabled(),
-            // A group's parameters carry no snapshot yet, so the session starts from the build
-            // defaults and its creator installs its own with `with_policy`.
-            policy: wz_session_core::policy::SessionPolicy::defaults(),
+            policy,
             // R2690 — allocated but never filled on a multicast session: the
             // admin declare surface is `Session<R, T, Unicast>`-only, and a
             // multicast session holds no face whose declarations could be

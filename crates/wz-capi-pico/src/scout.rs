@@ -66,6 +66,7 @@ use wz_session_core::scouting_host::{
     SCOUTING_WHAT_DEFAULT,
 };
 
+use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_zid::SessionZid;
 
 use crate::config::{ConfigState, Z_CONFIG_SESSION_ZID_KEY};
@@ -94,9 +95,13 @@ pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
 /// picks the engine with: the tokio engine whenever it is in the build, the cooperative one
 /// otherwise. A scout needs no session, so the window is a plane beside the engine and not one of
 /// its methods; each engine's is the host that pumps the session's window rules over its sockets.
+///
+/// Each window is handed the snapshot of the scout's config. The tokio engine opens its sockets
+/// under it; the cooperative engine's sockets read no policy of it.
 mod window {
     use core::net::IpAddr;
 
+    use wz_session_core::policy::SessionPolicy;
     use wz_session_core::scouting_host::ScoutedHello;
     use wz_session_core::session_zid::SessionZid;
 
@@ -109,9 +114,10 @@ mod window {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
+        policy: &SessionPolicy,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        wz_capi_core::scouting::run_scout(group, port, what, zid, budget_ms, on_hello)
+        wz_capi_core::scouting::run_scout(group, port, what, zid, budget_ms, policy, on_hello)
     }
 
     /// Scout and answer the first node that replies, or `None` when none does in the window.
@@ -122,8 +128,9 @@ mod window {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
+        policy: &SessionPolicy,
     ) -> Option<ScoutedHello> {
-        wz_capi_core::scouting::scout_first(group, port, what, zid, budget_ms)
+        wz_capi_core::scouting::scout_first(group, port, what, zid, budget_ms, policy)
     }
 
     // The cooperative engine on a host with `scout`: a socket for each interface.
@@ -134,6 +141,7 @@ mod window {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
+        _policy: &SessionPolicy,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
         wz_capi_coop::scout::run_scout(
@@ -154,6 +162,7 @@ mod window {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
+        _policy: &SessionPolicy,
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout::scout_first(
             &wz_runtime_posix::PosixClock,
@@ -174,6 +183,7 @@ mod window {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
+        _policy: &SessionPolicy,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
         crate::coop_host::run_scout(group, port, what, zid, budget_ms, on_hello)
@@ -186,6 +196,7 @@ mod window {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
+        _policy: &SessionPolicy,
     ) -> Option<ScoutedHello> {
         crate::coop_host::scout_first(group, port, what, zid, budget_ms)
     }
@@ -649,13 +660,18 @@ impl ScoutConfig {
 ///
 /// pico's lookup names the session's zid, which it minted when the config stated none; the
 /// engine mints this session's later, so a config that states none asks with a fresh one.
-pub(crate) fn locators_by_scout(cfg: &ConfigState) -> Result<Vec<String>, ZResult> {
+///
+/// `policy` is the snapshot the open resolved, which the lookup's sockets are opened under.
+pub(crate) fn locators_by_scout(
+    cfg: &ConfigState,
+    policy: &SessionPolicy,
+) -> Result<Vec<String>, ZResult> {
     let read = ScoutConfig::read(Some(cfg))?;
     let Some((group, port)) = parse_multicast_locator(&read.locator) else {
         return Err(crate::result::Z_ERR_INVALID);
     };
     let zid = read.zid.or_else(fresh_scout_zid);
-    window::first(group, port, read.what, zid, read.budget_ms)
+    window::first(group, port, read.what, zid, read.budget_ms, policy)
         .map(|hello| hello.locators)
         .filter(|locators| !locators.is_empty())
         .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
@@ -707,6 +723,12 @@ pub unsafe extern "C" fn z_scout(
         Some(Box::from_raw(config_handle as *mut ConfigState))
     };
     let read = ScoutConfig::read(cfg.as_deref());
+    // The scout's snapshot, resolved as `z_open` resolves one from its config: a scout handed
+    // no config reads pico's defaults, the empty config.
+    let policy = match cfg.as_deref() {
+        Some(cfg) => crate::session::resolve_policy(cfg),
+        None => crate::session::resolve_policy(&ConfigState::default()),
+    };
     drop(cfg);
     let read = match read {
         Ok(read) => read,
@@ -730,7 +752,7 @@ pub unsafe extern "C" fn z_scout(
         return crate::result::Z_ERR_INVALID;
     };
 
-    let hellos = run_scout(group, port, what, zid, budget_ms, |hello| {
+    let hellos = run_scout(group, port, what, zid, budget_ms, &policy, |hello| {
         // The callback takes a MUTABLE loaned pointer (pico's signature), but
         // this side keeps ownership: the state is dropped when `run_scout`'s
         // per-hello box goes out of scope, matching upstream, where the hello
@@ -769,16 +791,17 @@ pub unsafe extern "C" fn z_scout(
 /// twice here and there.
 ///
 /// All this side keeps is the ABI mapping: a scouted hello becomes the `HelloState` behind
-/// pico's `z_loaned_hello_t`.
+/// pico's `z_loaned_hello_t`. `policy` is the scout's snapshot, handed to the window.
 fn run_scout(
     group: IpAddr,
     port: u16,
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
+    policy: &SessionPolicy,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> usize {
-    window::run(group, port, what, zid, budget_ms, |hello| {
+    window::run(group, port, what, zid, budget_ms, policy, |hello| {
         let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
         let mut state = HelloState::new(
             z_id_t::from_wire(&hello.zid),

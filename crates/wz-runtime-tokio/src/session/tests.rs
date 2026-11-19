@@ -2270,8 +2270,9 @@ fn a_unicast_session_holds_the_snapshot_of_its_params() {
     }
 }
 
-/// A multicast session holds the snapshot its creator installs, in place of the build defaults
-/// it starts from.
+/// A multicast session holds the snapshot its creator makes it with, which is what its
+/// declarations read: each value of `subscriber-overload` the domain allows is selected and
+/// read back.
 #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 #[test]
 fn a_multicast_session_holds_the_snapshot_it_is_given() {
@@ -2285,8 +2286,7 @@ fn a_multicast_session_holds_the_snapshot_it_is_given() {
         if policy.select_subscriber_overload(value).is_err() {
             continue;
         }
-        let (session, _tap) = tapped_qos_group_session();
-        let session = session.with_policy(policy);
+        let (session, _tap) = tapped_qos_group_session_under(policy);
         assert_eq!(session.policy().subscriber_overload(), value);
         assert_eq!(SubscribeOptions::new().overload_by(session.policy()), value);
     }
@@ -13572,6 +13572,18 @@ fn tapped_qos_group_session() -> (
     TokioMulticastSession,
     crate::multicast_pipeline::MulticastTxTap,
 ) {
+    tapped_qos_group_session_under(wz_session_core::policy::SessionPolicy::defaults())
+}
+
+/// [`tapped_qos_group_session`] whose parameters carry `policy`, the snapshot the group's
+/// creator resolved, which the session is made with.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+fn tapped_qos_group_session_under(
+    policy: wz_session_core::policy::SessionPolicy,
+) -> (
+    TokioMulticastSession,
+    crate::multicast_pipeline::MulticastTxTap,
+) {
     let params = wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Peer,
         zid: [0xAA, 0xBB, 0xCC, 0xDD].into(),
@@ -13586,11 +13598,15 @@ fn tapped_qos_group_session() -> (
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
+        policy,
     };
     let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
-    (Session::new_multicast(observer, clock, producer), tap)
+    (
+        Session::new_multicast(observer, clock, params.policy, producer),
+        tap,
+    )
 }
 
 /// Open-debt item 913 — a member's interest in this session's keyexprs is answered after the

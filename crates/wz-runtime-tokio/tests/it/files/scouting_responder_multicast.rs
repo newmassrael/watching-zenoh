@@ -51,7 +51,7 @@ use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 fn loopback_on() -> McastSocketConfig<'static> {
     McastSocketConfig {
         loopback: MulticastLoopback::On,
-        ..McastSocketConfig::default()
+        ..McastSocketConfig::of_policy(&wz_runtime_tokio::policy::SessionPolicy::defaults())
     }
 }
 use wz_session_core::scout_responder::{ResponderIdentity, ScoutIgnored};

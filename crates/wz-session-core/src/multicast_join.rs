@@ -513,6 +513,7 @@ mod tests {
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
+            policy: crate::policy::SessionPolicy::defaults(),
         }
     }
 

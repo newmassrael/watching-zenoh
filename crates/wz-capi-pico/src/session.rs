@@ -200,7 +200,7 @@ const fn pico_group(sn_resolution: SnResolution) -> wz_capi_core::drive::GroupPr
 /// The policies a session [`z_open`] opens from `config` runs under: the one place this ABI's open
 /// decides them, resolved once and handed to the engine and to the session's handle. The build
 /// defaults, until pico's configuration has a key for a policy.
-fn resolve_policy(_config: &ConfigState) -> SessionPolicy {
+pub(crate) fn resolve_policy(_config: &ConfigState) -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
@@ -599,19 +599,20 @@ pub unsafe extern "C" fn z_open(
         // scouting answers `_Z_ERR_SCOUT_NO_RESULTS`. A session that is re-dialled after it
         // lost its link dials the locators found here again. pico re-runs the whole open,
         // scouting included (`_z_client_reopen_task_fn` calls `_z_open`), so a router that
-        // comes back on another locator is found there and not here.
+        // comes back on another locator is found there and not here. The scout runs under the
+        // snapshot of the open it finds a node for.
+        let policy = resolve_policy(&cfg);
         let connect: Vec<String> = match (connect, &listen) {
             (Some(connect), _) => vec![connect],
             (None, Some(_)) => Vec::new(),
             #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-            (None, None) => match crate::scout::locators_by_scout(&cfg) {
+            (None, None) => match crate::scout::locators_by_scout(&cfg, &policy) {
                 Ok(locators) => locators,
                 Err(code) => return code,
             },
             #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
             (None, None) => return crate::result::Z_ERR_SCOUT_NO_RESULTS,
         };
-        let policy = resolve_policy(&cfg);
         drop(cfg);
         // A build without the `peer` feature is a client build: it opens to the endpoint it is
         // given, and a listener or `mode=peer` is a role it does not have. (zenoh-pico's own

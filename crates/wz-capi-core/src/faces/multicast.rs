@@ -485,9 +485,14 @@ impl SharedSession {
         is_shm: bool,
     ) -> TokioMulticastSession {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
-        let session =
-            TokioMulticastSession::new_multicast(observer, Arc::new(self.clock), producer)
-                .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+        // The node's snapshot, the one its group's parameters carry to the drive loop.
+        let session = TokioMulticastSession::new_multicast(
+            observer,
+            Arc::new(self.clock),
+            *self.session_policy(),
+            producer,
+        )
+        .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
         // A group that is a shared-memory one reads what its members send through the node's
         // own reader, as a face does, and reads a descriptor where it finds one.
         #[cfg(feature = "transport-shm")]

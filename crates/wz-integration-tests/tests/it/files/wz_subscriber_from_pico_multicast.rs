@@ -109,6 +109,7 @@ fn wz_mc_params() -> MulticastParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     }
 }
 
@@ -133,13 +134,13 @@ async fn wz_subscriber_admits_pico_multicast_push() {
     // co-bind the host group port that pico's peer also binds.
     // The session is brought up here, which binds its link, rather than when
     // the drive below is first polled.
-    let mut link =
-        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default()));
+    let params = wz_mc_params();
+    let socket = McastSocketConfig::of_policy(&params.policy);
+    let mut link = MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, socket));
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     open_multicast_session(&mut dispatcher, &mut link)
         .await
         .expect("bind wz multicast subscriber link (REUSE co-bind)");
-    let params = wz_mc_params();
 
     let fired = Arc::new(AtomicUsize::new(0));
     let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));

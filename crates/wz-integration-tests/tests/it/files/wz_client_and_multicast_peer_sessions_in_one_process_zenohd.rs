@@ -103,6 +103,7 @@ fn group_params(zid_byte: u8) -> MulticastParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     }
 }
 
@@ -153,13 +154,13 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
     );
 
     // Session B — PEER, joined to the group, with its own observer.
-    let mut link_b =
-        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default()));
+    let params_b = group_params(0xBB);
+    let socket_b = McastSocketConfig::of_policy(&params_b.policy);
+    let mut link_b = MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, socket_b));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     open_multicast_session(&mut dispatcher_b, &mut link_b)
         .await
         .expect("session B joins the group");
-    let params_b = group_params(0xBB);
     let producer_b = MulticastTxProducer::new();
     let clock = Arc::new(TokioTime::new());
     let session_b = TokioMulticastSession::new_multicast(
@@ -167,6 +168,7 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
             ApplicationLayerObserver::new(),
         )),
         clock.clone(),
+        params_b.policy,
         producer_b.clone(),
     );
     let group_samples = Arc::new(AtomicUsize::new(0));

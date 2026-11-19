@@ -601,12 +601,12 @@ impl MulticastTxPlane {
             }
         };
         let (report, written) = tokio::sync::mpsc::unbounded_channel();
+        let mut pacing = group_writer_pacing::<crate::datagram_pacing::OfBuild>(params);
         let writer = crate::runtime_pool::WzRuntime::Tx.spawn(async move {
             // R3264 — a pooled datagram is a slot of the link's transmit pool:
             // started as the send begins, home through the completion edge once
             // the send has returned.
             use crate::datagram_pacing::Pacing;
-            let mut pacing = crate::datagram_pacing::of_build_defaults();
             while let Some((priority, mut datagram)) = queued.recv_wire_tagged().await {
                 // The `datagram-fragment-pacing` policy: a fragment past the burst waits here, in
                 // the writer, so the producers that queued it are held only by the lane's room.
@@ -933,6 +933,58 @@ impl Drop for MulticastTxPlane {
     }
 }
 
+/// The pacing of a group's transmit task: `P`'s, for the `datagram-fragment-pacing` value of the
+/// snapshot the group's parameters carry. [`OfBuild`](crate::datagram_pacing::OfBuild) is the
+/// writer's in production; a test names the pacing it observes.
+fn group_writer_pacing<P: crate::datagram_pacing::Pacing>(params: &MulticastParams) -> P {
+    P::of_policy(&params.policy)
+}
+
+#[cfg(test)]
+mod writer_pacing_tests {
+    use super::*;
+    use crate::datagram_pacing::ByPolicy;
+    use wz_session_core::policy::{DatagramFragmentPacing, SessionPolicy};
+    use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+
+    fn params(policy: SessionPolicy) -> MulticastParams {
+        MulticastParams {
+            whatami: wz_session_core::WhatAmI::Peer,
+            zid: [1, 2, 3, 4].into(),
+            lease_ms: 5_000,
+            join_interval_ms: 100,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            tx_queue: TxQueueConf::of_policy(&policy),
+            link_rx: LinkRxConf::default(),
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
+            policy,
+        }
+    }
+
+    /// A group's transmit task paces as the snapshot its parameters carry says, not as the
+    /// build's default does: each value the domain allows is selected and observed on a writer
+    /// that holds both.
+    #[test]
+    fn a_group_writer_paces_as_its_parameters_snapshot_says() {
+        for (value, paced) in [
+            (DatagramFragmentPacing::On, true),
+            (DatagramFragmentPacing::Off, false),
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_datagram_fragment_pacing(value).is_err() {
+                continue;
+            }
+            let pacing: ByPolicy = group_writer_pacing(&params(policy));
+            assert_eq!(pacing.is_paced(), paced, "{value:?}");
+        }
+    }
+}
+
 // R2937 — the producer's push against a pipeline whose lanes nobody drains (a
 // tap that is never read is a link that has stopped writing). A reply
 // terminator carries its own congestion control, so one item shape gives both
@@ -969,6 +1021,7 @@ mod tests {
             link_rx: LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
         }
     }
 

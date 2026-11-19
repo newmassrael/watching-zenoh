@@ -157,7 +157,10 @@ impl Responder {
                 .build()
                 .expect("a runtime for the responder");
             runtime.block_on(async move {
-                let driver = UdpDriver::bind_multicast(group, port, McastSocketConfig::default())
+                let socket = McastSocketConfig::of_policy(
+                    &wz_runtime_tokio::policy::SessionPolicy::defaults(),
+                );
+                let driver = UdpDriver::bind_multicast(group, port, socket)
                     .await
                     .expect("the responder joins its group");
                 let identity = ResponderIdentity::try_new(

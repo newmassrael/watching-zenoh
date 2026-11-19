@@ -41,6 +41,7 @@
 
 use std::net::IpAddr;
 
+use wz_runtime_tokio::policy::SessionPolicy;
 use wz_runtime_tokio::scouting_glue::ScoutedHello;
 use wz_session_core::session_zid::SessionZid;
 
@@ -68,16 +69,20 @@ pub const SCOUT_CYCLE_MS: u64 = 1000;
 /// `zid` is the asker the Scout names, `None` for a Scout that names none. It
 /// is already a zid: refusing a configured one that is not is the ABI's, which
 /// knows the error code its caller reads.
+///
+/// `policy` is the snapshot the ABI's scout resolved from its config, which the
+/// window's sockets are opened under.
 pub fn run_scout(
     group: IpAddr,
     port: u16,
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
+    policy: &SessionPolicy,
     on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
     // The survey arm — report every responder, do not stop at one.
-    let hellos = scout_window(group, port, what, zid, budget_ms, false);
+    let hellos = scout_window(group, port, what, zid, budget_ms, false, policy);
     deliver_in_upstream_order(&hellos, on_hello)
 }
 
@@ -87,20 +92,25 @@ pub fn run_scout(
 /// `_z_hello_slist_t *hellos = _z_scout_inner(what, *zid, &mcast_locator, timeout, true);`).
 /// The `true` is `exit_on_first`: the window ends at the first Hello, which is this function's
 /// whole answer. A bind failure is `None`, as a window nobody answers is.
+///
+/// `policy` is the snapshot of the open that scouts, which the window's sockets are opened
+/// under.
 pub fn scout_first(
     group: IpAddr,
     port: u16,
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
+    policy: &SessionPolicy,
 ) -> Option<ScoutedHello> {
-    scout_window(group, port, what, zid, budget_ms, true)
+    scout_window(group, port, what, zid, budget_ms, true, policy)
         .into_iter()
         .next()
 }
 
 /// One scouting window: bind the group, send one Scout, and collect the Hellos that answer
-/// within `budget_ms`, in arrival order, ending at the first when `exit_on_first`.
+/// within `budget_ms`, in arrival order, ending at the first when `exit_on_first`. Every socket
+/// is opened under `policy`.
 fn scout_window(
     group: IpAddr,
     port: u16,
@@ -108,6 +118,7 @@ fn scout_window(
     zid: Option<SessionZid>,
     budget_ms: u64,
     exit_on_first: bool,
+    policy: &SessionPolicy,
 ) -> Vec<ScoutedHello> {
     use wz_runtime_tokio::scouting_fanout::{
         bind_scout_sockets, scout_interface_addresses, ScoutFanOut,
@@ -136,7 +147,7 @@ fn scout_window(
         // whose group socket cannot be bound goes on with the ask sockets, and is empty
         // only when there is nothing to ask or listen with.
         let group_socket =
-            UdpDriver::bind_scouting_group(group, port, McastSocketConfig::default())
+            UdpDriver::bind_scouting_group(group, port, McastSocketConfig::of_policy(policy))
                 .await
                 .ok();
         // R2611 — and that sentence is only true if the Scout LEAVES by every
@@ -148,7 +159,7 @@ fn scout_window(
         // cannot pin offers nothing and the group socket asks alone, which is
         // the pre-R2611 behaviour kept as a floor.
         let locals = scout_interface_addresses().unwrap_or_default();
-        let (ask, refused) = bind_scout_sockets(group, port, &locals, None).await;
+        let (ask, refused) = bind_scout_sockets(group, port, &locals, None, policy).await;
         // The shape `over` returns is REPORTED by `over` itself, at the one
         // place that knows it — this crate carries no logger, and a value
         // dropped here would make "the survey found nothing" and "the Scout

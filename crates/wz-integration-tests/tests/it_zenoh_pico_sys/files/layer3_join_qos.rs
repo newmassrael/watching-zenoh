@@ -197,6 +197,7 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     };
     assert!(
         !params.join_advertises_caps(),

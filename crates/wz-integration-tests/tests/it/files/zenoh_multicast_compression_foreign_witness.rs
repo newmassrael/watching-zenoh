@@ -246,6 +246,7 @@ fn member_params(zid_byte: u8, compression: bool) -> MulticastParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Zenoh,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     }
 }
 

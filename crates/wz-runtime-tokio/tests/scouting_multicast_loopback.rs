@@ -44,7 +44,7 @@ use wz_session_core::scout_params::ScoutParams;
 fn loopback_on() -> McastSocketConfig<'static> {
     McastSocketConfig {
         loopback: MulticastLoopback::On,
-        ..McastSocketConfig::default()
+        ..McastSocketConfig::of_policy(&wz_runtime_tokio::policy::SessionPolicy::defaults())
     }
 }
 
