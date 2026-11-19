@@ -235,7 +235,7 @@ impl StreamSocket for WindowsTcpSocket {
     }
 
     fn send_parts(&self, parts: &[&[u8]]) -> Result<(), WindowsNetError> {
-        // The parts not yet written; a short write moves the front forward.
+        // The parts the stack has still to take; a short write moves the front forward.
         let mut bufs = [ws::WSABUF {
             len: 0,
             buf: core::ptr::null_mut(),

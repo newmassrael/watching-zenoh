@@ -40,8 +40,8 @@
 //! Windows is the one host that is not POSIX: its calls are the system's own (the performance
 //! counter, the system's random number generator, Winsock), and they are [`windows`](mod@windows),
 //! the clock, entropy, wall clock and sockets the pico C ABI's cooperative engine is opened over.
-//! Every item above is the POSIX half's and is not built there. On another OS this crate is empty,
-//! so a workspace-wide build there does not stop on it; a port names its own calls here.
+//! Every item above is the POSIX half's, compiled on a POSIX host only. On another OS this crate
+//! is empty, so a workspace-wide build there does not stop on it; a port names its own calls here.
 #![no_std]
 #![cfg(any(target_os = "linux", target_os = "android", target_os = "nto", windows))]
 
