@@ -237,6 +237,9 @@ pub enum OpenError {
     EntropyUnavailable,
     /// The configured zid is not one: it is not one to sixteen bytes, or its bytes are all zero.
     InvalidZid(ZidError),
+    /// The session states no zid and its `zid-derivation` is `address-ports`, and its `listen`
+    /// endpoints give the node no address a zid can be built on.
+    ZidDerivation(wz_session_core::zid_derivation::ZidDerivationError),
 }
 
 /// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id. Refused
@@ -277,6 +280,23 @@ fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
     if zid.iter().all(|b| *b == 0) {
         return Err(OpenError::EntropyUnavailable);
     }
+    wire_zid(&zid)
+}
+
+/// The zid `zid-derivation = address-ports` derives from the `listen` endpoints and eight bytes
+/// of `entropy` (see `wz_session_core::zid_derivation`), in its wire form.
+pub(crate) fn derived_zid(
+    listen: &[String],
+    entropy: &mut dyn EntropySource,
+) -> Result<SessionZid, OpenError> {
+    use wz_session_core::zid_derivation::{ListenerFacts, RANDOM_BYTES};
+    let mut random = [0u8; RANDOM_BYTES];
+    entropy
+        .try_fill_bytes(&mut random)
+        .map_err(|_| OpenError::EntropyUnavailable)?;
+    let zid = ListenerFacts::of_endpoints(listen.iter().map(String::as_str))
+        .derive(None, random)
+        .map_err(OpenError::ZidDerivation)?;
     wire_zid(&zid)
 }
 
@@ -1513,9 +1533,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
     ) -> Result<Arc<Self>, OpenError> {
         let mut entropy = SharedEntropy::new(entropy);
-        let wire = match &config.zid {
-            Some(zid) => wire_zid(zid)?,
-            None => fresh_zid(&mut entropy)?,
+        let wire = match (&config.zid, policy.zid_derivation()) {
+            (Some(zid), _) => wire_zid(zid)?,
+            (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(&mut entropy)?,
+            (None, wz_session_core::policy::ZidDerivation::AddressPorts) => {
+                derived_zid(&config.listen, &mut entropy)?
+            }
         };
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);

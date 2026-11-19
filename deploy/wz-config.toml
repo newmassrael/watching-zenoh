@@ -3385,6 +3385,32 @@ arrives while the node has no room left to hold another final is refused and
 counted under either value, since the final it would owe has nowhere to wait.
 '''
 
+[[policy]]
+id = "zid-derivation"
+kind = "choice"
+kconfig = "WZ_POLICY_ZID_DERIVATION"
+choices = ["random", "address-ports"]
+default = "random"
+upstream = "Draws every byte of a zid the configuration does not state from its random source."
+scope = "runtime"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: the zid is what every INIT and every routing message names the node by.
+wire = "visible"
+since = 2
+help = '''
+How a node makes its zid when the configuration states none. `random` draws all
+sixteen bytes, as upstream does. `address-ports` derives the first eight from
+where the node is reachable and draws the other eight: bytes 0 to 3 are the
+IPv4 address of the first listen endpoint that binds an address of the node,
+bytes 4 and 5 the lowest port of its tcp listeners and bytes 6 and 7 the lowest
+port of its udp listeners, each little-endian and 0 for a node with no listener
+of that protocol. A wildcard, multicast or broadcast address names no node, and
+a node whose listeners name no address of its own is refused at open rather
+than given a random zid. A zid the configuration states is used under either
+value. Only the C ABIs' open reads this policy.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -3430,6 +3456,7 @@ routing-table-sharing = "rwlock"
 reassembly-pool-overflow = "reject"
 link-tie-order = "zid-number"
 query-unanswerable-final = "none"
+zid-derivation = "random"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

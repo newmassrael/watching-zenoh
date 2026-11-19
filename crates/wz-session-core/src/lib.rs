@@ -629,6 +629,9 @@ pub mod credential_identity;
 /// Ungated for the reason [`credential_identity`] is: it allocates nothing, and
 /// the fixed-memory profile keeps the same value in the session's storage.
 pub mod session_zid;
+/// The zid a node derives from its address and listener ports under the `zid-derivation`
+/// policy's `address-ports` value. Ungated: pure arithmetic on values, no allocation.
+pub mod zid_derivation;
 
 /// The rule an identity's two files are provisioned by (make both, keep both, refuse half), and
 /// the words a maker refuses with: shared by a declared node's `--make-identity` and the C

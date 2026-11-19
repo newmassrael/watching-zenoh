@@ -304,6 +304,7 @@ mod tests {
             ReassemblyPoolOverflow::HELD,
             LinkTieOrder::HELD,
             QueryUnanswerableFinal::HELD,
+            ZidDerivation::HELD,
         ];
         assert_eq!(
             core::mem::size_of::<SessionPolicy>(),
