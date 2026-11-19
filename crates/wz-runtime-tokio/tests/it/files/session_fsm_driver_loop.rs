@@ -354,7 +354,7 @@ async fn a_forward_gap_on_the_reliable_channel_ends_the_link_only_when_the_polic
             );
             assert_eq!(engine.get_current_state(), S::Established);
         }
-        Mode::UntilDeclarationsSynced | Mode::Always => {
+        Mode::UntilDeclarationsSynced | Mode::UntilDeclarationsSyncedWhenBegun | Mode::Always => {
             assert!(
                 matches!(
                     outcomes[1],
@@ -382,7 +382,12 @@ async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final
     use wz_session_core::lease::LeaseCheckOutcome;
 
     const WINDOW: u64 = 250;
-    for mode in [Mode::Off, Mode::UntilDeclarationsSynced, Mode::Always] {
+    for mode in [
+        Mode::Off,
+        Mode::UntilDeclarationsSynced,
+        Mode::Always,
+        Mode::UntilDeclarationsSyncedWhenBegun,
+    ] {
         let mut params = fixture_session_init_params();
         if params.policy.select_reliable_gap_reconnect(mode).is_err() {
             continue;
@@ -408,7 +413,9 @@ async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final
         actions.note_declare_finals_in(IterationEvent::Lease(LeaseCheckOutcome::WithinLease));
         let expected = match mode {
             Mode::Off => None,
-            Mode::UntilDeclarationsSynced | Mode::Always => Some(established + WINDOW),
+            Mode::UntilDeclarationsSynced
+            | Mode::Always
+            | Mode::UntilDeclarationsSyncedWhenBegun => Some(established + WINDOW),
         };
         assert_eq!(
             actions.declaration_watch_deadline_for(WINDOW),
@@ -426,6 +433,79 @@ async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final
             None,
             "{mode:?}: the peer's final ends the watch"
         );
+    }
+}
+
+// `until-declarations-synced-when-begun`: the side of the link is the one the
+// establishment ran (the InitSyn sent, or the InitAck), and a window that runs
+// out settles an ACCEPTED link whose peer began nothing, where a dialled link
+// loses its link as under `until-declarations-synced`.
+#[cfg(feature = "session-unicast-accept")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_window_settles_only_an_accepted_links_sync_under_when_begun() {
+    use wz_runtime_tokio::policy::ReliableGapReconnect as Mode;
+    use wz_runtime_tokio::session_glue::IterationEvent;
+    use wz_session_core::declaration_sync::WatchExpiry;
+    use wz_session_core::lease::LeaseCheckOutcome;
+    use wz_session_wire_fixtures::craft_initsyn_wire;
+
+    for accepted in [false, true] {
+        let mut params = fixture_session_init_params();
+        if params
+            .policy
+            .select_reliable_gap_reconnect(Mode::UntilDeclarationsSyncedWhenBegun)
+            .is_err()
+        {
+            return;
+        }
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
+            Arc::new(NoopOutboundDriver::default());
+        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        if accepted {
+            engine.process_event(E::InboundStart);
+            let mut driver =
+                QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
+            let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+            assert_eq!(engine.get_current_state(), S::SentInitAck);
+            engine.process_event(E::OpenSynReceived);
+        } else {
+            drive_to_sent_init_syn(&mut engine);
+            engine.process_event(E::InitAckReceived);
+            engine.process_event(E::OpenAckReceived);
+        }
+        assert_eq!(engine.get_current_state(), S::Established);
+        assert_eq!(
+            actions.link_accepted(),
+            accepted,
+            "the side the establishment ran"
+        );
+        actions.note_declare_finals_in(IterationEvent::Lease(LeaseCheckOutcome::WithinLease));
+        assert!(!actions.peer_declarations_begun());
+        assert!(actions.declaration_watch_deadline_for(250).is_some());
+
+        let expiry = actions.expire_declaration_watch();
+        if accepted {
+            assert_eq!(
+                expiry,
+                WatchExpiry::EndsSync,
+                "a quiet peer has nothing to send"
+            );
+            assert!(actions.peer_declarations_settled(), "the gap rule stops");
+            assert_eq!(
+                actions.declaration_watch_deadline_for(250),
+                None,
+                "so does the watch"
+            );
+        } else {
+            assert_eq!(
+                expiry,
+                WatchExpiry::LosesLink,
+                "a dialled link is held to the end"
+            );
+            assert!(!actions.peer_declarations_settled());
+        }
     }
 }
 
@@ -463,7 +543,7 @@ async fn a_forward_gap_after_the_peers_declarations_are_final_follows_the_mode()
     actions.note_peer_declarations_final();
     let outcomes = deliver_frames(&actions, &mut engine, vec![craft_frame_wire(105, true)]).await;
     match SessionPolicy::from_build().reliable_gap_reconnect() {
-        Mode::Off | Mode::UntilDeclarationsSynced => {
+        Mode::Off | Mode::UntilDeclarationsSynced | Mode::UntilDeclarationsSyncedWhenBegun => {
             assert!(
                 matches!(outcomes[0], DriverLoopOutcome::FramePayload { sn: 105, .. }),
                 "the jump is accepted; got {:?}",

@@ -2954,7 +2954,7 @@ not refused. Only the tokio engine reads this policy.
 id = "reliable-gap-reconnect"
 kind = "choice"
 kconfig = "WZ_POLICY_RELIABLE_GAP_RECONNECT"
-choices = ["off", "until-declarations-synced", "always"]
+choices = ["off", "until-declarations-synced", "always", "until-declarations-synced-when-begun"]
 default = "off"
 upstream = "Accepts a forward jump of the reliable channel's sequence number without a word: the frames in between are lost, the session stays open and nothing is repaired, so a peer's declaration lost that way is never noticed."
 scope = "session"
@@ -2976,7 +2976,12 @@ advance the number is dropped as before, and the best-effort channels are not
 affected. Only the tokio engine reconnects, so another engine ends the link and
 leaves it to the application, and only the tokio engine reports the end of the
 peer's declarations, so for another engine `until-declarations-synced` is
-`always`.
+`always`. `until-declarations-synced-when-begun` is `until-declarations-synced`
+on a link this node dialled; on a link it accepted, a peer that lets
+DECLARATION_SYNC_RX_NO_PROGRESS_MS pass without sending any declaration of its
+initial interest is taken to have none to send, which settles the sync, while a
+peer that began them is held to their end as under `until-declarations-synced`.
+With that limit at 0 nothing settles an accepted link early.
 '''
 
 [[policy]]

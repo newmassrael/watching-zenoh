@@ -755,6 +755,16 @@ const TX_CONDUITS: usize = 1;
 ))]
 const HANDSHAKE_LANE: Priority = Priority::Control;
 
+/// `SessionLinkActions::peer_sync_bits`: this node accepted the link.
+#[cfg(feature = "alloc")]
+const SYNC_ACCEPTED: u8 = 1;
+/// `SessionLinkActions::peer_sync_bits`: the peer began its initial declarations.
+#[cfg(feature = "alloc")]
+const SYNC_BEGUN: u8 = 2;
+/// `SessionLinkActions::peer_sync_bits`: a quiet window settled the sync as empty.
+#[cfg(feature = "alloc")]
+const SYNC_QUIET: u8 = 4;
+
 /// The longest establishment answer a session holds for `handshake-stray-message =
 /// ignore-and-replay`: an InitAck with the widest cookie this node issues and room for its
 /// extension chain, or an OpenSyn echoing a cookie of that width. An answer longer than this is
@@ -1980,6 +1990,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// final never runs a watch that only the final could end. Reset with the flag above.
     #[cfg(feature = "alloc")]
     peer_declaration_progress_ms: core::sync::atomic::AtomicU64,
+    /// The facts `until-declarations-synced-when-begun` reads of this link's sync, as bits:
+    /// [`SYNC_ACCEPTED`] this node answered the link's InitSyn (it accepted the link, where a
+    /// dialled one sent it), [`SYNC_BEGUN`] the peer sent a declaration of its initial interest,
+    /// [`SYNC_QUIET`] a quiet window passed on an accepted link whose peer began none, which
+    /// settles the sync as one with nothing in it. Reset with the flag above.
+    #[cfg(feature = "alloc")]
+    peer_sync_bits: core::sync::atomic::AtomicU8,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
@@ -3888,6 +3905,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "alloc")]
                 peer_declaration_progress_ms: core::sync::atomic::AtomicU64::new(u64::MAX),
+                #[cfg(feature = "alloc")]
+                peer_sync_bits: core::sync::atomic::AtomicU8::new(0),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
@@ -15919,6 +15938,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "alloc")]
             self.peer_declaration_progress_ms
                 .store(u64::MAX, core::sync::atomic::Ordering::Release);
+            #[cfg(feature = "alloc")]
+            self.peer_sync_bits
+                .store(0, core::sync::atomic::Ordering::Release);
             // §5.21 routing-namespace — the per-session INGRESS correlation is
             // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
             // declaration tables + a RESTARTED id space, so a stale blocked-id
@@ -16026,13 +16048,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn note_declaration_progress(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
         use core::sync::atomic::Ordering;
         #[cfg(feature = "codec-declare")]
-        let declared = crate::declaration_sync::declares_in_event(event);
+        let progress = crate::declaration_sync::declaration_progress_in(event);
         #[cfg(not(feature = "codec-declare"))]
-        let declared = {
+        let progress = {
             let _ = event;
-            false
+            crate::declaration_sync::DeclarationProgress::default()
         };
-        if declared {
+        if progress.initial_scope {
+            self.peer_sync_bits.fetch_or(SYNC_BEGUN, Ordering::AcqRel);
+        }
+        if progress.declared {
             self.peer_declaration_progress_ms
                 .store(self.clock.now_monotonic_ms(), Ordering::Release);
         } else {
@@ -16069,10 +16094,82 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let established = R::with_mutex_mut(&self.link.established_at, |slot| *slot)?;
         crate::declaration_sync::stall_deadline(
             self.params.policy.reliable_gap_reconnect(),
-            self.peer_declarations_final_seen(),
+            self.peer_declarations_settled(),
             established.max(progress),
             window_ms,
         )
+    }
+
+    /// What the no-progress window that just ran out means for this link's sync
+    /// ([`crate::declaration_sync::watch_expiry`]): the link is lost, or (an accepted link under
+    /// `until-declarations-synced-when-begun` whose peer began nothing) the sync is settled as
+    /// empty, which this records so the watch and the gap rule stop.
+    #[cfg(feature = "alloc")]
+    pub fn expire_declaration_watch(&self) -> crate::declaration_sync::WatchExpiry {
+        use core::sync::atomic::Ordering;
+        let bits = self.peer_sync_bits.load(Ordering::Acquire);
+        let expiry = crate::declaration_sync::watch_expiry(
+            self.params.policy.reliable_gap_reconnect(),
+            bits & SYNC_ACCEPTED != 0,
+            bits & SYNC_BEGUN != 0,
+        );
+        if expiry == crate::declaration_sync::WatchExpiry::EndsSync {
+            self.peer_sync_bits.fetch_or(SYNC_QUIET, Ordering::AcqRel);
+        }
+        expiry
+    }
+
+    /// Say which side of the link this node is, from the establishment message it sends: `true`
+    /// when it answers the InitSyn (it accepted the link), `false` when it sends one (it dialled).
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn note_link_role(&self, accepted: bool) {
+        use core::sync::atomic::Ordering;
+        if accepted {
+            self.peer_sync_bits
+                .fetch_or(SYNC_ACCEPTED, Ordering::AcqRel);
+        } else {
+            self.peer_sync_bits
+                .fetch_and(!SYNC_ACCEPTED, Ordering::AcqRel);
+        }
+    }
+
+    /// Whether this node accepted the link, as the establishment it ran says
+    /// ([`Self::note_link_role`]); `false` for a dialled link and before an establishment.
+    #[cfg(feature = "alloc")]
+    pub fn link_accepted(&self) -> bool {
+        self.peer_sync_bits
+            .load(core::sync::atomic::Ordering::Acquire)
+            & SYNC_ACCEPTED
+            != 0
+    }
+
+    /// Whether the peer has sent a declaration of its initial interest on this session.
+    #[cfg(feature = "alloc")]
+    pub fn peer_declarations_begun(&self) -> bool {
+        self.peer_sync_bits
+            .load(core::sync::atomic::Ordering::Acquire)
+            & SYNC_BEGUN
+            != 0
+    }
+
+    /// Whether the peer's initial declarations are settled: their end arrived, or a quiet window
+    /// settled an accepted link's sync as empty ([`Self::expire_declaration_watch`]). What the
+    /// `reliable-gap-reconnect` policy and the no-progress watch wait for.
+    pub fn peer_declarations_settled(&self) -> bool {
+        #[cfg(feature = "alloc")]
+        if self
+            .peer_sync_bits
+            .load(core::sync::atomic::Ordering::Acquire)
+            & SYNC_QUIET
+            != 0
+        {
+            return true;
+        }
+        self.peer_declarations_final_seen()
     }
 
     /// The peer's `Declare(DeclFinal)` for `interest_id` arrived: the node stops waiting for it.
@@ -16560,6 +16657,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_init_syn += 1);
+            // This node dialled the link.
+            #[cfg(feature = "alloc")]
+            a.note_link_role(false);
             // R3b — initiator usrpwd offer (Unit) staged into the InitSyn chain.
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitSyn, |d| d.open_init_syn());
@@ -16726,6 +16826,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_init_ack_with_cookie += 1);
+            // This node accepted the link.
+            #[cfg(feature = "alloc")]
+            a.note_link_role(true);
             // R3b — responder usrpwd challenge (Z64 nonce) staged into the
             // InitAck chain.
             // R2779 — each method's challenge is drawn HERE, one per method,

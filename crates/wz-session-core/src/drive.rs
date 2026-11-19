@@ -1671,7 +1671,7 @@ fn refuse_by_sn<R: SessionRuntime, T: TimeSource>(
             sn,
         }),
         RxAdmit::Gap { .. }
-            if crate::sn::reacts_to_gap(mode, actions.peer_declarations_final_seen()) =>
+            if crate::sn::reacts_to_gap(mode, actions.peer_declarations_settled()) =>
         {
             *to_engine = Some(E::LinkLost);
             Some(DriverLoopOutcome::LinkLost(
@@ -2827,10 +2827,13 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     }
     // The watch of the peer's initial declarations first: the wake may be its own, and a sync
     // taken as lost ends the link however long the lease still has.
+    // A window that ends a link's sync as empty (an accepted link whose peer began none, under
+    // `until-declarations-synced-when-begun`) ends the watch and nothing else.
     #[cfg(feature = "alloc")]
     if actions
         .declaration_watch_deadline()
         .is_some_and(|deadline_ms| now_ms >= deadline_ms)
+        && actions.expire_declaration_watch() == crate::declaration_sync::WatchExpiry::LosesLink
     {
         engine.process_event(E::LinkLost);
         return LeaseCheckOutcome::DeclarationsStalled;
