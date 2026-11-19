@@ -20,7 +20,7 @@ use wz_session_core::policy::{KeyWireForm, SessionPolicy};
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
-use wz_session_core::shared_key_ids::{KeyIds, SharedKeyIds};
+use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen, SharedKeyIds};
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
 
@@ -51,27 +51,48 @@ fn open_keyed(
     ids: Option<SharedKeyIds>,
     policy: SessionPolicy,
 ) -> Result<Arc<Engine>, OpenError> {
+    open_with_keys(
+        config,
+        ids.map_or_else(OpenKeyIds::none, OpenKeyIds::shared),
+        policy,
+    )
+}
+
+fn open_with_keys(
+    config: CoopConfig,
+    key_ids: OpenKeyIds,
+    policy: SessionPolicy,
+) -> Result<Arc<Engine>, OpenError> {
     Engine::open_with_key_ids(
         PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         config,
         policy,
-        ids.map_or_else(OpenKeyIds::none, OpenKeyIds::shared),
+        key_ids,
     )
 }
 
-/// A peer listening on a loopback port the kernel picks, holding `ids`, stepped by its read task,
-/// with the endpoint it is bound to.
+/// The endpoint every listener here is configured with: a loopback port the kernel picks. A link
+/// it takes is the one a form stated for this text names.
+const LISTEN: &str = "tcp/127.0.0.1:0";
+
+/// A peer listening on [`LISTEN`], holding `ids`, stepped by its read task, with the endpoint it
+/// is bound to.
 fn listener(ids: Option<SharedKeyIds>, form: KeyWireForm) -> (Stepped, String) {
-    let engine = open_keyed(
+    listener_with(ids.map_or_else(OpenKeyIds::none, OpenKeyIds::shared), form)
+}
+
+/// [`listener`] opened with `key_ids`, which may state the form of its endpoint apart.
+fn listener_with(key_ids: OpenKeyIds, form: KeyWireForm) -> (Stepped, String) {
+    let engine = open_with_keys(
         CoopConfig {
             whatami: WhatAmI::Peer,
             zid: Some(vec![0xa1; 4]),
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            listen: vec![LISTEN.to_owned()],
             ..client_config()
         },
-        ids,
+        key_ids,
         policy_of(form),
     )
     .expect("the listener opens");
@@ -82,15 +103,30 @@ fn listener(ids: Option<SharedKeyIds>, form: KeyWireForm) -> (Stepped, String) {
 /// A client that dials `endpoint` holding the dictionary, under `shared`, once its face is up at
 /// `listener`.
 fn dialler(listener: &Stepped, endpoint: &str) -> Stepped {
+    dialler_with(
+        listener,
+        endpoint,
+        OpenKeyIds::shared(dictionary()),
+        KeyWireForm::Shared,
+    )
+}
+
+/// [`dialler`] opened with `key_ids` under `form`.
+fn dialler_with(
+    listener: &Stepped,
+    endpoint: &str,
+    key_ids: OpenKeyIds,
+    form: KeyWireForm,
+) -> Stepped {
     let client = Stepped::new(
-        open_keyed(
+        open_with_keys(
             CoopConfig {
                 endpoints: vec![endpoint.to_owned()],
                 zid: Some(vec![0xc1; 4]),
                 ..client_config()
             },
-            Some(dictionary()),
-            policy_of(KeyWireForm::Shared),
+            key_ids,
+            policy_of(form),
         )
         .expect("the client opens"),
     );
@@ -286,37 +322,177 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
 }
 
 #[test]
-fn the_session_names_a_key_as_its_form_says() {
+fn a_session_says_when_its_links_may_name_keys_their_own_way() {
     let (shared, _) = listener(Some(dictionary()), KeyWireForm::Shared);
-    let exact = shared
-        .key_wire_by_form("lab/rig/alpha")
-        .expect("the shared form names the key");
-    assert_eq!((exact.mapping_id, exact.suffix), (41, None));
-    let below = shared
-        .key_wire_by_form("lab/rig/gamma")
-        .expect("the shared form names the key");
-    assert_eq!(
-        (below.mapping_id, below.suffix.as_deref()),
-        (40, Some("/gamma"))
-    );
-    let elsewhere = shared
-        .key_wire_by_form("elsewhere/x")
-        .expect("the shared form names the key");
-    assert!(
-        elsewhere.is_literal(),
-        "a key the dictionary does not cover"
-    );
-
+    assert!(shared.names_keys_by_link());
     let (literal, _) = listener(None, KeyWireForm::Literal);
-    assert!(literal
-        .key_wire_by_form("lab/rig/alpha")
-        .expect("the literal form names the key")
-        .is_literal());
-
-    let (declared, _) = listener(Some(dictionary()), KeyWireForm::Declared);
+    assert!(literal.names_keys_by_link());
+    let (declared, _) = listener(None, KeyWireForm::Declared);
     assert!(
-        declared.key_wire_by_form("lab/rig/alpha").is_none(),
-        "the declared form leaves the key to the ABI, as upstream's"
+        !declared.names_keys_by_link(),
+        "upstream's form with no dictionary names every key as the ABI does"
+    );
+    let stated = OpenKeyIds::new(KeyIdsAtOpen {
+        ids: None,
+        links: vec![(LISTEN.to_owned(), KeyWireForm::Literal)],
+    });
+    let (apart, _) = listener_with(stated, KeyWireForm::Declared);
+    assert!(
+        apart.names_keys_by_link(),
+        "one link stated apart is enough"
+    );
+}
+
+/// What a client that holds no dictionary hears of a put on `lab/rig/alpha` from a listener whose
+/// session form is `shared`, when the listener's endpoint is stated `endpoint_form` or not stated,
+/// followed by a put on `lab/mark`, which no dictionary entry covers and which every form sends as
+/// the literal.
+fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>) -> Vec<String> {
+    let at_open = KeyIdsAtOpen {
+        ids: Some(dictionary()),
+        links: endpoint_form
+            .map(|form| vec![(LISTEN.to_owned(), form)])
+            .unwrap_or_default(),
+    };
+    let (listener, endpoint) = listener_with(OpenKeyIds::new(at_open), KeyWireForm::Shared);
+    let client = dialler_with(
+        &listener,
+        &endpoint,
+        OpenKeyIds::none(),
+        KeyWireForm::Declared,
+    );
+    let heard = hear(&client, "lab/**", WireKey::literal());
+    for key in ["lab/rig/alpha", "lab/mark"] {
+        listener
+            .publish_on_wire_all(key, &WireKey::literal(), b"value", &remote())
+            .expect("a put the link carries");
+    }
+    eventually("the client to hear the literal put", || {
+        heard.lock().unwrap().iter().any(|key| key == "lab/mark")
+    });
+    let heard = heard.lock().unwrap().clone();
+    heard
+}
+
+#[test]
+fn a_link_stated_literal_names_its_keys_whole_under_a_shared_session() {
+    assert_eq!(
+        heard_from_a_shared_listener(Some(KeyWireForm::Literal)),
+        ["lab/rig/alpha", "lab/mark"]
+    );
+}
+
+#[test]
+fn a_link_left_to_the_shared_session_names_its_keys_by_the_dictionary() {
+    assert_eq!(
+        heard_from_a_shared_listener(None),
+        ["lab/mark"],
+        "CONTROL: the shared form sent the dictionary's id, which a client without it drops"
+    );
+}
+
+#[test]
+fn a_dialled_link_stated_declared_keeps_the_abis_form_under_a_shared_session() {
+    let (listener, endpoint) = listener(None, KeyWireForm::Declared);
+    let heard = hear(&listener, "lab/**", WireKey::literal());
+    let at_open = KeyIdsAtOpen {
+        ids: Some(dictionary()),
+        links: vec![(endpoint.clone(), KeyWireForm::Declared)],
+    };
+    let client = dialler_with(
+        &listener,
+        &endpoint,
+        OpenKeyIds::new(at_open),
+        KeyWireForm::Shared,
+    );
+    client
+        .publish_on_wire_all("lab/rig/alpha", &WireKey::literal(), b"value", &remote())
+        .expect("a put the link carries");
+    eventually("the listener to hear the put", || {
+        !heard.lock().unwrap().is_empty()
+    });
+    assert_eq!(*heard.lock().unwrap(), ["lab/rig/alpha"]);
+}
+
+#[test]
+fn an_endpoint_stated_twice_is_refused_at_the_open() {
+    let at_open = KeyIdsAtOpen {
+        ids: Some(dictionary()),
+        links: vec![
+            (LISTEN.to_owned(), KeyWireForm::Literal),
+            (LISTEN.to_owned(), KeyWireForm::Shared),
+        ],
+    };
+    assert_eq!(
+        open_with_keys(
+            client_config(),
+            OpenKeyIds::new(at_open),
+            policy_of(KeyWireForm::Declared)
+        )
+        .err(),
+        Some(OpenError::KeyWireForm(KeyWireFormRefused::LinkStatedTwice))
+    );
+    let shared_without = KeyIdsAtOpen {
+        ids: None,
+        links: vec![(LISTEN.to_owned(), KeyWireForm::Shared)],
+    };
+    assert_eq!(
+        open_with_keys(
+            client_config(),
+            OpenKeyIds::new(shared_without),
+            policy_of(KeyWireForm::Declared)
+        )
+        .err(),
+        Some(OpenError::KeyWireForm(KeyWireFormRefused::NoDictionary)),
+        "an endpoint stated shared needs the dictionary as the session does"
+    );
+}
+
+/// How the reply to a query a peer asks by the dictionary's id 43 and the rest `/x` names its key
+/// on the wire, when the session that answers is opened under `form`: the peer is a stand-in that
+/// records each Response as it arrived.
+fn reply_key_under(
+    form: KeyWireForm,
+) -> Vec<(wz_session_core::wire_id::ExprId, Option<String>, bool)> {
+    let router = super::Router::start_peer();
+    let engine = open_keyed(super::config(&router), Some(dictionary()), policy_of(form))
+        .expect("the session opens");
+    engine
+        .declare_queryable_on_wire(
+            "lab/q/**".to_owned(),
+            WireKey::literal(),
+            false,
+            Locality::Any,
+            None,
+            Arc::new(|_: Arc<dyn QueryHolder>| {
+                Box::new(|query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                    out.reply_keyed(query.keyexpr(), b"answer")
+                        .expect("a reply on the query's own key");
+                }) as QueryCallback
+            }),
+        )
+        .expect("the engine has queryables in this build");
+    router.send(super::Command::QueryById(9, 43, "/x"));
+    super::until(&engine, "the peer to hear the reply", || {
+        router.seen(|seen| seen.reply_keys.len()) == 1
+    });
+    router.seen(|seen| seen.reply_keys.clone())
+}
+
+#[test]
+fn a_reply_to_a_query_by_a_shared_id_repeats_its_form_with_the_bit_turned() {
+    assert_eq!(
+        reply_key_under(KeyWireForm::Shared),
+        [(43, Some("/x".to_owned()), false)]
+    );
+}
+
+#[test]
+fn a_reply_under_the_declared_form_names_its_key_whole() {
+    assert_eq!(
+        reply_key_under(KeyWireForm::Declared),
+        [(0, Some("lab/q/x".to_owned()), true)],
+        "CONTROL: the same query and reply under upstream's form"
     );
 }
 

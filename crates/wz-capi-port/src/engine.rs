@@ -123,15 +123,15 @@ pub trait SessionEngine: Send + Sync + 'static {
         false
     }
 
-    /// How `keyexpr` goes on the wire under the session's key-wire form, when that form names
-    /// it otherwise than the ABI would: by an id of the key ids every node of the deployment
-    /// shares (and the rest of the key), or as the literal. `None` leaves the key to the ABI (the
-    /// key expression it declared, or the literal), which is the provided answer of an engine that
-    /// holds no dictionary; a session on such an engine is not opened with a form but `declared`.
+    /// Whether a link of the session may name a key otherwise than the [`WireKey`] an ABI hands
+    /// over: the session holds key ids every node of the deployment shares, or a key-wire form
+    /// other than `declared` is the session's or a link's. Each link then names the key as its
+    /// own form says ([`wire_on_link`](crate::wire_on_link)), so an ABI that would send a
+    /// declared id straight to every link (a declared publisher's plain put) goes the general
+    /// way instead. The provided answer is no, an engine with none of it.
     #[cfg(feature = "shared-key-ids")]
-    fn key_wire_by_form(&self, keyexpr: &str) -> Option<WireKey> {
-        let _ = keyexpr;
-        None
+    fn names_keys_by_link(&self) -> bool {
+        false
     }
 
     /// The graph of each region the node's admin space answers a `linkstate` query for, as text

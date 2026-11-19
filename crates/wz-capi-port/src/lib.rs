@@ -422,6 +422,20 @@ impl WireKey {
     }
 }
 
+/// `wire` as one link names its key, by what the link's key-wire form answered for it
+/// (`SessionLinkActions::key_wire_on_link`): `None` for the declared form, which keeps `wire` as
+/// the ABI made it; the literal; or an id of the dictionary every node of the deployment shares,
+/// with the rest of the key, which no declaration precedes and which therefore keeps nothing.
+#[cfg(feature = "shared-key-ids")]
+pub fn wire_on_link(link: wz_session_core::shared_key_ids::KeyWire<'_>) -> Option<WireKey> {
+    use wz_session_core::shared_key_ids::KeyWire;
+    match link {
+        KeyWire::Declared => None,
+        KeyWire::Literal => Some(WireKey::literal()),
+        KeyWire::Shared { id, suffix } => Some(WireKey::aliased(id, suffix.map(String::from))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -89,6 +89,14 @@ enum Command {
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
     Query(wz_session_core::wire_id::RequestId, &'static str),
+    /// Ask a query of request id `.0` naming its key by id `.1` in the sender's space and the
+    /// rest `.2`, which no declaration precedes: an id of the key ids both ends share.
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    QueryById(
+        wz_session_core::wire_id::RequestId,
+        wz_session_core::wire_id::ExprId,
+        &'static str,
+    ),
     /// Hold a queryable on the key that answers each query with the payload, on the query's key.
     #[cfg(feature = "query")]
     Answer(&'static str, &'static [u8]),
@@ -132,6 +140,10 @@ struct Seen {
     /// `final` for a ResponseFinal.
     #[cfg(feature = "queryable")]
     answers: Vec<&'static str>,
+    /// How each Response named its key on the wire: its id, the rest after it and the mapping bit
+    /// (`true` is the sender's space).
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    reply_keys: Vec<(wz_session_core::wire_id::ExprId, Option<String>, bool)>,
     /// The queries the session asked.
     #[cfg(feature = "query")]
     queries: usize,
@@ -191,12 +203,30 @@ impl Router {
     }
 
     fn start_on_as(port: u16, zid: u8, catch_all: CatchAll) -> Self {
+        Self::start_announcing(port, zid, WhatAmI::Router, catch_all)
+    }
+
+    /// A stand-in that announces itself a peer, on a free port: a session holding the shared
+    /// key ids names its keys to a peer by them, and to a router by its declarations.
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    fn start_peer() -> Self {
+        let port = UdpSocket::bind("127.0.0.1:0")
+            .and_then(|s| s.local_addr())
+            .expect("a free port")
+            .port();
+        Self::start_announcing(port, ROUTER_ZID, WhatAmI::Peer, CatchAll::None)
+    }
+
+    /// A stand-in that announces itself as `whatami`: a peer is told what a router is not (the
+    /// key form of the shared key ids, whose rule sends a router the declared form).
+    fn start_announcing(port: u16, zid: u8, whatami: WhatAmI, catch_all: CatchAll) -> Self {
         let (commands, inbox) = channel();
         let (ready, bound) = channel();
         let seen = Arc::new(Mutex::new(Seen::default()));
         let reported = seen.clone();
-        let thread =
-            std::thread::spawn(move || run_router(port, zid, catch_all, inbox, reported, ready));
+        let thread = std::thread::spawn(move || {
+            run_router(port, (zid, whatami), catch_all, inbox, reported, ready)
+        });
         bound.recv().expect("the router bound its port");
         Self {
             port,
@@ -229,9 +259,24 @@ impl Drop for Router {
     }
 }
 
+/// How `response` named its key on the wire: its id, the rest and the mapping bit (`true` is the
+/// sender's space).
+#[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+fn reply_key_of(
+    response: &wz_session_core::wire::ResponseOwned,
+) -> (wz_session_core::wire_id::ExprId, Option<String>, bool) {
+    let body = &response.keyexpr.body;
+    let (id, rest) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
+    let sender = matches!(
+        body,
+        wz_session_core::wire::parts::WireexprOwnedVariant::WireexprLocal(_)
+    );
+    (id, rest.map(str::to_owned), sender)
+}
+
 fn run_router(
     port: u16,
-    zid: u8,
+    (zid, whatami): (u8, WhatAmI),
     catch_all: CatchAll,
     inbox: Receiver<Command>,
     seen: Arc<Mutex<Seen>>,
@@ -245,7 +290,7 @@ fn run_router(
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
     let actions = new_session_actions(
         sink,
-        params(WhatAmI::Router, zid),
+        params(whatami, zid),
         CoopTime::new(&runtime),
         PosixEntropy,
     );
@@ -321,7 +366,11 @@ fn run_router(
                         NetworkMessage::Interest(_) => seen.interests += 1,
                         NetworkMessage::Push(_) => seen.pushes += 1,
                         #[cfg(feature = "queryable")]
-                        NetworkMessage::Response(_) => seen.answers.push("reply"),
+                        NetworkMessage::Response(_response) => {
+                            seen.answers.push("reply");
+                            #[cfg(feature = "shared-key-ids")]
+                            seen.reply_keys.push(reply_key_of(_response));
+                        }
                         #[cfg(feature = "queryable")]
                         NetworkMessage::ResponseFinal(_) => seen.answers.push("final"),
                         #[cfg(feature = "query")]
@@ -410,6 +459,10 @@ fn run_router(
             #[cfg(feature = "queryable")]
             Ok(Command::Query(rid, key)) => {
                 let _ = actions.send_request_query(rid, 0, Some(key));
+            }
+            #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+            Ok(Command::QueryById(rid, id, rest)) => {
+                let _ = actions.send_request_query(rid, id, Some(rest));
             }
             #[cfg(feature = "query")]
             Ok(Command::Answer(key, value)) => {
