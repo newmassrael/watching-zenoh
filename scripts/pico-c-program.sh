@@ -40,6 +40,11 @@
 # to GITHUB_STEP_SUMMARY when that is set. Exit status 0 means the program built, ran and
 # passed. A failure to build is reported as NOT-MEASURED and is a non-zero exit too: a
 # step that could not compile its program has not shown that the program passes.
+#
+# PICO_C_PROGRAM_OUT=<path> builds the program to <path> and does not run it, on Linux and
+# macOS: for a caller that runs it itself, with arguments (scripts/app-plane-oracle.sh). The
+# header tree of the library's arm is left beside it, as <dir>/pico-arm-include-<name>, so
+# that caller can compile other programs against the same arm.
 
 set -u
 
@@ -144,7 +149,15 @@ if command -v cygpath > /dev/null 2>&1; then
 fi
 echo "pico headers: $inc"
 
-if command -v cygpath > /dev/null 2>&1 && [ -n "${RUNNER_TEMP:-}" ]; then
+out_exe="${PICO_C_PROGRAM_OUT:-}"
+if [ -n "$out_exe" ]; then
+    if [ "$os" = Windows ]; then
+        echo "pico-c-program: PICO_C_PROGRAM_OUT is read on Linux and macOS only" >&2
+        exit 2
+    fi
+    temp="$(dirname "$out_exe")"
+    mkdir -p "$temp"
+elif command -v cygpath > /dev/null 2>&1 && [ -n "${RUNNER_TEMP:-}" ]; then
     temp="$(cygpath -u "$RUNNER_TEMP")"
 else
     temp="${RUNNER_TEMP:-$(mktemp -d)}"
@@ -170,7 +183,7 @@ if ! "$py" scripts/lib/wz_config.py --pico-config-h ${header_engine[@]+"${header
 fi
 inc="$arm_inc"
 echo "pico headers of this build's arm: $inc"
-exe="$temp/$(basename "${src%.c}")"
+exe="${out_exe:-$temp/$(basename "${src%.c}")}"
 compiled=FAIL
 compiler=none
 case "$os" in
@@ -203,6 +216,11 @@ esac
 if [ "$compiled" != PASS ]; then
     say "pico-program-probe on ${os} (${compiler}): the program did not compile or link NOT-MEASURED"
     exit 1
+fi
+
+if [ -n "$out_exe" ]; then
+    say "pico-program-probe on ${os} (${compiler}): ${what}: built ${exe} against ${lib_dir}"
+    exit 0
 fi
 
 result=FAIL
