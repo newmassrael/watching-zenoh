@@ -187,17 +187,17 @@ impl PublishOptions {
         self
     }
 
-    /// Make the publish retry as `retry` says when no link had room. A build whose
+    /// Make the publish retry as `retry` says when no link had room. A session whose
     /// `publisher-admission-retry` policy is off refuses it where the engine reads it
-    /// ([`crate::admission_retry::admit_in_build`]).
+    /// ([`crate::admission_retry::admit_by`]).
     pub fn with_admission_retry(mut self, retry: AdmissionRetry) -> Self {
         self.admission_retry = Some(retry);
         self
     }
 
-    /// Make the publish reach all of its links or none. A build whose `multi-route-atomic-tx`
+    /// Make the publish reach all of its links or none. A session whose `multi-route-atomic-tx`
     /// policy is off refuses it where the engine reads it
-    /// ([`crate::atomic_tx::admit_in_build`]).
+    /// ([`crate::atomic_tx::admit_by`]).
     pub fn with_atomic_tx(mut self) -> Self {
         self.atomic_tx = true;
         self

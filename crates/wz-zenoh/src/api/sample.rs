@@ -100,23 +100,33 @@ pub(crate) const ANY_LINKS: Links = Links::Any;
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) const ANY_LINKS: Links = Links;
 
-/// Whether this build lets an entity be limited to `links`: an unrestricted set always, a
-/// restricted one only when the build's `entity-link-restriction` policy is on. The refusal is
-/// the policy's own text, as an error of the call that stated the set.
+/// The policies of the session an entity is declared on: the snapshot its engine was opened
+/// with, which decides what an entity may state.
 #[cfg(feature = "engine-tokio")]
-pub(crate) fn admit_links(links: Links) -> ZResult<()> {
+pub(crate) type Policy = wz_session_core::policy::SessionPolicy;
+
+/// The policies of the session an entity is declared on. A build with no engine opens no
+/// session, so there is no snapshot to hold.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type Policy = std::convert::Infallible;
+
+/// Whether the session whose snapshot is `policy` lets an entity be limited to `links`: an
+/// unrestricted set always, a restricted one only when its `entity-link-restriction` policy is
+/// on. The refusal is the policy's own text, as an error of the call that stated the set.
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn admit_links(links: Links, policy: &Policy) -> ZResult<()> {
     if !links.is_restricted() {
         return Ok(());
     }
     links
-        .admit_in_build()
+        .admit_by(policy)
         .map(|_admitted| ())
         .map_err(|refusal| zerror!("{refusal}").into())
 }
 
 /// A build with no engine states no set of links, so there is nothing to admit.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn admit_links(_links: Links) -> ZResult<()> {
+pub(crate) fn admit_links(_links: Links, _policy: &Policy) -> ZResult<()> {
     Ok(())
 }
 
@@ -140,18 +150,18 @@ pub(crate) type TargetPeer = Option<ZenohId>;
 /// What a query that names no node has: every link that has a matching queryable.
 pub(crate) const NO_PEER: TargetPeer = None;
 
-/// Whether this build lets a publish state `retry`: none always, one only when the build's
-/// `publisher-admission-retry` policy is on and its numbers are ones the policy accepts. The
-/// refusal is the policy's own text, as an error of the call that stated the retry.
+/// Whether the session whose snapshot is `policy` lets a publish state `retry`: none always, one
+/// only when its `publisher-admission-retry` policy is on and its numbers are ones the policy
+/// accepts. The refusal is the policy's own text, as an error of the call that stated the retry.
 #[cfg(feature = "engine-tokio")]
-pub(crate) fn admit_retry(retry: Retry) -> ZResult<()> {
-    wz_session_core::admission_retry::admit_in_build(retry)
+pub(crate) fn admit_retry(retry: Retry, policy: &Policy) -> ZResult<()> {
+    wz_session_core::admission_retry::admit_by(retry, policy)
         .map_err(|refusal| zerror!("{refusal}").into())
 }
 
 /// A build with no engine states no retry, so there is nothing to admit.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn admit_retry(_retry: Retry) -> ZResult<()> {
+pub(crate) fn admit_retry(_retry: Retry, _policy: &Policy) -> ZResult<()> {
     Ok(())
 }
 
@@ -161,18 +171,18 @@ pub(crate) type Atomic = bool;
 /// What a publish that states nothing has: each link on its own terms, as upstream's does.
 pub(crate) const NOT_ATOMIC: Atomic = false;
 
-/// Whether this build lets a publish state the all-or-none form: unstated always, stated only
-/// when the build's `multi-route-atomic-tx` policy is on. The refusal is the policy's own text,
-/// as an error of the call that stated it.
+/// Whether the session whose snapshot is `policy` lets a publish state the all-or-none form:
+/// unstated always, stated only when its `multi-route-atomic-tx` policy is on. The refusal is the
+/// policy's own text, as an error of the call that stated it.
 #[cfg(feature = "engine-tokio")]
-pub(crate) fn admit_atomic(atomic: Atomic) -> ZResult<()> {
-    wz_session_core::atomic_tx::admit_in_build(atomic)
+pub(crate) fn admit_atomic(atomic: Atomic, policy: &Policy) -> ZResult<()> {
+    wz_session_core::atomic_tx::admit_by(atomic, policy)
         .map_err(|refusal| zerror!("{refusal}").into())
 }
 
 /// A build with no engine has no links to reach, so nothing is stated and nothing to admit.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn admit_atomic(_atomic: Atomic) -> ZResult<()> {
+pub(crate) fn admit_atomic(_atomic: Atomic, _policy: &Policy) -> ZResult<()> {
     Ok(())
 }
 
@@ -183,21 +193,21 @@ pub(crate) fn peer_bytes(zid: ZenohId) -> Vec<u8> {
     zid.to_le_bytes()[..zid.size()].to_vec()
 }
 
-/// Whether this build lets a query name `peer`: no node always, one only when the build's
-/// `targeted-query` policy is on. The refusal is the policy's own text, as an error of the call
-/// that named the node.
+/// Whether the session whose snapshot is `policy` lets a query name `peer`: no node always, one
+/// only when its `targeted-query` policy is on. The refusal is the policy's own text, as an error
+/// of the call that named the node.
 #[cfg(feature = "engine-tokio")]
-pub(crate) fn admit_target(peer: TargetPeer) -> ZResult<()> {
+pub(crate) fn admit_target(peer: TargetPeer, policy: &Policy) -> ZResult<()> {
     let Some(zid) = peer else {
         return Ok(());
     };
-    wz_session_core::peer_target::admit_in_build(Some(peer_bytes(zid).as_slice()))
+    wz_session_core::peer_target::admit_by(Some(peer_bytes(zid).as_slice()), policy)
         .map_err(|refusal| zerror!("{refusal}").into())
 }
 
 /// A build with no engine names no node, so there is nothing to admit.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn admit_target(_peer: TargetPeer) -> ZResult<()> {
+pub(crate) fn admit_target(_peer: TargetPeer, _policy: &Policy) -> ZResult<()> {
     Ok(())
 }
 

@@ -89,8 +89,8 @@ use crate::api::{
     query::{ConsolidationMode, QueryConsolidation, Reply, ReplyKeyExpr},
     queryable::Query,
     sample::{
-        admit_atomic, admit_links, admit_retry, admit_target, Atomic, Links, Locality, QoS, Retry,
-        Sample, SampleKind, TargetPeer, ANY_LINKS, NOT_ATOMIC, NO_PEER, NO_RETRY,
+        admit_atomic, admit_links, admit_retry, admit_target, Atomic, Links, Locality, Policy, QoS,
+        Retry, Sample, SampleKind, TargetPeer, ANY_LINKS, NOT_ATOMIC, NO_PEER, NO_RETRY,
     },
     selector::Selector,
     subscriber::SubscriberKind,
@@ -794,6 +794,15 @@ impl Engine {
         match self {
             Engine::Tokio(state) => state.session_defaults(),
             Engine::Router(router) => router.node.session_defaults(),
+        }
+    }
+
+    /// The policies the session runs under: the snapshot the open resolved and handed the node,
+    /// which decides what an entity declared on it may state.
+    fn session_policy(&self) -> &Policy {
+        match self {
+            Engine::Tokio(state) => state.shared.session_policy(),
+            Engine::Router(router) => router.node.session_policy(),
         }
     }
 
@@ -1745,6 +1754,10 @@ impl Engine {
     }
 
     fn is_closed(&self) -> bool {
+        match *self {}
+    }
+
+    fn session_policy(&self) -> &Policy {
         match *self {}
     }
 
@@ -4359,7 +4372,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
+        admit_links(links, self.engine.session_policy())?;
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
@@ -4407,7 +4420,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
+        admit_links(links, self.engine.session_policy())?;
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
@@ -4448,7 +4461,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
+        admit_links(links, self.engine.session_policy())?;
         #[cfg(feature = "unstable")]
         let fan = cancellation_token
             .is_some()
@@ -4816,8 +4829,8 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
-        admit_target(peer)?;
+        admit_links(links, self.engine.session_policy())?;
+        admit_target(peer, self.engine.session_policy())?;
         tracing::trace!("declare_querier({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4876,7 +4889,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
+        admit_links(links, self.engine.session_policy())?;
         tracing::trace!("declare_queryable({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4945,9 +4958,9 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
-        admit_retry(retry)?;
-        admit_atomic(atomic)?;
+        admit_links(links, self.engine.session_policy())?;
+        admit_retry(retry, self.engine.session_policy())?;
+        admit_atomic(atomic, self.engine.session_policy())?;
         tracing::trace!("declare_publisher({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4995,9 +5008,9 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
-        admit_retry(retry)?;
-        admit_atomic(atomic)?;
+        admit_links(links, self.engine.session_policy())?;
+        admit_retry(retry, self.engine.session_policy())?;
+        admit_atomic(atomic, self.engine.session_policy())?;
         // A publication that asks for its instrumentation starts the stack the nodes it crosses
         // record on, with what this node records at the send, and the one that leaves the node
         // has what it records on routing the message out as well.
@@ -5079,8 +5092,8 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
-        admit_target(peer)?;
+        admit_links(links, self.engine.session_policy())?;
+        admit_target(peer, self.engine.session_policy())?;
         // A query of a querier counts in the querier's group, which is the session's child. A
         // query of the session's own counts in the session's: a close that waits for callbacks
         // waits for the reply callback of a get as well.
@@ -6340,7 +6353,7 @@ impl Session {
         if self.0.is_closed() {
             return Err(SessionClosedError.into());
         }
-        admit_links(links)?;
+        admit_links(links, self.0.engine.session_policy())?;
         let wire = key_expr.to_wire(&self.anchor());
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
         let id = self.0.engine.declare_subscriber(Subscription {
@@ -9388,16 +9401,91 @@ mod tests {
         assert!(!session.delete("demo/reach/a2").publisher.atomic);
     }
 
+    /// The snapshot of a session opened with the build defaults, which is what `open` resolves
+    /// until a run-time document is read.
+    fn build_policy() -> Policy {
+        wz_session_core::policy::SessionPolicy::defaults()
+    }
+
     #[test]
     fn nothing_stated_is_admitted_whatever_the_policy() {
-        assert!(admit_target(NO_PEER).is_ok());
-        assert!(admit_retry(NO_RETRY).is_ok());
-        assert!(admit_atomic(NOT_ATOMIC).is_ok());
+        assert!(admit_target(NO_PEER, &build_policy()).is_ok());
+        assert!(admit_retry(NO_RETRY, &build_policy()).is_ok());
+        assert!(admit_atomic(NOT_ATOMIC, &build_policy()).is_ok());
+        assert!(admit_links(ANY_LINKS, &build_policy()).is_ok());
     }
 
     #[test]
     fn all_or_none_stated_is_admitted_only_when_the_policy_is_on() {
-        assert_atomic_decides("admit_atomic", admit_atomic(true));
+        assert_atomic_decides("admit_atomic", admit_atomic(true, &build_policy()));
+    }
+
+    /// What an entity states is admitted by the snapshot of the session it is declared on, not by
+    /// the build: each policy is selected on and off in a snapshot of its own, and the statement
+    /// is taken under the one and refused, in the policy's words, under the other.
+    #[test]
+    fn a_statement_is_admitted_by_the_snapshot_of_its_session() {
+        use wz_session_core::{
+            policy::{
+                EntityLinkRestriction, MultiRouteAtomicTx, PublisherAdmissionRetry, TargetedQuery,
+            },
+            policy_binding::PolicyValue,
+        };
+        fn refused_by(result: ZResult<()>, policy: &str) -> bool {
+            result.is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(&format!("policy {policy} is off"))
+            })
+        }
+        if !EntityLinkRestriction::DOMAIN.is_singleton() {
+            let (mut on, mut off) = (build_policy(), build_policy());
+            on.select_entity_link_restriction(EntityLinkRestriction::On)
+                .expect("the domain holds both values");
+            off.select_entity_link_restriction(EntityLinkRestriction::Off)
+                .expect("the domain holds both values");
+            assert!(admit_links(some_links(), &on).is_ok());
+            assert!(refused_by(
+                admit_links(some_links(), &off),
+                "entity-link-restriction"
+            ));
+        }
+        if !TargetedQuery::DOMAIN.is_singleton() {
+            let (mut on, mut off) = (build_policy(), build_policy());
+            on.select_targeted_query(TargetedQuery::On)
+                .expect("the domain holds both values");
+            off.select_targeted_query(TargetedQuery::Off)
+                .expect("the domain holds both values");
+            assert!(admit_target(Some(some_peer()), &on).is_ok());
+            assert!(refused_by(
+                admit_target(Some(some_peer()), &off),
+                "targeted-query"
+            ));
+        }
+        if !PublisherAdmissionRetry::DOMAIN.is_singleton() {
+            let (mut on, mut off) = (build_policy(), build_policy());
+            on.select_publisher_admission_retry(PublisherAdmissionRetry::On)
+                .expect("the domain holds both values");
+            off.select_publisher_admission_retry(PublisherAdmissionRetry::Off)
+                .expect("the domain holds both values");
+            assert!(admit_retry(Some(some_retry()), &on).is_ok());
+            assert!(refused_by(
+                admit_retry(Some(some_retry()), &off),
+                "publisher-admission-retry"
+            ));
+        }
+        if !MultiRouteAtomicTx::DOMAIN.is_singleton() {
+            let (mut on, mut off) = (build_policy(), build_policy());
+            on.select_multi_route_atomic_tx(MultiRouteAtomicTx::On)
+                .expect("the domain holds both values");
+            off.select_multi_route_atomic_tx(MultiRouteAtomicTx::Off)
+                .expect("the domain holds both values");
+            assert!(admit_atomic(true, &on).is_ok());
+            assert!(refused_by(
+                admit_atomic(true, &off),
+                "multi-route-atomic-tx"
+            ));
+        }
     }
 
     #[test]
@@ -9491,18 +9579,25 @@ mod tests {
 
     #[test]
     fn a_node_named_is_admitted_only_when_the_policy_is_on() {
-        assert_target_decides("admit_target", admit_target(Some(some_peer())));
+        assert_target_decides(
+            "admit_target",
+            admit_target(Some(some_peer()), &build_policy()),
+        );
     }
 
     #[test]
     fn a_retry_stated_is_admitted_only_when_the_policy_is_on_and_its_numbers_are_a_retry() {
-        assert_retry_decides("admit_retry", admit_retry(Some(some_retry())));
+        assert_retry_decides(
+            "admit_retry",
+            admit_retry(Some(some_retry()), &build_policy()),
+        );
         // The fields are public, so a retry built by hand can state a zero that `new` refuses.
         let spin = wz_session_core::admission_retry::AdmissionRetry {
             attempts: 1,
             delay_ms: 0,
         };
-        let error = admit_retry(Some(spin)).expect_err("a retry that waits no time is refused");
+        let error = admit_retry(Some(spin), &build_policy())
+            .expect_err("a retry that waits no time is refused");
         let text = error.to_string();
         if retry_policy_on() {
             assert!(text.contains("at least a millisecond"), "{text}");

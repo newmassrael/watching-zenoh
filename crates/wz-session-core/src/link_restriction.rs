@@ -153,12 +153,6 @@ impl LinkRestriction {
     ) -> Result<Self, LinkRestrictionError> {
         self.admit(policy.entity_link_restriction())
     }
-
-    /// [`Self::admit_by`] under the build defaults: the call of an entry point that does not yet
-    /// hold its session's snapshot.
-    pub const fn admit_in_build(self) -> Result<Self, LinkRestrictionError> {
-        self.admit_by(&crate::policy::SessionPolicy::defaults())
-    }
 }
 
 #[cfg(test)]
@@ -209,13 +203,13 @@ mod tests {
         // On: both pass, unchanged.
         assert_eq!(LinkRestriction::Any.admit(true), Ok(LinkRestriction::Any));
         assert_eq!(only.admit(true), Ok(only));
-        // The build's own answer is the policy's: off unless the build stated it.
+        // The build defaults' answer is the policy's: off unless the build stated it.
         let defaults = crate::policy::SessionPolicy::defaults();
         assert_eq!(
-            only.admit_in_build().is_ok(),
+            only.admit_by(&defaults).is_ok(),
             defaults.entity_link_restriction()
         );
-        assert!(LinkRestriction::Any.admit_in_build().is_ok());
+        assert!(LinkRestriction::Any.admit_by(&defaults).is_ok());
     }
 
     /// A snapshot's answer is the snapshot's policy, whatever the build's default is: a session
@@ -225,10 +219,6 @@ mod tests {
         use crate::policy::{EntityLinkRestriction, SessionPolicy};
         use crate::policy_binding::PolicyValue;
         let only = LinkRestriction::only([4]).expect("one slot");
-        assert_eq!(
-            only.admit_by(&SessionPolicy::defaults()),
-            only.admit_in_build()
-        );
         for value in [EntityLinkRestriction::Off, EntityLinkRestriction::On] {
             let mut policy = SessionPolicy::defaults();
             if !EntityLinkRestriction::DOMAIN.contains(value)

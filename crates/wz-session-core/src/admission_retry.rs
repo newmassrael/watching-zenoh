@@ -28,9 +28,9 @@
 //!
 //! # The default is no retry
 //!
-//! `None` is a publish that waits for room as upstream's does, and it is the only one a build
-//! without the policy has. A call that states a retry in such a build is refused by
-//! [`crate::admission_retry::admit_in_build`] with a reason, not ignored. A retry with no
+//! `None` is a publish that waits for room as upstream's does, and it is the only one a session
+//! without the policy has. A call that states a retry on such a session is refused by
+//! [`crate::admission_retry::admit_by`] with a reason, not ignored. A retry with no
 //! attempts is no retry and one with no delay is a spin, so neither can be built.
 
 /// Why a retry could not be used.
@@ -127,12 +127,6 @@ pub const fn admit_by(
     admit(retry, policy.publisher_admission_retry())
 }
 
-/// [`admit_by`] under the build defaults: the call of an entry point that does not yet hold its
-/// session's snapshot.
-pub const fn admit_in_build(retry: Option<AdmissionRetry>) -> Result<(), AdmissionRetryError> {
-    admit_by(retry, &crate::policy::SessionPolicy::defaults())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,7 +170,10 @@ mod tests {
     fn no_retry_is_admitted_whatever_the_policy() {
         assert_eq!(admit(None, false), Ok(()));
         assert_eq!(admit(None, true), Ok(()));
-        assert_eq!(admit_in_build(None), Ok(()));
+        assert_eq!(
+            admit_by(None, &crate::policy::SessionPolicy::defaults()),
+            Ok(())
+        );
     }
 
     #[test]
@@ -184,8 +181,11 @@ mod tests {
         let stated = Some(retry(2, 5));
         assert_eq!(admit(stated, false), Err(AdmissionRetryError::PolicyOff));
         assert_eq!(admit(stated, true), Ok(()));
-        let in_build = crate::policy::SessionPolicy::defaults().publisher_admission_retry();
-        assert_eq!(admit_in_build(stated).is_ok(), in_build);
+        let defaults = crate::policy::SessionPolicy::defaults();
+        assert_eq!(
+            admit_by(stated, &defaults).is_ok(),
+            defaults.publisher_admission_retry()
+        );
     }
 
     /// The snapshot a retry is asked with decides, not the build: a snapshot that selected the
@@ -195,10 +195,6 @@ mod tests {
         use crate::policy::{PublisherAdmissionRetry, SessionPolicy};
         use crate::policy_binding::PolicyValue;
         let stated = Some(retry(2, 5));
-        assert_eq!(
-            admit_by(stated, &SessionPolicy::defaults()),
-            admit_in_build(stated)
-        );
         assert_eq!(admit_by(None, &SessionPolicy::defaults()), Ok(()));
         if PublisherAdmissionRetry::DOMAIN.is_singleton() {
             return;

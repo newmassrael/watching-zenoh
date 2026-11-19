@@ -90,10 +90,6 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     # The policy plane itself.
     ("crates/wz-session-core/src/policy*.rs", "*", "the policy plane, which defines the build defaults"),
     # Session-core: the build-default wrappers, each beside the call that takes a snapshot.
-    ("crates/wz-session-core/src/admission_retry.rs", "admit_in_build", WRAPPER + " (admit_by)"),
-    ("crates/wz-session-core/src/atomic_tx.rs", "admit_in_build", WRAPPER + " (admit_by)"),
-    ("crates/wz-session-core/src/peer_target.rs", "admit_in_build", WRAPPER + " (admit_by)"),
-    ("crates/wz-session-core/src/link_restriction.rs", "admit_in_build", WRAPPER + " (admit_by)"),
     ("crates/wz-session-core/src/link_admission.rs", "judge_second_link", WRAPPER + " (judge_second_link_by)"),
     ("crates/wz-session-core/src/link_admission.rs", "new", WRAPPER + " (LinkBook and LinkRegistry::with_order)"),
     ("crates/wz-session-core/src/replay_pacing.rs", "from_build", WRAPPER + " (ReplayPacing::of_policy)"),
