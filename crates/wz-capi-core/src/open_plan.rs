@@ -1508,6 +1508,10 @@ impl OpenPlan {
                 groups,
                 session_defaults: self.session,
                 session_policy: self.session_policy,
+                // A plan reads a zenoh configuration document, which names no transport of the
+                // program's.
+                #[cfg(feature = "app-transport")]
+                app_transport: None,
             },
         }
     }

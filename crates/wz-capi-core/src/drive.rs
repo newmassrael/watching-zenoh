@@ -192,6 +192,10 @@ struct Dialer {
     /// asks it at the InitAck and again before the OpenAck is taken. `None` for a client, which
     /// holds one link.
     admission: Option<Arc<dyn wz_session_core::link_admission::LinkAdmission>>,
+    /// The transport the program supplies, kept so a locator the session FINDS is dialled over
+    /// it as a configured one is.
+    #[cfg(feature = "scout")]
+    app: AppSlot,
 }
 
 impl Dialer {
@@ -246,7 +250,10 @@ impl Dialer {
     ) -> Result<OpenedSession, OpenError> {
         let expected = wz_session_core::credential_identity::zid_from_wire(expected)
             .ok_or(OpenError::LinkFailed)?;
-        let dial_cfg = dial_config(&self.tls, locator).map_err(|_| OpenError::LinkFailed)?;
+        let dial_cfg = dial_over(
+            dial_config(&self.tls, locator).map_err(|_| OpenError::LinkFailed)?,
+            &self.app,
+        );
         self.open_with(locator, &dial_cfg, Some(expected))
             .await
             .map_err(DialFailure::into_open_error)
@@ -1465,6 +1472,9 @@ struct DriveContext {
     /// how long and how often it is tried; see [`OpenStance::listen_phase`].
     #[cfg(feature = "peer")]
     listen_phase: ListenPhase,
+    /// The transport the program supplies, which every dial and listen of the session goes over
+    /// when it is there (see `AppSlot`).
+    app: AppSlot,
 }
 
 /// The shutdown signal both roles race their drive against. See
@@ -1502,7 +1512,7 @@ fn prepare_dial(
     let mut dial_cfgs: Vec<(String, DialConfig)> = Vec::with_capacity(endpoints.len());
     for endpoint in endpoints {
         match dial_config(tls, endpoint) {
-            Ok(config) => dial_cfgs.push((endpoint.clone(), config)),
+            Ok(config) => dial_cfgs.push((endpoint.clone(), dial_over(config, &ctx.app))),
             Err(error) => {
                 log_open_failure("dial configuration of a connect endpoint", &error);
                 return None;
@@ -1540,6 +1550,8 @@ fn prepare_dial(
         } else {
             None
         },
+        #[cfg(feature = "scout")]
+        app: ctx.app.clone(),
     });
     Some(DialSetup { scheduled, dialer })
 }
@@ -1641,6 +1653,7 @@ async fn drive_dial(
         dials,
         gossiping,
         listen_phase,
+        app,
     } = ctx;
     // R2950 — the two ROLES connect differently upstream, and each is built
     // here as upstream builds it. A client connects through
@@ -1660,6 +1673,7 @@ async fn drive_dial(
         &listen,
         listen_phase,
         &tls,
+        &app,
         zid,
         link_conf,
         offer,
@@ -3101,6 +3115,7 @@ struct BoundListeners {
 struct LateBinds {
     pending: Vec<PendingBind>,
     tls: CapiTlsConfig,
+    app: AppSlot,
     zid: SessionZid,
     link_conf: LinkConf,
     offer: SessionOffer,
@@ -3167,6 +3182,7 @@ impl LateBinds {
         let LateBinds {
             pending,
             tls,
+            app,
             zid,
             link_conf,
             offer,
@@ -3180,12 +3196,13 @@ impl LateBinds {
             .into_iter()
             .map(|pending| {
                 let tls = tls.clone();
+                let app = app.clone();
                 let (shared, gate) = (shared.clone(), gate.clone());
                 let (locators, bound_before) = (locators.clone(), bound_before.clone());
                 let mut closing = closing.clone();
                 tokio::task::spawn_local(CallerSpan::current().carry(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
-                        bind_one(&pending.endpoint, &tls, zid, link_conf, whatami)
+                        bind_one(&pending.endpoint, &tls, &app, zid, link_conf, whatami)
                     });
                     let listening = tokio::select! {
                         listening = bound => listening,
@@ -3222,6 +3239,7 @@ impl LateBinds {
         let LateBinds {
             pending,
             tls,
+            app,
             zid,
             link_conf,
             locators,
@@ -3237,11 +3255,12 @@ impl LateBinds {
                     .into_iter()
                     .map(|pending| {
                         let tls = tls.clone();
+                        let app = app.clone();
                         let locators = locators.clone();
                         let (shared, bound_before) = (shared.clone(), bound_before.clone());
                         tokio::task::spawn_local(CallerSpan::current().carry(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
-                                bind_one(&pending.endpoint, &tls, zid, link_conf, whatami)
+                                bind_one(&pending.endpoint, &tls, &app, zid, link_conf, whatami)
                             })
                             .await;
                             // A client that answers a Scout names its listener as it binds, and
@@ -3291,11 +3310,12 @@ fn log_open_failure(what: &str, why: &dyn core::fmt::Debug) {
 async fn bind_one(
     endpoint: &str,
     tls: &CapiTlsConfig,
+    app: &AppSlot,
     zid: SessionZid,
     link_conf: LinkConf,
     whatami: WhatAmI,
 ) -> Result<Listening, OpenError> {
-    bind_listener(endpoint, tls, zid, link_conf, whatami).await
+    bind_listener(endpoint, tls, app, zid, link_conf, whatami).await
 }
 
 /// Bind the endpoints a session's `listen` states, in the order the config states them, under the
@@ -3326,6 +3346,7 @@ async fn bind_listeners(
     endpoints: &[String],
     phase: ListenPhase,
     tls: &CapiTlsConfig,
+    app: &AppSlot,
     zid: SessionZid,
     link_conf: LinkConf,
     offer: SessionOffer,
@@ -3335,7 +3356,7 @@ async fn bind_listeners(
     // A phase that fails names why its last attempt did; one cut off before any answered is a
     // link that did not open.
     let outcome = drive_bind_phase(phase.policy, phase.schedule, endpoints, |position, _| {
-        bind_one(&endpoints[position], tls, zid, link_conf, whatami)
+        bind_one(&endpoints[position], tls, app, zid, link_conf, whatami)
     })
     .await
     .map_err(|e| {
@@ -3366,6 +3387,7 @@ async fn bind_listeners(
         late: LateBinds {
             pending,
             tls: tls.clone(),
+            app: app.clone(),
             zid,
             link_conf,
             offer,
@@ -3389,6 +3411,7 @@ async fn bind_listeners(
 async fn bind_listener(
     endpoint: &str,
     tls: &CapiTlsConfig,
+    app: &AppSlot,
     zid: SessionZid,
     link_conf: LinkConf,
     whatami: WhatAmI,
@@ -3407,6 +3430,7 @@ async fn bind_listener(
         log_open_failure("listen configuration", &e);
         OpenError::DriveFailed
     })?;
+    let accept_cfg = accept_over(accept_cfg, app);
     let listener = bind_endpoint_with_config(endpoint, &accept_cfg)
         .await
         .map_err(|e| {
@@ -3585,11 +3609,13 @@ async fn drive_listen(
         dials: _,
         gossiping: _,
         listen_phase,
+        app,
     } = ctx;
     let BoundListeners { legs, late } = match bind_listeners(
         &endpoints,
         listen_phase,
         &tls,
+        &app,
         zid,
         link_conf,
         offer,
@@ -4253,6 +4279,51 @@ pub struct OpenStance {
     /// created it (`open_plan::resolve_policy` for a plan, the ABI's own open otherwise). Every
     /// session, link and face the open makes is handed it; none reads the build.
     pub session_policy: SessionPolicy,
+    /// The transport the program supplies, which carries every link the session dials or listens
+    /// on in place of the system's sockets; `None` opens on the sockets the locators name. A
+    /// locator the transport does not carry fails the open as a scheme this build does not know.
+    #[cfg(feature = "app-transport")]
+    pub app_transport: Option<Arc<wz_runtime_tokio::app_link::AppTransport>>,
+}
+
+/// The transport the program supplies, as the dial and listen roles carry it: the stance's
+/// [`OpenStance::app_transport`] in a build with the `app-transport` feature, and nothing in one
+/// without, so a session of that build holds no field for it.
+#[cfg(feature = "app-transport")]
+type AppSlot = Option<Arc<wz_runtime_tokio::app_link::AppTransport>>;
+/// See the alias of the same name: a build without the feature carries no transport.
+#[cfg(not(feature = "app-transport"))]
+#[derive(Clone, Debug, Default)]
+struct AppSlot;
+
+/// `cfg` dialling over the program's transport when the session has one.
+#[cfg(feature = "app-transport")]
+fn dial_over(cfg: DialConfig, app: &AppSlot) -> DialConfig {
+    match app {
+        Some(app) => cfg.with_app_transport(Arc::clone(app)),
+        None => cfg,
+    }
+}
+
+/// `cfg` as it is: a build without the feature has no transport to dial over.
+#[cfg(not(feature = "app-transport"))]
+fn dial_over(cfg: DialConfig, _app: &AppSlot) -> DialConfig {
+    cfg
+}
+
+/// `cfg` listening over the program's transport when the session has one.
+#[cfg(all(feature = "peer", feature = "app-transport"))]
+fn accept_over(cfg: AcceptConfig, app: &AppSlot) -> AcceptConfig {
+    match app {
+        Some(app) => cfg.with_app_transport(Arc::clone(app)),
+        None => cfg,
+    }
+}
+
+/// `cfg` as it is: a build without the feature has no transport to listen over.
+#[cfg(all(feature = "peer", not(feature = "app-transport")))]
+fn accept_over(cfg: AcceptConfig, _app: &AppSlot) -> AcceptConfig {
+    cfg
 }
 
 /// Open-debt item 913 — whether `endpoint` names a multicast group in zenoh's sense: a `udp/`
@@ -4535,8 +4606,14 @@ pub fn open_blocking(
         groups,
         session_defaults,
         session_policy,
+        #[cfg(feature = "app-transport")]
+        app_transport,
         ..
     } = stance;
+    #[cfg(feature = "app-transport")]
+    let app: AppSlot = app_transport;
+    #[cfg(not(feature = "app-transport"))]
+    let app = AppSlot;
     // The prefix as the decorator takes it. The plan validated the text, so a text that does not
     // convert here came from a caller that built its stance by hand; the open fails with it, and
     // so does a build that has no decorator to install one with, and neither is run unprefixed.
@@ -4737,6 +4814,7 @@ pub fn open_blocking(
                 gossiping,
                 #[cfg(feature = "peer")]
                 listen_phase,
+                app,
             };
             // R3074 -- and a listener that gossips is a peer that dials what it is told of, so
             // it takes the dial role as one that scouts does. A session that gossips with no
@@ -5121,6 +5199,7 @@ mod tests {
                 offer: SessionOffer::universal(),
                 clock: TokioTime::new(),
                 tls: CapiTlsConfig::default(),
+                app: AppSlot::default(),
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
                 namespace: None,
@@ -5260,6 +5339,7 @@ mod tests {
                 clock: TokioTime::new(),
                 #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
+                app: AppSlot::default(),
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
                 namespace: None,
@@ -5340,6 +5420,7 @@ mod tests {
                 clock: TokioTime::new(),
                 #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
+                app: AppSlot::default(),
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
                 namespace: None,
@@ -5923,6 +6004,8 @@ mod tests {
             groups: Vec::new(),
             session_defaults: Default::default(),
             session_policy: SessionPolicy::defaults(),
+            #[cfg(feature = "app-transport")]
+            app_transport: None,
         }
     }
 

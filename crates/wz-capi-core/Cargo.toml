@@ -231,6 +231,11 @@ lifecycle-doors = []
 # writer of `wz-app-frame`, so this feature only carries the capability's name, as `e2e-sender`'s
 # does.
 segment-sender = []
+# A transport the program supplies: every link a session opens goes over the program's own network
+# stack, through the calls of its port, and over no socket of the system's. The model threads the
+# transport from the stance to each dial and listen config (`OpenStance::app_transport`); the
+# links themselves are the runtime's (`wz_runtime_tokio::app_link`).
+app-transport = ["wz-runtime-tokio/transport-link-app"]
 # A subscriber whose callback runs off the receive path. The model has nothing behind it: the lane
 # is the runtime's (`wz_runtime_tokio::session::DetachedOffload`), fed through the subscriber
 # factory every face already takes, and the doors are the zenoh-c ABI's own
