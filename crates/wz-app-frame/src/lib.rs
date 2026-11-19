@@ -39,6 +39,7 @@
 //! | `proto_schema` | the `.proto` schema reader: files read, imports resolved, names linked, the field tree walked | `proto` |
 //! | `proto_decode` | a protobuf payload read by the types its schema gives it | `proto` |
 //! | `proto_lex`, `proto_parse` | the tokenizer and the parser behind the schema reader | `proto` |
+//! | `instance_key` | the instance of a message a sample is, read from payload fields; a stream and a last value per instance | `instance-key` |
 //!
 //! `no_std`, with no third-party dependency. The CRC engine and the judge need
 //! no allocator, so a build without `alloc` links none; the three profile
@@ -67,6 +68,11 @@ pub mod e2e_stream_sender;
 // synthetic profiles.
 #[cfg(all(test, feature = "alloc"))]
 mod e2e_rules_tests;
+#[cfg(feature = "instance-key")]
+pub mod instance_key;
+// The model tests of the instance keys, on a synthetic schema and profile.
+#[cfg(all(test, feature = "instance-key"))]
+mod instance_key_tests;
 #[cfg(feature = "proto")]
 pub mod proto_decode;
 #[cfg(feature = "proto")]

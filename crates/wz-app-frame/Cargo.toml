@@ -42,6 +42,11 @@ alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 # Off, a node that only frames its payloads links none of it.
 proto = ["alloc"]
 
+# `instance_key`: which instance of a message a sample is, read from fields of its payload through
+# the schema reader, and the receiver's and the sender's streams and the last values kept per
+# instance. Off, a node whose messages have one instance each links none of it.
+instance-key = ["proto"]
+
 # `segment_profile::synthetic`: a synthetic segment profile and a builder of its pieces, for the
 # tests of crates above this one. A `#[cfg(test)]` module cannot cross a crate boundary, so the
 # capture crate turns this on for its own tests and forwards it from its `fixtures` feature.

@@ -330,6 +330,18 @@ impl SchemaSet {
         &self.msgs[message.0].full_name
     }
 
+    /// The linked message `message` names: its fields, their types and labels,
+    /// for a reader that picks fields out of a decoding by number.
+    pub fn linked(&self, message: SchemaMessage) -> &Msg {
+        &self.msgs[message.0]
+    }
+
+    /// The linked message at `index`, as a field of message type names it
+    /// ([`FieldKind::Message`]); `None` for an index the set has not.
+    pub fn linked_at(&self, index: usize) -> Option<&Msg> {
+        self.msgs.get(index)
+    }
+
     /// Read `bytes` as one `message`, on [`LinkedSchema::decode`]'s rules.
     ///
     /// # Errors
