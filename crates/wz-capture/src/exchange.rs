@@ -364,20 +364,65 @@ impl ExchangeGaps {
 /// 0` is one predicate over one view, not a request-time half joined to an
 /// outcome-time half.
 /// R2512 (open-debt item 713) — the exchanges a fold has opened and not yet
-/// closed, keyed `(list, asker, rid)`.
+/// closed, keyed `(scope, rid)`.
 ///
 /// It was a local of the per-list loop, so the list scoped it by construction.
 /// The walk may now interleave two lists
-/// ([`ExchangeTable::observe_frame_where`]), so the scope is said in the KEY,
-/// which keeps today's behaviour exactly: a `ResponseFinal` on one link cannot
-/// close a `Request` opened on its sibling. It also keeps the drain
-/// deterministic and in the same sequence as before — `pop_first` over a
-/// list-leading key walks list by list.
+/// ([`ExchangeTable::observe_frame_where`]), so the scope is said in the KEY.
 ///
-/// ⚠ Whether a sibling link SHOULD close it is the same open question
-/// `crate::interest::InterestCorrelation` records, and neither round answers it.
+/// A REQUEST ID IS THE SESSION'S, NOT THE LINK'S. A session over several links
+/// is one transport, and its sender mints one sequence of ids for it, so the
+/// `Response` to a `Request` sent on one link may come back on another. Where
+/// the capture names the flow's session the scope is the two zids
+/// ([`ExchangeScope::Session`]): every link of the session reaches the same
+/// open exchange, whichever of its two halves each link calls `a`. Where it
+/// cannot, the scope stays the list ([`ExchangeScope::List`]), the only scope
+/// this observer can defend, and the exchanges it leaves unpaired are counted
+/// as ones that may be on another link ([`ExchangeTable::without_session`]).
 pub type OpenExchanges =
-    BTreeMap<(usize, usize, wz_session_core::wire_id::RequestId), OpenExchange>;
+    BTreeMap<(ExchangeScope, wz_session_core::wire_id::RequestId), OpenExchange>;
+
+/// Whose request ids an exchange's id is one of. See [`OpenExchanges`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExchangeScope {
+    /// A session the capture names: the zid of the side that asked, then the
+    /// zid of the side that answers.
+    Session {
+        /// The asker's zid.
+        asker: Vec<u8>,
+        /// The answerer's zid.
+        answerer: Vec<u8>,
+    },
+    /// One list whose session the capture cannot name, and the direction the
+    /// asker sends in on it.
+    List {
+        /// The list's index.
+        list: usize,
+        /// `dir_index` of the asker's direction.
+        asker: usize,
+    },
+}
+
+impl ExchangeScope {
+    /// The scope of an exchange whose asker sends in `asker` on the list `ctx`
+    /// describes.
+    fn of(ctx: crate::node::ListContext<'_>, asker: Direction) -> Self {
+        match (ctx.zid(asker), ctx.zid(asker.peer())) {
+            (Some(a), Some(b)) => ExchangeScope::Session {
+                asker: a.to_vec(),
+                answerer: b.to_vec(),
+            },
+            _ => ExchangeScope::List {
+                list: ctx.list(),
+                asker: dir_index(asker),
+            },
+        }
+    }
+
+    fn names_a_session(&self) -> bool {
+        matches!(self, ExchangeScope::Session { .. })
+    }
+}
 
 /// Where one end of an exchange was carried, kept past its frame so the row it
 /// sits on can be judged with its own row facts when the exchange is.
@@ -424,6 +469,10 @@ impl RowPlace {
 pub struct OpenExchange {
     /// The request's row, for the row terms of a selector judged at close.
     place: RowPlace,
+    /// The exchange is scoped by a session the capture names
+    /// ([`ExchangeScope::Session`]); an unclosed one that is not may have been
+    /// closed on another link ([`ExchangeTable::without_session`]).
+    in_session: bool,
     /// `None` when the request's keyexpr did not resolve — the exchange is
     /// still correlated and still timed, it just has no row to land in.
     keyexpr: Option<String>,
@@ -590,12 +639,44 @@ pub struct ExchangeTable {
     /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term. Set
     /// only by [`exchanges_where`], the entry point that has the whole capture.
     capture_origin_ms: Option<u64>,
+    /// The ends this table could not pair on a flow whose session the capture
+    /// does not name: see [`Self::without_session`].
+    without_session: WithoutSession,
+}
+
+/// The exchange ends left unpaired on flows whose session the capture cannot
+/// name, so whose other end MAY be on another link of that session: a request
+/// id belongs to the session, and the link it was answered on is not known.
+/// Part of [`ExchangeGaps::orphan_responses`] and [`ExchangeTable::unclosed`],
+/// and never more than them. On a session the capture names, every link shares
+/// one scope ([`ExchangeScope::Session`]), and an end left unpaired there was
+/// not on any link the capture holds.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WithoutSession {
+    /// `Response` and `ResponseFinal` records whose request was not found.
+    pub orphan_responses: usize,
+    /// Admitted requests never seen closed.
+    pub unclosed: usize,
 }
 
 impl ExchangeTable {
     /// An empty table.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The ends left unpaired on flows with no named session, which may be
+    /// paired on another link: see [`WithoutSession`].
+    pub fn without_session(&self) -> WithoutSession {
+        self.without_session
+    }
+
+    /// A `Response` or `ResponseFinal` whose request was not found in `scope`.
+    fn orphan(&mut self, scope: &ExchangeScope) {
+        self.gaps.orphan_responses += 1;
+        if !scope.names_a_session() {
+            self.without_session.orphan_responses += 1;
+        }
     }
 
     /// R311y618 (§1.1q) — the same correlation, over the exchanges a selector
@@ -680,11 +761,11 @@ impl ExchangeTable {
     /// from the table whenever the `DeclKexpr` had gone out on the session's
     /// other link.
     ///
-    /// `list` leads the open-exchange key so the walk may interleave two lists
-    /// without one link's `ResponseFinal` closing the other's request. That
-    /// keeps today's behaviour exactly; whether a sibling link SHOULD close it
-    /// is the same open question `crate::interest::InterestCorrelation` records,
-    /// and this round does not answer it.
+    /// The open-exchange key is scoped by the session where the capture names
+    /// it and by the list where it does not ([`OpenExchanges`]), so the walk may
+    /// interleave two lists: a sibling link of a named session closes the
+    /// request its sibling opened, as the session's one request-id sequence
+    /// means, and two unnamed flows stay apart.
     pub fn observe_frame_where(
         &mut self,
         frame: &crate::messages::Row<'_>,
@@ -774,7 +855,8 @@ impl ExchangeTable {
         match message {
             NetworkMessage::Declare(d) => spaces.absorb(direction, d),
             NetworkMessage::Request(r) => {
-                let key = (list, dir_index(direction), r.rid);
+                let key = (ExchangeScope::of(ctx, direction), r.rid);
+                let in_session = key.0.names_a_session();
                 // Resolution happens HERE and not at the close, because a
                 // keyexpr id is resolved against the space as it stood when the
                 // request went past: a `DeclKexpr` arriving later must not
@@ -792,6 +874,7 @@ impl ExchangeTable {
                 // and `finish` is the single place that judges and commits.
                 let entry = OpenExchange {
                     place: RowPlace::of(ctx, frame, message),
+                    in_session,
                     keyexpr: resolved.ok(),
                     direction,
                     zid: ctx.zid(direction).map(<[u8]>::to_vec),
@@ -827,9 +910,9 @@ impl ExchangeTable {
             }
             NetworkMessage::Response(r) => {
                 // The reply travels back, so the rid lives in the PEER's space.
-                let key = (list, dir_index(direction.peer()), r.request_id);
+                let key = (ExchangeScope::of(ctx, direction.peer()), r.request_id);
                 let Some(entry) = open.get_mut(&key) else {
-                    self.gaps.orphan_responses += 1;
+                    self.orphan(&key.0);
                     return;
                 };
                 use wz_codecs::response::ResponseOwnedVariant;
@@ -866,9 +949,9 @@ impl ExchangeTable {
                     });
             }
             NetworkMessage::ResponseFinal(f) => {
-                let key = (list, dir_index(direction.peer()), f.request_id);
+                let key = (ExchangeScope::of(ctx, direction.peer()), f.request_id);
                 let Some(entry) = open.remove(&key) else {
-                    self.gaps.orphan_responses += 1;
+                    self.orphan(&key.0);
                     return;
                 };
                 let tree = place.tree(frame).map(alloc::boxed::Box::new);
@@ -1058,6 +1141,9 @@ impl ExchangeTable {
         }
         if !closed {
             self.unclosed += 1;
+            if !entry.in_session {
+                self.without_session.unclosed += 1;
+            }
             return;
         }
 
@@ -1259,6 +1345,8 @@ impl ExchangeTable {
         self.gaps.unstamped += other.gaps.unstamped;
         self.gaps.non_monotonic += other.gaps.non_monotonic;
         self.gaps.unattributed_requests += other.gaps.unattributed_requests;
+        self.without_session.orphan_responses += other.without_session.orphan_responses;
+        self.without_session.unclosed += other.without_session.unclosed;
         self.unread.halted_batches += other.unread.halted_batches;
         self.unread.unparsed_bytes += other.unread.unparsed_bytes;
         self.unread.undecompressible_batches += other.unread.undecompressible_batches;
@@ -1907,6 +1995,57 @@ pub(crate) mod tests {
         assert_eq!(t.completed(), 0);
         assert_eq!(t.gaps().orphan_responses, 2, "the reply AND the close");
         assert!(t.rows().is_empty(), "nothing to attribute");
+        assert_eq!(
+            t.without_session().orphan_responses,
+            2,
+            "the flow names no session, so its request may be on another link"
+        );
+    }
+
+    /// A REQUEST ID IS THE SESSION'S. One session over two links: the request
+    /// goes out on the first, its reply and its close come back on the second.
+    /// The exchange is paired and timed, nothing is an orphan, and nothing is
+    /// counted as maybe on another link, because the session is named. The
+    /// control is the same three records on one link.
+    #[test]
+    fn a_reply_on_the_sessions_other_link_answers_the_request() {
+        for second in [true, false] {
+            let t = exchanges(&crate::agg::tests::multilink_session_with(&[
+                (
+                    false,
+                    true,
+                    request_query(5, sender_space(0, Some("demo/q"))),
+                ),
+                (
+                    second,
+                    false,
+                    response_reply(5, sender_space(0, Some("demo/q")), b"r"),
+                ),
+                (second, false, response_final(5)),
+            ]));
+            assert_eq!(t.requests(), 1, "second={second}");
+            assert_eq!(t.completed(), 1, "second={second}");
+            assert_eq!(t.gaps().orphan_responses, 0, "second={second}");
+            assert_eq!(t.unclosed(), 0, "second={second}");
+            assert_eq!(
+                t.without_session(),
+                WithoutSession::default(),
+                "second={second}"
+            );
+        }
+    }
+
+    /// An exchange left open on a flow that names no session may have been
+    /// closed on another link of it, and is counted so beside `unclosed`.
+    #[test]
+    fn an_unclosed_exchange_on_a_flow_with_no_session_may_be_on_another_link() {
+        let t = correlate(&[(
+            true,
+            Some(10),
+            request_query(3, sender_space(0, Some("demo/q"))),
+        )]);
+        assert_eq!(t.unclosed(), 1);
+        assert_eq!(t.without_session().unclosed, 1);
     }
 
     /// A query whose close the capture never carried is UNCLOSED. It must not

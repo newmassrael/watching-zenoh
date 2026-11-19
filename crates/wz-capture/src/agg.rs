@@ -592,6 +592,19 @@ pub struct UnresolvedAlias {
     /// session is not, and folding those into one row would report a count with
     /// two meanings. See [`UnresolvedCause`] for what a reader does with each.
     pub cause: UnresolvedCause,
+    /// The capture-global packet of the FIRST reference that missed, as the
+    /// walk's [`KeyexprSpaces::at_packet`] stood; `0` for a walk that sets none.
+    pub first_reference_packet: usize,
+    /// The packet of the first declaration of this id in this space that went
+    /// past AFTER that reference, `None` while none did: a use seen before its
+    /// declaration, which a session over two links shows when a reference on
+    /// one overtakes the declaration on the other (census revision 27). The
+    /// reference stays unresolved, because a declaration does not name a
+    /// reference that came before it.
+    pub declared_at_packet: Option<usize>,
+    /// The owner of the space the id missed in, so a later declaration in that
+    /// space can be matched to it whichever link it travelled.
+    owner: SpaceOwner,
 }
 
 /// Which slot of a per-direction pair a [`Direction`] reads.
@@ -1786,7 +1799,21 @@ impl ThroughputTable {
         if let NetworkMessage::Declare(d) = message {
             use wz_codecs::declare::DeclareOwnedVariant;
             match &d.body {
-                DeclareOwnedVariant::CodecZenohDeclKexpr(_) => self.declarations += 1,
+                DeclareOwnedVariant::CodecZenohDeclKexpr(k) => {
+                    self.declarations += 1;
+                    // A declaration of an id a reference already missed, in the
+                    // same space: the use came before it. The id is minted in
+                    // the SENDER's space, as `absorb` binds it.
+                    let owner = spaces.side(direction);
+                    for alias in self.unresolved.values_mut() {
+                        if alias.owner == owner
+                            && alias.id == k.id
+                            && alias.declared_at_packet.is_none()
+                        {
+                            alias.declared_at_packet = Some(spaces.at);
+                        }
+                    }
+                }
                 DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => self.undeclarations += 1,
                 _ => {}
             }
@@ -1952,6 +1979,9 @@ impl ThroughputTable {
                         id,
                         references: 0,
                         cause,
+                        first_reference_packet: spaces.at,
+                        declared_at_packet: None,
+                        owner: spaces.side(space),
                     })
                     .references += 1;
             }
@@ -5937,6 +5967,24 @@ pub(crate) mod tests {
         (d, file)
     }
 
+    /// ONE session over TWO links, both handshaken, then `records` in order:
+    /// each `(second_link, from_low, record)`, framed, on the first link
+    /// (`43210 <-> 7447`) or the second (`43211 <-> 7447`).
+    pub(crate) fn multilink_session_with(records: &[(bool, bool, Vec<u8>)]) -> crate::Dissection {
+        let links = [(43210u16, 7447u16), (43211u16, 7447u16)];
+        let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
+        for link in links {
+            for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
+                rows.push((from_low, sport, dport, wire, false));
+            }
+        }
+        for (second, from_low, record) in records {
+            let (sport, dport) = links[usize::from(*second)];
+            rows.push((*from_low, sport, dport, record.clone(), true));
+        }
+        multilink_capture_with_file(&rows).0
+    }
+
     /// The fixture the acceptance below is graded on: ONE session over TWO
     /// links, declaring on the first and publishing on the second.
     ///
@@ -6106,6 +6154,36 @@ pub(crate) mod tests {
     /// resolves whatever order the walk takes, which is a test that cannot fail.
     pub(crate) fn push_for_item_713() -> Vec<u8> {
         push(sender_space(7, None), &[0u8; 11])
+    }
+
+    /// A KEY ID USED BEFORE ITS DECLARATION, across a session's links: the
+    /// reference to id 7 goes out on the first link (packet 4) and the
+    /// declaration of id 7 on the second (packet 5). The reference stays
+    /// unresolved, and its row says where it first missed and where the id was
+    /// declared after it. The control is the session that declared first: its
+    /// id 9, which nobody ever declared, has no `declared_at_packet`.
+    #[cfg(feature = "dissect")]
+    #[test]
+    fn a_key_id_used_before_its_declaration_says_where_each_went_past() {
+        let (d, _) = multilink_session_declaring_after_the_reference_with_file();
+        let table = aggregate(&d);
+        let unresolved = table.unresolved();
+        let late = unresolved
+            .iter()
+            .find(|u| u.id == 7)
+            .unwrap_or_else(|| panic!("id 7 stays unresolved: {unresolved:?}"));
+        assert_eq!(late.cause, UnresolvedCause::NoDeclaration);
+        assert_eq!(late.first_reference_packet, 4);
+        assert_eq!(late.declared_at_packet, Some(5));
+
+        let control = aggregate(&multilink_session());
+        let never = control
+            .unresolved()
+            .into_iter()
+            .find(|u| u.id == 9 && u.cause == UnresolvedCause::NoDeclaration)
+            .copied()
+            .expect("id 9 on a session link");
+        assert_eq!(never.declared_at_packet, None);
     }
 
     /// The same `Push` naming `id 7` with `suffix` written after the id, the

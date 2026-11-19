@@ -1731,7 +1731,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":26,
+ *     {"document":{"name":"census","revision":27,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1777,13 +1777,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":74,"key":"kind","values":[...],
+ *     {"name":"fields","revision":75,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":26,"key":"mode","values":[...],
+ *     {"name":"census","revision":27,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1959,6 +1959,39 @@
  * you — those two are indistinguishable, and the consumer report that asked
  * for this had derived exactly that: the acceptance is not that multilink
  * resolves, it is that what STILL does not resolve says which of the two it is.
+ *
+ * A KEY ID USED BEFORE ITS DECLARATION (census revision 27). Each row also says
+ * where its first miss went past and whether the id was declared after it:
+ *
+ *     {"space":"a","id":7,"references":1,"cause":"no_declaration",
+ *      "first_reference_packet":4,"declared_at_packet":5}
+ *
+ * `first_reference_packet` is the capture-global packet of the first reference
+ * that missed. `declared_at_packet` is the packet of the first declaration of
+ * that id, in that space, that went past AFTER it, and `null` while none did.
+ * A number there is a use seen before its declaration: the shape a session
+ * over two links shows when a reference on one link overtakes the declaration
+ * sent on the other, or a reconnection reuses an id before declaring it again.
+ * The reference stays unresolved, because a declaration does not name a
+ * reference that came before it, so `cause` reads as it did. The packets name
+ * the links: each packet is of one flow.
+ *
+ * A REQUEST ID IS THE SESSION'S (census revision 27, field document 75). A
+ * session over several links mints one sequence of request ids, so the
+ * `Response` to a `Request` sent on one link may come back on another. On a
+ * session the capture names, every link reaches the same open exchange, and
+ * such a reply pairs with its request where it was an orphan before:
+ * `orphan_responses` and `unclosed` fall by those, the latency samples gain
+ * them, and the field document's `answers` and the reply's and the final's
+ * entries name the request. Where a flow's session is not named the exchange
+ * stays scoped to the flow, and the exchange plane counts what that leaves
+ * unpaired:
+ *
+ *     "maybe_other_link":{"orphan_responses":N,"unclosed":M}
+ *
+ * the replies and finals whose request was not found, and the requests never
+ * seen closed, on such flows: their other end may be on another link of the
+ * session. A part of `gaps.orphan_responses` and of `unclosed`.
  *
  * wz_dissect_transport_message is the one door with no such revision, and
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own
@@ -6241,7 +6274,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":74,"key":"state",
+ *     "value_families":[{"name":"fields","revision":75,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

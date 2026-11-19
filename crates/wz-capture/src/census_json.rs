@@ -659,10 +659,25 @@ pub fn keyexprs_json(t: &ThroughputTable) -> String {
         u64_into(alias.id, &mut out);
         let _ = write!(
             out,
-            ",\"references\":{},\"cause\":\"{}\"}}",
+            ",\"references\":{},\"cause\":\"{}\"",
             alias.references,
             alias.cause.name()
         );
+        // Census revision 27 — where the first miss was, and whether the id was
+        // declared after it in the same space: a use seen before its
+        // declaration. Packet indices, bare numbers.
+        let _ = write!(
+            out,
+            ",\"first_reference_packet\":{},\"declared_at_packet\":",
+            alias.first_reference_packet
+        );
+        match alias.declared_at_packet {
+            Some(packet) => {
+                let _ = write!(out, "{packet}");
+            }
+            None => out.push_str("null"),
+        }
+        out.push('}');
     }
     let (declared, undeclared) = t.declarations();
     let _ = write!(
@@ -889,6 +904,16 @@ pub fn exchanges_json(t: &crate::exchange::ExchangeTable) -> String {
         ",\"gaps\":{{\"orphan_responses\":{},\"unstamped\":{},\"non_monotonic\":{},\
          \"unattributed_requests\":{}}},",
         g.orphan_responses, g.unstamped, g.non_monotonic, g.unattributed_requests,
+    );
+    // Census revision 27 — the ends left unpaired on flows whose session the
+    // capture cannot name, whose other end may be on another link of it
+    // (`crate::exchange::WithoutSession`). A part of `orphan_responses` and of
+    // `unclosed` above.
+    let w = t.without_session();
+    let _ = write!(
+        out,
+        "\"maybe_other_link\":{{\"orphan_responses\":{},\"unclosed\":{}}},",
+        w.orphan_responses, w.unclosed,
     );
     push_selection(&t.selection(), true, &mut out);
     out.push(',');

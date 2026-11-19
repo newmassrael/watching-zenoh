@@ -4334,8 +4334,11 @@ int main(void) {
      * on across a front trim, counting what its planes folded since they
      * began.
      * 26: an Interest's restricted key is read in the table its options
-     * byte's M bit names. Values move under stationary keys. */
-    revisioned[0].revision = 26;
+     * byte's M bit names. Values move under stationary keys.
+     * 27: an unresolved alias says where it first missed and whether it was
+     * declared after; the exchange plane gains `maybe_other_link`; a reply
+     * pairs with its request across a named session's links. */
+    revisioned[0].revision = 27;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4637,8 +4640,10 @@ int main(void) {
      * `witnesses`. Four keys and two families arrive; nothing retires.
      * 74: each context gains `shm`, the handshake's shared memory message by
      * message and how each Open's extension was encoded. Six keys and two
-     * families arrive; nothing retires. */
-    revisioned[2].revision = 74;
+     * families arrive; nothing retires.
+     * 75: a reply pairs with its request across a named session's links.
+     * Values move under stationary keys. */
+    revisioned[2].revision = 75;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

@@ -2903,6 +2903,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R74_CARRIES,
     },
+    // Revision 75 moves no key and no word. A request id is the SESSION's, so
+    // on a session the capture names, a `Response` or `ResponseFinal` on one
+    // link pairs with the `Request` sent on another (census revision 27).
+    //
+    // ⚠ A VALUE MOVES on such a session: a Request's `answers` and
+    // `completion_ns`, and the reply's and the final's entries that name the
+    // request they answered, where they read as answering nothing.
+    DocumentShape {
+        document: FIELDS,
+        revision: 75,
+        keys: FIELDS_R74_KEYS,
+        retiring: &[],
+        families: FIELDS_R74_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R74_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -4834,6 +4850,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: ROW_FACTS_R14_CARRIES,
     },
+    // Revision 15 is the field document's revision 75 on these rows: a reply
+    // and a final pair with a request across a named session's links. No key
+    // or word moves. See that row.
+    DocumentShape {
+        document: ROW_FACTS,
+        revision: 15,
+        keys: ROW_FACTS_R14_KEYS,
+        retiring: &[],
+        families: ROW_FACTS_R14_FAMILIES,
+        planes: &[],
+        carries: ROW_FACTS_R14_CARRIES,
+    },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
     //
@@ -5000,6 +5028,32 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: CENSUS,
         revision: 26,
         keys: CENSUS_R25_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
+    // Revision 27 ADDS three keys and retires nothing.
+    //
+    // * Each keyexpr plane `unresolved` row gains `first_reference_packet`, the
+    //   packet of its first miss, and `declared_at_packet`, the packet of the
+    //   first declaration of that id in that space AFTER it, `null` while none
+    //   went past: a use seen before its declaration, the shape a session over
+    //   two links shows when a reference on one overtakes the declaration on
+    //   the other. The reference stays unresolved.
+    // * The exchange plane gains `maybe_other_link`, with `orphan_responses` and
+    //   `unclosed`: the ends left unpaired on flows whose session the capture
+    //   cannot name, whose other end may be on another link of that session.
+    //
+    // ⚠ A VALUE MOVES too. A request id is the SESSION's: on a session the
+    // capture names, a `Response` or `ResponseFinal` on one link now pairs with
+    // the `Request` sent on another, where it was an orphan and the request
+    // unclosed. `orphan_responses` and `unclosed` fall by those, and the
+    // latency samples gain them.
+    DocumentShape {
+        document: CENSUS,
+        revision: 27,
+        keys: CENSUS_R27_KEYS,
         retiring: &[],
         families: CENSUS_R20_FAMILIES,
         planes: CENSUS_R6_PLANES,
@@ -36555,6 +36609,204 @@ pub const CENSUS_R21_KEYS: &[&str] = &[
 /// named space and not a `first_packet`, the node plane's key that revision 2
 /// retired for naming a byte offset a packet.
 ///
+/// The census document's key set at revision 27: revision 25's (26 moved no
+/// key) and `first_reference_packet` and `declared_at_packet` on each of the
+/// keyexpr plane's `unresolved` rows, and `maybe_other_link` on the exchange
+/// plane, with `orphan_responses` and `unclosed` inside it (both already in the
+/// set).
+///
+/// Written out rather than aliased, for revision 18's reason: this set moves.
+pub const CENSUS_R27_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "aborted_unresolvable",
+    "addr",
+    "admissible",
+    "aggregate",
+    "ambiguous_zid_prefixes",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "candidates",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declared_at_packet",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "end",
+    "ends",
+    "errs",
+    "evidence",
+    "exchanges",
+    "family",
+    "first",
+    "first_anchor",
+    "first_reference_packet",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "interval",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_ns",
+    "max_scout_askers",
+    "maybe_other_link",
+    "mean_ms",
+    "mean_ns",
+    "messages",
+    "min_ms",
+    "min_ns",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "node",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "observed",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "scouting",
+    "selection",
+    "sender_end",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_ns",
+    "total_payload_bytes",
+    "totals",
+    "trimmed",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unobserved",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
 /// Written out rather than aliased, for revision 18's reason: this set moves.
 pub const CENSUS_R25_KEYS: &[&str] = &[
     "a",
@@ -38963,7 +39215,10 @@ mod tests {
             // on across front trims.
             // To 26 when an Interest's restricted key was read in the table its
             // M bit names: values only.
-            (CENSUS, 26u32),
+            // To 27 when an unresolved alias gained where it was first missed
+            // and declared, the exchange plane `maybe_other_link`, and a
+            // request id began to pair across a named session's links.
+            (CENSUS, 27u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -39144,7 +39399,9 @@ mod tests {
             // zenoh of a version this reader does not read.
             // To 74 when each context gained `shm`, the handshake's shared
             // memory message by message.
-            (FIELDS, 74),
+            // To 75 when a reply began to pair with its request across a named
+            // session's links: values move.
+            (FIELDS, 75),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -39325,8 +39582,9 @@ mod tests {
             // The field document's rows without their trees; to 5 with the
             // field document's 64, to 6 with its 65, to 7 with its 66, to 8
             // with its 67, to 9 with its 69, to 10 with its 70, to 11 with its
-            // 71, to 12 with its 72, to 13 with its 73, to 14 with its 74.
-            (ROW_FACTS, 14),
+            // 71, to 12 with its 72, to 13 with its 73, to 14 with its 74, to 15
+            // with its 75.
+            (ROW_FACTS, 15),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");
