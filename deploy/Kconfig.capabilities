@@ -366,6 +366,18 @@ config WZ_CAP_E2E_SUPERVISION
 	  Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors).
 	  Exported by: pico.
 
+config WZ_CAP_REPLAY_CACHE
+	bool "replay-cache"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	select WZ_CAP_QUERY
+	select WZ_CAP_QUERYABLE
+	select WZ_CAP_REMOTE_DECLARATION_WATCH
+	select WZ_CAP_E2E_RECEIVER
+	help
+	  Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (wz_ext_replay_*, wz-own doors).
+	  Exported by: pico.
+
 config WZ_CAP_MESSAGE_CATALOG
 	bool "message-catalog"
 	default n

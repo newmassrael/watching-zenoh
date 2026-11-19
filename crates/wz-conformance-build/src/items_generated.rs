@@ -67,6 +67,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("lifecycle-doors", &["core", "c"]),
     ("segment-sender", &["core", "pico", "c"]),
     ("e2e-supervision", &["core", "pico"]),
+    ("replay-cache", &["core", "pico"]),
     ("message-catalog", &["core", "pico"]),
     ("app-transport", &["core", "pico"]),
     ("shared-key-ids", &["core", "pico"]),
@@ -406,6 +407,24 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "WZ_POLICY_E2E_SUPERVISION_NOTIFY",
         &["status-only", "last-value"],
         "status-only",
+    ),
+    (
+        "replay-reply-shape",
+        "WZ_POLICY_REPLAY_REPLY_SHAPE",
+        &["frame-per-sample", "segmented"],
+        "frame-per-sample",
+    ),
+    (
+        "replay-serve-holds-sends",
+        "WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS",
+        &["off", "on"],
+        "off",
+    ),
+    (
+        "replay-live-before-answer",
+        "WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER",
+        &["deliver", "hold-back"],
+        "deliver",
     ),
     (
         "event-ring-full",

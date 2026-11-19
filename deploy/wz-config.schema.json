@@ -240,6 +240,42 @@
               "x-wz-mutability": "fixed",
               "x-wz-wire": "none"
             },
+            "replay-reply-shape": {
+              "description": "How a publisher's replay cache answers a query.",
+              "enum": [
+                "frame-per-sample",
+                "segmented"
+              ],
+              "default": "frame-per-sample",
+              "x-wz-scope": "message",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "replay-serve-holds-sends": {
+              "description": "Whether a publisher's sends of a message wait while its replay cache answers a query.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "default": "off",
+              "x-wz-scope": "message",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "timing"
+            },
+            "replay-live-before-answer": {
+              "description": "How a subscriber that asks for a replay orders its live samples against it.",
+              "enum": [
+                "deliver",
+                "hold-back"
+              ],
+              "default": "deliver",
+              "x-wz-scope": "message",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "none"
+            },
             "event-ring-full": {
               "description": "Which event a full event ring gives up.",
               "enum": [
