@@ -399,8 +399,6 @@ wz-session-core	wz-session-core/src/inbound.rs	1	error: unresolved link to `crat
 wz-session-core	wz-session-core/src/inbound.rs	2	error: unresolved link to `inbound_to_fsm_event`: no item named `inbound_to_fsm_event` in scope
 wz-session-core	wz-session-core/src/join_decode.rs	1	error: unresolved link to `crate::multicast_dispatch::MulticastDispatcher::ingest_join`: no item named `multicast_dispatch` in module `wz_session_core`
 wz-session-core	wz-session-core/src/keyexpr_match.rs	1	error: unresolved link to `crate::keyexpr_prefix::NonWildKeyExpr::new`: no item named `keyexpr_prefix` in module `wz_session_core`
-wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_patterns`: no item named `keyexpr_includes_patterns` in scope
-wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_target`: no item named `keyexpr_includes_target` in scope
 wz-session-core	wz-session-core/src/keyexpr_prefix.rs	1	error: unresolved link to `crate::namespace`: no item named `namespace` in module `wz_session_core`
 wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::drive::check_keepalive_deadline`: no item named `check_keepalive_deadline` in module `drive`
 wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::drive::check_keepalive_deadline`: no item named `drive` in module `wz_session_core`
