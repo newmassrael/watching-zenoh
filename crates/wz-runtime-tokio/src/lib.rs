@@ -1995,6 +1995,12 @@ pub mod ws_pipeline;
 #[cfg(all(feature = "transport-link-unixsock", unix))]
 pub mod unixsock_pipeline;
 
+// Links over a transport the program supplies: the port the session calls, the table behind a
+// lock, and the stream halves the shared stream pipeline frames over. Documented in its own
+// `//!`; see the note at `link_ring_fd`.
+#[cfg(feature = "transport-link-app")]
+pub mod app_link;
+
 // R311xj — AF_VSOCK backend for the vsock link (VM<->host / VM<->VM). The
 // STREAM sibling of `link_pipeline` (TCP) / `unixsock_pipeline`: vsock is a
 // reliable byte stream (zenoh's vsock link, `is_streamed = true`, MTU

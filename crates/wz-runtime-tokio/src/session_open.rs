@@ -136,6 +136,12 @@ use crate::serial_pipeline::{
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::serial_link::SerialRole;
 
+// A transport the program supplies rides this tcp+unicast-gated module as an additive stream
+// transport (transport-link-app forwards transport-link-tcp). A dial or listen config that carries
+// one opens every link on it, whatever socket the locator would otherwise have named.
+#[cfg(feature = "transport-link-app")]
+use crate::app_link::{wire_app_stream, AppListener, AppReadDriver, AppStream, AppTransport};
+
 // R311oa — the TLS arm, like serial, rides this tcp+unicast-gated module as
 // an additive transport (transport-link-tls forwards transport-link-tcp, so
 // this module is always compiled when TLS is). The stream type is the unified
@@ -316,6 +322,10 @@ pub struct DialConfig {
     /// its handshake on one clock ([`open_within`]). [`OPEN_TIMEOUT`] unless the node states
     /// another.
     pub open_timeout: std::time::Duration,
+    /// The transport the program supplies, which carries every dial of this config in place of
+    /// the system's sockets. `None` (the default) dials the sockets the locator names.
+    #[cfg(feature = "transport-link-app")]
+    pub app: Option<Arc<AppTransport>>,
 }
 
 impl Default for DialConfig {
@@ -327,6 +337,8 @@ impl Default for DialConfig {
             quic: None,
             link_defaults: LinkDefaults::default(),
             open_timeout: OPEN_TIMEOUT,
+            #[cfg(feature = "transport-link-app")]
+            app: None,
         }
     }
 }
@@ -414,6 +426,13 @@ impl DialConfig {
     #[cfg(feature = "transport-link-quic")]
     pub fn with_quic(mut self, quic: QuicDialConfig) -> Self {
         self.quic = Some(quic);
+        self
+    }
+
+    /// Dial over the transport the program supplies rather than the system's sockets.
+    #[cfg(feature = "transport-link-app")]
+    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+        self.app = Some(app);
         self
     }
 }
@@ -583,9 +602,20 @@ pub struct AcceptConfig {
     /// every listened locator's own options, the accept mirror of
     /// [`DialConfig::link_defaults`].
     pub link_defaults: LinkDefaults,
+    /// The transport the program supplies, which carries every listen of this config in place of
+    /// the system's sockets, the accept mirror of [`DialConfig::app`].
+    #[cfg(feature = "transport-link-app")]
+    pub app: Option<Arc<AppTransport>>,
 }
 
 impl AcceptConfig {
+    /// Listen over the transport the program supplies rather than the system's sockets.
+    #[cfg(feature = "transport-link-app")]
+    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+        self.app = Some(app);
+        self
+    }
+
     /// R2592 — supply the per-link-kind socket configuration every listen
     /// layers its locator's options over.
     pub fn with_link_defaults(mut self, link_defaults: LinkDefaults) -> Self {
@@ -865,6 +895,12 @@ pub enum DialedLink {
     /// [`dial_locator`] from the locator alone — it needs no cert config.
     #[cfg(feature = "transport-link-udp-reliable")]
     UdpReliable(Box<QuicLink>),
+    /// A byte stream over the transport the program supplies, dialled or accepted. A reliable
+    /// STREAM like TCP, so the steady-state split is uniform with [`Self::Tcp`]; produced by
+    /// [`dial_endpoint`] when its [`DialConfig`] carries the transport, and by an accept on a
+    /// [`BoundListener::App`].
+    #[cfg(feature = "transport-link-app")]
+    App(AppStream),
 }
 
 impl DialedLink {
@@ -904,6 +940,9 @@ impl DialedLink {
             // witness which of the two udp links was dialed.
             #[cfg(feature = "transport-link-udp-reliable")]
             DialedLink::UdpReliable(_) => "udp-reliable",
+            // A log word: the scheme is `tcp`, carried by the program's stack.
+            #[cfg(feature = "transport-link-app")]
+            DialedLink::App(_) => "app-stream",
         }
     }
 }
@@ -1135,6 +1174,11 @@ pub enum BoundListener {
     /// what serves a serial listen.
     #[cfg(feature = "transport-link-serial")]
     Serial(SerialListener),
+    /// A stream listener over the transport the program supplies: each stream the program
+    /// accepts on it is a [`DialedLink::App`] with no post-accept handshake (a direct wrap, like
+    /// `tcp`). Mesh-capable: every accepted stream is a link of its own.
+    #[cfg(feature = "transport-link-app")]
+    App(AppListener),
 }
 
 /// The "listener" state of a bound `serial/...` endpoint (R311y805) — a tty is
@@ -1276,6 +1320,8 @@ impl BoundListener {
             BoundListener::UdpReliable(_) => "udp-reliable",
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(_) => "serial",
+            #[cfg(feature = "transport-link-app")]
+            BoundListener::App(_) => "app-stream",
         }
     }
 
@@ -1352,6 +1398,9 @@ impl BoundListener {
             BoundListener::UdpReliable(_) => LinkKind::UdpReliable,
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(_) => LinkKind::Serial,
+            // A peer dials it as `tcp/...`: the program's stack carries TCP.
+            #[cfg(feature = "transport-link-app")]
+            BoundListener::App(_) => LinkKind::Tcp,
         }
     }
 
@@ -1422,6 +1471,9 @@ impl BoundListener {
             // serial listen, which is the path the demo's Acceptor role uses.
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(_) => false,
+            // Each stream the program accepts is a link of its own, as each TCP accept is.
+            #[cfg(feature = "transport-link-app")]
+            BoundListener::App(_) => true,
         }
     }
 
@@ -1501,6 +1553,9 @@ impl BoundListener {
             // socket's, this address is known at bind and no syscall reads it.
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(l) => l.endpoint.locator_address_with_config(),
+            // The address the listener was opened for: the program's stack holds the socket.
+            #[cfg(feature = "transport-link-app")]
+            BoundListener::App(l) => l.address().to_string(),
         })
     }
 
@@ -1569,6 +1624,16 @@ impl BoundListener {
                 "a serial listener has no IP SocketAddr (it addresses by tty device); \
                  use local_addr_display",
             )),
+            // The address it was opened for, when that is numeric; a named one has no
+            // `SocketAddr` this side can read.
+            #[cfg(feature = "transport-link-app")]
+            BoundListener::App(l) => l.address().parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "a listener of the program's transport was opened for a named address; \
+                     use local_addr_display",
+                )
+            }),
         }
     }
 
@@ -1817,6 +1882,20 @@ impl BoundListener {
                     AcceptedPeer::NonIp("serial"),
                 )
             }
+            // The next stream the program accepted. Cancel-safe as the accept loop's `select!`
+            // needs: a stream is taken only by the poll that returns it.
+            #[cfg(feature = "transport-link-app")]
+            BoundListener::App(l) => {
+                let (stream, _remote) = l.accept().await?;
+                let peer = match stream
+                    .remote_address()
+                    .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                {
+                    Some(address) => AcceptedPeer::Ip(address),
+                    None => AcceptedPeer::NonIp("app-stream"),
+                };
+                (AcceptedLink::App(stream), peer)
+            }
         })
     }
 
@@ -1950,6 +2029,9 @@ pub enum AcceptedLink {
         stream: SerialPort,
         endpoint: SerialEndpoint,
     },
+    /// A stream the program accepted on a [`BoundListener::App`]; no post-accept handshake.
+    #[cfg(feature = "transport-link-app")]
+    App(AppStream),
 }
 
 impl AcceptedLink {
@@ -2067,6 +2149,8 @@ impl AcceptedLink {
                     .await?;
                 DialedLink::Serial { stream, endpoint }
             }
+            #[cfg(feature = "transport-link-app")]
+            AcceptedLink::App(stream) => DialedLink::App(stream),
         })
     }
 
@@ -2127,6 +2211,8 @@ impl AcceptedLink {
             // crypto wording.
             #[cfg(feature = "transport-link-serial")]
             AcceptedLink::Serial { .. } => "; serial link handshake",
+            #[cfg(feature = "transport-link-app")]
+            AcceptedLink::App(_) => "",
         }
     }
 }
@@ -2791,6 +2877,10 @@ pub(crate) fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError
 /// `cfg` is forwarded to [`dial_locator`] for transports needing out-of-band
 /// material (TLS); cert-free transports ignore it.
 pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<DialedLink> {
+    #[cfg(feature = "transport-link-app")]
+    if let Some(app) = &cfg.app {
+        return dial_app(app, connect).await;
+    }
     let locator = plan_endpoint(connect).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -3903,6 +3993,10 @@ pub async fn bind_endpoint_with_config(
     listen: &str,
     cfg: &AcceptConfig,
 ) -> io::Result<BoundListener> {
+    #[cfg(feature = "transport-link-app")]
+    if let Some(app) = &cfg.app {
+        return bind_app(app, listen).await;
+    }
     let locator = plan_endpoint(listen).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -3910,6 +4004,38 @@ pub async fn bind_endpoint_with_config(
         )
     })?;
     bind_locator(locator, cfg).await
+}
+
+/// Dial `connect` over the transport the program supplies. A locator of a kind this runtime does
+/// not carry over it yet is a typed `Unsupported`, which an open names as an unknown scheme: the
+/// program's transport carries every link of the config or none, and no locator falls through to
+/// the system's sockets.
+#[cfg(feature = "transport-link-app")]
+async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLink> {
+    use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
+    match kind_for_locator(connect, false) {
+        Some(AppLinkKind::StreamDial) => Ok(DialedLink::App(app.dial_stream(connect).await?)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("the program's transport does not carry a dial of {connect:?} on this runtime"),
+        )),
+    }
+}
+
+/// Listen on `listen` over the transport the program supplies, refusing what [`dial_app`]
+/// refuses for the same reason.
+#[cfg(feature = "transport-link-app")]
+async fn bind_app(app: &Arc<AppTransport>, listen: &str) -> io::Result<BoundListener> {
+    use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
+    match kind_for_locator(listen, true) {
+        Some(AppLinkKind::StreamListen) => Ok(BoundListener::App(app.listen_stream(listen).await?)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "the program's transport does not carry a listen on {listen:?} on this runtime"
+            ),
+        )),
+    }
 }
 
 /// Inbound read driver of a dialed link — the transport union on the read
@@ -3939,6 +4065,8 @@ pub enum InboundLink {
     Quic(QuicReadDriver),
     #[cfg(feature = "transport-link-quic-datagram")]
     QuicDatagram(QuicDatagramReadDriver),
+    #[cfg(feature = "transport-link-app")]
+    App(AppReadDriver),
 }
 
 impl InboundLink {
@@ -3982,6 +4110,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Quic(d) => d.open().await,
             #[cfg(feature = "transport-link-quic-datagram")]
             InboundLink::QuicDatagram(d) => d.open().await,
+            #[cfg(feature = "transport-link-app")]
+            InboundLink::App(d) => d.open().await,
         }
     }
 
@@ -4006,6 +4136,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Quic(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-quic-datagram")]
             InboundLink::QuicDatagram(d) => d.send(frame, reliability).await,
+            #[cfg(feature = "transport-link-app")]
+            InboundLink::App(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -4030,6 +4162,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Quic(d) => d.close().await,
             #[cfg(feature = "transport-link-quic-datagram")]
             InboundLink::QuicDatagram(d) => d.close().await,
+            #[cfg(feature = "transport-link-app")]
+            InboundLink::App(d) => d.close().await,
         }
     }
 
@@ -4054,6 +4188,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Quic(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-quic-datagram")]
             InboundLink::QuicDatagram(d) => d.poll_event().await,
+            #[cfg(feature = "transport-link-app")]
+            InboundLink::App(d) => d.poll_event().await,
         }
     }
 }
@@ -4174,6 +4310,13 @@ pub fn wire_dialed_link_with_lowlatency(
         DialedLink::UdpReliable(link) => {
             let (inbound, outbound, handle) = wire_udp_reliable(*link, rx_buffer_size);
             (InboundLink::Quic(inbound), outbound, handle)
+        }
+        // Universal framing only: the lowlatency negotiation is wired for the system's TCP link,
+        // and a pico session offers none.
+        #[cfg(feature = "transport-link-app")]
+        DialedLink::App(stream) => {
+            let (inbound, outbound, handle) = wire_app_stream(stream, rx_buffer_size);
+            (InboundLink::App(inbound), outbound, handle)
         }
     }
 }
