@@ -191,9 +191,10 @@ fn link_refusal(refusal: LinkRestrictionError) -> ZResult {
     }
 }
 
-/// The retry two numbers state: none when both are zero. The value is built as stated, so that
-/// the model refuses a retry of no passes or of no delay itself; one that does not fit what a
-/// retry holds cannot be built and is `Z_EINVAL`.
+/// The retry two numbers state: none when both are zero. A retry of no passes or of no delay is
+/// no retry, and one whose numbers do not fit what a retry holds cannot be built; both are
+/// `Z_EINVAL` here, in the statement's shape, so they answer so whatever the session and its
+/// policy.
 fn retry_value(attempts: u32, delay_ms: u32) -> Result<Option<AdmissionRetry>, ZResult> {
     if attempts == 0 && delay_ms == 0 {
         return Ok(None);
@@ -201,7 +202,9 @@ fn retry_value(attempts: u32, delay_ms: u32) -> Result<Option<AdmissionRetry>, Z
     let (Ok(attempts), Ok(delay_ms)) = (u8::try_from(attempts), u16::try_from(delay_ms)) else {
         return Err(Z_EINVAL);
     };
-    Ok(Some(AdmissionRetry { attempts, delay_ms }))
+    AdmissionRetry::new(attempts, delay_ms)
+        .map(Some)
+        .map_err(retry_refusal)
 }
 
 /// The code a refused retry answers.
@@ -316,10 +319,13 @@ impl Stated for wz_capi_c_query_ext_t {
         let Some(ext) = ext else {
             return Ok(QueryStatement::default());
         };
-        Ok(QueryStatement {
-            links: restriction_of(ext.link_mask).map_err(link_refusal)?,
-            target_peer: (ext.has_target != 0).then(|| target_bytes(&ext.target.id)),
-        })
+        let links = restriction_of(ext.link_mask).map_err(link_refusal)?;
+        // A target of no byte names no node, whatever the session: refused here.
+        let target_peer = (ext.has_target != 0).then(|| target_bytes(&ext.target.id));
+        if let Some(zid) = &target_peer {
+            peer_target::check(zid).map_err(target_refusal)?;
+        }
+        Ok(QueryStatement { links, target_peer })
     }
 
     /// The links, then the target, the first refusal answering.
@@ -824,21 +830,9 @@ mod tests {
         );
         assert_eq!(retry_value(256, 20), Err(Z_EINVAL));
         assert_eq!(retry_value(3, 65536), Err(Z_EINVAL));
-        // Half a retry is built as stated, for the model to refuse.
-        assert_eq!(
-            retry_value(0, 5),
-            Ok(Some(AdmissionRetry {
-                attempts: 0,
-                delay_ms: 5
-            }))
-        );
-        assert_eq!(
-            retry_value(5, 0),
-            Ok(Some(AdmissionRetry {
-                attempts: 5,
-                delay_ms: 0
-            }))
-        );
+        // Half a retry is no retry: refused in the shape, before any session or policy is read.
+        assert_eq!(retry_value(0, 5), Err(Z_EINVAL));
+        assert_eq!(retry_value(5, 0), Err(Z_EINVAL));
     }
 
     #[test]
@@ -1075,6 +1069,22 @@ mod tests {
                 "256 passes is no retry, whatever the session"
             );
         }
+        let mut no_pass = wz_capi_c_publish_ext_t::OFF;
+        no_pass.delay_ms = 5;
+        // SAFETY: every handle is null and the statement is a local.
+        unsafe {
+            assert_eq!(
+                wz_capi_c_put_ext(
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &no_pass
+                ),
+                Z_EINVAL,
+                "a delay with no pass is no retry, whatever the session"
+            );
+        }
 
         let mut retry = wz_capi_c_publish_ext_t::OFF;
         retry.attempts = 2;
@@ -1167,6 +1177,20 @@ mod tests {
                     &target
                 ),
                 refused_or_null(target_on())
+            );
+            let mut nobody = wz_capi_c_query_ext_t::OFF;
+            nobody.has_target = 1;
+            assert_eq!(
+                wz_capi_c_get_ext(
+                    session,
+                    key,
+                    std::ptr::null(),
+                    &mut reply,
+                    std::ptr::null_mut(),
+                    &nobody
+                ),
+                Z_EINVAL,
+                "a target of no byte names no node, whatever the session"
             );
 
             let mut querier: z_owned_querier_t = std::mem::zeroed();
