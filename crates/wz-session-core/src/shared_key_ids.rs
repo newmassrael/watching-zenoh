@@ -35,9 +35,10 @@
 //!   pattern, and is never cut into an id and a rest: a pattern is matched as a whole by whoever
 //!   reads it, and the dictionary numbers the patterns a deployment uses as entries of their own.
 //!   Without its exact entry it goes as the literal.
-//! * Under `shared` a reply on the query's own key mirrors the request ([`reply_key`]): the same
-//!   id and rest, the `M` bit flipped, since the id is in the requester's space and the requester
-//!   is the receiver of the reply.
+//! * Under `shared` a reply on the query's own key may mirror the request ([`reply_key`]): the
+//!   same id and rest, the `M` bit flipped, since the id is in the requester's space and the
+//!   requester is the receiver of the reply. The engines' reply path carries the reply's key as
+//!   text and so sends it whole; a requester that holds the dictionary reads either form.
 //!
 //! # Where it lives
 //!
