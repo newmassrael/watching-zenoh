@@ -148,6 +148,13 @@ pub enum InboundRefusal {
     /// The call does not apply to the link's kind: bytes on a listener, an accept on a link that
     /// is not one.
     WrongKind,
+    /// The link already queues its bound of bytes the session has not read, so nothing was
+    /// taken. The program hands the same bytes in again once the session has read the queue
+    /// down: the transport tells it so with `drained` ([`Effects::drained`]).
+    Full,
+    /// A group's datagram named no source: the session tells the members of a group apart by
+    /// the locator each datagram came from.
+    NoSource,
 }
 
 /// Bytes the program handed in, copied at the call.
@@ -160,13 +167,16 @@ pub struct Received {
 }
 
 /// What the host does after a method returns, with no lock held: call the program's `close` for
-/// each link in `close` and then report each with [`AppLinkTable::close_done`], and wake every
-/// waker in `wake`.
+/// each link in `close` and then report each with [`AppLinkTable::close_done`], tell the program
+/// of each link in `drained`, and wake every waker in `wake`.
 #[derive(Debug, Default)]
-#[must_use = "the program's close and the wakes are the host's to perform"]
+#[must_use = "the program's close, its drained and the wakes are the host's to perform"]
 pub struct Effects {
     /// The links whose program side the host closes.
     pub close: Vec<LinkHandle>,
+    /// The links that refused the program's bytes for being full ([`InboundRefusal::Full`]) and
+    /// have since been read down to half their bound: the program may hand bytes in again.
+    pub drained: Vec<LinkHandle>,
     /// The tasks to wake.
     pub wake: Vec<Waker>,
 }
@@ -174,11 +184,12 @@ pub struct Effects {
 impl Effects {
     /// Whether there is nothing to do.
     pub fn is_empty(&self) -> bool {
-        self.close.is_empty() && self.wake.is_empty()
+        self.close.is_empty() && self.drained.is_empty() && self.wake.is_empty()
     }
 
     fn absorb(&mut self, other: Effects) {
         self.close.extend(other.close);
+        self.drained.extend(other.drained);
         self.wake.extend(other.wake);
     }
 }
@@ -315,6 +326,12 @@ struct Link {
     sending: bool,
     /// The session has let the link go; the row goes once the link is closed.
     released: bool,
+    /// The program's bytes were refused for the bound since the queue last drained: it is told
+    /// when the session has read the queue down.
+    refused_full: bool,
+    /// Bytes a writer that cannot wait handed over and the program has not taken yet (an engine
+    /// whose stream seam takes every byte or fails; [`AppLinkTable::hold_remainder`]).
+    remainder: Vec<u8>,
 }
 
 impl Link {
@@ -341,11 +358,31 @@ impl Link {
             writables: 0,
             sending: false,
             released: false,
+            refused_full: false,
+            remainder: Vec::new(),
         }
     }
 
     fn state(&self) -> AppLinkState {
         self.machine.get_current_state()
+    }
+
+    /// The bytes queued and not yet read.
+    fn queued(&self) -> usize {
+        self.rx
+            .iter()
+            .map(|received| received.bytes.len())
+            .sum::<usize>()
+            - self.rx_front_taken
+    }
+
+    /// After a read: a link that refused the program for being full and is now read down to half
+    /// of `bound` is one the program is told of.
+    fn note_read(&mut self, handle: LinkHandle, bound: usize, drained: &mut Vec<LinkHandle>) {
+        if self.refused_full && self.queued() <= bound / 2 {
+            self.refused_full = false;
+            drained.push(handle);
+        }
     }
 
     fn is_gone(&self) -> bool {
@@ -384,6 +421,12 @@ fn keep(slot: &mut Option<Waker>, waker: Option<&Waker>) {
 pub struct AppLinkTable {
     links: BTreeMap<LinkHandle, Link>,
     next: LinkHandle,
+    /// The most bytes one link queues in either direction: what the program handed in and the
+    /// session has not read, and what a writer that cannot wait handed over and the program has
+    /// not taken.
+    bound: usize,
+    /// The links read down since the host last asked ([`Self::take_drained`]).
+    drained: Vec<LinkHandle>,
 }
 
 impl Default for AppLinkTable {
@@ -393,11 +436,32 @@ impl Default for AppLinkTable {
 }
 
 impl AppLinkTable {
-    /// A table with no link.
+    /// A table with no link, whose links queue at most the build's `APP_LINK_QUEUE_BYTES`.
     pub const fn new() -> Self {
+        Self::with_queue_bound(crate::caps::APP_LINK_QUEUE_BYTES)
+    }
+
+    /// A table with no link, whose links queue at most `bound` bytes in each direction. A bound
+    /// of 0 is taken as 1: a link always takes the program's bytes when its queue is empty.
+    pub const fn with_queue_bound(bound: usize) -> Self {
         Self {
             links: BTreeMap::new(),
             next: 1,
+            bound: if bound == 0 { 1 } else { bound },
+            drained: Vec::new(),
+        }
+    }
+
+    /// The most bytes one link queues in either direction.
+    pub fn queue_bound(&self) -> usize {
+        self.bound
+    }
+
+    /// The links read down since the last call, for the host to tell the program of.
+    pub fn take_drained(&mut self) -> Effects {
+        Effects {
+            drained: core::mem::take(&mut self.drained),
+            ..Effects::default()
         }
     }
 
@@ -428,13 +492,7 @@ impl AppLinkTable {
 
     /// How many bytes are queued on a link and not yet read.
     pub fn queued_bytes(&self, handle: LinkHandle) -> usize {
-        self.links.get(&handle).map_or(0, |link| {
-            link.rx
-                .iter()
-                .map(|received| received.bytes.len())
-                .sum::<usize>()
-                - link.rx_front_taken
-        })
+        self.links.get(&handle).map_or(0, Link::queued)
     }
 
     fn take_handle(&mut self) -> LinkHandle {
@@ -572,10 +630,19 @@ impl AppLinkTable {
             AppLinkState::Closing | AppLinkState::Closed => return Err(InboundRefusal::Closed),
             AppLinkState::Open | AppLinkState::Blocked => {}
         }
+        if link.kind == AppLinkKind::Group && source.is_none() {
+            return Err(InboundRefusal::NoSource);
+        }
         let mut effects = Effects::default();
         // An empty stream chunk carries nothing; an empty datagram is a datagram.
         if bytes.is_empty() && link.kind.is_stream() {
             return Ok(effects);
+        }
+        // Past the bound nothing is taken, and the program learns when to hand it in again. An
+        // empty queue takes anything, so a datagram larger than the bound is not refused forever.
+        if !link.rx.is_empty() && link.queued() + bytes.len() > self.bound {
+            link.refused_full = true;
+            return Err(InboundRefusal::Full);
         }
         link.rx.push_back(Received {
             bytes: bytes.to_vec(),
@@ -615,6 +682,7 @@ impl AppLinkTable {
             }
         }
         if copied > 0 {
+            link.note_read(handle, self.bound, &mut self.drained);
             return StreamRead::Bytes(copied);
         }
         if buf.is_empty() {
@@ -627,12 +695,27 @@ impl AppLinkTable {
         StreamRead::Empty
     }
 
+    /// Whether a read of `handle` would answer now: bytes or a datagram are queued, a stream is
+    /// waiting on the listener, or the link is closing or closed. `waker` is kept when it would
+    /// not, and woken when it would.
+    pub fn poll_readable(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> bool {
+        let Some(link) = self.links.get_mut(&handle) else {
+            return true;
+        };
+        if !link.rx.is_empty() || !link.accepted.is_empty() || link.is_gone() {
+            return true;
+        }
+        keep(&mut link.reader, waker);
+        false
+    }
+
     /// The next datagram queued on `handle`.
     pub fn read_datagram(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> DatagramRead {
         let Some(link) = self.links.get_mut(&handle) else {
             return DatagramRead::End;
         };
         if let Some(datagram) = link.rx.pop_front() {
+            link.note_read(handle, self.bound, &mut self.drained);
             return DatagramRead::Datagram(datagram);
         }
         if link.is_gone() {
@@ -734,6 +817,45 @@ impl AppLinkTable {
                 SendStep::Failed,
                 link.drive(handle, AppLinkEvent::SendFailed),
             ),
+        }
+    }
+
+    /// Hold `bytes` a writer sends on `handle` and the program has not taken, behind any held
+    /// before: the remainder of a writer that cannot wait for the program (an engine whose stream
+    /// seam takes every byte or fails), which offers it again from [`Self::remainder`] and drops
+    /// what the program took with [`Self::drop_remainder`]. Refused, with nothing held, on a link
+    /// that is closing or closed, and past the bound ([`InboundRefusal::Full`]).
+    pub fn hold_remainder(
+        &mut self,
+        handle: LinkHandle,
+        bytes: &[u8],
+    ) -> Result<(), InboundRefusal> {
+        let link = self
+            .links
+            .get_mut(&handle)
+            .ok_or(InboundRefusal::NoSuchLink)?;
+        if link.is_gone() {
+            return Err(InboundRefusal::Closed);
+        }
+        if link.remainder.len() + bytes.len() > self.bound {
+            return Err(InboundRefusal::Full);
+        }
+        link.remainder.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// The bytes held on `handle` for the program, oldest first; empty for a link not held.
+    pub fn remainder(&self, handle: LinkHandle) -> &[u8] {
+        self.links
+            .get(&handle)
+            .map_or(&[][..], |link| link.remainder.as_slice())
+    }
+
+    /// The program took the first `taken` bytes of the remainder of `handle`.
+    pub fn drop_remainder(&mut self, handle: LinkHandle, taken: usize) {
+        if let Some(link) = self.links.get_mut(&handle) {
+            let taken = taken.min(link.remainder.len());
+            link.remainder.drain(..taken);
         }
     }
 
@@ -1268,7 +1390,14 @@ mod tests {
         let _ = table
             .received(handle, b"one", Some("udp/198.51.100.4:7447"))
             .unwrap();
-        let _ = table.received(handle, b"", None).unwrap();
+        let _ = table
+            .received(handle, b"", Some("udp/198.51.100.5:7447"))
+            .unwrap();
+        // A group's datagram that names no source is refused: the members are told apart by it.
+        assert_eq!(
+            table.received(handle, b"anon", None).unwrap_err(),
+            InboundRefusal::NoSource
+        );
         assert_eq!(
             table.read_datagram(handle, None),
             DatagramRead::Datagram(Received {
@@ -1280,7 +1409,7 @@ mod tests {
             table.read_datagram(handle, None),
             DatagramRead::Datagram(Received {
                 bytes: Vec::new(),
-                source: None,
+                source: Some(String::from("udp/198.51.100.5:7447")),
             }),
             "an empty datagram is a datagram"
         );
@@ -1297,5 +1426,109 @@ mod tests {
             .received(handle, b"ab", Some("tcp/198.51.100.4:1"))
             .unwrap();
         assert_eq!(table.queued_bytes(handle), 2);
+    }
+
+    #[test]
+    fn bytes_past_the_bound_are_refused_and_change_nothing() {
+        let mut table = AppLinkTable::with_queue_bound(8);
+        let handle = open_stream(&mut table);
+        let _ = table.received(handle, b"abcdef", None).unwrap();
+        assert_eq!(
+            table.received(handle, b"ghi", None).unwrap_err(),
+            InboundRefusal::Full
+        );
+        assert_eq!(
+            table.queued_bytes(handle),
+            6,
+            "nothing of the refused call was taken"
+        );
+        // What fits is still taken.
+        let _ = table.received(handle, b"gh", None).unwrap();
+        assert_eq!(table.queued_bytes(handle), 8);
+    }
+
+    #[test]
+    fn a_refused_program_is_told_once_the_queue_is_read_down_to_half() {
+        let mut table = AppLinkTable::with_queue_bound(8);
+        let handle = open_stream(&mut table);
+        let _ = table.received(handle, b"abcdefgh", None).unwrap();
+        assert!(table.received(handle, b"i", None).is_err());
+        let mut buf = [0u8; 3];
+        assert_eq!(
+            table.read_stream(handle, &mut buf, None),
+            StreamRead::Bytes(3)
+        );
+        assert!(
+            table.take_drained().drained.is_empty(),
+            "five bytes still queued: above half the bound"
+        );
+        assert_eq!(
+            table.read_stream(handle, &mut buf, None),
+            StreamRead::Bytes(3)
+        );
+        assert_eq!(
+            table.take_drained().drained,
+            [handle],
+            "two queued: at most half"
+        );
+        assert!(table.take_drained().drained.is_empty(), "told once");
+        // The retry is taken.
+        let _ = table.received(handle, b"i", None).unwrap();
+        assert_eq!(table.queued_bytes(handle), 3);
+    }
+
+    #[test]
+    fn a_link_never_refused_is_never_reported_drained() {
+        let mut table = AppLinkTable::with_queue_bound(8);
+        let handle = open_stream(&mut table);
+        let _ = table.received(handle, b"abc", None).unwrap();
+        let mut buf = [0u8; 8];
+        let _ = table.read_stream(handle, &mut buf, None);
+        assert!(table.take_drained().drained.is_empty());
+    }
+
+    #[test]
+    fn an_empty_queue_takes_a_datagram_larger_than_the_bound() {
+        let mut table = AppLinkTable::with_queue_bound(4);
+        let handle = table.reserve(AppLinkKind::Datagram);
+        let _ = table.opened(handle, ProgramOpen::Up);
+        let _ = table.received(handle, b"longer", None).unwrap();
+        assert_eq!(
+            table.received(handle, b"x", None).unwrap_err(),
+            InboundRefusal::Full
+        );
+        assert!(matches!(
+            table.read_datagram(handle, None),
+            DatagramRead::Datagram(_)
+        ));
+        assert_eq!(table.take_drained().drained, [handle]);
+    }
+
+    #[test]
+    fn a_held_remainder_is_offered_in_order_and_dropped_as_taken() {
+        let mut table = AppLinkTable::with_queue_bound(8);
+        let handle = open_stream(&mut table);
+        table.hold_remainder(handle, b"abc").unwrap();
+        table.hold_remainder(handle, b"de").unwrap();
+        assert_eq!(table.remainder(handle), b"abcde");
+        table.drop_remainder(handle, 2);
+        assert_eq!(table.remainder(handle), b"cde");
+        assert_eq!(
+            table.hold_remainder(handle, b"fghijk").unwrap_err(),
+            InboundRefusal::Full,
+            "past the bound"
+        );
+        assert_eq!(
+            table.remainder(handle),
+            b"cde",
+            "nothing of the refused hold was kept"
+        );
+        table.drop_remainder(handle, 99);
+        assert!(table.remainder(handle).is_empty());
+        let _ = table.event(handle, ProgramEvent::Closed).unwrap();
+        assert_eq!(
+            table.hold_remainder(handle, b"x").unwrap_err(),
+            InboundRefusal::Closed
+        );
     }
 }

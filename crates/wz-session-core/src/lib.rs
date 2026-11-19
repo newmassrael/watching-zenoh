@@ -2271,6 +2271,12 @@ pub mod app_link {
 #[cfg(feature = "app-link")]
 pub mod app_link_table;
 
+// A transport the program supplies as every engine reads it: the program's calls, the table
+// behind the lock the ABI gives it, and the calls the program makes into it. Gated as the table
+// is. Documented in its own `//!`; see the note at `event_ring`.
+#[cfg(feature = "app-link")]
+pub mod app_transport;
+
 /// The peers a node is told to hold, each with its [`peer_connection`]
 /// machine, in a table of fixed capacity (decision D5). Gated as the machine
 /// is.
