@@ -610,6 +610,8 @@ pub unsafe extern "C" fn z_open(
         }
         #[cfg(not(feature = "engine-tokio"))]
         let key_ids = crate::key_ids::coop_key_ids(&cfg);
+        #[cfg(all(feature = "engine-tokio", feature = "shared-key-ids"))]
+        let key_ids = cfg.key_ids.clone();
         let connect: Vec<String> = match (connect, &listen) {
             (Some(connect), _) => vec![connect],
             (None, Some(_)) => Vec::new(),
@@ -649,7 +651,7 @@ pub unsafe extern "C" fn z_open(
             #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
             policy,
-            #[cfg(not(feature = "engine-tokio"))]
+            #[cfg(any(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
             key_ids,
         };
         #[cfg(feature = "engine-tokio")]
@@ -893,10 +895,13 @@ struct OpenRequest {
     /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
-    /// The key ids every node of the deployment shares that the config states, for the
-    /// cooperative engine; the tokio engine holds none, and its open refused a config that does.
+    /// The key ids every node of the deployment shares that the config states, and the endpoints
+    /// whose key-wire form it states apart, as the engine the session opens on takes them.
     #[cfg(not(feature = "engine-tokio"))]
     key_ids: wz_capi_coop::OpenKeyIds,
+    /// See the cooperative engine's twin.
+    #[cfg(all(feature = "engine-tokio", feature = "shared-key-ids"))]
+    key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
 }
 
 /// Open `request` on the tokio engine and install the session in `zs`.
@@ -915,6 +920,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         start_admin_space,
         tls,
         policy,
+        #[cfg(feature = "shared-key-ids")]
+        key_ids,
     } = request;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
@@ -1063,6 +1070,13 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             groups,
             // pico's config has no `qos/publication` and no `transport/shared_memory` keys, so
             // its session applies nothing above its links.
+            // And the key ids every node shares, when the config states them (`crate::key_ids`).
+            #[cfg(feature = "shared-key-ids")]
+            session_defaults: wz_capi_core::session_defaults::SessionDefaults {
+                key_ids,
+                ..Default::default()
+            },
+            #[cfg(not(feature = "shared-key-ids"))]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
         },

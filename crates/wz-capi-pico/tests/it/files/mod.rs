@@ -16,6 +16,7 @@ mod decl_watch_doors;
 mod fragmentation_roundtrip;
 mod get_roundtrip;
 mod get_to_peer_door;
+mod key_ids_tokio;
 mod listen_and_connect;
 mod listener_multipeer;
 mod liveliness_face_death;

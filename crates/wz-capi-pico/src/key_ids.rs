@@ -2,25 +2,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The key ids every node of a deployment shares, from C: `wz_ext_config_key_ids` hands a config
-//! the dictionary, and the open hands it to the engine with the session's key-wire form.
+//! the dictionary, `wz_ext_config_key_wire_form_for` states the key-wire form of one endpoint apart
+//! from the session's, and the open hands both to the engine.
 //!
-//! A door wz has and zenoh-pico does not, so it is `wz_ext_*`, declared in `wz_ext.h`, and part of
-//! the unstable surface: the `shared-key-ids` capability implies `unstable-api`. The dictionary and
-//! its rules are `wz_session_core::shared_key_ids`'s, and the cooperative engine holds it
-//! (`wz_capi_coop::CoopEngine::open_with_key_ids`).
+//! Doors wz has and zenoh-pico does not, so they are `wz_ext_*`, declared in `wz_ext.h`, and part
+//! of the unstable surface: the `shared-key-ids` capability implies `unstable-api`. The dictionary
+//! and its rules are `wz_session_core::shared_key_ids`'s; both engines hold it, and each link of a
+//! session names its keys as the form stated for its endpoint, or the session's, says.
 //!
-//! What every build has here is the open's judgement of the key-wire form ([`admit_at_open`]):
-//! the tokio engine names keys as upstream does and holds no dictionary, so a session on it that
-//! states a dictionary or a form other than `declared` is refused, and so is any form other than
-//! `declared` in a build without the capability. A refusal is the code `z_open` answers, before
-//! anything is dialled.
+//! What every build has here is the open's judgement of the key-wire form ([`admit_at_open`]): a
+//! session whose form, or an endpoint's, is `shared` and whose config states no dictionary is
+//! refused, and so is any form but `declared` in a build without the capability. A refusal is the
+//! code `z_open` answers, before anything is dialled.
 
 #[cfg(feature = "shared-key-ids")]
 use core::ffi::{c_char, CStr};
 
-use wz_session_core::policy::{KeyWireForm, SessionPolicy};
+#[cfg(not(feature = "shared-key-ids"))]
+use wz_session_core::policy::KeyWireForm;
+use wz_session_core::policy::SessionPolicy;
 #[cfg(feature = "shared-key-ids")]
-use wz_session_core::shared_key_ids::{KeyIds, KeyIdsRefused};
+use wz_session_core::shared_key_ids::{form_in_domain, key_wire_form_named, KeyIds, KeyIdsRefused};
 
 #[cfg(feature = "shared-key-ids")]
 use crate::abi::z_loaned_config_t;
@@ -30,10 +32,22 @@ use crate::ffi::guarded;
 #[cfg(feature = "shared-key-ids")]
 use crate::prelude::*;
 use crate::result::ZResult;
-#[cfg(any(feature = "engine-tokio", not(feature = "shared-key-ids")))]
+#[cfg(not(feature = "shared-key-ids"))]
 use crate::result::WZ_EXT_ERR_UNSUPPORTED;
 #[cfg(feature = "shared-key-ids")]
-use crate::result::{Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
+use crate::result::{WZ_EXT_ERR_POLICY_OFF, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
+
+/// The config behind a loaned handle, or `None` for a null one.
+///
+/// # Safety
+/// `config` must be null or a live loaned config.
+#[cfg(feature = "shared-key-ids")]
+unsafe fn state_of<'c>(config: *mut z_loaned_config_t) -> Option<&'c mut ConfigState> {
+    if config.is_null() || (*config).handle.is_null() {
+        return None;
+    }
+    Some(&mut *((*config).handle as *mut ConfigState))
+}
 
 /// Hand `config` the key ids every node of the deployment shares: `count` entries, entry `i` the
 /// id `ids[i]` and the key expression `keys[i]`, a NUL-terminated UTF-8 string. The session
@@ -58,12 +72,11 @@ pub unsafe extern "C" fn wz_ext_config_key_ids(
     count: usize,
 ) -> ZResult {
     guarded(|| {
-        if config.is_null() || (*config).handle.is_null() {
+        let Some(state) = state_of(config) else {
             return Z_ERR_NULL;
-        }
-        let state = &mut *((*config).handle as *mut ConfigState);
+        };
         if count == 0 {
-            state.key_ids = None;
+            state.key_ids.ids = None;
             return Z_OK;
         }
         if ids.is_null() || keys.is_null() {
@@ -83,7 +96,7 @@ pub unsafe extern "C" fn wz_ext_config_key_ids(
         }
         match KeyIds::new(entries) {
             Ok(dictionary) => {
-                state.key_ids = Some(alloc::sync::Arc::new(dictionary));
+                state.key_ids.ids = Some(alloc::sync::Arc::new(dictionary));
                 Z_OK
             }
             Err(KeyIdsRefused::TooMany { .. }) => Z_ERR_OVERFLOW,
@@ -92,39 +105,72 @@ pub unsafe extern "C" fn wz_ext_config_key_ids(
     })
 }
 
-/// Whether a session may open from `cfg` under `policy`'s key-wire form on the engine this build
-/// opens on, or the code `z_open` answers.
+/// State the key-wire form of the link to `locator` apart from the session's: `form` is
+/// `"declared"`, `"shared"` or `"literal"`, as the policy names its values, and `locator` an
+/// endpoint the config dials or listens on, written as the config writes it. A link to an
+/// endpoint no statement names takes the session's form; a second statement for one endpoint
+/// replaces the first. The peer's zid is not known before the handshake, so a link is named by
+/// its endpoint.
 ///
-/// The tokio engine holds no dictionary: a dictionary stated, or a form other than `declared`, is
-/// [`WZ_EXT_ERR_UNSUPPORTED`].
-#[cfg(feature = "engine-tokio")]
-pub(crate) fn admit_at_open(cfg: &ConfigState, policy: &SessionPolicy) -> Result<(), ZResult> {
-    #[cfg(feature = "shared-key-ids")]
-    let stated = cfg.key_ids.is_some();
-    #[cfg(not(feature = "shared-key-ids"))]
-    let stated = {
-        let _ = cfg;
-        false
-    };
-    if stated || policy.key_wire_form() != KeyWireForm::Declared {
-        return Err(WZ_EXT_ERR_UNSUPPORTED);
-    }
-    Ok(())
+/// `Z_OK`; `Z_ERR_NULL` for a NULL config, locator or form; `Z_ERR_INVALID` for text that is not
+/// UTF-8, an empty locator, or a form the policy has no value of; `WZ_EXT_ERR_POLICY_OFF` for a
+/// form the build's domain of `key-wire-form` leaves out. A `shared` form needs the dictionary,
+/// which `z_open` checks: a config that states one with no dictionary is refused there with
+/// `Z_ERR_INVALID`. A refused call leaves the config as it was.
+///
+/// # Safety
+/// `config` must be null or a live loaned config; `locator` and `form` must be null or
+/// NUL-terminated strings.
+#[cfg(feature = "shared-key-ids")]
+#[no_mangle]
+pub unsafe extern "C" fn wz_ext_config_key_wire_form_for(
+    config: *mut z_loaned_config_t,
+    locator: *const c_char,
+    form: *const c_char,
+) -> ZResult {
+    guarded(|| {
+        if locator.is_null() || form.is_null() {
+            return Z_ERR_NULL;
+        }
+        let Some(state) = state_of(config) else {
+            return Z_ERR_NULL;
+        };
+        let (Ok(locator), Ok(form)) = (
+            CStr::from_ptr(locator).to_str(),
+            CStr::from_ptr(form).to_str(),
+        ) else {
+            return Z_ERR_INVALID;
+        };
+        if locator.is_empty() {
+            return Z_ERR_INVALID;
+        }
+        let Some(form) = key_wire_form_named(form) else {
+            return Z_ERR_INVALID;
+        };
+        if !form_in_domain(form) {
+            return WZ_EXT_ERR_POLICY_OFF;
+        }
+        state.key_ids.set_link(locator, form);
+        Z_OK
+    })
 }
 
-/// See the tokio engine's twin. On the cooperative engine with the capability, `shared` needs a
-/// dictionary, which is `Z_ERR_INVALID` when the config states none; the other two forms open.
-#[cfg(all(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
+/// Whether a session may open from `cfg` under `policy`'s key-wire form, or the code `z_open`
+/// answers: `Z_ERR_INVALID` when the session's form or an endpoint's is `shared` and the config
+/// states no dictionary.
+#[cfg(feature = "shared-key-ids")]
 pub(crate) fn admit_at_open(cfg: &ConfigState, policy: &SessionPolicy) -> Result<(), ZResult> {
-    match (policy.key_wire_form(), &cfg.key_ids) {
-        (KeyWireForm::Shared, None) => Err(Z_ERR_INVALID),
-        _ => Ok(()),
-    }
+    cfg.key_ids
+        .forms(policy.key_wire_form())
+        .map(|_| ())
+        .map_err(|_| Z_ERR_INVALID)
 }
 
-/// See the tokio engine's twin. A build without the capability names keys as upstream does and
-/// no other way: any form but `declared` is [`WZ_EXT_ERR_UNSUPPORTED`].
-#[cfg(all(not(feature = "engine-tokio"), not(feature = "shared-key-ids")))]
+/// See the twin with the capability. A build without it names keys as upstream does and no other
+/// way: any form but `declared` is [`WZ_EXT_ERR_UNSUPPORTED`]. A comparison the open makes in
+/// line, and nothing at all where the build's domain of the policy is that one value.
+#[cfg(not(feature = "shared-key-ids"))]
+#[inline(always)]
 pub(crate) fn admit_at_open(cfg: &ConfigState, policy: &SessionPolicy) -> Result<(), ZResult> {
     let _ = cfg;
     if policy.key_wire_form() != KeyWireForm::Declared {
@@ -133,16 +179,14 @@ pub(crate) fn admit_at_open(cfg: &ConfigState, policy: &SessionPolicy) -> Result
     Ok(())
 }
 
-/// The key ids `cfg` hands the cooperative engine's open: the dictionary the config states, or
-/// none.
+/// The key ids `cfg` hands the cooperative engine's open: the dictionary and the endpoints'
+/// forms the config states, or none.
 #[cfg(not(feature = "engine-tokio"))]
+#[inline(always)]
 pub(crate) fn coop_key_ids(cfg: &ConfigState) -> wz_capi_coop::OpenKeyIds {
     #[cfg(feature = "shared-key-ids")]
     {
-        cfg.key_ids.clone().map_or_else(
-            wz_capi_coop::OpenKeyIds::none,
-            wz_capi_coop::OpenKeyIds::shared,
-        )
+        wz_capi_coop::OpenKeyIds::new(cfg.key_ids.clone())
     }
     #[cfg(not(feature = "shared-key-ids"))]
     {
@@ -154,8 +198,11 @@ pub(crate) fn coop_key_ids(cfg: &ConfigState) -> wz_capi_coop::OpenKeyIds {
 #[cfg(all(test, feature = "shared-key-ids"))]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::prelude::*;
+    use wz_session_core::policy::KeyWireForm;
 
-    /// `state` as the loaned config the door is handed.
+    /// `state` as the loaned config the doors are handed.
     fn loaned(state: &mut ConfigState) -> z_loaned_config_t {
         z_loaned_config_t {
             handle: state as *mut ConfigState as *mut core::ffi::c_void,
@@ -183,6 +230,7 @@ mod tests {
         );
         let held = state
             .key_ids
+            .ids
             .as_deref()
             .expect("the config holds the dictionary");
         assert_eq!(held.key_of(41), Some("lab/rig/alpha"));
@@ -193,7 +241,7 @@ mod tests {
             unsafe { wz_ext_config_key_ids(&mut config, core::ptr::null(), core::ptr::null(), 0) },
             Z_OK
         );
-        assert!(state.key_ids.is_none(), "a count of 0 takes it back");
+        assert!(state.key_ids.ids.is_none(), "a count of 0 takes it back");
     }
 
     #[test]
@@ -247,39 +295,68 @@ mod tests {
             Z_ERR_NULL
         );
         assert_eq!(
-            state.key_ids.as_deref().and_then(|held| held.key_of(41)),
+            state
+                .key_ids
+                .ids
+                .as_deref()
+                .and_then(|held| held.key_of(41)),
             Some("lab/rig/alpha"),
             "a refused call leaves the dictionary handed before"
         );
     }
 
-    #[cfg(feature = "engine-tokio")]
     #[test]
-    fn the_tokio_engine_refuses_a_dictionary_and_every_form_but_declared() {
+    fn the_form_door_states_an_endpoint_apart_and_refuses_by_code() {
         let mut state = ConfigState::default();
+        let state_for = |state: &mut ConfigState, locator: *const c_char, form: *const c_char| {
+            let mut config = loaned(state);
+            unsafe { wz_ext_config_key_wire_form_for(&mut config, locator, form) }
+        };
+        let endpoint = c"tcp/192.0.2.7:7447".as_ptr();
+        assert_eq!(state_for(&mut state, endpoint, c"literal".as_ptr()), Z_OK);
+        assert_eq!(state_for(&mut state, endpoint, c"shared".as_ptr()), Z_OK);
         assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
-            Ok(())
+            state.key_ids.links,
+            [("tcp/192.0.2.7:7447".to_owned(), KeyWireForm::Shared)],
+            "a second statement for one endpoint replaces the first"
         );
-        for form in [KeyWireForm::Shared, KeyWireForm::Literal] {
-            assert_eq!(
-                admit_at_open(&state, &policy_of(form)),
-                Err(WZ_EXT_ERR_UNSUPPORTED)
-            );
-        }
-        state.key_ids = Some(alloc::sync::Arc::new(
-            KeyIds::new([(40, "lab/rig")]).expect("valid"),
-        ));
         assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
-            Err(WZ_EXT_ERR_UNSUPPORTED),
-            "a dictionary the engine would not hold"
+            state_for(&mut state, endpoint, c"Literal".as_ptr()),
+            Z_ERR_INVALID,
+            "a form the policy has no value of"
+        );
+        assert_eq!(
+            state_for(&mut state, c"".as_ptr(), c"literal".as_ptr()),
+            Z_ERR_INVALID,
+            "an empty locator"
+        );
+        assert_eq!(
+            state_for(&mut state, core::ptr::null(), c"literal".as_ptr()),
+            Z_ERR_NULL
+        );
+        assert_eq!(
+            state_for(&mut state, endpoint, core::ptr::null()),
+            Z_ERR_NULL
+        );
+        assert_eq!(
+            unsafe {
+                wz_ext_config_key_wire_form_for(
+                    core::ptr::null_mut(),
+                    endpoint,
+                    c"literal".as_ptr(),
+                )
+            },
+            Z_ERR_NULL
+        );
+        assert_eq!(
+            state.key_ids.links.len(),
+            1,
+            "a refused call leaves the config as it was"
         );
     }
 
-    #[cfg(not(feature = "engine-tokio"))]
     #[test]
-    fn the_cooperative_engine_needs_a_dictionary_for_the_shared_form_only() {
+    fn the_open_needs_a_dictionary_for_a_shared_form_only() {
         let mut state = ConfigState::default();
         assert_eq!(
             admit_at_open(&state, &policy_of(KeyWireForm::Shared)),
@@ -288,11 +365,23 @@ mod tests {
         for form in [KeyWireForm::Declared, KeyWireForm::Literal] {
             assert_eq!(admit_at_open(&state, &policy_of(form)), Ok(()));
         }
-        state.key_ids = Some(alloc::sync::Arc::new(
+        state
+            .key_ids
+            .set_link("tcp/192.0.2.7:7447", KeyWireForm::Shared);
+        assert_eq!(
+            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
+            Err(Z_ERR_INVALID),
+            "an endpoint stated shared needs the dictionary too"
+        );
+        state.key_ids.ids = Some(alloc::sync::Arc::new(
             KeyIds::new([(40, "lab/rig")]).expect("valid"),
         ));
         assert_eq!(
             admit_at_open(&state, &policy_of(KeyWireForm::Shared)),
+            Ok(())
+        );
+        assert_eq!(
+            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
             Ok(())
         );
     }

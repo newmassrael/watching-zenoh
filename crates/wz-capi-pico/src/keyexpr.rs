@@ -74,12 +74,6 @@ pub(crate) unsafe fn wire_key_of(
     shared: &Engine,
 ) -> Option<WireKey> {
     keyexpr_str(ke)?;
-    // A session that names keys by the key ids every node shares, or as the literal, names this
-    // one so whatever declaration it has (`crate::key_ids`).
-    #[cfg(feature = "shared-key-ids")]
-    if let Some(wire) = keyexpr_str(ke).and_then(|text| shared.key_wire_by_form(text)) {
-        return Some(wire);
-    }
     Some(match declared_of(ke) {
         Some(declared) => declared.wire(shared),
         None => WireKey::literal(),
@@ -209,12 +203,6 @@ impl DeclaredKeyexpr {
     /// entry replayed onto later faces — holds the id declared for as long as
     /// it names it.
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
-        // A session whose key-wire form is not `declared` names the key as the form says,
-        // whatever declaration it holds (`crate::key_ids`).
-        #[cfg(feature = "shared-key-ids")]
-        if let Some(wire) = shared.key_wire_by_form(&self.literal) {
-            return wire;
-        }
         // Every constructor keeps the declared prefix at the front of the
         // literal (see `extended`), so the remainder always exists; the `get`
         // turns a broken invariant into the literal rather than a panic.
@@ -242,11 +230,11 @@ impl DeclaredKeyexpr {
         &self,
         shared: &Engine,
     ) -> Option<wz_session_core::wire_id::ExprId> {
-        // Under a key-wire form other than `declared` the id is the form's: a shared id that is
-        // the whole key, and none for the literal or an id with a rest.
+        // A session whose links name keys their own way (`crate::key_ids`) is sent a put the
+        // general way, which each link names as its form says: no id goes to every link at once.
         #[cfg(feature = "shared-key-ids")]
-        if let Some(wire) = shared.key_wire_by_form(&self.literal) {
-            return (!wire.is_literal() && wire.suffix.is_none()).then_some(wire.mapping_id);
+        if shared.names_keys_by_link() {
+            return None;
         }
         self.declared_on(shared)
             .filter(|d| d.prefix_len == self.literal.len())

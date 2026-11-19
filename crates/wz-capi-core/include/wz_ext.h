@@ -561,12 +561,28 @@ const char *wz_ext_conformance_digest(void);
  * more entries than the build's MAX_SHARED_KEY_IDS. A refused call leaves
  * the config as it was.
  *
- * z_open then refuses, with WZ_EXT_ERR_UNSUPPORTED, a config that states a
- * dictionary on a session of the tokio engine, which holds none, and with
- * Z_ERR_INVALID a session whose key-wire form is shared and whose config
+ * z_open then refuses with Z_ERR_INVALID a session whose key-wire form, or
+ * the form stated for one of its endpoints, is shared and whose config
  * states no dictionary. */
 z_result_t wz_ext_config_key_ids(z_loaned_config_t *config,
                                  const uint16_t *ids,
                                  const char *const *keys, size_t count);
+
+/* State the key-wire form of the link to locator apart from the session's:
+ * form is "declared", "shared" or "literal", as the key-wire-form policy
+ * names its values, and locator an endpoint the config dials or listens on,
+ * written as the config writes it. A link whose endpoint no statement names
+ * takes the session's form; a second statement for one endpoint replaces the
+ * first. A link is named by its endpoint because the peer's zid is not known
+ * before the handshake. Part of the unstable surface, and present only in a
+ * build with the shared-key-ids capability.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL config, locator or form; Z_ERR_INVALID for text
+ * that is not UTF-8, an empty locator, or a form the policy has no value of;
+ * WZ_EXT_ERR_POLICY_OFF for a form the build's domain of key-wire-form leaves
+ * out. A refused call leaves the config as it was. */
+z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
+                                           const char *locator,
+                                           const char *form);
 
 #endif /* WZ_EXT_H */

@@ -94,10 +94,11 @@ pub const Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY: u8 = 0x56;
 #[derive(Clone, Default)]
 pub(crate) struct ConfigState {
     pub(crate) entries: BTreeMap<u8, String>,
-    /// The key ids every node of the deployment shares (`wz_ext_config_key_ids`), which the open
-    /// hands the engine.
+    /// The key ids every node of the deployment shares (`wz_ext_config_key_ids`) and the
+    /// endpoints whose key-wire form is stated apart (`wz_ext_config_key_wire_form_for`), which
+    /// the open hands the engine.
     #[cfg(feature = "shared-key-ids")]
-    pub(crate) key_ids: Option<wz_session_core::shared_key_ids::SharedKeyIds>,
+    pub(crate) key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
 }
 
 impl ConfigState {
