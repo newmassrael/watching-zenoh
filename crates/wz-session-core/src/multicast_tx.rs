@@ -406,9 +406,15 @@ pub fn multicast_tx_emit(
 ) -> MulticastTxFrames {
     let reliable = multicast_tx_reliable(&item);
     let mut collect = UnboundedCollect(Vec::new());
-    // Always room, so never `Congested`; the waits are never spent, and no policy of the queue
-    // is ever asked, so the queue is upstream's.
-    let _ = multicast_tx_push(item, tx_sn, params, &TxQueueConf::upstream(), &mut collect);
+    // Always room, so never `Congested` and the waits are never spent; the queue is the one the
+    // group's snapshot makes, as every queue a machine builds is.
+    let _ = multicast_tx_push(
+        item,
+        tx_sn,
+        params,
+        &TxQueueConf::of_policy(&params.policy),
+        &mut collect,
+    );
     MulticastTxFrames {
         datagrams: collect.0,
         reliable,
