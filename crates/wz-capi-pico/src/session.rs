@@ -584,6 +584,19 @@ pub unsafe extern "C" fn z_open(
             dial_whatami,
             zid: _,
         } = open;
+        // A config that carries the program's transport opens every link on it, so a locator the
+        // transport does not carry, and an open that would scout on the system's sockets, are
+        // refused here, before anything is opened.
+        #[cfg(feature = "app-transport")]
+        let app_transport = cfg.transport.clone();
+        #[cfg(feature = "app-transport")]
+        if app_transport.is_some() {
+            if let Some(code) =
+                crate::app_transport::refused_open(connect.as_deref(), listen.as_deref())
+            {
+                return code;
+            }
+        }
         // R311y406 / R311y534 — the TLS material, RESOLVED here (path or inline
         // base64 -> PEM bytes) because the key numbers are this ABI's knowledge.
         // A malformed value fails the open rather than degrading to a plaintext
@@ -642,6 +655,8 @@ pub unsafe extern "C" fn z_open(
             #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
             policy,
+            #[cfg(feature = "app-transport")]
+            app_transport,
         };
         #[cfg(feature = "engine-tokio")]
         return open_on_tokio(zs, request);
@@ -884,6 +899,9 @@ struct OpenRequest {
     /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
+    /// The transport the program supplies, when the config carries one: every link goes over it.
+    #[cfg(feature = "app-transport")]
+    app_transport: Option<std::sync::Arc<wz_capi_core::runtime::app_link::AppTransport>>,
 }
 
 /// Open `request` on the tokio engine and install the session in `zs`.
@@ -902,6 +920,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         start_admin_space,
         tls,
         policy,
+        #[cfg(feature = "app-transport")]
+        app_transport,
     } = request;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
@@ -1052,6 +1072,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // its session applies nothing above its links.
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
+            #[cfg(feature = "app-transport")]
+            app_transport,
         },
     ) {
         Ok(state) => {

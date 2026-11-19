@@ -1302,6 +1302,21 @@ implies = ["unstable-api"]
 help = "The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors)."
 
 [[capability]]
+id = "app-transport"
+kconfig = "WZ_CAP_APP_TRANSPORT"
+# Off by default: zenoh-pico opens its links on the system's sockets, and so does a build made as it
+# is. A program whose network stack is its own turns it on and hands each config the transport its
+# session opens every link on. It asks nothing of the operating system: the program's stack carries
+# the links. The pico ABI's doors are wz_ext_* and part of its unstable surface; the model threads
+# the transport to each dial and listen of a session.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors)."
+
+[[capability]]
 id = "rx-callback-offload"
 kconfig = "WZ_CAP_RX_CALLBACK_OFFLOAD"
 # Off by default: zenoh-c runs a subscriber's callback where the sample arrives, and so does a build

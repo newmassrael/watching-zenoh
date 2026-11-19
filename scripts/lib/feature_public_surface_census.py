@@ -509,9 +509,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`, the event struct, the owned
         # watch and the constants they take, declared in `wz_ext.h`, off by default as the
         # observation plane's doors are.
+        # `app-transport` gates `pub mod app_transport`, whose public items are wz's own doors
+        # `wz_ext_transport_new`, `_received`, `_event`, `_accepted`, `_loan`, `_move`, `_drop`,
+        # `wz_ext_config_transport` and the two `wz_ext_internal_transport_*` doors, and the types
+        # and constants they take, declared in `wz_ext.h`; off by default, as upstream has no such
+        # doors.
         frozenset(
             {
                 "admin-space",
+                "app-transport",
                 "clock-source",
                 "declarations-synced-event",
                 "event-ring",
