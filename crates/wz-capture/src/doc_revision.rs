@@ -73,6 +73,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use wz_session_core::doc_out::{DocOut, JsonOut};
+
 /// One document's shape AT one revision.
 ///
 /// A ROW IN A HISTORY, not a description of today: the newest row for a
@@ -35009,14 +35011,22 @@ fn emitted(document: &str) -> Option<&'static Emitted> {
 /// written as `revision: 0`, a value [`audit`] refuses, rather than being
 /// silently omitted: a document with no envelope is exactly the state item 509
 /// measured, and it must not be reachable by a typo.
+///
+/// `out` ends where the member goes, right after the `{` that opens the
+/// document: the key is written with no separator before it.
 pub fn envelope_into(document: &str, out: &mut String) {
-    out.push_str("\"document\":{\"name\":\"");
-    out.push_str(document);
-    let _ = write!(
-        out,
-        "\",\"revision\":{}",
-        emitted(document).map_or(0, |e| e.revision)
-    );
+    JsonOut::value_onto(out, |w| write_envelope(document, w));
+}
+
+/// [`envelope_into`] through any [`DocOut`]: the member `document` and its map,
+/// into the document's map the caller has open.
+pub fn write_envelope<W: DocOut>(document: &str, out: &mut W) {
+    out.key("document");
+    out.open_map();
+    out.key("name");
+    out.text(document);
+    out.key("revision");
+    out.uint(u64::from(emitted(document).map_or(0, |e| e.revision)));
     // R2180 (open-debt item 554) — WHICH OF THIS DOCUMENT'S TOP-LEVEL KEYS ARE
     // PLANES, written into the document rather than answered by a second door,
     // so the list cannot be paired with a document from a different build.
@@ -35034,16 +35044,14 @@ pub fn envelope_into(document: &str, out: &mut String) {
     // six documents (`emitted_planes`), which is what the silence rests on.
     let planes = emitted(document).map_or(&[][..], |e| e.planes);
     if !planes.is_empty() {
-        out.push_str(",\"planes\":[");
-        for (i, plane) in planes.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            let _ = write!(out, "\"{plane}\"");
+        out.key("planes");
+        out.open_array();
+        for plane in planes {
+            out.text(plane);
         }
-        out.push(']');
+        out.close_array();
     }
-    out.push('}');
+    out.close_map();
 }
 
 /// The whole envelope as its own string, for a caller building a document with

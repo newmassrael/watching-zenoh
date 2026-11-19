@@ -87,132 +87,122 @@
 //! 64-bit values that can pass 2^53 (a CRC, a wide header field) are decimal
 //! strings beyond it, by the integer rule every document here keeps.
 
+#[cfg(test)]
 use alloc::string::String;
-use core::fmt::Write as _;
 
-use wz_session_core::json::{escape_into, u64_into};
+use wz_session_core::doc_out::DocOut;
+#[cfg(test)]
+use wz_session_core::doc_out::JsonOut;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
-use crate::e2e_json::push_fields;
+use crate::e2e_json::write_fields;
 use crate::e2e_slots::{Opened, Outcome, SlotSender};
-use crate::payload_decode::{push_matched_rule, E2eJudged};
+use crate::payload_decode::{write_matched_rule, E2eJudged};
 
 /// Write `null` or the number.
-fn push_optional(value: Option<u64>, out: &mut String) {
+fn write_optional<W: DocOut>(value: Option<u64>, out: &mut W) {
     match value {
-        Some(value) => u64_into(value, out),
-        None => out.push_str("null"),
+        Some(value) => out.uint_exact(value),
+        None => out.null(),
     }
 }
 
 /// Write `null` or the number, for the facts a frame was judged under
 /// (`previous_counter`, `counter_step`, `max_gap`, `timeout_ms`). A function of
-/// its own, and not [`push_optional`], because the cells the integer-door gate
+/// its own, and not [`write_optional`], because the cells the integer-door gate
 /// names are one per call and these four were born at revision 35, while
 /// `silence_ms` was born at 34.
-fn push_counter_fact(value: Option<u64>, out: &mut String) {
+fn write_counter_fact<W: DocOut>(value: Option<u64>, out: &mut W) {
     match value {
-        Some(value) => u64_into(value, out),
-        None => out.push_str("null"),
+        Some(value) => out.uint_exact(value),
+        None => out.null(),
     }
 }
 
-/// Write `null` or the boolean.
-fn push_optional_bool(value: Option<bool>, out: &mut String) {
-    out.push_str(match value {
-        Some(true) => "true",
-        Some(false) => "false",
-        None => "null",
-    });
+/// [`write_block`] as JSON text onto `out`, which ends where a value goes: the
+/// form the tests read a block in. The field document writes the block through
+/// its own writer.
+#[cfg(test)]
+pub(crate) fn push_block(judged: &E2eJudged<'_>, out: &mut String) {
+    JsonOut::value_onto(out, |w| write_block(judged, w));
 }
 
 /// The object that follows `"e2e":`.
-pub(crate) fn push_block(judged: &E2eJudged<'_>, out: &mut String) {
+pub(crate) fn write_block<W: DocOut>(judged: &E2eJudged<'_>, out: &mut W) {
     let profile = judged.format.profile();
-    out.push_str("{\"profile\":");
-    escape_into(profile.name(), out);
-    out.push_str(",\"matched_rule\":");
-    push_matched_rule(&judged.rule, out);
+    out.open_map();
+    out.key("profile");
+    out.text(profile.name());
+    out.key("matched_rule");
+    write_matched_rule(&judged.rule, out);
     if let Some(schema) = judged.format.schema() {
-        out.push_str(",\"body_schema\":");
-        escape_into(schema, out);
+        out.key("body_schema");
+        out.text(schema);
     }
     match &judged.outcome {
         Outcome::Unreadable { why } => {
-            out.push_str(",\"opened\":false,\"why\":");
-            escape_into(why, out);
+            out.key("opened");
+            out.bool(false);
+            out.key("why");
+            out.text(why);
         }
         Outcome::TooShort {
             payload_bytes,
             header_bytes,
         } => {
-            let _ = write!(
-                out,
-                ",\"opened\":false,\"payload_bytes\":{payload_bytes},\"why\":"
-            );
-            escape_into(
-                &alloc::format!(
-                    "the payload is {payload_bytes} bytes and the profile's header is \
-                     {header_bytes}"
-                ),
-                out,
-            );
+            out.key("opened");
+            out.bool(false);
+            out.key("payload_bytes");
+            out.uint(*payload_bytes as u64);
+            out.key("why");
+            out.text_fmt(format_args!(
+                "the payload is {payload_bytes} bytes and the profile's header is \
+                 {header_bytes}"
+            ));
         }
-        Outcome::Opened(opened) => push_opened(judged, opened, out),
+        Outcome::Opened(opened) => write_opened(judged, opened, out),
     }
     // The machine word beside the sentence, on exactly the blocks that have a
     // sentence: `why` and `unopened_reason` arrive together or not at all.
     if let Some(reason) = judged.outcome.unopened() {
-        out.push_str(",\"unopened_reason\":\"");
-        out.push_str(reason.word());
-        out.push('"');
+        out.key("unopened_reason");
+        out.text(reason.word());
     }
-    out.push('}');
+    out.close_map();
 }
 
-fn push_opened(judged: &E2eJudged<'_>, opened: &Opened, out: &mut String) {
+fn write_opened<W: DocOut>(judged: &E2eJudged<'_>, opened: &Opened, out: &mut W) {
     let profile = judged.format.profile();
     let frame = &opened.frame;
-    let _ = write!(
-        out,
-        ",\"opened\":true,\"payload_offset\":{},\"payload_bytes\":{},",
-        frame.payload_offset, frame.payload_bytes
-    );
-    push_fields(profile, &frame.fields, "header", out);
-    out.push_str(",\"crc_computed\":");
-    u64_into(frame.crc_computed, out);
-    let _ = write!(out, ",\"crc_error\":{}", !frame.crc_ok);
-    out.push_str(",\"length_field\":");
-    u64_into(frame.length_found, out);
-    out.push_str(",\"length_expected\":");
-    u64_into(frame.length_expected, out);
-    let _ = write!(
-        out,
-        ",\"length_matches_frame\":{}",
-        frame.length_matches_frame
-    );
-    out.push_str(",\"counter\":");
-    u64_into(frame.counter(profile), out);
+    out.key("opened");
+    out.bool(true);
+    out.key("payload_offset");
+    out.uint(frame.payload_offset as u64);
+    out.key("payload_bytes");
+    out.uint(frame.payload_bytes as u64);
+    write_fields(profile, &frame.fields, "header", out);
+    out.key("crc_computed");
+    out.uint_exact(frame.crc_computed);
+    out.key("crc_error");
+    out.bool(!frame.crc_ok);
+    out.key("length_field");
+    out.uint_exact(frame.length_found);
+    out.key("length_expected");
+    out.uint_exact(frame.length_expected);
+    out.key("length_matches_frame");
+    out.bool(frame.length_matches_frame);
+    out.key("counter");
+    out.uint_exact(frame.counter(profile));
 
     let judgment = opened.judgment.as_ref();
-    out.push_str(",\"counter_error\":");
-    push_optional_bool(judgment.map(|j| j.counter_error), out);
-    out.push_str(",\"timeout_error\":");
-    push_optional_bool(
-        judgment.filter(|_| opened.timed).map(|j| j.timeout_error),
-        out,
-    );
-    out.push_str(",\"counter_reason\":");
-    match judgment {
-        Some(j) => {
-            out.push('"');
-            out.push_str(j.counter_reason.word());
-            out.push('"');
-        }
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"silence_ms\":");
-    push_optional(
+    out.key("counter_error");
+    out.opt_bool(judgment.map(|j| j.counter_error));
+    out.key("timeout_error");
+    out.opt_bool(judgment.filter(|_| opened.timed).map(|j| j.timeout_error));
+    out.key("counter_reason");
+    out.opt_text(judgment.map(|j| j.counter_reason.word()));
+    out.key("silence_ms");
+    write_optional(
         judgment.filter(|_| opened.timed).and_then(|j| j.silence_ms),
         out,
     );
@@ -222,54 +212,51 @@ fn push_opened(judged: &E2eJudged<'_>, opened: &Opened, out: &mut String) {
     // no timestamp alike). All five are `null` when there is no slot to judge
     // against, and the counter step and the timeout limit are `null` where that
     // part of the judgement was not made.
-    out.push_str(",\"previous_counter\":");
-    push_counter_fact(judgment.and(opened.previous), out);
-    out.push_str(",\"first\":");
-    push_optional_bool(judgment.map(|_| opened.previous.is_none()), out);
-    out.push_str(",\"counter_step\":");
-    push_counter_fact(judgment.and(opened.step), out);
-    out.push_str(",\"max_gap\":");
-    push_counter_fact(judgment.map(|_| profile.counter().max_gap), out);
-    out.push_str(",\"timeout_ms\":");
-    push_counter_fact(
+    out.key("previous_counter");
+    write_counter_fact(judgment.and(opened.previous), out);
+    out.key("first");
+    out.opt_bool(judgment.map(|_| opened.previous.is_none()));
+    out.key("counter_step");
+    write_counter_fact(judgment.and(opened.step), out);
+    out.key("max_gap");
+    write_counter_fact(judgment.map(|_| profile.counter().max_gap), out);
+    out.key("timeout_ms");
+    write_counter_fact(
         judgment
             .filter(|_| opened.timed)
             .map(|_| profile.counter().timeout_ms),
         out,
     );
-    out.push_str(",\"unjudged_reason\":");
-    match opened.unjudged {
-        Some(why) => {
-            out.push('"');
-            out.push_str(why.word());
-            out.push('"');
-        }
-        None => out.push_str("null"),
-    }
+    out.key("unjudged_reason");
+    out.opt_text(opened.unjudged.map(|why| why.word()));
 
-    out.push_str(",\"slot\":{\"keyexpr\":");
-    escape_into(&opened.slot.keyexpr, out);
+    out.key("slot");
+    out.open_map();
+    out.key("keyexpr");
+    out.text(&opened.slot.keyexpr);
     match &opened.slot.sender {
         SlotSender::Pooled => {}
         SlotSender::Zid(zid) => {
-            out.push_str(",\"zid\":");
-            escape_into(&zid_to_zenoh_hex(zid), out);
+            out.key("zid");
+            out.text(&zid_to_zenoh_hex(zid));
         }
-        SlotSender::Unknown => out.push_str(",\"zid\":null"),
+        SlotSender::Unknown => {
+            out.key("zid");
+            out.null();
+        }
     }
     if !opened.slot.identity.is_empty() {
-        out.push_str(",\"identity\":[");
-        for (i, (name, value)) in opened.slot.identity.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str("{\"name\":");
-            escape_into(name, out);
-            out.push_str(",\"value\":");
-            u64_into(*value, out);
-            out.push('}');
+        out.key("identity");
+        out.open_array();
+        for (name, value) in &opened.slot.identity {
+            out.open_map();
+            out.key("name");
+            out.text(name);
+            out.key("value");
+            out.uint_exact(*value);
+            out.close_map();
         }
-        out.push(']');
+        out.close_array();
     }
-    out.push('}');
+    out.close_map();
 }

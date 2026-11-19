@@ -89,6 +89,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use wz_session_core::doc_out::{DocOut, JsonOut};
 use wz_session_core::json::{escape_into, u64_into};
 use wz_session_core::passive::Direction;
 
@@ -1186,10 +1187,16 @@ pub(crate) fn push_latency(l: &crate::exchange::LatencySamples, out: &mut String
 /// SAME way this module does. Two renderings of one key is how the two
 /// consumption surfaces came to disagree in the first place, one level up.
 pub(crate) fn push_flow(flow: &crate::link::FlowKey, out: &mut String) {
-    out.push_str("{\"low\":");
-    push_endpoint(&flow.low, flow.link(), out);
-    out.push_str(",\"high\":");
-    push_endpoint(&flow.high, flow.link(), out);
+    JsonOut::value_onto(out, |w| write_flow(flow, w));
+}
+
+/// [`push_flow`] through any [`DocOut`].
+pub(crate) fn write_flow<W: DocOut>(flow: &crate::link::FlowKey, out: &mut W) {
+    out.open_map();
+    out.key("low");
+    write_endpoint(&flow.low, flow.link(), out);
+    out.key("high");
+    write_endpoint(&flow.high, flow.link(), out);
     // Round 2447 (open-debt item 696) — WHICH LINK, on the flow object itself.
     //
     // The consumer report asked for exactly this and said in its own
@@ -1203,17 +1210,21 @@ pub(crate) fn push_flow(flow: &crate::link::FlowKey, out: &mut String) {
     // STRUCTURAL, on every flow object of every plane: a key a consumer has to
     // test for cannot be switched on, which is the rule this document set
     // states for `carried` and `keyexpr` one plane over.
-    let _ = write!(out, ",\"link\":\"{}\"}}", flow.link().name());
+    out.key("link");
+    out.text(flow.link().name());
+    out.close_map();
 }
 
-fn push_endpoint(e: &crate::link::Endpoint, link: crate::link::LinkKind, out: &mut String) {
-    out.push_str("{\"addr\":\"");
+fn write_endpoint<W: DocOut>(e: &crate::link::Endpoint, link: crate::link::LinkKind, out: &mut W) {
+    out.open_map();
+    out.key("addr");
     // Round 2447 (open-debt item 696) — the spelling comes from the LINK, and
     // it is `Endpoint::addr_text` because two other surfaces spell an address
     // too and all three had the same defect. See that method for what each kind
     // spells and for the residue this leaves named.
-    out.push_str(&e.addr_text(link));
-    let _ = write!(out, "\",\"port\":{}", e.port);
+    out.text(&e.addr_text(link));
+    out.key("port");
+    out.uint(u64::from(e.port));
     // The ADDRESS FAMILY, on the endpoint, so a reader that formats an endpoint
     // never has to recover it from the address text. `addr` is the address alone
     // and the port is beside it, so the pair is one join away from ambiguous once
@@ -1226,12 +1237,9 @@ fn push_endpoint(e: &crate::link::Endpoint, link: crate::link::LinkKind, out: &m
     // The VALUE is a word for an IP link and `null` for one that does not address
     // by IP (a MAC, a context id, no address), which is `Endpoint::family`'s own
     // answer and not a placeholder: those endpoints have no family to name.
-    match e.family(link) {
-        Some(family) => {
-            let _ = write!(out, ",\"family\":\"{}\"}}", family.name());
-        }
-        None => out.push_str(",\"family\":null}"),
-    }
+    out.key("family");
+    out.opt_text(e.family(link).map(|family| family.name()));
+    out.close_map();
 }
 
 pub(crate) fn dir_name(d: Direction) -> &'static str {
