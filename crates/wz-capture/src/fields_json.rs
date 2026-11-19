@@ -5682,8 +5682,94 @@ pub(crate) fn write_context<W: DocOut>(
     out.opt_uint(context.batch_size().map(u64::from));
     out.key("version");
     out.opt_uint(context.version.map(u64::from));
+    write_shm(&context.shm, out);
     push_parameters(context, compression, out);
     out.close_map();
+}
+
+/// Revision 74 — the context's `shm`: what the session's handshake said about
+/// shared memory, message by message
+/// ([`wz_session_core::passive::ShmHandshake`]).
+///
+/// ```text
+/// "shm":{"init_syn":true,"init_ack":true,"open_syn":"zbuf",
+///        "open_ack":"zbuf","established":true}
+/// ```
+///
+/// `init_syn` and `init_ack` say whether that Init carried a `Shm` extension,
+/// `null` until it was read. `open_syn` and `open_ack` say how that Open's was
+/// encoded, a word of [`ShmExtWord`], `absent` when it carried none and `null`
+/// until it was read: release 1.9.0 writes `z64` there and the pinned release
+/// `zbuf`. `established` is `true` when both Opens carried it in one encoding,
+/// `false` when a message of the exchange carried none or the two encodings
+/// differ, and `null` while the messages read leave it open.
+fn write_shm<W: DocOut>(shm: &wz_session_core::passive::ShmHandshake, out: &mut W) {
+    out.key("shm");
+    out.open_map();
+    out.key("init_syn");
+    out.opt_bool(shm.init_syn);
+    out.key("init_ack");
+    out.opt_bool(shm.init_ack);
+    for (key, open) in [("open_syn", shm.open_syn), ("open_ack", shm.open_ack)] {
+        out.key(key);
+        out.opt_text(open.map(|e| ShmExtWord::of(e).name()));
+    }
+    out.key("established");
+    out.opt_bool(shm.established());
+    out.close_map();
+}
+
+/// The word an Open's `Shm` extension is written as: how it was encoded, or
+/// `absent`. The closed set of `open_syn` and `open_ack` (revision 74).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShmExtWord {
+    Absent,
+    Unit,
+    Z64,
+    ZBuf,
+    Reserved,
+}
+
+impl ShmExtWord {
+    fn of(encoding: Option<wz_session_core::passive::ShmExtEncoding>) -> Self {
+        use wz_session_core::passive::ShmExtEncoding;
+        match encoding {
+            None => ShmExtWord::Absent,
+            Some(ShmExtEncoding::Unit) => ShmExtWord::Unit,
+            Some(ShmExtEncoding::Z64) => ShmExtWord::Z64,
+            Some(ShmExtEncoding::ZBuf) => ShmExtWord::ZBuf,
+            Some(ShmExtEncoding::Reserved) => ShmExtWord::Reserved,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            ShmExtWord::Absent => "absent",
+            ShmExtWord::Unit => "unit",
+            ShmExtWord::Z64 => "z64",
+            ShmExtWord::ZBuf => "zbuf",
+            ShmExtWord::Reserved => "reserved",
+        }
+    }
+
+    /// Every word, sorted, from an exhaustive walk: what the vocabulary gate
+    /// holds `open_syn` and `open_ack` to.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        use wz_session_core::passive::ShmExtEncoding;
+        let mut words: Vec<&'static str> = [
+            None,
+            Some(ShmExtEncoding::Unit),
+            Some(ShmExtEncoding::Z64),
+            Some(ShmExtEncoding::ZBuf),
+            Some(ShmExtEncoding::Reserved),
+        ]
+        .into_iter()
+        .map(|e| ShmExtWord::of(e).name())
+        .collect();
+        words.sort_unstable();
+        words
+    }
 }
 
 /// What the bytes of a session say about its parameters beside what its
@@ -9418,6 +9504,31 @@ mod tests {
             push_context(&context, &ParameterGrounds::of_context(&context), &mut out);
             arms.push(out);
         }
+        // Revision 74 — every `open_syn` and `open_ack` word, on a context.
+        {
+            use wz_session_core::passive::{ShmExtEncoding, ShmHandshake};
+            let mut words = alloc::collections::BTreeSet::new();
+            for open in [
+                None,
+                Some(ShmExtEncoding::Unit),
+                Some(ShmExtEncoding::Z64),
+                Some(ShmExtEncoding::ZBuf),
+                Some(ShmExtEncoding::Reserved),
+            ] {
+                let mut context = FlowContext::default();
+                context.shm = ShmHandshake {
+                    init_syn: Some(true),
+                    init_ack: Some(true),
+                    open_syn: Some(open),
+                    open_ack: Some(open),
+                };
+                words.insert(ShmExtWord::of(open).name());
+                let mut out = String::new();
+                push_context(&context, &ParameterGrounds::of_context(&context), &mut out);
+                arms.push(out);
+            }
+            assert_eq!(words.into_iter().collect::<Vec<_>>(), ShmExtWord::names());
+        }
         // Every `batch_header` word, on a half.
         for header in [
             wz_session_core::passive::BatchHeader::Absent,
@@ -9925,17 +10036,19 @@ mod tests {
     }
 
     /// The FLAT cells of each flow's `context` object in `doc`, exactly as
-    /// written and closed as an object: every key ahead of the `parameters`
-    /// object revision 45 added, which restates them with their basis and is
-    /// held by its own tests (`context_parameters`).
+    /// written and closed as an object: every key ahead of the `shm` object
+    /// revision 74 added, which is held by its own tests
+    /// (`session_table_tests`), and of the `parameters` object revision 45
+    /// added after it, which restates them with their basis and is held by its
+    /// own tests (`context_parameters`).
     fn context_objects(doc: &str) -> Vec<String> {
         const KEY: &str = "\"context\":";
         doc.match_indices(KEY)
             .map(|(at, _)| {
                 let rest = &doc[at + KEY.len()..];
                 let flat = rest
-                    .find(",\"parameters\":")
-                    .expect("a context object carries its parameters");
+                    .find(",\"shm\":")
+                    .expect("a context object carries its shared memory");
                 alloc::format!("{}}}", &rest[..flat])
             })
             .collect()
@@ -11311,7 +11424,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 102] = [
+        let live: [(&str, &str, Vec<&'static str>); 104] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11354,6 +11467,9 @@ mod tests {
                 "witness",
                 crate::foreign_zenoh::WitnessKind::names(),
             ),
+            // How each Open's `Shm` extension was encoded (revision 74).
+            (rev::FIELDS, "open_syn", ShmExtWord::names()),
+            (rev::FIELDS, "open_ack", ShmExtWord::names()),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the

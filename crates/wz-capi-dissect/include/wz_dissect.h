@@ -1432,6 +1432,42 @@
  *     `phase` is one of `unseen`, `half_init`, `init_complete`,
  *     `established`, `closed`.
  *
+ *     Since field-document revision 74 (row_facts 14) the context says, after
+ *     `version`, what the handshake said about SHARED MEMORY, message by
+ *     message:
+ *
+ *       "shm":{"init_syn":bool|null,"init_ack":bool|null,
+ *              "open_syn":W|null,"open_ack":W|null,"established":bool|null}
+ *
+ *     zenoh sets shared memory up inside the four handshake messages, each
+ *     carrying a `Shm` extension (id 0x2) or not: the opener names its segment
+ *     in the InitSyn, the acceptor answers in the InitAck only when it could
+ *     open that segment, the opener answers the acceptor's challenge in the
+ *     OpenSyn only when it could open the acceptor's segment, and the acceptor
+ *     acknowledges in the OpenAck only when the challenge held. `init_syn` and
+ *     `init_ack` say whether that Init carried the extension. `open_syn` and
+ *     `open_ack` say how that Open's was encoded, `W` one of `absent` (it
+ *     carried none), `unit`, `z64`, `zbuf` or `reserved`. Each is `null` until
+ *     the first such message was read, which is the only one recorded.
+ *
+ *     The Open's encoding is what tells two releases of one protocol version
+ *     apart: release 1.9.0 declares the Open's extension an integer, written
+ *     `z64`, and the release this library is pinned to a buffer, written
+ *     `zbuf`. The Init's extension is a buffer in both and does not tell them
+ *     apart. `established` is `true` when both Opens carried the extension in
+ *     one encoding, `false` when a message of the exchange carried none or the
+ *     two Opens' encodings differ (two releases that cannot set shared memory
+ *     up together), and `null` while the messages read leave it open.
+ *
+ *     Whether one message's payload IS a descriptor into shared memory is said
+ *     per message, by the `shm_descriptor` of its `carried` entry's `payload`:
+ *     the Put or Err carried the body extension that marks it. A descriptor
+ *     sent without that mark reads as payload bytes, and nothing on the wire
+ *     tells it from data.
+ *
+ * @values fields open_syn
+ * @values fields open_ack
+ *
  *     Since field-document revision 26 -- WHAT `negotiated` MEANS, and what a
  *     flow that did not see its handshake says. `negotiated` is `true` once
  *     BOTH Inits of the handshake were observed, the InitSyn and the InitAck,
@@ -1741,7 +1777,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":73,"key":"kind","values":[...],
+ *     {"name":"fields","revision":74,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1794,6 +1830,8 @@
  * @carries fields link passenger
  * @carries fields message passenger
  * @carries fields offset_space discriminant
+ * @carries fields open_ack passenger
+ * @carries fields open_syn passenger
  * @carries fields outcome passenger
  * @carries fields phase passenger
  * @carries fields place passenger
@@ -6203,7 +6241,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":73,"key":"state",
+ *     "value_families":[{"name":"fields","revision":74,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7961,6 +7999,8 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts link
  * @values row_facts message
  * @values row_facts offset_space
+ * @values row_facts open_ack
+ * @values row_facts open_syn
  * @values row_facts outcome
  * @values row_facts phase
  * @values row_facts place
@@ -8002,6 +8042,8 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts link passenger
  * @carries row_facts message passenger
  * @carries row_facts offset_space discriminant
+ * @carries row_facts open_ack passenger
+ * @carries row_facts open_syn passenger
  * @carries row_facts outcome passenger
  * @carries row_facts phase passenger
  * @carries row_facts place passenger

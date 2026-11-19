@@ -3230,6 +3230,129 @@ fn a_session_of_this_version_is_not_zenoh_of_another_and_the_document_says_null(
     );
 }
 
+// ── shared memory in the handshake ─────────────────────────────────────────
+
+/// `wire` with one `Shm` (`0x2`) extension behind its body: the header's Z bit
+/// set, then the entry, a buffer (`zbuf`) or an integer (`z64`) of `value`.
+fn with_shm(mut wire: Vec<u8>, zbuf: bool) -> Vec<u8> {
+    wire[0] |= 0x80;
+    if zbuf {
+        wire.extend_from_slice(&[0x02 | 0x40, 3, 0xA1, 0xB2, 0xC3]);
+    } else {
+        wire.extend_from_slice(&[0x02 | 0x20, 0x2A]);
+    }
+    wire
+}
+
+/// A handshake whose four messages carry the `Shm` extension as given:
+/// `Some(zbuf)` carries one of that encoding, `None` none.
+fn shm_handshake(
+    init_syn: Option<bool>,
+    init_ack: Option<bool>,
+    open_syn: Option<bool>,
+    open_ack: Option<bool>,
+) -> Packets {
+    let ext = |wire: Vec<u8>, shm: Option<bool>| match shm {
+        Some(zbuf) => with_shm(wire, zbuf),
+        None => wire,
+    };
+    let mut out = Packets::default();
+    let mut tcp = Tcp::new(true, 43210);
+    tcp.send(&mut out, T0, true, &ext(init(&ZID_A, false), init_syn));
+    tcp.send(
+        &mut out,
+        T0 + 1_000,
+        false,
+        &ext(init_ack_with_cookie(&ZID_B), init_ack),
+    );
+    tcp.send(
+        &mut out,
+        T0 + 2_000,
+        true,
+        &ext(open_syn_with_cookie(), open_syn),
+    );
+    tcp.send(&mut out, T0 + 3_000, false, &ext(open(true), open_ack));
+    out
+}
+
+/// WHERE A SESSION'S SHARED MEMORY STOPPED, message by message, and which
+/// release's Open encoding it used: the pinned release's buffer on both Opens
+/// is set up; release 1.9.0's integer on both is set up too; a buffer answered
+/// by no extension, or by the other encoding, is not; an InitAck without one
+/// ends it there.
+#[test]
+fn the_context_says_where_the_handshakes_shared_memory_stopped() {
+    use wz_session_core::passive::{ShmExtEncoding, ShmHandshake};
+    let zbuf = Some(ShmExtEncoding::ZBuf);
+    let z64 = Some(ShmExtEncoding::Z64);
+    for (exts, want, established) in [
+        (
+            (Some(true), Some(true), Some(true), Some(true)),
+            (Some(true), Some(true), Some(zbuf), Some(zbuf)),
+            Some(true),
+        ),
+        (
+            (Some(true), Some(true), Some(false), Some(false)),
+            (Some(true), Some(true), Some(z64), Some(z64)),
+            Some(true),
+        ),
+        (
+            (Some(true), Some(true), Some(true), None),
+            (Some(true), Some(true), Some(zbuf), Some(None)),
+            Some(false),
+        ),
+        (
+            (Some(true), Some(true), Some(true), Some(false)),
+            (Some(true), Some(true), Some(zbuf), Some(z64)),
+            Some(false),
+        ),
+        (
+            (Some(true), None, None, None),
+            (Some(true), Some(false), Some(None), Some(None)),
+            Some(false),
+        ),
+    ] {
+        let d = shm_handshake(exts.0, exts.1, exts.2, exts.3).dissect();
+        assert_eq!(d.flows().len(), 1);
+        let shm = d.flows()[0].session.context().shm;
+        assert_eq!(
+            shm,
+            ShmHandshake {
+                init_syn: want.0,
+                init_ack: want.1,
+                open_syn: want.2,
+                open_ack: want.3,
+            },
+            "{exts:?}"
+        );
+        assert_eq!(shm.established(), established, "{exts:?}");
+    }
+}
+
+/// The document's `shm`: a session of the pinned release that set it up, and
+/// one with no shared memory at all, whose Inits say so.
+#[test]
+fn the_field_document_writes_the_handshakes_shared_memory() {
+    let out = shm_handshake(Some(true), Some(true), Some(true), Some(true));
+    let fields = crate::fields_json::fields_json(&out.dissect(), &out.file(), None, None);
+    assert!(
+        fields.contains(
+            "\"shm\":{\"init_syn\":true,\"init_ack\":true,\"open_syn\":\"zbuf\",\
+             \"open_ack\":\"zbuf\",\"established\":true}"
+        ),
+        "{fields}"
+    );
+    let (out, _) = tcp_session(true, 0);
+    let plain = crate::fields_json::fields_json(&out.dissect(), &out.file(), None, None);
+    assert!(
+        plain.contains(
+            "\"shm\":{\"init_syn\":false,\"init_ack\":false,\"open_syn\":\"absent\",\
+             \"open_ack\":\"absent\",\"established\":false}"
+        ),
+        "{plain}"
+    );
+}
+
 /// The document's object for a recognised flow: the version, the exchange and
 /// each witness's word, direction and packet.
 #[test]

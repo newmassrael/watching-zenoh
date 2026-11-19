@@ -4634,8 +4634,11 @@ int main(void) {
      * under stationary keys.
      * 73: each flow gains `foreign_zenoh`, whether the flow is zenoh of a
      * version this library does not read, with `recognized_by` and its
-     * `witnesses`. Four keys and two families arrive; nothing retires. */
-    revisioned[2].revision = 73;
+     * `witnesses`. Four keys and two families arrive; nothing retires.
+     * 74: each context gains `shm`, the handshake's shared memory message by
+     * message and how each Open's extension was encoded. Six keys and two
+     * families arrive; nothing retires. */
+    revisioned[2].revision = 74;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
