@@ -328,6 +328,7 @@ mod tests {
             .then_some(upstream)
     }
 
+    #[cfg(feature = "config-document")]
     fn policies_document(statements: &[(&str, &str)]) -> String {
         let members: Vec<String> = statements
             .iter()
