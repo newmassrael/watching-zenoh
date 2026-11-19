@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 1936de2cab43fd9c254ed4116e5ca0344c7ce0fedd26d1f63f85c52aca3c2d26
+// source-hash: 85b0d9b437f04a77c9efbed8b91b021dba742b01b779f8807f10f62a38d9ccb2
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -71,7 +71,7 @@
 // closure; this one suspicious-category lint reads the `match` of a constant
 // default as a hand-written `unwrap_or_default`.
 
-// SCE-MAP: session_fsm_multicast.scxml:77 :: _machine
+// SCE-MAP: session_fsm_multicast.scxml:81 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -551,12 +551,12 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: session_fsm_multicast.scxml:77 :: _machine"]
-// SCE-MAP: session_fsm_multicast.scxml:77 :: _machine
+    #[doc = "SCE-MAP: session_fsm_multicast.scxml:81 :: _machine"]
+// SCE-MAP: session_fsm_multicast.scxml:81 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             SessionFsmMulticastState::LinkOpening => {
-                // SCE-MAP: session_fsm_multicast.scxml:96 :: LinkOpening :: _state_body
+                // SCE-MAP: session_fsm_multicast.scxml:100 :: LinkOpening :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -566,7 +566,7 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
                 }
             }
             SessionFsmMulticastState::Running => {
-                // SCE-MAP: session_fsm_multicast.scxml:110 :: Running :: _state_body
+                // SCE-MAP: session_fsm_multicast.scxml:114 :: Running :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -576,7 +576,7 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
                 }
             }
             SessionFsmMulticastState::Stopped => {
-                // SCE-MAP: session_fsm_multicast.scxml:119 :: Stopped :: _state_body
+                // SCE-MAP: session_fsm_multicast.scxml:123 :: Stopped :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -596,8 +596,8 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
     // recorded runs nothing.
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: session_fsm_multicast.scxml:77 :: _machine"]
-// SCE-MAP: session_fsm_multicast.scxml:77 :: _machine
+    #[doc = "SCE-MAP: session_fsm_multicast.scxml:81 :: _machine"]
+// SCE-MAP: session_fsm_multicast.scxml:81 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -619,8 +619,8 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
     // the ordered set. `Event::Null` asks for eventless transitions.
-    #[doc = "SCE-MAP: session_fsm_multicast.scxml:77 :: _machine"]
-// SCE-MAP: session_fsm_multicast.scxml:77 :: _machine
+    #[doc = "SCE-MAP: session_fsm_multicast.scxml:81 :: _machine"]
+// SCE-MAP: session_fsm_multicast.scxml:81 :: _machine
     fn first_enabled_transition(
         &mut self,
         state: Self::State,
@@ -674,8 +674,8 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
-    #[doc = "SCE-MAP: session_fsm_multicast.scxml:77 :: _machine"]
-// SCE-MAP: session_fsm_multicast.scxml:77 :: _machine
+    #[doc = "SCE-MAP: session_fsm_multicast.scxml:81 :: _machine"]
+// SCE-MAP: session_fsm_multicast.scxml:81 :: _machine
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,

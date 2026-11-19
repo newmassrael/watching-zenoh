@@ -33,9 +33,13 @@
   Running is a LEAF (no `<parallel>`):
     §3.1 describes Running as three parallel regions — JoinEmit (periodic
     Join, default 2500ms), RxDispatch (classify Join/Frame/Fragment/
-    KeepAlive/Close/OAM), PeerSweep (lease/3 eviction). The engine-free SCE
-    surface has no `<parallel>` (verified: zero `State::Parallel` in
-    sce-rust-runtime), and `session_fsm_unicast.scxml` already set the
+    KeepAlive/Close/OAM), PeerSweep (lease/3 eviction). When this document
+    was written the engine-free SCE surface had no `<parallel>`; the pinned
+    SCE has it (a core construct of its accepted subset, and the engine-free
+    Rust runtime carries the parallel procedures), so this is a choice of
+    this document and no longer a limit of SCE. Moving the three regions
+    into Running is row 47 of slice S5 of docs/zenoh-logic-as-sce-kinds.md.
+    `session_fsm_unicast.scxml` already set the
     precedent of eliding §2.3's parallel established sub-regions to a leaf
     and letting the host drive loop own the concurrency. The same split
     applies here: the host Router owns the three Running concerns (the

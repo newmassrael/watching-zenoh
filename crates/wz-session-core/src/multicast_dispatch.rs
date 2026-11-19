@@ -25,7 +25,9 @@
 //!   [`notify_link_lost`](MulticastDispatcher::notify_link_lost) /
 //!   [`stop`](MulticastDispatcher::stop)).
 //! - **The §3.1 Running parallel concerns — the Router.** Running is a leaf
-//!   (the SCE surface has no `<parallel>`); the host owns JoinEmit /
+//!   (`session_fsm_multicast.scxml` does not use the `<parallel>` SCE has;
+//!   slice S5 row 47 of `docs/zenoh-logic-as-sce-kinds.md` moves the regions
+//!   into it); the host owns JoinEmit /
 //!   RxDispatch / PeerSweep. The Router realises RxDispatch
 //!   ([`ingest_join`](MulticastDispatcher::ingest_join) for JOIN /
 //!   [`refresh_by_src`](MulticastDispatcher::refresh_by_src) for Frame /
