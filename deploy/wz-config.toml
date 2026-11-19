@@ -1362,7 +1362,8 @@ help = "Supervise the reception of periodic streams: a deadline per stream, a lo
 # the subscriber's round are wz-session-core's. How deep a ring is is the REPLAY_DEPTH_MAX limit;
 # the answer's shape, whether serving holds the message's sends and whether live samples wait for
 # the replay are the three replay-* policies. The subscriber hears a publisher's queryable through
-# the declaration watch and asks it with a get, so the capability implies both ends of a query.
+# the declaration watch, asks it with a get and judges the answers with the receiving judge, so
+# the capability implies both ends of a query, the watch and the judge.
 [[capability]]
 id = "replay-cache"
 kconfig = "WZ_CAP_REPLAY_CACHE"
@@ -1370,7 +1371,7 @@ default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-implies = ["unstable-api", "query", "queryable", "remote-declaration-watch"]
+implies = ["unstable-api", "query", "queryable", "remote-declaration-watch", "e2e-receiver"]
 help = "Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (wz_ext_replay_*, wz-own doors)."
 
 [[capability]]
@@ -3486,8 +3487,9 @@ How a publisher's replay cache answers a query. `frame-per-sample` answers one
 reply per sample of the ring, each the frame exactly as it was sent, then the
 final. `segmented` answers each sample as the pieces of the message's declared
 segment profile, every sample under the next transfer number, for a message
-whose frames are larger than a deployment puts in one sample. Decided when the
-cache starts serving, and fixed while it serves.
+whose frames are larger than a deployment puts in one sample. A subscriber that
+asks for a replay under `segmented` is refused until it joins pieces. Decided
+when the cache or the subscriber is made, and fixed for its life.
 '''
 
 [[policy]]
@@ -3508,7 +3510,7 @@ before the replay that precedes it. On, a periodic send is held and only the
 latest of each instance goes out once the answer is over, and an event send is
 deferred to a queue of max(1, depth/2) frames that gives up the oldest when it
 is full; the held frames go out in the order they were sent, before any later
-send. Decided when the cache starts serving, and fixed while it serves.
+send. Decided when the cache is made, and fixed for its life.
 '''
 
 [[policy]]

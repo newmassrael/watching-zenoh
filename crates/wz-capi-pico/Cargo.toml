@@ -343,6 +343,25 @@ e2e-receiver = [
     "dep:wz-app-frame",
     "wz-capi-core?/e2e-receiver",
 ]
+# `replay-cache`: the replay cache of a message (`wz_ext_replay_publisher_*`,
+# `wz_ext_replay_subscriber_*`): a publisher's ring of the frames it sent, answered on the message's
+# key plus a suffix the program states, and a subscriber that asks each publisher as its queryable
+# appears and orders the replies against its live samples. wz's own, off as the reference build is,
+# part of the unstable surface. The ring and the round are `wz-session-core`'s and the admission of
+# a reply to the judge is `wz-app-frame`'s. A publisher answers with a queryable and a subscriber
+# asks with a get, hears its publishers through the declaration watch and judges with the receiving
+# judge, so it selects all four; it touches neither engine itself and forwards weakly.
+replay-cache = [
+    "std",
+    "unstable-api",
+    "query",
+    "queryable",
+    "remote-declaration-watch",
+    "e2e-receiver",
+    "wz-app-frame/replay",
+    "wz-session-core/replay-cache",
+    "wz-capi-core?/replay-cache",
+]
 # `e2e-sender-demux`: the receiving judge keeps one stream per sender, chosen by the sender
 # identity the frame's header carries, in at most `E2E_SENDER_SLOTS` slots.
 e2e-sender-demux = ["e2e-receiver", "wz-capi-core?/e2e-sender-demux"]

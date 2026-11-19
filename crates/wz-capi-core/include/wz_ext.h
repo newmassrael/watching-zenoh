@@ -964,6 +964,278 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
                               z_get_options_t *options, const z_id_t *peer);
 #endif
 
+/* ---- The replay cache (replay-cache) ----------------------------------- */
+
+/* What each publisher of a message last sent, for a subscriber that arrives
+ * later. Part of the unstable surface, and present only in a build with the
+ * replay-cache capability.
+ *
+ * THE PUBLISHER keeps a ring of depth frames per instance of the message, in
+ * the program's storage, each frame exactly as it was sent (a protection
+ * header included), recorded before it is put and whether or not the put
+ * succeeds. Serving declares a queryable on the message's key followed by the
+ * program's suffix, which answers a query with every frame of every ring in
+ * ascending (time, instance, sequence) order, from a snapshot taken when the
+ * answer begins, then the final; an empty cache answers the final only. Under
+ * the session's replay-reply-shape policy segmented, each frame is answered as
+ * the pieces of a segment profile, every frame under the next transfer number.
+ * Under replay-serve-holds-sends on, a put while an answer is served is held:
+ * a periodic one as its instance's latest, an event in a queue of
+ * max(1, depth/2) that gives up its oldest; they go out once the last answer
+ * is over, oldest first, before any later put.
+ *
+ * THE SUBSCRIBER subscribes to the key, watches the session's peers for a
+ * queryable declared on the suffixed key, and asks each such publisher once,
+ * as it appears (addressed to it under the targeted-query policy, otherwise of
+ * every node answering the key), at most max_in_flight at once. The replies
+ * enter the receive path of the live samples: one receiving judge, which the
+ * subscriber takes, judges both, and a reply that repeats the judge's baseline
+ * frame, or is behind it by less than depth, is dropped. A round ends when
+ * every query ended, or is abandoned when the progress deadline (from the last
+ * reply) or the round deadline passes. Under replay-live-before-answer
+ * hold-back, the live samples that arrive before the first round is over are
+ * held in the program's store and handed on after its replies; under deliver,
+ * as they arrive. A publisher that declared its queryable before the
+ * subscriber was made is not told again: make the subscriber before the links
+ * to its publishers come up.
+ *
+ * TIME is milliseconds: the program's own for a publisher's frames (it orders
+ * an answer), and for a subscriber its clock in 32 bits that wrap, given in
+ * the options, or the library's monotonic clock when it gives none; the
+ * deadlines are judged by wz_ext_replay_subscriber_poll.
+ *
+ * THREADS. Each door runs under the object's lock. A subscriber's callback
+ * runs inside that lock, one sample at a time in the order the judge saw them,
+ * on the thread the session hands the sample to or the one that polls, so it
+ * must not call a door of its own subscriber. Keep the session (and a
+ * publisher's publisher) until the object is dropped. */
+
+#define WZ_EXT_REPLAY_SEND_PERIODIC 0
+#define WZ_EXT_REPLAY_SEND_EVENT 1
+
+/* What a put did. */
+#define WZ_EXT_REPLAY_SENT 0
+#define WZ_EXT_REPLAY_HELD 1
+#define WZ_EXT_REPLAY_HELD_REPLACED 2      /* the instance's earlier held frame
+                                              will not go out */
+#define WZ_EXT_REPLAY_DEFERRED 3
+#define WZ_EXT_REPLAY_DEFERRED_OVERWROTE 4 /* the queue gave up its oldest */
+
+/* Where a publisher's cache stands. */
+#define WZ_EXT_REPLAY_SERVING_IDLE 0
+#define WZ_EXT_REPLAY_SERVING_ANSWERING 1
+#define WZ_EXT_REPLAY_SERVING_RELEASING 2
+#define WZ_EXT_REPLAY_NO_CACHE 255
+
+/* Where a subscriber's round stands. */
+#define WZ_EXT_REPLAY_ROUND_IDLE 0
+#define WZ_EXT_REPLAY_ROUND_ASKING 1
+#define WZ_EXT_REPLAY_ROUND_ANSWERING 2
+#define WZ_EXT_REPLAY_ROUND_ABANDONED 3
+#define WZ_EXT_REPLAY_ROUND_LIVE 4
+#define WZ_EXT_REPLAY_NO_SUBSCRIBER 255
+
+typedef struct wz_ext_replay_shape_t {
+  size_t frame_max;   /* the longest frame kept, at least 1 */
+  uint32_t depth;     /* frames per instance, 1 to REPLAY_DEPTH_MAX */
+  uint32_t instances; /* at least 1 */
+} wz_ext_replay_shape_t;
+
+typedef struct wz_ext_replay_publisher_counts_t {
+  uint64_t recorded;
+  uint64_t deferred_overwritten;
+  uint64_t periodic_replaced;
+  uint64_t answers;
+} wz_ext_replay_publisher_counts_t;
+
+/* Under segmented: the segment profile and the program's values of its
+ * fields (JSON, BORROWED for the call), the first transfer number and the
+ * size of a piece's chunk. Not read under frame-per-sample. */
+typedef struct wz_ext_replay_serve_options_t {
+  const char *segment_profile;
+  const char *segment_values;
+  uint64_t first_transfer;
+  size_t chunk_bytes;
+} wz_ext_replay_serve_options_t;
+
+typedef struct wz_ext_owned_replay_publisher_t {
+  void *_handle;
+} wz_ext_owned_replay_publisher_t;
+typedef struct wz_ext_loaned_replay_publisher_t {
+  void *_handle;
+} wz_ext_loaned_replay_publisher_t;
+typedef struct wz_ext_moved_replay_publisher_t {
+  wz_ext_owned_replay_publisher_t _this;
+} wz_ext_moved_replay_publisher_t;
+
+/* The storage a cache of shape takes; 0 for a NULL shape, one with no depth,
+ * instance or frame room, or one whose size overflows. */
+size_t wz_ext_replay_publisher_storage_size(const wz_ext_replay_shape_t *shape);
+
+/* A cache of shape over storage, on session (whose policies it reads once),
+ * putting the message on publisher. this_ holds the null state on every
+ * error; refusal may be NULL. Z_OK; Z_ERR_NULL for a NULL argument;
+ * Z_ERR_SESSION_CLOSED; _Z_ERR_CONFIG_INVALID_VALUE (-89) for a shape out of
+ * range or storage too short, refusal saying why. */
+z_result_t wz_ext_replay_publisher_new(wz_ext_owned_replay_publisher_t *this_,
+                                       const z_loaned_session_t *session,
+                                       const z_loaned_publisher_t *publisher,
+                                       uint8_t *storage, size_t storage_len,
+                                       const wz_ext_replay_shape_t *shape,
+                                       z_owned_string_t *refusal);
+
+/* Record a frame sent at time_ms on instance, without putting it. Z_OK;
+ * Z_EINVAL (-75) for no such instance or a frame past frame_max (nothing
+ * recorded); Z_ERR_NULL. */
+z_result_t wz_ext_replay_publisher_record(
+    const wz_ext_loaned_replay_publisher_t *this_, size_t instance,
+    uint64_t time_ms, const uint8_t *frame, size_t len);
+
+/* Record a frame and put it, or hold it while an answer is served under
+ * replay-serve-holds-sends; dispatch (may be NULL) says which. Z_OK when put
+ * or held; the put's code when it failed (the frame is recorded); Z_EINVAL for
+ * no such instance, a frame past frame_max or an unknown kind (nothing
+ * recorded); Z_ERR_NULL. */
+z_result_t wz_ext_replay_publisher_put(
+    const wz_ext_loaned_replay_publisher_t *this_, size_t instance,
+    uint64_t time_ms, const uint8_t *frame, size_t len, uint8_t kind,
+    uint8_t *dispatch);
+
+/* No segment profile, chunks of 0 bytes. */
+void wz_ext_replay_serve_options_default(wz_ext_replay_serve_options_t *this_);
+
+/* Declare the cache's queryable on keyexpr followed by suffix. options may be
+ * NULL under frame-per-sample. Z_OK; Z_ERR_NULL; Z_EINVAL for text that is not
+ * UTF-8, a cache that serves already, or a chunk of 0 under segmented;
+ * Z_ERR_INVALID for a suffixed key that is no key expression;
+ * _Z_ERR_CONFIG_INVALID_VALUE for a segment profile or values refused;
+ * otherwise what z_declare_queryable answers. */
+z_result_t wz_ext_replay_publisher_serve(
+    const wz_ext_loaned_replay_publisher_t *this_,
+    const z_loaned_keyexpr_t *keyexpr, const char *suffix,
+    const wz_ext_replay_serve_options_t *options, z_owned_string_t *refusal);
+
+/* WZ_EXT_REPLAY_SERVING_*, or WZ_EXT_REPLAY_NO_CACHE. */
+uint8_t wz_ext_replay_publisher_phase(
+    const wz_ext_loaned_replay_publisher_t *this_);
+z_result_t wz_ext_replay_publisher_counts(
+    const wz_ext_loaned_replay_publisher_t *this_,
+    wz_ext_replay_publisher_counts_t *out);
+
+const wz_ext_loaned_replay_publisher_t *wz_ext_replay_publisher_loan(
+    const wz_ext_owned_replay_publisher_t *this_);
+wz_ext_moved_replay_publisher_t *wz_ext_replay_publisher_move(
+    wz_ext_owned_replay_publisher_t *this_);
+/* Undeclares the queryable; the storage is the program's again on return. */
+void wz_ext_replay_publisher_drop(wz_ext_moved_replay_publisher_t *this_);
+void wz_ext_internal_replay_publisher_null(
+    wz_ext_owned_replay_publisher_t *this_);
+bool wz_ext_internal_replay_publisher_check(
+    const wz_ext_owned_replay_publisher_t *this_);
+
+/* One row of a subscriber's table of publishers. */
+typedef struct wz_ext_replay_publisher_slot_t {
+  uint64_t _opaque[4];
+} wz_ext_replay_publisher_slot_t;
+
+/* The program's clock: writes the milliseconds of a monotonic source and
+ * returns 0, or returns anything else when it cannot say what time it is. */
+typedef int8_t wz_ext_replay_clock_fn(void *context, uint32_t *now_ms);
+
+/* One sample handed to the program: 120 bytes on a 64-bit target. It and the
+ * frame it points to are valid only for the call. */
+typedef struct wz_ext_replay_sample_t {
+  const uint8_t *frame;
+  size_t len;
+  wz_ext_e2e_verdict_t verdict; /* zero when judged is 0 */
+  uint8_t from_replay;          /* 1 for a reply, 0 for a live sample */
+  uint8_t judged;               /* 0 when stream is none the receiver has */
+  uint8_t zid_len;              /* the replying publisher; 0 when live */
+  uint8_t reserved;
+  uint8_t zid[16];
+} wz_ext_replay_sample_t;
+
+typedef void wz_ext_replay_deliver_fn(void *context,
+                                      const wz_ext_replay_sample_t *sample);
+typedef void wz_ext_replay_drop_fn(void *context);
+
+typedef struct wz_ext_replay_subscriber_options_t {
+  wz_ext_replay_publisher_slot_t *slots; /* at least one row */
+  size_t slot_count;
+  uint8_t *held;    /* under hold-back: cells of 4 + held_cell bytes */
+  size_t held_len;
+  size_t held_cell; /* the longest live sample held */
+  size_t depth;     /* the publishers' ring depth, at least 1 */
+  size_t max_in_flight; /* 0: QUERIER_MAX_PENDING_QUERIES, never above */
+  size_t stream;    /* the receiver's stream (0 under sender keying) */
+  uint32_t progress_ms; /* 1 to 2147483647, no default */
+  uint32_t round_ms;    /* 1 to 2147483647, no default */
+  wz_ext_replay_clock_fn *clock; /* NULL: the library's clock */
+  void *clock_context;
+} wz_ext_replay_subscriber_options_t;
+
+typedef struct wz_ext_replay_subscriber_counts_t {
+  uint64_t late_replies;
+  uint64_t unknown_replies;
+  uint64_t duplicates;
+  uint64_t stale;
+  uint64_t held;
+  uint64_t table_full;
+  uint64_t abandoned;
+} wz_ext_replay_subscriber_counts_t;
+
+typedef struct wz_ext_owned_replay_subscriber_t {
+  void *_handle;
+} wz_ext_owned_replay_subscriber_t;
+typedef struct wz_ext_loaned_replay_subscriber_t {
+  void *_handle;
+} wz_ext_loaned_replay_subscriber_t;
+typedef struct wz_ext_moved_replay_subscriber_t {
+  wz_ext_owned_replay_subscriber_t _this;
+} wz_ext_moved_replay_subscriber_t;
+
+/* No storage, a depth of 1, the querier's bound, stream 0, the library's
+ * clock, and no deadlines. */
+void wz_ext_replay_subscriber_options_default(
+    wz_ext_replay_subscriber_options_t *this_);
+
+/* A replay subscriber of keyexpr on session, watching for keyexpr followed by
+ * suffix, judging by receiver (taken), handing each sample to deliver. The
+ * receiver and context are taken on every path: on a refusal the receiver is
+ * dropped and drop(context) runs before this returns. Z_OK; Z_ERR_NULL;
+ * Z_ERR_SESSION_CLOSED; Z_EINVAL (-75) for an option out of range;
+ * Z_ERR_INVALID for a suffixed key that is no key expression;
+ * WZ_EXT_ERR_UNSUPPORTED under replay-reply-shape segmented; otherwise what
+ * declaring the subscription or the watch answers. */
+z_result_t wz_ext_replay_subscriber_new(
+    wz_ext_owned_replay_subscriber_t *this_, const z_loaned_session_t *session,
+    const z_loaned_keyexpr_t *keyexpr, const char *suffix,
+    wz_ext_moved_e2e_receiver_t *receiver,
+    const wz_ext_replay_subscriber_options_t *options,
+    wz_ext_replay_deliver_fn *deliver, wz_ext_replay_drop_fn *drop,
+    void *context);
+
+/* Judge the deadlines now and hand on what an ended round released. */
+z_result_t wz_ext_replay_subscriber_poll(
+    const wz_ext_loaned_replay_subscriber_t *this_);
+/* WZ_EXT_REPLAY_ROUND_*, or WZ_EXT_REPLAY_NO_SUBSCRIBER. */
+uint8_t wz_ext_replay_subscriber_phase(
+    const wz_ext_loaned_replay_subscriber_t *this_);
+z_result_t wz_ext_replay_subscriber_counts(
+    const wz_ext_loaned_replay_subscriber_t *this_,
+    wz_ext_replay_subscriber_counts_t *out);
+
+const wz_ext_loaned_replay_subscriber_t *wz_ext_replay_subscriber_loan(
+    const wz_ext_owned_replay_subscriber_t *this_);
+wz_ext_moved_replay_subscriber_t *wz_ext_replay_subscriber_move(
+    wz_ext_owned_replay_subscriber_t *this_);
+/* Nothing is handed on after this returns; drop(context) has run. */
+void wz_ext_replay_subscriber_drop(wz_ext_moved_replay_subscriber_t *this_);
+void wz_ext_internal_replay_subscriber_null(
+    wz_ext_owned_replay_subscriber_t *this_);
+bool wz_ext_internal_replay_subscriber_check(
+    const wz_ext_owned_replay_subscriber_t *this_);
+
 /* ---- Declarations told again ------------------------------------------- */
 
 /* Tell the peer of every link of the session that is up everything the
