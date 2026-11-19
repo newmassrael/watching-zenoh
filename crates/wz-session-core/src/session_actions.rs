@@ -42,6 +42,12 @@ use core::ops::Deref;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "no_std")]
 use portable_atomic::{AtomicU32, AtomicU64, Ordering};
+// The link's sync bits are set with `fetch_or`, a read-modify-write a core without compare-and-swap
+// (a Cortex-M0) does not have natively, so a `no_std` build takes portable-atomic's, as above.
+#[cfg(all(feature = "alloc", not(feature = "no_std")))]
+use core::sync::atomic::AtomicU8;
+#[cfg(all(feature = "alloc", feature = "no_std"))]
+use portable_atomic::AtomicU8;
 
 /// Take the next id of a `u32` id space whose counter is `counter`, or `None` once every id has
 /// been taken. The counter is a `u64` so that it can stand one past `u32::MAX` and stay there:
@@ -1996,7 +2002,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`SYNC_QUIET`] a quiet window passed on an accepted link whose peer began none, which
     /// settles the sync as one with nothing in it. Reset with the flag above.
     #[cfg(feature = "alloc")]
-    peer_sync_bits: core::sync::atomic::AtomicU8,
+    peer_sync_bits: AtomicU8,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
@@ -3924,7 +3930,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "alloc")]
                 peer_declaration_progress_ms: AtomicU64::new(u64::MAX),
                 #[cfg(feature = "alloc")]
-                peer_sync_bits: core::sync::atomic::AtomicU8::new(0),
+                peer_sync_bits: AtomicU8::new(0),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
