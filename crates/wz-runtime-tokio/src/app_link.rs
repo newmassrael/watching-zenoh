@@ -383,6 +383,29 @@ impl AppListener {
     /// The next stream the program accepts, and the locator it named for the remote end.
     /// Cancel-safe: a stream is taken only by a call that returns it.
     pub async fn accept(&self) -> io::Result<(AppStream, String)> {
+        let (guard, remote) = self.accept_link().await?;
+        let stream = AppStream {
+            guard,
+            local: Some(self.address.clone()),
+            remote: Some(locator_address(&remote).to_owned()),
+        };
+        Ok((stream, remote))
+    }
+
+    /// The datagrams of the next source the program accepts on a datagram listener, as a datagram
+    /// link to it. Cancel-safe as [`Self::accept`] is.
+    #[cfg(feature = "transport-link-udp")]
+    pub async fn accept_datagram(&self) -> io::Result<(AppDatagram, String)> {
+        let (guard, remote) = self.accept_link().await?;
+        let link = AppDatagram {
+            guard,
+            locator: remote.clone(),
+        };
+        Ok((link, remote))
+    }
+
+    /// The next link the program accepts on the listener, and the locator it named for it.
+    async fn accept_link(&self) -> io::Result<(Arc<AppLinkGuard>, String)> {
         let transport = &self.guard.transport;
         let listener = self.guard.handle;
         let (handle, remote) = poll_fn(|cx| {
@@ -397,13 +420,25 @@ impl AppListener {
             }
         })
         .await?;
-        let stream = AppStream {
-            guard: Arc::new(AppLinkGuard::new(Arc::clone(transport), handle)),
-            local: Some(self.address.clone()),
-            remote: Some(locator_address(&remote).to_owned()),
-        };
-        Ok((stream, remote))
+        Ok((
+            Arc::new(AppLinkGuard::new(Arc::clone(transport), handle)),
+            remote,
+        ))
     }
+}
+
+/// Listen for datagrams on `locator` (a `udp/` locator naming no interface) over the program's
+/// stack: the program accepts each source that sends to it as a link of its own.
+#[cfg(feature = "transport-link-udp")]
+pub async fn listen_datagram(
+    transport: &Arc<AppTransport>,
+    locator: &str,
+) -> io::Result<AppListener> {
+    let guard = open_link(transport, AppLinkKind::DatagramListen, locator).await?;
+    Ok(AppListener {
+        guard,
+        address: locator_address(locator).to_owned(),
+    })
 }
 
 /// The next datagram of `guard`'s link: `Ready(Some)` with it, `Ready(None)` at its end, or

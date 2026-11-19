@@ -58,6 +58,9 @@ pub const WZ_EXT_LINK_STREAM_LISTEN: wz_ext_link_kind_t = AppLinkKind::StreamLis
 pub const WZ_EXT_LINK_DATAGRAM: wz_ext_link_kind_t = AppLinkKind::Datagram as u8;
 /// A multicast group (a `udp/` listen locator with `#iface=`).
 pub const WZ_EXT_LINK_GROUP: wz_ext_link_kind_t = AppLinkKind::Group as u8;
+/// A datagram listener (a `udp/` listen locator naming no interface): the program accepts each
+/// source that sends to it with `wz_ext_transport_accepted`.
+pub const WZ_EXT_LINK_DATAGRAM_LISTEN: wz_ext_link_kind_t = AppLinkKind::DatagramListen as u8;
 
 /// What the program's `open` and `send` answer.
 pub type wz_ext_link_result_t = i8;
@@ -546,7 +549,8 @@ pub(crate) fn refused_open(connect: Option<&str>, listen: Option<&str>) -> Optio
             Some(
                 AppLinkKind::StreamDial | AppLinkKind::StreamListen | AppLinkKind::StreamAccepted,
             ) => true,
-            Some(AppLinkKind::Datagram) => DATAGRAMS_CARRIED,
+            Some(AppLinkKind::Datagram | AppLinkKind::DatagramAccepted) => DATAGRAMS_CARRIED,
+            Some(AppLinkKind::DatagramListen) => DATAGRAM_LISTENS_CARRIED,
             Some(AppLinkKind::Group) => GROUPS_CARRIED,
         };
         if !carried {
@@ -563,6 +567,10 @@ const DATAGRAMS_CARRIED: bool = cfg!(feature = "link-udp") || !cfg!(feature = "e
 /// Whether this build joins groups: the multicast transport, the tokio engine's.
 const GROUPS_CARRIED: bool = cfg!(feature = "multicast-transport");
 
+/// Whether this build listens for datagrams: the tokio engine with its udp link (the cooperative
+/// engine listens on streams alone).
+const DATAGRAM_LISTENS_CARRIED: bool = cfg!(feature = "engine-tokio") && cfg!(feature = "link-udp");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,6 +582,20 @@ mod tests {
         assert_eq!(WZ_EXT_LINK_STREAM_LISTEN, 1);
         assert_eq!(WZ_EXT_LINK_DATAGRAM, 2);
         assert_eq!(WZ_EXT_LINK_GROUP, 3);
+        assert_eq!(WZ_EXT_LINK_DATAGRAM_LISTEN, 4);
+    }
+
+    #[test]
+    fn a_full_link_and_a_sourceless_group_datagram_answer_their_codes() {
+        assert_eq!(
+            refusal_code(InboundRefusal::Full),
+            crate::result::WZ_EXT_ERR_LINK_FULL
+        );
+        assert_eq!(refusal_code(InboundRefusal::NoSource), Z_ERR_NULL);
+        assert_eq!(
+            refusal_code(InboundRefusal::NoSuchLink),
+            crate::result::WZ_EXT_ERR_LINK_UNKNOWN
+        );
     }
 
     #[test]
@@ -610,13 +632,12 @@ mod tests {
             refused_open(Some("tls/192.0.2.8:7447"), None),
             Some(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN)
         );
-        assert_eq!(
-            refused_open(None, Some("udp/192.0.2.8:7447")),
-            Some(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN),
-            "a unicast datagram listener is no kind"
-        );
         let refused_unless =
             |carried: bool| (!carried).then_some(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN);
+        assert_eq!(
+            refused_open(None, Some("udp/192.0.2.8:7447")),
+            refused_unless(DATAGRAM_LISTENS_CARRIED)
+        );
         assert_eq!(
             refused_open(Some("udp/192.0.2.8:7447"), None),
             refused_unless(DATAGRAMS_CARRIED)

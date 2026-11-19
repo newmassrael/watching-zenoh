@@ -1188,6 +1188,11 @@ pub enum BoundListener {
     /// `tcp`). Mesh-capable: every accepted stream is a link of its own.
     #[cfg(feature = "transport-link-app")]
     App(AppListener),
+    /// A datagram listener over the transport the program supplies: the program accepts each
+    /// source that sends to it as a link of its own, a [`DialedLink::AppDatagram`] with no
+    /// post-accept handshake, as the udp demux hands out one face per source.
+    #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+    AppDatagram(AppListener),
 }
 
 /// The "listener" state of a bound `serial/...` endpoint (R311y805) — a tty is
@@ -1331,6 +1336,8 @@ impl BoundListener {
             BoundListener::Serial(_) => "serial",
             #[cfg(feature = "transport-link-app")]
             BoundListener::App(_) => "app-stream",
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            BoundListener::AppDatagram(_) => "app-datagram",
         }
     }
 
@@ -1410,6 +1417,8 @@ impl BoundListener {
             // A peer dials it as `tcp/...`: the program's stack carries TCP.
             #[cfg(feature = "transport-link-app")]
             BoundListener::App(_) => LinkKind::Tcp,
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            BoundListener::AppDatagram(_) => LinkKind::Udp,
         }
     }
 
@@ -1483,6 +1492,8 @@ impl BoundListener {
             // Each stream the program accepts is a link of its own, as each TCP accept is.
             #[cfg(feature = "transport-link-app")]
             BoundListener::App(_) => true,
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            BoundListener::AppDatagram(_) => true,
         }
     }
 
@@ -1565,6 +1576,8 @@ impl BoundListener {
             // The address the listener was opened for: the program's stack holds the socket.
             #[cfg(feature = "transport-link-app")]
             BoundListener::App(l) => l.address().to_string(),
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            BoundListener::AppDatagram(l) => l.address().to_string(),
         })
     }
 
@@ -1637,6 +1650,14 @@ impl BoundListener {
             // `SocketAddr` this side can read.
             #[cfg(feature = "transport-link-app")]
             BoundListener::App(l) => l.address().parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "a listener of the program's transport was opened for a named address; \
+                     use local_addr_display",
+                )
+            }),
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            BoundListener::AppDatagram(l) => l.address().parse().map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::Unsupported,
                     "a listener of the program's transport was opened for a named address; \
@@ -1905,6 +1926,19 @@ impl BoundListener {
                 };
                 (AcceptedLink::App(stream), peer)
             }
+            // The next source the program accepted, keyed by the address it named for it.
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            BoundListener::AppDatagram(l) => {
+                let (link, remote) = l.accept_datagram().await?;
+                let peer = match remote
+                    .split_once('/')
+                    .and_then(|(_, address)| address.parse::<std::net::SocketAddr>().ok())
+                {
+                    Some(address) => AcceptedPeer::Ip(address),
+                    None => AcceptedPeer::NonIp("app-datagram"),
+                };
+                (AcceptedLink::AppDatagram(link), peer)
+            }
         })
     }
 
@@ -2041,6 +2075,10 @@ pub enum AcceptedLink {
     /// A stream the program accepted on a [`BoundListener::App`]; no post-accept handshake.
     #[cfg(feature = "transport-link-app")]
     App(AppStream),
+    /// A source the program accepted on a [`BoundListener::AppDatagram`]; no post-accept
+    /// handshake.
+    #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+    AppDatagram(crate::app_link::AppDatagram),
 }
 
 impl AcceptedLink {
@@ -2160,6 +2198,8 @@ impl AcceptedLink {
             }
             #[cfg(feature = "transport-link-app")]
             AcceptedLink::App(stream) => DialedLink::App(stream),
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            AcceptedLink::AppDatagram(link) => DialedLink::AppDatagram(link),
         })
     }
 
@@ -2222,6 +2262,8 @@ impl AcceptedLink {
             AcceptedLink::Serial { .. } => "; serial link handshake",
             #[cfg(feature = "transport-link-app")]
             AcceptedLink::App(_) => "",
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            AcceptedLink::AppDatagram(_) => "",
         }
     }
 }
@@ -4045,6 +4087,10 @@ async fn bind_app(app: &Arc<AppTransport>, listen: &str) -> io::Result<BoundList
     match kind_for_locator(listen, true) {
         Some(AppLinkKind::StreamListen) => Ok(BoundListener::App(
             crate::app_link::listen_stream(app, listen).await?,
+        )),
+        #[cfg(feature = "transport-link-udp")]
+        Some(AppLinkKind::DatagramListen) => Ok(BoundListener::AppDatagram(
+            crate::app_link::listen_datagram(app, listen).await?,
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,

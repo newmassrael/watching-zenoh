@@ -555,11 +555,16 @@ const char *wz_ext_conformance_digest(void);
  *   tcp/ listen    a stream listener                 WZ_EXT_LINK_STREAM_LISTEN
  *   udp/ connect   a unicast datagram link           WZ_EXT_LINK_DATAGRAM
  *   udp/ listen    with #iface=, a multicast group   WZ_EXT_LINK_GROUP
+ *   udp/ listen    without, a datagram listener      WZ_EXT_LINK_DATAGRAM_LISTEN
+ * On a listener of either kind the program names each stream, or each
+ * source that sends datagrams to it, with wz_ext_transport_accepted, and
+ * hands in what arrives on the link that returns.
  * Either engine of the library runs a session over it. z_open refuses a config
  * whose transport cannot carry what it names: another scheme (tls/, serial/,
  * ...), or a kind this build has no link of (a udp/ dial on the tokio engine
  * without the udp link, a group without the multicast transport, which the
- * cooperative engine has not), with _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
+ * cooperative engine has not, a datagram listener but on the tokio engine with
+ * the udp link), with _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
  * (-92), as the same locator over the system's sockets is; a config with
  * neither connect nor listen (it would scout on the system's sockets) with
  * WZ_EXT_ERR_UNSUPPORTED (-3). A stream is framed by the session exactly as a
@@ -643,6 +648,7 @@ typedef uint8_t wz_ext_link_kind_t;
 #define WZ_EXT_LINK_STREAM_LISTEN 1
 #define WZ_EXT_LINK_DATAGRAM 2
 #define WZ_EXT_LINK_GROUP 3
+#define WZ_EXT_LINK_DATAGRAM_LISTEN 4
 
 typedef int8_t wz_ext_link_result_t;
 #define WZ_EXT_LINK_OK 0

@@ -65,8 +65,14 @@ pub enum AppLinkKind {
     /// A multicast group the session joins (a `udp/` listen locator naming an interface). Each
     /// datagram is one batch, read with the locator it came from.
     Group = 3,
+    /// A listener for unicast datagrams (a `udp/` listen locator naming no interface). It carries
+    /// no datagram itself: the program tells each source that sends to it apart as a link of its
+    /// own, which it accepts on the listener, as a stream.
+    DatagramListen = 4,
     /// A stream the program accepted on a listener.
-    StreamAccepted = 4,
+    StreamAccepted = 5,
+    /// The datagrams of one source the program accepted on a datagram listener.
+    DatagramAccepted = 6,
 }
 
 impl AppLinkKind {
@@ -77,14 +83,28 @@ impl AppLinkKind {
 
     /// Whether the link carries datagrams, each one batch.
     pub const fn is_datagram(self) -> bool {
-        matches!(self, Self::Datagram | Self::Group)
+        matches!(self, Self::Datagram | Self::Group | Self::DatagramAccepted)
+    }
+
+    /// Whether the link is a listener, which carries nothing itself and on which the program
+    /// accepts links.
+    pub const fn is_listener(self) -> bool {
+        matches!(self, Self::StreamListen | Self::DatagramListen)
+    }
+
+    /// The kind of the links the program accepts on a listener of this kind.
+    const fn accepted(self) -> Option<Self> {
+        match self {
+            Self::StreamListen => Some(Self::StreamAccepted),
+            Self::DatagramListen => Some(Self::DatagramAccepted),
+            _ => None,
+        }
     }
 }
 
 /// The kind of link a transport opens for `locator`, or `None` for a locator no kind carries
-/// (any scheme but `tcp/` and `udp/`, and a `udp/` listen that names no interface: a listener of
-/// unicast datagrams is not a link a pico session opens). `listen` says whether the locator is a
-/// listen one.
+/// (any scheme but `tcp/` and `udp/`). A `udp/` listen naming an interface is a group, one naming
+/// none a datagram listener. `listen` says whether the locator is a listen one.
 pub fn kind_for_locator(locator: &str, listen: bool) -> Option<AppLinkKind> {
     let (address, metadata) = locator.split_once('#').unwrap_or((locator, ""));
     let names_interface = metadata.split(';').any(|pair| pair.starts_with("iface="));
@@ -97,6 +117,7 @@ pub fn kind_for_locator(locator: &str, listen: bool) -> Option<AppLinkKind> {
         ("tcp", true) => Some(AppLinkKind::StreamListen),
         ("udp", false) => Some(AppLinkKind::Datagram),
         ("udp", true) if names_interface => Some(AppLinkKind::Group),
+        ("udp", true) => Some(AppLinkKind::DatagramListen),
         _ => None,
     }
 }
@@ -583,16 +604,16 @@ impl AppLinkTable {
             .links
             .get(&listener)
             .ok_or(InboundRefusal::NoSuchLink)?;
-        if link.kind != AppLinkKind::StreamListen {
+        let Some(accepted_kind) = link.kind.accepted() else {
             return Err(InboundRefusal::WrongKind);
-        }
+        };
         match link.state() {
             AppLinkState::Opening => return Err(InboundRefusal::NotOpen),
             AppLinkState::Closing | AppLinkState::Closed => return Err(InboundRefusal::Closed),
             AppLinkState::Open | AppLinkState::Blocked => {}
         }
         let handle = self.take_handle();
-        let mut stream = Link::new(AppLinkKind::StreamAccepted);
+        let mut stream = Link::new(accepted_kind);
         stream.remote = Some(String::from(remote));
         // Nobody waits on the new link yet, so its entry wakes nobody.
         let _ = stream.drive(handle, AppLinkEvent::LinkAccepted);
@@ -622,7 +643,7 @@ impl AppLinkTable {
             .links
             .get_mut(&handle)
             .ok_or(InboundRefusal::NoSuchLink)?;
-        if link.kind == AppLinkKind::StreamListen {
+        if link.kind.is_listener() {
             return Err(InboundRefusal::WrongKind);
         }
         match link.state() {
@@ -747,7 +768,7 @@ impl AppLinkTable {
         let Some(link) = self.links.get_mut(&handle) else {
             return SendGate::Closed;
         };
-        if link.kind == AppLinkKind::StreamListen {
+        if link.kind.is_listener() {
             return SendGate::Closed;
         }
         match link.state() {
@@ -962,8 +983,11 @@ mod tests {
             kind_for_locator("udp/239.1.2.3:7447#iface=lan7", true),
             Some(AppLinkKind::Group)
         );
-        // Refused: a unicast datagram listener, other schemes, a scheme with no address.
-        assert_eq!(kind_for_locator("udp/192.0.2.7:7447", true), None);
+        assert_eq!(
+            kind_for_locator("udp/192.0.2.7:7447", true),
+            Some(AppLinkKind::DatagramListen)
+        );
+        // Refused: other schemes, a scheme with no address.
         for locator in [
             "tls/192.0.2.7:7447",
             "quic/192.0.2.7:7447",
@@ -1341,6 +1365,28 @@ mod tests {
         );
         assert_eq!(table.next_accepted(listener, None), AcceptRead::Empty);
         // A listener carries no bytes and takes no send.
+        assert_eq!(
+            table.received(listener, b"x", None).unwrap_err(),
+            InboundRefusal::WrongKind
+        );
+        assert_eq!(table.begin_send(listener, None), SendGate::Closed);
+    }
+
+    #[test]
+    fn a_datagram_listener_accepts_each_source_as_a_datagram_link() {
+        let mut table = AppLinkTable::new();
+        let listener = table.reserve(AppLinkKind::DatagramListen);
+        let _ = table.opened(listener, ProgramOpen::Up);
+        let (link, _) = table.accepted(listener, "udp/198.51.100.7:40000").unwrap();
+        assert_eq!(table.kind(link), Some(AppLinkKind::DatagramAccepted));
+        let _ = table
+            .received(link, b"d", Some("udp/198.51.100.7:40000"))
+            .unwrap();
+        assert!(matches!(
+            table.read_datagram(link, None),
+            DatagramRead::Datagram(_)
+        ));
+        // The listener itself carries nothing and sends nothing.
         assert_eq!(
             table.received(listener, b"x", None).unwrap_err(),
             InboundRefusal::WrongKind
