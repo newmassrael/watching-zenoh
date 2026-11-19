@@ -90,10 +90,11 @@ pub fn judge_second_link_by(
 /// The node's say, DURING a link's handshake, on whether the link may become a face.
 ///
 /// [`judge_second_link_by`] decides which of two links to one node is kept. WHEN it is asked
-/// decides what the application sees. Asked after both ends of a link have completed the handshake, each
-/// end admits the link that came up first on its side, exchanges declarations over it, and only
-/// then, when the rival comes up, closes the one the zid rule rejects: the declarations that crossed
-/// the closed link were delivered and are delivered again over the kept one.
+/// decides what the application sees. Asked after both ends of a link have completed the
+/// handshake, each end admits the link that came up first on its side, exchanges declarations
+/// over it, and only then, when the rival comes up, closes the one the zid rule rejects: the
+/// declarations that crossed the closed link were delivered and are delivered again over the kept
+/// one.
 ///
 /// Upstream asks while the link is still being established, and so does this: the acceptor before
 /// it sends the OpenAck, the initiator before it sends the OpenSyn and again before it takes the
@@ -115,8 +116,9 @@ pub fn judge_second_link_by(
 /// 4. [`LinkAdmission::release`]: the link is gone, or never got further than it did.
 ///
 /// What an implementation decides, with the rule above, is [`judge_second_link_by`]'s for two
-/// links still in the handshake and the established one's for a link that has come up: a link that has
-/// is kept, as BGP keeps its Established one, which both ends read alike once both have it.
+/// links still in the handshake and the established one's for a link that has come up: a link
+/// that has is kept, as BGP keeps its Established one, which both ends read alike once both have
+/// it.
 #[cfg(feature = "alloc")]
 pub trait LinkAdmission: Send + Sync {
     /// A link `dialled` (or taken off a port) begins its handshake. The token names it in the
