@@ -39,6 +39,12 @@
 //! | `segment_profile` | the profile of the header in front of each piece of a split message | `alloc` |
 //! | `segment_chain` | the joining state of those pieces: a transfer per stream, a verdict per piece, the whole message on the piece that completes it | `alloc` |
 //! | `segment_sender` | the writer of those pieces: one message cut under a segment profile | `alloc` |
+//! | `message_catalog_table` | a deployment's message catalog as static tables, for an image that links it | always |
+//! | `message_catalog` | the reader and judge of a message catalog, and the senders, receivers and supervision rows made from it | `alloc` |
+//! | `proto_schema` | the `.proto` schema reader: files read, imports resolved, names linked, the field tree walked | `proto` |
+//! | `proto_decode` | a protobuf payload read by the types its schema gives it | `proto` |
+//! | `proto_lex`, `proto_parse` | the tokenizer and the parser behind the schema reader | `proto` |
+//! | `instance_key` | the instance of a message a sample is, read from payload fields; a stream and a last value per instance | `instance-key` |
 //!
 //! `no_std`, with no third-party dependency. The CRC engine and the judge need
 //! no allocator, so a build without `alloc` links none; the three profile
@@ -51,8 +57,14 @@
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;
 
+// The tables the catalog generator writes name this crate by its name, as an image that links them
+// does; the tests that include them are inside it.
+#[cfg(test)]
+extern crate self as wz_app_frame;
+
 pub mod e2e_crc;
 pub mod e2e_judge;
+pub mod message_catalog_table;
 
 #[cfg(feature = "alloc")]
 pub mod e2e_frame;
@@ -67,6 +79,25 @@ pub mod e2e_stream_sender;
 // synthetic profiles.
 #[cfg(all(test, feature = "alloc"))]
 mod e2e_rules_tests;
+#[cfg(feature = "instance-key")]
+pub mod instance_key;
+// The model tests of the instance keys, on a synthetic schema and profile.
+#[cfg(all(test, feature = "instance-key"))]
+mod instance_key_tests;
+#[cfg(feature = "alloc")]
+pub mod message_catalog;
+#[cfg(feature = "proto")]
+pub mod proto_decode;
+#[cfg(feature = "proto")]
+pub mod proto_lex;
+#[cfg(feature = "proto")]
+pub mod proto_parse;
+#[cfg(feature = "proto")]
+pub mod proto_schema;
+// The model tests of the catalog reader: the synthetic catalog, its handles, the generator's
+// tables of it, and the corpus of refused catalogs.
+#[cfg(all(test, feature = "alloc"))]
+mod message_catalog_tests;
 #[cfg(feature = "replay")]
 pub mod replay_admission;
 #[cfg(feature = "replay")]

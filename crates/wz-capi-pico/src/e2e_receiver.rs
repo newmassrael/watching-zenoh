@@ -150,13 +150,18 @@ pub struct wz_ext_e2e_verdict_t {
 
 /// The most sender slots a receiver of this build keeps.
 #[cfg(feature = "e2e-sender-demux")]
-const SLOT_LIMIT: usize = wz_session_core::caps::E2E_SENDER_SLOTS;
+pub(crate) const SLOT_LIMIT: usize = wz_session_core::caps::E2E_SENDER_SLOTS;
 #[cfg(not(feature = "e2e-sender-demux"))]
-const SLOT_LIMIT: usize = 0;
+pub(crate) const SLOT_LIMIT: usize = 0;
 
 /// The handle word of a loaned receiver.
 fn word(this_: *const wz_ext_loaned_e2e_receiver_t) -> *const *mut c_void {
     this_.cast::<*mut c_void>()
+}
+
+/// Box a made receiver behind the caller's handle word.
+pub(crate) fn adopt_receiver(this_: &mut wz_ext_owned_e2e_receiver_t, receiver: Receiver) {
+    this_.handle = adopt(receiver);
 }
 
 /// The sender keying the options state; `WZ_EXT_ERR_UNSUPPORTED` in a build without the
@@ -285,7 +290,7 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_new(
         let max_gap = (options.max_gap != 0).then_some(options.max_gap);
         match Receiver::new(profile, &expected, keying, max_gap, SLOT_LIMIT) {
             Ok(receiver) => {
-                (*this_).handle = adopt(receiver);
+                adopt_receiver(&mut *this_, receiver);
                 Z_OK
             }
             Err(why) => {
@@ -296,7 +301,8 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_new(
     })
 }
 
-/// The C form of a verdict; the replay subscriber hands its samples on with it too.
+/// The C form of a verdict; the instance keys' judging door writes it too, and the replay
+/// subscriber hands its samples on with it.
 pub(crate) fn to_c(verdict: &Verdict) -> wz_ext_e2e_verdict_t {
     let mut out = wz_ext_e2e_verdict_t {
         status: match verdict.status {

@@ -404,7 +404,8 @@ fn regen_codec_deployment(
 ///                      peer_connection, clock_quality, supervision,
 ///                      stream_activation, app_link, replay_round,
 ///                      replay_serving (statecharts);
-///                      tick_elapsed, tick_until_due, key_facts (algorithms);
+///                      tick_elapsed, tick_until_due, key_facts, the keyexpr matcher,
+///                      stream_deadline, declaration_stall_deadline (algorithms);
 ///                      key_facts_schema (the event-schema key_facts returns)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
@@ -483,6 +484,10 @@ fn regen_statecharts_and_pools(root: &Path) {
         "keyexpr_shape",
         "keyexpr_chunk_end",
         "keyexpr_chunk_kind",
+        // Reception supervision per stream — a stream's deadline, `period x factor` in range.
+        "stream_deadline",
+        // The declaration-sync watch — when a peer's initial declarations have stalled.
+        "declaration_stall_deadline",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }
@@ -492,7 +497,8 @@ fn regen_statecharts_and_pools(root: &Path) {
         codegen.emit_event_schema(stem, &algorithms, &sc_out);
     }
     // The receiving judge of end-to-end protected frames (wz-app-frame `e2e_judge`): the step of
-    // a counter from its baseline in the counter's own width, and what that step is.
+    // a counter from its baseline in the counter's own width, and what that step is. And the
+    // instance keys' (`instance_key`): whether the drops held are reported now.
     let app_frame_out = root.join("out/wz-app-frame");
     mkdir(&app_frame_out);
     // The replay cache's admission of a reply to that judge (wz-app-frame `replay_admission`):
@@ -500,6 +506,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     for stem in [
         "e2e_counter_step",
         "e2e_counter_verdict",
+        "drop_report_due",
         "replay_reply_admission",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &app_frame_out);

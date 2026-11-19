@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  When the watch of a peer's initial declarations ends the link: `window_ms` after
+  `baseline_ms`, or absent when no watch is kept.
+
+  No watch is kept when the `reliable-gap-reconnect` policy does not react to a cut-short sync
+  (`reacts` is false for its `off` value), when the window is 0, or when the peer's initial
+  declarations are settled. `baseline_ms` is the later of the session's establishment and the
+  peer's last declaration, on a millisecond clock that does not wrap, so a deadline past the
+  clock's last value is that last value: `saturatingAdd`, never a deadline that wrapped to the
+  past and would end the link at once.
+
+  The declaration-sync watch (wz-session-core `declaration_sync::stall_deadline`) asks it each
+  time a link's progress moves.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="declaration_stall_deadline"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="reacts" type="bool"/>
+    <sce:param name="peer_settled" type="bool"/>
+    <sce:param name="baseline_ms" type="uint64"/>
+    <sce:param name="window_ms" type="uint64"/>
+    <sce:return type="optional&lt;uint64&gt;"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="!reacts || window_ms === 0 || peer_settled">
+      <sce:return expr="null"/>
+    </sce:if>
+    <sce:return expr="saturatingAdd(baseline_ms, window_ms)"/>
+  </sce:body>
+</scxml>

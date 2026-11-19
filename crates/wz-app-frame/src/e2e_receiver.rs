@@ -351,6 +351,12 @@ impl Receiver {
         self.streams.len()
     }
 
+    /// Whether it chooses each frame's stream by the sender identity
+    /// ([`Keying::Senders`]) rather than taking the caller's.
+    pub fn keyed_by_sender(&self) -> bool {
+        self.by_sender
+    }
+
     /// The sender that holds a slot, under sender keying; `None` for a free
     /// slot, a slot the receiver does not have, or indexed keying.
     pub fn slot_sender(&self, slot: usize) -> Option<u64> {

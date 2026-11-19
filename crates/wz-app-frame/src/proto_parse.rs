@@ -3,9 +3,9 @@
 
 //! The `.proto` parser behind [`crate::proto_schema`].
 //!
-//! Private for the reason [`crate::proto_lex`] is. It turns one file's text into
-//! the part of the syntax tree the declaration door ([`crate::proto_schema`]) and
-//! the value door ([`crate::proto_encode`]) need: the package, the imports, and
+//! Public for the reason [`crate::proto_lex`] is. It turns one file's text into
+//! the part of the syntax tree the schema reader ([`crate::proto_schema`]) and
+//! the capture crate's value door (`proto_encode`) need: the package, the imports, and
 //! for every message its fields (name, number, type, label, oneof, the options
 //! that change the wire form, position), its nested messages and enums, its
 //! oneofs and its reserved ranges and names. The declaration door uses the shape
@@ -72,7 +72,7 @@ use crate::proto_lex::{Lexer, Pos, SyntaxError, Tok, Token};
 
 /// The largest legal field number, `2^29 - 1`: the tag keeps three bits for the
 /// wire type in a 32-bit varint.
-pub(crate) const MAX_FIELD_NUMBER: u64 = 536_870_911;
+pub const MAX_FIELD_NUMBER: u64 = 536_870_911;
 
 /// How deeply messages may be written inside one another.
 ///
@@ -89,15 +89,15 @@ pub(crate) const MAX_FIELD_NUMBER: u64 = 536_870_911;
 /// whichever `protoc` is installed. The oracle test in `wz-integration-tests`
 /// measures the limit of the `protoc` it runs and holds the door to its own 31
 /// on both sides, as a deliberate refusal where `protoc` is more permissive.
-pub(crate) const MAX_MESSAGE_NESTING: usize = 31;
+pub const MAX_MESSAGE_NESTING: usize = 31;
 
 /// The scalar type keywords. A field of one of these has no structure to name.
 ///
 /// The declaration door only needs to know that a type IS one; the value door
-/// ([`crate::proto_encode`]) needs which, because the wire form of `int32`,
+/// (the capture crate's `proto_encode`) needs which, because the wire form of `int32`,
 /// `sint32` and `fixed32` differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ScalarKind {
+pub enum ScalarKind {
     Double,
     Float,
     Int32,
@@ -119,7 +119,7 @@ impl ScalarKind {
     /// Every scalar kind, in the order the language guide lists them. The walk a
     /// vocabulary of type words is held to, so a kind added to the enum is a
     /// keyword a document has to declare.
-    pub(crate) const ALL: [Self; 15] = [
+    pub const ALL: [Self; 15] = [
         Self::Double,
         Self::Float,
         Self::Int32,
@@ -138,7 +138,7 @@ impl ScalarKind {
     ];
 
     /// The kind a type keyword names, or `None` for any other word.
-    pub(crate) fn from_keyword(word: &str) -> Option<Self> {
+    pub fn from_keyword(word: &str) -> Option<Self> {
         Some(match word {
             "double" => Self::Double,
             "float" => Self::Float,
@@ -160,7 +160,7 @@ impl ScalarKind {
     }
 
     /// The keyword, as written in a `.proto` file.
-    pub(crate) fn keyword(self) -> &'static str {
+    pub fn keyword(self) -> &'static str {
         match self {
             Self::Double => "double",
             Self::Float => "float",
@@ -183,7 +183,7 @@ impl ScalarKind {
     /// Whether a map key may be of this kind: integral types, `bool` and
     /// `string` (language guide, "Maps": the key type "can be any integral or
     /// string type"; `float`, `double` and `bytes` are out).
-    pub(crate) fn may_key_a_map(self) -> bool {
+    pub fn may_key_a_map(self) -> bool {
         !matches!(self, Self::Double | Self::Float | Self::Bytes)
     }
 }
@@ -191,21 +191,21 @@ impl ScalarKind {
 /// Which `syntax` the file declared. Without a statement it is proto2, which is
 /// what `protoc` assumes too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Syntax {
+pub enum Syntax {
     Proto2,
     Proto3,
 }
 
 /// How a file imports another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ImportKind {
+pub enum ImportKind {
     Normal,
     Public,
 }
 
 /// One `import` statement.
 #[derive(Clone, Debug)]
-pub(crate) struct Import {
+pub struct Import {
     pub path: String,
     pub kind: ImportKind,
     /// The `import` keyword, which is where `protoc` blames a missing file.
@@ -214,14 +214,14 @@ pub(crate) struct Import {
 
 /// A name and where it was written.
 #[derive(Clone, Debug)]
-pub(crate) struct Named {
+pub struct Named {
     pub name: String,
     pub pos: Pos,
 }
 
 /// One enum value: its name, and the number the wire carries for it.
 #[derive(Clone, Debug)]
-pub(crate) struct EnumValue {
+pub struct EnumValue {
     pub name: Named,
     /// Wider than any legal number so that an illegal one (outside `i32`) is
     /// kept as written and judged by whoever uses the value, instead of being
@@ -231,28 +231,28 @@ pub(crate) struct EnumValue {
 
 /// An enum: its names go to the symbol table, and its numbers to the value door.
 #[derive(Clone, Debug)]
-pub(crate) struct EnumDecl {
+pub struct EnumDecl {
     pub name: Named,
     pub values: Vec<EnumValue>,
 }
 
 /// A type reference as written, `.pkg.Outer.Inner` or `Inner`.
 #[derive(Clone, Debug)]
-pub(crate) struct TypeName {
+pub struct TypeName {
     pub text: String,
     pub pos: Pos,
 }
 
 /// The value type of a map field.
 #[derive(Clone, Debug)]
-pub(crate) enum MapValue {
+pub enum MapValue {
     Scalar(ScalarKind),
     Named(TypeName),
 }
 
 /// A `map<K, V>` field.
 #[derive(Clone, Debug)]
-pub(crate) struct MapType {
+pub struct MapType {
     /// Why the key type is not allowed, judged later (see the module doc).
     pub key_error: Option<String>,
     /// The key's kind when it is a legal one; `None` exactly when `key_error`
@@ -264,7 +264,7 @@ pub(crate) struct MapType {
 /// What a field's type is: a scalar, a name still to be resolved, a map, or a
 /// group.
 #[derive(Clone, Debug)]
-pub(crate) enum FieldType {
+pub enum FieldType {
     /// A scalar keyword: no nested structure.
     Scalar(ScalarKind),
     /// A message or an enum, to be resolved.
@@ -277,7 +277,7 @@ pub(crate) enum FieldType {
 
 /// The label a field was written with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Label {
+pub enum Label {
     /// None: a proto3 singular field, a member of a oneof, or a map.
     Implicit,
     Optional,
@@ -288,7 +288,7 @@ pub(crate) enum Label {
 /// What an option's value was written as. The parser keeps the value as written
 /// and does not judge it: whoever acts on an option decides what it may be.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OptionValue {
+pub enum OptionValue {
     /// A bare word: `true`, `false`, an enum value's name, `inf`, or a signed
     /// one (`-inf`).
     Ident(String),
@@ -309,7 +309,7 @@ pub(crate) enum OptionValue {
 /// (`foo.bar`), or an extension in parentheses with the rest of the path after it
 /// (`(my.ext).field`), the parts joined by `.`.
 #[derive(Clone, Debug)]
-pub(crate) struct FieldOption {
+pub struct FieldOption {
     pub name: String,
     pub value: OptionValue,
     /// Where the value starts, which is where a wrong value is blamed.
@@ -320,7 +320,7 @@ pub(crate) struct FieldOption {
 /// for the rule), as it stores them: the text after the comment marker, line
 /// breaks included.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Docs {
+pub struct Docs {
     /// The comment in front of the declaration with no blank line between.
     pub leading: Option<String>,
     /// The comment after the declaration's `;`, or after the `{` that opens a
@@ -330,7 +330,7 @@ pub(crate) struct Docs {
 
 /// One field.
 #[derive(Clone, Debug)]
-pub(crate) struct FieldDecl {
+pub struct FieldDecl {
     pub name: Named,
     pub number: u64,
     pub number_pos: Pos,
@@ -347,7 +347,7 @@ pub(crate) struct FieldDecl {
 
 /// One message.
 #[derive(Clone, Debug)]
-pub(crate) struct MessageDecl {
+pub struct MessageDecl {
     pub name: Named,
     pub docs: Docs,
     /// The message's own `option` statements, in the order written.
@@ -373,7 +373,7 @@ pub(crate) struct MessageDecl {
 /// NAMES of the extension fields it declares (an option written as `(name)`
 /// is looked up among them).
 #[derive(Clone, Debug)]
-pub(crate) struct ExtendDecl {
+pub struct ExtendDecl {
     /// The `extend` keyword, where a block that turns out to matter is blamed.
     pub pos: Pos,
     /// The extended message as written.
@@ -394,7 +394,7 @@ impl ExtendDecl {
 
 /// One parsed file.
 #[derive(Clone, Debug)]
-pub(crate) struct FileAst {
+pub struct FileAst {
     pub syntax: Syntax,
     pub package: Option<Named>,
     pub imports: Vec<Import>,
@@ -443,7 +443,7 @@ struct Parser<'a> {
 ///
 /// The first problem is the only one reported: it is the one a person fixes
 /// first, and later ones are often its consequence.
-pub(crate) fn parse_file(src: &str) -> Result<FileAst, SyntaxError> {
+pub fn parse_file(src: &str) -> Result<FileAst, SyntaxError> {
     let mut p = Parser {
         src,
         lex: Lexer::new(src),

@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Written by hand, and the one statement of a message catalog's shape. The reader (crates/wz-app-frame/src/message_catalog.rs) is held to its object members and refusal words by a unit test; the generator (scripts/lib/message_catalog.py) interprets it. The x-wz-* keywords are the rules JSON Schema has no word for: an unsigned integer written as a number or a string (x-wz-range, whose bound may be a build limit, with x-wz-refusal-below and -above naming the refusal of each end; value_out_of_range when unnamed), a list bounded by a build limit (x-wz-limit-items, x-wz-refusal-items), a literal key expression (x-wz-key-expr), the values of an instance-key field (x-wz-key-values), a document another reader judges (x-wz-document, naming its refusal), and the refusal of a pattern (x-wz-refusal).",
+  "title": "wz message catalog",
+  "description": "The messages of one deployment, as data: for each, its key expression, its id, the nodes that publish and subscribe to it, its period, its protection, its senders, its instance key, its replay depth, its supervision and its segment profile. JSON5: comments, unquoted keys, single-quoted strings and trailing commas are read.",
+  "$ref": "#/$defs/catalog",
+  "$defs": {
+    "uint": {
+      "description": "An unsigned integer: a plain decimal number, or a string of decimal or 0x hex digits, so a 64-bit value survives a reader that holds numbers as doubles.",
+      "oneOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "string", "pattern": "^(0|[1-9][0-9]*|0[xX][0-9a-fA-F]+)$"}
+      ]
+    },
+    "name": {
+      "description": "A name: letters, digits, `_`, `-` and `.`, 1 to 64 bytes.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,64}$",
+      "x-wz-refusal": "invalid_name"
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "messages"],
+      "properties": {
+        "nodes": {
+          "description": "The nodes of the deployment; a node's number is its place here.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 65535,
+          "items": {"$ref": "#/$defs/node"}
+        },
+        "e2e_profiles": {
+          "description": "The end-to-end protection profiles, by name. Each is judged by the profile reader (wz_app_frame::e2e_profile::Profile::parse).",
+          "type": "object",
+          "maxProperties": 65535,
+          "propertyNames": {"$ref": "#/$defs/name"},
+          "additionalProperties": {"type": "object", "x-wz-document": "e2e_profile_invalid"}
+        },
+        "segment_profiles": {
+          "description": "The segment profiles, by name. Each is judged by the segment profile reader (wz_app_frame::segment_profile::SegmentProfile::parse).",
+          "type": "object",
+          "maxProperties": 65535,
+          "propertyNames": {"$ref": "#/$defs/name"},
+          "additionalProperties": {"type": "object", "x-wz-document": "segment_profile_invalid"}
+        },
+        "supervision": {"$ref": "#/$defs/catalog_supervision"},
+        "messages": {
+          "description": "The messages, at most MESSAGE_CATALOG_ENTRIES.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/message"},
+          "x-wz-limit-items": "MESSAGE_CATALOG_ENTRIES",
+          "x-wz-refusal-items": "too_many_messages"
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "address": {
+          "description": "The node's address, from which the profile's derived fields of its frames are computed, unless the values state `@address`.",
+          "$ref": "#/$defs/uint",
+          "x-wz-range": [0, 18446744073709551615]
+        }
+      }
+    },
+    "catalog_supervision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_delay_ms"],
+      "properties": {
+        "start_delay_ms": {
+          "description": "How long after the first poll that has a clock a supervisor judges nothing. 0 when the catalog states no supervision.",
+          "$ref": "#/$defs/uint",
+          "x-wz-range": [0, 2147483647]
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_expr", "id", "publishers", "subscribers"],
+      "properties": {
+        "key_expr": {
+          "description": "The key expression the message is put on: a literal key, no wildcard.",
+          "type": "string",
+          "x-wz-key-expr": true
+        },
+        "id": {"$ref": "#/$defs/uint", "x-wz-range": [0, 4294967295]},
+        "publishers": {
+          "description": "The nodes that publish it, by name, each once.",
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"}
+        },
+        "subscribers": {
+          "description": "The nodes that subscribe to it, by name, each once.",
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "period_ms": {
+          "description": "Its period. A message that states none is sent on an event.",
+          "$ref": "#/$defs/uint",
+          "x-wz-range": [1, 4294967295],
+          "x-wz-refusal-below": "period_zero"
+        },
+        "protection": {"$ref": "#/$defs/protection"},
+        "senders": {
+          "description": "The senders a receiver binds one slot each to, at most E2E_SENDER_SLOTS. Needs the protection, and a profile whose message cell names a sender.",
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/sender"},
+          "x-wz-limit-items": "E2E_SENDER_SLOTS",
+          "x-wz-refusal-items": "too_many_senders"
+        },
+        "instance_key": {
+          "description": "The payload fields that tell the message's instances apart, and the values each may take. Exclusive with senders.",
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/key_field"}
+        },
+        "replay_depth": {
+          "description": "How many of its last frames a publisher keeps for a subscriber that arrives later, 1 to REPLAY_DEPTH_MAX.",
+          "$ref": "#/$defs/uint",
+          "x-wz-range": [1, "REPLAY_DEPTH_MAX"],
+          "x-wz-refusal-below": "replay_depth_out_of_range",
+          "x-wz-refusal-above": "replay_depth_out_of_range"
+        },
+        "supervision": {"$ref": "#/$defs/message_supervision"},
+        "segment_profile": {
+          "description": "The name of the segment profile a sample larger than one frame is cut by.",
+          "type": "string"
+        }
+      }
+    },
+    "protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "values"],
+      "properties": {
+        "profile": {"description": "The name of an e2e profile.", "type": "string"},
+        "values": {
+          "description": "The header values: every field but the CRC, the length and the counter, as a sender's values text states them. Judged against the profile for every publisher and subscriber.",
+          "type": "object",
+          "x-wz-document": "values_invalid"
+        }
+      }
+    },
+    "sender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "id"],
+      "properties": {
+        "node": {"description": "A publisher of the message, by name.", "type": "string"},
+        "id": {
+          "description": "The sender identity its frames' header carries.",
+          "$ref": "#/$defs/uint",
+          "x-wz-range": [0, 18446744073709551615]
+        }
+      }
+    },
+    "key_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "values"],
+      "properties": {
+        "field": {"description": "The payload field.", "type": "string", "minLength": 1},
+        "values": {
+          "description": "The values it may take, each once: unsigned integers, or strings.",
+          "type": "array",
+          "minItems": 1,
+          "items": {"oneOf": [{"$ref": "#/$defs/uint"}, {"type": "string"}]},
+          "x-wz-key-values": true
+        }
+      }
+    },
+    "message_supervision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["factor"],
+      "properties": {
+        "factor": {
+          "description": "How many periods a stream may miss: its deadline is the period times this, at most 2147483646 ms.",
+          "$ref": "#/$defs/uint",
+          "x-wz-range": [1, 65535]
+        },
+        "awaited": {
+          "description": "Whether a stream can be lost before its first reception. True when not stated.",
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "x-wz-refusals": {
+    "syntax": "The text is not JSON5, or nests deeper than the reader reads.",
+    "unknown_field": "An object member the catalog does not have.",
+    "duplicate_field": "An object member stated twice.",
+    "missing_field": "A required member absent.",
+    "wrong_type": "A value of another type than its member's, or an unsigned integer in another spelling.",
+    "value_out_of_range": "A number outside its member's range, or too many of something a table numbers in 16 bits.",
+    "invalid_name": "A name with a character a name has not, empty, or longer than 64 bytes.",
+    "empty": "An empty list or text where one is required.",
+    "duplicate_node": "A node named twice, in the nodes or in one list of a message.",
+    "unknown_node": "A node name no node has.",
+    "key_expr": "A key expression that is not a literal key.",
+    "duplicate_key_expr": "Two messages on one key expression.",
+    "duplicate_id": "Two messages of one id.",
+    "period_zero": "A period of 0.",
+    "deadline_out_of_range": "A period times its supervision factor above 2147483646 ms.",
+    "supervision_without_period": "A supervised message that states no period.",
+    "replay_depth_out_of_range": "A replay depth of 0 or above REPLAY_DEPTH_MAX.",
+    "too_many_messages": "More messages than MESSAGE_CATALOG_ENTRIES.",
+    "unknown_e2e_profile": "A protection that names no e2e profile of the catalog.",
+    "unknown_segment_profile": "A segment profile reference that names no segment profile of the catalog.",
+    "senders_without_protection": "Senders on a message that is not protected.",
+    "sender_not_publisher": "A sender that is not a publisher of its message.",
+    "duplicate_sender": "A sender node or identity stated twice for one message.",
+    "too_many_senders": "More senders than E2E_SENDER_SLOTS.",
+    "instance_key_with_senders": "An instance key and senders on one message, which keeps its streams by one or the other.",
+    "duplicate_instance_key": "A field of an instance key, or a value of one field, stated twice.",
+    "e2e_profile_invalid": "An e2e profile the profile reader refuses.",
+    "segment_profile_invalid": "A segment profile the segment profile reader refuses.",
+    "values_invalid": "Header values the profile refuses for a node that publishes or subscribes to the message.",
+    "senders_unsupported_by_profile": "Senders under a profile whose message cell names no sender, or an identity its sender part cannot hold."
+  },
+  "x-wz-reader-only": [
+    "e2e_profile_invalid",
+    "segment_profile_invalid",
+    "values_invalid",
+    "senders_unsupported_by_profile"
+  ]
+}

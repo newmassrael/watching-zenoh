@@ -121,9 +121,12 @@ AXIS: dict[str, str] = {
     # `wz_admin::admin_connect`, so the probe is this crate's.
     "wz-admin": "wz_admin",
     # The application frame, which left `wz-capture` with the segment profile
-    # and its synthetic fixture. Its one non-default feature, `fixtures`, gates
-    # `segment_profile::synthetic`, the path a consumer's test types; the probe
-    # is read off the module tree, as the storage plane's are off its root.
+    # and its synthetic fixture. Its non-default features each gate a module a
+    # consumer types the path of: `fixtures` gates `segment_profile::synthetic`,
+    # `proto` the schema reader and the typed reader (`proto_schema`,
+    # `proto_decode` and the two behind them), and `instance-key` the keyer
+    # (`instance_key`). The probes are read off the module tree, as the storage
+    # plane's are off its root.
     "wz-app-frame": "wz_app_frame",
 }
 
@@ -483,8 +486,7 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-slot",
         )
     },
-    # Its non-default features (`fixtures`, `replay`) gate public paths, probed off the module
-    # tree.
+    # Each of its non-default features gates a public path, probed off the module tree.
     "wz-app-frame": {},
 }
 

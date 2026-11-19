@@ -618,6 +618,14 @@ jobs:
             crates -> target
             vendor/sce -> target
 
+      # scripts/pico-c-program.sh reads cargo's build report and renders the header of the
+      # library's arm (`wz_config.py --pico-config-h`) in python, the version the repository pins.
+      - name: Set up Python (the pico C programs' header is rendered in python)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
       - name: the C ABI crates on this host, gated (one verdict line per question)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 35
@@ -829,6 +837,22 @@ jobs:
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_session_loopback.c "a pico C program that opens two sessions over loopback"
 
+      # A zenoh-pico C program that calls every public platform export of pico's header
+      # (random, memory, task, mutex, condition variable, sleep, clock, wall time), on this
+      # host. The host-layer program above holds the layouts; this one holds that each
+      # export links (on Windows through the DLL's import library, which no ELF census reads)
+      # and that the ones the host-layer program does not call answer as pico's backend for
+      # the host does. It builds the library with the default features, as the two steps
+      # above do, so it costs no second build; it is placed before the step below, which
+      # builds another. Observed, not yet gated, as that step is, until two consecutive
+      # hosted runs read it green on both hosts.
+      - name: a zenoh-pico C program over every platform export (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 25
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_platform_surface.c "a pico C program over every platform export"
+
       # A zenoh-pico C program whose sessions open NO socket, on this host: two sessions
       # joined by an in-memory transport the program supplies through the wz extension
       # doors (wz_ext_transport_*, wz_ext.h), over a stream pair with injected partial
@@ -845,6 +869,169 @@ jobs:
         continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "a pico C program over a transport it supplies" app-transport
+
+  # The C examples of the pico C ABI (crates/wz-capi-pico/examples/c/), on Linux and on
+  # Windows: the policy profile the library is built with, the three transport configs over
+  # the system's sockets and over a transport the program supplies, batching, end-to-end
+  # protection, stream supervision and a program's own periodic task. Each is compiled
+  # against zenoh-pico's own headers for the host and linked against the wz library by
+  # scripts/pico-c-program.sh, as the programs of the `capi` job are, and exits 0 when it
+  # ran its exchange.
+  #
+  # A job of its own and not steps of `capi`: that job's budget is spent by what it gates,
+  # and Linux is not one of its hosts. Every example builds the library with ONE feature list
+  # (`WZ_EXAMPLE_FEATURES`, the union of what the examples' doors need), so the library is
+  # built once; the profile example's second run builds it again under the other profile's
+  # policy default, last, because that build replaces the first.
+  #
+  # Observed, not yet gated, as each new program has started: every step is
+  # `continue-on-error` and so is the job, so a red or a timeout here does not fail the
+  # run; each script's verdict line in the job summary is the reading. A step becomes a
+  # gate once two consecutive hosted runs read it green on both hosts.
+  capi-examples:
+    name: C ABI examples (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            host: linux
+          - os: windows-latest
+            host: windows
+    env:
+      WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
+      WZ_EXAMPLE_FEATURES: app-transport,e2e-sender,e2e-receiver,e2e-supervision
+    steps:
+      - name: Checkout (with submodules)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        shell: bash
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          # A READER of the `leg` job's entry (class `rust-host-workspace`). The leg runs
+          # on macOS and Windows only, so the Linux row finds no entry and builds cold.
+          shared-key: host-workspace
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      # The vendored pico library's bindings are generated through libclang. The Linux
+      # runner image carries one with its clang packages; it is installed only when none
+      # is found, so the step costs nothing where it is there.
+      - name: Set up Python (the pico C programs' header is rendered in python)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
+      - name: libclang for the pico bindings, where the image has none
+        if: ${{ env.WZ_HOST_SELECTED == 'true' && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          if compgen -G "/usr/lib/llvm-*/lib/libclang*.so*" > /dev/null; then
+            echo "libclang: $(compgen -G '/usr/lib/llvm-*/lib/libclang*.so*' | head -n 1)"
+          else
+            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
+          fi
+
+      # The group of the transport example needs an interface the host carries multicast
+      # on: the loopback on Linux; on Windows, whose loopback adapter carries no group, the
+      # adapter of the default route, by the name `#iface=` reads there (its adapter name,
+      # the interface GUID).
+      - name: name the interface the example's group is joined on
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            iface="$(powershell -NoProfile -Command "(Get-NetAdapter -InterfaceIndex (Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).ifIndex).InterfaceGuid" | tr -d '\r')"
+          else
+            iface=lo
+          fi
+          echo "group interface: ${iface:-none}"
+          echo "WZ_EXAMPLE_GROUP_IFACE=${iface}" >> "$GITHUB_ENV"
+
+      - name: example, pub/sub and query under the upstream profile (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 50
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the upstream profile" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, tcp, udp and a group over the system's sockets (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/transports.c "example of tcp, udp and a group over the system's sockets" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, tcp, udp and a group over a transport the program supplies (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "example of tcp, udp and a group over a transport the program supplies" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, batching on and off with a flush (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/batching.c "example of batching on and off with a flush" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, end-to-end protection across a session (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/e2e.c "example of end-to-end protection across a session" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, supervision of a periodic stream (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/supervision.c "example of supervision of a periodic stream" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, a program's own periodic task (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic.c "example of a program's own periodic task" "$WZ_EXAMPLE_FEATURES"
+
+      # The platform exports the periodic task stands on (its timer, lock, task and event
+      # wait), on the Linux row too, which the `capi` job does not run.
+      - name: every platform export (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_platform_surface.c "every platform export" "$WZ_EXAMPLE_FEATURES"
+
+      # Last: the policy's build default rebuilds the library, and every later step would
+      # run against this profile instead of the upstream one.
+      - name: example, pub/sub and query under the entity-timestamp-opt-in profile (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 40
+        continue-on-error: true
+        shell: bash
+        env:
+          WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN: "on"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the entity-timestamp-opt-in profile" "$WZ_EXAMPLE_FEATURES"
 
   # The superseded generations of this workflow's two saved classes, deleted as
   # soon as the savers finish. The why, the least-privilege argument and the

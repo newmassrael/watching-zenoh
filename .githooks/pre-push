@@ -1131,6 +1131,13 @@ round_fed_gates=(
     # are current. MEASURED: 0.43s, a text read, no build. The Rust half, which compares them with
     # the real matcher, is crates/wz-session-core/tests/it/files/key_catalogue_model.rs.
     "wz_key_set.py --selftest"
+    # The message catalog's generator (the schema's rules, the shared corpus of refused catalogs and
+    # the fixture's tables). Round-fed by deploy/message-catalog.schema.json, deploy/wz-config.toml
+    # (the three limits a catalog is bounded by) and crates/wz-app-frame/catalog/: the selftest
+    # runs every rule on the corpus and ends by checking the fixture's tables are current. A text
+    # read, no build. The Rust half, which reads the same corpus and compares the tables with the
+    # reader's resolved form, is crates/wz-app-frame/src/message_catalog_tests.rs.
+    "message_catalog.py --selftest"
     # R3440 -- the pico drop-in header against zenoh-pico's own, and wz_ext.h. Round-fed by
     # the two headers and the pico submodule. MEASURED: 0.66s, three `cc -E` runs, no build.
     "drop_in_header_gate.py"

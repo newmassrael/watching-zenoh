@@ -28,6 +28,17 @@ pub const SOURCE_SUPERVISION_EXPIRED: u16 = library::SUPERVISION_EXPIRED;
 /// A host's secure-channel listener ended a connection without a stream. Two integers: why
 /// ([`TLS_DROP_STALLED`], [`TLS_DROP_NO_ROOM`] or [`TLS_DROP_OTHER`]) and the channel's own code.
 pub const SOURCE_TLS_HANDSHAKE_DROPPED: u16 = library::TLS_HANDSHAKE_DROPPED;
+/// Samples of a message whose payload is no instance of its instance key were dropped. Three
+/// integers: why the one that carries the report was ([`INSTANCE_KEY_UNDECODABLE`],
+/// [`INSTANCE_KEY_ABSENT`] or [`INSTANCE_KEY_NOT_LISTED`]), which key field, and how many were
+/// dropped since the last report.
+pub const SOURCE_INSTANCE_KEY_DROPPED: u16 = library::INSTANCE_KEY_DROPPED;
+/// The payload is not a message of the schema.
+pub const INSTANCE_KEY_UNDECODABLE: u64 = 0;
+/// A key field that has presence is not in the payload.
+pub const INSTANCE_KEY_ABSENT: u64 = 1;
+/// A key value is in no list.
+pub const INSTANCE_KEY_NOT_LISTED: u64 = 2;
 /// A peer that stalled past the accept budget.
 pub const TLS_DROP_STALLED: u64 = 0;
 /// The arena or the key store had no room for the handshake.
@@ -121,6 +132,18 @@ pub fn emit_tls_handshake_dropped(why: u64, code: u32) {
         LEVEL_LIBRARY,
         SOURCE_TLS_HANDSHAKE_DROPPED,
         &[why, u64::from(code)],
+    );
+}
+
+/// Write the event the library writes when an instance key reports its drops: `why` is one of the
+/// `INSTANCE_KEY_*` words, `field` the key field and `dropped` how many since the last report. A
+/// full log under `drop-newest` refuses it and counts it, as for any event.
+pub fn emit_instance_key_dropped(why: u64, field: u64, dropped: u64) {
+    global().emit_from(
+        &process_clock(),
+        LEVEL_LIBRARY,
+        SOURCE_INSTANCE_KEY_DROPPED,
+        &[why, field, dropped],
     );
 }
 

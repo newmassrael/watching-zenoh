@@ -451,6 +451,42 @@ pub const E2E_SENDER_SLOTS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::REPLAY_DEPTH_MAX`] is bound.
+pub const REPLAY_DEPTH_MAX: LimitBinding = LimitBinding {
+    storage: Storage::Both,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MESSAGE_CATALOG_ENTRIES`] is bound.
+pub const MESSAGE_CATALOG_ENTRIES: LimitBinding = LimitBinding {
+    storage: Storage::Both,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::INSTANCE_KEY_FIELDS`] is bound.
+pub const INSTANCE_KEY_FIELDS: LimitBinding = LimitBinding {
+    storage: Storage::Both,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::INSTANCES_PER_MESSAGE`] is bound.
+pub const INSTANCES_PER_MESSAGE: LimitBinding = LimitBinding {
+    storage: Storage::Both,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::CLOCK_MAX_FORWARD_STEP_MS`] is bound.
 pub const CLOCK_MAX_FORWARD_STEP_MS: LimitBinding = LimitBinding {
     storage: Storage::Quota,

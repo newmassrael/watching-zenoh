@@ -368,12 +368,33 @@ pub(crate) fn derived_zid(
     listen: &[String],
     entropy: &mut dyn EntropySource,
 ) -> Result<SessionZid, OpenError> {
-    use wz_session_core::zid_derivation::{ListenerFacts, RANDOM_BYTES};
+    use wz_runtime_coop::session_drive::LinkProto;
+    use wz_session_core::zid_derivation::{ListenerFacts, ListenerTransport, RANDOM_BYTES};
     let mut random = [0u8; RANDOM_BYTES];
     entropy
         .try_fill_bytes(&mut random)
         .map_err(|_| OpenError::EntropyUnavailable)?;
-    let zid = ListenerFacts::of_endpoints(listen.iter().map(String::as_str))
+    // The listeners are read with the engine's own locator reader, the one its listens bind
+    // through, not the session core's full one: that reader parses every option a locator may
+    // carry (TLS material, socket options, numbers in floating point), none of which names an
+    // address or a port, and linking it put some thirty kilobytes into every cooperative build.
+    let mut facts = ListenerFacts::new();
+    for endpoint in listen {
+        let Ok(at) = wz_session_mcu::dial::parse_listen_locator(endpoint) else {
+            continue;
+        };
+        let transport = match at.proto {
+            LinkProto::Tcp => ListenerTransport::Tcp,
+            LinkProto::Udp => ListenerTransport::Udp,
+            LinkProto::Tls => continue,
+        };
+        if let core::net::SocketAddr::V4(address) = at.at {
+            if !address.ip().is_multicast() {
+                facts.listener(transport, address.ip().octets(), address.port());
+            }
+        }
+    }
+    let zid = facts
         .derive(None, random)
         .map_err(OpenError::ZidDerivation)?;
     wire_zid(&zid)
