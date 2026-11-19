@@ -253,14 +253,28 @@ pub enum KeyWireFormRefused {
     NoDictionary,
 }
 
-/// The key ids an open hands the session, which a build without `shared-key-ids` has none of.
-#[derive(Default)]
-struct OpenKeyIds {
+/// The key ids every node of a deployment shares that an open hands the session
+/// ([`CoopEngine::open_with_key_ids`]). A build without `shared-key-ids` hands none, and an ABI
+/// that opens in either build says so with [`Self::none`].
+#[derive(Clone, Default)]
+pub struct OpenKeyIds {
     #[cfg(feature = "shared-key-ids")]
     ids: Option<SharedKeyIds>,
 }
 
 impl OpenKeyIds {
+    /// No dictionary: the session reads and names its keys as upstream does, and may not be
+    /// opened under `shared`.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The dictionary `ids`.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn shared(ids: SharedKeyIds) -> Self {
+        Self { ids: Some(ids) }
+    }
+
     /// Whether a session may open under `policy`'s key-wire form with these key ids: `shared`
     /// needs a dictionary, `declared` and `literal` do not.
     #[cfg(feature = "shared-key-ids")]
@@ -1563,36 +1577,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         config: CoopConfig,
         policy: SessionPolicy,
     ) -> Result<Arc<Self>, OpenError> {
-        Self::open_parts(links, clock, entropy, config, policy, OpenKeyIds::default())
+        Self::open_with_key_ids(links, clock, entropy, config, policy, OpenKeyIds::none())
     }
 
     /// [`Self::open_with_policy`], the session holding `key_ids`, the key ids every node of the
-    /// deployment shares: every link of it reads an id only the dictionary names, the session
-    /// declares no key expression under one of its ids, and a key goes on the wire as the
-    /// policy's `key-wire-form` says ([`SessionEngine::key_wire_by_form`]). `None` is the session
-    /// without a dictionary, which may not be opened under `shared`.
-    #[cfg(feature = "shared-key-ids")]
+    /// deployment shares (`shared-key-ids`): every link of it reads an id only the dictionary
+    /// names, the session declares no key expression under one of its ids, and a key goes on the
+    /// wire as the policy's `key-wire-form` says. The form is judged first, so a session that
+    /// cannot honour it dials and binds nothing: `shared` with no dictionary, or any form but
+    /// `declared` in a build without the feature, is [`OpenError::KeyWireForm`].
     pub fn open_with_key_ids(
-        links: L,
-        clock: C,
-        entropy: impl EntropySource + Send + 'static,
-        config: CoopConfig,
-        policy: SessionPolicy,
-        key_ids: Option<SharedKeyIds>,
-    ) -> Result<Arc<Self>, OpenError> {
-        Self::open_parts(
-            links,
-            clock,
-            entropy,
-            config,
-            policy,
-            OpenKeyIds { ids: key_ids },
-        )
-    }
-
-    /// The one open both doors above make. The key-wire form is judged first, so a session that
-    /// cannot honour it dials and binds nothing.
-    fn open_parts(
         links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,

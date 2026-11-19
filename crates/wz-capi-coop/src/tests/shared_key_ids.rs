@@ -27,7 +27,7 @@ use wz_session_core::WhatAmI;
 use super::get::remote_get;
 use super::listen::{eventually, Stepped};
 use super::{client_config, Engine, LOOPBACK};
-use crate::{CoopConfig, KeyWireFormRefused, OpenError};
+use crate::{CoopConfig, KeyWireFormRefused, OpenError, OpenKeyIds};
 
 /// The dictionary both ends hold: a key, a key below it, and a prefix a get names a key under.
 fn dictionary() -> SharedKeyIds {
@@ -57,7 +57,7 @@ fn open_keyed(
         PosixEntropy,
         config,
         policy,
-        ids,
+        ids.map_or_else(OpenKeyIds::none, OpenKeyIds::shared),
     )
 }
 

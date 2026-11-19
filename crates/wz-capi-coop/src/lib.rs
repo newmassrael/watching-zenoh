@@ -82,7 +82,7 @@ pub mod tls;
 mod tests;
 
 pub use engine::{
-    CoopConfig, CoopEngine, KeyWireFormRefused, OpenError, DEFAULT_ACCEPT_PENDING,
+    CoopConfig, CoopEngine, KeyWireFormRefused, OpenError, OpenKeyIds, DEFAULT_ACCEPT_PENDING,
     DEFAULT_MAX_FACES,
 };
 }

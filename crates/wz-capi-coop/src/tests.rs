@@ -1091,6 +1091,38 @@ fn a_configured_zid_of_zero_bytes_or_seventeen_is_refused_at_open() {
     );
 }
 
+/// A build without the shared key ids names a key as upstream does and no other way: a session
+/// opened under any other key-wire form is refused before it dials, and `declared` opens on as
+/// before (and fails here for the endpoint the config does not name).
+#[cfg(not(feature = "shared-key-ids"))]
+#[test]
+fn a_key_wire_form_but_declared_is_refused_in_a_build_without_shared_key_ids() {
+    use crate::{KeyWireFormRefused, OpenError};
+    use wz_session_core::policy::{KeyWireForm, SessionPolicy};
+
+    let open = |form: KeyWireForm| {
+        let mut policy = SessionPolicy::defaults();
+        policy
+            .select_key_wire_form(form)
+            .expect("a host build allows every value of the key-wire form");
+        Engine::open_with_policy(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            client_config(),
+            policy,
+        )
+        .err()
+    };
+    for form in [KeyWireForm::Shared, KeyWireForm::Literal] {
+        assert_eq!(
+            open(form),
+            Some(OpenError::KeyWireForm(KeyWireFormRefused::NotInBuild))
+        );
+    }
+    assert_eq!(open(KeyWireForm::Declared), Some(OpenError::NoEndpoint));
+}
+
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
 mod decl_watch;
