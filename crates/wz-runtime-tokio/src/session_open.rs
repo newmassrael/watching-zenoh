@@ -140,7 +140,9 @@ use wz_session_core::serial_link::SerialRole;
 // transport (transport-link-app forwards transport-link-tcp). A dial or listen config that carries
 // one opens every link on it, whatever socket the locator would otherwise have named.
 #[cfg(feature = "transport-link-app")]
-use crate::app_link::{wire_app_stream, AppListener, AppReadDriver, AppStream, AppTransport};
+use crate::app_link::{wire_app_stream, AppListener, AppReadDriver, AppStream};
+#[cfg(feature = "transport-link-app")]
+use wz_session_core::app_transport::AppTransport;
 
 // R311oa — the TLS arm, like serial, rides this tcp+unicast-gated module as
 // an additive transport (transport-link-tls forwards transport-link-tcp, so
@@ -901,6 +903,10 @@ pub enum DialedLink {
     /// [`BoundListener::App`].
     #[cfg(feature = "transport-link-app")]
     App(AppStream),
+    /// A datagram link over the transport the program supplies (a `udp/` dial), each datagram
+    /// one batch, uniform with [`Self::Udp`] in the steady state.
+    #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+    AppDatagram(crate::app_link::AppDatagram),
 }
 
 impl DialedLink {
@@ -943,6 +949,9 @@ impl DialedLink {
             // A log word: the scheme is `tcp`, carried by the program's stack.
             #[cfg(feature = "transport-link-app")]
             DialedLink::App(_) => "app-stream",
+            // A log word: the scheme is `udp`, carried by the program's stack.
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            DialedLink::AppDatagram(_) => "app-datagram",
         }
     }
 }
@@ -4006,15 +4015,21 @@ pub async fn bind_endpoint_with_config(
     bind_locator(locator, cfg).await
 }
 
-/// Dial `connect` over the transport the program supplies. A locator of a kind this runtime does
-/// not carry over it yet is a typed `Unsupported`, which an open names as an unknown scheme: the
-/// program's transport carries every link of the config or none, and no locator falls through to
-/// the system's sockets.
+/// Dial `connect` over the transport the program supplies: a `tcp/` locator as a stream, a `udp/`
+/// one as a datagram link (in a build with the udp link). Any other is a typed `Unsupported`,
+/// which an open names as an unknown scheme: the program's transport carries every link of the
+/// config or none, and no locator falls through to the system's sockets.
 #[cfg(feature = "transport-link-app")]
 async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLink> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(connect, false) {
-        Some(AppLinkKind::StreamDial) => Ok(DialedLink::App(app.dial_stream(connect).await?)),
+        Some(AppLinkKind::StreamDial) => Ok(DialedLink::App(
+            crate::app_link::dial_stream(app, connect).await?,
+        )),
+        #[cfg(feature = "transport-link-udp")]
+        Some(AppLinkKind::Datagram) => Ok(DialedLink::AppDatagram(
+            crate::app_link::dial_datagram(app, connect).await?,
+        )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("the program's transport does not carry a dial of {connect:?} on this runtime"),
@@ -4028,7 +4043,9 @@ async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLi
 async fn bind_app(app: &Arc<AppTransport>, listen: &str) -> io::Result<BoundListener> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(listen, true) {
-        Some(AppLinkKind::StreamListen) => Ok(BoundListener::App(app.listen_stream(listen).await?)),
+        Some(AppLinkKind::StreamListen) => Ok(BoundListener::App(
+            crate::app_link::listen_stream(app, listen).await?,
+        )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
@@ -4067,6 +4084,8 @@ pub enum InboundLink {
     QuicDatagram(QuicDatagramReadDriver),
     #[cfg(feature = "transport-link-app")]
     App(AppReadDriver),
+    #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+    AppDatagram(crate::app_link::AppDatagramReadDriver),
 }
 
 impl InboundLink {
@@ -4112,6 +4131,8 @@ impl LinkDriver for InboundLink {
             InboundLink::QuicDatagram(d) => d.open().await,
             #[cfg(feature = "transport-link-app")]
             InboundLink::App(d) => d.open().await,
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            InboundLink::AppDatagram(d) => d.open().await,
         }
     }
 
@@ -4138,6 +4159,8 @@ impl LinkDriver for InboundLink {
             InboundLink::QuicDatagram(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-app")]
             InboundLink::App(d) => d.send(frame, reliability).await,
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            InboundLink::AppDatagram(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -4164,6 +4187,8 @@ impl LinkDriver for InboundLink {
             InboundLink::QuicDatagram(d) => d.close().await,
             #[cfg(feature = "transport-link-app")]
             InboundLink::App(d) => d.close().await,
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            InboundLink::AppDatagram(d) => d.close().await,
         }
     }
 
@@ -4190,6 +4215,8 @@ impl LinkDriver for InboundLink {
             InboundLink::QuicDatagram(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-app")]
             InboundLink::App(d) => d.poll_event().await,
+            #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+            InboundLink::AppDatagram(d) => d.poll_event().await,
         }
     }
 }
@@ -4317,6 +4344,11 @@ pub fn wire_dialed_link_with_lowlatency(
         DialedLink::App(stream) => {
             let (inbound, outbound, handle) = wire_app_stream(stream, rx_buffer_size);
             (InboundLink::App(inbound), outbound, handle)
+        }
+        #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
+        DialedLink::AppDatagram(link) => {
+            let (inbound, outbound, handle) = crate::app_link::wire_app_datagram(link);
+            (InboundLink::AppDatagram(inbound), outbound, handle)
         }
     }
 }

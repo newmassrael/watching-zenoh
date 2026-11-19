@@ -3759,6 +3759,9 @@ struct GroupSetup {
     /// Where a group that cannot be joined reports the open as failed, before the role
     /// reports anything.
     opened: OpenReport,
+    /// The transport the program supplies, which every group of the session is joined over
+    /// when it is there.
+    app: AppSlot,
 }
 
 /// One group, resolved from its [`GroupJoin`]: where it is and what this session
@@ -3786,6 +3789,10 @@ enum GroupLinkSpec {
     /// Open-debt item 911 — raw Ethernet, as the `reth/` endpoint configures it.
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
     RawEth(wz_runtime_tokio::raweth_link::RethLocator),
+    /// A group the program's transport joins, named by its endpoint: the program's stack holds
+    /// the socket.
+    #[cfg(feature = "app-transport")]
+    App(Arc<wz_runtime_tokio::app_link::AppTransport>),
 }
 
 #[cfg(feature = "multicast-transport")]
@@ -3894,6 +3901,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         link_rx,
         policy,
         opened,
+        app,
     } = setup;
     if joins.is_empty() {
         role.await;
@@ -3909,6 +3917,21 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         let _ = opened.send(Err(OpenError::SchemeUnknown));
         return;
     };
+    // Over the program's transport each group is joined by the program, on the endpoint read as
+    // a group was read above; no socket of the system's is bound for it.
+    #[cfg(feature = "app-transport")]
+    let groups: Vec<ResolvedGroup> = match &app {
+        Some(transport) => groups
+            .into_iter()
+            .map(|group| ResolvedGroup {
+                link: GroupLinkSpec::App(Arc::clone(transport)),
+                ..group
+            })
+            .collect(),
+        None => groups,
+    };
+    #[cfg(not(feature = "app-transport"))]
+    let _ = app;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
@@ -3963,6 +3986,31 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                                                 );
                                             }
                                             Ok(driver)
+                                        }
+                                    },
+                                    stop,
+                                    up,
+                                )
+                                .await
+                            }
+                            // The same group face over the program's transport: each join asks
+                            // the program to join, and a leave is the link's close.
+                            #[cfg(feature = "app-transport")]
+                            GroupLinkSpec::App(transport) => {
+                                let locator = endpoint.clone();
+                                serve_group(
+                                    shared,
+                                    index as u64,
+                                    label,
+                                    &params,
+                                    || {
+                                        let (transport, locator) =
+                                            (transport.clone(), locator.clone());
+                                        async move {
+                                            wz_runtime_tokio::app_link::join_group(
+                                                &transport, &locator,
+                                            )
+                                            .await
                                         }
                                     },
                                     stop,
@@ -4795,6 +4843,7 @@ pub fn open_blocking(
                 link_rx: link_conf.rx,
                 policy: link_conf.policy,
                 opened: tx.clone(),
+                app: app.clone(),
             };
             let ctx = DriveContext {
                 zid: wire_zid,
