@@ -5051,6 +5051,30 @@
       "carry_forward_bullets": [
         "Step 4: the open-stage document under the `wz/` namespace of the zenoh JSON5 file, read by each creator's `resolve_policy` (layers, schema and constraint validation, provenance, a named refusal per reason); then step 5, the config doors of the three ABIs. Capability cost (C1cs) and the Zephyr kit lane (Qzk), red since Round 4506, are read on this tree's hosted run and paid by symbol diff against 4050dd889."
       ]
+    },
+    "Round 4525": {
+      "decision_summary": "The row-facts door wrote the treeless field document as JSON text and converted it to CBOR, which was about a quarter of the call. It now writes the CBOR itself, by the same writer. Every writer of the field document and of the helpers its rows call writes through one structured sink, DocOut, with a JSON and a CBOR encoding behind it; the encodings hold no fact, only a spelling, so this is not a second derivation of any fact on a row. The CBOR encoding writes through the same head, integer and float primitives the converter does, and the converter's reader moved beside them as the one reader of the JSON-to-CBOR mapping, which also writes a value a model holds as JSON text (a typed payload value). The JSON documents are unchanged to the byte; the CBOR is the mapping of the JSON at the same state, byte for byte.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/doc_out.rs: new; DocOut, JsonOut, CborOut, the CBOR primitives and the one JSON-to-CBOR reader (of_json_into); the field tree writer (dissect.rs) writes through it.",
+        "crates/wz-capture/src/fields_json.rs: every row and envelope writer is generic over DocOut; RowSink keeps rows in the document's encoding; FieldsMemory is keyed by encoding too; fields_cbor_since_judged is the CBOR door.",
+        "crates/wz-capture/src/payload_decode.rs, proto_decode_json.rs, e2e_row.rs, e2e_json.rs, census_json.rs, doc_revision.rs, report.rs: write_* forms through DocOut, the String functions now thin wrappers.",
+        "crates/wz-capture/src/cbor_of_json.rs: a wrapper over the shared reader.",
+        "crates/wz-capi-dissect/src/live.rs, lib.rs: the row-facts door calls the CBOR door and returns no conversion refusal.",
+        "scripts/lib/json_integer_cell_gate.py: uint_exact is a door; cells re-keyed to the renamed writers.",
+        "Tests and the row_facts_cost bench hold the writer's CBOR to the mapping of its JSON."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1825 passed and 6 ignored, among them the row-facts tests that now hold the writer's CBOR, in both shapes, to cbor_of_json of its JSON byte for byte; every JSON golden of the crate unchanged. Red-first: a map that miscounts one key fails exactly the four row-facts tests that make that comparison.",
+        "The dissection crate's tests, 259 passed and 4 ignored; clippy with warnings denied of wz-capture, wz-capi-dissect and wz-session-core, one crate per run; wz-capture with no default features builds; the integer-cell gate and the pre-push hook's 150 static gates pass.",
+        "The row_facts_cost bench, origin/main then this tree on one build machine (hkl001): the row-facts door, text and conversion against CBOR written straight, 6.67 to 4.63 us a row over 2,004 rows and 7.35 to 5.25 over 20,004, the bytes the same (1,916,200 and 19,160,204). The field document with trees 15.13 to 13.16 and 16.18 to 14.71 us a row."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "The treeless JSON document read 5.05 to 5.33 and 5.65 to 5.99 us a row in the same pair of runs, while the converter, whose code did not change, moved 1.62 to 1.69 and 1.70 to 1.87: the difference is inside that pair's noise and is not decided; interleaved runs on one quiet machine decide it.",
+        "The consumer's own per-row figure, over its live step on its machine, is its number to read after it moves its pin."
+      ]
     }
   },
   "inventory_entries": {
