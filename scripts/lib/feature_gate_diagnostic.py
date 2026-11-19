@@ -483,7 +483,8 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-slot",
         )
     },
-    # Its one non-default feature gates a public path, probed off the module tree.
+    # Its non-default features (`fixtures`, `replay`) gate public paths, probed off the module
+    # tree.
     "wz-app-frame": {},
 }
 

@@ -41,6 +41,11 @@ alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 # capture crate turns this on for its own tests and forwards it from its `fixtures` feature.
 fixtures = ["alloc"]
 
+# `replay_admission`: whether a reply of a replay reaches the receiving judge (judged, a duplicate
+# of its baseline, or a frame it has passed), and the CRC of each stream's baseline frame the
+# receiver keeps for it. The replay cache's subscriber turns it on; off, a receiver keeps no CRC.
+replay = ["alloc"]
+
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 

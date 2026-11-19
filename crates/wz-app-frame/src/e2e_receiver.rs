@@ -231,6 +231,10 @@ struct Stream {
     judge: Judge,
     /// The sender that holds the slot, under sender keying.
     sender: Option<u64>,
+    /// The CRC of the frame that became the baseline, which the replay admission compares a
+    /// reply carrying the baseline's counter with (`crate::replay_admission`).
+    #[cfg(feature = "replay")]
+    baseline_crc: Option<u64>,
 }
 
 /// The receiving judge of one message.
@@ -283,6 +287,8 @@ impl Receiver {
         let fresh = |sender: Option<u64>| Stream {
             judge: Judge::with_rules(config, rules),
             sender,
+            #[cfg(feature = "replay")]
+            baseline_crc: None,
         };
         let (streams, bound, by_sender): (Vec<Stream>, bool, bool) = match keying {
             Keying::Indexed { streams } => {
@@ -356,6 +362,49 @@ impl Receiver {
         self.counts
     }
 
+    /// Where `frame`, arriving on `stream`, would be judged and the baseline it would be judged
+    /// against, read without judging it; `None` when it is not intact, would be judged in no
+    /// stream that holds a baseline, or names a stream the receiver does not have.
+    #[cfg(feature = "replay")]
+    pub(crate) fn standing(
+        &self,
+        stream: usize,
+        frame: &[u8],
+    ) -> Option<crate::replay_admission::Standing> {
+        let addressable = if self.by_sender {
+            1
+        } else {
+            self.streams.len()
+        };
+        if stream >= addressable {
+            return None;
+        }
+        let opened = open(&self.profile, frame).ok()?;
+        if self.integrity(&opened) != 0 {
+            return None;
+        }
+        let slot = if self.by_sender {
+            let (_, _, sender) = self.cell_values(&opened);
+            let sender = sender?;
+            self.streams
+                .iter()
+                .position(|held| held.sender == Some(sender))?
+        } else {
+            stream
+        };
+        let held = &self.streams[slot];
+        let baseline = held.judge.baseline()?;
+        let bits = held.judge.config().counter_bytes * 8;
+        Some(crate::replay_admission::Standing {
+            counter: opened.counter(&self.profile),
+            crc: opened.crc_found,
+            baseline,
+            baseline_crc: held.baseline_crc,
+            // A counter field is 1 to 8 bytes, so its width fits a byte.
+            mask: crate::e2e_crc::width_mask(bits as u8),
+        })
+    }
+
     /// Judge `frame`, which arrived at `now_ms` on `stream`. Under sender
     /// keying the receiver chooses the stream, and `stream` must be 0.
     pub fn receive(
@@ -413,13 +462,21 @@ impl Receiver {
         };
         verdict.stream = Some(slot);
         let judge = &mut self.streams[slot].judge;
-        let first = judge.baseline().is_none();
+        let before = judge.baseline();
+        let first = before.is_none();
         if intact {
             verdict.step = judge.step_from_baseline(counter);
         }
         let judgment = judge
             .receive(intact, counter, now_ms)
             .map_err(ReceiveError::Counter)?;
+        #[cfg(feature = "replay")]
+        {
+            let held = &mut self.streams[slot];
+            if intact && held.judge.baseline() != before {
+                held.baseline_crc = Some(opened.crc_found);
+            }
+        }
         verdict.timeout = judgment.timeout_error;
         verdict.silence_ms = judgment.silence_ms;
         verdict.status = self.status(intact, first, &judgment);
