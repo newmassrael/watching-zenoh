@@ -9284,6 +9284,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (a parameter, a destructuring, a returned tuple) is one more such slot in
     /// the frame of the dispatch that inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
+        // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
+        // session belongs to an establishment that is over: it records no handshake fact and is
+        // no sign of the peer's life, so it neither overwrites what the session negotiated nor
+        // keeps a silent peer's lease alive. The dispatch drops it after this.
+        #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+        if crate::drive::handshake_message_of(frame).is_some()
+            && crate::handshake_stray::established_drops_silently(
+                self.params.policy.handshake_stray_message(),
+            )
+            && self.is_established()
+        {
+            return;
+        }
         match frame {
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {

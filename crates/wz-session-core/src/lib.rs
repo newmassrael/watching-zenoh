@@ -625,6 +625,9 @@ pub mod accept_state;
 /// and the `sha2` it hashes with is already a dependency of every build.
 pub mod credential_identity;
 
+/// What a handshake step does with a handshake message it does not await (the
+/// `handshake-stray-message` policy). Ungated: a pure judgement on values.
+pub mod handshake_stray;
 /// A session's own zid as a value that is one to sixteen bytes by construction.
 /// Ungated for the reason [`credential_identity`] is: it allocates nothing, and
 /// the fixed-memory profile keeps the same value in the session's storage.

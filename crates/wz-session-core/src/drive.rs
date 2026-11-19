@@ -695,6 +695,12 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     match parsed {
         Ok(_) => match inbound_to_fsm_event(frame) {
             Some(event) => {
+                // A handshake message out of its step is judged first, before any admission,
+                // check or merge below can take anything from it.
+                #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+                if let Some(outcome) = judge_handshake_step(frame, to_engine, actions, engine) {
+                    return outcome;
+                }
                 // R311kc — initiator InitAck params validation (zenoh-pico
                 // unicast/transport.c:123-140): an InitAck whose size
                 // parameters exceed our InitSyn advertisement REJECTS the
@@ -1467,6 +1473,90 @@ pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
 ) -> Option<DriverLoopOutcome> {
     let residue = actions.take_pending_batch()?;
     Some(dispatch_unit(&residue, actions, engine))
+}
+
+/// [`decide_unit_in`]'s first judgement of a handshake message, under the session's
+/// `handshake-stray-message` ([`crate::handshake_stray`]): `Some` is the outcome of a message the
+/// dispatch goes no further with. A message out of the establishment step the machine is in ends
+/// the attempt under `fail` (the event handed back is `framing.error`) and is dropped under
+/// `ignore`; under `ignore` an Init or Open that reaches an established session is dropped too,
+/// before it is admitted or merged.
+#[cfg(all(
+    any(
+        feature = "alloc",
+        all(feature = "codec-frame", feature = "session-slot")
+    ),
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+fn judge_handshake_step<R: SessionRuntime, T: TimeSource>(
+    frame: &InboundFrame,
+    to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
+    actions: &SessionLinkActions<R, T>,
+    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> Option<DriverLoopOutcome> {
+    use crate::handshake_stray::{established_drops_silently, judge, StrayVerdict};
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    use crate::session_fsm_unicast::SessionFsmUnicastState as S;
+    let message = handshake_message_of(frame)?;
+    let policy = actions.params.policy.handshake_stray_message();
+    let state = engine.get_current_state();
+    if state == S::Established && established_drops_silently(policy) {
+        return Some(DriverLoopOutcome::HandshakeStrayIgnored);
+    }
+    match judge(awaited_in(state), message, policy) {
+        StrayVerdict::Pass => None,
+        StrayVerdict::Reject => {
+            *to_engine = Some(E::FramingError);
+            Some(DriverLoopOutcome::HandshakeStrayRejected)
+        }
+        StrayVerdict::Drop => Some(DriverLoopOutcome::HandshakeStrayIgnored),
+    }
+}
+
+/// The establishment message `frame` is, if it is one.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+pub(crate) fn handshake_message_of(
+    frame: &crate::inbound::InboundFrame,
+) -> Option<crate::handshake_stray::HandshakeMessage> {
+    use crate::handshake_stray::HandshakeMessage as M;
+    use crate::inbound::InboundFrame as F;
+    match frame {
+        #[cfg(feature = "codec-init-body")]
+        F::Init { is_ack: false, .. } => Some(M::InitSyn),
+        #[cfg(feature = "codec-init-body")]
+        F::Init { is_ack: true, .. } => Some(M::InitAck),
+        #[cfg(feature = "codec-open-body")]
+        F::Open { is_ack: false, .. } => Some(M::OpenSyn),
+        #[cfg(feature = "codec-open-body")]
+        F::Open { is_ack: true, .. } => Some(M::OpenAck),
+        _ => None,
+    }
+}
+
+/// The establishment message the machine's `state` reads next, or `None` outside the
+/// establishment. `SentOpenAck` is not one: the machine leaves it for `Established` in the same
+/// step that enters it, so no message ever finds it current.
+#[cfg(all(
+    any(
+        feature = "alloc",
+        all(feature = "codec-frame", feature = "session-slot")
+    ),
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+fn awaited_in(
+    state: crate::session_fsm_unicast::SessionFsmUnicastState,
+) -> Option<crate::handshake_stray::HandshakeMessage> {
+    use crate::handshake_stray::HandshakeMessage as M;
+    use crate::session_fsm_unicast::SessionFsmUnicastState as S;
+    match state {
+        S::SentInitSyn => Some(M::InitAck),
+        S::GotInitAck => Some(M::OpenAck),
+        #[cfg(feature = "session-unicast-accept")]
+        S::AwaitingInitSyn => Some(M::InitSyn),
+        #[cfg(feature = "session-unicast-accept")]
+        S::SentInitAck => Some(M::OpenSyn),
+        _ => None,
+    }
 }
 
 /// The two gates a decoded `Frame` passes before its payload is read, in the

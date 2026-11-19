@@ -246,6 +246,16 @@ pub enum DriverLoopOutcome {
     /// level.
     #[cfg(feature = "codec-init-body")]
     InitRegionRejected,
+    /// A handshake message (an Init or an Open) arrived in a handshake step that awaits another
+    /// one, and the session's `handshake-stray-message` is `fail`: the attempt ends with
+    /// `framing.error` and so a Close(INVALID), as upstream's establishment ends on any message
+    /// but the one it reads next.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayRejected,
+    /// The same message under `handshake-stray-message = ignore`: dropped before it is admitted
+    /// or merged, and the step goes on waiting for its own message under the deadline it had.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    HandshakeStrayIgnored,
     /// An InitSyn announced a protocol version other than
     /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], carried here.
     ///

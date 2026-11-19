@@ -3411,6 +3411,32 @@ than given a random zid. A zid the configuration states is used under either
 value. Only the C ABIs' open reads this policy.
 '''
 
+[[policy]]
+id = "handshake-stray-message"
+kind = "choice"
+kconfig = "WZ_POLICY_HANDSHAKE_STRAY_MESSAGE"
+choices = ["fail", "ignore"]
+default = "fail"
+upstream = "Ends a unicast establishment, closing the link with INVALID, on any message but the one its current step reads next, and drops an Init or Open that reaches an established session while counting it as traffic for the lease."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `fail` sends a Close(INVALID) where `ignore` sends nothing.
+wire = "visible"
+since = 2
+help = '''
+What a unicast establishment does with an Init or an Open that is not the
+message its current step awaits: an InitAck repeated after the OpenSyn went out,
+an InitSyn repeated after the InitAck went out, or any other out of its step.
+`fail` ends the attempt and closes the link with INVALID, as upstream does.
+`ignore` drops the message before anything is taken from it and the step goes
+on waiting, under the deadline it already had: nothing a peer sends extends an
+establishment. Under `ignore` an Init or Open that reaches an established
+session is dropped as well, and is not counted as a sign of the peer's life for
+the lease, nor does it change anything the session negotiated. A peer that
+repeats an earlier step is not answered again under either value.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -3457,6 +3483,7 @@ reassembly-pool-overflow = "reject"
 link-tie-order = "zid-number"
 query-unanswerable-final = "none"
 zid-derivation = "random"
+handshake-stray-message = "fail"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

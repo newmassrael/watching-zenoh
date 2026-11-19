@@ -795,11 +795,16 @@ async fn r311ke_rx_duplicate_frame_sn_rejected_per_channel() {
 
 // ── R311kj review fix: the InitAck params gate is SCOPED to
 //    SentInitSyn — an ACCEPTOR mid-handshake receiving a bogus
-//    enlarging InitAck must NOT tear down (the FSM ignores the
-//    no-transition event, pico drops it). The R311kc !is_established()
-//    scope was role-blind.
+//    enlarging InitAck is not refused by THAT gate. The R311kc
+//    !is_established() scope was role-blind. What the acceptor does with
+//    an InitAck it does not await is the `handshake-stray-message`
+//    policy's: upstream's `fail` ends the attempt (zenoh's accept and
+//    pico's listen both refuse any first message but an InitSyn), and
+//    `ignore` leaves the acceptor waiting. The build's value is the one
+//    this session runs under, so the test holds in each build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r311kj_acceptor_ignores_enlarging_init_ack() {
+    use wz_runtime_tokio::policy::{HandshakeStrayMessage, SessionPolicy};
     use wz_session_wire_fixtures::craft_initack_wire_with_caps;
 
     let (actions, mut engine) = fresh_setup();
@@ -817,15 +822,26 @@ async fn r311kj_acceptor_ignores_enlarging_init_ack() {
         !matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
         "acceptor-side InitAck must not trigger the params gate; got {outcome:?}"
     );
-    assert_eq!(
-        engine.get_current_state(),
-        pre_state,
-        "the FSM ignores the no-transition event (no teardown)"
-    );
-    assert!(
-        !engine.is_in_final_state(),
-        "acceptor session survives a bogus InitAck"
-    );
+    match SessionPolicy::from_build().handshake_stray_message() {
+        HandshakeStrayMessage::Fail => {
+            assert!(
+                matches!(outcome, DriverLoopOutcome::HandshakeStrayRejected),
+                "fail: the stray rule ends the attempt; got {outcome:?}"
+            );
+            assert_eq!(engine.get_current_state(), S::Closing);
+        }
+        HandshakeStrayMessage::Ignore => {
+            assert_eq!(
+                engine.get_current_state(),
+                pre_state,
+                "ignore: the acceptor keeps waiting for its InitSyn"
+            );
+            assert!(
+                !engine.is_in_final_state(),
+                "acceptor session survives a bogus InitAck"
+            );
+        }
+    }
 }
 
 // ── R311y817 Scenario: Rx(InitAck announcing a PATCH level above ours) →
