@@ -358,6 +358,19 @@ message-catalog = [
     "dep:wz-app-frame",
     "wz-capi-core?/message-catalog",
 ]
+# `instance-key`: the instance a sample of a message is, read from fields of its payload through
+# the message's schema (`wz_ext_instance_keyer_*`), its last value per instance in the program's
+# storage, and with `e2e-receiver` or `e2e-sender` the doors that judge or protect a frame in its
+# instance's stream. wz's own, off as the reference build is, part of the unstable surface. The
+# keyer is `wz-app-frame`'s; like the e2e doors it selects `std` and neither engine. A sample of no
+# instance is counted, and with `event-ring` also reported in the node's event log.
+instance-key = [
+    "std",
+    "unstable-api",
+    "dep:wz-app-frame",
+    "wz-app-frame/instance-key",
+    "wz-capi-core?/instance-key",
+]
 # `app-transport`: a transport the program supplies (`wz_ext_transport_*`, `wz_ext_config_transport`),
 # which carries every link of a session opened from the config that names it, over the program's
 # own network stack and over no socket of the system's. wz's own, which zenoh-pico has not, so off
@@ -569,7 +582,8 @@ wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 wz-node-time = { path = "../wz-node-time", optional = true }
 # The piece writer behind `segment-sender` (`src/segment_sender.rs`), and the frame writer and
 # receiving judge behind `e2e-sender` and `e2e-receiver` (`src/e2e.rs`), at its defaults (`alloc`),
-# which they are behind. Optional: a build without any of the three links none of it.
+# which they are behind, and the keyer behind `instance-key`, which names its own feature of the
+# crate. Optional: a build without any of the four links none of it.
 wz-app-frame = { path = "../wz-app-frame", optional = true }
 # The port between this ABI and the engine that runs its sessions: the vocabulary both name
 # (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI

@@ -3,8 +3,9 @@
 
 //! The `.proto` tokenizer behind [`crate::proto_schema`].
 //!
-//! Private for the reason [`crate::payload_builtin`] is: the one module a caller
-//! reads is `proto_schema`, and the file boundary is an authoring convenience.
+//! Public so the readers built on the schema in the capture crate can name its
+//! positions; a caller that reads a schema reads it through `proto_schema`, and
+//! the file boundary is an authoring convenience.
 //!
 //! ## What it reads
 //!
@@ -37,7 +38,7 @@ use alloc::vec::Vec;
 
 /// A place in a source file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Pos {
+pub struct Pos {
     /// 1-based line.
     pub line: u32,
     /// 1-based byte column within the line.
@@ -46,13 +47,13 @@ pub(crate) struct Pos {
 
 /// A lexical or syntactic refusal, with the place it is blamed on.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SyntaxError {
+pub struct SyntaxError {
     pub pos: Pos,
     pub reason: String,
 }
 
 impl SyntaxError {
-    pub(crate) fn new(pos: Pos, reason: impl Into<String>) -> Self {
+    pub fn new(pos: Pos, reason: impl Into<String>) -> Self {
         Self {
             pos,
             reason: reason.into(),
@@ -62,7 +63,7 @@ impl SyntaxError {
 
 /// What a token is.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Tok<'a> {
+pub enum Tok<'a> {
     /// `[A-Za-z_][A-Za-z0-9_]*`.
     Ident(&'a str),
     /// A decimal, octal or hexadecimal integer that fits `u64`.
@@ -102,7 +103,7 @@ pub(crate) enum Tok<'a> {
 /// block comment's continuation lines stripped of their leading white space and
 /// one `*`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Gap {
+pub struct Gap {
     /// The comment trailing the token BEFORE this gap.
     pub trailing: Option<String>,
     /// The comment leading the token that owns this record.
@@ -111,7 +112,7 @@ pub(crate) struct Gap {
 
 /// A token and where it starts.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Token<'a> {
+pub struct Token<'a> {
     pub tok: Tok<'a>,
     pub pos: Pos,
     /// Byte offsets of the token in the source text, `start..end`.
@@ -123,7 +124,7 @@ pub(crate) struct Token<'a> {
 }
 
 /// The tokenizer over one file's text.
-pub(crate) struct Lexer<'a> {
+pub struct Lexer<'a> {
     src: &'a str,
     at: usize,
     line: u32,
@@ -217,7 +218,7 @@ fn is_ident_continue(b: u8) -> bool {
 }
 
 impl<'a> Lexer<'a> {
-    pub(crate) fn new(src: &'a str) -> Self {
+    pub fn new(src: &'a str) -> Self {
         let at = if src.as_bytes().starts_with(b"\xEF\xBB\xBF") {
             3
         } else {
@@ -437,7 +438,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// The next token. Calling it again after `Tok::Eof` returns `Tok::Eof`.
-    pub(crate) fn next_token(&mut self) -> Result<Token<'a>, SyntaxError> {
+    pub fn next_token(&mut self) -> Result<Token<'a>, SyntaxError> {
         let gap = self.gap()?;
         self.started = true;
         let gap = (gap != Gap::default()).then(|| Rc::new(gap));

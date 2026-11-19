@@ -525,6 +525,15 @@ const _: () = assert!(
     "a message catalog holds at least one message"
 );
 
+/// How many payload fields one message's instance key names, when `instance-key` is on
+/// (`wz_app_frame::instance_key`). A keyer whose description names more is refused. At least `1`.
+pub const INSTANCE_KEY_FIELDS: usize = generated::INSTANCE_KEY_FIELDS;
+
+/// How many instances one message's instance key tells apart, the product of its value lists'
+/// lengths, when `instance-key` is on (`wz_app_frame::instance_key`). It bounds the streams and
+/// the last values kept for the message; a keyer whose lists make more is refused. At least `1`.
+pub const INSTANCES_PER_MESSAGE: usize = generated::INSTANCES_PER_MESSAGE;
+
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
 /// the hybrid logical clock (`hlc::HlcCore`) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
 /// is 500 unless the host states otherwise. A time and not a table size: it sizes no memory.

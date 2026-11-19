@@ -553,6 +553,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `e2e-supervision`, `_e2e_sender_new`, `_e2e_receiver_new`, `_supervision_rows` and
         # `_supervise`, with the types and constants they take, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
+        # `instance-key` gates `pub mod instance_key`, whose public items are wz's own doors
+        # `wz_ext_instance_keyer_new`, `_instances`, `_index`, `_flush`, `_counts`, `_last`,
+        # `_set_last`, `_loan`, `_move`, `_drop`, `wz_ext_instance_keyer_options_default` and the
+        # two `wz_ext_internal_instance_keyer_*` doors, and the types and constants they take,
+        # declared in `wz_ext.h`; `e2e-receiver` and `e2e-sender` gate its `_judge` and `_protect`
+        # doors inside it. Off by default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",
@@ -564,6 +570,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "e2e-sender-demux",
                 "e2e-supervision",
                 "event-ring",
+                "instance-key",
                 "message-catalog",
                 "remote-declaration-watch",
                 "resource-snapshot",

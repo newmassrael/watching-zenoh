@@ -18,6 +18,7 @@ mod e2e_doors;
 mod fragmentation_roundtrip;
 mod get_roundtrip;
 mod get_to_peer_door;
+mod instance_key_doors;
 mod key_ids_tokio;
 mod listen_and_connect;
 mod listener_multipeer;
