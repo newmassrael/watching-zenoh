@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 6d9f6fc6e75edaeb84e0ea673d3c24201608243d706f317ce57558761f2f84a2
+// source-hash: bbd23c97f2927c8e507456393183c79bcc3c142142c24aa2750d76549f8c7370
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -1386,6 +1386,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 // that turns a feature on and leaves out one it requires compiles none of this.
 #[cfg(all(feature = "alloc", not(feature = "storage-profile")))]
 compile_error!("feature `alloc` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "app-link", not(feature = "alloc")))]
+compile_error!("feature `app-link` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "clock-source", not(feature = "clock-quality")))]
 compile_error!("feature `clock-source` requires `clock-quality`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "codec-declare", not(feature = "codec-frame")))]

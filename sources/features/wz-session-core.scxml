@@ -15,6 +15,7 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:sce="http://sce.dev/ext"
        version="1.0" sce:kind="feature-model" name="wz-session-core">
   <sce:feature name="alloc" requires="storage-profile"/>
+  <sce:feature name="app-link" requires="alloc"/>
   <sce:feature name="attachment-bytes"/>
   <sce:feature name="bounded-heapless"/>
   <sce:feature name="clock-quality"/>
@@ -109,6 +110,7 @@
   <sce:feature name="session-unicast"/>
   <sce:feature name="session-unicast-accept" requires="rx-control rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
+  <sce:feature name="shared-key-ids" requires="alloc"/>
   <sce:feature name="storage-profile"/>
   <sce:feature name="supervision"/>
   <sce:feature name="switchboard" requires="codec-push"/>

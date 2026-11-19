@@ -66,6 +66,8 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("lifecycle-doors", &["core", "c"]),
     ("segment-sender", &["core", "pico", "c"]),
     ("e2e-supervision", &["core", "pico"]),
+    ("app-transport", &["core", "pico"]),
+    ("shared-key-ids", &["core", "pico"]),
     ("rx-callback-offload", &["core", "c"]),
     ("switch-doors", &["core", "c"]),
     ("transport_compression", &["core", "c"]),
@@ -123,6 +125,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES",
         16,
     ),
+    ("MAX_SHARED_KEY_IDS", "WZ_LIMIT_MAX_SHARED_KEY_IDS", 256),
     ("MAX_REMOTE_DECLS", "WZ_LIMIT_MAX_REMOTE_DECLS", 16),
     ("MAX_PENDING_REPLIES", "WZ_LIMIT_MAX_PENDING_REPLIES", 8),
     ("MAX_PENDING_FINALS", "WZ_LIMIT_MAX_PENDING_FINALS", 8),
@@ -201,6 +204,11 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_E2E_SUPERVISED_STREAMS",
         32,
     ),
+    (
+        "APP_LINK_QUEUE_BYTES",
+        "WZ_LIMIT_APP_LINK_QUEUE_BYTES",
+        262144,
+    ),
     ("EVENT_RING_SLOTS", "WZ_LIMIT_EVENT_RING_SLOTS", 64),
     ("EVENT_RECORD_ARGS", "WZ_LIMIT_EVENT_RECORD_ARGS", 4),
     ("CLOCK_SOURCES", "WZ_LIMIT_CLOCK_SOURCES", 1),
@@ -224,6 +232,21 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "DECLARATION_SYNC_INTERVAL_MS",
         "WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS",
         10,
+    ),
+    (
+        "DECLARATION_SYNC_RX_NO_PROGRESS_MS",
+        "WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS",
+        0,
+    ),
+    (
+        "DECLARATION_SYNC_RETRY_INTERVAL_MS",
+        "WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS",
+        0,
+    ),
+    (
+        "DECLARATION_SYNC_TX_NO_PROGRESS_MS",
+        "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS",
+        0,
     ),
     (
         "PICO_UNICAST_BATCH_BYTES",
@@ -301,7 +324,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
     (
         "reliable-gap-reconnect",
         "WZ_POLICY_RELIABLE_GAP_RECONNECT",
-        &["off", "until-declarations-synced", "always"],
+        &[
+            "off",
+            "until-declarations-synced",
+            "always",
+            "until-declarations-synced-when-begun",
+        ],
         "off",
     ),
     (
@@ -400,5 +428,29 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "WZ_POLICY_LINK_TIE_ORDER",
         &["zid-number", "zid-bytes"],
         "zid-number",
+    ),
+    (
+        "query-unanswerable-final",
+        "WZ_POLICY_QUERY_UNANSWERABLE_FINAL",
+        &["none", "empty-final"],
+        "none",
+    ),
+    (
+        "zid-derivation",
+        "WZ_POLICY_ZID_DERIVATION",
+        &["random", "address-ports"],
+        "random",
+    ),
+    (
+        "handshake-stray-message",
+        "WZ_POLICY_HANDSHAKE_STRAY_MESSAGE",
+        &["fail", "ignore", "ignore-and-replay"],
+        "fail",
+    ),
+    (
+        "key-wire-form",
+        "WZ_POLICY_KEY_WIRE_FORM",
+        &["declared", "shared", "literal"],
+        "declared",
     ),
 ];

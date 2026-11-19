@@ -96,7 +96,8 @@
               "enum": [
                 "off",
                 "until-declarations-synced",
-                "always"
+                "always",
+                "until-declarations-synced-when-begun"
               ],
               "default": "off",
               "x-wz-scope": "session",
@@ -312,6 +313,56 @@
               "x-wz-binding": "open",
               "x-wz-mutability": "fixed",
               "x-wz-wire": "visible"
+            },
+            "query-unanswerable-final": {
+              "description": "How a node answers a query from a peer that it cannot run at all because the query's key names an id the peer never declared to this node.",
+              "enum": [
+                "none",
+                "empty-final"
+              ],
+              "default": "none",
+              "x-wz-scope": "session",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "zid-derivation": {
+              "description": "How a node makes its zid when the configuration states none.",
+              "enum": [
+                "random",
+                "address-ports"
+              ],
+              "default": "random",
+              "x-wz-scope": "runtime",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "handshake-stray-message": {
+              "description": "What a unicast establishment does with an Init or an Open that is not the message its current step awaits: an InitAck repeated after the OpenSyn went out, an InitSyn repeated after the InitAck went out, or any other out of its step.",
+              "enum": [
+                "fail",
+                "ignore",
+                "ignore-and-replay"
+              ],
+              "default": "fail",
+              "x-wz-scope": "session",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
+            },
+            "key-wire-form": {
+              "description": "How a node names a key on the wire to the peer of a link.",
+              "enum": [
+                "declared",
+                "shared",
+                "literal"
+              ],
+              "default": "declared",
+              "x-wz-scope": "link",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
             }
           },
           "additionalProperties": false
@@ -482,6 +533,17 @@
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
               "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_SHARED_KEY_IDS": {
+              "description": "The entries of the key-id dictionary every node of a deployment shares (shared-key-ids) that one session may be given.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 256,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
               "x-wz-wire": "none"
             },
             "MAX_REMOTE_DECLS": {
@@ -699,6 +761,17 @@
               "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
+            "APP_LINK_QUEUE_BYTES": {
+              "description": "The most bytes one link of a transport the program supplies queues in either direction: what the program handed in and the session has not read, and what a session that cannot wait handed over and the program has not taken.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 262144,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "link",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
             "EVENT_RING_SLOTS": {
               "description": "How many event records the node's event ring holds.",
               "type": "integer",
@@ -775,6 +848,39 @@
               "x-wz-binding-heap": "live",
               "x-wz-binding-fixed": "none",
               "x-wz-wire": "timing"
+            },
+            "DECLARATION_SYNC_RX_NO_PROGRESS_MS": {
+              "description": "How long, in milliseconds, a session waits for the next of its peer's initial declarations before it takes the declaration sync as cut short, when the reliable-gap-reconnect policy is not off.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
+            },
+            "DECLARATION_SYNC_RETRY_INTERVAL_MS": {
+              "description": "How long, in milliseconds, a paced declaration replay waits before it tries again a turn the link did not take for want of room, when the declaration-sync-pacing policy is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "timing"
+            },
+            "DECLARATION_SYNC_TX_NO_PROGRESS_MS": {
+              "description": "How long, in milliseconds, a paced declaration replay that retries refused turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration sent before it gives up, which ends the link as a refused turn does without retries.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "none",
+              "x-wz-wire": "none"
             },
             "PICO_UNICAST_BATCH_BYTES": {
               "description": "The batch size, in bytes, a session of the zenoh-pico interface advertises when it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE.",

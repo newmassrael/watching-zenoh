@@ -163,6 +163,15 @@ pub const MAX_PEER_KEYEXPR_ALIASES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_SHARED_KEY_IDS`] is bound.
+pub const MAX_SHARED_KEY_IDS: LimitBinding = LimitBinding {
+    storage: Storage::Quota,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: None,
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_REMOTE_DECLS`] is bound.
 pub const MAX_REMOTE_DECLS: LimitBinding = LimitBinding {
     storage: Storage::Both,
@@ -397,6 +406,15 @@ pub const E2E_SUPERVISED_STREAMS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::APP_LINK_QUEUE_BYTES`] is bound.
+pub const APP_LINK_QUEUE_BYTES: LimitBinding = LimitBinding {
+    storage: Storage::Quota,
+    scope: &[Scope::Link],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: None,
+    wire: Wire::Timing,
+};
+
 /// Where [`super::EVENT_RING_SLOTS`] is bound.
 pub const EVENT_RING_SLOTS: LimitBinding = LimitBinding {
     storage: Storage::Both,
@@ -467,6 +485,33 @@ pub const DECLARATION_SYNC_INTERVAL_MS: LimitBinding = LimitBinding {
     binding_heap: Some(Binding::Live),
     binding_fixed: None,
     wire: Wire::Timing,
+};
+
+/// Where [`super::DECLARATION_SYNC_RX_NO_PROGRESS_MS`] is bound.
+pub const DECLARATION_SYNC_RX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
+    storage: Storage::Quota,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: None,
+    wire: Wire::None,
+};
+
+/// Where [`super::DECLARATION_SYNC_RETRY_INTERVAL_MS`] is bound.
+pub const DECLARATION_SYNC_RETRY_INTERVAL_MS: LimitBinding = LimitBinding {
+    storage: Storage::Quota,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: None,
+    wire: Wire::Timing,
+};
+
+/// Where [`super::DECLARATION_SYNC_TX_NO_PROGRESS_MS`] is bound.
+pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
+    storage: Storage::Quota,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: None,
+    wire: Wire::None,
 };
 
 /// Where [`super::PICO_UNICAST_BATCH_BYTES`] is bound.

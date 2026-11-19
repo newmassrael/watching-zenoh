@@ -358,6 +358,22 @@ config WZ_CAP_E2E_SUPERVISION
 	  Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors).
 	  Exported by: pico.
 
+config WZ_CAP_APP_TRANSPORT
+	bool "app-transport"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors).
+	  Exported by: pico.
+
+config WZ_CAP_SHARED_KEY_IDS
+	bool "shared-key-ids"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (wz_ext_config_key_ids, wz_ext_config_key_wire_form_for, wz-own doors), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says.
+	  Exported by: pico.
+
 config WZ_CAP_RX_CALLBACK_OFFLOAD
 	bool "rx-callback-offload"
 	default n
