@@ -18,8 +18,13 @@
 //! Intersection between key expressions: do two sets of keys have a key in common?
 //!
 //! The answer is watching-zenoh's one key expression matcher (`wz_session_core::keyexpr_match`):
-//! [`keyexpr::intersects`] asks it about the two key texts, and [`ClassicIntersector`] about the
-//! bytes it is given.
+//! [`keyexpr::intersects`] asks it about the two key texts, and
+//! [`ClassicIntersector`](crate::key_expr::intersect::ClassicIntersector) about the bytes it is
+//! given.
+
+// The links above name crate paths. rustdoc joins this text with the outer doc `mod.rs` keeps on
+// `pub mod intersect` (upstream's form) and resolves the joined text from `key_expr`, where a
+// bare `ClassicIntersector` is not in scope; a crate path resolves from either module.
 
 use super::keyexpr;
 
