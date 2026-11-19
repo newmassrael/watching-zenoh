@@ -289,6 +289,29 @@ static void put(const z_loaned_session_t *session, const char *key, const char *
     z_put(session, z_view_keyexpr_loan(&ke), z_bytes_move(&payload), NULL);
 }
 
+static void on_peer(const z_id_t *id, void *arg) {
+    (void)id;
+    (*(int *)arg)++;
+}
+
+/* Wait until `session` knows a peer, as z_info_peers_zid lists them; 1 when it does. A group
+ * member knows another only from the other's JOIN, which zenoh-pico sends every
+ * Z_JOIN_INTERVAL (2500 ms by default) and not in answer to a new member's own, and a get
+ * a session asks while it knows no peer completes at once with no reply
+ * (src/net/primitives.c, _z_query: remaining_finals == 0). So a get on a group waits for
+ * this first. */
+static int wait_for_peer(const z_loaned_session_t *session) {
+    for (int i = 0; i < 1000; i++) {
+        int peers = 0;
+        z_owned_closure_zid_t closure;
+        z_closure_zid(&closure, on_peer, NULL, &peers);
+        z_info_peers_zid(session, z_closure_zid_move(&closure));
+        if (peers > 0) return 1;
+        z_sleep_ms(10);
+    }
+    return 0;
+}
+
 /* Ask `demo/ask` until a get is answered or the bound runs out. 1 when one was. */
 static int ask(const z_loaned_session_t *session) {
     for (int attempt = 0; attempt < 15; attempt++) {
@@ -307,6 +330,9 @@ static int ask(const z_loaned_session_t *session) {
         }
         for (int i = 0; i < 500 && !asked.done; i++) z_sleep_ms(10);
         if (asked.replies > 0) return 1;
+        /* A get that found no target completed at once; the next is asked after a pause,
+         * so the attempts span time rather than a few microseconds. */
+        z_sleep_ms(200);
     }
     return 0;
 }
@@ -404,7 +430,8 @@ static void run_join(const char *what, uint8_t first_key, const char *first, uin
             CHECK(read_counter(&pipe_state.blocks) > 0, "%s: no would-block was injected", what);
         }
 
-        /* A query gets its reply. */
+        /* A query gets its reply, once the asking session knows the answering one. */
+        CHECK(wait_for_peer(z_session_loan(&two)), "%s: the asking session never knew a peer", what);
         CHECK(ask(z_session_loan(&two)), "%s: no get was answered", what);
         CHECK(strcmp(asked.payload, "answer-over-the-pipe") == 0, "%s: the reply was '%s'", what, asked.payload);
 
