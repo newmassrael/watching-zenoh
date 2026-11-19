@@ -805,6 +805,50 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "REPLAY_DEPTH_MAX": {
+              "description": "The deepest replay a message may keep: how many of the frames it last sent, as they were sent, a publisher holds for a subscriber that arrives later and asks for them.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 32,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MESSAGE_CATALOG_ENTRIES": {
+              "description": "How many messages one message catalog declares, when the message-catalog capability is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 64,
+              "x-wz-storage": "both",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "INSTANCE_KEY_FIELDS": {
+              "description": "How many fields of a payload one message's instance key names, when the instance-key capability is on.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 2,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "INSTANCES_PER_MESSAGE": {
+              "description": "How many instances one message's instance key may tell apart, when the instance-key capability is on: the product of the lengths of the lists of values its key fields may take.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 32,
+              "x-wz-storage": "both",
+              "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
             "CLOCK_MAX_FORWARD_STEP_MS": {
               "description": "How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before the node's hybrid logical clock refuses it, as zenoh's UHLC_MAX_DELTA_MS.",
               "type": "integer",
