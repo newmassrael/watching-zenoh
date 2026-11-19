@@ -13410,7 +13410,10 @@ layer_c1q_multicast_glue() {
     # on the build host.
     # 13 -> 15: two more `udp_multicast_config` tests landed on 2026-11-07 without the guard
     # (hosted run 42403286547 printed `15 passed` for this exact command).
-    _runci_guarded_test C1q 15 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # 15 -> 16: Round 4521's `the_socket_builder_reads_the_snapshot_the_config_was_made_from`,
+    # which landed while C1p, the step before this one, was red, so no hosted run reached this
+    # guard; the build host printed `16 passed` at 5f5342ae1.
+    _runci_guarded_test C1q 16 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
     # Debt 873 side finding -- a scouting socket goes on past a refused IPv4 membership and
     # a multicast link does not. Its own leg because the one above builds no scouting
