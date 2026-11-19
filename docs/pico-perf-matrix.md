@@ -13,7 +13,7 @@ is compiled from the same source for each arm:
 
 | arm | library | headers | carries |
 |---|---|---|---|
-| P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, udp, multicast |
+| P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, multicast |
 | W | `wz-capi-pico`, release, default features | the zenoh-pico-sys headers of that build with the `config.h` of its feature list (`wz_config.py --pico-config-h`) | tcp, udp, multicast |
 | W (program transport) | `wz-capi-pico`, release, default features and `app-transport` | the same, for that feature list | the program transport |
 
@@ -42,9 +42,10 @@ AF_UNIX stream in the abstract namespace, one reading thread per link, and a sen
 (it answers would-block and reports the link writable when the socket has room again). zenoh-pico has
 no such door, so arm P's program cells are recorded as not applicable, with that reason.
 
-A pico peer's listener accepts streams only, so arm P's udp cells may end lost; each lost cell
-carries the reason its program printed, and the reader takes the reason from the run, not from this
-page. The accept task of a listening pico peer:
+A pico peer listening on a `udp/` unicast locator binds the socket, but its accept task takes streams
+only, so a peer dialling it never completes its handshake: the dialling session's open fails with
+-120, the handshake's receive timeout. Arm P's udp cells are therefore recorded as not applicable,
+with that reason, as its program cells are. The accept task of a listening pico peer:
 
 `vendor/zenoh-pico/src/transport/unicast/accept.c` @ `_z_tcp_accept(`
 
@@ -78,10 +79,24 @@ A group of the pico preset carries no declarations and sends every put, so on mu
 waits for the peer's JOIN only. Both arms run the same arguments.
 
 **Batching.** With batching off every put leaves as the session sends it. With batching on, `pub`
-opens one batch window (`zp_batch_start`) for its whole loop and closes it at the end, as upstream's
-`z_pub_thr` does; `ping` and `pong` open and close one around each put, the close flushing it. A
-round trip with batching on is therefore the cost of the window on the path, not a delay waiting for
-a batch to fill.
+puts in cycles of one millisecond: each cycle opens a batch window (`zp_batch_start`) and closes it
+at its end (`zp_batch_stop`, which sends what the window holds), and a batch that fills inside a cycle
+leaves when it fills. `pub` reports the windows it opened as `batch_cycles`. `ping` and `pong` open
+and close one window around each put, the close flushing it. A round trip with batching on is
+therefore the cost of the window on the path, not a delay waiting for a batch to fill.
+
+The rule is the one both libraries' transmit paths state: a full batch is sent when the next message
+does not fit, and a window's remainder when the window is flushed or closed. In zenoh-pico:
+
+`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_transport_tx_batch_overflow(`
+
+wz's batch window states the same (an overflow drains it, as an express put does). Upstream's
+`z_pub_thr` holds one window for its whole loop instead. A run of an earlier version of this probe
+that did the same left the reference's subscriber with nothing in its window while the publisher
+went on putting, although by its code a full batch should have left; why is not known, and the
+cycle does not explain it. The cycle is the shape `scripts/host-bench/paced_pub.c` (`-b`) measured
+both libraries in, and it is the same for both arms. A held window remains a question for the
+reference, to be answered by a run that holds one, not a figure of this matrix.
 
 ## 2. The figures
 
@@ -156,7 +171,7 @@ share does not tell a performance core from an efficiency core; both arms run on
 the comparison stays fair, but the absolute figures belong to the cores named in the record.
 
 A full run is every transport, both batching settings, both workloads and three sizes, for both arms,
-three times: 288 cells, of which the 36 of arm P on the program transport are not applicable. Narrow
+three times: 288 cells, of which the 72 of arm P on udp and the program transport are not applicable. Narrow
 it with the variables above when a question needs fewer. The selftest of the reader runs anywhere and
 builds nothing:
 
