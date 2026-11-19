@@ -381,6 +381,13 @@ pub enum OpenRefusal {
     /// The document lists `stats/filters` in a build without `transport-stats`, which keeps no
     /// counter to count a payload under a filter in.
     StatsNotInBuild,
+    /// The document's `wz` member is refused
+    /// ([`ConfigIngestError::PoliciesRefused`], whose text names each refusal): a policy, a value
+    /// or a profile the build does not have, a value its domain leaves out, a member of `wz` it
+    /// does not read. Reported before every refusal that reads the rest of the document, as the
+    /// reader refuses the whole document: a session is never opened on part of the policies it
+    /// was given, nor on the build defaults in their place.
+    Policies,
 }
 
 impl OpenRefusal {
@@ -408,6 +415,7 @@ impl OpenRefusal {
             Self::PluginHostNotInBuild => "plugins_loading/enabled",
             Self::Aggregation => "aggregation/subscribers, aggregation/publishers",
             Self::StatsNotInBuild => "stats/filters",
+            Self::Policies => "wz/profile, wz/policies",
         }
     }
 }
@@ -904,10 +912,13 @@ pub struct OpenPlan {
 }
 
 /// The policies an open from `node` (the document the open read, or `None` when it read none)
-/// runs under: the one place the open of an [`OpenPlan`] decides them. The build defaults, until
-/// the document's own keys for a policy are read here.
-pub fn resolve_policy(_node: Option<&ZenohNodeConfig>) -> SessionPolicy {
-    SessionPolicy::defaults()
+/// runs under: the one place the open of an [`OpenPlan`] decides them. The snapshot the
+/// document's `wz` member resolved to when the reader read it ([`ZenohNodeConfig::policies`]),
+/// which is the build defaults for a document with no such member; the build defaults when no
+/// document was read. A member the reader refused never reaches here: the open is refused with
+/// [`OpenRefusal::Policies`].
+pub fn resolve_policy(node: Option<&ZenohNodeConfig>) -> SessionPolicy {
+    node.map_or_else(SessionPolicy::defaults, |node| node.policies.policy)
 }
 
 impl OpenPlan {
@@ -1055,6 +1066,11 @@ impl OpenPlan {
             // it asks, where a build with the reader and not the mechanism refuses it.
             Some(Err(ConfigIngestError::NotInBuild { path, .. })) => {
                 return Err(refusal_of_unbuilt_key(path))
+            }
+            // The policies the document states for the session, refused: what the session would
+            // run under is not known, so nothing else about the open is decided.
+            Some(Err(ConfigIngestError::PoliciesRefused { .. })) => {
+                return Err(OpenRefusal::Policies)
             }
             Some(Err(_)) | None => None,
         };
@@ -1736,6 +1752,72 @@ mod tests {
     /// The offer for a config document, read by the one reader an open uses.
     fn offer_for(document: &str) -> Result<SessionOffer, OpenRefusal> {
         session_offer(&node_of(document))
+    }
+
+    /// A value of `subscriber-overload` other than the build default that the build's domain
+    /// allows, by its id; the build default itself where the build allows one value.
+    fn a_chosen_overload() -> &'static str {
+        use wz_runtime_tokio::policy::SubscriberOverload;
+        use wz_session_core::policy_binding::PolicyValue;
+
+        <SubscriberOverload as PolicyValue>::ALL
+            .iter()
+            .copied()
+            .find(|value| {
+                *value != <SubscriberOverload as PolicyValue>::DEFAULT
+                    && <SubscriberOverload as PolicyValue>::DOMAIN.contains(*value)
+            })
+            .unwrap_or(<SubscriberOverload as PolicyValue>::DEFAULT)
+            .id()
+    }
+
+    /// The plan runs under the snapshot the document's `wz` member resolved to, and a document
+    /// without the member, or no document, under the build defaults.
+    #[test]
+    fn the_plan_runs_under_the_policies_the_document_states() {
+        let value = a_chosen_overload();
+        let stated = format!(r#"{{ wz: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#);
+        let plan = plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], &stated)
+            .expect("a client told its router opens");
+        assert_eq!(plan.session_policy.subscriber_overload().id(), value);
+        let node = node_of(&stated);
+        assert_eq!(resolve_policy(Some(&node)), node.policies.policy);
+        assert_eq!(plan.session_policy, node.policies.policy);
+
+        let plain = plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], "{}")
+            .expect("a client told its router opens");
+        assert_eq!(plain.session_policy, SessionPolicy::defaults());
+        assert_eq!(resolve_policy(None), SessionPolicy::defaults());
+    }
+
+    /// A refused `wz` member refuses the open, before every refusal that reads the rest of the
+    /// document: a client with nothing to dial is told of the member, not of its endpoints.
+    #[test]
+    fn a_refused_wz_member_refuses_the_open_first() {
+        assert_eq!(
+            refusal_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                r#"{ wz: { policies: { "key-set": "ajar" } } }"#
+            ),
+            OpenRefusal::Policies
+        );
+        let nothing_to_dial = r#"{ scouting: { multicast: { enabled: false } } }"#;
+        assert_eq!(
+            refusal_of(WhatAmI::Client, &[], &[], nothing_to_dial),
+            OpenRefusal::NothingToDial
+        );
+        assert_eq!(
+            refusal_of(
+                WhatAmI::Client,
+                &[],
+                &[],
+                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: {} } }"#
+            ),
+            OpenRefusal::Policies
+        );
+        assert_eq!(OpenRefusal::Policies.key(), "wz/profile, wz/policies");
     }
 
     /// A peer is a forwarding node when it accepts sessions and asks nothing the node does not
