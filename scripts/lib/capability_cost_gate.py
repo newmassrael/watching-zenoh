@@ -1410,15 +1410,24 @@ def refused_switches(asked: dict[str, int], header: str) -> list[str]:
     return sorted(s for s, v in asked.items() if (s in on) != bool(v))
 
 
-def pico_reference_build(asked: dict[str, int]) -> Reference:
+def reference_key(pin: str, toolchain: str, flags: list[str]) -> str:
+    """The directory name of the reference build of `flags` at `pin` with `toolchain`: one per
+    triple, so a run that asks for the same build again reads it instead of building it, and a
+    switch, the pin or the compiler that moves gets a build of its own."""
+    return hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
+
+
+def pico_reference_tree(asked: dict[str, int]) -> tuple[pathlib.Path, str, str]:
     """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
-    writes a header into its source tree, which must not dirty the submodule), and measure it."""
+    writes a header into its source tree, which must not dirty the submodule), unless that build
+    is there already. Returns its directory (`src` the export, `build` the CMake tree), the full
+    pin and the toolchain. The host performance matrix (`scripts/host-bench/perf_matrix.py`)
+    links this same build, so the library it times is the one whose size this gate prints."""
     pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
                          text=True, check=True).stdout.strip()
     toolchain = f"{first_line(['cc', '--version'])}; {first_line(['cmake', '--version'])}"
     flags = [f"-D{s}={v}" for s, v in sorted(asked.items())]
-    key = hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
-    work = PICO_BUILDS / key
+    work = PICO_BUILDS / reference_key(pin, toolchain, flags)
     lib = work / "build" / "lib" / "libzenohpico.so"
     if not lib.exists():
         archive = subprocess.run(["git", "-C", str(PICO_SOURCE), "archive", "--format=tar", "HEAD"],
@@ -1429,6 +1438,13 @@ def pico_reference_build(asked: dict[str, int]) -> Reference:
                    "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
                    "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags])
         run_quiet(["cmake", "--build", str(work / "build"), "--parallel", str(os.cpu_count() or 1)])
+    return work, pin, toolchain
+
+
+def pico_reference_build(asked: dict[str, int]) -> Reference:
+    """zenoh-pico built with `asked` set ([`pico_reference_tree`]), measured."""
+    work, pin, toolchain = pico_reference_tree(asked)
+    lib = work / "build" / "lib" / "libzenohpico.so"
     header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
@@ -1559,6 +1575,15 @@ def cmd_selftest() -> int:
            refused_switches(asked, "#define Z_FEATURE_MATCHING 0\n#define Z_FEATURE_INTEREST 0\n"
                                    "#define Z_FEATURE_QUERY 1\n")
            == ["Z_FEATURE_MATCHING", "Z_FEATURE_QUERY"])
+    # A reference build is found again by its key, and a key that ignored one of its three inputs
+    # would hand a run the build of another switch set, pin or compiler.
+    flags = ["-DZ_FEATURE_MATCHING=1", "-DZ_FEATURE_QUERY=0"]
+    expect("the same build is the same key, and a switch, the pin or the toolchain moves it",
+           reference_key("pin", "cc", flags) == reference_key("pin", "cc", list(flags))
+           and len({reference_key("pin", "cc", flags),
+                    reference_key("pin", "cc", ["-DZ_FEATURE_MATCHING=0", "-DZ_FEATURE_QUERY=0"]),
+                    reference_key("other", "cc", flags),
+                    reference_key("pin", "other", flags)}) == 4)
     expect("a case's features are its package's as cargo resolves them",
            {"serial-drive-own-thread", "rx-busy-poll"}
            <= case_features(next(c for c in CASES if c.id == "pico-client"))
