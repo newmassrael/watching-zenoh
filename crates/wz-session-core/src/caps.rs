@@ -505,6 +505,17 @@ pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = generated::DECLARATION_SYNC
 /// and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTERVAL_MS;
 
+/// How long, in milliseconds, a paced declaration replay waits before it tries a turn the link
+/// refused again, its own wait and not [`DECLARATION_SYNC_INTERVAL_MS`]
+/// ([`crate::replay_pacing::ReplayPacing::after_refusal`]). `0` tries none again: the refusal
+/// ends the replay, as it did before this limit. A time and not a table size.
+pub const DECLARATION_SYNC_RETRY_INTERVAL_MS: usize = generated::DECLARATION_SYNC_RETRY_INTERVAL_MS;
+
+/// How long, in milliseconds, a paced replay that retries refused turns goes on with no
+/// declaration sent before it gives up and the link ends
+/// ([`crate::replay_pacing::ReplayPacing::after_refusal`]). `0` gives up only when the link does.
+pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: usize = generated::DECLARATION_SYNC_TX_NO_PROGRESS_MS;
+
 /// How long, in milliseconds, a session waits for the next of its peer's initial declarations
 /// before it takes the sync as cut short, when `reliable-gap-reconnect` is not `off`
 /// ([`crate::declaration_sync::stall_deadline`]). `0` keeps no watch, as upstream keeps none. A

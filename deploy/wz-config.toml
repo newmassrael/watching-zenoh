@@ -2671,6 +2671,42 @@ upstream keeps none. Only the tokio engine reads it, since only it notes the
 end of the peer's declarations.
 '''
 
+[[limit]]
+id = "DECLARATION_SYNC_RETRY_INTERVAL_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
+help = '''
+How long, in milliseconds, a paced declaration replay waits before it tries
+again a turn the link did not take for want of room, when the
+declaration-sync-pacing policy is on. The wait is its own and not
+DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
+link refused. 0 tries nothing again: a refused turn ends the replay and the
+link, and a reconnecting session replays again on the next one, as before this
+limit. Only the tokio engine reads it.
+'''
+
+[[limit]]
+id = "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
+help = '''
+How long, in milliseconds, a paced declaration replay that retries refused
+turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
+sent before it gives up, which ends the link as a refused turn does without
+retries. Each declaration sent starts the stretch again. 0 gives up only when
+the link itself ends. Only the tokio engine reads it.
+'''
+
 # The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
 # pico ABI states them. Each defaults to pico's own default, so the drop-in's default build states
 # what pico's does; a pico built with other numbers is matched by stating them here.

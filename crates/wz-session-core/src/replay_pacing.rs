@@ -16,17 +16,64 @@
 pub struct ReplayPacing {
     burst: usize,
     interval_ms: u64,
+    retry_interval_ms: u64,
+    no_progress_ms: u64,
+}
+
+/// What a paced replay does after the link refused a turn it had room to try again
+/// ([`ReplayPacing::after_refusal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalStep {
+    /// Try the refused turn again this many milliseconds from now, from the declaration the link
+    /// refused.
+    RetryIn(u64),
+    /// Give the replay up: the refusal ends the replay and, with it, the link, and a reconnecting
+    /// session begins the replay again on the next one.
+    EndsLink,
 }
 
 impl ReplayPacing {
     /// A pace of `burst` declarations a turn and `interval_ms` between turns. Both must be at least
     /// 1: a turn that sends nothing would never finish, and no wait would run the turns together.
+    /// A refused turn ends the replay ([`Self::with_refusal`] states otherwise).
     pub const fn new(burst: usize, interval_ms: u64) -> Option<Self> {
         if burst == 0 || interval_ms == 0 {
             None
         } else {
-            Some(Self { burst, interval_ms })
+            Some(Self {
+                burst,
+                interval_ms,
+                retry_interval_ms: 0,
+                no_progress_ms: 0,
+            })
         }
+    }
+
+    /// This pace, with a turn the link refused for want of room tried again after
+    /// `retry_interval_ms` (`DECLARATION_SYNC_RETRY_INTERVAL_MS`), its own wait and not the turn
+    /// interval, and the replay given up when no declaration has gone out for `no_progress_ms`
+    /// (`DECLARATION_SYNC_TX_NO_PROGRESS_MS`). A retry interval of `0` tries nothing again, as
+    /// upstream's one call does not; a no-progress bound of `0` gives up only when the link does.
+    pub const fn with_refusal(self, retry_interval_ms: u64, no_progress_ms: u64) -> Self {
+        Self {
+            retry_interval_ms,
+            no_progress_ms,
+            ..self
+        }
+    }
+
+    /// What follows a turn the link refused for want of room, `last_progress_ms` being when the
+    /// replay last sent a declaration (or began) and `now_ms` now, on one clock.
+    pub const fn after_refusal(&self, last_progress_ms: u64, now_ms: u64) -> RefusalStep {
+        if self.retry_interval_ms == 0 {
+            return RefusalStep::EndsLink;
+        }
+        if self.no_progress_ms != 0
+            && now_ms.saturating_sub(last_progress_ms) >= self.no_progress_ms
+        {
+            return RefusalStep::EndsLink;
+        }
+        RefusalStep::RetryIn(self.retry_interval_ms)
     }
 
     /// The pace `policy` states, the snapshot of the session that replays: `None`, upstream's one
@@ -39,14 +86,20 @@ impl ReplayPacing {
                 && crate::caps::DECLARATION_SYNC_INTERVAL_MS >= 1,
             "DECLARATION_SYNC_BURST_MESSAGES and DECLARATION_SYNC_INTERVAL_MS must be at least 1"
         );
-        if policy.declaration_sync_pacing() {
-            Self::new(
-                crate::caps::DECLARATION_SYNC_BURST_MESSAGES,
-                crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
-            )
-        } else {
-            None
+        if !policy.declaration_sync_pacing() {
+            return None;
         }
+        // `?` and `Option::map` are not `const`, so the two steps are written out.
+        let Some(pace) = Self::new(
+            crate::caps::DECLARATION_SYNC_BURST_MESSAGES,
+            crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
+        ) else {
+            return None;
+        };
+        Some(pace.with_refusal(
+            crate::caps::DECLARATION_SYNC_RETRY_INTERVAL_MS as u64,
+            crate::caps::DECLARATION_SYNC_TX_NO_PROGRESS_MS as u64,
+        ))
     }
 
     /// Declarations sent in one turn.
@@ -57,6 +110,16 @@ impl ReplayPacing {
     /// Milliseconds between two turns.
     pub const fn interval_ms(&self) -> u64 {
         self.interval_ms
+    }
+
+    /// Milliseconds before a turn the link refused is tried again; `0` tries none again.
+    pub const fn retry_interval_ms(&self) -> u64 {
+        self.retry_interval_ms
+    }
+
+    /// Milliseconds with no declaration out after which a retrying replay gives up; `0` never.
+    pub const fn no_progress_ms(&self) -> u64 {
+        self.no_progress_ms
     }
 }
 
@@ -111,7 +174,34 @@ mod tests {
                 crate::caps::DECLARATION_SYNC_BURST_MESSAGES,
                 crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64
             )
+            .map(|pace| pace.with_refusal(
+                crate::caps::DECLARATION_SYNC_RETRY_INTERVAL_MS as u64,
+                crate::caps::DECLARATION_SYNC_TX_NO_PROGRESS_MS as u64
+            ))
         );
         assert_eq!(ReplayPacing::of_policy(&off), None);
+    }
+
+    /// With no retry interval a refused turn ends the replay, as it always did; with one, the
+    /// turn is tried again after its own wait and not the turn interval, until no declaration
+    /// has gone out for the no-progress bound, and a bound of 0 never gives up.
+    #[test]
+    fn a_refused_turn_is_retried_at_its_own_interval_until_no_progress_ends_the_link() {
+        let pace = ReplayPacing::new(8, 10).expect("a pace");
+        assert_eq!(pace.after_refusal(0, 1_000_000), RefusalStep::EndsLink);
+
+        let retrying = pace.with_refusal(3, 50);
+        assert_eq!(retrying.interval_ms(), 10, "the turn interval is untouched");
+        assert_eq!(retrying.after_refusal(100, 100), RefusalStep::RetryIn(3));
+        assert_eq!(retrying.after_refusal(100, 149), RefusalStep::RetryIn(3));
+        assert_eq!(retrying.after_refusal(100, 150), RefusalStep::EndsLink);
+        assert_eq!(
+            retrying.after_refusal(200, 100),
+            RefusalStep::RetryIn(3),
+            "a clock read before the progress stamp is no stall"
+        );
+
+        let patient = pace.with_refusal(3, 0);
+        assert_eq!(patient.after_refusal(0, u64::MAX), RefusalStep::RetryIn(3));
     }
 }
