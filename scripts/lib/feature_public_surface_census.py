@@ -401,8 +401,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "gated methods are exercised by that arm's legs against upstream's own "
         "subscriber; `resource-snapshot` "
         "gates the accessor `SharedSession::message_reading`, the node's received-message "
-        "count, which the pico crate's `snapshot_doors` test reads through the doors",
-        frozenset({"resource-snapshot", "transport-shm"}),
+        "count, which the pico crate's `snapshot_doors` test reads through the doors; "
+        "`shared-key-ids` gates `faces::KeyIdPlan`, the key ids and each face's key-wire form "
+        "the registry hands its face sessions, and `SharedSession::names_keys_by_link`, which "
+        "the pico crate's `key_ids_tokio` test drives through the doors",
+        frozenset({"resource-snapshot", "shared-key-ids", "transport-shm"}),
     ),
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
@@ -414,8 +417,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "(`tls::HostTls`), and all four are run by this crate's own tests: the second by "
         "`scout_datagram`'s unit tests, the others over loopback sockets "
         "(`tests/tls_provider.rs` for the last, and again through the pico ABI's "
-        "`tls_coop_roundtrip`); `shared-key-ids` gates `OpenKeyIds::shared`, the dictionary "
-        "an open hands the session, which `tests/shared_key_ids.rs` runs over loopback",
+        "`tls_coop_roundtrip`); `shared-key-ids` gates `OpenKeyIds::shared` and "
+        "`OpenKeyIds::new`, the dictionary and the endpoints' key-wire forms an open hands the "
+        "session, which `tests/shared_key_ids.rs` runs over loopback",
         frozenset({"scout", "scout-datagram", "listen", "tls-mbedtls", "shared-key-ids"}),
     ),
     "wz-tls-mbedtls": (
@@ -433,8 +437,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "program names. Its four features gate `observation`, the one behaviour of the node's "
         "clock registry, event log, supervisor and resource sampler that the doors of both C ABIs "
         "call; each function in it is run by this crate's own tests and again through each ABI's "
-        "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests)",
-        frozenset({"clock-source", "event-ring", "supervision", "resource-snapshot"}),
+        "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests). "
+        "`shared-key-ids` gates `wire_on_link`, a key as one link's key-wire form names it, which "
+        "both engines call for each link and the cooperative engine's `shared_key_ids` tests run",
+        frozenset(
+            {"clock-source", "event-ring", "supervision", "resource-snapshot", "shared-key-ids"}
+        ),
     ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
@@ -510,8 +518,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`, the event struct, the owned
         # watch and the constants they take, declared in `wz_ext.h`, off by default as the
         # observation plane's doors are.
-        # `shared-key-ids` gates the door `wz_ext_config_key_ids` of `pub mod key_ids`, declared
-        # in `wz_ext.h`; off by default, as upstream has no such door.
+        # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
+        # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
+        # default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",

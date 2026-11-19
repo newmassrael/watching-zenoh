@@ -1306,15 +1306,15 @@ id = "shared-key-ids"
 kconfig = "WZ_CAP_SHARED_KEY_IDS"
 # Off by default: a node that names a key by an id it never declared cannot be read by a stock
 # peer, which has no such dictionary, so a build has the dictionary and the forms of the
-# key-wire-form policy that use it only when a deployment asks for them. The pico ABI's door is
-# wz_ext_* and part of its unstable surface, as its other wz-own doors are; the cooperative engine
-# holds the dictionary, and a session opened on the tokio engine refuses one by name.
+# key-wire-form policy that use it only when a deployment asks for them. The pico ABI's doors are
+# wz_ext_* and part of its unstable surface, as its other wz-own doors are; both engines hold the
+# dictionary and name each link's keys in that link's form.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open (wz_ext_config_key_ids, a wz-own door), so a put, a query or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
+help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (wz_ext_config_key_ids, wz_ext_config_key_wire_form_for, wz-own doors), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
 
 [[capability]]
 id = "rx-callback-offload"
@@ -3416,14 +3416,17 @@ it, the id of the longest entry that ends at one of its slashes followed by
 the rest of the key, or the whole key, whichever takes the fewest bytes, with
 no declaration first; a key with a wildcard goes by an id only when the
 dictionary holds that exact pattern, a peer that announced itself a router is
-sent the declared form, and a reply names its key whole. A peer that does not hold the same
-dictionary cannot read what `shared` sends, so both ends of the link must
-hold it. Every node that holds the dictionary reads an id only the dictionary
-names, whatever its own value. Only the cooperative engine reads this policy,
-and it applies the value of the session to every link of it. A session
-opened with `shared` and no dictionary is refused, and so is one whose value is
-not `declared` in a build without the capability or, on the zenoh-pico
-interface, on the tokio engine.
+sent the declared form, and a reply on the key of a query that came by an id
+of the dictionary names it by that id and rest, its mapping bit turned. A peer
+that does not hold the same dictionary cannot read what `shared` sends, so both
+ends of the link must hold it. Every node that holds the dictionary reads an id
+only the dictionary names, whatever its own value. The value is the session's,
+and an endpoint the configuration dials or listens on may be stated a value of
+its own (wz_ext_config_key_wire_form_for), which every link to or from that
+endpoint takes. A session opened with `shared`, for itself or an endpoint, and
+no dictionary is refused, and so is one whose value is not `declared` in a build
+without the capability. Interests and liveliness interests name their keys as
+under `declared`.
 '''
 
 # A profile is a named set of policy values a run-time document starts from: the document names it

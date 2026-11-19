@@ -636,6 +636,9 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "router-multicast-faces",
                 "routing-interceptor-hotreload",
                 "routing-token-tables",
+                # `shared-key-ids` gates one method of this package, `Session::install_link_keys`,
+                # which hands a face session the dictionary and its link's key-wire form.
+                "shared-key-ids",
             )
         },
         # The THIRD reason, and the axis found it by building the probe and
