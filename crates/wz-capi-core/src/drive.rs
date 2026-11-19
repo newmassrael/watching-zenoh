@@ -4372,8 +4372,16 @@ pub struct OpenStance {
 type AppSlot = Option<Arc<wz_runtime_tokio::app_link::AppTransport>>;
 /// See the alias of the same name: a build without the feature carries no transport.
 #[cfg(not(feature = "app-transport"))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct AppSlot;
+
+/// The slot of a role that carries no program transport, in either build: the one spelling a
+/// role written for both uses, so neither build constructs the other's shape.
+#[cfg(feature = "app-transport")]
+const NO_APP: AppSlot = None;
+/// See the constant of the same name.
+#[cfg(not(feature = "app-transport"))]
+const NO_APP: AppSlot = AppSlot;
 
 /// `cfg` dialling over the program's transport when the session has one.
 #[cfg(feature = "app-transport")]
@@ -5372,7 +5380,7 @@ mod tests {
                 offer: SessionOffer::universal(),
                 clock: TokioTime::new(),
                 tls: CapiTlsConfig::default(),
-                app: AppSlot::default(),
+                app: NO_APP,
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
                 namespace: None,
@@ -5513,7 +5521,7 @@ mod tests {
                 #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
                 #[cfg(feature = "scout")]
-                app: AppSlot::default(),
+                app: NO_APP,
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
                 namespace: None,
@@ -5595,7 +5603,7 @@ mod tests {
                 #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
                 #[cfg(feature = "scout")]
-                app: AppSlot::default(),
+                app: NO_APP,
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
                 namespace: None,

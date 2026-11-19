@@ -876,7 +876,7 @@ async fn run_router(
         listen_phase,
         &tls,
         // `refused_ask` has refused a node asked to bind over the program's transport.
-        &AppSlot::default(),
+        &NO_APP,
         zid,
         link_conf,
         offer,
