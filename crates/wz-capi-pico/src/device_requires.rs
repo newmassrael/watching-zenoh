@@ -77,6 +77,12 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
             "the open refuses this config: its mode is neither client nor peer",
         )
     })?;
+    crate::session::resolve_policy(&cfg.policies).map_err(|code| {
+        (
+            code,
+            "the open refuses this config: the build refuses a policy it states",
+        )
+    })?;
     #[cfg(not(feature = "peer"))]
     if listen.is_some() || dial_whatami != WhatAmI::Client {
         return Err((
@@ -167,6 +173,16 @@ mod tests {
             got.contains("\"name-resolution\", \"sockets-tcp\""),
             "{got}"
         );
+    }
+
+    /// A config whose policies the build refuses is refused with the open's code and reason.
+    #[test]
+    fn a_config_whose_policies_the_open_refuses_is_refused() {
+        let mut cfg = config(&[(Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447")]);
+        cfg.policies = crate::config_policy::PolicyStatements::unchecked("no-such-policy", "on");
+        let (code, reason) = requirement_of(&cfg).unwrap_err();
+        assert_eq!(code, crate::result::Z_ERR_CONFIG_INVALID_VALUE);
+        assert!(reason.contains("policy"), "{reason}");
     }
 
     #[test]
