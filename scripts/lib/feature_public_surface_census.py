@@ -549,11 +549,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
         # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
+        # `config-document` gates the door `wz_ext_config_document` of `pub mod config_policy`
+        # (its two siblings are in every build), declared in `wz_ext.h`; off by default, as
+        # zenoh-pico reads no document and the door links a JSON5 reader.
         frozenset(
             {
                 "admin-space",
                 "app-transport",
                 "clock-source",
+                "config-document",
                 "declarations-synced-event",
                 "e2e-receiver",
                 "e2e-sender",
