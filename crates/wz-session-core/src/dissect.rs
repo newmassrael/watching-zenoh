@@ -4520,27 +4520,32 @@ mod message_context_tests {
 /// place in its schema with that key, and one key with two meanings in one
 /// document is a lookup that finds the wrong object.
 pub fn to_json(field: &Field) -> String {
-    let paths = crate::dissect_schema::node_paths(field);
-    let mut out = String::new();
-    push_json(field, &paths, &mut out);
-    out
+    let mut out = crate::doc_out::JsonOut::default();
+    write_tree(field, &mut out);
+    crate::doc_out::DocOut::finish(out)
 }
 
-fn push_json(field: &Field, paths: &crate::dissect_schema::NodePaths, out: &mut String) {
-    use core::fmt::Write as _;
-    out.push_str("{\"name\":");
-    crate::json::escape_into(&field.name, out);
-    let _ = write!(
-        out,
-        ",\"start\":{},\"end\":{},",
-        field.span.start, field.span.end
-    );
-    out.push_str("\"selector_path\":");
-    match paths.of(field) {
-        Some(path) => crate::json::escape_into(path, out),
-        None => out.push_str("null"),
-    }
-    out.push(',');
+/// [`to_json`]'s tree, written through any [`crate::doc_out::DocOut`]: the one
+/// writer of a field tree, in whichever encoding the document it stands in is.
+pub fn write_tree<W: crate::doc_out::DocOut>(field: &Field, out: &mut W) {
+    let paths = crate::dissect_schema::node_paths(field);
+    push_tree(field, &paths, out);
+}
+
+fn push_tree<W: crate::doc_out::DocOut>(
+    field: &Field,
+    paths: &crate::dissect_schema::NodePaths,
+    out: &mut W,
+) {
+    out.open_map();
+    out.key("name");
+    out.text(&field.name);
+    out.key("start");
+    out.uint(field.span.start as u64);
+    out.key("end");
+    out.uint(field.span.end as u64);
+    out.key("selector_path");
+    out.opt_text(paths.of(field));
     // R2182 (open-debt item 555) — THE WORD COMES FROM THE VOCABULARY WALK,
     // written once here rather than once per arm. Eight arms each spelling
     // their own literal is eight places for the emitted word to differ from the
@@ -4553,9 +4558,8 @@ fn push_json(field: &Field, paths: &crate::dissect_schema::NodePaths, out: &mut 
     // map is pinned by `the_field_object_carries_one_key_per_kind_word`; see
     // its doc for why this round declares the WORDS to a consumer and files the
     // per-word key map as its own item rather than declaring half an axis.
-    out.push_str("\"kind\":\"");
-    out.push_str(field.value.kind_word());
-    out.push('"');
+    out.key("kind");
+    out.text(field.value.kind_word());
     match &field.value {
         // The two integer arms write through `json::u64_into`: a number up to
         // 2^53 - 1, the same digits in a string beyond it. A `Uint` is a decoded
@@ -4565,22 +4569,20 @@ fn push_json(field: &Field, paths: &crate::dissect_schema::NodePaths, out: &mut 
         // the line, but it takes the same door so that the rule has no exception
         // for a reader to learn.
         FieldValue::Bits(v) => {
-            out.push_str(",\"value\":");
-            crate::json::u64_into(*v, out);
+            out.key("value");
+            out.uint_exact(u64::from(*v));
         }
         FieldValue::Flag(b) => {
-            let _ = write!(out, ",\"value\":{b}");
+            out.key("value");
+            out.bool(*b);
         }
         FieldValue::Uint(v) => {
-            out.push_str(",\"value\":");
-            crate::json::u64_into(*v, out);
+            out.key("value");
+            out.uint_exact(*v);
         }
         FieldValue::Bytes(b) => {
-            out.push_str(",\"value\":\"");
-            for byte in b {
-                let _ = write!(out, "{byte:02x}");
-            }
-            out.push('"');
+            out.key("value");
+            out.hex(b);
         }
         // A zid's `value` is the identity text, zenoh's spelling, and
         // not the hex of its span: the span still names the raw wire bytes, and
@@ -4588,31 +4590,28 @@ fn push_json(field: &Field, paths: &crate::dissect_schema::NodePaths, out: &mut 
         // `start..end`. Written through the one recipe, so this document and
         // every other place that names a node cannot spell a zid two ways.
         FieldValue::Zid(z) => {
-            out.push_str(",\"value\":\"");
-            out.push_str(&crate::zid_hex::zid_to_zenoh_hex(z));
-            out.push('"');
+            out.key("value");
+            out.text(&crate::zid_hex::zid_to_zenoh_hex(z));
         }
         FieldValue::Text(s) => {
-            out.push_str(",\"value\":");
-            crate::json::escape_into(s, out);
+            out.key("value");
+            out.text(s);
         }
         FieldValue::Opaque => {}
         FieldValue::Label(s) => {
-            out.push_str(",\"value\":");
-            crate::json::escape_into(s, out);
+            out.key("value");
+            out.text(s);
         }
         FieldValue::Nested(children) => {
-            out.push_str(",\"fields\":[");
-            for (i, child) in children.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                push_json(child, paths, out);
+            out.key("fields");
+            out.open_array();
+            for child in children {
+                push_tree(child, paths, out);
             }
-            out.push(']');
+            out.close_array();
         }
     }
-    out.push('}');
+    out.close_map();
 }
 
 #[cfg(test)]

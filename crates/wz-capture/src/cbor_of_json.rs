@@ -76,20 +76,15 @@ pub fn cbor_of_json(text: &str) -> Result<Vec<u8>, Refused> {
     Ok(reader.out)
 }
 
-/// CBOR major types, shifted into the head byte's top three bits.
-const MAJOR_UNSIGNED: u8 = 0 << 5;
-const MAJOR_NEGATIVE: u8 = 1 << 5;
-const MAJOR_TEXT: u8 = 3 << 5;
-const MAJOR_ARRAY: u8 = 4 << 5;
-const MAJOR_MAP: u8 = 5 << 5;
-const MAJOR_SIMPLE: u8 = 7 << 5;
-
-const SIMPLE_FALSE: u8 = MAJOR_SIMPLE | 20;
-const SIMPLE_TRUE: u8 = MAJOR_SIMPLE | 21;
-const SIMPLE_NULL: u8 = MAJOR_SIMPLE | 22;
-const FLOAT_HALF: u8 = MAJOR_SIMPLE | 25;
-const FLOAT_SINGLE: u8 = MAJOR_SIMPLE | 26;
-const FLOAT_DOUBLE: u8 = MAJOR_SIMPLE | 27;
+// The encoding primitives are `wz_session_core::doc_out::cbor`'s, which the
+// document writers' own CBOR encoding (`DocOut` / `CborOut`) writes through: one
+// spelling of a head, an integer and a float for both doors.
+use wz_session_core::doc_out::cbor::{
+    close_head, head, open_head, MAJOR_ARRAY, MAJOR_MAP, MAJOR_NEGATIVE, MAJOR_SIMPLE, MAJOR_TEXT,
+    MAJOR_UNSIGNED, SIMPLE_FALSE, SIMPLE_NULL, SIMPLE_TRUE,
+};
+#[cfg(test)]
+use wz_session_core::doc_out::cbor::{float, FLOAT_DOUBLE, FLOAT_HALF, FLOAT_SINGLE};
 
 /// The one pass over the text, and what it has written.
 struct Reader<'t> {
@@ -201,25 +196,16 @@ impl Reader<'_> {
         Ok(())
     }
 
-    /// Opens a container: its head's first byte, holding no count yet. Returns
-    /// where that byte is.
+    /// Opens a container ([`open_head`]): its head's first byte, holding no
+    /// count yet. Returns where that byte is.
     fn open(&mut self, major: u8) -> usize {
-        let place = self.out.len();
-        self.out.push(major);
-        place
+        open_head(major, &mut self.out)
     }
 
-    /// Completes the head opened at `place` with the container's count. Under 24
-    /// the count fits the byte already there; past it, the argument bytes go in
-    /// after that byte and the members written since move along by their width.
+    /// Completes the head opened at `place` with the container's count
+    /// ([`close_head`]).
     fn close(&mut self, place: usize, major: u8, members: u64) {
-        let mut wide = [0u8; 9];
-        let len = head_into(major, members, &mut wide);
-        self.out[place] = wide[0];
-        if len > 1 {
-            self.out
-                .splice(place + 1..place + 1, wide[1..len].iter().copied());
-        }
+        close_head(place, major, members, &mut self.out);
     }
 
     /// Where the run of plain string bytes from `from` ends: the first quote,
@@ -351,9 +337,7 @@ impl Reader<'_> {
             Some(b'1'..=b'9') => self.digits(),
             _ => return self.refuse("a number has no digits"),
         }
-        let mut integral = true;
         if self.peek() == Some(b'.') {
-            integral = false;
             self.at += 1;
             if !matches!(self.peek(), Some(b'0'..=b'9')) {
                 return self.refuse("a fraction has no digits");
@@ -361,7 +345,6 @@ impl Reader<'_> {
             self.digits();
         }
         if let Some(b'e' | b'E') = self.peek() {
-            integral = false;
             self.at += 1;
             if let Some(b'+' | b'-') = self.peek() {
                 self.at += 1;
@@ -371,105 +354,23 @@ impl Reader<'_> {
             }
             self.digits();
         }
-        let out = &mut self.out;
-        // The text is ASCII digits and signs by construction above.
+        // The text is ASCII digits and signs by construction above, so it is a
+        // number as RFC 8259 spells one: the shared encoding writes it, the one
+        // the document writers' CBOR encoding writes a number through.
         let spelled = core::str::from_utf8(&self.text[start..self.at]).unwrap_or("");
-        let digits = spelled.strip_prefix('-').unwrap_or(spelled);
-        if integral {
-            // Nineteen digits always fit a u64 (10^19 - 1 < 2^64), which is every
-            // integer the field document writes as a number; longer ones parse.
-            let magnitude = if digits.len() <= 19 {
-                Some(
-                    digits
-                        .bytes()
-                        .fold(0u64, |n, d| n * 10 + u64::from(d - b'0')),
-                )
-            } else {
-                digits.parse::<u64>().ok()
-            };
-            if let Some(magnitude) = magnitude {
-                match (negative, magnitude) {
-                    (false, n) => head(MAJOR_UNSIGNED, n, out),
-                    // `-0` is the integer 0; CBOR's negative head holds -1 - n.
-                    (true, 0) => head(MAJOR_UNSIGNED, 0, out),
-                    (true, n) => head(MAJOR_NEGATIVE, n - 1, out),
-                }
-                return Ok(());
-            }
-            // -2^64 is the one magnitude past u64 that a negative head holds.
-            if negative && digits == "18446744073709551616" {
-                head(MAJOR_NEGATIVE, u64::MAX, out);
-                return Ok(());
-            }
-        }
-        match spelled.parse::<f64>() {
-            Ok(v) if v.is_finite() => {
-                float(v, out);
-                Ok(())
-            }
-            _ => Err(Refused {
+        if wz_session_core::doc_out::cbor::number(spelled, &mut self.out) {
+            Ok(())
+        } else {
+            Err(Refused {
                 at: start,
                 why: "a number that does not fit a double",
-            }),
+            })
         }
     }
 
     fn digits(&mut self) {
         while let Some(b'0'..=b'9') = self.peek() {
             self.at += 1;
-        }
-    }
-}
-
-/// A head: `major` with argument `n`, in the fewest bytes (RFC 8949 §3).
-fn head(major: u8, n: u64, out: &mut Vec<u8>) {
-    let mut wide = [0u8; 9];
-    let len = head_into(major, n, &mut wide);
-    out.extend_from_slice(&wide[..len]);
-}
-
-/// The head of `major` with argument `n`, into `wide`; returns how many of its
-/// bytes it took.
-fn head_into(major: u8, n: u64, wide: &mut [u8; 9]) -> usize {
-    if n < 24 {
-        wide[0] = major | n as u8;
-        1
-    } else if let Ok(n) = u8::try_from(n) {
-        wide[0] = major | 24;
-        wide[1] = n;
-        2
-    } else if let Ok(n) = u16::try_from(n) {
-        wide[0] = major | 25;
-        wide[1..3].copy_from_slice(&n.to_be_bytes());
-        3
-    } else if let Ok(n) = u32::try_from(n) {
-        wide[0] = major | 26;
-        wide[1..5].copy_from_slice(&n.to_be_bytes());
-        5
-    } else {
-        wide[0] = major | 27;
-        wide[1..9].copy_from_slice(&n.to_be_bytes());
-        9
-    }
-}
-
-/// A finite float in the shortest of half, single and double that holds it
-/// exactly (RFC 8949 §4.1).
-fn float(v: f64, out: &mut Vec<u8>) {
-    let single = v as f32;
-    if f64::from(single) != v {
-        out.push(FLOAT_DOUBLE);
-        out.extend_from_slice(&v.to_bits().to_be_bytes());
-        return;
-    }
-    match half_of(single) {
-        Some(half) => {
-            out.push(FLOAT_HALF);
-            out.extend_from_slice(&half.to_be_bytes());
-        }
-        None => {
-            out.push(FLOAT_SINGLE);
-            out.extend_from_slice(&single.to_bits().to_be_bytes());
         }
     }
 }
@@ -641,41 +542,6 @@ fn value_of_half(bits: u16) -> f64 {
         _ => f32::from_bits(sign | ((exponent + 127 - 15) << 23) | (mantissa << 13)),
     };
     f64::from(single)
-}
-
-/// The IEEE 754 half that holds `v` exactly, if one does. `v` is finite.
-fn half_of(v: f32) -> Option<u16> {
-    let bits = v.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exponent = ((bits >> 23) & 0xFF) as i32;
-    let mantissa = bits & 0x7F_FFFF;
-    if exponent == 0 && mantissa == 0 {
-        return Some(sign);
-    }
-    if exponent == 0 {
-        // A single's subnormal is below every half.
-        return None;
-    }
-    let unbiased = exponent - 127;
-    if (-14..=15).contains(&unbiased) {
-        // A normal half keeps ten mantissa bits.
-        if mantissa & 0x1FFF != 0 {
-            return None;
-        }
-        return Some(sign | (((unbiased + 15) as u16) << 10) | (mantissa >> 13) as u16);
-    }
-    if (-24..-14).contains(&unbiased) {
-        // A subnormal half is m * 2^-24 with m below 1024. The single is
-        // whole * 2^(unbiased - 23), so m = whole * 2^(unbiased + 1): a shift
-        // right by -1 - unbiased, from 14 to 23, that must drop no set bit.
-        let whole = mantissa | 0x80_0000;
-        let shift = (-1 - unbiased) as u32;
-        if whole & ((1 << shift) - 1) != 0 {
-            return None;
-        }
-        return Some(sign | (whole >> shift) as u16);
-    }
-    None
 }
 
 #[cfg(test)]

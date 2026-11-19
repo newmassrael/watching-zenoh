@@ -922,6 +922,13 @@ pub mod zid_hex;
 #[cfg(feature = "storage-profile")]
 pub mod json;
 
+/// One document, two encodings: the structured writer ([`doc_out::DocOut`]) a
+/// dissection document is written through, with a JSON and a CBOR encoding
+/// behind it that are the same document (RFC 8949 §6.2). With [`dissect`],
+/// whose documents are its writers.
+#[cfg(feature = "dissect")]
+pub mod doc_out;
+
 /// R311y842 — the READ direction of [`json`]: a hand-rolled JSON5 reader, so
 /// the stock zenoh config an operator already holds is an INPUT to wz rather
 /// than only ever an output of it. `alloc`-only, same as its emit twin.
