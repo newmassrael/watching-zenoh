@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  What the chunk k[s..e] is to the sequence walks: 1 for `*`, 2 for `**`, 3 for
+  a VERBATIM chunk (it begins with `@`), and 0 for any other chunk, the empty
+  one included. Whether `*` and `**` are wildcards at all is the caller's flag;
+  this names only the spelling.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_chunk_kind"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="k" type="bytes"/>
+    <sce:param name="s" type="uint32"/>
+    <sce:param name="e" type="uint32"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="e &gt; len(k)">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="s &gt;= e">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="k[s] === 64">
+      <sce:return expr="3"/>
+    </sce:if>
+    <sce:if cond="k[s] !== 42">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:var name="s1" type="uint32" init="s + 1"/>
+    <!-- s &lt; e, so s1 &gt;= e is s1 = e: the chunk is `*`. -->
+    <sce:if cond="s1 &gt;= e">
+      <sce:return expr="1"/>
+    </sce:if>
+    <sce:if cond="k[s1] !== 42">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:var name="s2" type="uint32" init="s1 + 1"/>
+    <!-- s1 &lt; e, so s2 &gt;= e is s2 = e: the chunk is `**`. -->
+    <sce:if cond="s2 &gt;= e">
+      <sce:return expr="2"/>
+    </sce:if>
+    <sce:return expr="0"/>
+  </sce:body>
+</scxml>

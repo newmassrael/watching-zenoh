@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the key a covers every key b covers, both well formed and at least
+  one holding `**`: a dynamic programme over their prefixes. I(i, j) is whether
+  the first i chunks of a cover the first j of b:
+
+  * I(0, 0) holds; an empty prefix of a covers no chunk of b.
+  * The i-th chunk of a is `**`: it covers nothing more, I(i - 1, j), or it
+    covers the j-th chunk of b, unless that chunk is VERBATIM, and stays,
+    I(i, j - 1). A `**` of a covers a `**` of b.
+  * The j-th chunk of b is `**` and the i-th of a is not: no; a chunk that is
+    not `**` does not cover any number of chunks.
+  * Otherwise the chunk of a covers the chunk of b (keyexpr_chunk_includes)
+    and I(i - 1, j - 1).
+
+  `rows_b` says which side the rows run over: false, a row for each chunk of a
+  and a bit for each prefix of b, so b has at most 63 chunks; true, the other
+  way, so a has at most 63. Inclusion is not symmetric, so the two sides cannot
+  be exchanged; the same table is filled in either order, and the caller picks
+  the one whose bit side fits a uint64.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_includes_dp"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_chunk_end.scxml" as="keyexpr_chunk_end"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_kind.scxml" as="keyexpr_chunk_kind"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_includes.scxml" as="keyexpr_chunk_includes"/>
+  <sce:signature>
+    <sce:param name="a" type="bytes"/>
+    <sce:param name="b" type="bytes"/>
+    <sce:param name="rows_b" type="bool"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <!-- r: the side the rows run over; c: the side the bits stand for. -->
+    <sce:var name="rn" type="uint32" init="len(a)"/>
+    <sce:var name="cn" type="uint32" init="len(b)"/>
+    <sce:if cond="rows_b">
+      <sce:assign target="rn" expr="len(b)"/>
+      <sce:assign target="cn" expr="len(a)"/>
+    </sce:if>
+    <!-- one: the bit shifted into place, a uint64 local (see
+         keyexpr_intersects_dp). -->
+    <sce:var name="one" type="uint64" init="1"/>
+    <!-- Row 0. Rows over a: I(0, j) holds for j = 0 alone. Rows over b: the bit
+         of I(i, 0) holds while the first i chunks of a are all `**`. -->
+    <sce:var name="prev" type="uint64" init="1"/>
+    <sce:var name="m" type="uint32" init="0"/>
+    <sce:var name="cs0" type="uint32" init="0"/>
+    <sce:var name="more0" type="bool" init="true"/>
+    <sce:while cond="more0">
+      <sce:var name="ce0" type="uint32" init="0"/>
+      <sce:var name="kind0" type="uint8" init="0"/>
+      <sce:if cond="rows_b">
+        <sce:assign target="ce0" expr="keyexpr_chunk_end(a, cs0)"/>
+        <sce:assign target="kind0" expr="keyexpr_chunk_kind(a, cs0, ce0)"/>
+        <sce:else>
+          <sce:assign target="ce0" expr="keyexpr_chunk_end(b, cs0)"/>
+        </sce:else>
+      </sce:if>
+      <sce:if cond="m &gt;= 63">
+        <sce:return expr="false"/>
+      </sce:if>
+      <sce:assign target="m" expr="m + 1"/>
+      <sce:if cond="rows_b &amp;&amp; kind0 === 2">
+        <sce:var name="below0" type="uint32" init="m - 1"/>
+        <sce:if cond="((prev &gt;&gt; below0) &amp; 1) === 1">
+          <sce:assign target="prev" expr="prev | (one &lt;&lt; m)"/>
+        </sce:if>
+      </sce:if>
+      <sce:if cond="ce0 &lt; cn">
+        <sce:assign target="cs0" expr="ce0 + 1"/>
+        <sce:else>
+          <sce:assign target="more0" expr="false"/>
+        </sce:else>
+      </sce:if>
+    </sce:while>
+    <sce:var name="rs" type="uint32" init="0"/>
+    <sce:var name="rmore" type="bool" init="true"/>
+    <sce:while cond="rmore">
+      <sce:var name="re" type="uint32" init="0"/>
+      <sce:var name="rkind" type="uint8" init="0"/>
+      <sce:if cond="rows_b">
+        <sce:assign target="re" expr="keyexpr_chunk_end(b, rs)"/>
+        <sce:assign target="rkind" expr="keyexpr_chunk_kind(b, rs, re)"/>
+        <sce:else>
+          <sce:assign target="re" expr="keyexpr_chunk_end(a, rs)"/>
+          <sce:assign target="rkind" expr="keyexpr_chunk_kind(a, rs, re)"/>
+        </sce:else>
+      </sce:if>
+      <sce:var name="cur" type="uint64" init="0"/>
+      <!-- The bit of the empty prefix of the bit side. Rows over a: I(i, 0)
+           holds when the i-th chunk of a is `**` and I(i - 1, 0). Rows over b:
+           I(0, j) does not hold for j &gt; 0. -->
+      <sce:if cond="!rows_b &amp;&amp; rkind === 2 &amp;&amp; (prev &amp; 1) === 1">
+        <sce:assign target="cur" expr="1"/>
+      </sce:if>
+      <sce:var name="j" type="uint32" init="0"/>
+      <sce:var name="cs" type="uint32" init="0"/>
+      <sce:var name="cmore" type="bool" init="true"/>
+      <sce:while cond="cmore &amp;&amp; j &lt; 63">
+        <sce:var name="ce" type="uint32" init="0"/>
+        <sce:var name="ckind" type="uint8" init="0"/>
+        <sce:if cond="rows_b">
+          <sce:assign target="ce" expr="keyexpr_chunk_end(a, cs)"/>
+          <sce:assign target="ckind" expr="keyexpr_chunk_kind(a, cs, ce)"/>
+          <sce:else>
+            <sce:assign target="ce" expr="keyexpr_chunk_end(b, cs)"/>
+            <sce:assign target="ckind" expr="keyexpr_chunk_kind(b, cs, ce)"/>
+          </sce:else>
+        </sce:if>
+        <sce:var name="jb" type="uint32" init="j + 1"/>
+        <!-- up: the cell one row above, the same bit; left: the cell to the
+             left in this row; diag: the cell above and to the left. -->
+        <sce:var name="up" type="bool" init="((prev &gt;&gt; jb) &amp; 1) === 1"/>
+        <sce:var name="left" type="bool" init="((cur &gt;&gt; j) &amp; 1) === 1"/>
+        <sce:var name="diag" type="bool" init="((prev &gt;&gt; j) &amp; 1) === 1"/>
+        <!-- akind / bkind: the kinds of this cell's chunk of a and of b. -->
+        <sce:var name="akind" type="uint8" init="rkind"/>
+        <sce:var name="bkind" type="uint8" init="ckind"/>
+        <sce:if cond="rows_b">
+          <sce:assign target="akind" expr="ckind"/>
+          <sce:assign target="bkind" expr="rkind"/>
+        </sce:if>
+        <sce:var name="v" type="bool" init="false"/>
+        <sce:if cond="akind === 2">
+          <!-- a's `**` covers nothing more (the cell where a's prefix is one
+               shorter) or covers b's chunk and stays (the cell where b's prefix
+               is one shorter). -->
+          <sce:if cond="rows_b">
+            <sce:assign target="v" expr="left || (bkind !== 3 &amp;&amp; up)"/>
+            <sce:else>
+              <sce:assign target="v" expr="up || (bkind !== 3 &amp;&amp; left)"/>
+            </sce:else>
+          </sce:if>
+          <sce:else>
+            <sce:if cond="bkind !== 2 &amp;&amp; diag">
+              <sce:if cond="rows_b">
+                <sce:assign target="v" expr="keyexpr_chunk_includes(a, cs, ce, b, rs, re, wild_single, wild_dsl)"/>
+                <sce:else>
+                  <sce:assign target="v" expr="keyexpr_chunk_includes(a, rs, re, b, cs, ce, wild_single, wild_dsl)"/>
+                </sce:else>
+              </sce:if>
+            </sce:if>
+          </sce:else>
+        </sce:if>
+        <sce:if cond="v">
+          <sce:assign target="cur" expr="cur | (one &lt;&lt; jb)"/>
+        </sce:if>
+        <sce:assign target="j" expr="jb"/>
+        <sce:if cond="ce &lt; cn">
+          <sce:assign target="cs" expr="ce + 1"/>
+          <sce:else>
+            <sce:assign target="cmore" expr="false"/>
+          </sce:else>
+        </sce:if>
+      </sce:while>
+      <sce:assign target="prev" expr="cur"/>
+      <sce:if cond="re &lt; rn">
+        <sce:assign target="rs" expr="re + 1"/>
+        <sce:else>
+          <sce:assign target="rmore" expr="false"/>
+        </sce:else>
+      </sce:if>
+    </sce:while>
+    <sce:return expr="((prev &gt;&gt; m) &amp; 1) === 1"/>
+  </sce:body>
+</scxml>

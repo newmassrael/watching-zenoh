@@ -181,8 +181,8 @@ traceability-anchor normalization, then body equivalence).
 
 ```sh
 ./scripts/verify-codegen.sh \
-  sources/algorithms/keyexpr_intersect.scxml \
-  vendor/sce/tests/forge/resources/algorithm_keyexpr_intersect_exact.scxml
+  sources/algorithms/crc16_ccitt.scxml \
+  vendor/sce/tests/forge/resources/algorithm_crc16.scxml
 ```
 
 ## Local CI gates

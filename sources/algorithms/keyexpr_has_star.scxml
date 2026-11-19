@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the key k holds a `*` byte: every wildcard (`*`, `**`, `$*`) is
+  spelled with one, so a key without one is a literal key.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_has_star"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="k" type="bytes"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:foreach item="byte" in="k">
+      <sce:if cond="byte === 42">
+        <sce:return expr="true"/>
+      </sce:if>
+    </sce:foreach>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

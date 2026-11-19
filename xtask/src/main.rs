@@ -454,6 +454,26 @@ fn regen_statecharts_and_pools(root: &Path) {
         "tick_until_due",
         // The keyexpr matcher's facts of a key's text, read once (docs/query-answer-path.md L0).
         "key_facts",
+        // The keyexpr wildcard matcher (wz-session-core `keyexpr_match`): the three relations
+        // over two key texts and the chunk steps they share. Each document names those it calls
+        // as sibling modules (`super::<name>`), so they are emitted into one directory and
+        // included as siblings.
+        "keyexpr_intersects",
+        "keyexpr_includes",
+        "keyexpr_matches",
+        "keyexpr_intersects_dp",
+        "keyexpr_includes_dp",
+        "keyexpr_chunk_intersects",
+        "keyexpr_chunk_includes",
+        "keyexpr_chunk_matches",
+        "keyexpr_dsl_matches",
+        "keyexpr_range_equal",
+        "keyexpr_has_dsl",
+        "keyexpr_has_star",
+        "keyexpr_has_double",
+        "keyexpr_chunk_count",
+        "keyexpr_chunk_end",
+        "keyexpr_chunk_kind",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  How many `/`-separated chunks the key k has, or 0 when one of them is empty
+  (the empty text, a leading or trailing `/`, `//`): such a text is not a key
+  the walks accept, and every walk refuses it.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_chunk_count"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="k" type="bytes"/>
+    <sce:return type="uint32"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="n" type="uint32" init="len(k)"/>
+    <sce:if cond="n === 0">
+      <sce:return expr="0"/>
+    </sce:if>
+    <!-- chunks counts the chunks begun; the first begins at 0. A `/` closes a
+         chunk, which is empty when nothing came since the last boundary. -->
+    <sce:var name="chunks" type="uint32" init="1"/>
+    <sce:var name="empty" type="bool" init="true"/>
+    <sce:var name="i" type="uint32" init="0"/>
+    <sce:while cond="i &lt; n">
+      <sce:if cond="k[i] === 47">
+        <sce:if cond="empty">
+          <sce:return expr="0"/>
+        </sce:if>
+        <!-- At most one chunk per byte, and a byte index is below 2^32 - 1. -->
+        <sce:if cond="chunks &lt; i + 1">
+          <sce:assign target="chunks" expr="chunks + 1"/>
+        </sce:if>
+        <sce:assign target="empty" expr="true"/>
+        <sce:else>
+          <sce:assign target="empty" expr="false"/>
+        </sce:else>
+      </sce:if>
+      <sce:assign target="i" expr="i + 1"/>
+    </sce:while>
+    <sce:if cond="empty">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:return expr="chunks"/>
+  </sce:body>
+</scxml>

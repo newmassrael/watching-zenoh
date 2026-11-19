@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether one of the chunks of the key k is `**`.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_has_double"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_chunk_end.scxml" as="keyexpr_chunk_end"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_kind.scxml" as="keyexpr_chunk_kind"/>
+  <sce:signature>
+    <sce:param name="k" type="bytes"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="n" type="uint32" init="len(k)"/>
+    <sce:var name="s" type="uint32" init="0"/>
+    <sce:var name="more" type="bool" init="true"/>
+    <sce:while cond="more">
+      <sce:var name="e" type="uint32" init="keyexpr_chunk_end(k, s)"/>
+      <sce:if cond="keyexpr_chunk_kind(k, s, e) === 2">
+        <sce:return expr="true"/>
+      </sce:if>
+      <sce:if cond="e &lt; n">
+        <sce:assign target="s" expr="e + 1"/>
+        <sce:else>
+          <sce:assign target="more" expr="false"/>
+        </sce:else>
+      </sce:if>
+    </sce:while>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

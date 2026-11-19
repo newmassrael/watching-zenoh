@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the chunk a[a_start..a_end] covers every chunk b[b_start..b_end]
+  covers: zenoh's `chunk_includes`, in its order. Equal bytes cover; then a
+  chunk that begins with `@` (VERBATIM) covers and is covered by nothing else;
+  then (when `wild_single`) a `*` covers any chunk and nothing but `*` covers a `*`;
+  then (when `wild_dsl`) a `$*` chunk covers what its sub-parts are found in, the
+  other chunk's text read as the haystack, and a chunk without `$*` covers no
+  `$*` chunk, which stands for more than one text. A wildcard whose flag is off
+  is a literal. `**` never reaches here: the sequence walk resolves it.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_chunk_includes"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_range_equal.scxml" as="keyexpr_range_equal"/>
+  <sce:import kind="algorithm" src="keyexpr_has_dsl.scxml" as="keyexpr_has_dsl"/>
+  <sce:import kind="algorithm" src="keyexpr_dsl_matches.scxml" as="keyexpr_dsl_matches"/>
+  <sce:signature>
+    <sce:param name="a" type="bytes"/>
+    <sce:param name="a_start" type="uint32"/>
+    <sce:param name="a_end" type="uint32"/>
+    <sce:param name="b" type="bytes"/>
+    <sce:param name="b_start" type="uint32"/>
+    <sce:param name="b_end" type="uint32"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="a_end &gt; len(a)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="b_end &gt; len(b)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="keyexpr_range_equal(a, a_start, a_end, b, b_start, b_end)">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="a_start &gt;= a_end || b_start &gt;= b_end">
+      <sce:return expr="false"/>
+    </sce:if>
+    <!-- @verbatim: covered only by an equal chunk. -->
+    <sce:if cond="a[a_start] === 64 || b[b_start] === 64">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="wild_single">
+      <sce:var name="a_next" type="uint32" init="a_start + 1"/>
+      <sce:var name="b_next" type="uint32" init="b_start + 1"/>
+      <sce:if cond="a[a_start] === 42 &amp;&amp; a_next === a_end">
+        <sce:return expr="true"/>
+      </sce:if>
+      <sce:if cond="b[b_start] === 42 &amp;&amp; b_next === b_end">
+        <sce:return expr="false"/>
+      </sce:if>
+    </sce:if>
+    <sce:if cond="wild_dsl">
+      <sce:if cond="keyexpr_has_dsl(a, a_start, a_end)">
+        <sce:return expr="keyexpr_dsl_matches(a, a_start, a_end, b, b_start, b_end)"/>
+      </sce:if>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

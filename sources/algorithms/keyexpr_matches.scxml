@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the pattern p matches the key t, read as a literal key (a `*` in t is
+  a byte, not a wildcard): the glob walk of a subscriber's pattern over a
+  published key.
+
+  * A text with an empty chunk matches nothing, and on a build whose key
+    buffer is fixed (`bounded`) neither does one of more than `chunk_bound`
+    chunks.
+  * The walk advances both cursors chunk by chunk: `*` (when `wild_single`)
+    takes one chunk that is not VERBATIM, and any other chunk must match
+    (keyexpr_chunk_matches). At a mismatch it backtracks to the last `**` (when
+    `wild_double`), which takes one more chunk of t, unless that chunk is
+    VERBATIM: `**` does not cross one (zenoh `it_intersect`). Worst case
+    O(|p| * |t|) chunk steps with a single `**`.
+  * When t is exhausted, what is left of p must be `**` chunks only.
+
+  A wildcard whose switch is off is a literal chunk.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_matches"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_chunk_count.scxml" as="keyexpr_chunk_count"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_end.scxml" as="keyexpr_chunk_end"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_kind.scxml" as="keyexpr_chunk_kind"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_matches.scxml" as="keyexpr_chunk_matches"/>
+  <sce:signature>
+    <sce:param name="p" type="bytes"/>
+    <sce:param name="t" type="bytes"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_double" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:param name="bounded" type="bool"/>
+    <sce:param name="chunk_bound" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="np" type="uint32" init="keyexpr_chunk_count(p)"/>
+    <sce:var name="nt" type="uint32" init="keyexpr_chunk_count(t)"/>
+    <sce:if cond="np === 0 || nt === 0">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="bounded &amp;&amp; (np &gt; chunk_bound || nt &gt; chunk_bound)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:var name="pn" type="uint32" init="len(p)"/>
+    <sce:var name="tn" type="uint32" init="len(t)"/>
+    <!-- ps / ts: where the current chunk of p / t begins; p_more / t_more:
+         whether there is one. -->
+    <sce:var name="ps" type="uint32" init="0"/>
+    <sce:var name="ts" type="uint32" init="0"/>
+    <sce:var name="p_more" type="bool" init="true"/>
+    <sce:var name="t_more" type="bool" init="true"/>
+    <!-- The backtrack frame of the last `**`: where p resumes past it, where
+         the chunk of t it would take next begins, and whether there is one. -->
+    <sce:var name="frame" type="bool" init="false"/>
+    <sce:var name="frame_ps" type="uint32" init="0"/>
+    <sce:var name="frame_p_more" type="bool" init="false"/>
+    <sce:var name="frame_ts" type="uint32" init="0"/>
+    <sce:while cond="t_more">
+      <sce:var name="te" type="uint32" init="keyexpr_chunk_end(t, ts)"/>
+      <sce:var name="advanced" type="bool" init="false"/>
+      <sce:if cond="p_more">
+        <sce:var name="pe" type="uint32" init="keyexpr_chunk_end(p, ps)"/>
+        <sce:var name="pkind" type="uint8" init="keyexpr_chunk_kind(p, ps, pe)"/>
+        <sce:var name="tkind" type="uint8" init="keyexpr_chunk_kind(t, ts, te)"/>
+        <!-- next_ps / next_p_more: the chunk of p after this one. -->
+        <sce:var name="next_ps" type="uint32" init="ps"/>
+        <sce:var name="next_p_more" type="bool" init="false"/>
+        <sce:if cond="pe &lt; pn">
+          <sce:assign target="next_ps" expr="pe + 1"/>
+          <sce:assign target="next_p_more" expr="true"/>
+        </sce:if>
+        <sce:if cond="wild_double &amp;&amp; pkind === 2">
+          <!-- A `**`: remember it, take nothing of t yet. -->
+          <sce:assign target="frame" expr="true"/>
+          <sce:assign target="frame_ps" expr="next_ps"/>
+          <sce:assign target="frame_p_more" expr="next_p_more"/>
+          <sce:assign target="frame_ts" expr="ts"/>
+          <sce:assign target="ps" expr="next_ps"/>
+          <sce:assign target="p_more" expr="next_p_more"/>
+          <sce:assign target="advanced" expr="true"/>
+          <sce:else>
+            <sce:var name="take" type="bool" init="false"/>
+            <sce:if cond="wild_single &amp;&amp; pkind === 1">
+              <sce:assign target="take" expr="tkind !== 3"/>
+              <sce:else>
+                <sce:assign target="take" expr="keyexpr_chunk_matches(p, ps, pe, t, ts, te, wild_dsl)"/>
+              </sce:else>
+            </sce:if>
+            <sce:if cond="take">
+              <sce:assign target="ps" expr="next_ps"/>
+              <sce:assign target="p_more" expr="next_p_more"/>
+              <sce:assign target="advanced" expr="true"/>
+              <sce:if cond="te &lt; tn">
+                <sce:assign target="ts" expr="te + 1"/>
+                <sce:else>
+                  <sce:assign target="t_more" expr="false"/>
+                </sce:else>
+              </sce:if>
+            </sce:if>
+          </sce:else>
+        </sce:if>
+      </sce:if>
+      <sce:if cond="!advanced">
+        <!-- A mismatch, or p is exhausted while t is not: the last `**` takes
+             one more chunk of t, unless it is VERBATIM. -->
+        <sce:if cond="!frame">
+          <sce:return expr="false"/>
+        </sce:if>
+        <sce:var name="fe" type="uint32" init="keyexpr_chunk_end(t, frame_ts)"/>
+        <sce:if cond="keyexpr_chunk_kind(t, frame_ts, fe) === 3">
+          <sce:return expr="false"/>
+        </sce:if>
+        <sce:if cond="fe &lt; tn">
+          <sce:assign target="frame_ts" expr="fe + 1"/>
+          <sce:assign target="ts" expr="fe + 1"/>
+          <sce:else>
+            <sce:assign target="t_more" expr="false"/>
+          </sce:else>
+        </sce:if>
+        <sce:assign target="ps" expr="frame_ps"/>
+        <sce:assign target="p_more" expr="frame_p_more"/>
+      </sce:if>
+    </sce:while>
+    <!-- t is exhausted: what is left of p must be `**` alone. -->
+    <sce:while cond="p_more">
+      <sce:var name="pe2" type="uint32" init="keyexpr_chunk_end(p, ps)"/>
+      <sce:if cond="!(wild_double &amp;&amp; keyexpr_chunk_kind(p, ps, pe2) === 2)">
+        <sce:return expr="false"/>
+      </sce:if>
+      <sce:if cond="pe2 &lt; pn">
+        <sce:assign target="ps" expr="pe2 + 1"/>
+        <sce:else>
+          <sce:assign target="p_more" expr="false"/>
+        </sce:else>
+      </sce:if>
+    </sce:while>
+    <sce:return expr="true"/>
+  </sce:body>
+</scxml>
