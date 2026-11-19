@@ -31,9 +31,10 @@ path = "src/lib.rs"
 [features]
 default = ["alloc"]
 
-# The profile, frame, segment-profile and segment-sender modules. Each reads a profile from the
-# workspace's JSON reader (`wz_session_core::json5`, behind the core's own `alloc`) and holds its
-# fields in a `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link no allocator.
+# The profile, frame, segment-profile, segment-chain and segment-sender modules. Each reads a
+# profile from the workspace's JSON reader (`wz_session_core::json5`, behind the core's own
+# `alloc`) and holds its fields in a `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link
+# no allocator.
 alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 
 # `segment_profile::synthetic`: a synthetic segment profile and a builder of its pieces, for the
@@ -43,7 +44,8 @@ fixtures = ["alloc"]
 
 # `replay_admission`: whether a reply of a replay reaches the receiving judge (judged, a duplicate
 # of its baseline, or a frame it has passed), and the CRC of each stream's baseline frame the
-# receiver keeps for it. The replay cache's subscriber turns it on; off, a receiver keeps no CRC.
+# receiver keeps for it; and `replay_pieces`, the pieces of a segmented message joined into the
+# frames they cut. The replay cache's subscriber turns it on; off, a receiver keeps no CRC.
 replay = ["alloc"]
 
 [dependencies]

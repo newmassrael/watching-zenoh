@@ -35,6 +35,7 @@
 //! | `e2e_stream_sender` | the sender of one message: a counter per stream, and a CRC cache for an unchanged payload | `alloc` |
 //! | `e2e_receiver` | the receiving judge of one message: a judge per stream or per sender, the profile's rules, a verdict per frame | `alloc` |
 //! | `replay_admission` | whether a reply of a replay reaches that judge: judged, a duplicate of its baseline, or a frame it has passed | `replay` |
+//! | `replay_pieces` | the pieces of a segmented message, live and replied, joined into the frames they cut | `replay` |
 //! | `segment_profile` | the profile of the header in front of each piece of a split message | `alloc` |
 //! | `segment_chain` | the joining state of those pieces: a transfer per stream, a verdict per piece, the whole message on the piece that completes it | `alloc` |
 //! | `segment_sender` | the writer of those pieces: one message cut under a segment profile | `alloc` |
@@ -68,6 +69,8 @@ pub mod e2e_stream_sender;
 mod e2e_rules_tests;
 #[cfg(feature = "replay")]
 pub mod replay_admission;
+#[cfg(feature = "replay")]
+pub mod replay_pieces;
 #[cfg(feature = "alloc")]
 pub mod segment_chain;
 #[cfg(feature = "alloc")]
