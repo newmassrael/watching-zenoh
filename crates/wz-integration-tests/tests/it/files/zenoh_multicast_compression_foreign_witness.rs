@@ -242,7 +242,9 @@ fn member_params(zid_byte: u8, compression: bool) -> MulticastParams {
         batch_size: MULTICAST_BATCH as u16,
         is_qos: false,
         compression,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Zenoh,
         max_sessions: None,

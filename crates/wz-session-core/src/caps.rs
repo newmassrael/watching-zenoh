@@ -446,12 +446,12 @@ pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 pub const HANDSHAKE_COOKIE_BYTES: usize = generated::HANDSHAKE_COOKIE_BYTES;
 
 /// How many batches each priority's outbound queue holds for the pico C ABI
-/// ([`crate::session_init_params::TxQueueConf::pico`]), in upstream's `1..=16` for a queue size (a
-/// value outside it counts as the nearest end). zenoh-pico has no bounded queue, a put writes on
-/// the calling thread; the queue of the tokio runtime is written by a second thread, and a lane
-/// of two batches holds four frames of 1 KiB, so sender and writer wait for each other after
-/// every four. A bound on the bytes queued and not a table size: a frame takes heap only while it
-/// is queued.
+/// ([`crate::session_init_params::TxQueueConf::pico_of_policy`]), in upstream's `1..=16` for a
+/// queue size (a value outside it counts as the nearest end). zenoh-pico has no bounded queue, a
+/// put writes on the calling thread; the queue of the tokio runtime is written by a second
+/// thread, and a lane of two batches holds four frames of 1 KiB, so sender and writer wait for
+/// each other after every four. A bound on the bytes queued and not a table size: a frame takes
+/// heap only while it is queued.
 pub const PICO_TX_QUEUE_SIZE: usize = generated::PICO_TX_QUEUE_SIZE;
 
 /// How often, in milliseconds, the resource sampler takes a snapshot

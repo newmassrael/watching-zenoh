@@ -6965,8 +6965,10 @@ mod tests {
         // What the session hands the link's write half at Established, with the
         // batch the handshake negotiated.
         let established = |outbound: &Arc<dyn BoxedLinkDriver + Send + Sync>, batch: usize| {
-            let shape = wz_session_core::session_init_params::TxQueueConf::default()
-                .shape(true, batch, batch);
+            let shape = wz_session_core::session_init_params::TxQueueConf::of_policy(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+            )
+            .shape(true, batch, batch);
             BoxedLinkDriver::shape_tx_queue(&**outbound, shape);
         };
         let endpoint = format!("tcp/127.0.0.1:{port}");

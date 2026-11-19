@@ -446,15 +446,6 @@ const fn build_pico_queue_size() -> usize {
     }
 }
 
-impl Default for TxQueueConf {
-    /// Upstream's queue under the build defaults of the policies
-    /// ([`TxQueueConf::of_policy`] of [`SessionPolicy::defaults`]): the shape a creator that
-    /// holds no snapshot of its own still has.
-    fn default() -> Self {
-        Self::of_policy(&SessionPolicy::defaults())
-    }
-}
-
 /// Why a [`TxQueueConf`] is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxQueueConfError {
@@ -493,12 +484,27 @@ impl TxQueueConf {
     /// [`SessionInitParams::policy`].
     pub const fn of_policy(policy: &SessionPolicy) -> Self {
         Self {
+            no_progress_us: no_progress_us(policy),
+            expiry_keeps_session: policy.tx_expiry_keeps_session(),
+            ..Self::upstream()
+        }
+    }
+
+    /// Upstream's queue sizes and waits, with the two policies the queue carries at upstream's
+    /// behaviour: no window but the total wait, and an expiry that closes the session.
+    ///
+    /// This is the queue a zenoh configuration's `transport/link/tx/queue` section describes
+    /// before any session holds it, and the queue of a push that is never made to wait. A
+    /// session's queue is built with [`Self::of_policy`] from the snapshot it is handed, which
+    /// is where the two policies are decided.
+    pub const fn upstream() -> Self {
+        Self {
             sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
             wait_before_drop_us: WAIT_BEFORE_DROP_US,
             max_wait_before_drop_fragments_us: MAX_WAIT_BEFORE_DROP_FRAGMENTS_US,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
-            no_progress_us: no_progress_us(policy),
-            expiry_keeps_session: policy.tx_expiry_keeps_session(),
+            no_progress_us: None,
+            expiry_keeps_session: false,
             expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
@@ -524,13 +530,8 @@ impl TxQueueConf {
     /// pico writes on its own thread, where here a second thread writes, and a lane of four
     /// frames of 1 KiB made the two wait for each other after every four.
     ///
-    /// The two policies the queue carries are the build defaults; a creator that holds a snapshot
-    /// builds the queue with [`Self::pico_of_policy`].
-    pub const fn pico() -> Self {
-        Self::pico_of_policy(&SessionPolicy::defaults())
-    }
-
-    /// [`Self::pico`] with the two policies the queue carries as `policy` holds them.
+    /// The two policies the queue carries are taken from `policy`, the snapshot of the session
+    /// the queue is built for.
     pub const fn pico_of_policy(policy: &SessionPolicy) -> Self {
         Self {
             sizes: [build_pico_queue_size(); crate::qos::Priority::NUM],
@@ -624,13 +625,18 @@ impl SessionInitParams {
 mod shape_tests {
     use super::TxQueueConf;
 
+    /// Upstream's queue under the build defaults' policies.
+    fn zenoh_queue() -> TxQueueConf {
+        TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
+    }
+
     /// A lane is bounded in the session's configured batch size, so a link
     /// that sends datagrams does not shrink it to two datagrams; and a
     /// configured size below what the link sends never lowers the unit under
     /// the batch the link really sends.
     #[test]
     fn a_lane_is_counted_in_the_configured_batch_and_never_below_the_links() {
-        let conf = TxQueueConf::default();
+        let conf = zenoh_queue();
         let udp = conf.shape(true, 1450, 65535);
         assert_eq!((udp.batch_bytes, udp.queue_unit_bytes), (1450, 65535));
         let small = conf.shape(true, 2048, 1024);
@@ -641,7 +647,7 @@ mod shape_tests {
     /// handed at Established, and a session configured with none hands them the writer's own.
     #[test]
     fn the_batching_bound_reaches_the_shape_a_link_takes() {
-        let bare = TxQueueConf::default().shape(true, 65535, 65535);
+        let bare = zenoh_queue().shape(true, 65535, 65535);
         assert_eq!(bare.pipeline, crate::link::TxPipeline::DEFAULT);
         assert_eq!(
             bare.pipeline.batching_time_limit_us,
@@ -650,7 +656,7 @@ mod shape_tests {
         let configured = TxQueueConf {
             batching_time_limit_us: 3_000,
             allocation: crate::link::QueueAllocation::Init,
-            ..TxQueueConf::default()
+            ..zenoh_queue()
         };
         let shaped = configured.shape(true, 65535, 65535).pipeline;
         assert_eq!(shaped.batching_time_limit_us, 3_000);
@@ -756,11 +762,22 @@ mod cookie_bound_tests {
 #[cfg(test)]
 mod no_progress_tests {
     use super::{TxQueueConf, TxQueueConfError, WAIT_BEFORE_CLOSE_US};
+    use crate::policy::SessionPolicy;
+
+    /// Upstream's queue under the build defaults' policies.
+    fn zenoh_queue() -> TxQueueConf {
+        TxQueueConf::of_policy(&SessionPolicy::defaults())
+    }
+
+    /// The pico ABI's queue under the build defaults' policies.
+    fn pico_queue() -> TxQueueConf {
+        TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+    }
 
     fn conf(no_progress_us: Option<u64>) -> TxQueueConf {
         TxQueueConf {
             no_progress_us,
-            ..TxQueueConf::default()
+            ..zenoh_queue()
         }
     }
 
@@ -768,21 +785,30 @@ mod no_progress_tests {
     /// message that finds no room closes the session.
     #[test]
     fn a_build_that_states_no_policy_is_upstreams_behaviour() {
-        assert_eq!(TxQueueConf::default().no_progress_us, None);
-        assert!(!TxQueueConf::default().expiry_keeps_session);
-        assert_eq!(TxQueueConf::pico().no_progress_us, None);
-        assert!(!TxQueueConf::pico().expiry_keeps_session);
-        assert_eq!(TxQueueConf::default().expiry_close_after, 0);
-        assert_eq!(TxQueueConf::pico().expiry_close_after, 0);
+        assert_eq!(zenoh_queue().no_progress_us, None);
+        assert!(!zenoh_queue().expiry_keeps_session);
+        assert_eq!(pico_queue().no_progress_us, None);
+        assert!(!pico_queue().expiry_keeps_session);
+        assert_eq!(zenoh_queue().expiry_close_after, 0);
+        assert_eq!(pico_queue().expiry_close_after, 0);
     }
 
-    /// The queue a creator holds no snapshot for is the queue of the build defaults, so the
-    /// wrappers and the snapshot path agree in every build.
+    /// Upstream's queue is the queue of a snapshot whose two queue policies are upstream's
+    /// behaviour, whatever the build states for them: the policies are the snapshot's alone, and
+    /// every other number is the same in both.
     #[test]
-    fn the_default_queue_is_the_queue_of_the_build_defaults() {
-        let defaults = crate::policy::SessionPolicy::defaults();
-        assert_eq!(TxQueueConf::default(), TxQueueConf::of_policy(&defaults));
-        assert_eq!(TxQueueConf::pico(), TxQueueConf::pico_of_policy(&defaults));
+    fn upstreams_queue_holds_upstreams_behaviour_and_the_queues_own_numbers() {
+        let upstream = TxQueueConf::upstream();
+        assert_eq!(upstream.no_progress_us, None);
+        assert!(!upstream.expiry_keeps_session);
+        assert_eq!(
+            TxQueueConf {
+                no_progress_us: zenoh_queue().no_progress_us,
+                expiry_keeps_session: zenoh_queue().expiry_keeps_session,
+                ..upstream
+            },
+            zenoh_queue()
+        );
     }
 
     /// The two policies the queue carries are read from the snapshot it is built from, not from
@@ -791,7 +817,7 @@ mod no_progress_tests {
     /// the case is skipped there.
     #[test]
     fn the_queue_carries_the_policies_of_the_snapshot_it_is_built_from() {
-        use crate::policy::{SessionPolicy, TxExpiryKeepsSession, TxNoProgressDeadline};
+        use crate::policy::{TxExpiryKeepsSession, TxNoProgressDeadline};
         use crate::policy_binding::PolicyValue;
         let wide = !TxNoProgressDeadline::DOMAIN.is_singleton()
             && !TxExpiryKeepsSession::DOMAIN.is_singleton();
@@ -834,14 +860,14 @@ mod no_progress_tests {
     /// range holds it, and every other configuration keeps upstream's default of two.
     #[test]
     fn the_pico_queue_is_the_declared_size_and_the_rest_keep_upstreams_default() {
-        let pico = TxQueueConf::pico();
+        let pico = pico_queue();
         let size = crate::caps::PICO_TX_QUEUE_SIZE.clamp(
             crate::link::TxQueueShape::MIN_SIZE,
             crate::link::TxQueueShape::MAX_SIZE,
         );
         assert!(pico.sizes.iter().all(|&s| s == size));
         assert_eq!(pico.validate(), Ok(()));
-        assert!(TxQueueConf::default()
+        assert!(zenoh_queue()
             .sizes
             .iter()
             .all(|&s| s == crate::link::TxQueueShape::DEFAULT_SIZE));
@@ -873,7 +899,7 @@ mod no_progress_tests {
         let tight = TxQueueConf {
             wait_before_close_us: 500,
             no_progress_us: Some(501),
-            ..TxQueueConf::default()
+            ..zenoh_queue()
         };
         assert_eq!(
             tight.validate(),
@@ -887,11 +913,11 @@ mod no_progress_tests {
     /// A queue size outside the range is still refused, now as a variant of the error.
     #[test]
     fn a_size_out_of_range_is_still_refused() {
-        let mut sizes = TxQueueConf::default().sizes;
+        let mut sizes = zenoh_queue().sizes;
         sizes[0] = 0;
         let bad = TxQueueConf {
             sizes,
-            ..TxQueueConf::default()
+            ..zenoh_queue()
         };
         assert!(matches!(
             bad.validate(),

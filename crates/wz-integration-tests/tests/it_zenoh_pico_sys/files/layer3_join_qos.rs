@@ -193,7 +193,9 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
         batch_size: 8192,
         is_qos: true,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,

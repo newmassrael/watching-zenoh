@@ -110,7 +110,9 @@ fn unicast_params(zid: u8) -> SessionInitParams {
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: vec![],
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
@@ -130,7 +132,9 @@ fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,

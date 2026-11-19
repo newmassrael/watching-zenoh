@@ -13699,7 +13699,9 @@ fn tapped_qos_group_session() -> (
         batch_size: 2_048,
         is_qos: true,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,

@@ -141,7 +141,9 @@ fn wz_mc_params(zid: Vec<u8>, lease_ms: u64) -> MulticastParams {
         batch_size: PICO_BATCH_MULTICAST_SIZE,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,

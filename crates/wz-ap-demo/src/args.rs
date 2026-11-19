@@ -8948,7 +8948,9 @@ mod stock_config_tests {
                 batching: false,
                 batching_time_limit_us: 5_000,
                 allocation: wz::runtime_tokio::session_glue::QueueAllocation::Init,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::default()
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
+                    &wz::runtime_tokio::policy::SessionPolicy::defaults()
+                )
             },
             "the file's queue section reaches the session the node opens"
         );
@@ -8970,7 +8972,9 @@ mod stock_config_tests {
         assert_eq!(bare.lease_ms, 10_000);
         assert_eq!(
             bare.tx_queue,
-            wz::runtime_tokio::session_glue::TxQueueConf::default()
+            wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
+                &wz::runtime_tokio::policy::SessionPolicy::defaults()
+            )
         );
         assert_eq!(
             bare.link_rx,
@@ -9237,7 +9241,9 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::default()
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
+                    &wz::runtime_tokio::policy::SessionPolicy::defaults()
+                )
             }
         );
     }

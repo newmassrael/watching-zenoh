@@ -1630,10 +1630,12 @@ impl Default for ZenohNodeConfig {
             // Upstream's batching bound is a millisecond (`commons/zenoh-config/src/defaults.rs`
             // @ `time_limit: 1,`). This struct is what a zenoh node makes of a file, so it holds
             // upstream's; a session that is given no bound keeps its writer's own, shorter one
-            // (`wz_session_core::link::BATCHING_TIME_LIMIT_US`).
+            // (`wz_session_core::link::BATCHING_TIME_LIMIT_US`). The two policies a queue carries
+            // are not a file's either: they are upstream's here, and a session takes them from
+            // the snapshot its creator hands it.
             tx_queue: wz_session_core::session_init_params::TxQueueConf {
                 batching_time_limit_us: UPSTREAM_BATCHING_TIME_LIMIT_MS * 1_000,
-                ..wz_session_core::session_init_params::TxQueueConf::default()
+                ..wz_session_core::session_init_params::TxQueueConf::upstream()
             },
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             max_links: 1,

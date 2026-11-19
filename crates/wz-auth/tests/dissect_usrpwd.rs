@@ -34,7 +34,7 @@ fn params() -> SessionInitParams {
         keep_alive: KeepAliveConf::default(),
         initial_sn: 77,
         cookie: cookie_bytes(&[]),
-        tx_queue: TxQueueConf::default(),
+        tx_queue: TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
         link_rx: LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),

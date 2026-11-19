@@ -565,7 +565,9 @@ fn peer_init_params() -> SessionInitParams {
         keep_alive: wz::runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::default(),
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        ),
         link_rx: wz::runtime_tokio::session_glue::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32 bytes"),

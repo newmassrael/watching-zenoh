@@ -907,7 +907,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     // config keys, and this shim resolves pico's numeric keys instead.
     // pico's transmit model, not zenoh's: a pico put writes on the
     // caller's thread and a full socket slows it rather than dropping it
-    // (see `TxQueueConf::pico`). zenoh's 1 ms drop wait here discarded the
+    // (see `TxQueueConf::pico_of_policy`). zenoh's 1 ms drop wait here discarded the
     // tail of a burst that `teardown_drain` puts before `z_close`.
     let session_mode = if listen.is_some() {
         WhatAmI::Peer
@@ -1108,8 +1108,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 ///
 /// What zenoh-pico's client advertises, as the tokio engine's open does: zenoh's default batch
 /// size (`transport/link/tx/batch_size`, 65535, which the link's own capacity caps), pico's lease
-/// (`Z_TRANSPORT_LEASE`, 10000 ms) and pico's transmit model ([`TxQueueConf::pico`]). The zid is
-/// the one `Z_CONFIG_SESSION_ZID_KEY` names, and otherwise minted, as this ABI's tokio open does.
+/// (`Z_TRANSPORT_LEASE`, 10000 ms) and pico's transmit model ([`TxQueueConf::pico_of_policy`]).
+/// The zid is the one `Z_CONFIG_SESSION_ZID_KEY` names, and otherwise minted, as this ABI's tokio
+/// open does.
 ///
 /// A lost link is dialled again, and the session declares again over it what it holds, as
 /// zenoh-pico's client reopens by default (`Z_FEATURE_AUTO_RECONNECT`) and as this ABI's tokio
