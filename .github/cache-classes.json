@@ -290,7 +290,7 @@
       "kind": "rust-cache",
       "prefixes": ["v0-rust-host-workspace-"],
       "owners": ["platform.yml:leg"],
-      "readers": ["ci.yml:portability", "platform.yml:capi", "platform.yml:capi-examples"],
+      "readers": ["ci.yml:portability", "platform.yml:capi", "platform.yml:capi-coop", "platform.yml:capi-examples"],
       "budget_mb": 620,
       "measured_mb": 568,
       "measured_on": "2026-10-09",
@@ -300,7 +300,7 @@
       "protect": false,
       "evict_priority": 10,
       "allow_run_scoped": false,
-      "note": "Windows and macOS dependency cache, one entry per host (the host is part of the rust-cache key). The Platform lane's leg saves it, with cache-on-failure because that lane is read while red; portability (ci.yml), capi and capi-examples read it (the last on its Windows row; its Linux row finds no entry of its host). The three jobs built one workspace and kept three copies."
+      "note": "Windows and macOS dependency cache, one entry per host (the host is part of the rust-cache key). The Platform lane's leg saves it, with cache-on-failure because that lane is read while red; portability (ci.yml), capi, capi-coop and capi-examples read it (the last two on their Windows rows; their Linux rows find no entry of their host). The three jobs built one workspace and kept three copies."
     },
     {
       "id": "rust-host-interop",
