@@ -68,6 +68,7 @@
 
 use std::sync::Arc;
 
+use wz_codecs::wire_const;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
 use wz_runtime_tokio::session_glue::{
@@ -138,7 +139,64 @@ async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (Option<u8>, u8) {
         peer_patch(&extensions),
         "the entry written is the level a peer reads"
     );
+    assert_eq!(
+        init_ack[0] & wire_const::FLAG_T_Z != 0,
+        !extensions.is_empty(),
+        "the InitAck's Z flag says whether an extension follows it, also when the patch \
+         entry was lowered away: a Z with nothing behind it is an InitAck the peer cannot \
+         decode"
+    );
     (entry, negotiated)
+}
+
+/// A downgraded InitAck (one that carries no patch entry because the peer announced none)
+/// still sets Z exactly when another extension follows, whatever else the acceptor answers
+/// with; the control answers CURRENT, carries the entry and so sets Z.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_downgraded_init_ack_sets_z_only_when_an_extension_follows() {
+    for (init_syn, downgraded) in [
+        (craft_initsyn_wire(), true),
+        (craft_initsyn_wire_with_patch(0), true),
+        (craft_initsyn_wire_with_patch(1), false),
+    ] {
+        let driver = Arc::new(LifecycleRecordingDriver::default());
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
+        let actions =
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        engine.process_event(E::InboundStart);
+        let mut queue = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
+        poll_and_dispatch_one(&mut queue, &actions, &mut engine).await;
+        let init_ack = driver
+            .snapshot()
+            .sends
+            .last()
+            .expect("the acceptor answers an admitted InitSyn")
+            .0
+            .clone();
+        let InboundFrame::Init {
+            is_ack: true,
+            has_ext,
+            extensions,
+            ..
+        } = parse_inbound(&init_ack).expect("wz parses its own InitAck")
+        else {
+            panic!("the acceptor's reply is not an InitAck");
+        };
+        let z = init_ack[0] & wire_const::FLAG_T_Z != 0;
+        assert_eq!(z, has_ext, "the parser reads the header's own Z");
+        assert_eq!(
+            z,
+            !extensions.is_empty(),
+            "downgraded={downgraded}: Z is set exactly when an extension follows"
+        );
+        assert_eq!(
+            extensions.iter().find_map(patch_of_entry).is_none(),
+            downgraded,
+            "downgraded={downgraded}: a lowered level writes no patch entry"
+        );
+    }
 }
 
 /// THE DEFECT, on the wire: a peer announcing PATCH 0 must be answered 0.

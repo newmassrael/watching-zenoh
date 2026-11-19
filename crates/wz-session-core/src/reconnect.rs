@@ -346,6 +346,20 @@ pub enum ReplayDeclarationsError {
     FeatureDisabled,
 }
 
+impl ReplayDeclarationsError {
+    /// Whether the replay was refused because the transport did not take the declaration now
+    /// (`TransportUnavailable`): what a paced replay may try again
+    /// ([`crate::replay_pacing::ReplayPacing::after_refusal`]). A builder's rejection would be the
+    /// same on every try, and is not.
+    pub const fn is_transport_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Declare(SendDeclareError::TransportUnavailable)
+                | Self::Interest(SendWireError::TransportUnavailable)
+        )
+    }
+}
+
 impl core::fmt::Display for ReplayDeclarationsError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

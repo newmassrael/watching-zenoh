@@ -304,6 +304,9 @@ mod tests {
             RoutingTableSharing::HELD,
             ReassemblyPoolOverflow::HELD,
             LinkTieOrder::HELD,
+            QueryUnanswerableFinal::HELD,
+            ZidDerivation::HELD,
+            HandshakeStrayMessage::HELD,
         ];
         assert_eq!(
             core::mem::size_of::<SessionPolicy>(),

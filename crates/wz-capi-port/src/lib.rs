@@ -79,7 +79,7 @@ pub mod sync;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};
-pub use engine::SessionEngine;
+pub use engine::{RedeclareRefusal, SessionEngine};
 pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an

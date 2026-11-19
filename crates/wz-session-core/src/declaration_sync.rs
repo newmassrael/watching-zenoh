@@ -151,11 +151,160 @@ pub fn finals_in_event(
     }
 }
 
+/// What one delivered event shows of the peer's declaration sync.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeclarationProgress {
+    /// At least one declaration from the peer arrived: progress, which the no-progress watch
+    /// ([`stall_deadline`]) restarts on.
+    pub declared: bool,
+    /// At least one of them belongs to the peer's initial declarations (its envelope names the
+    /// initial interest, [`crate::extbound::INITIAL_INTEREST_ID`]): the peer has begun its sync.
+    pub initial_scope: bool,
+}
+
+/// [`DeclarationProgress`] of `event`, read from the owned batch of a delivered frame, as
+/// [`finals_in_event`] reads the finals.
+#[cfg(feature = "codec-declare")]
+pub fn declaration_progress_in(
+    event: crate::driver_loop::IterationEvent<'_, '_>,
+) -> DeclarationProgress {
+    use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use crate::network_message::NetworkMessage;
+
+    let mut progress = DeclarationProgress::default();
+    let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
+        return progress;
+    };
+    for message in messages {
+        if let NetworkMessage::Declare(declare) = message {
+            progress.declared = true;
+            if declare.interest_id == Some(crate::extbound::INITIAL_INTEREST_ID) {
+                progress.initial_scope = true;
+            }
+        }
+    }
+    progress
+}
+
+/// What the end of a no-progress window means for the sync it watched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchExpiry {
+    /// The sync is taken as cut short: the link ends as lost.
+    LosesLink,
+    /// The peer has no initial declarations to send: the sync is taken as complete, and nothing
+    /// ends. Only under `until-declarations-synced-when-begun`, on a link this node accepted,
+    /// while the peer has begun no initial declaration.
+    EndsSync,
+}
+
+/// What a window that ran out with no declaration means under `mode`, on a link this node
+/// `accepted` (or dialled), the peer having `begun` its initial declarations or not. A dialled
+/// link and a peer that began its sync are held to the end of its declarations in every reacting
+/// mode; an accepted link under `until-declarations-synced-when-begun` whose peer stayed quiet
+/// takes the quiet as a sync with nothing in it, as a peer that answers no interest sends none.
+pub const fn watch_expiry(
+    mode: crate::policy::ReliableGapReconnect,
+    accepted: bool,
+    begun: bool,
+) -> WatchExpiry {
+    if matches!(
+        mode,
+        crate::policy::ReliableGapReconnect::UntilDeclarationsSyncedWhenBegun
+    ) && accepted
+        && !begun
+    {
+        WatchExpiry::EndsSync
+    } else {
+        WatchExpiry::LosesLink
+    }
+}
+
+/// When the watch of a peer's initial declarations ends the link: `window_ms` after `baseline_ms`
+/// (the later of the session's establishment and the peer's last declaration), while the
+/// `reliable-gap-reconnect` `mode` reacts to a cut-short sync and the peer's initial declarations
+/// are not settled (their end has not arrived, nor a quiet window ended a sync with nothing in
+/// it, see [`watch_expiry`]). `None` keeps no watch: `mode` is `off`, the window is `0`, or the
+/// peer's declarations are settled.
+pub const fn stall_deadline(
+    mode: crate::policy::ReliableGapReconnect,
+    peer_settled: bool,
+    baseline_ms: u64,
+    window_ms: u64,
+) -> Option<u64> {
+    if matches!(mode, crate::policy::ReliableGapReconnect::Off) || window_ms == 0 || peer_settled {
+        None
+    } else {
+        Some(baseline_ms.saturating_add(window_ms))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const TIMEOUT: u64 = 1_000;
+
+    /// A window that runs out ends the sync as empty only under the when-begun mode, on an
+    /// accepted link whose peer began nothing; every other cell loses the link.
+    #[test]
+    fn a_quiet_window_ends_the_sync_only_for_an_accepted_link_whose_peer_began_none() {
+        use crate::policy::ReliableGapReconnect as Mode;
+        for mode in [
+            Mode::UntilDeclarationsSynced,
+            Mode::Always,
+            Mode::UntilDeclarationsSyncedWhenBegun,
+        ] {
+            for accepted in [false, true] {
+                for begun in [false, true] {
+                    let expected = if matches!(mode, Mode::UntilDeclarationsSyncedWhenBegun)
+                        && accepted
+                        && !begun
+                    {
+                        WatchExpiry::EndsSync
+                    } else {
+                        WatchExpiry::LosesLink
+                    };
+                    assert_eq!(
+                        watch_expiry(mode, accepted, begun),
+                        expected,
+                        "{mode:?} accepted={accepted} begun={begun}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            stall_deadline(Mode::UntilDeclarationsSyncedWhenBegun, false, 10, 5),
+            Some(15),
+            "the when-begun mode watches as the others do until it is settled"
+        );
+    }
+
+    /// The watch runs only while the mode reacts, the window is set and the peer's final has not
+    /// arrived, and it ends a window after its baseline.
+    #[test]
+    fn the_declaration_watch_runs_only_in_a_reacting_mode_before_the_peers_final() {
+        use crate::policy::ReliableGapReconnect as Mode;
+        assert_eq!(stall_deadline(Mode::Off, false, 100, 250), None);
+        assert_eq!(
+            stall_deadline(Mode::UntilDeclarationsSynced, false, 100, 0),
+            None
+        );
+        assert_eq!(
+            stall_deadline(Mode::UntilDeclarationsSynced, true, 100, 250),
+            None
+        );
+        assert_eq!(stall_deadline(Mode::Always, true, 100, 250), None);
+        assert_eq!(
+            stall_deadline(Mode::UntilDeclarationsSynced, false, 100, 250),
+            Some(350)
+        );
+        assert_eq!(stall_deadline(Mode::Always, false, 100, 250), Some(350));
+        assert_eq!(
+            stall_deadline(Mode::Always, false, u64::MAX - 1, 250),
+            Some(u64::MAX),
+            "saturates rather than wrapping into the past"
+        );
+    }
 
     #[test]
     fn a_session_that_sent_no_interest_is_synced() {

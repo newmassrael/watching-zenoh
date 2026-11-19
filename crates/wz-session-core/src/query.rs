@@ -2151,6 +2151,11 @@ pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
     /// [`caps::QUERY_ATTACHMENT_MAX_BYTES`]). Saturating: a counter that wrapped would hide the
     /// refusals it exists to show.
     oversize_refused: u32,
+    /// Whether a query whose key does not resolve is owed a Final: the session's
+    /// `query-unanswerable-final` value, which the session states before every dispatch
+    /// ([`Self::set_unanswerable_final`]). A registry no session stated one to answers as
+    /// upstream does, with nothing.
+    answers_unresolved: bool,
     /// transport-shm -- the receive side of shared memory for the VALUE of a
     /// query: the same state a push and a reply have (the negotiated capability,
     /// the resolver, the means of acknowledging the peer's slices, the drop
@@ -2168,6 +2173,7 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
             next_id: 1,
             requester: None,
             oversize_refused: 0,
+            answers_unresolved: false,
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
         }
@@ -2185,6 +2191,20 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// (decision D12). The queries dispatched from now on carry it as [`QueryView::requester`].
     pub fn set_requester(&mut self, requester: Option<[u8; 16]>) {
         self.requester = requester;
+    }
+
+    /// State the `query-unanswerable-final` value of the session about to be dispatched, from
+    /// the snapshot the session was handed: with `empty-final`, a query from a peer whose key
+    /// does not resolve is owed an empty Final, as one that matched nobody is.
+    pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
+        self.answers_unresolved =
+            matches!(value, crate::policy::QueryUnanswerableFinal::EmptyFinal);
+    }
+
+    /// Whether a query whose key does not resolve is owed a Final
+    /// ([`Self::set_unanswerable_final`]).
+    pub fn answers_unresolved_queries(&self) -> bool {
+        self.answers_unresolved
     }
 }
 
@@ -2674,16 +2694,48 @@ pub struct DispatchOutcome {
     /// `0` is a legal outcome of a real dispatch and does NOT discharge the
     /// Final — read [`dispatched`](Self::dispatched) for that.
     pub matched: usize,
+    /// Whether the Request carried a Query body whose keyexpr this node could not
+    /// resolve (an id the peer never declared to it, or no key at all). Such a query is not
+    /// dispatched, and the node owes it a Final only when its
+    /// `query-unanswerable-final` policy is `empty-final`
+    /// ([`QueryableRegistry::set_unanswerable_final`]).
+    pub unresolved: bool,
 }
 
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl DispatchOutcome {
-    /// The Request never reached the queryable table (non-Query body, or an
-    /// unresolvable keyexpr): nothing fired and nothing is owed.
+    /// The Request never reached the queryable table and its key was not the
+    /// reason (a non-Query body, or a value that could not be read): nothing
+    /// fired and nothing is owed.
     pub const NOT_DISPATCHED: Self = Self {
         dispatched: false,
         matched: 0,
+        unresolved: false,
     };
+
+    /// A Query body whose keyexpr does not resolve: nothing fired, and the Final
+    /// is owed only by a node that answers such a query.
+    pub const UNRESOLVED: Self = Self {
+        dispatched: false,
+        matched: 0,
+        unresolved: true,
+    };
+
+    /// A query routed through the table, matching `matched` queryables.
+    pub const fn routed(matched: usize) -> Self {
+        Self {
+            dispatched: true,
+            matched,
+            unresolved: false,
+        }
+    }
+
+    /// Whether this outcome owes the requester a Final, under the session's
+    /// `query-unanswerable-final` value: every routed query does, and an unresolved
+    /// one does when the node answers such queries.
+    pub const fn owes_final(&self, answers_unresolved: bool) -> bool {
+        self.dispatched || (self.unresolved && answers_unresolved)
+    }
 }
 
 // R311gb (Track 2) — owned wire-dispatch surface: these entry points
@@ -2785,11 +2837,11 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         let resolved: &str =
             match resolve_wireexpr_into(&request.keyexpr.body, peer_keyexpr_table, &mut composed) {
                 Ok(Some(r)) => r,
-                Ok(None) => return DispatchOutcome::NOT_DISPATCHED,
+                Ok(None) => return DispatchOutcome::UNRESOLVED,
                 Err(KeyexprPastBound) => {
                     long = match resolve_wireexpr_in(&request.keyexpr.body, peer_keyexpr_table) {
                         Some(r) => r,
-                        None => return DispatchOutcome::NOT_DISPATCHED,
+                        None => return DispatchOutcome::UNRESOLVED,
                     };
                     &long
                 }
@@ -2837,10 +2889,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         let matched = self.fire_matching_queryables(
             envelope, resolved, projection, replies, /* is_remote = */ true,
         );
-        DispatchOutcome {
-            dispatched: true,
-            matched,
-        }
+        DispatchOutcome::routed(matched)
     }
 
     /// The value of `query` when it arrived as a list of slices after a
@@ -3354,7 +3403,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     continue;
                 }
                 let outcome = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
-                if outcome.dispatched {
+                if outcome.owes_final(self.answers_unresolved) {
                     // R2595 — the terminator carries the QUERY's QoS, as every
                     // reply before it does: upstream stamps it on the final from
                     // the same `QueryInner::qos` the replies came from.
@@ -5695,6 +5744,58 @@ mod tests {
             finals.is_empty(),
             "un-resolvable mapping id must not enqueue a Final"
         );
+    }
+
+    /// `query-unanswerable-final = empty-final`: the same query whose mapping id the peer never
+    /// declared is answered with an empty Final, and still runs no queryable. Stating `none`
+    /// again returns the registry to upstream's silence, and a non-Query body owes nothing under
+    /// either value, since it is not a query.
+    #[test]
+    fn an_unresolvable_query_is_owed_an_empty_final_only_when_the_session_answers_it() {
+        use crate::policy::QueryUnanswerableFinal;
+        let mut reg = QueryableRegistry::new();
+        reg.register("sensors/temp", |_q, responder| {
+            responder.reply(b"21.0");
+        });
+        assert!(
+            !reg.answers_unresolved_queries(),
+            "a registry no session stated a value to answers as upstream does"
+        );
+        let messages = vec![NetworkMessage::Request(Box::new(request_query(
+            77, 99, None,
+        )))];
+
+        reg.set_unanswerable_final(QueryUnanswerableFinal::EmptyFinal);
+        let mut replies = ReplyStage::new();
+        let mut finals = FinalStage::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        assert!(
+            replies.is_empty(),
+            "no queryable runs on a key it cannot read"
+        );
+        assert_eq!(
+            &finals[..],
+            &[(77, QosLevel::DEFAULT)][..],
+            "empty-final: the asker is told at once that nothing will come"
+        );
+
+        reg.set_unanswerable_final(QueryUnanswerableFinal::None);
+        let mut finals = FinalStage::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        assert!(finals.is_empty(), "none: upstream's silence again");
+    }
+
+    /// The outcome's own rule, for every pair: a routed query always owes its Final, an
+    /// unresolved one only when the session answers such queries, and a Request that is no
+    /// query never does.
+    #[test]
+    fn the_final_an_outcome_owes_follows_the_unanswerable_rule() {
+        for answers in [false, true] {
+            assert!(DispatchOutcome::routed(0).owes_final(answers));
+            assert!(DispatchOutcome::routed(2).owes_final(answers));
+            assert!(!DispatchOutcome::NOT_DISPATCHED.owes_final(answers));
+            assert_eq!(DispatchOutcome::UNRESOLVED.owes_final(answers), answers);
+        }
     }
 
     #[cfg(feature = "request-put-del")]

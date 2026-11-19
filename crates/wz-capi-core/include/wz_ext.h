@@ -964,6 +964,20 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
                               z_get_options_t *options, const z_id_t *peer);
 #endif
 
+/* ---- Declarations told again ------------------------------------------- */
+
+/* Tell the peer of every link of the session that is up everything the
+ * session holds again (its subscriptions, queryables, tokens and interests),
+ * as a link that has just come up is told, at the pace the session states.
+ * Nothing the session holds changes: each entity keeps its id and its route.
+ * For a program that holds that a peer lost declarations the session made.
+ * Part of the unstable surface.
+ *
+ * The number of links told (0 when none is up), Z_ERR_SESSION_CLOSED for a
+ * closed session, WZ_EXT_ERR_UNSUPPORTED when the session's engine keeps no
+ * record of what it declared, Z_ERR_NULL for a null session. */
+z_result_t wz_ext_redeclare(const z_loaned_session_t *session);
+
 /* The conformance digest of this build, read from the configuration it
  * was built with: "sha256:" and 64 lowercase hex digits, NUL-terminated and
  * static. It is the digest wz_config.py prints in the conformance statement

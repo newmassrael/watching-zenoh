@@ -1260,6 +1260,37 @@ fn session_zids(configured: Option<ConfiguredZid>) -> Option<([u8; ZID_LENGTH], 
     }
 }
 
+/// The two forms of the id `zid-derivation = address-ports` derives from the `listen` endpoints
+/// and eight random bytes, see [`wz_session_core::zid_derivation`]. A node whose listeners name
+/// no address of its own is refused with the reason, as is one whose random source fails.
+fn derived_zids(listen: &[String]) -> Result<([u8; ZID_LENGTH], SessionZid), DerivedZidError> {
+    use wz_session_core::zid_derivation::{ListenerFacts, RANDOM_BYTES};
+    let mut random = [0u8; RANDOM_BYTES];
+    getrandom::getrandom(&mut random).map_err(|_| DerivedZidError::Entropy)?;
+    let derived = ListenerFacts::of_endpoints(listen.iter().map(String::as_str))
+        .derive(None, random)
+        .map_err(DerivedZidError::Address)?;
+    minted_zids(derived).ok_or(DerivedZidError::Entropy)
+}
+
+/// Why [`derived_zids`] derived no zid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivedZidError {
+    /// The listeners gave the node no address a zid can be built on.
+    Address(wz_session_core::zid_derivation::ZidDerivationError),
+    /// The random source failed, which fails the open as a random zid's failure does.
+    Entropy,
+}
+
+impl core::fmt::Display for DerivedZidError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Address(refused) => core::fmt::Display::fmt(refused, f),
+            Self::Entropy => f.write_str("the random source gave no bytes for the zid"),
+        }
+    }
+}
+
 /// The two forms of an id the session minted for itself, see [`session_zids`]. `None` for
 /// sixteen zero bytes, which trim to no zid at all.
 fn minted_zids(minted: [u8; ZID_LENGTH]) -> Option<([u8; ZID_LENGTH], SessionZid)> {
@@ -4608,7 +4639,16 @@ pub fn open_blocking(
     let gossiping = gossip.is_some();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
-    let (zid, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
+    // A stated zid is the session's whatever the policy says; an unstated one is drawn at random
+    // (upstream's), or derived from the listeners under `zid-derivation = address-ports`.
+    let (zid, wire_zid) = match (zid, session_policy.zid_derivation()) {
+        (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zids(&listen)
+            .map_err(|refused| {
+                log_open_failure("zid", &refused.to_string());
+                OpenError::DriveFailed
+            })?,
+        (configured, _) => session_zids(configured).ok_or(OpenError::DriveFailed)?,
+    };
     // R3064 -- the node's clock, built ONCE here from the identity just fixed and the role the
     // session plays, and handed to the registry, which installs a clone on its plane and on every
     // face session it makes. `None` inside when the config does not enable timestamping for this
@@ -5030,6 +5070,72 @@ mod tests {
             "one choice, two views"
         );
         assert_ne!(state_a, state_b, "a session with no id mints its own");
+    }
+
+    /// `zid-derivation = address-ports` over a session's `listen` endpoints: the first endpoint
+    /// that binds a node's own IPv4 address heads the id, the lowest `tcp` and `udp` ports follow
+    /// little-endian, and the random half differs between two opens. A wildcard listener, a group
+    /// the node joins and a scheme that is neither `tcp` nor `udp` say nothing.
+    #[test]
+    fn a_derived_id_reads_the_address_and_lowest_ports_of_the_listeners() {
+        let listen = [
+            "tcp/0.0.0.0:31000".to_string(),
+            "udp/224.0.0.240:30000".to_string(),
+            "tls/10.9.8.6:29000".to_string(),
+            "tcp/10.9.8.7:31500".to_string(),
+            "udp/10.9.8.7:32500".to_string(),
+            "udp/10.9.8.8:32400".to_string(),
+        ];
+        let (state_a, wire_a) = derived_zids(&listen).expect("a listener names the node");
+        let (state_b, _) = derived_zids(&listen).expect("a listener names the node");
+        assert_eq!(
+            &state_a[..4],
+            &[10, 9, 8, 7],
+            "the first listener that names one"
+        );
+        assert_eq!(
+            &state_a[4..6],
+            &31_000u16.to_le_bytes(),
+            "the lowest tcp port"
+        );
+        assert_eq!(
+            &state_a[6..8],
+            &32_400u16.to_le_bytes(),
+            "the lowest udp port"
+        );
+        assert_eq!(
+            &state_a[..8],
+            &state_b[..8],
+            "the derived half is the node's"
+        );
+        assert_ne!(
+            &state_a[8..],
+            &state_b[8..],
+            "the random half is drawn each open"
+        );
+        assert_eq!(
+            wire_a.as_slice(),
+            wz_runtime_tokio::zid_hex::canonical_zid(&state_a),
+            "one choice, two views, as for a random id"
+        );
+    }
+
+    /// A session whose listeners bind no address of its own, or that has none, derives no id:
+    /// the open is refused with the reason rather than given a random one.
+    #[test]
+    fn a_derived_id_with_no_address_of_the_node_is_refused() {
+        use wz_session_core::zid_derivation::ZidDerivationError;
+        for listen in [
+            vec![],
+            vec!["tcp/0.0.0.0:31000".to_string()],
+            vec!["udp/239.1.2.3:30000".to_string()],
+        ] {
+            assert_eq!(
+                derived_zids(&listen),
+                Err(DerivedZidError::Address(ZidDerivationError::NoAddress)),
+                "{listen:?}"
+            );
+        }
     }
 
     /// A minted id whose last byte is zero (one in 256) is fifteen bytes on the wire and

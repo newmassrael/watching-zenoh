@@ -96,6 +96,12 @@ pub enum LeaseCheckOutcome {
     /// so the session-fsm `lease.expired -> Closing(Expired)`
     /// transition fires.
     Expired,
+    /// The lease holds, but the no-progress watch of the peer's initial declarations ran out
+    /// (`DECLARATION_SYNC_RX_NO_PROGRESS_MS`, see
+    /// `SessionLinkActions::declaration_watch_deadline`): the helper has invoked
+    /// `engine.process_event(SessionFsmUnicastEvent::LinkLost)`, as a gap on the reliable channel
+    /// does under the same policy, so a reconnecting session opens again and redoes the sync.
+    DeclarationsStalled,
 }
 
 /// R311kx — outcome of a single keepalive TX deadline check

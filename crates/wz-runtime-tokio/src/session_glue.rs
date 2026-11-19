@@ -379,6 +379,9 @@ pub use wz_session_core::send_wire_error::SendWireError;
 // unchanged. The concrete R = TokioRuntime constructor
 // (new_session_actions) + the Engine-bound new_session_engine factory stay
 // below (AP-only — they name tokio / sce-rust-runtime types).
+/// Why a session told its peer nothing again (`SessionLinkActions::replay_declarations`), named
+/// here so a facade over this crate can name it too.
+pub use wz_session_core::reconnect::ReplayDeclarationsError;
 pub use wz_session_core::session_actions::default_init_patch_ext_entry;
 // chunk-5 — re-aliased with the AP default type params restored. The
 // session-core struct dropped its `= TokioRuntime` / `= TokioTime` defaults

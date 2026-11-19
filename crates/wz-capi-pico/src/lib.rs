@@ -179,6 +179,9 @@ pub mod device_requires;
 // wz doors (`wz_ext.h`) of the unstable surface, in a build with either capability.
 #[cfg(any(feature = "e2e-sender", feature = "e2e-receiver"))]
 pub mod e2e;
+// `wz_ext_redeclare`: tell a session's peers what it holds again.
+#[cfg(feature = "unstable-api")]
+pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the event ring of the observation plane).
 pub mod encoding;

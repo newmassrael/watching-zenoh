@@ -2738,6 +2738,63 @@ served during the wait. It is read only when that policy is on, and must be at
 least 1.
 '''
 
+[[limit]]
+id = "DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
+help = '''
+How long, in milliseconds, a session waits for the next of its peer's initial
+declarations before it takes the declaration sync as cut short, when the
+reliable-gap-reconnect policy is not off. From the session's establishment
+until the peer's end of its initial declarations, a stretch this long with no
+declaration from the peer ends the link as lost, and a reconnecting session
+opens again and redoes the sync, as for a gap on the reliable channel. Each
+declaration the peer sends starts the stretch again. 0 keeps no such watch, as
+upstream keeps none. Only the tokio engine reads it, since only it notes the
+end of the peer's declarations.
+'''
+
+[[limit]]
+id = "DECLARATION_SYNC_RETRY_INTERVAL_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
+help = '''
+How long, in milliseconds, a paced declaration replay waits before it tries
+again a turn the link did not take for want of room, when the
+declaration-sync-pacing policy is on. The wait is its own and not
+DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
+link refused. 0 tries nothing again: a refused turn ends the replay and the
+link, and a reconnecting session replays again on the next one, as before this
+limit. Only the tokio engine reads it.
+'''
+
+[[limit]]
+id = "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
+help = '''
+How long, in milliseconds, a paced declaration replay that retries refused
+turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
+sent before it gives up, which ends the link as a refused turn does without
+retries. Each declaration sent starts the stretch again. 0 gives up only when
+the link itself ends. Only the tokio engine reads it.
+'''
+
 # The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
 # pico ABI states them. Each defaults to pico's own default, so the drop-in's default build states
 # what pico's does; a pico built with other numbers is matched by stating them here.
@@ -3021,7 +3078,7 @@ not refused. Only the tokio engine reads this policy.
 id = "reliable-gap-reconnect"
 kind = "choice"
 kconfig = "WZ_POLICY_RELIABLE_GAP_RECONNECT"
-choices = ["off", "until-declarations-synced", "always"]
+choices = ["off", "until-declarations-synced", "always", "until-declarations-synced-when-begun"]
 default = "off"
 upstream = "Accepts a forward jump of the reliable channel's sequence number without a word: the frames in between are lost, the session stays open and nothing is repaired, so a peer's declaration lost that way is never noticed."
 scope = "session"
@@ -3043,7 +3100,12 @@ advance the number is dropped as before, and the best-effort channels are not
 affected. Only the tokio engine reconnects, so another engine ends the link and
 leaves it to the application, and only the tokio engine reports the end of the
 peer's declarations, so for another engine `until-declarations-synced` is
-`always`.
+`always`. `until-declarations-synced-when-begun` is `until-declarations-synced`
+on a link this node dialled; on a link it accepted, a peer that lets
+DECLARATION_SYNC_RX_NO_PROGRESS_MS pass without sending any declaration of its
+initial interest is taken to have none to send, which settles the sync, while a
+peer that began them is held to their end as under `until-declarations-synced`.
+With that limit at 0 nothing settles an accepted link early.
 '''
 
 [[policy]]
@@ -3469,6 +3531,88 @@ so both ends of a link must state the same value: a peer that keeps one link by
 the other order closes the link this node kept, and neither link survives.
 '''
 
+[[policy]]
+id = "query-unanswerable-final"
+kind = "choice"
+kconfig = "WZ_POLICY_QUERY_UNANSWERABLE_FINAL"
+choices = ["none", "empty-final"]
+default = "none"
+upstream = "Drops a query from a peer whose key it cannot resolve (an id the peer never declared to it) before the query reaches any queryable, and sends nothing back, so the asker waits out its own timeout."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `empty-final` sends a RESPONSE_FINAL the peer reads.
+wire = "visible"
+since = 2
+help = '''
+How a node answers a query from a peer that it cannot run at all because the
+query's key names an id the peer never declared to this node. `none` sends
+nothing, as upstream does, and the asker's query ends only at its own timeout.
+`empty-final` answers it at once with a RESPONSE_FINAL and no reply, the answer
+a query that matched no queryable gets, so the asker learns now that nothing
+will come. A query whose parameters or attachment are longer than the build
+allows is answered with that final under either value, and a query that
+arrives while the node has no room left to hold another final is refused and
+counted under either value, since the final it would owe has nowhere to wait.
+'''
+
+[[policy]]
+id = "zid-derivation"
+kind = "choice"
+kconfig = "WZ_POLICY_ZID_DERIVATION"
+choices = ["random", "address-ports"]
+default = "random"
+upstream = "Draws every byte of a zid the configuration does not state from its random source."
+scope = "runtime"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: the zid is what every INIT and every routing message names the node by.
+wire = "visible"
+since = 2
+help = '''
+How a node makes its zid when the configuration states none. `random` draws all
+sixteen bytes, as upstream does. `address-ports` derives the first eight from
+where the node is reachable and draws the other eight: bytes 0 to 3 are the
+IPv4 address of the first listen endpoint that binds an address of the node,
+bytes 4 and 5 the lowest port of its tcp listeners and bytes 6 and 7 the lowest
+port of its udp listeners, each little-endian and 0 for a node with no listener
+of that protocol. A wildcard, multicast or broadcast address names no node, and
+a node whose listeners name no address of its own is refused at open rather
+than given a random zid. A zid the configuration states is used under either
+value. Only the C ABIs' open reads this policy.
+'''
+
+[[policy]]
+id = "handshake-stray-message"
+kind = "choice"
+kconfig = "WZ_POLICY_HANDSHAKE_STRAY_MESSAGE"
+choices = ["fail", "ignore", "ignore-and-replay"]
+default = "fail"
+upstream = "Ends a unicast establishment, closing the link with INVALID, on any message but the one its current step reads next, and drops an Init or Open that reaches an established session while counting it as traffic for the lease."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `fail` sends a Close(INVALID) where `ignore` sends nothing.
+wire = "visible"
+since = 2
+help = '''
+What a unicast establishment does with an Init or an Open that is not the
+message its current step awaits: an InitAck repeated after the OpenSyn went out,
+an InitSyn repeated after the InitAck went out, or any other out of its step.
+`fail` ends the attempt and closes the link with INVALID, as upstream does.
+`ignore` drops the message before anything is taken from it and the step goes
+on waiting, under the deadline it already had: nothing a peer sends extends an
+establishment. Under `ignore` an Init or Open that reaches an established
+session is dropped as well, and is not counted as a sign of the peer's life for
+the lease, nor does it change anything the session negotiated.
+`ignore-and-replay` is `ignore`, and in addition a peer that repeats the step
+this node last answered (an InitSyn after the InitAck went out, an InitAck
+after the OpenSyn went out) is sent that answer again, the very bytes first
+sent, so its cookie is the one already issued. A build whose domain allows this
+value holds one answer per establishment in flight, released when the
+establishment ends; an answer longer than the hold is not sent again.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -3514,6 +3658,9 @@ routing-face-drive = "task-per-face"
 routing-table-sharing = "rwlock"
 reassembly-pool-overflow = "reject"
 link-tie-order = "zid-number"
+query-unanswerable-final = "none"
+zid-derivation = "random"
+handshake-stray-message = "fail"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #
