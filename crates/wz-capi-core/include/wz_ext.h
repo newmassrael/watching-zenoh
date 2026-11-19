@@ -1276,4 +1276,167 @@ void wz_ext_transport_drop(wz_ext_moved_transport_t *this_);
 void wz_ext_internal_transport_null(wz_ext_owned_transport_t *this_);
 bool wz_ext_internal_transport_check(const wz_ext_owned_transport_t *this_);
 
+/* ================================================ the message catalog
+ *
+ * A deployment's messages, declared once as data: one JSON5 text names the
+ * nodes, the e2e and segment profiles, and for each message its key
+ * expression, its id, the nodes that publish and subscribe to it, its period
+ * (none for an event message), its protection (a profile and the header
+ * values), the senders a receiver binds its slots to, its instance key, its
+ * replay depth, its supervision and its segment profile. The library reads
+ * and judges it once; the program then asks, per message, for its entry and
+ * for the pieces the other doors take, so one library serves every deployment
+ * whose catalog it is given. The shape is deploy/message-catalog.schema.json.
+ * Part of the unstable surface, and present only in a build with the
+ * message-catalog capability; the doors that make a sender, a receiver or
+ * supervision rows also need e2e-sender, e2e-receiver or e2e-supervision.
+ *
+ * A message and a node are named by their index: the place of the message in
+ * the catalog's messages and of the node in its nodes. A catalog does not
+ * change once read, so several threads may read one at once; a key expression
+ * an entry points at lives as long as the catalog. */
+
+#define WZ_EXT_MESSAGE_PUBLISHES 1  /* the node publishes the message */
+#define WZ_EXT_MESSAGE_SUBSCRIBES 2 /* the node subscribes to it */
+
+/* The bits of has: what an entry states. */
+#define WZ_EXT_MESSAGE_HAS_PERIOD 1
+#define WZ_EXT_MESSAGE_HAS_PROTECTION 2
+#define WZ_EXT_MESSAGE_HAS_SENDERS 4
+#define WZ_EXT_MESSAGE_HAS_INSTANCE_KEY 8
+#define WZ_EXT_MESSAGE_HAS_REPLAY 16
+#define WZ_EXT_MESSAGE_HAS_SUPERVISION 32
+#define WZ_EXT_MESSAGE_HAS_SEGMENT_PROFILE 64
+
+typedef struct wz_ext_owned_message_catalog_t {
+  void *_handle;
+} wz_ext_owned_message_catalog_t;
+typedef struct wz_ext_loaned_message_catalog_t {
+  void *_handle;
+} wz_ext_loaned_message_catalog_t;
+typedef struct wz_ext_moved_message_catalog_t {
+  wz_ext_owned_message_catalog_t _this;
+} wz_ext_moved_message_catalog_t;
+
+/* One message's entry. A number whose has bit is clear is 0. */
+typedef struct wz_ext_message_entry_t {
+  const char *key_expr;   /* the literal key it is put on, valid while the
+                             catalog lives */
+  uint32_t id;
+  uint32_t period_ms;     /* 0 for an event message */
+  uint32_t replay_depth;  /* 0 for no replay */
+  uint16_t supervision_factor; /* 0 when its reception is not supervised */
+  uint8_t has;            /* WZ_EXT_MESSAGE_HAS_* */
+  uint8_t supervision_awaited; /* 1 when a stream can be lost before its
+                                  first reception */
+  uint32_t senders;       /* how many senders its receivers bind slots to */
+  uint32_t reserved;
+} wz_ext_message_entry_t;
+
+/* Read and judge the catalog text, against the build's
+ * MESSAGE_CATALOG_ENTRIES, REPLAY_DEPTH_MAX and E2E_SENDER_SLOTS. this_ holds
+ * the null state on every error; refusal may be NULL and, on
+ * _Z_ERR_CONFIG_INVALID_VALUE (-89), holds why: the refusal's word (the
+ * schema's x-wz-refusals, such as duplicate_id or replay_depth_out_of_range),
+ * the JSON pointer to the place, and a sentence.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_ or text; Z_EINVAL (-75) for text that is
+ * not UTF-8; _Z_ERR_CONFIG_INVALID_VALUE for a catalog refused. */
+z_result_t wz_ext_message_catalog_new(wz_ext_owned_message_catalog_t *this_,
+                                      const char *text,
+                                      z_owned_string_t *refusal);
+
+/* How many messages it declares; 0 for a NULL catalog. */
+size_t wz_ext_message_catalog_len(const wz_ext_loaned_message_catalog_t *this_);
+
+/* The index of the message put on key_expr, of the message of id, and of the
+ * node called name. Z_OK; Z_ERR_INVALID (-1) when there is none; Z_EINVAL for
+ * text that is not UTF-8; Z_ERR_NULL for a NULL argument. */
+z_result_t wz_ext_message_catalog_find(
+    const wz_ext_loaned_message_catalog_t *this_, const char *key_expr,
+    size_t *out_index);
+z_result_t wz_ext_message_catalog_find_id(
+    const wz_ext_loaned_message_catalog_t *this_, uint32_t id,
+    size_t *out_index);
+z_result_t wz_ext_message_catalog_node(
+    const wz_ext_loaned_message_catalog_t *this_, const char *name,
+    size_t *out_node);
+
+/* The entry of message index, written to out (zeroed on every error). Z_OK;
+ * Z_ERR_INVALID for no such message; Z_ERR_NULL for a NULL argument. */
+z_result_t wz_ext_message_catalog_entry(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index,
+    wz_ext_message_entry_t *out);
+
+/* Whether node publishes or subscribes to message index: the
+ * WZ_EXT_MESSAGE_PUBLISHES and _SUBSCRIBES bits, 0 for neither or no such
+ * message or node. */
+uint8_t wz_ext_message_catalog_direction(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node);
+
+/* The start delay every reception supervisor of the deployment is made with,
+ * in milliseconds; 0 when the catalog states none. */
+uint32_t wz_ext_message_catalog_supervision_start_delay(
+    const wz_ext_loaned_message_catalog_t *this_);
+
+/* With e2e-sender: the sender node protects message index with, from the
+ * message's profile and header values and the node's address, made as
+ * options says (NULL: the defaults); the handle wz_ext_e2e_sender_new makes.
+ * out holds the null state on every error; refusal may be NULL.
+ *
+ * Z_OK; Z_ERR_INVALID for no such message or node; Z_EINVAL for an unknown
+ * rollover; _Z_ERR_CONFIG_INVALID_VALUE when the node does not publish the
+ * message, the message is not protected or an option is refused, refusal
+ * saying why; Z_ERR_NULL for a NULL catalog or out. */
+z_result_t wz_ext_message_catalog_e2e_sender_new(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    const wz_ext_e2e_sender_options_t *options, wz_ext_owned_e2e_sender_t *out,
+    z_owned_string_t *refusal);
+
+/* With e2e-receiver: the receiver node judges message index with, from the
+ * message's profile and header values, with one slot per sender the entry
+ * lists, bound to its identity, or one stream when it lists none; the handle
+ * wz_ext_e2e_receiver_new makes. out holds the null state on every error.
+ *
+ * Z_OK; Z_ERR_INVALID for no such message or node; WZ_EXT_ERR_UNSUPPORTED for
+ * a message that lists senders in a build without e2e-sender-demux;
+ * _Z_ERR_CONFIG_INVALID_VALUE when the node does not subscribe to the message
+ * or it is not protected, refusal saying why; Z_ERR_NULL for a NULL catalog
+ * or out. */
+z_result_t wz_ext_message_catalog_e2e_receiver_new(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    wz_ext_owned_e2e_receiver_t *out, z_owned_string_t *refusal);
+
+/* With e2e-supervision: how many rows a reception supervisor of node takes
+ * for message index (one per sender the entry lists, else one), and the door
+ * that adds them to supervisor: the message's period and factor, each row's
+ * sender the index of the node that sends the stream (the number
+ * wz_ext_stream_supervisor_set_sender_present takes). The stream numbers are
+ * written to out_streams in the order of the receiver's slots, and how many
+ * to written.
+ *
+ * Z_OK; Z_ERR_OVERFLOW (-74) when capacity is less than the rows, before any
+ * is added; Z_ERR_INVALID for no such message or node;
+ * _Z_ERR_CONFIG_INVALID_VALUE when the node does not subscribe to the message
+ * or its reception is not supervised; the code of
+ * wz_ext_stream_supervisor_add when the supervisor refuses a row, the rows
+ * before it added and counted in written; Z_ERR_NULL for a NULL argument. */
+z_result_t wz_ext_message_catalog_supervision_rows(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    size_t *out_rows, z_owned_string_t *refusal);
+z_result_t wz_ext_message_catalog_supervise(
+    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    const wz_ext_loaned_stream_supervisor_t *supervisor, uint32_t *out_streams,
+    size_t capacity, size_t *written, z_owned_string_t *refusal);
+
+const wz_ext_loaned_message_catalog_t *wz_ext_message_catalog_loan(
+    const wz_ext_owned_message_catalog_t *this_);
+wz_ext_moved_message_catalog_t *wz_ext_message_catalog_move(
+    wz_ext_owned_message_catalog_t *this_);
+void wz_ext_message_catalog_drop(wz_ext_moved_message_catalog_t *this_);
+void wz_ext_internal_message_catalog_null(
+    wz_ext_owned_message_catalog_t *this_);
+bool wz_ext_internal_message_catalog_check(
+    const wz_ext_owned_message_catalog_t *this_);
+
 #endif /* WZ_EXT_H */

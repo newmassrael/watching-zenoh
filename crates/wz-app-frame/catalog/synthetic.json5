@@ -1,0 +1,74 @@
+// A synthetic message catalog for the tests of the catalog reader and generator: two nodes, one
+// periodic message protected and supervised, one event message with a replay depth and a segment
+// profile. Every width, constant and name is made up for the tests and unlike any deployment's.
+//
+// scripts/lib/message_catalog.py --write turns it into catalog/synthetic_tables.rs, which the
+// reader's tests compare with what the reader makes of this text.
+{
+  nodes: [
+    {name: 'north', address: '0x0007A100'},
+    {name: 'south', address: '0x0007B200'},
+  ],
+  e2e_profiles: {
+    'cat-demo': {
+      name: 'cat-demo',
+      fields: [
+        {name: 'counter', bytes: 1},
+        {name: 'ident', bytes: 2, xor: '0x0C3F',
+         split: [{name: 'group', lsb: 10, width: 6}, {name: 'msg', lsb: 0, width: 10}]},
+        {name: 'length', bytes: 2},
+        {name: 'cell', bytes: 3,
+         split: [{name: 'kind', lsb: 20, width: 4},
+                 {name: 'sender', lsb: 0, width: 20,
+                  derive: {from: 'address', mask: '0x000FFF00', xor: '0x33'}}]},
+        {name: 'crc', bytes: 2},
+      ],
+      crc: {field: 'crc', width: 16, poly: '0x8BB7', init: '0x0000', refin: false,
+            refout: false, xorout: '0x0000',
+            cover: ['ident', 'counter', '@payload', 'length', 'cell']},
+      length: {field: 'length', counts: 'frame'},
+      counter: {field: 'counter', max_gap: 3, timeout_ms: 400},
+      judge: {ident: 'ident', length: true},
+      cell: {field: 'cell', kind: 'kind', sender: 'sender'},
+    },
+  },
+  segment_profiles: {
+    'cat-pieces': {
+      name: 'cat-pieces',
+      segments: {
+        fields: [
+          {name: 'mark', bytes: 1, equals: '0x7E'},
+          {name: 'run', bytes: 2},
+          {name: 'seq', bytes: 1},
+          {name: 'whole', bytes: 4, order: 'little'},
+          {name: 'from', bytes: 4, order: 'little'},
+        ],
+        stream: ['run'],
+        transfer: 'seq',
+        total: 'whole',
+        offset: 'from',
+        total_max: 65536,
+      },
+    },
+  },
+  supervision: {start_delay_ms: 750},
+  messages: [
+    {
+      key_expr: 'demo/catalog/pose',
+      id: 401,
+      publishers: ['north'],
+      subscribers: ['south'],
+      period_ms: 40,
+      protection: {profile: 'cat-demo', values: {ident: {group: 21, msg: 300}, cell: {kind: 6}}},
+      supervision: {factor: 4},
+    },
+    {
+      key_expr: 'demo/catalog/map',
+      id: 402,
+      publishers: ['south'],
+      subscribers: ['north'],
+      replay_depth: 6,
+      segment_profile: 'cat-pieces',
+    },
+  ],
+}

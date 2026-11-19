@@ -504,6 +504,27 @@ pub const CLOCK_SOURCES: usize = generated::CLOCK_SOURCES;
 /// when it makes it, at most this many. At least `1`.
 pub const E2E_SENDER_SLOTS: usize = generated::E2E_SENDER_SLOTS;
 
+/// The deepest replay one message, or one instance of it, keeps: how many of the frames it last
+/// sent a publisher holds for a subscriber that arrives later. Each message states its own depth,
+/// from `1` to this, and the message catalog (`wz_app_frame::message_catalog`) refuses one above
+/// it. At least `1`.
+pub const REPLAY_DEPTH_MAX: usize = generated::REPLAY_DEPTH_MAX;
+
+const _: () = assert!(
+    REPLAY_DEPTH_MAX >= 1,
+    "a message that keeps a replay keeps at least one frame"
+);
+
+/// How many messages one message catalog declares (`wz_app_frame::message_catalog`), when the
+/// `message-catalog` capability is on: a catalog with more is refused when it is read, and the
+/// generator of a fixed-memory image refuses to write its tables. At least `1`.
+pub const MESSAGE_CATALOG_ENTRIES: usize = generated::MESSAGE_CATALOG_ENTRIES;
+
+const _: () = assert!(
+    MESSAGE_CATALOG_ENTRIES >= 1,
+    "a message catalog holds at least one message"
+);
+
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
 /// the hybrid logical clock (`hlc::HlcCore`) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
 /// is 500 unless the host states otherwise. A time and not a table size: it sizes no memory.

@@ -82,6 +82,37 @@ fn word(this_: *const wz_ext_loaned_e2e_sender_t) -> *const *mut c_void {
     this_.cast::<*mut c_void>()
 }
 
+/// The sender options `options` states (null: the defaults); `Z_EINVAL` for a rollover this
+/// library does not know. Every door that makes a sender reads them here.
+///
+/// # Safety
+/// `options` is null or valid.
+pub(crate) unsafe fn sender_options(
+    options: *const wz_ext_e2e_sender_options_t,
+) -> Result<SenderOptions, ZResult> {
+    let options = if options.is_null() {
+        wz_ext_e2e_sender_options_t::default()
+    } else {
+        *options
+    };
+    let rollover = match options.rollover {
+        WZ_EXT_E2E_ROLLOVER_REFUSE => Rollover::Refuse,
+        WZ_EXT_E2E_ROLLOVER_WRAP => Rollover::Wrap,
+        _ => return Err(Z_EINVAL),
+    };
+    Ok(SenderOptions {
+        streams: options.streams,
+        first_counter: options.first_counter,
+        rollover,
+        crc_cache: options.crc_cache,
+    })
+}
+
+/// Box a made sender behind the caller's handle word.
+pub(crate) fn adopt_sender(this_: &mut wz_ext_owned_e2e_sender_t, sender: StreamSender) {
+    this_.handle = adopt(sender);
+}
+
 /// Fill in the default sender options: one stream, a first counter of 0, refuse after the largest
 /// value, no CRC cache.
 ///
@@ -131,15 +162,9 @@ pub unsafe extern "C" fn wz_ext_e2e_sender_new(
         let (Some(profile), Some(values)) = (utf8_arg(profile_json), utf8_arg(values_json)) else {
             return Z_EINVAL;
         };
-        let options = if options.is_null() {
-            wz_ext_e2e_sender_options_t::default()
-        } else {
-            *options
-        };
-        let rollover = match options.rollover {
-            WZ_EXT_E2E_ROLLOVER_REFUSE => Rollover::Refuse,
-            WZ_EXT_E2E_ROLLOVER_WRAP => Rollover::Wrap,
-            _ => return Z_EINVAL,
+        let options = match sender_options(options) {
+            Ok(options) => options,
+            Err(code) => return code,
         };
         let profile = match Profile::parse(profile) {
             Ok(p) => p,
@@ -155,19 +180,9 @@ pub unsafe extern "C" fn wz_ext_e2e_sender_new(
                 return Z_ERR_CONFIG_INVALID_VALUE;
             }
         };
-        let made = StreamSender::new(
-            profile,
-            values,
-            SenderOptions {
-                streams: options.streams,
-                first_counter: options.first_counter,
-                rollover,
-                crc_cache: options.crc_cache,
-            },
-        );
-        match made {
+        match StreamSender::new(profile, values, options) {
             Ok(sender) => {
-                (*this_).handle = adopt(sender);
+                adopt_sender(&mut *this_, sender);
                 Z_OK
             }
             Err(why) => {

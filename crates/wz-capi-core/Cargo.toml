@@ -242,6 +242,10 @@ segment-sender = []
 # (`wz-capi-pico/e2e-supervision`), so this feature only carries the capability's name, as
 # `e2e-sender`'s does.
 e2e-supervision = []
+# The message catalog. The model has nothing behind it: the reader is `wz-app-frame`'s
+# (`message_catalog`) and the doors are the pico ABI's own (`wz-capi-pico/message-catalog`), so
+# this feature only carries the capability's name, as `e2e-sender`'s does.
+message-catalog = []
 # A transport the program supplies: every link a session opens goes over the program's own network
 # stack, through the calls of its port, and over no socket of the system's. The model threads the
 # transport from the stance to each dial and listen config (`OpenStance::app_transport`); the

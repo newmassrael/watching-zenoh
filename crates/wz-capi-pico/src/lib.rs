@@ -220,6 +220,10 @@ mod link_properties;
 pub mod liveliness;
 pub mod locality;
 pub mod matching;
+// A deployment's message catalog, read from one JSON5 declaration: wz doors (`wz_ext.h`) of the
+// unstable surface, over the reader of `wz-app-frame`.
+#[cfg(feature = "message-catalog")]
+pub mod message_catalog;
 mod option_fields;
 mod os;
 pub mod platform;

@@ -36,6 +36,8 @@
 //! | `e2e_receiver` | the receiving judge of one message: a judge per stream or per sender, the profile's rules, a verdict per frame | `alloc` |
 //! | `segment_profile` | the profile of the header in front of each piece of a split message | `alloc` |
 //! | `segment_sender` | the writer of those pieces: one message cut under a segment profile | `alloc` |
+//! | `message_catalog_table` | a deployment's message catalog as static tables, for an image that links it | always |
+//! | `message_catalog` | the reader and judge of a message catalog, and the senders, receivers and supervision rows made from it | `alloc` |
 //!
 //! `no_std`, with no third-party dependency. The CRC engine and the judge need
 //! no allocator, so a build without `alloc` links none; the three profile
@@ -48,8 +50,14 @@
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;
 
+// The tables the catalog generator writes name this crate by its name, as an image that links them
+// does; the tests that include them are inside it.
+#[cfg(test)]
+extern crate self as wz_app_frame;
+
 pub mod e2e_crc;
 pub mod e2e_judge;
+pub mod message_catalog_table;
 
 #[cfg(feature = "alloc")]
 pub mod e2e_frame;
@@ -64,6 +72,12 @@ pub mod e2e_stream_sender;
 // synthetic profiles.
 #[cfg(all(test, feature = "alloc"))]
 mod e2e_rules_tests;
+#[cfg(feature = "alloc")]
+pub mod message_catalog;
+// The model tests of the catalog reader: the synthetic catalog, its handles, the generator's
+// tables of it, and the corpus of refused catalogs.
+#[cfg(all(test, feature = "alloc"))]
+mod message_catalog_tests;
 #[cfg(feature = "alloc")]
 pub mod segment_profile;
 #[cfg(feature = "alloc")]

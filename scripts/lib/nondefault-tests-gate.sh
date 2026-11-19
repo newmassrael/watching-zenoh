@@ -401,6 +401,16 @@ transport-link-unixpipe,transport-link-ws|"
     # by name. The doors have no unit tests of their own; the mechanism's are `wz-app-frame`'s.
     "wz-capi-pico|hook|e2e-sender,e2e-sender-demux|--test=e2e_doors"
     "wz-capi-pico|hook|e2e-sender,e2e-receiver|--test=e2e_doors"
+    # The message catalog driven from C (`wz_ext_message_catalog_*`): the file that reads the
+    # reader's synthetic catalog, reads each entry back and refuses what the reader refuses
+    # (`message_catalog_doors`, whose module is behind the feature). With the e2e doors and
+    # supervision, where it holds the sender, receiver and supervision rows a catalog makes to
+    # those made by hand; with the receiver's sender slots, where a receiver of listed senders
+    # binds them, and without, where it is refused by name. The reader's own tests are
+    # `wz-app-frame`'s, in its default build.
+    "wz-capi-pico|hook|message-catalog|--test=message_catalog_doors"
+    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-receiver,e2e-supervision|--test=message_catalog_doors"
+    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-sender-demux|--test=message_catalog_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
