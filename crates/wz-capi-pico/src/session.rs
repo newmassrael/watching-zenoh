@@ -603,6 +603,13 @@ pub unsafe extern "C" fn z_open(
         // comes back on another locator is found there and not here. The scout runs under the
         // snapshot of the open it finds a node for.
         let policy = resolve_policy(&cfg);
+        // The key-wire form, judged for the engine the session opens on, and the key ids every
+        // node shares that the config states (`crate::key_ids`).
+        if let Err(code) = crate::key_ids::admit_at_open(&cfg, &policy) {
+            return code;
+        }
+        #[cfg(not(feature = "engine-tokio"))]
+        let key_ids = crate::key_ids::coop_key_ids(&cfg);
         let connect: Vec<String> = match (connect, &listen) {
             (Some(connect), _) => vec![connect],
             (None, Some(_)) => Vec::new(),
@@ -642,6 +649,8 @@ pub unsafe extern "C" fn z_open(
             #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
             policy,
+            #[cfg(not(feature = "engine-tokio"))]
+            key_ids,
         };
         #[cfg(feature = "engine-tokio")]
         return open_on_tokio(zs, request);
@@ -884,6 +893,10 @@ struct OpenRequest {
     /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
+    /// The key ids every node of the deployment shares that the config states, for the
+    /// cooperative engine; the tokio engine holds none, and its open refused a config that does.
+    #[cfg(not(feature = "engine-tokio"))]
+    key_ids: wz_capi_coop::OpenKeyIds,
 }
 
 /// Open `request` on the tokio engine and install the session in `zs`.
@@ -1163,7 +1176,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
-    let opened = wz_capi_coop::CoopEngine::open_with_policy(
+    let opened = wz_capi_coop::CoopEngine::open_with_key_ids(
         links.waited_by_owner(),
         crate::coop_host::clock(),
         crate::coop_host::entropy(),
@@ -1208,10 +1221,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
         },
         policy,
+        request.key_ids,
     );
     let engine = match opened {
         Ok(engine) => engine,
         Err(wz_capi_coop::OpenError::EntropyUnavailable) => return crate::result::Z_ERR_GENERIC,
+        // `z_open` judged the form before this (`crate::key_ids::admit_at_open`), and the engine
+        // judges it again with the same rule.
+        Err(wz_capi_coop::OpenError::KeyWireForm(_)) => return crate::result::Z_ERR_INVALID,
         Err(_) => return crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     };
     let zid = wz_capi_port::SessionDrive::zid(&*engine);

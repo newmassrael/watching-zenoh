@@ -191,6 +191,9 @@ pub mod get;
 #[cfg(feature = "query")]
 pub mod get_to_peer;
 pub mod handlers;
+// The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
+// with the capability, and in every build the open's judgement of the key-wire form.
+pub mod key_ids;
 pub mod keyexpr;
 mod last_timestamp;
 #[cfg(any(feature = "connectivity", feature = "admin-space"))]

@@ -540,4 +540,33 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
  * Present in every build. */
 const char *wz_ext_conformance_digest(void);
 
+/* ---- Key ids every node of a deployment shares (shared-key-ids) ---- */
+
+/* Hand config the key ids every node of the deployment shares: count
+ * entries, entry i the id ids[i] and the key expression keys[i], a
+ * NUL-terminated UTF-8 string. The session z_open makes of the config holds
+ * the dictionary: it reads an id the dictionary names though its peer never
+ * declared it, declares no key expression under one of its ids, and names a
+ * key by one as its key-wire-form policy says (shared: the key's id, or the
+ * id of the longest entry that ends at one of its slashes followed by the
+ * rest, whichever is cheaper than the whole key). A count of 0 takes back a
+ * dictionary handed before. Every node of the deployment must hand the same
+ * dictionary; a peer without it cannot read a key named by one of its ids.
+ * Part of the unstable surface, and present only in a build with the
+ * shared-key-ids capability.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL config, a NULL array with entries, or a NULL
+ * key; Z_ERR_INVALID for a key that is not UTF-8 or not a canonical key
+ * expression, an id of 0, and an id or a key named twice; Z_ERR_OVERFLOW for
+ * more entries than the build's MAX_SHARED_KEY_IDS. A refused call leaves
+ * the config as it was.
+ *
+ * z_open then refuses, with WZ_EXT_ERR_UNSUPPORTED, a config that states a
+ * dictionary on a session of the tokio engine, which holds none, and with
+ * Z_ERR_INVALID a session whose key-wire form is shared and whose config
+ * states no dictionary. */
+z_result_t wz_ext_config_key_ids(z_loaned_config_t *config,
+                                 const uint16_t *ids,
+                                 const char *const *keys, size_t count);
+
 #endif /* WZ_EXT_H */
