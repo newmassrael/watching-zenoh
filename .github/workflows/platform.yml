@@ -829,6 +829,22 @@ jobs:
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_session_loopback.c "a pico C program that opens two sessions over loopback"
 
+      # A zenoh-pico C program that calls every public platform export of pico's header
+      # (random, memory, task, mutex, condition variable, sleep, clock, wall time), on this
+      # host. The host-layer program above holds the layouts; this one holds that each
+      # export links (on Windows through the DLL's import library, which no ELF census reads)
+      # and that the ones the host-layer program does not call answer as pico's backend for
+      # the host does. It builds the library with the default features, as the two steps
+      # above do, so it costs no second build; it is placed before the step below, which
+      # builds another. Observed, not yet gated, as that step is, until two consecutive
+      # hosted runs read it green on both hosts.
+      - name: a zenoh-pico C program over every platform export (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 25
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_platform_surface.c "a pico C program over every platform export"
+
       # A zenoh-pico C program whose sessions open NO socket, on this host: two sessions
       # joined by an in-memory transport the program supplies through the wz extension
       # doors (wz_ext_transport_*, wz_ext.h), over a stream pair with injected partial
@@ -982,6 +998,15 @@ jobs:
         continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic.c "example: a program's own periodic task" "$WZ_EXAMPLE_FEATURES"
+
+      # The platform exports the periodic task stands on (its timer, lock, task and event
+      # wait), on the Linux row too, which the `capi` job does not run.
+      - name: every platform export (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_platform_surface.c "every platform export" "$WZ_EXAMPLE_FEATURES"
 
       # Last: the policy's build default rebuilds the library, and every later step would
       # run against this profile instead of the upstream one.

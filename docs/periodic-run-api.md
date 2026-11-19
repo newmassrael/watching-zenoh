@@ -105,7 +105,10 @@ backend (`vendor/zenoh-pico/src/system/windows/system.c`, `crates/wz-capi-pico/s
 | task | `z_task_init`, `_join`, `_detach`, `_drop`, `_loan`, `_loan_mut`, `_move`, `_take` | a thread `HANDLE` |
 
 The mutex, condition variable and task families are the multi-threaded arm's, as in
-zenoh-pico. What zenoh-pico's header also declares and the wz library does not export is its
+zenoh-pico. `crates/wz-capi-pico/tests/c/pico_host_layer.c` holds the layout of each type on
+the host, and `crates/wz-capi-pico/tests/c/pico_platform_surface.c` calls every export of the
+table, so that on Windows each is shown to resolve through the DLL's import library and to
+answer as zenoh-pico's Windows backend answers. What zenoh-pico's header also declares and the wz library does not export is its
 internal `_z_*` system layer (`_z_task_init` and the rest of the task, mutex and condition
 variable families, the recursive mutex `_z_mutex_rec_*`, `_z_condvar_signal_all`,
 `_z_get_time_since_epoch`): those are zenoh-pico's own and not its API, the drop-in owes them
