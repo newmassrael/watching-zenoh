@@ -5332,6 +5332,23 @@
       "carry_forward_bullets": [
         "No real capture of a failed lookup was read; the datagrams are built from the message layout. DNS over TCP, and lookups over DoT or DoH, are not read. A lookup answered from a cache on the host sends nothing and so is not in the capture. A UDP zenoh endpoint's address is not joined to the flow after it, only a TCP SYN is. The datagrams on the two ports still take the path every UDP datagram takes and are decoded as zenoh there, as before this round."
       ]
+    },
+    "Round 4539": {
+      "decision_summary": "Round 4536 (W1, the keyexpr relations generated from SCE documents) was filed under the number it was predicted to take, R4530, in two reason pins and six inventory entries; this round puts its real number there. The same landing went out before its Layer C1bzr measurement finished, and that measurement found what W1 broke: the matcher's module docs linked `keyexpr_includes`, which a build without `keyexpr-includes` does not have, so those docs failed in that reduced configuration. The docs now name it as code, and the two ledger lines of the descent's helpers W1 removed are lowered. The preflight on main also found two round-fed static gates red from capture rounds that landed beside it (Round 4535 and an earlier one, watching-zenoh-16's, who agreed to this repayment): the TCP facts' acknowledgement queue removes an entry the discard lint did not see accounted for, and the shared-memory handshake account reads an extension's 4-bit id where the identity gate has no classification. Both read as designed, so each is registered with its reason rather than changed.",
+      "changes_bullets": [
+        "`docs/reason-review-pins.md`: the two session-close-ingress rows (drive.rs, switchboard.rs) carry R4536. Inventory: the CORRECTION notes of keyexpr-includes, keyexpr-dollar-star, keyexpr-wildcard-single, keyexpr-wildcard-double and session-close-ingress, and keyexpr-intersect's source, name R4536 (keyexpr-intersect re-filed, as its source has no setter).",
+        "`crates/wz-session-core/src/keyexpr_match.rs`: the module docs name `keyexpr_includes` as code, not as a link. `scripts/lib/reduced_docs_ledger.txt`: the `keyexpr_includes_patterns` and `keyexpr_includes_target` lines go, their items having left with W1.",
+        "`scripts/lib/discard_site_lint.py`: `wz-capture/tcp_facts.rs` `peer.pending.pop_front();` registered (an acknowledged small segment leaves its queue with its gap kept in `gaps` or counted in `gaps_more`; a capture clock that stepped back and an acknowledging packet without a time give none).`scripts/lib/ext_identity_gate.py`: `passive.rs` `extension` classified `hint` (it finds the shared-memory entry by id to report the encoding the wire wrote, and reads no body)."
+      ],
+      "verification_bullets": [
+        "`cargo doc -p wz-session-core` in Layer C1bzr's `all-without-keyexpr-includes` configuration builds on the build machine with no warning and no unresolved link (exit 0 at the round's HEAD). The C1bzr measurement of the seven crates W1 touched differs from the ledger in exactly three lines: the two lowered helper lines (2 to 0) and the `keyexpr_includes` link this round removes, which the measurement taken before the fix counted twice. Of the 150 round-fed static gates run on main with W1, 148 passed; the two reds (discard-site lint, extension identity gate) pass after their registrations (136 sites; identity OK). The upstream citation gate passes. `validate-workspace` after the inventory re-filing: T1 orphans unchanged, T3 warnings unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "carry_forward_bullets": [
+        "The full Layer C1bzr over every crate is read by the hosted run; the measurement behind this round covered the seven crates W1 touched. One store mutation reason still says R4530: it is the record of the re-filing W1 made, and a record is not rewritten."
+      ]
     }
   },
   "inventory_entries": {
