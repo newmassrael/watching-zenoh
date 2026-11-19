@@ -5029,6 +5029,28 @@
       "carry_forward_bullets": [
         "Capability cost (C1cs) and the Zephyr kit lane (Qzk), red since Round 4506, are read on the hosted run of Round 4522 (f7ab3a770, the first CI run of this tree's sizes that is not cancelled) and paid by symbol diff against 4050dd889."
       ]
+    },
+    "Round 4524": {
+      "decision_summary": "Step 3c of the staged policy binding finishes step 3: no wrapper hides a read of the build any more, so outside the policy module the only reads of the build defaults in production code are the creators' own `resolve_policy` and the key gate's two. A multicast group's parameters carry the snapshot its creator resolved (`MulticastParams::policy`), and its writer's pacing, its reassembly, its session, its socket options and the queue of the frames it emits read that snapshot; every scouting socket and `z_scout` door is handed its creator's. Node clocks are made only by the `_by` forms from the session's or the node's snapshot, and a C ABI router, peer or client node is made through `RouterForwarder::for_node` with the snapshot its open built. The session-core wrappers that read the build (`admit_in_build`, `judge_second_link`, `LinkBook::new`, `LinkRegistry::new`, `ReplayPacing::from_build`, `BuildSupervisor::for_build`, `default_exposed`, `TxQueueConf`'s `Default` and `pico()`) are deleted with every caller moved. An entity's timestamp option is either what the entity chose or \"its session's\", which the session resolves from its own snapshot when the entity is declared, so an options struct that derives `Default` no longer reads the build. The read gate now also counts a struct that derives `Default` over a policy field and a policy field filled from an inferred `Default::default()`. No behaviour changes with today's defaults.",
+      "changes_bullets": [
+        "`wz-session-core`: `MulticastParams::policy`; the build-default wrappers deleted; `TxQueueConf::upstream()` (upstream's queue behaviour, read by the zenoh node config of a file, which holds no snapshot); `ExposeTimestamp`/`StampTimestamp` are `OfSession | Chosen(bool)` with `resolve(&SessionPolicy)`.",
+        "`wz-runtime-tokio`: the multicast writer, drive loop, session and socket configs read `params.policy`; `of_build_defaults`, `reassembly_config_of_build`, the build-default `Session::new_multicast`, `wire_dialed_link` and the `Default` of `McastSocketConfig`/`McastGroupOptions` deleted; scouting binders take the snapshot; publishers, queryables and queries resolve their timestamp option from the session's snapshot at declaration.",
+        "`wz-node-time`: `NodeHlc::for_node`, `for_node_with_registry`, `for_node_over_source` and `build_defaults` deleted; `RouterForwarder::with_timestamping` and its peer and client twins deleted in favour of `for_node`.",
+        "`wz-capi-core`, `wz-capi-c`, `wz-capi-pico`, `wz-zenoh`, `wz-ap-demo`, the MCU crates and the tests: each creator hands its snapshot (`Engine::session_policy()` in the zenoh API); tests pass `SessionPolicy::defaults()`.",
+        "`scripts/lib/policy_read_gate.py`: eighteen wrapper rows removed; derived and inferred `Default` of a policy field counted, with selftest cases both ways. `scripts/run-ci.sh`: the C1q multicast_glue guards; `docs/reason-review-pins.md`: five session-close-ingress pins."
+      ],
+      "verification_bullets": [
+        "On the build host at the merged tree: `cargo check --workspace --all-targets`; lib tests of wz-runtime-tokio by default and with routing-peer and multilink, routing-router-hat and time-hlc, the multicast features, scouting-active and locator-iface, and time-hlc with query-queryable and pubsub-timestamp; wz-session-core lib by default and with the multicast features, and its integration tests; wz-session-lwip, wz-session-mcu, wz-capi-core (also with router-node and transport-qos), wz-capi-c, wz-capi-pico, wz-node-time with time-hlc, the zenoh API crate (184 passed), wz-runtime-coop, wz-ap-demo with all features, wz-replay with live, wz-auth, wz-ext-pubsub and the multicast test crate; clippy -D warnings of the 18 touched crates one by one, wz-runtime-tokio also with the router hat and the multicast features, wz-capi-core with router-node, wz-ap-demo with all features; `session_slot_bytes.py --check` equal to the record; `run-ci.sh` layers C1, C1p, C1s and C1y pass, and C1q's three multicast_glue guards print 43, 48 and 50, the pins moved here; `guarded_count_gate.py` over this range measured all 79 guards it reaches, and the 13 that printed another number (C1AX, nine C1AY router_forward guards, C1ah, C1i) are moved to what they printed.",
+        "Locally: `policy_read_gate.py --selftest` (the derived and inferred `Default` cases both ways) and `--check` (14 reads at 15 allowed sites); `wz_config.py --check`; `cargo fmt --all --check`; reason review pins, store reason citations, reason citations, upstream citation anchors and the prose name gate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/4-conflict-policy",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4: the open-stage document under the `wz/` namespace of the zenoh JSON5 file, read by each creator's `resolve_policy` (layers, schema and constraint validation, provenance, a named refusal per reason); then step 5, the config doors of the three ABIs. Capability cost (C1cs) and the Zephyr kit lane (Qzk), red since Round 4506, are read on this tree's hosted run and paid by symbol diff against 4050dd889."
+      ]
     }
   },
   "inventory_entries": {
