@@ -33,7 +33,8 @@ started afresh, the server side (pong, sub) pinned to --server-cpus and the clie
 --client-cpus, in peer mode:
 
   * tcp        the server listens on tcp/127.0.0.1:<port>, the client connects;
-  * udp        the same over udp/127.0.0.1:<port>;
+  * udp        the same over udp/127.0.0.1:<port>; arm W only, since a zenoh-pico peer accepts streams
+               only and arm P records the cell as not applicable (NOT_APPLICABLE says why);
   * multicast  both listen on the group udp/224.0.0.224:<port>#iface=lo;
   * program    wz only (perf_probe_Wapp, built with the `app-transport` capability): every link goes
                over a transport the program supplies, an AF_UNIX stream of its own (perf_probe.c, -T);
@@ -110,8 +111,14 @@ GROUP = "224.0.0.224"
 #: What a session of the program transport is told to listen on and to dial: the transport carries it,
 #: no socket of the system's is opened for it (TEST-NET-1).
 PROGRAM_LOCATOR = "tcp/192.0.2.1:7447"
+#: The cells an arm has no such transport for, and why. A zenoh-pico peer listening on a udp/ unicast
+#: locator binds the socket but its accept task takes streams only, so a peer dialling it never completes
+#: its handshake (its open fails with _Z_ERR_TRANSPORT_RX_DURATION_EXPIRED, -120):
+#: `vendor/zenoh-pico/src/transport/unicast/accept.c` @ `_z_tcp_accept(`
 NOT_APPLICABLE = {
     ("P", "program"): "zenoh-pico has no transport a program supplies (wz_ext_transport_* is wz's own door)",
+    ("P", "udp"): "a zenoh-pico peer accepts streams only, so a udp/ listener answers no dialling peer "
+                  "(its open fails with -120, the handshake's receive timeout)",
 }
 
 #: Every figure a cell can carry, and which way it is better. `perf.json` carries this table, so a reader
@@ -719,6 +726,8 @@ def cmd_selftest() -> int:
     expect("arm P has no program transport and arm W runs it from its own build",
            binary_name("P", "program") is None and binary_name("W", "program") == "perf_probe_Wapp"
            and binary_name("P", "tcp") == "perf_probe_P" and binary_name("W", "multicast") == "perf_probe_W")
+    expect("arm P has no udp cell, and arm W runs udp from its default build",
+           binary_name("P", "udp") is None and binary_name("W", "udp") == "perf_probe_W")
     expect("every arm and transport has a program or a reason it has none",
            all(binary_name(a, t) is not None or (a, t) in NOT_APPLICABLE for a in ARMS for t in TRANSPORTS))
 
