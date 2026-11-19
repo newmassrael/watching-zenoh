@@ -483,6 +483,74 @@ pub struct WsDeframer {
     chain_depth: usize,
     /// Frames dropped because their opcode carries no zenoh.
     skipped_frames: usize,
+    /// What the HTTP opening this deframer stepped over said.
+    opening: Option<HttpOpening>,
+    /// The Ping and Pong frames read, the first [`PINGS_PONGS_HELD`].
+    pings_pongs: Vec<PingPong>,
+    /// Ping and Pong frames past that bound.
+    pings_pongs_more: u64,
+    /// How many of `pings_pongs` have been placed in the capture.
+    placed: usize,
+}
+
+/// How many Ping and Pong frames one direction keeps.
+pub const PINGS_PONGS_HELD: usize = 64;
+
+/// One Ping or Pong frame: where it began in its direction's stream, and the
+/// packet and instant that carried that byte once [`WsDeframer::place`] was
+/// given them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PingPong {
+    /// A Ping; a Pong otherwise.
+    pub ping: bool,
+    /// The stream offset of the frame's first byte.
+    pub offset: usize,
+    /// The capture packet that carried it.
+    pub packet: Option<usize>,
+    /// That packet's capture instant.
+    pub at_ns: Option<u64>,
+}
+
+/// What one direction's HTTP opening of a WebSocket said (RFC 6455 section
+/// 4): the request's or the response's status and the subprotocols it named.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HttpOpening {
+    /// The response's status code; `None` for a request.
+    pub status: Option<u16>,
+    /// The `Sec-WebSocket-Protocol` header's values, in order: what a request
+    /// offers, or the one a response chose.
+    pub subprotocols: Vec<alloc::string::String>,
+}
+
+impl HttpOpening {
+    /// The opening `preamble` (its lines, up to the blank line) says.
+    fn of(preamble: &[u8]) -> Self {
+        let text = alloc::string::String::from_utf8_lossy(preamble);
+        let mut lines = text.split("\r\n");
+        let status = lines.next().and_then(|first| {
+            let mut words = first.split(' ');
+            let version = words.next()?;
+            if !version.starts_with("HTTP/") {
+                return None;
+            }
+            words.next()?.parse().ok()
+        });
+        let subprotocols = lines
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("sec-websocket-protocol"))
+            .flat_map(|(_, value)| {
+                value
+                    .split(',')
+                    .map(|p| alloc::string::String::from(p.trim()))
+                    .filter(|p| !p.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        HttpOpening {
+            status,
+            subprotocols,
+        }
+    }
 }
 
 impl Default for WsDeframer {
@@ -499,6 +567,10 @@ impl Default for WsDeframer {
             accounting: WsResyncAccounting::default(),
             chain_depth: WS_CHAIN_DEPTH,
             skipped_frames: 0,
+            opening: None,
+            pings_pongs: Vec::new(),
+            pings_pongs_more: 0,
+            placed: 0,
         }
     }
 }
@@ -622,6 +694,28 @@ impl WsDeframer {
     /// R311y612 — this direction's cumulative framing health.
     pub fn accounting(&self) -> WsResyncAccounting {
         self.accounting
+    }
+
+    /// What the HTTP opening said, once it was stepped over; `None` while it
+    /// has not been, and for a deframer whose opening was lost to a hole.
+    pub fn opening(&self) -> Option<&HttpOpening> {
+        self.opening.as_ref()
+    }
+
+    /// The Ping and Pong frames read, in stream order, and how many more past
+    /// [`PINGS_PONGS_HELD`].
+    pub fn pings_pongs(&self) -> (&[PingPong], u64) {
+        (&self.pings_pongs, self.pings_pongs_more)
+    }
+
+    /// Give each Ping and Pong frame read since the last call its packet and
+    /// instant, from the stream offset it began at. Called right after the
+    /// frames were taken, while the bytes that carried them are still held.
+    pub fn place(&mut self, at: impl Fn(usize) -> (Option<usize>, Option<u64>)) {
+        for frame in &mut self.pings_pongs[self.placed..] {
+            (frame.packet, frame.at_ns) = at(frame.offset);
+        }
+        self.placed = self.pings_pongs.len();
     }
 
     /// Frames dropped because they were Close / Ping / Pong / Text.
@@ -794,6 +888,18 @@ impl WsDeframer {
                     // `partial` — clearing it here would truncate the message
                     // being assembled around it.
                     self.skipped_frames += 1;
+                    if matches!(frame.opcode, OP_PING | OP_PONG) {
+                        if self.pings_pongs.len() < PINGS_PONGS_HELD {
+                            self.pings_pongs.push(PingPong {
+                                ping: frame.opcode == OP_PING,
+                                offset: frame.start,
+                                packet: None,
+                                at_ns: None,
+                            });
+                        } else {
+                            self.pings_pongs_more += 1;
+                        }
+                    }
                 }
                 OP_BINARY => {
                     if self.partial_offset.is_some() {
@@ -855,6 +961,7 @@ impl WsDeframer {
         const END: &[u8] = b"\r\n\r\n";
         if let Some(at) = find(&self.buf, END) {
             let cut = at + END.len();
+            self.opening = Some(HttpOpening::of(&self.buf[..at]));
             self.buf.drain(..cut);
             self.base += cut;
             self.preamble_done = true;
@@ -943,6 +1050,7 @@ impl WsDeframer {
         // Where the payload stands in the stream: past the header (and the mask,
         // which is part of it), counted from where this frame began.
         let payload_at = self.base + cursor;
+        let start = self.base;
         self.buf.drain(..total);
         self.base += total;
         Frame::Got(ParsedFrame {
@@ -950,6 +1058,7 @@ impl WsDeframer {
             opcode,
             masked,
             payload_at,
+            start,
             payload,
         })
     }
@@ -984,6 +1093,8 @@ struct ParsedFrame {
     masked: bool,
     /// Stream offset of the payload's first byte.
     payload_at: usize,
+    /// Stream offset of the frame header's first byte.
+    start: usize,
     payload: Vec<u8>,
 }
 
@@ -1056,6 +1167,116 @@ pub(crate) mod tests {
     }
 
     const UPGRADE: &[u8] = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+
+    /// A client and a server deframer that disagreed on the subprotocol: the
+    /// request offered two, the response chose a third. The server pinged
+    /// once and the client answered.
+    pub(crate) fn a_subprotocol_mismatch() -> [WsDeframer; 2] {
+        let mut client = WsDeframer::new();
+        client.push(
+            b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\
+              Sec-WebSocket-Protocol: zenoh, zenoh-v2\r\n\
+              sec-websocket-protocol: other\r\n\r\n",
+        );
+        client.push(&frame(true, OP_PONG, b"t", Some([1, 2, 3, 4])));
+        let mut server = WsDeframer::new();
+        server.push(b"HTTP/1.1 400 Bad Request\r\nSec-WebSocket-Protocol: mqtt\r\n\r\n");
+        server.push(&frame(true, OP_PING, b"t", None));
+        for d in [&mut client, &mut server] {
+            while d.next_spanned_message().is_some() {}
+            d.place(|offset| (Some(offset + 100), Some(offset as u64 * 10)));
+        }
+        [client, server]
+    }
+
+    #[test]
+    fn an_opening_names_its_status_and_its_subprotocols() {
+        let [client, server] = a_subprotocol_mismatch();
+        let request = client.opening().expect("request stepped over");
+        assert_eq!(request.status, None);
+        assert_eq!(request.subprotocols, ["zenoh", "zenoh-v2", "other"]);
+        let response = server.opening().expect("response stepped over");
+        assert_eq!(response.status, Some(400));
+        assert_eq!(response.subprotocols, ["mqtt"]);
+        assert!(WsDeframer::after_lost_opening(9).opening().is_none());
+    }
+
+    #[test]
+    fn a_ping_and_a_pong_are_placed_where_their_frames_began() {
+        let [client, server] = a_subprotocol_mismatch();
+        let (pongs, more) = client.pings_pongs();
+        assert_eq!(more, 0);
+        assert_eq!(pongs.len(), 1);
+        assert!(!pongs[0].ping);
+        // The frame begins right after the opening's blank line.
+        let offset = pongs[0].offset;
+        assert_eq!(pongs[0].packet, Some(offset + 100));
+        assert_eq!(pongs[0].at_ns, Some(offset as u64 * 10));
+        let (pings, _) = server.pings_pongs();
+        assert!(pings[0].ping);
+        let response = b"HTTP/1.1 400 Bad Request\r\nSec-WebSocket-Protocol: mqtt\r\n\r\n";
+        assert_eq!(pings[0].offset, response.len());
+    }
+
+    /// THE CLAIM'S OTHER CASE, through a capture: the request offered one
+    /// subprotocol, the response chose another, and the field document names
+    /// both, with the Ping's packet and the Pong's.
+    #[cfg(all(feature = "fixtures", feature = "dissect"))]
+    #[test]
+    fn a_capture_of_a_subprotocol_mismatch_names_both_sides_on_its_flow() {
+        let request: &[u8] = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\
+                               Sec-WebSocket-Protocol: zenoh\r\n\r\n";
+        let response: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                                Sec-WebSocket-Protocol: mqtt\r\n\r\n";
+        let ping = frame(true, OP_PING, b"", None);
+        let pong = frame(true, OP_PONG, b"", Some([1, 2, 3, 4]));
+        let file = crate::fixtures::tcp_connection_capture(&[
+            (true, request),
+            (false, response),
+            (false, &ping),
+            (true, &pong),
+        ]);
+        let d = crate::Dissection::from_capture(&file).expect("the capture reads");
+        assert!(d.flows()[0].framing().is_websocket());
+        let doc = crate::fields_json::fields_json(&d, &file, None, None);
+        // Packets 0 to 2 are the three-way handshake, so the request is 3.
+        assert!(
+            doc.contains(
+                "\"handshake\":{\"tls\":null,\"websocket\":{\"halves\":[\
+                 {\"direction\":\"a\",\"opening_seen\":true,\"status\":null,\
+                 \"subprotocols\":[\"zenoh\"],\"controls\":[{\"control\":\"pong\",\
+                 \"packet\":6,"
+            ),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(
+                "{\"direction\":\"b\",\"opening_seen\":true,\"status\":101,\
+                 \"subprotocols\":[\"mqtt\"],\"controls\":[{\"control\":\"ping\",\
+                 \"packet\":5,"
+            ),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn pings_past_the_bound_are_counted_and_a_placed_one_is_not_moved() {
+        let mut d = WsDeframer::new();
+        d.push(UPGRADE);
+        d.push(&frame(true, OP_PING, b"", None));
+        while d.next_spanned_message().is_some() {}
+        d.place(|_| (Some(1), Some(1)));
+        for _ in 0..PINGS_PONGS_HELD + 2 {
+            d.push(&frame(true, OP_PING, b"", None));
+        }
+        while d.next_spanned_message().is_some() {}
+        d.place(|_| (Some(2), Some(2)));
+        let (frames, more) = d.pings_pongs();
+        assert_eq!(frames.len(), PINGS_PONGS_HELD);
+        assert_eq!(more, 3);
+        assert_eq!(frames[0].packet, Some(1));
+        assert_eq!(frames[1].packet, Some(2));
+    }
 
     #[test]
     fn the_detector_answers_for_both_halves_of_the_handshake() {

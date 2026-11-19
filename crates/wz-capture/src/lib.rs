@@ -325,6 +325,7 @@ pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
 pub mod tcp_facts;
+pub mod tls_handshake;
 /// Captures of upstream software outside the calibration corpus
 /// (`captures/upstream/`), each read for the behaviour it was taken to hold,
 /// through the field document a consumer reads.
@@ -4390,6 +4391,18 @@ impl FlowDissection {
         while let Some(resync) = deframer.take_resync() {
             resyncs.push(resync);
         }
+        // A Ping or Pong taken in this push is placed now, while the bytes
+        // that carried it are still held.
+        let assembler = match direction {
+            Direction::A => &self.low_to_high,
+            Direction::B => &self.high_to_low,
+        };
+        deframer.place(|offset| {
+            (
+                assembler.packet_for_offset(offset),
+                assembler.instant_of_offset(offset),
+            )
+        });
         for resync in resyncs {
             self.ws_resyncs.push((direction, resync));
         }
@@ -4742,6 +4755,13 @@ impl FlowDissection {
                         summary.records += 1;
                         changed = true;
                         carry[index].next = record.index + 1;
+                        // TLS 1.3's certificate and its alerts after the
+                        // ServerHello are only ever read here.
+                        state.handshake.observe_opened(
+                            index,
+                            opened.content_type,
+                            &opened.plaintext,
+                        );
                         // (1) of `decrypt_with`.
                         if opened.content_type == tls::CT_APPLICATION_DATA {
                             carry[index]
@@ -9734,10 +9754,11 @@ impl Dissection {
         // resembles a short header (`T_MID_INIT | 0x40` = `0x41`) out of here:
         // the sound rule needs a long header with a known version, which zenoh
         // does not produce.
+        let seat = agg::dir_index(direction);
         match &mut flow.quic {
             Some(census) => {
                 match quic::recognise_on_quic_flow(d.payload) {
-                    Some(p) => census.add(p),
+                    Some(p) => census.add_from(p, seat),
                     // Counted, not ignored. A QUIC flow carrying a datagram this
                     // reader cannot name is a fact, and absorbing it into the
                     // packet count would claim a packet that was never read.
@@ -9753,7 +9774,7 @@ impl Dissection {
                 // evidence as well as premise, and the census should say so.
                 if let Some(p) = quic::recognise_long(d.payload) {
                     let mut census = quic::QuicCensus::default();
-                    census.add(p);
+                    census.add_from(p, seat);
                     flow.quic = Some(census);
                     self.quic_seen = true;
                     self.evict_datagram_flows_beyond_cap();
@@ -9777,7 +9798,7 @@ impl Dissection {
                         ..Default::default()
                     };
                     match quic::recognise_on_quic_flow(d.payload) {
-                        Some(p) => census.add(p),
+                        Some(p) => census.add_from(p, seat),
                         None => census.add_unrecognised(d.payload.len()),
                     }
                     flow.quic = Some(census);

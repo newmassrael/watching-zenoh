@@ -168,6 +168,14 @@ ALLOWED = [
         "The third list of the mapping in the entries above, cut with them.",
     ),
     (
+        "wz-capture/tls_handshake.rs",
+        "self.held[layer][d].drain(..4 + len);",
+        "A whole handshake message leaving the bytes held until it was whole: "
+        "it was copied into the body the next line parses, so nothing leaves "
+        "unread. Bytes that overflow the bound are a separate site, counted as "
+        "`overflowed` for that direction.",
+    ),
+    (
         "wz-capture/segment_chain.rs",
         "let _ = self.judged.remove(&key);",
         "The segment chain lets go of the verdict it kept for each piece of a row "

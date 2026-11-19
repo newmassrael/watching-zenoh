@@ -4651,8 +4651,11 @@ int main(void) {
      * arrive; no family.
      * 78: each flow gains `tcp`, its connection's attempts, windows,
      * acknowledgements and retransmissions, `null` for a flow that is not
-     * TCP. Thirty keys and two families arrive; nothing retires. */
-    revisioned[2].revision = 78;
+     * TCP. Thirty keys and two families arrive; nothing retires.
+     * 79: each flow gains `handshake`, what its TLS, WebSocket or QUIC
+     * handshake said, `null` for a flow that carried none. Twenty-three keys
+     * and three families arrive; nothing retires. */
+    revisioned[2].revision = 79;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
