@@ -11,8 +11,9 @@
 //! id of the node that declared it, and tells [`ReplaySubscriber::appeared`]. Each publisher is
 //! asked once, by one query addressed to it; a publisher that is declared again on another link
 //! is not asked again, and one that left (its queryable undeclared) and comes back is. At most
-//! `quota` queries are in flight at once (the querier's own bound, `QUERIER_MAX_PENDING_QUERIES`,
-//! or less); a publisher that appears while the quota is used waits, and is asked as a query ends.
+//! `quota` queries are in flight at once, a [`crate::quota::Quota`] whose `0` is no bound (the
+//! querier's own bound, `QUERIER_MAX_PENDING_QUERIES`, or a tighter one the caller states); a
+//! publisher that appears while the quota is used waits, and is asked as a query ends.
 //!
 //! # The round
 //!
@@ -49,6 +50,7 @@ use sce_rust_runtime::helpers::session_id::SessionId;
 use sce_rust_runtime::Engine;
 
 use crate::duty_outbox::{Duties, DutyOutbox};
+use crate::quota::Quota;
 use crate::replay_round::{ReplayRoundActions, ReplayRoundEvent, ReplayRoundPolicy};
 use crate::session_zid::ZID_MAX;
 use crate::wrapping_ticks::{elapsed, MAX_TIMEOUT_TICKS};
@@ -125,8 +127,6 @@ pub struct Deadlines {
 pub enum CreateRefused {
     /// No row for a publisher.
     NoSlots,
-    /// A quota of 0: no query could ever go out.
-    NoQuota,
     /// A deadline of 0, or past [`MAX_TIMEOUT_TICKS`].
     DeadlineOutOfRange,
     /// Under `hold-back`, a store with no room for one sample of `held_cell` bytes, or a cell of
@@ -256,8 +256,8 @@ pub struct ReplaySubscriber<'a> {
     held_head: usize,
     held_count: usize,
     deadlines: Deadlines,
-    quota: usize,
-    in_flight: usize,
+    /// The queries in flight, those of an abandoned round included, and their bound.
+    quota: Quota,
     progress: Mark,
     round: Mark,
     live: LiveBeforeAnswer,
@@ -271,7 +271,8 @@ impl<'a> ReplaySubscriber<'a> {
     /// A subscriber that has asked no one, over `slots` (one row per publisher it can tell) and,
     /// under [`LiveBeforeAnswer::HoldBack`], `held`, cut into cells of `held_cell` bytes plus a
     /// four-byte header (under `deliver` `held` and `held_cell` are not read, and may be empty
-    /// and 0). At most `quota` queries are in flight. The round deadline counts from `now`.
+    /// and 0). At most `quota` queries are in flight, `0` for no bound, as a
+    /// [`crate::quota::Quota`] reads it. The round deadline counts from `now`.
     pub fn new(
         slots: &'a mut [PublisherSlot],
         held: &'a mut [u8],
@@ -283,9 +284,6 @@ impl<'a> ReplaySubscriber<'a> {
     ) -> Result<Self, CreateRefused> {
         if slots.is_empty() {
             return Err(CreateRefused::NoSlots);
-        }
-        if quota == 0 {
-            return Err(CreateRefused::NoQuota);
         }
         let in_range = |ticks: u32| (1..=MAX_TIMEOUT_TICKS).contains(&ticks);
         if !in_range(deadlines.progress) || !in_range(deadlines.round) {
@@ -324,8 +322,7 @@ impl<'a> ReplaySubscriber<'a> {
             held_head: 0,
             held_count: 0,
             deadlines,
-            quota,
-            in_flight: 0,
+            quota: Quota::new(quota),
             progress: Mark::default(),
             round,
             live,
@@ -375,7 +372,7 @@ impl<'a> ReplaySubscriber<'a> {
 
     /// How many queries are in flight, those of an abandoned round included.
     pub fn in_flight(&self) -> usize {
-        self.in_flight
+        self.quota.live()
     }
 
     /// How many live samples are held.
@@ -474,17 +471,16 @@ impl<'a> ReplaySubscriber<'a> {
     /// The next row to ask, if the quota has room and a publisher waits; it is in flight from
     /// here. A publisher asked while no round is open starts one.
     pub fn next_ask(&mut self, now: Option<u32>) -> Option<usize> {
-        if self.in_flight >= self.quota {
+        let index = self.slots.iter().position(|row| row.state == WAITING)?;
+        if self.quota.try_acquire().is_err() {
             return None;
         }
-        let index = self.slots.iter().position(|row| row.state == WAITING)?;
         if !matches!(self.phase(), Phase::Asking | Phase::Answering) {
             self.drive(ReplayRoundEvent::PublisherAppeared, now);
         }
         let row = &mut self.slots[index];
         row.state = ASKED;
         row.flags &= !ABANDONED;
-        self.in_flight += 1;
         Some(index)
     }
 
@@ -514,7 +510,7 @@ impl<'a> ReplaySubscriber<'a> {
             if row.state == ASKED {
                 row.state = ANSWERED;
                 row.flags &= !ABANDONED;
-                self.in_flight -= 1;
+                self.quota.release();
             }
         }
         let next = self.next_ask(now);
@@ -686,7 +682,8 @@ mod tests {
         );
         assert_eq!(
             make(&mut slots, &mut held, 0, DEADLINES, 0, deliver),
-            Some(CreateRefused::NoQuota)
+            None,
+            "a quota of 0 is no bound, as every quota's is"
         );
         let zero = Deadlines {
             progress: 0,
@@ -805,6 +802,23 @@ mod tests {
         assert_eq!(sub.query_ended(0, Some(1)), Some(1), "B's turn");
         assert_eq!(sub.phase(), Phase::Asking, "the round waits for B");
         assert_eq!(sub.query_ended(1, Some(2)), None);
+        assert_eq!(sub.phase(), Phase::Live);
+    }
+
+    #[test]
+    fn a_quota_of_zero_asks_every_publisher_at_once() {
+        let mut store = Store::new(3, 0, 0);
+        let mut sub = store.subscriber(0, 0, LiveBeforeAnswer::Deliver);
+        assert_eq!(sub.appeared(A, 1, Some(0)), Ok(Some(0)));
+        assert_eq!(
+            sub.appeared(B, 2, Some(0)),
+            Ok(Some(1)),
+            "no bound to wait for"
+        );
+        assert_eq!(sub.in_flight(), 2);
+        assert_eq!(sub.query_ended(0, Some(1)), None);
+        assert_eq!(sub.query_ended(1, Some(2)), None);
+        assert_eq!(sub.in_flight(), 0);
         assert_eq!(sub.phase(), Phase::Live);
     }
 

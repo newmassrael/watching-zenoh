@@ -59,6 +59,7 @@ use wz_app_frame::e2e_receiver::Receiver;
 use wz_app_frame::replay_admission::{admit, Admission};
 use wz_app_frame::replay_pieces::{Joined, PieceJoiner};
 use wz_session_core::policy::ReplayReplyShape;
+use wz_session_core::quota::Quota;
 use wz_session_core::replay_subscriber::{
     CreateRefused, Deadlines, LiveFate, Phase, PublisherSlot, ReplaySubscriber, ReplyFate,
 };
@@ -172,8 +173,8 @@ pub struct wz_ext_replay_subscriber_options_t {
     pub held_cell: usize,
     /// The depth of the publishers' rings: a reply behind the judge's baseline by less is stale.
     pub depth: usize,
-    /// The most queries in flight at once; 0 for the querier's own bound,
-    /// `QUERIER_MAX_PENDING_QUERIES`, and never above it.
+    /// The most queries in flight at once, 0 for no bound of the program's own; never above the
+    /// querier's own bound, `QUERIER_MAX_PENDING_QUERIES` (itself 0 for none, upstream's).
     pub max_in_flight: usize,
     /// The receiver's stream every sample is judged in (0 under sender keying).
     pub stream: usize,
@@ -692,7 +693,6 @@ fn phase_code(phase: Phase) -> u8 {
 fn create_code(refusal: CreateRefused) -> ZResult {
     match refusal {
         CreateRefused::NoSlots
-        | CreateRefused::NoQuota
         | CreateRefused::DeadlineOutOfRange
         | CreateRefused::NoHoldStore
         | CreateRefused::HoldCellTooLarge => Z_EINVAL,
@@ -850,10 +850,12 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
                 core::slice::from_raw_parts_mut(options.held, options.held_len)
             }
         };
-        let quota = match options.max_in_flight {
-            0 => wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
-            asked => asked.min(wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES),
-        };
+        // Both are quotas, `0` for no bound: the build's is `0` on a host and a number on an
+        // image, so the two are combined as quotas, not by a `min` that `0` would turn into none.
+        let quota = Quota::tighter(
+            options.max_in_flight,
+            wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
+        );
         let clock = Clock {
             read: options.clock,
             context: SendPtr(options.clock_context),
