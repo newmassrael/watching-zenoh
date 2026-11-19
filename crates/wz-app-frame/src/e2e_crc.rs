@@ -196,6 +196,17 @@ impl Crc {
         }
     }
 
+    /// A computation resumed from the register an earlier digest of THIS
+    /// engine reported ([`Digest::register`]). A digest borrows its engine, so a
+    /// caller that keeps a computation across calls keeps the register instead;
+    /// feeding the rest then finishes exactly as the unbroken digest would.
+    pub fn resume(&self, register: u64) -> Digest<'_> {
+        Digest {
+            crc: self,
+            register,
+        }
+    }
+
     /// The CRC of `data` taken in one piece.
     pub fn checksum(&self, data: &[u8]) -> u64 {
         let mut digest = self.start();
@@ -231,6 +242,12 @@ impl Digest<'_> {
                 self.register = ((self.register << 8) ^ table[index]) & mask;
             }
         }
+    }
+
+    /// The running register, for [`Crc::resume`]. It is the computation's
+    /// state, not a CRC: only `finish` gives the CRC.
+    pub fn register(&self) -> u64 {
+        self.register
     }
 
     /// The finished CRC.
@@ -498,6 +515,22 @@ mod tests {
             digest.update(&CHECK_INPUT[..cut]);
             digest.update(&CHECK_INPUT[cut..]);
             assert_eq!(digest.finish(), check, "cut at {cut}");
+        }
+    }
+
+    /// A computation kept as its register and resumed later finishes as the
+    /// unbroken one, for every published set and every cut of the input.
+    #[test]
+    fn a_resumed_register_finishes_as_the_unbroken_digest() {
+        for (name, params, check) in published() {
+            let crc = Crc::new(params).expect("valid");
+            for cut in 0..=CHECK_INPUT.len() {
+                let mut first = crc.start();
+                first.update(&CHECK_INPUT[..cut]);
+                let mut resumed = crc.resume(first.register());
+                resumed.update(&CHECK_INPUT[cut..]);
+                assert_eq!(resumed.finish(), check, "{name}, cut at {cut}");
+            }
         }
     }
 

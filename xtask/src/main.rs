@@ -481,6 +481,13 @@ fn regen_statecharts_and_pools(root: &Path) {
     for stem in ["key_facts_schema", "keyexpr_shape_schema"] {
         codegen.emit_event_schema(stem, &algorithms, &sc_out);
     }
+    // The receiving judge of end-to-end protected frames (wz-app-frame `e2e_judge`): the step of
+    // a counter from its baseline in the counter's own width, and what that step is.
+    let app_frame_out = root.join("out/wz-app-frame");
+    mkdir(&app_frame_out);
+    for stem in ["e2e_counter_step", "e2e_counter_verdict"] {
+        codegen.emit_algorithm(stem, &algorithms, &app_frame_out);
+    }
 
     // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
     let pools: &[(&str, &str)] = &[
@@ -517,6 +524,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         "wz-runtime-tokio",
         "wz-runtime-coop",
         "wz-link-lwip",
+        "wz-app-frame",
     ] {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }
