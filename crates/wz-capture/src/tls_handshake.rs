@@ -673,7 +673,9 @@ pub(crate) mod tests {
         h
     }
 
-    /// Handshakes that between them hold every word a document writes.
+    /// Handshakes that between them hold every word a document writes. For
+    /// the field document's vocabulary gate, which only a `dissect` build has.
+    #[cfg(feature = "dissect")]
     pub(crate) fn every_word() -> Vec<TlsHandshake> {
         let mut only_hello = TlsHandshake::default();
         only_hello.observe(0, &client_hello("x"));

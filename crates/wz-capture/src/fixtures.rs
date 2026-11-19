@@ -347,7 +347,10 @@ pub(crate) fn tcp_segment_flagged(
 /// A capture of one TCP connection, `10.0.0.1:40000` to `10.0.0.2:7447`: its
 /// three-way handshake, then each `(from_low, payload)` in order, each
 /// direction's bytes numbered on from its SYN.
-#[cfg(test)]
+///
+/// For the capture tests of the handshake and lookup readers, which read the
+/// field document and so exist only in a `dissect` build.
+#[cfg(all(test, feature = "dissect"))]
 pub(crate) fn tcp_connection_capture(payloads: &[(bool, &[u8])]) -> Vec<u8> {
     const SPORT: u16 = 40_000;
     const DPORT: u16 = 7447;
@@ -372,7 +375,7 @@ pub(crate) fn tcp_connection_capture(payloads: &[(bool, &[u8])]) -> Vec<u8> {
 }
 
 /// An Ethernet pcap of `packets`, the `i`th at 1 s and `i` microseconds.
-#[cfg(test)]
+#[cfg(all(test, feature = "dissect"))]
 pub(crate) fn pcap_of(packets: &[Vec<u8>]) -> Vec<u8> {
     let refs: Vec<(u32, u32, &[u8])> = packets
         .iter()
@@ -383,7 +386,7 @@ pub(crate) fn pcap_of(packets: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// One UDP datagram in an Ethernet frame.
-#[cfg(test)]
+#[cfg(all(test, feature = "dissect"))]
 pub(crate) fn udp_datagram(
     src: [u8; 4],
     sport: u16,
