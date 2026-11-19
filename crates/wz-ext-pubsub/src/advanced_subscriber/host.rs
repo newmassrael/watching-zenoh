@@ -721,18 +721,17 @@ fn issue_get(
         finish: Box::new(finish),
         _registration: registration,
     });
-    let sub_chunks: Arc<[String]> = shared.base_keyexpr.split('/').map(str::to_owned).collect();
     let mut leg = || -> ReplyCallback {
         let end = Arc::clone(&end);
-        let sub_chunks = Arc::clone(&sub_chunks);
         Box::new(move |reply: &dyn ReplyView| {
             let shared = &end.shared;
             if shared.is_closing() {
                 return;
             }
-            let sub: Vec<&str> = sub_chunks.iter().map(String::as_str).collect();
-            let reply_ke: Vec<&str> = reply.keyexpr().split('/').collect();
-            if !wz_session_core::pubsub::keyexpr_intersect_patterns(&sub, &reply_ke) {
+            if !wz_session_core::keyexpr_match::keyexpr_intersects(
+                &shared.base_keyexpr,
+                reply.keyexpr(),
+            ) {
                 return;
             }
             // `live = false`: the get that produced this reply is the one in flight, so a gap
