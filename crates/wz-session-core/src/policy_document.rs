@@ -491,6 +491,51 @@ fn apply<'a>(
     }
 }
 
+/// `base` with what a caller states and no document: the profile `overrides` names, then its
+/// statements ([`Origin::Api`]). It answers what `resolve_document_under` answers for a document
+/// with no `wz` member, without reading a document, so a build that is handed none links no
+/// reader of one.
+// The refusals are held inline because the core has no heap to box them in.
+#[allow(clippy::result_large_err)]
+pub fn resolve_under<'a>(
+    base: SessionPolicy,
+    overrides: Overrides<'_, 'a>,
+) -> Result<Resolved, Refusals<'a>> {
+    let mut refusals = Refusals::new();
+    let stated = find_profile(overrides.profile, Origin::Api, &mut refusals);
+    let api = Layer {
+        origin: Origin::Api,
+        statements: overrides.statements,
+    };
+    let resolved = match stated {
+        Some(profile) => compose(&POLICIES, base, &[profile.layer(), api], &mut refusals),
+        None => compose(&POLICIES, base, &[api], &mut refusals),
+    };
+    if refusals.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(refusals)
+    }
+}
+
+/// The profile of the build whose id is `id`, or `None` when `id` is; an id the build has no
+/// profile for is refused in `layer`, the layer that named it.
+fn find_profile<'a>(
+    id: Option<&'a str>,
+    layer: Origin,
+    refusals: &mut Refusals<'a>,
+) -> Option<&'static Profile> {
+    let id = id?;
+    let found = Profile::find(id);
+    if found.is_none() {
+        refusals.push(Refusal {
+            layer,
+            reason: Reason::UnknownProfile { profile: id },
+        });
+    }
+    found
+}
+
 #[cfg(feature = "alloc")]
 pub use from_json5::{
     resolve_document, resolve_document_under, statements_from_json5, DocumentStatements,
@@ -501,7 +546,8 @@ mod from_json5 {
     use alloc::vec::Vec;
 
     use super::{
-        compose, Layer, Origin, Overrides, Profile, Reason, Refusal, Refusals, Resolved, Statement,
+        compose, find_profile, Layer, Origin, Overrides, Reason, Refusal, Refusals, Resolved,
+        Statement,
     };
     use crate::json5::Json5Value;
     use crate::policy::{SessionPolicy, POLICIES, POLICY_COUNT};
@@ -598,24 +644,6 @@ mod from_json5 {
         } else {
             Err(refusals)
         }
-    }
-
-    /// The profile of the build whose id is `id`, or `None` when `id` is; an id the build has no
-    /// profile for is refused in `layer`, the layer that named it.
-    fn find_profile<'a>(
-        id: Option<&'a str>,
-        layer: Origin,
-        refusals: &mut Refusals<'a>,
-    ) -> Option<&'static Profile> {
-        let id = id?;
-        let found = Profile::find(id);
-        if found.is_none() {
-            refusals.push(Refusal {
-                layer,
-                reason: Reason::UnknownProfile { profile: id },
-            });
-        }
-        found
     }
 
     /// The members of the document's `wz` tree already read, so a second one is refused.
@@ -1450,6 +1478,48 @@ mod tests {
                 resolved.provenance.origin("key-set"),
                 Some(Origin::BuildDefault)
             );
+        }
+
+        /// A caller handed no document resolves as one handed a document with no `wz` member:
+        /// `resolve_under` and the reader answer the same snapshot, the same provenance and the
+        /// same refusals, for no statement, a statement, a profile and a profile the build does
+        /// not have. Turned red by a path that composes the caller's layers apart from the
+        /// reader's.
+        #[test]
+        fn no_document_resolves_as_a_document_with_no_wz_member() {
+            let empty = parse("{}").unwrap();
+            let base = SessionPolicy::defaults();
+            let ring = another::<EventRingFull>().unwrap_or(EventRingFull::DEFAULT);
+            let stated = [Statement::new("event-ring-full", id_of(ring))];
+            let cases = [
+                Overrides::default(),
+                Overrides {
+                    profile: None,
+                    statements: &stated,
+                },
+                Overrides {
+                    profile: Some("upstream"),
+                    statements: &[],
+                },
+                Overrides {
+                    profile: Some("no-such-profile"),
+                    statements: &stated,
+                },
+            ];
+            for overrides in cases {
+                let through_reader = resolve_document_under(base, &empty, overrides);
+                let without = super::super::resolve_under(base, overrides);
+                assert_eq!(
+                    through_reader.as_ref().ok(),
+                    without.as_ref().ok(),
+                    "{overrides:?}"
+                );
+                assert_eq!(
+                    through_reader.err().map(|refused| refused.to_string()),
+                    without.err().map(|refused| refused.to_string()),
+                    "{overrides:?}"
+                );
+            }
         }
 
         /// The profile the open names is read below the document's policies, as the document's

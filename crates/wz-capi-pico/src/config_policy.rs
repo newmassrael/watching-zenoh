@@ -12,7 +12,8 @@
 //!
 //! What the doors state is kept in the config ([`PolicyStatements`]) and composed by the open,
 //! lowest first, through [`policy_document::resolve_document_under`], the reader the other ABIs
-//! compose a document and their open's statements with:
+//! compose a document and their open's statements with, or, for a config handed no document,
+//! through [`policy_document::resolve_under`], which answers the same without reading one:
 //!
 //! 1. the build defaults;
 //! 2. the profile `wz_ext_config_profile` named, else the one the document names;
@@ -28,8 +29,7 @@
 use core::ffi::{c_char, CStr};
 
 #[cfg(feature = "config-document")]
-use wz_session_core::json5;
-use wz_session_core::json5::Json5Value;
+use wz_session_core::json5::{self, Json5Value};
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::policy_document::{self, Overrides, Resolved, Statement};
 
@@ -51,6 +51,7 @@ pub(crate) struct PolicyStatements {
     profile: Option<String>,
     /// The `wz` members of the document `wz_ext_config_document` was handed, gathered as the
     /// members of a document of their own.
+    #[cfg(feature = "config-document")]
     document: Option<Json5Value>,
     /// The statements of `wz_ext_config_policy`, a policy's id and a value's id, one per policy,
     /// in the order each policy was first stated.
@@ -62,10 +63,6 @@ impl PolicyStatements {
     /// layer is refused, a document whose shape is refused and a profile the build does not have
     /// among them.
     pub(crate) fn compose(&self, base: SessionPolicy) -> Result<Resolved, ZResult> {
-        // A config handed no document is resolved as one with no `wz` member, so the layers are
-        // composed by one reader whether or not a document was handed.
-        let no_document = Json5Value::Object(Vec::new());
-        let document = self.document.as_ref().unwrap_or(&no_document);
         let api: Vec<Statement<'_>> = self
             .api
             .iter()
@@ -75,8 +72,15 @@ impl PolicyStatements {
             profile: self.profile.as_deref(),
             statements: &api,
         };
-        policy_document::resolve_document_under(base, document, overrides)
-            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
+        #[cfg(feature = "config-document")]
+        if let Some(document) = &self.document {
+            return policy_document::resolve_document_under(base, document, overrides)
+                .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE);
+        }
+        // A config handed no document is resolved as one with no `wz` member, without the reader
+        // of a document (`policy_document::resolve_under`), which a build with no document door
+        // then does not link.
+        policy_document::resolve_under(base, overrides).map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
     /// `policy` is to take `value` in the API layer; an earlier statement of the policy is
