@@ -19,7 +19,11 @@
 //!
 //! The answer is watching-zenoh's one key expression matcher (`wz_session_core::keyexpr_match`),
 //! the code the sessions route by: [`keyexpr::includes`] asks it about the two key texts, and
-//! [`LTRIncluder`] about the bytes it is given.
+//! [`LTRIncluder`](crate::key_expr::include::LTRIncluder) about the bytes it is given.
+
+// The links above name crate paths. rustdoc joins this text with the outer doc `mod.rs` keeps on
+// `pub mod include` (upstream's form) and resolves the joined text from `key_expr`, where a
+// bare `LTRIncluder` is not in scope; a crate path resolves from either module.
 
 use wz_session_core::keyexpr_match::keyexpr_includes;
 

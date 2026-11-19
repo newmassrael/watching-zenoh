@@ -48,6 +48,17 @@ pub type ReplyHandler = Box<dyn for<'a> FnMut(&'a dyn ReplyView) + Send + 'stati
 /// What a query of the face is told its end by, on the face's thread: once, after the last reply.
 pub type FinalHandler = Box<dyn FnMut() + Send + 'static>;
 
+/// What a tokens get of the face is handed each key alive by, on the face's thread.
+pub type KeyHandler = Box<dyn FnMut(&str) + Send + 'static>;
+
+/// A tokens get the face holds until a router's end of its answers: the keys it has told, so a key
+/// answered twice (by the face's own tables and by the router) is told once.
+struct TokensGet {
+    told: HashSet<String>,
+    on_key: KeyHandler,
+    on_final: FinalHandler,
+}
+
 /// What is done to a reply as the router hands it to the face, before the face's thread reads it:
 /// the arrival of a reply is recorded as it is handed over, as upstream's session records it when
 /// the dispatcher gives it the reply, and not when the thread of the face gets to it.
@@ -97,6 +108,18 @@ enum Command {
         pattern: String,
         answer: mpsc::Sender<Vec<String>>,
     },
+    /// The program asked which tokens are alive on `pattern`, under `id`: the face tells it the
+    /// keys it knows of now, and then those a router above the node answers under `id`, each
+    /// once, until that router's end of them (or [`Command::TokensGetEnd`] when no router was
+    /// asked).
+    TokensGet {
+        id: u64,
+        pattern: String,
+        on_key: KeyHandler,
+        on_final: FinalHandler,
+    },
+    /// No router was asked for the get `id`: it ends with what the face knew.
+    TokensGetEnd(u64),
     /// The program asked a query under the request id `rid`; the router is asked next, so the
     /// replies it tells the face find the query held.
     Get {
@@ -221,6 +244,8 @@ struct State {
     /// The tokens the program declared, by the id the router holds them under.
     own: HashMap<u64, String>,
     subscribers: Vec<Subscriber>,
+    /// The tokens gets a router above the node has not ended, by the interest id they asked under.
+    gets: HashMap<u64, TokensGet>,
     /// The queries the program asked that have not ended, by the request id it gave them: a
     /// reply the router tells the face is handed to the query it answers, and the end of the
     /// replies ends it. The face has no alias table, so a key it is told is literal.
@@ -256,6 +281,7 @@ impl State {
             remote: HashMap::new(),
             own: HashMap::new(),
             subscribers: Vec::new(),
+            gets: HashMap::new(),
             queries: ReplyRegistry::new(),
             watches: Vec::new(),
             router,
@@ -346,6 +372,20 @@ impl State {
                     move |_| on_final(),
                 );
             }
+            // A router's answer to a tokens get of the face is the get's alone: it is told to the
+            // get, once per key, and not counted as a token of the face, whose id is the router
+            // above's and not this node's.
+            Command::Told(LocalFaceEvent::TokenUp {
+                keyexpr,
+                interest: Some(interest),
+                ..
+            }) if self.gets.contains_key(&interest) => {
+                if let Some(get) = self.gets.get_mut(&interest) {
+                    if get.told.insert(keyexpr.clone()) {
+                        (get.on_key)(&keyexpr);
+                    }
+                }
+            }
             Command::Told(LocalFaceEvent::TokenUp {
                 id,
                 keyexpr,
@@ -435,6 +475,46 @@ impl State {
                 keys.sort();
                 keys.dedup();
                 let _ = answer.send(keys);
+            }
+            Command::TokensGet {
+                id,
+                pattern,
+                mut on_key,
+                on_final,
+            } => {
+                // What the face knows now is told first: the tokens the router's tables hold and
+                // the program's own, as `Alive` reads them. A router above the node answers the
+                // rest under `id`, behind this command on the face's queue.
+                let mut keys = self
+                    .router
+                    .upgrade()
+                    .map(|router| router.local_tokens_alive(&pattern))
+                    .unwrap_or_default();
+                keys.extend(
+                    self.own
+                        .values()
+                        .filter(|key| keyexpr_intersects_text(&pattern, key))
+                        .cloned(),
+                );
+                keys.sort();
+                keys.dedup();
+                for key in &keys {
+                    on_key(key);
+                }
+                self.gets.insert(
+                    id,
+                    TokensGet {
+                        told: keys.into_iter().collect(),
+                        on_key,
+                        on_final,
+                    },
+                );
+            }
+            Command::TokensGetEnd(id)
+            | Command::Told(LocalFaceEvent::InterestFinal { interest: id }) => {
+                if let Some(mut get) = self.gets.remove(&id) {
+                    (get.on_final)();
+                }
             }
             Command::Stop => return false,
         }
@@ -604,9 +684,44 @@ impl LocalLiveliness {
             handler,
         });
         if let Some(router) = self.router.upgrade() {
-            router.ask_local_tokens(id, pattern, true);
+            router.ask_local_tokens(id, pattern, true, history);
         }
         id
+    }
+
+    /// Which liveliness tokens are alive on `pattern`, as a liveliness get of the node's own
+    /// session: `on_key` is told each key once, first those the node knows of (its tables and the
+    /// program's own tokens), then those a router above the node answers, and `on_final` the end,
+    /// which is that router's end of its answers or the node's deadline for them
+    /// ([`RouterForwarder::ask_routers_current_tokens`]), or at once on a node that asks no
+    /// router. `id` is one [`Self::tokens_get_id`] gave, which [`Self::end_tokens_get`] takes.
+    pub fn get_tokens(&self, id: u64, pattern: &str, on_key: KeyHandler, on_final: FinalHandler) {
+        // The get is held before the router is asked, so no answer finds the face without it.
+        let _ = self.commands.send(Command::TokensGet {
+            id,
+            pattern: pattern.to_owned(),
+            on_key,
+            on_final,
+        });
+        let asked = self
+            .router
+            .upgrade()
+            .map_or(0, |router| router.ask_routers_current_tokens(id, pattern));
+        if asked == 0 {
+            let _ = self.commands.send(Command::TokensGetEnd(id));
+        }
+    }
+
+    /// An id for a tokens get, from the face's interest ids: known before the get is asked, so a
+    /// cancel recorded first can name it.
+    pub fn tokens_get_id(&self) -> u64 {
+        self.next_subscriber.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// End the tokens get `id` now, with what it was told: its token was cancelled. An end the
+    /// router tells later finds no get and does nothing.
+    pub fn end_tokens_get(&self, id: u64) {
+        let _ = self.commands.send(Command::TokensGetEnd(id));
     }
 
     /// End the subscription `id`. The handler is not called again once this has returned to a
@@ -873,6 +988,72 @@ mod tests {
             keyexpr: keyexpr.to_owned(),
             interest: Some(interest),
         });
+    }
+
+    /// A recorder of a tokens get: the keys it is told, and whether it has ended.
+    fn get_recorder() -> (
+        KeyHandler,
+        FinalHandler,
+        Arc<StdMutex<Vec<String>>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let keys = Arc::new(StdMutex::new(Vec::new()));
+        let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (written, done) = (keys.clone(), ended.clone());
+        (
+            Box::new(move |key: &str| written.lock().unwrap().push(key.to_owned())),
+            Box::new(move || done.store(true, std::sync::atomic::Ordering::SeqCst)),
+            keys,
+            ended,
+        )
+    }
+
+    /// A tokens get is told the keys the face knows first, then a router's answers under its id,
+    /// each key once, and ends at that router's end of them; an answer is the get's alone and not
+    /// a token of the face. Turned red by a get that read the face's own tables only, which is
+    /// how a peer node under a router missed every token beyond it (Z8 `three_node_combination`).
+    #[test]
+    fn a_tokens_get_is_told_what_the_face_knows_then_a_routers_answers_until_its_end() {
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        face.own_up(7, "a/own");
+        let (on_key, on_final, keys, ended) = get_recorder();
+        let id = face.tokens_get_id();
+        let _ = face.commands.send(Command::TokensGet {
+            id,
+            pattern: "a/**".to_owned(),
+            on_key,
+            on_final,
+        });
+        answer(&sink, id, 9, "a/far");
+        answer(&sink, id, 10, "a/own");
+        settle(&face);
+        assert!(
+            !ended.load(std::sync::atomic::Ordering::SeqCst),
+            "not before the router's end"
+        );
+        sink(LocalFaceEvent::InterestFinal { interest: id });
+        settle(&face);
+        assert_eq!(*keys.lock().unwrap(), ["a/own", "a/far"], "each key once");
+        assert!(ended.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            face.alive("a/**"),
+            ["a/own"],
+            "an answer is not a token of the face"
+        );
+        face.stop();
+    }
+
+    /// A node that asks no router ends a tokens get at once, with what the face knows.
+    #[test]
+    fn a_tokens_get_of_a_node_that_asks_no_router_ends_with_what_the_face_knows() {
+        let (face, _sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
+        face.own_up(7, "a/own");
+        let (on_key, on_final, keys, ended) = get_recorder();
+        face.get_tokens(face.tokens_get_id(), "a/**", on_key, on_final);
+        settle(&face);
+        assert_eq!(*keys.lock().unwrap(), ["a/own"]);
+        assert!(ended.load(std::sync::atomic::Ordering::SeqCst));
+        face.stop();
     }
 
     #[test]

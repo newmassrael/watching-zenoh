@@ -2624,6 +2624,68 @@ impl RouterDeclarationsView {
     }
 }
 
+/// What an interest of the node's own session asks for, as [`Tables`] keeps it to send to the
+/// routers a PEER node is linked to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnInterestPlane {
+    /// A publisher's: the subscribers of its key.
+    Subscribers,
+    /// A querier's: the queryables of its key.
+    Queryables,
+    /// A liveliness subscriber's: the tokens of its key, and the ones alive when it asked if
+    /// `history`.
+    #[cfg(feature = "routing-token-tables")]
+    Tokens {
+        /// Whether the subscriber asked for the tokens alive when it was declared.
+        history: bool,
+    },
+}
+
+impl OwnInterestPlane {
+    /// The plane of a publisher (`queryables` false) or a querier (true).
+    fn of_matching(queryables: bool) -> Self {
+        if queryables {
+            Self::Queryables
+        } else {
+            Self::Subscribers
+        }
+    }
+
+    /// Whether `self` and `other` are the same plane, whatever a token interest's history.
+    fn same_plane(self, other: Self) -> bool {
+        core::mem::discriminant(&self) == core::mem::discriminant(&other)
+    }
+}
+
+/// An interest of the node's own session: the session's id of the entity that asked, the id it
+/// goes to the routers under, its key and what it asks for.
+///
+/// The id on the wire is minted by the node, from the counter its brokered interests take theirs
+/// from, and not the session's: the session numbers its publishers and queriers and the node its
+/// liveliness subscribers, each from one, so the two would meet on the wire, and a router keeps an
+/// interest by the id and the face it came on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OwnInterest {
+    /// The session's id of the entity.
+    id: u64,
+    /// The id the interest is sent under.
+    wire_id: u64,
+    /// The key, as the wire carries it.
+    keyexpr: String,
+    /// What it asks for.
+    plane: OwnInterestPlane,
+}
+
+impl RouterForwarder {
+    /// A fresh id for an interest this node sends a router or a gateway
+    /// ([`interest_ids`](Self#structfield.interest_ids)).
+    fn mint_interest_id(&self) -> u64 {
+        self.interest_ids
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
+    }
+}
+
 /// What the router's routing decisions read: the hats, the faces and the stores a declaration
 /// writes (`docs/router-task-per-face.md`, phase 0).
 ///
@@ -2767,13 +2829,13 @@ pub(crate) struct Tables {
     /// linkless early-return (OBLIGATION 1), like `client_subs`. SUBS plane only
     /// (the QABL future-push is the value-aware [`future_qabls`](Self#structfield.future_qabls)).
     future_subs: Arc<FutureSubStore>,
-    /// The publishers and queriers of the node's own session, `(id, keyexpr, queryables)`, as
-    /// they asked for subscribers (or queryables) of their key: a PEER node sends each as an
-    /// interest to the routers it is linked to, and again to one that comes up later, as
-    /// upstream's peer hat repropagates its interests on a new face
+    /// The publishers, queriers and liveliness subscribers of the node's own session,
+    /// `(id, keyexpr, plane)`, as they asked for subscribers, queryables or tokens of their key: a
+    /// PEER node sends each as an interest to the routers it is linked to, and again to one that
+    /// comes up later, as upstream's peer hat repropagates its interests on a new face
     /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn repropagate_interests`). A router has
-    /// no router to ask and keeps them for the admin legs alone.
-    own_interests: Arc<Vec<(u64, String, bool)>>,
+    /// no router to ask and keeps the first two for the admin legs alone.
+    own_interests: Arc<Vec<OwnInterest>>,
     /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
     /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
     /// ([`declare_queryable`](RouterForwarder::declare_queryable)) is proactively
@@ -2827,6 +2889,10 @@ pub enum LocalFaceEvent {
     /// was never told of a token that it is gone, by a retraction that names the key and no id
     /// (upstream's `maybe_unpropagate_token`, its second arm): `keyexpr` is then the key.
     TokenDown { id: u64, keyexpr: Option<String> },
+    /// The answers to the interest the face asked under `interest` are all told: the router
+    /// relayed a gateway's end of a current interest the face asked beyond the node
+    /// ([`RouterForwarder::ask_routers_current_tokens`]), or ended it unanswered.
+    InterestFinal { interest: u64 },
     /// A reply to a query the face asked, carrying the request id the face gave it.
     Reply(Box<ResponseOwned>),
     /// A reply to a query the face asked whose value went through shared memory, read already by
@@ -2876,7 +2942,7 @@ pub fn local_face_aliases() -> hashbrown::HashMap<u64, String> {
 }
 
 /// The event a message for the `Local` face is, or `None` for one the face does not act on (a
-/// final of an interest, a declaration of another plane).
+/// declaration of another plane, a final that names no interest).
 fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
     match msg {
         NetworkMessage::Response(response) => Some(LocalFaceEvent::Reply(response)),
@@ -2901,6 +2967,9 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
                     &hashbrown::HashMap::new(),
                 ),
             }),
+            DeclareOwnedVariant::CodecZenohDeclFinal(_) => declare
+                .interest_id
+                .map(|interest| LocalFaceEvent::InterestFinal { interest }),
             _ => None,
         },
         _ => None,
@@ -3036,6 +3105,15 @@ pub struct RouterForwarder {
     /// [`brokered_interest`]). The interest twin of [`pending`](Self#structfield.pending).
     #[cfg(feature = "routing-interest-pending-gc")]
     broker: brokered_interest::InterestBroker,
+    /// The last id this node gave an interest it sends a router or a gateway: its own session's
+    /// ([`OwnInterest`]) and the copies it brokers for its clients. One counter, as upstream's
+    /// peer hat numbers every interest it sends a face from that face's one
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `let id = self.face_hat(&dst).next_id.fetch_add(1, Ordering::SeqCst);`),
+    /// so no two interests the node sends one face share an id; one for the node rather than one
+    /// per face, which is the same rule for every face at once. Starts at 0 and the first id is
+    /// 1: id 0 is what a `Declare` with no interest id decodes to, and upstream keeps it for the
+    /// initial interest (`zenoh/src/net/routing/hat/peer/mod.rs` @ `next_id: AtomicU32::new(1),`).
+    interest_ids: std::sync::atomic::AtomicU64,
     /// Running total of `Request` (Query) messages received — the query-plane
     /// reception witness, the query twin of
     /// [`data_seen`](Self#structfield.data_seen).
@@ -3688,7 +3766,7 @@ impl Tables {
     }
 
     /// The interests of the node's own session, for writing (see [`face_mut`](Self::face_mut)).
-    fn own_interests_mut(&mut self) -> &mut Vec<(u64, String, bool)> {
+    fn own_interests_mut(&mut self) -> &mut Vec<OwnInterest> {
         Arc::make_mut(&mut self.own_interests)
     }
 
@@ -4332,7 +4410,7 @@ router_entry_points! { on_tables_mut:
     fn unhost_queryable(&self, id: u64) -> bool;
     fn attach_local_face(&self, sink: LocalFaceSink);
     #[cfg(feature = "routing-token-tables")]
-    fn ask_local_tokens(&self, interest_id: u64, keyexpr: &str, current: bool);
+    fn ask_local_tokens(&self, interest_id: u64, keyexpr: &str, current: bool, history: bool);
     #[cfg(feature = "routing-token-tables")]
     fn forget_local_tokens(&self, interest_id: u64) -> bool;
     #[cfg(feature = "routing-token-tables")]
@@ -4354,6 +4432,8 @@ router_entry_points! { on_tables:
     ) -> bool;
     #[cfg(feature = "routing-token-tables")]
     fn local_tokens_alive(&self, keyexpr: &str) -> Vec<String>;
+    #[cfg(feature = "routing-token-tables")]
+    fn ask_routers_current_tokens(&self, interest_id: u64, keyexpr: &str) -> usize;
     fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut));
     fn release_held(&self, record: &HeldRecord);
     fn north_net_node_count(&self) -> usize;
@@ -5090,6 +5170,7 @@ impl RouterForwarder {
             pending: PlainMutex::new(PendingQueries::new()),
             #[cfg(feature = "routing-interest-pending-gc")]
             broker: brokered_interest::InterestBroker::new(),
+            interest_ids: std::sync::atomic::AtomicU64::new(0),
             queries_seen: Counter::new(),
             query_timeout: PlainCell::new(Self::DEFAULT_QUERY_TIMEOUT),
             timed_out: Counter::new(),
@@ -7649,6 +7730,38 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
+    /// Hold a token a gateway answered an interest this node brokered for a client that asked
+    /// `CurrentFuture` ([`Self::holds_brokered_token_answer`]): registered as the gateway's, and
+    /// its id remembered, so that the gateway's withdrawal of it resolves; and propagated nowhere,
+    /// since the answer is the client's alone and is relayed to it apart, as the pin's dispatcher
+    /// registers such a token and propagates it only as the current answer
+    /// (`zenoh/src/net/routing/dispatcher/token.rs` @ `propagate_current_token(ctx, res, interest)`).
+    #[cfg(all(
+        feature = "routing-token-tables",
+        feature = "routing-interest-pending-gc"
+    ))]
+    fn hold_answered_token(
+        &mut self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) where
+        T: std::ops::DerefMut,
+    {
+        let (decl_id, wireexpr) = match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(t) => (t.id, &t.keyexpr),
+            _ => return,
+        };
+        let Some(declared) = self.resolve_declared(inbound, region, declare, |t| {
+            resolve_wireexpr(&wireexpr.body, t)
+        }) else {
+            return;
+        };
+        self.register_token(inbound, region, reliable, &declared, decl_id);
+        self.remember_declared(DeclKind::Token, inbound, region, decl_id, &declared);
+    }
+
     /// Register a resolved token in the hat that owns `region`, whether it
     /// changed anything. A broker hat keys it by the client's `decl_id`.
     #[cfg(feature = "routing-token-tables")]
@@ -7748,6 +7861,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
         if self.unregister_token(inbound, region, reliable, &declared, decl_id) {
             self.repropagate(snapshot);
+            self.undeclare_push_token(declared.keyexpr());
+        } else if matches!(declared, Declared::Sourced(_)) {
+            // A withdrawal that names its key is passed on to the faces that asked for it even
+            // when this node never held the token: a router tells a peer that asked after a token
+            // came alive only that it went, by its key, and the peer's own subscribers and clients
+            // that asked are told so in turn, as the pin's dispatcher unpropagates a token its hat
+            // did not know (`zenoh/src/net/routing/dispatcher/token.rs` @
+            // `.unregister_token(ctx.reborrow(), id, res.clone(), node_id)`, then `.or(res)`). The
+            // faces told are only those for which nothing backs the key any more
+            // ([`Self::undeclare_push_token`]).
             self.undeclare_push_token(declared.keyexpr());
         }
     }
@@ -8079,6 +8202,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 inbound,
                 NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
             );
+        } else if interest.f() {
+            // A FUTURE-only interest has nothing to answer now, and is routed to the gateways in
+            // its own mode as the pin's peer hat routes it ([`Self::broker_future_interest`]).
+            #[cfg(feature = "routing-interest-pending-gc")]
+            self.broker_future_interest(inbound, interest_id, body, aggregate, target.as_deref());
         }
     }
 
@@ -8124,18 +8252,41 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         faces
     }
 
-    /// Send `face` the interest of the node's own publisher (`queryables` false) or querier
-    /// (true) `id` on `keyexpr`: current and future, for the subscribers or the queryables of
-    /// the key.
-    fn send_own_interest(&self, face: FaceId, id: u64, keyexpr: &str, queryables: bool) {
+    /// Send `face` the interest of the node's own entity `id` on `keyexpr`: a publisher's or a
+    /// querier's, current and future, for the subscribers or the queryables of the key; a
+    /// liveliness subscriber's for the tokens of the key, future, and current when it asked for
+    /// history, as upstream's session sends it
+    /// (`zenoh/src/api/session.rs` @ `InterestMode::CurrentFuture`).
+    fn send_own_interest(&self, face: FaceId, id: u64, keyexpr: &str, plane: OwnInterestPlane) {
         use wz_session_core::interest_build::{build_interest_propagated, InterestKinds};
-        // An interest the node sends on, stamped as upstream's hat stamps the ones it propagates.
-        let kinds = if queryables {
-            InterestKinds::QUERYABLES
-        } else {
-            InterestKinds::SUBSCRIBERS
+        // A publisher's or a querier's interest the node sends on, stamped as upstream's hat
+        // stamps the ones it propagates; a liveliness subscriber's as its session sends it.
+        let built = match plane {
+            OwnInterestPlane::Subscribers => build_interest_propagated(
+                id,
+                InterestKinds::SUBSCRIBERS,
+                false,
+                true,
+                Some((0, Some(keyexpr))),
+            ),
+            OwnInterestPlane::Queryables => build_interest_propagated(
+                id,
+                InterestKinds::QUERYABLES,
+                false,
+                true,
+                Some((0, Some(keyexpr))),
+            ),
+            #[cfg(feature = "routing-token-tables")]
+            OwnInterestPlane::Tokens { history } => {
+                wz_session_core::interest_build::build_interest_liveliness_subscriber(
+                    id,
+                    history,
+                    0,
+                    Some(keyexpr),
+                )
+            }
         };
-        match build_interest_propagated(id, kinds, false, true, Some((0, Some(keyexpr)))) {
+        match built {
             Ok(interest) => self.send_one_to_face(face, NetworkMessage::Interest(interest)),
             Err(e) => log::warn!(
                 "router forward: own interest {id} on {keyexpr:?} could not be built: {e:?}"
@@ -8156,6 +8307,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Whether a token interest of `face` is answered with the tokens the router knows of at the
     /// time. A client's is; so is a peer's of the peer hat, which asks as any session does (a
     /// liveliness get, a subscriber with its history) and which the pin's peer hat answers.
+    /// Ask a router above the node for the liveliness tokens alive on `keyexpr`, for the `Local`
+    /// face under `interest_id`, as a liveliness get of the node's own session: the answers and
+    /// then their end reach the face ([`LocalFaceEvent::TokenUp`] under that interest,
+    /// [`LocalFaceEvent::InterestFinal`]). How many routers were asked: none for a node that asks
+    /// no router, or one built without the interest broker, whose get reads its own tables alone.
+    /// `keyexpr` is the session's: under its namespace, if it has one, the router names it.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn ask_routers_current_tokens(&self, interest_id: u64, keyexpr: &str) -> usize {
+        #[cfg(feature = "routing-interest-pending-gc")]
+        {
+            let target = self.fwd.wire_key(keyexpr);
+            self.ask_gateways_current_tokens(interest_id, &target)
+        }
+        #[cfg(not(feature = "routing-interest-pending-gc"))]
+        {
+            let _ = (interest_id, keyexpr);
+            0
+        }
+    }
+
     #[cfg(feature = "routing-token-tables")]
     fn asks_for_tokens(&self, face: FaceId) -> bool {
         self.tables.faces.get(&face).is_some_and(|s| {
@@ -10986,16 +11157,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let keyexpr = self.fwd.wire_key(keyexpr);
-        self.tables
-            .own_interests_mut()
-            .retain(|(held, _, plane)| !(*held == id && *plane == queryables));
-        self.tables
-            .own_interests_mut()
-            .push((id, keyexpr.to_string(), queryables));
-        for face in self.router_faces() {
-            self.send_own_interest(face, id, &keyexpr, queryables);
-        }
+        let keyexpr = self.fwd.wire_key(keyexpr).into_owned();
+        self.hold_own_interest(id, &keyexpr, OwnInterestPlane::of_matching(queryables));
         #[cfg(feature = "adminspace-introspection-handlers")]
         if queryables {
             self.tables
@@ -11019,20 +11182,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        let before = self.tables.own_interests.len();
-        self.tables
-            .own_interests_mut()
-            .retain(|(held, _, plane)| !(*held == id && *plane == queryables));
-        if self.tables.own_interests.len() != before {
-            for face in self.router_faces() {
-                self.send_one_to_face(
-                    face,
-                    NetworkMessage::Interest(
-                        wz_session_core::interest_build::build_interest_final_propagated(id),
-                    ),
-                );
-            }
-        }
+        self.drop_own_interest(id, |plane| {
+            plane == OwnInterestPlane::of_matching(queryables)
+        });
         #[cfg(feature = "adminspace-introspection-handlers")]
         if queryables {
             self.tables
@@ -11045,6 +11197,66 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         #[cfg(not(feature = "adminspace-introspection-handlers"))]
         let _ = (id, queryables);
+    }
+
+    /// Keep the interest of the node's own entity `id` on `keyexpr` (a wire key) in `plane`,
+    /// replacing one it held there, and send it to every router the node is linked to under an
+    /// id the node mints ([`OwnInterest`]). A replaced interest keeps its wire id.
+    fn hold_own_interest(&mut self, id: u64, keyexpr: &str, plane: OwnInterestPlane)
+    where
+        T: std::ops::DerefMut,
+    {
+        let held = self
+            .tables
+            .own_interests
+            .iter()
+            .find(|own| own.id == id && own.plane.same_plane(plane))
+            .map(|own| own.wire_id);
+        let wire_id = held.unwrap_or_else(|| self.fwd.mint_interest_id());
+        self.tables
+            .own_interests_mut()
+            .retain(|own| !(own.id == id && own.plane.same_plane(plane)));
+        self.tables.own_interests_mut().push(OwnInterest {
+            id,
+            wire_id,
+            keyexpr: keyexpr.to_owned(),
+            plane,
+        });
+        for face in self.router_faces() {
+            self.send_own_interest(face, wire_id, keyexpr, plane);
+        }
+    }
+
+    /// Forget the interest of the node's own entity `id` in the plane `in_plane` names, and tell
+    /// every router the node is linked to that it ended, by a Final under the id it was sent
+    /// under. Nothing is sent for an interest the node does not hold.
+    fn drop_own_interest(&mut self, id: u64, in_plane: impl Fn(OwnInterestPlane) -> bool)
+    where
+        T: std::ops::DerefMut,
+    {
+        let gone: Vec<u64> = self
+            .tables
+            .own_interests
+            .iter()
+            .filter(|own| own.id == id && in_plane(own.plane))
+            .map(|own| own.wire_id)
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        self.tables
+            .own_interests_mut()
+            .retain(|own| !(own.id == id && in_plane(own.plane)));
+        for wire_id in gone {
+            for face in self.router_faces() {
+                self.send_one_to_face(
+                    face,
+                    NetworkMessage::Interest(
+                        wz_session_core::interest_build::build_interest_final_propagated(wire_id),
+                    ),
+                );
+            }
+        }
     }
 
     /// [`host_subscriber`](Self::host_subscriber) for the publications `origin` admits: those of
@@ -11223,13 +11435,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// key from another node is not pushed as a key that came alive. The answers go to the face's
     /// sink as declarations of tokens and their retractions; the face's own tokens are not among
     /// them. `keyexpr` is the session's: under its namespace, if it has one, the router names it.
+    ///
+    /// A node whose hat asks the routers above it ([`Tables::routes_interest_north`]) sends them
+    /// the subscriber's interest as well, as upstream's peer hat sends on its session's
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn repropagate_interests`): `Future`,
+    /// or `CurrentFuture` when the subscriber asked for `history`, as the session sends it. A
+    /// router tells a peer below it the tokens it asked for and no others
+    /// ([`Tables::serves_asking_peers`]), so a subscriber that asked nothing above its node would
+    /// never learn of a token beyond its router.
     #[cfg(feature = "routing-token-tables")]
-    pub fn ask_local_tokens(&mut self, interest_id: u64, keyexpr: &str, current: bool)
-    where
+    pub fn ask_local_tokens(
+        &mut self,
+        interest_id: u64,
+        keyexpr: &str,
+        current: bool,
+        history: bool,
+    ) where
         T: std::ops::DerefMut,
     {
         let self_zid = *self.north_net().self_zid();
         let target = self.fwd.wire_key(keyexpr).into_owned();
+        if self.tables.routes_interest_north() {
+            self.hold_own_interest(interest_id, &target, OwnInterestPlane::Tokens { history });
+        }
         self.tables.future_tokens_mut().store_interest(
             LOCAL_FACE,
             interest_id,
@@ -11257,6 +11485,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
+        self.drop_own_interest(interest_id, |plane| {
+            matches!(plane, OwnInterestPlane::Tokens { .. })
+        });
         self.tables
             .future_tokens_mut()
             .remove_interest(LOCAL_FACE, interest_id)
@@ -13930,12 +14161,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let flood_done = Instant::now();
         self.replay_declarations_to_new_face(id, tier);
         self.end_initial_declarations(id, tier);
-        // The publishers and queriers the node already has ask the router that comes up now, as
-        // they asked the ones that were there.
+        // The publishers, queriers and liveliness subscribers the node already has ask the router
+        // that comes up now, as they asked the ones that were there.
         if self.router_faces().contains(&id) {
             let own = self.tables.own_interests.to_vec();
-            for (interest_id, keyexpr, queryables) in own {
-                self.send_own_interest(id, interest_id, &keyexpr, queryables);
+            for interest in own {
+                self.send_own_interest(id, interest.wire_id, &interest.keyexpr, interest.plane);
             }
         }
         // A gateway that comes up is sent what the faces south of the node already asked for.
@@ -14608,8 +14839,16 @@ impl RouterForwarder {
                         // brokered, belongs to the client that is waiting: consumed here, and
                         // not a topology change for the ordinary ingest.
                         #[cfg(feature = "routing-interest-pending-gc")]
-                        if on.absorb_brokered_declare(id, declare) {
-                            continue;
+                        {
+                            #[cfg(feature = "routing-token-tables")]
+                            let hold = on.holds_brokered_token_answer(id, declare);
+                            if on.absorb_brokered_declare(id, declare) {
+                                #[cfg(feature = "routing-token-tables")]
+                                if hold {
+                                    on.hold_answered_token(id, tier, *reliable, declare);
+                                }
+                                continue;
+                            }
                         }
                         on.route_declaration(id, tier, whatami, *reliable, declare);
                     }
@@ -16268,6 +16507,27 @@ mod tests {
             .collect()
     }
 
+    /// The `(current, future)` mode of each interest `sink` was sent, in order: the C (`0x20`)
+    /// and F (`0x40`) bits of the interest's header.
+    #[cfg(feature = "routing-token-tables")]
+    fn interest_modes_sent(sink: &RecordingLinkDriver) -> Vec<(bool, bool)> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        (0..sink.frame_count())
+            .filter_map(|i| {
+                let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&sink.frame_bytes(i))
+                else {
+                    return None;
+                };
+                match parse_frame_payload(&payload).ok()?.into_iter().next() {
+                    Some(NetworkMessage::Interest(interest)) => {
+                        Some((interest.header & 0x20 != 0, interest.header & 0x40 != 0))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// A PEER node's publisher asks the routers it is linked to for the subscribers of its key:
     /// the router's peer hat tells a peer below it a declaration only for an interest it holds
     /// ([`Tables::serves_asking_peers`]), and upstream's `declare_publisher` sends that interest.
@@ -16283,11 +16543,8 @@ mod tests {
         sink_peer.reset();
 
         fwd.declare_local_interest(7, "demo/data", false);
-        assert_eq!(
-            interest_ids_sent(&sink_router),
-            vec![7],
-            "the router is asked"
-        );
+        let asked = interest_ids_sent(&sink_router);
+        assert_eq!(asked.len(), 1, "the router is asked");
         assert!(
             interest_ids_sent(&sink_peer).is_empty(),
             "a peer beside the node is not"
@@ -16296,8 +16553,8 @@ mod tests {
         fwd.undeclare_local_interest(7, false);
         assert_eq!(
             interest_ids_sent(&sink_router),
-            vec![7, 7],
-            "the withdrawal is a Final under the same id"
+            vec![asked[0], asked[0]],
+            "the withdrawal is a Final under the id it was asked under"
         );
     }
 
@@ -16312,10 +16569,56 @@ mod tests {
 
         let (router, sink_router) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &router);
+        let asked = interest_ids_sent(&sink_router);
+        assert_eq!(
+            asked.len(),
+            2,
+            "a publisher's and a querier's, as they were declared"
+        );
+        assert_ne!(asked[0], asked[1]);
+    }
+
+    /// The liveliness subscriber of a peer node asks the routers it is linked to for the tokens
+    /// of its key, as upstream's peer hat sends its session's interest on: `Future`, or
+    /// `CurrentFuture` with history (`zenoh/src/api/session.rs` @ `InterestMode::CurrentFuture`),
+    /// again to a router that comes up later, and a Final when it ends. A router tells a peer
+    /// below it only the tokens it asked for, so without this a peer node's subscriber never
+    /// learns of a token beyond its router (Z8 `subscriber_double_peer_*`, `subget_peer_*`). Its
+    /// id on the wire is not that of a publisher the session numbered the same.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_peer_nodes_liveliness_subscriber_asks_its_routers_for_tokens() {
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let (router, sink_router) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &router);
+        sink_router.reset();
+
+        fwd.declare_local_interest(1, "demo/data", false);
+        fwd.ask_local_tokens(1, "live/**", true, false);
+        fwd.ask_local_tokens(2, "live/**", true, true);
+        let asked = interest_ids_sent(&sink_router);
+        assert_eq!(asked.len(), 3, "the publisher and both subscribers ask");
+        assert_ne!(asked[0], asked[1], "a token interest has an id of its own");
+        assert_eq!(
+            interest_modes_sent(&sink_router)[1..],
+            [(false, true), (true, true)],
+            "Future without history, CurrentFuture with it"
+        );
+
+        let (later, sink_later) = face(zid(0xBB), WIRE_ROUTER);
+        fwd.register(FaceId(1), &later);
+        assert_eq!(
+            interest_ids_sent(&sink_later).len(),
+            3,
+            "a router that comes up later is asked as the first was"
+        );
+
+        sink_router.reset();
+        assert!(fwd.forget_local_tokens(1));
         assert_eq!(
             interest_ids_sent(&sink_router),
-            vec![7, 8],
-            "a publisher's and a querier's, as they were declared"
+            vec![asked[1]],
+            "the end of a subscriber is a Final under the id it asked under"
         );
     }
 
@@ -22557,7 +22860,7 @@ mod tests {
         let told = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = told.clone();
         fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
-        fwd.ask_local_tokens(1, "**", false);
+        fwd.ask_local_tokens(1, "**", false, false);
         forward_one(
             &fwd,
             FaceId(0),
@@ -22614,8 +22917,8 @@ mod tests {
             );
         };
         declare(3, "demo/t/before");
-        fwd.ask_local_tokens(1, "demo/t/*", false);
-        fwd.ask_local_tokens(2, "demo/t/*", true);
+        fwd.ask_local_tokens(1, "demo/t/*", false, false);
+        fwd.ask_local_tokens(2, "demo/t/*", true, true);
         declare(4, "demo/t/after");
         let told: Vec<(String, Option<u64>)> = told
             .lock()
@@ -22650,8 +22953,8 @@ mod tests {
         let told = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = told.clone();
         fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
-        fwd.ask_local_tokens(1, "demo/t/*", true);
-        fwd.ask_local_tokens(2, "demo/t/**", true);
+        fwd.ask_local_tokens(1, "demo/t/*", true, true);
+        fwd.ask_local_tokens(2, "demo/t/**", true, true);
         forward_one(
             &fwd,
             FaceId(0),
@@ -22696,7 +22999,7 @@ mod tests {
             );
         };
         declare(0, 3, "demo/t/x");
-        fwd.ask_local_tokens(1, "demo/t/x", true);
+        fwd.ask_local_tokens(1, "demo/t/x", true, true);
         declare(1, 4, "demo/t/x");
         let pushes = told
             .lock()
@@ -22719,7 +23022,7 @@ mod tests {
         let told = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = told.clone();
         fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
-        fwd.ask_local_tokens(1, "demo/t/*", false);
+        fwd.ask_local_tokens(1, "demo/t/*", false, false);
         assert!(fwd.forget_local_tokens(1));
         assert!(!fwd.forget_local_tokens(1), "it was ended already");
         assert!(!fwd.forget_local_tokens(9), "it was never asked");

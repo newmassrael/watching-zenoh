@@ -556,26 +556,48 @@ impl SessionEngine for RouterState {
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Option<usize> {
-        // One leg: the node's own face answers from the tokens the router's tables hold and the
-        // ones the program declared, as the C door's snapshot does (`liveliness_get_on_node` in
-        // wz-capi-c). The snapshot is whole when it is read, so the leg ends here, its callback
-        // let go once each key is told, and no timeout has anything to bound. A token whose cancel
-        // has already started is told nothing.
-        if fan.is_some_and(|fan| !fan.record(|| {})) {
+        // One leg: the node's own face tells the tokens the router's tables hold and the ones the
+        // program declared, and then those a router above the node answers, as upstream's peer
+        // hat sends its session's current interest to a gateway; a router tells a peer below it
+        // no token it was not asked for. The leg ends at that router's end of its answers (or the
+        // node's deadline for them), or at once on a node that asks no router: its callback is
+        // let go then. A token whose cancel has already started is told nothing, and a cancel
+        // ends the leg with what it was told.
+        use super::{FinalHandler, KeyHandler};
+        let callback: Arc<Mutex<Option<ReplyCallback>>> = Arc::new(Mutex::new(None));
+        let told = Arc::clone(&callback);
+        let ended = Arc::clone(&callback);
+        let face = Arc::clone(&self.liveliness);
+        let on_key: KeyHandler = Box::new(move |key: &str| {
+            let mut held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(callback) = held.as_mut() {
+                callback(&wz_runtime_tokio::reply_sink::BorrowedReply {
+                    rid: 0,
+                    keyexpr: key,
+                    kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
+                    payload: &[],
+                    err_encoding: None,
+                    attachment: None,
+                    put_encoding: None,
+                });
+            }
+        });
+        let on_final: FinalHandler = Box::new(move || {
+            ended
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+        });
+        // The get's id is taken before its cancel is recorded, so a cancel at any point names it;
+        // one that comes before the get is asked ends nothing, and the leg's callback, not yet
+        // held, is not called.
+        let id = face.tokens_get_id();
+        let cancel_face = Arc::clone(&face);
+        if fan.is_some_and(|fan| !fan.record(move || cancel_face.end_tokens_get(id))) {
             return Some(0);
         }
-        let mut callback = leg();
-        for alive in self.liveliness().alive(keyexpr) {
-            callback(&wz_runtime_tokio::reply_sink::BorrowedReply {
-                rid: 0,
-                keyexpr: &alive,
-                kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
-                payload: &[],
-                err_encoding: None,
-                attachment: None,
-                put_encoding: None,
-            });
-        }
+        *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(leg());
+        face.get_tokens(id, keyexpr, on_key, on_final);
         Some(1)
     }
 

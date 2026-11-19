@@ -1989,7 +1989,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// ([`SessionLinkActions::note_declare_finals_in`]), so an engine that cannot see the peer's
     /// final never runs a watch that only the final could end. Reset with the flag above.
     #[cfg(feature = "alloc")]
-    peer_declaration_progress_ms: core::sync::atomic::AtomicU64,
+    peer_declaration_progress_ms: AtomicU64,
     /// The facts `until-declarations-synced-when-begun` reads of this link's sync, as bits:
     /// [`SYNC_ACCEPTED`] this node answered the link's InitSyn (it accepted the link, where a
     /// dialled one sent it), [`SYNC_BEGUN`] the peer sent a declaration of its initial interest,
@@ -3922,7 +3922,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "alloc")]
-                peer_declaration_progress_ms: core::sync::atomic::AtomicU64::new(u64::MAX),
+                peer_declaration_progress_ms: AtomicU64::new(u64::MAX),
                 #[cfg(feature = "alloc")]
                 peer_sync_bits: core::sync::atomic::AtomicU8::new(0),
                 tx_conduits: TxConduits::new(),

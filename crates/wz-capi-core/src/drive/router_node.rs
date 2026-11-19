@@ -30,7 +30,8 @@ mod local_face;
 pub use engine::PeriodicJob;
 use local_face::QueryHold;
 pub use local_face::{
-    FinalHandler, LivelinessHandler, LocalLiveliness, MatchHandler, ReplyHandler, ReplyIngress,
+    FinalHandler, KeyHandler, LivelinessHandler, LocalLiveliness, MatchHandler, ReplyHandler,
+    ReplyIngress,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::locality::Locality;

@@ -948,17 +948,17 @@ mod tests {
             },
             publish_statement(Some(&publish)),
         );
-        // The policy answers before the numbers do: a build without it says so for half a retry.
+        // Half a retry is no retry, whatever the policy: it is refused in the statement's shape,
+        // as `wz_capi_c.h` says of a retry of no pass or no delay.
         for (attempts, delay_ms) in [(0, 5), (5, 0)] {
             let mut half = wz_capi_c_publish_ext_t::OFF;
             half.attempts = attempts;
             half.delay_ms = delay_ms;
-            let got = publish_statement(Some(&half));
-            if retry_on() {
-                assert_eq!(got, Err(Z_EINVAL), "{attempts} passes, {delay_ms} ms");
-            } else {
-                assert_eq!(got, Err(WZ_CAPI_C_E_POLICY_OFF));
-            }
+            assert_eq!(
+                publish_statement(Some(&half)),
+                Err(Z_EINVAL),
+                "{attempts} passes, {delay_ms} ms"
+            );
         }
         // A number past what a retry holds is no retry, whatever the policy.
         let mut wide = wz_capi_c_publish_ext_t::OFF;
@@ -1004,16 +1004,12 @@ mod tests {
             },
             query_statement(Some(&query)),
         );
-        // An identity of no byte names no node.
+        // An identity of no byte names no node, whatever the policy: it is refused in the
+        // statement's shape, as `wz_capi_c.h` says of a target of no byte.
         query.target = z_id_t {
             id: [0u8; Z_ID_SIZE],
         };
-        let got = query_statement(Some(&query));
-        if target_on() {
-            assert_eq!(got, Err(Z_EINVAL));
-        } else {
-            assert_eq!(got, Err(WZ_CAPI_C_E_POLICY_OFF));
-        }
+        assert_eq!(query_statement(Some(&query)), Err(Z_EINVAL));
     }
 
     #[test]

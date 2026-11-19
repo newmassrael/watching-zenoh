@@ -224,6 +224,25 @@ pub fn build_interest_propagated(
     Ok(interest)
 }
 
+/// [`build_interest_propagated`] in the mode the downstream interest was sent in, `Future`
+/// (`current` clear) included: the pin's peer hat routes a client's `Future` and `CurrentFuture`
+/// interests to its gateways in their own mode (`zenoh/src/net/routing/hat/peer/interests.rs` @
+/// `mode: msg.mode,`), stamped as every propagated interest is.
+#[cfg(feature = "alloc")]
+pub fn build_interest_propagated_as(
+    interest_id: u64,
+    kinds: InterestKinds,
+    aggregate: bool,
+    current: bool,
+    future: bool,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
+) -> Result<InterestOwned, CodecError> {
+    let mut interest =
+        build_interest_composed(interest_id, kinds, current, future, aggregate, keyexpr)?;
+    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE)?;
+    Ok(interest)
+}
+
 /// The `A` (AGGREGATE) bit of the `InterestBody` header: the mask the generated
 /// `InterestBodyOwned::ag` reads (`out/wz-codecs/interest_body.rs`) and
 /// zenoh-pico's `_Z_INTEREST_FLAG_AGGREGATE` (`1 << 7`). Private and written
