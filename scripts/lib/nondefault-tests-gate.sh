@@ -1628,6 +1628,16 @@ a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarde
     # `cfg(not(feature = "zenoh-c-no-unstable-api"))`, which `--all-features` turns on, so the
     # census never lists them and a row naming one fails as a test that no longer exists. They
     # are run by Layer Z all the same, which is what the count of six guards.
+    # The pico ABI's stress run (`tests/stability.rs`, needs `app-transport`): `#[ignore]` because
+    # each test runs for its seconds and threads, bounded by the environment its lane sets, so a
+    # leg of this table, which never passes `--ignored`, would run none of them. Layer S runs the
+    # three with `--ignored`, 3 passed guarded.
+    "wz-capi-pico|calls_on_every_thread_over_a_stream_that_blocks_splits_and_cuts_neither_stall_nor_leak|\
+a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|calls_on_every_thread_over_datagrams_that_are_lost_or_blocked_neither_stall_nor_leak|\
+a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|sessions_opened_and_closed_in_sequence_leave_no_allocation_behind|\
+a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this table never passes --ignored"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then
