@@ -2361,6 +2361,7 @@ fn push_stream_flow<W: DocOut>(
     write_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
+    write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -2738,6 +2739,7 @@ fn push_datagram_flow<W: DocOut>(
     write_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
+    write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -5536,6 +5538,57 @@ pub(crate) fn push_unit_readings(
     out: &mut String,
 ) {
     JsonOut::members_onto(out, |out| write_unit_readings(readings, out));
+}
+
+/// The flow's `foreign_zenoh` member (field document revision 73): whether the
+/// flow is zenoh of a protocol version this reader does not read, a zenoh 0.x
+/// deployment being the case it answers ([`crate::foreign_zenoh`]).
+///
+/// `null` while no exchange recognised it, which says nothing either way: a
+/// flow of this reader's version reads `null`, and so does a flow of another
+/// version the capture joined after its handshake. Otherwise
+///
+/// ```text
+/// {"version":8,"recognized_by":"answered",
+///  "witnesses":[{"witness":"init_syn","direction":"a","packet":3},
+///               {"witness":"init_ack","direction":"b","packet":4}]}
+/// ```
+///
+/// `version` is the version the messages announced; `recognized_by` is
+/// `answered`, `refused`, `answered_scout` or `repeated`; `witnesses` are the
+/// messages of that exchange on this flow in arrival order, each `witness` a
+/// word of `init_syn`, `init_ack`, `join`, `scout`, `hello` or `close`, its
+/// `direction` and its capture-global `packet`. Beside `zenoh`, which is the
+/// verdict of this reader's version alone and is left as it reads. Counted at
+/// ingest, so a retention ceiling does not move it.
+pub(crate) fn write_foreign_zenoh<W: DocOut>(
+    recognition: Option<&crate::foreign_zenoh::Recognition>,
+    out: &mut W,
+) {
+    out.key("foreign_zenoh");
+    let Some(r) = recognition else {
+        out.null();
+        return;
+    };
+    out.open_map();
+    out.key("version");
+    out.uint(u64::from(r.version));
+    out.key("recognized_by");
+    out.text(r.recognized_by.name());
+    out.key("witnesses");
+    out.open_array();
+    for w in &r.witnesses {
+        out.open_map();
+        out.key("witness");
+        out.text(w.kind.name());
+        out.key("direction");
+        out.text(dir_name(w.direction));
+        out.key("packet");
+        out.uint(w.packet);
+        out.close_map();
+    }
+    out.close_array();
+    out.close_map();
 }
 
 /// [`push_unit_readings`]' member, written through any [`DocOut`].
@@ -9475,6 +9528,40 @@ mod tests {
                 AnnouncedVersion::names()
             );
         }
+        // Revision 73 — `foreign_zenoh` null, and once per exchange, with every
+        // witness word among the witnesses.
+        {
+            use crate::foreign_zenoh::{Recognition, RecognizedBy, Witness, WitnessKind};
+            use wz_session_core::foreign_version::VersionBearing;
+            arms.push(members(|out| write_foreign_zenoh(None, out)));
+            let mut kinds = VersionBearing::all()
+                .into_iter()
+                .map(WitnessKind::Message)
+                .chain([WitnessKind::Close]);
+            let mut witness_words = alloc::collections::BTreeSet::new();
+            for recognized_by in RecognizedBy::all() {
+                let witnesses: Vec<Witness> = kinds
+                    .by_ref()
+                    .take(2)
+                    .map(|kind| Witness {
+                        kind,
+                        direction: Direction::A,
+                        packet: 0,
+                    })
+                    .collect();
+                witness_words.extend(witnesses.iter().map(|w| w.kind.name()));
+                let r = Recognition {
+                    version: 0x08,
+                    recognized_by,
+                    witnesses,
+                };
+                arms.push(members(|out| write_foreign_zenoh(Some(&r), out)));
+            }
+            assert_eq!(
+                witness_words.into_iter().collect::<Vec<_>>(),
+                WitnessKind::names()
+            );
+        }
         arms.push(members(|out| {
             push_first_byte(
                 Some(FirstByte {
@@ -11224,7 +11311,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 100] = [
+        let live: [(&str, &str, Vec<&'static str>); 102] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11254,6 +11341,18 @@ mod tests {
                 rev::FIELDS,
                 "initial_sn_derivation",
                 DerivationWord::names(),
+            ),
+            // Whether a flow is zenoh of another version: the exchange and the
+            // witness, each an exhaustive match.
+            (
+                rev::FIELDS,
+                "recognized_by",
+                crate::foreign_zenoh::RecognizedBy::names(),
+            ),
+            (
+                rev::FIELDS,
+                "witness",
+                crate::foreign_zenoh::WitnessKind::names(),
             ),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the

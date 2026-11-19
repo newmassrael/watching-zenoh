@@ -306,12 +306,52 @@ impl ScoutingFrame {
 /// telling a Hello from bytes that open like one (see `VersionEvidence` in the
 /// passive reader).
 pub fn parse_scouting_observed(bytes: &[u8]) -> Result<(ScoutingFrame, usize), InboundParseError> {
-    let (frame, consumed) = parse_scouting_consuming(bytes)?;
+    parse_scouting_observed_keeping(bytes).0
+}
+
+/// [`parse_scouting_observed`], and for a message it refuses as another
+/// version, what the decode read of it before the refusal: which message, its
+/// zid, and whether it took the whole datagram. See
+/// [`crate::foreign_version`].
+pub fn parse_scouting_observed_keeping(
+    bytes: &[u8],
+) -> (
+    Result<(ScoutingFrame, usize), InboundParseError>,
+    Option<crate::foreign_version::ForeignVersionMessage>,
+) {
+    use crate::foreign_version::{ForeignVersionMessage, VersionBearing};
+    let (frame, consumed) = match parse_scouting_consuming(bytes) {
+        Ok(read) => read,
+        Err(e) => return (Err(e), None),
+    };
     match frame.announced_version() {
         Some(version) if version != wz_codecs::wire_const::PROTOCOL_VERSION => {
-            Err(InboundParseError::ForeignVersion { version })
+            let (kind, zid) = match &frame {
+                #[cfg(feature = "codec-scout")]
+                ScoutingFrame::Scout { body, .. } => (
+                    VersionBearing::Scout,
+                    body.zid.as_ref().map(|zid| zid.as_slice().to_vec()),
+                ),
+                #[cfg(feature = "codec-hello")]
+                ScoutingFrame::Hello { body, .. } => {
+                    (VersionBearing::Hello, Some(body.zid.as_slice().to_vec()))
+                }
+                ScoutingFrame::Unknown { .. } => {
+                    return (Err(InboundParseError::ForeignVersion { version }), None)
+                }
+            };
+            let foreign = ForeignVersionMessage {
+                version,
+                kind,
+                zid,
+                whole: consumed == bytes.len(),
+            };
+            (
+                Err(InboundParseError::ForeignVersion { version }),
+                Some(foreign),
+            )
         }
-        _ => Ok((frame, consumed)),
+        _ => (Ok((frame, consumed)), None),
     }
 }
 

@@ -1741,7 +1741,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":72,"key":"kind","values":[...],
+ *     {"name":"fields","revision":73,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1800,6 +1800,7 @@
  * @carries fields priority passenger
  * @carries fields q_basis passenger
  * @carries fields reason passenger
+ * @carries fields recognized_by passenger
  * @carries fields request_kind passenger
  * @carries fields selected passenger
  * @carries fields size_verdict passenger
@@ -1811,6 +1812,7 @@
  * @carries fields unjudged_reason passenger
  * @carries fields unopened_reason discriminant
  * @carries fields verdict passenger
+ * @carries fields witness passenger
  * @carries fields wrong passenger
  * @carries fields zenoh passenger
  *
@@ -3033,6 +3035,48 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @values fields strength
  * @values fields q_basis
  * @values fields eps_basis
+ *
+ * ZENOH OF ANOTHER VERSION (field-document revision 73, row_facts 13). The
+ * test above rejects zenoh of THIS wire, so a zenoh 0.x deployment (protocol
+ * version 0x08: a DDS bridge of an older release, a router never upgraded)
+ * reads `foreign` in `announced_version` and `undecided` or `no` in `zenoh`,
+ * like bytes that are not zenoh at all. Every flow object of the field
+ * document carries, after `zenoh_evidence`, the answer to that other question:
+ *
+ *   `foreign_zenoh`  null, or
+ *       {"version":8,"recognized_by":"answered",
+ *        "witnesses":[{"witness":"init_syn","direction":"a","packet":3},
+ *                     {"witness":"init_ack","direction":"b","packet":4}]}
+ *
+ * The Init, Join, Scout and Hello of version 0x08 have the layout of 0x09's and
+ * differ in their extensions, which state their own length, so this library
+ * reads such a message to its end and keeps one fact of it: whether it took
+ * its whole framing unit alone. Nothing of it is folded, as before. One such
+ * message is never enough, and the flow is recognised by the first of four
+ * exchanges it shows, which latches (`recognized_by`):
+ *
+ *   `answered`        an InitSyn of version V in one direction, then an
+ *                     InitAck of V in the other;
+ *   `refused`         an InitSyn of V in one direction, then a Close read whole
+ *                     in the other: an acceptor refusing an offer of a version
+ *                     not its own (the Close says nothing about the version of
+ *                     the side that sent it);
+ *   `answered_scout`  a Hello of V on a datagram addressed to an endpoint the
+ *                     capture saw send a Scout; its one witness is the Hello,
+ *                     the Scout being a message of another flow;
+ *   `repeated`        a Join, or a Scout naming its asker, of V twice from the
+ *                     same zid in the same direction.
+ *
+ * `version` is V. `witnesses` are the exchange's messages on this flow in
+ * arrival order: `witness` is `init_syn`, `init_ack`, `join`, `scout`, `hello`
+ * or `close`, `direction` the half it travelled and `packet` its capture-global
+ * packet index. `null` says no exchange was seen, which is also what a flow of
+ * another version joined after its handshake reads. Recognition only: no body
+ * of another version is decoded, and `zenoh` is not moved by it. Counted at
+ * ingest, so a retention ceiling does not move it.
+ *
+ * @values fields recognized_by
+ * @values fields witness
  *
  * A message of the four announcing another version is not read past that byte
  * (since field-document revision 41 and session_table revision 3): its row is a
@@ -6159,7 +6203,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":72,"key":"state",
+ *     "value_families":[{"name":"fields","revision":73,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7923,6 +7967,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts priority
  * @values row_facts q_basis
  * @values row_facts reason
+ * @values row_facts recognized_by
  * @values row_facts request_kind
  * @values row_facts selected
  * @values row_facts size_verdict
@@ -7934,6 +7979,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts unjudged_reason
  * @values row_facts unopened_reason
  * @values row_facts verdict
+ * @values row_facts witness
  * @values row_facts wrong
  * @values row_facts zenoh
  * @carries row_facts announced_version passenger
@@ -7962,6 +8008,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts priority passenger
  * @carries row_facts q_basis passenger
  * @carries row_facts reason passenger
+ * @carries row_facts recognized_by passenger
  * @carries row_facts request_kind passenger
  * @carries row_facts selected passenger
  * @carries row_facts size_verdict passenger
@@ -7973,6 +8020,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts unjudged_reason passenger
  * @carries row_facts unopened_reason discriminant
  * @carries row_facts verdict passenger
+ * @carries row_facts witness passenger
  * @carries row_facts wrong passenger
  * @carries row_facts zenoh passenger */
 int wz_dissect_live_row_facts_since(wz_dissect_live *h,

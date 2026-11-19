@@ -1546,6 +1546,41 @@ pub struct PassiveFrame {
     /// message that opens a unit of arbitrary bytes and happens to decode is not
     /// followed by more messages that end where the unit ends.
     pub unit_read_whole: bool,
+    /// For a message refused as [`InboundParseError::ForeignVersion`], what the
+    /// decode read of it before the refusal: which message, its zid, and
+    /// whether it took its whole unit alone. `None` for every other message.
+    /// See [`crate::foreign_version`].
+    pub foreign_version: Option<crate::foreign_version::ForeignVersionMessage>,
+}
+
+/// The facts [`PassiveFrame::foreign_version`] keeps of `frame`, decoded under
+/// this reader's layout and announcing `version`. `None` for a message that
+/// carries no version.
+fn foreign_version_message(
+    frame: &InboundFrame,
+    version: u8,
+    whole: bool,
+) -> Option<crate::foreign_version::ForeignVersionMessage> {
+    use crate::foreign_version::{ForeignVersionMessage, VersionBearing};
+    let (kind, zid) = match frame {
+        InboundFrame::Init { is_ack, body, .. } => (
+            if *is_ack {
+                VersionBearing::InitAck
+            } else {
+                VersionBearing::InitSyn
+            },
+            body.zid.as_slice().to_vec(),
+        ),
+        #[cfg(feature = "codec-join")]
+        InboundFrame::Join { body, .. } => (VersionBearing::Join, body.zid.as_slice().to_vec()),
+        _ => return None,
+    };
+    Some(ForeignVersionMessage {
+        version,
+        kind,
+        zid: Some(zid),
+        whole,
+    })
 }
 
 /// R311y609 (C12) — what the observer makes of ONE data frame's sequence
@@ -4154,6 +4189,7 @@ fn walk_unit(
                     reserved_header_bits: 0,
                     decompressed: None,
                     unit_read_whole: false,
+                    foreign_version: None,
                 }];
             }
         }
@@ -4195,9 +4231,14 @@ fn walk_unit(
         // An Init or a Join announcing another protocol version is not read past
         // that byte: see `InboundParseError::ForeignVersion`. It takes the
         // decode-error path from here, so it names nobody, folds nothing and,
-        // past the front of the unit, stops the walk.
+        // past the front of the unit, stops the walk. What the decode read of it
+        // is kept as one fact, whether it took the whole unit alone: see
+        // `crate::foreign_version`.
+        let mut foreign_version = None;
         let parsed = parsed.and_then(|(f, n)| match f.announced_version() {
             Some(version) if version != wz_codecs::wire_const::PROTOCOL_VERSION => {
+                let whole = pos == front && n == rest.len();
+                foreign_version = foreign_version_message(&f, version, whole);
                 Err(InboundParseError::ForeignVersion { version })
             }
             _ => Ok((f, n)),
@@ -4312,6 +4353,7 @@ fn walk_unit(
             decompressed: own,
             // Stamped below once the walk has ended.
             unit_read_whole: false,
+            foreign_version,
         });
         batch_index += 1;
         if consumed == 0 {
@@ -7027,7 +7069,44 @@ mod tests {
             );
             assert_eq!(s.context().version, None);
             assert_eq!(s.context().phase, SessionPhase::Unseen);
+            // What the decode read of it before the refusal is kept as one
+            // fact: an InitSyn of that version, its zid, alone in its unit.
+            let foreign = frame
+                .foreign_version
+                .as_ref()
+                .expect("the refused message's facts");
+            assert_eq!(foreign.version, version);
+            assert_eq!(
+                foreign.kind,
+                crate::foreign_version::VersionBearing::InitSyn
+            );
+            assert!(foreign.zid.is_some());
+            assert!(foreign.whole, "the Init is its unit's only message");
         }
+    }
+
+    /// A message of THIS reader's version carries no foreign facts, and a
+    /// foreign Init that does not take its whole unit is not alone in it.
+    #[test]
+    fn foreign_facts_belong_to_a_refused_message_alone_in_its_unit() {
+        let mut s = PassiveSession::new();
+        s.push(
+            Direction::A,
+            &framed(&init_wire_versioned(false, 0x09, vec![]), 2),
+        );
+        let own = s.next_frame(Direction::A).expect("a record");
+        assert!(own.frame.is_ok() && own.foreign_version.is_none());
+
+        let mut unit = init_wire_versioned(false, 0x08, vec![]);
+        unit.push(wz_codecs::wire_const::T_MID_KEEP_ALIVE);
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&unit, 2));
+        let front = s.next_frame(Direction::A).expect("the Init at the front");
+        assert!(
+            front.foreign_version.as_ref().is_some_and(|f| !f.whole),
+            "a byte follows it in its unit: {:?}",
+            front.foreign_version
+        );
     }
 
     /// An acceptor's answer seen FIRST is not replaced by a claim seen after

@@ -309,6 +309,9 @@ mod row_facts_tests;
 // tables on every build. The document is gated on `dissect` with the field
 // document whose phase words it reuses.
 pub mod session_table;
+// Whether a flow is zenoh of a version this reader does not read, taken at
+// ingest beside the session table's version evidence and as ungated.
+pub mod foreign_zenoh;
 #[cfg(feature = "dissect")]
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
@@ -646,7 +649,9 @@ use wz_session_core::passive::NANOS_PER_MILLI;
 pub use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
-use wz_session_core::scouting_message::{parse_scouting_observed, ScoutingFrame};
+use wz_session_core::scouting_message::{
+    parse_scouting_observed, parse_scouting_observed_keeping, ScoutingFrame,
+};
 
 use crate::link::{FlowKey, SkipReason, Transport};
 use crate::tcp::StreamAssembler;
@@ -9606,6 +9611,10 @@ impl Dissection {
         // answer depends on an exchange that spans two DIFFERENT flows: the
         // SCOUT's key is (asker, group) and the HELLO's is (asker, responder).
         let scouting = self.datagram_namespace(&d);
+        // A unicast Hello is read as scouting only when it was addressed to an
+        // endpoint that scouted (`datagram_namespace`): it answers that Scout.
+        let answers_a_scout = scouting == Some(wz_session_core::wire_const::S_MID_HELLO)
+            && !d.destination().is_ip_multicast();
         if scouting == Some(wz_session_core::wire_const::S_MID_SCOUT) {
             // Recorded on the ROUTING decision, not on a successful decode: a
             // build with `codec-hello` and without `codec-scout` still has to
@@ -9714,11 +9723,15 @@ impl Dissection {
             // are fed. A scouting datagram advances no session, which is a
             // different question from whether anything read it.
             flow.residue.fed += d.payload.len() as u64;
-            let read = parse_scouting_observed(d.payload);
+            let (read, foreign) = parse_scouting_observed_keeping(d.payload);
             let whole = matches!(&read, Ok((_, n)) if *n == d.payload.len());
             let frame = read.map(|(frame, _)| frame);
             flow.ingest
                 .observe_scouting(&frame, whole, d.payload.len(), d.checksums.integrity());
+            if let Some(foreign) = &foreign {
+                flow.ingest
+                    .observe_foreign_scouting(foreign, direction, answers_a_scout);
+            }
             // Open-debt item 924, step 4c — the payload is logged (or named by
             // its place in the container) and the message is read again from
             // it. The clock was advanced for this datagram above, before the

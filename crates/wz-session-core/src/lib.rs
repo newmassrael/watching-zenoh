@@ -1453,6 +1453,13 @@ pub mod unit_ext;
 #[cfg(any(feature = "reassembly", feature = "transport-fragmentation"))]
 pub mod extfragment;
 
+// A version-bearing message of another protocol version, as far as the layout
+// this reader shares with it reads (an Init, a Join, a Scout or a Hello the
+// observer refuses as a foreign version). A comment and not an outer `///` doc,
+// so the module's own `//!` doc resolves its links in its own scope.
+#[cfg(feature = "alloc")]
+pub mod foreign_version;
+
 // R311y578 (G2) — the PASSIVE session-context tracker: the observer-side
 // counterpart to `session_actions`'s participant state. Folds BOTH sides'
 // Init offers (a participant computes only its own half), tracks the phase

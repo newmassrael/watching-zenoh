@@ -3100,6 +3100,154 @@ fn arbitrary_udp_bytes_prove_no_flow_zenoh_and_name_no_node() {
         .map(|f| f.ingest.versions().foreign_version)
         .sum();
     assert!(foreign > 0, "no datagram reached the version byte");
+    // And none of them is zenoh of another version: a refused header is not an
+    // exchange.
+    for flow in d.datagram_flows() {
+        assert_eq!(flow.ingest.foreign_zenoh(), None, "{:?}", flow.flow);
+    }
+}
+
+// ── zenoh of another version ───────────────────────────────────────────────
+
+/// [`init`] announcing `version` instead of this reader's.
+fn init_of(version: u8, zid: &[u8], ack: bool) -> Vec<u8> {
+    let mut wire = if ack {
+        init_ack_with_cookie(zid)
+    } else {
+        init(zid, false)
+    };
+    wire[1] = version;
+    wire
+}
+
+/// The one stream flow of `d`, and what it came to.
+fn foreign_of(d: &Dissection) -> Option<crate::foreign_zenoh::Recognition> {
+    assert_eq!(d.flows().len(), 1, "one connection");
+    d.flows()[0].ingest.foreign_zenoh().cloned()
+}
+
+/// A ZENOH 0.x SESSION IS ZENOH OUT OF RANGE. An InitSyn and an InitAck of
+/// version 0x08, as zenoh 0.11 writes them, then its Open pair: the flow is
+/// recognised as version 8 by the answer, with the two Inits as its witnesses,
+/// whichever end sorts first. The verdict of this reader's version is not
+/// moved to `yes` by it.
+#[test]
+fn a_zenoh_0x_handshake_is_zenoh_of_another_version() {
+    for dialer_low in [true, false] {
+        let mut out = Packets::default();
+        let mut tcp = Tcp::new(dialer_low, 43210);
+        tcp.send(&mut out, T0, true, &init_of(0x08, &ZID_A, false));
+        tcp.send(&mut out, T0 + 1_000, false, &init_of(0x08, &ZID_B, true));
+        tcp.send(&mut out, T0 + 2_000, true, &open_syn_with_cookie());
+        tcp.send(&mut out, T0 + 3_000, false, &open(true));
+        let d = out.dissect();
+        let r = foreign_of(&d).expect("an answered 0x08 offer is recognised");
+        let (dialer, acceptor) = if dialer_low {
+            (Direction::A, Direction::B)
+        } else {
+            (Direction::B, Direction::A)
+        };
+        use crate::foreign_zenoh::{RecognizedBy, Witness, WitnessKind};
+        use wz_session_core::foreign_version::VersionBearing;
+        assert_eq!(r.version, 0x08);
+        assert_eq!(r.recognized_by, RecognizedBy::Answered);
+        assert_eq!(
+            r.witnesses,
+            vec![
+                Witness {
+                    kind: WitnessKind::Message(VersionBearing::InitSyn),
+                    direction: dialer,
+                    packet: 0,
+                },
+                Witness {
+                    kind: WitnessKind::Message(VersionBearing::InitAck),
+                    direction: acceptor,
+                    packet: 1,
+                },
+            ],
+            "dialer_low={dialer_low}"
+        );
+        assert_ne!(word(&d.flows()[0].zenoh_evidence()), ZenohVerdict::Yes);
+    }
+}
+
+/// AN OFFER OF ANOTHER VERSION REFUSED is recognised too: zenoh's acceptor
+/// closes on an InitSyn whose version is not its own. A lone InitSyn, and the
+/// same InitSyn answered from its OWN side, are not.
+#[test]
+fn a_refused_offer_of_another_version_is_recognised_and_a_lone_one_is_not() {
+    let mut out = Packets::default();
+    let mut tcp = Tcp::new(true, 43210);
+    tcp.send(&mut out, T0, true, &init_of(0x08, &ZID_A, false));
+    tcp.send(&mut out, T0 + 1_000, false, &close());
+    let r = foreign_of(&out.dissect()).expect("a refusal answers the offer");
+    assert_eq!(r.recognized_by, crate::foreign_zenoh::RecognizedBy::Refused);
+    assert_eq!(r.version, 0x08);
+    assert_eq!(r.witnesses.len(), 2);
+
+    let mut lone = Packets::default();
+    Tcp::new(true, 43210).send(&mut lone, T0, true, &init_of(0x08, &ZID_A, false));
+    assert_eq!(
+        foreign_of(&lone.dissect()),
+        None,
+        "one message is no exchange"
+    );
+
+    let mut same_side = Packets::default();
+    let mut tcp = Tcp::new(true, 43210);
+    tcp.send(&mut same_side, T0, true, &init_of(0x08, &ZID_A, false));
+    tcp.send(&mut same_side, T0 + 1_000, true, &close());
+    assert_eq!(
+        foreign_of(&same_side.dissect()),
+        None,
+        "a Close from the offer's own side answers nothing"
+    );
+}
+
+/// The control: a session of this reader's version is not zenoh of another
+/// one, and the field document says so with `null` beside its `zenoh`.
+#[test]
+fn a_session_of_this_version_is_not_zenoh_of_another_and_the_document_says_null() {
+    let (out, _) = tcp_session(true, 4);
+    let d = out.dissect();
+    assert_eq!(foreign_of(&d), None);
+    let fields = parse(&crate::fields_json::fields_json(
+        &d,
+        &out.file(),
+        None,
+        None,
+    ));
+    let flows = array(&fields, "stream_flows");
+    assert_eq!(flows.len(), 1);
+    let Json5Value::Object(flow) = &flows[0] else {
+        panic!("a flow object")
+    };
+    assert_eq!(
+        flow.iter()
+            .find(|(k, _)| k == "foreign_zenoh")
+            .map(|(_, v)| v),
+        Some(&Json5Value::Null)
+    );
+}
+
+/// The document's object for a recognised flow: the version, the exchange and
+/// each witness's word, direction and packet.
+#[test]
+fn the_field_document_writes_a_recognised_flow() {
+    let mut out = Packets::default();
+    let mut tcp = Tcp::new(true, 43210);
+    tcp.send(&mut out, T0, true, &init_of(0x08, &ZID_A, false));
+    tcp.send(&mut out, T0 + 1_000, false, &init_of(0x08, &ZID_B, true));
+    let d = out.dissect();
+    let fields = crate::fields_json::fields_json(&d, &out.file(), None, None);
+    assert!(
+        fields.contains(
+            "\"foreign_zenoh\":{\"version\":8,\"recognized_by\":\"answered\",\
+             \"witnesses\":[{\"witness\":\"init_syn\",\"direction\":\"a\",\"packet\":0},\
+             {\"witness\":\"init_ack\",\"direction\":\"b\",\"packet\":1}]}"
+        ),
+        "{fields}"
+    );
 }
 
 /// A session whose handshake is in the capture is `yes`, in the row and in the

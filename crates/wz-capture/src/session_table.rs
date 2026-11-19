@@ -103,6 +103,10 @@ pub struct LinkIngest {
     /// reason the module gives: an Init is the oldest message of a flow and the
     /// first a retention ceiling discards. See [`VersionEvidence`].
     versions: VersionEvidence,
+    /// Whether those messages, where they announced another version, form an
+    /// exchange that makes the flow zenoh of that version; counted here for the
+    /// same reason. See [`crate::foreign_zenoh`].
+    foreign: crate::foreign_zenoh::ForeignZenoh,
     /// How the flow's framing units read, counted at ingest for the same reason
     /// [`Self::versions`] is. See [`ReadingEvidence`].
     readings: ReadingEvidence,
@@ -424,6 +428,18 @@ impl LinkIngest {
         // names nobody, and is still a message of a version.
         let announced = frame.frame.as_ref().map(InboundFrame::announced_version);
         self.versions.observe(announced, frame.unit_read_whole);
+        // A message of another version is never read whole as a unit (the walk
+        // refuses it), so it is weighed by what it carries; a Close counts only
+        // out of a unit read whole, on a link that can carry one.
+        if let Some(foreign) = &frame.foreign_version {
+            self.foreign.observe(foreign, frame.direction, self.packet);
+        }
+        if matches!(&frame.frame, Ok(InboundFrame::Close { .. }))
+            && frame.unit_read_whole
+            && !frame.inadmissible_on_link
+        {
+            self.foreign.observe_close(frame.direction, self.packet);
+        }
         // An Init in a unit not read whole names nobody either: see
         // `PassiveFrame::unit_read_whole`. Neither is evidence of the test: a
         // zenoh peer never sends an Init on a link without a handshake.
@@ -650,6 +666,25 @@ impl LinkIngest {
     /// What the flow's version-bearing messages said.
     pub fn versions(&self) -> VersionEvidence {
         self.versions
+    }
+
+    /// A scouting message of the flow refused as another version, travelling
+    /// `direction`: what its decode read, and whether its datagram was
+    /// addressed to an endpoint the capture saw send a Scout
+    /// ([`crate::foreign_zenoh`]).
+    pub(crate) fn observe_foreign_scouting(
+        &mut self,
+        message: &wz_session_core::foreign_version::ForeignVersionMessage,
+        direction: Direction,
+        answers_a_scout: bool,
+    ) {
+        self.foreign
+            .observe_scouting(message, direction, self.packet, answers_a_scout);
+    }
+
+    /// Whether the flow is zenoh of a version this reader does not read.
+    pub fn foreign_zenoh(&self) -> Option<&crate::foreign_zenoh::Recognition> {
+        self.foreign.recognition()
     }
 
     /// The flow's evidence for the zenoh test now: what was observed, and what

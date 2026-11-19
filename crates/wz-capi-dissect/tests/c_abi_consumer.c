@@ -4631,8 +4631,11 @@ int main(void) {
      * keys.
      * 72: an Interest's restricted key is read in the table bit 6 of its
      * options byte names; it was always read in the sender's. Values move
-     * under stationary keys. */
-    revisioned[2].revision = 72;
+     * under stationary keys.
+     * 73: each flow gains `foreign_zenoh`, whether the flow is zenoh of a
+     * version this library does not read, with `recognized_by` and its
+     * `witnesses`. Four keys and two families arrive; nothing retires. */
+    revisioned[2].revision = 73;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
