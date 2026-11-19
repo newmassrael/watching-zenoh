@@ -1278,7 +1278,9 @@
  * 1970 are past the line); to the instants of a flow's `handshake` (a
  * WebSocket control frame's `at_ns`, a key that exists there from field
  * document 79 and takes the rule from its first appearance, for the same
- * reason); to every integer of a
+ * reason); to the instants of the document's `dns` (`query_ns` and
+ * `answer_ns`, keys that exist from field document 80, for the same reason);
+ * to every integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1783,7 +1785,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":79,"key":"kind","values":[...],
+ *     {"name":"fields","revision":80,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1847,6 +1849,8 @@
  * @carries fields place passenger
  * @carries fields priority passenger
  * @carries fields q_basis passenger
+ * @carries fields qtype passenger
+ * @carries fields rcode passenger
  * @carries fields reason passenger
  * @carries fields recognized_by passenger
  * @carries fields request_kind passenger
@@ -3194,6 +3198,46 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * @values fields unreachable
  * @values fields what
+ *
+ * WHETHER A NAME RESOLVED (field-document revision 80, row_facts 20). The
+ * document carries, after `capture_interfaces`, `dns`: every A, AAAA and SRV
+ * question asked by a UDP datagram on port 53 (DNS) or 5353 (multicast DNS),
+ * in the order first sent, with what answered it. An endpoint named by host
+ * is looked up before any session; when the name does not resolve no SYN
+ * follows, and this is the only place the capture says why.
+ *
+ *   "dns":{"queries":[{"name":"router.lan","qtype":"a","mdns":false,
+ *                      "asker":{"addr":"10.0.0.1","port":40001},
+ *                      "server":{"addr":"10.0.0.53","port":53},
+ *                      "query_packet":0,"query_ns":T,"sent":1,
+ *                      "answered":true,"answer_packet":1,"answer_ns":T,
+ *                      "rcode":"nxdomain","rcode_number":3,"addresses":[],
+ *                      "addresses_more":0}],
+ *          "more":0,"unmatched_answers":0}
+ *
+ * `qtype` is `a`, `aaaa` or `srv`; other questions are not read. `sent` counts
+ * the query and its resends (the same id, endpoints and question).
+ * `answered` is `false`, with `answer_packet`, `answer_ns`, `rcode` and
+ * `rcode_number` `null`, when no response came: no answer, not an error.
+ * `rcode` is `noerror`, `formerr`, `servfail`, `nxdomain`, `notimp`,
+ * `refused` or `other`, its number beside it. A DNS response answers the
+ * query of its id sent from the endpoint it is addressed to; a multicast DNS
+ * response, addressed to the group, answers the oldest unanswered multicast
+ * query whose name and type one of its records names.
+ *
+ * `addresses` are the response's records about the name and about the
+ * targets of its SRV records: an A or AAAA record's `addr` (`target` and
+ * `port` `null`), an SRV record's `target` and `port` (`addr` `null`), each
+ * with `ttl_s`. `connected` is, for an address, the first TCP SYN the capture
+ * holds to it (and to the SRV record's port, when the question was SRV) sent
+ * after the answer, as `syn_packet` and `port`; `null` when there was none.
+ * The first 16 records, `addresses_more` past them; the first 256 queries,
+ * `more` past them; `unmatched_answers` counts the responses that answered no
+ * query the capture held. DNS over TCP is not read. The datagrams on those
+ * ports also take the path every UDP datagram takes.
+ *
+ * @values fields qtype
+ * @values fields rcode
  *
  * WHAT A HANDSHAKE SAID (field-document revision 79, row_facts 19). Every flow
  * object carries, after `tcp`, `handshake`: `null` for a flow that carried no
@@ -6465,7 +6509,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":79,"key":"state",
+ *     "value_families":[{"name":"fields","revision":80,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -8234,6 +8278,8 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts place
  * @values row_facts priority
  * @values row_facts q_basis
+ * @values row_facts qtype
+ * @values row_facts rcode
  * @values row_facts reason
  * @values row_facts recognized_by
  * @values row_facts request_kind
@@ -8284,6 +8330,8 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts place passenger
  * @carries row_facts priority passenger
  * @carries row_facts q_basis passenger
+ * @carries row_facts qtype passenger
+ * @carries row_facts rcode passenger
  * @carries row_facts reason passenger
  * @carries row_facts recognized_by passenger
  * @carries row_facts request_kind passenger

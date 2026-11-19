@@ -193,6 +193,17 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=79,
         ),
     ),
+    # Field document 80: a lookup's `query_ns` and `answer_ns`, through one
+    # closure.
+    ("crates/wz-capture/src/fields_json.rs", "write_dns"): (
+        Cell(
+            "fields",
+            "a dns instant",
+            "the instants of the document's `dns`",
+            "the `dns` instants are nanoseconds since 1970",
+            born=80,
+        ),
+    ),
     ("crates/wz-capture/src/fields_json.rs", "push_parameters"): (
         Cell("fields", "a context parameters entry's integer value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
     ),

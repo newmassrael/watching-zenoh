@@ -320,6 +320,7 @@ pub mod control;
 pub mod ip_facts;
 // What a TCP flow's connection did under its session, taken at ingest the same
 // way.
+pub mod dns;
 #[cfg(feature = "dissect")]
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
@@ -5319,6 +5320,8 @@ mod message_list_census {
             skip_census: _,
             // ICMP and IGMP messages, which are not zenoh messages.
             control: _,
+            // DNS lookups, which are not zenoh messages either.
+            dns: _,
             limits: _,
             drops: _,
             declared_quic_ports: _,
@@ -6488,6 +6491,9 @@ pub struct Dissection {
     /// The ICMP, ICMPv6 and IGMP messages read off packets skipped as not a
     /// transport, bounded: see [`control`].
     control: control::ControlPlane,
+    /// The DNS and multicast DNS lookups read off UDP datagrams on their
+    /// ports, beside the path every datagram takes: see [`dns`].
+    dns: dns::DnsPlane,
     /// R311y594b — what this dissection may accumulate.
     limits: DissectionLimits,
     /// What the limits have cost so far.
@@ -6737,6 +6743,7 @@ impl Default for Dissection {
             skipped: Vec::new(),
             skip_census: SkipCensus::default(),
             control: control::ControlPlane::default(),
+            dns: dns::DnsPlane::default(),
             declared_quic_ports: Vec::new(),
             declared_serial_linktypes: Vec::new(),
             serial: None,
@@ -8687,6 +8694,13 @@ impl Dissection {
         &self.control
     }
 
+    /// The DNS and multicast DNS lookups the capture carried, each with what
+    /// answered it. Their datagrams also took the path every UDP datagram
+    /// takes. See [`dns`].
+    pub fn dns(&self) -> &dns::DnsPlane {
+        &self.dns
+    }
+
     /// The flow matching `key`, if the capture carried one.
     pub fn flow(&self, key: &FlowKey) -> Option<&FlowDissection> {
         self.flows.find(key)
@@ -9680,6 +9694,19 @@ impl Dissection {
         in_container: Option<usize>,
     ) {
         self.tally_checksums(&d.checksums);
+        if matches!(link, DatagramLink::Udp)
+            && dns::DnsPlane::reads(d.source().port, d.destination().port)
+        {
+            self.dns.observe(
+                d.source(),
+                d.destination(),
+                d.payload,
+                dns::Moment {
+                    packet: d.packet_index,
+                    at_ns: ts_nanos,
+                },
+            );
+        }
         let idx = match self.datagram_flows.position(&d.flow) {
             Some(i) => i,
             None => {
