@@ -469,6 +469,11 @@ pub const SNAPSHOT_HISTOGRAM_BUCKETS: usize = generated::SNAPSHOT_HISTOGRAM_BUCK
 /// at most `64`: a check names the checkpoints that expired in one 64-bit word.
 pub const SUPERVISION_CHECKPOINTS: usize = generated::SUPERVISION_CHECKPOINTS;
 
+/// How many streams one reception supervisor holds (`stream_supervisor::StreamSupervisor`). Its
+/// table is the caller's storage, so this bounds the rows used of it and sizes nothing. At least
+/// `1`.
+pub const E2E_SUPERVISED_STREAMS: usize = generated::E2E_SUPERVISED_STREAMS;
+
 /// How many event records the node's event ring holds (`event_ring::EventRing`). A count of
 /// records of a fixed size, so it sizes the ring's memory. At least `1`.
 pub const EVENT_RING_SLOTS: usize = generated::EVENT_RING_SLOTS;
