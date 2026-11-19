@@ -294,6 +294,9 @@ CAPABILITY_FEATURES = frozenset({
     # A subscriber whose callback runs off the receive path (`wz_capi_c_*offload*`): wz-own doors
     # and the structs they take, no zenoh-c type; off in the default and in every arm.
     "rx-callback-offload",
+    # The key ids every node shares, read from the config's `wz/key-ids` member: no door and no
+    # type, so no footprint moves; off in the default and in every arm.
+    "shared-key-ids",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

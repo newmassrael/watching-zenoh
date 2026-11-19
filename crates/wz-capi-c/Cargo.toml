@@ -191,6 +191,12 @@ segment-sender = ["dep:wz-app-frame", "wz-capi-core/segment-sender"]
 # delivery lane that every face feeds. OFF by default: zenoh-c has no such door, and a callback
 # runs where the sample arrives in a build made as zenoh-c is.
 rx-callback-offload = ["wz-capi-core/rx-callback-offload"]
+# The key ids every node of a deployment shares, stated in the config's `wz/key-ids`
+# (`zc_config_insert_json5`, `zc_config_from_str`): the dictionary and the key-wire form of one
+# endpoint apart from the session's, which the registry of faces holds for each link. OFF by
+# default: zenoh-c has no such member, and a stock peer cannot read a key named by an id it never
+# saw declared. A build without it refuses the member at the open by name.
+shared-key-ids = ["wz-capi-core/shared-key-ids"]
 # The `wz_capi_c_*_ext` doors and the three statement structs they take (`src/switch_doors.rs`):
 # the links an entity may use, a publish's retry and all-or-none form, and the node a query is
 # addressed to, stated beside the arguments of `z_put`, `z_delete`, `z_declare_publisher`, `z_get`,

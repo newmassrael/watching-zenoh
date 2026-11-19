@@ -1431,13 +1431,15 @@ kconfig = "WZ_CAP_SHARED_KEY_IDS"
 # peer, which has no such dictionary, so a build has the dictionary and the forms of the
 # key-wire-form policy that use it only when a deployment asks for them. The pico ABI's doors are
 # wz_ext_* and part of its unstable surface, as its other wz-own doors are; both engines hold the
-# dictionary and name each link's keys in that link's form.
+# dictionary and name each link's keys in that link's form. A configuration document states the
+# same in its wz/key-ids member, which the zenoh-c ABI reads from its config and the pico ABI from
+# wz_ext_config_document; the doors go over the document. The zenoh-c ABI adds no door and no type.
 default = "off"
 os_needs = []
-upstream_off = ["zenoh-pico"]
-abis = ["core", "pico"]
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
+abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
-help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (wz_ext_config_key_ids, wz_ext_config_key_wire_form_for, wz-own doors), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
+help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the wz/key-ids member of a configuration document, and wz_ext_config_key_ids and wz_ext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
 
 [[capability]]
 id = "rx-callback-offload"
@@ -3921,11 +3923,12 @@ that does not hold the same dictionary cannot read what `shared` sends, so both
 ends of the link must hold it. Every node that holds the dictionary reads an id
 only the dictionary names, whatever its own value. The value is the session's,
 and an endpoint the configuration dials or listens on may be stated a value of
-its own (wz_ext_config_key_wire_form_for), which every link to or from that
-endpoint takes. A session opened with `shared`, for itself or an endpoint, and
-no dictionary is refused, and so is one whose value is not `declared` in a build
-without the capability. Interests and liveliness interests name their keys as
-under `declared`.
+its own (wz/key-ids/links, wz_ext_config_key_wire_form_for), which every link
+to or from that endpoint takes. A session opened with `shared`, for itself or an
+endpoint, and no dictionary is refused, and so is one whose value is not
+`declared` in a build without the capability, and a router node, whose faces
+read no id of a dictionary, with any value but `declared`. Interests and
+liveliness interests name their keys as under `declared`.
 '''
 
 # A profile is a named set of policy values a run-time document starts from: the document names it

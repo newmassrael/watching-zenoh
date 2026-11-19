@@ -2383,5 +2383,101 @@ mod tests {
                 z_config_drop((&mut { back } as *mut z_owned_config_t).cast());
             }
         }
+
+        /// The key ids the open of `cfg` hands its session: the document the open renders, read
+        /// by the reader the open's plan reads it with, through what the session applies above
+        /// its links (`session_defaults_of`); `None` when the reader refuses the document.
+        #[cfg(feature = "shared-key-ids")]
+        unsafe fn key_ids_at_open(
+            cfg: &z_owned_config_t,
+        ) -> Option<wz_session_core::shared_key_ids::KeyIdsAtOpen> {
+            // SAFETY: a live owned config, only read here.
+            let state =
+                unsafe { config_state(z_config_loan(cfg) as *mut _) }.expect("a live state");
+            let document = state.render_nested().expect("the config nests");
+            let node = ZenohNodeConfig::from_json5(&document).ok()?.config;
+            wz_capi_core::open_plan::session_defaults_of(&node)
+                .ok()
+                .map(|defaults| defaults.key_ids)
+        }
+
+        /// The document the pico ABI's key-id tests hand its document door (the twin is in
+        /// `wz-capi-pico`'s `key_ids` tests), and the key ids it states: one document gives both
+        /// ABIs equal key ids.
+        #[cfg(feature = "shared-key-ids")]
+        const KEY_IDS_DOCUMENT: &str = r#"{ mode: "peer", wz: { "key-ids": {
+            dictionary: [ { id: 40, key: "lab/rig" }, { id: 41, key: "lab/rig/alpha" } ],
+            links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" } ] } } }"#;
+
+        #[cfg(feature = "shared-key-ids")]
+        fn document_key_ids() -> wz_session_core::shared_key_ids::KeyIdsAtOpen {
+            use wz_session_core::policy::KeyWireForm;
+            use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen};
+
+            KeyIdsAtOpen {
+                ids: Some(std::sync::Arc::new(
+                    KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("valid"),
+                )),
+                links: vec![("tcp/192.0.2.7:7447".to_owned(), KeyWireForm::Literal)],
+            }
+        }
+
+        /// The document's key ids reach the open whether the document is read whole or its
+        /// `wz/key-ids` is inserted, as the member or as its two lists.
+        #[cfg(feature = "shared-key-ids")]
+        #[test]
+        fn a_documents_key_ids_reach_the_open_through_each_door() {
+            let dictionary = r#"[ { id: 40, key: "lab/rig" }, { id: 41, key: "lab/rig/alpha" } ]"#;
+            let links = r#"[ { locator: "tcp/192.0.2.7:7447", form: "literal" } ]"#;
+            let member = format!("{{ dictionary: {dictionary}, links: {links} }}");
+            // SAFETY: configs built through the C doors, live until dropped here.
+            unsafe {
+                let (rc, read) = from_str(KEY_IDS_DOCUMENT);
+                assert_eq!(rc, Z_OK);
+                let inserted = config_of(&[("wz/key-ids", member.as_str())]);
+                let by_list = config_of(&[
+                    ("wz/key-ids/dictionary", dictionary),
+                    ("wz/key-ids/links", links),
+                ]);
+                for (cfg, door) in [
+                    (&read, "zc_config_from_str"),
+                    (&inserted, "the member inserted"),
+                    (&by_list, "the lists inserted"),
+                ] {
+                    assert_eq!(key_ids_at_open(cfg), Some(document_key_ids()), "{door}");
+                }
+                for cfg in [read, inserted, by_list] {
+                    z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+                }
+            }
+        }
+
+        /// A refused part of `wz/key-ids` is taken by the insert door and refused at the open, in
+        /// the list that refuses the member's policies.
+        #[cfg(feature = "shared-key-ids")]
+        #[test]
+        fn a_refused_key_ids_member_refuses_the_open() {
+            // SAFETY: a config built through the C doors, live until dropped here.
+            unsafe {
+                let cfg =
+                    config_of(&[("wz/key-ids/dictionary", r#"[ { id: 0, key: "lab/rig" } ]"#)]);
+                assert_eq!(key_ids_at_open(&cfg), None);
+                assert_eq!(resolved_at_open(&cfg), None);
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+            }
+        }
+
+        /// A build without the capability refuses `wz/key-ids` at the open by name.
+        #[cfg(not(feature = "shared-key-ids"))]
+        #[test]
+        fn a_key_ids_member_is_refused_at_the_open_without_the_capability() {
+            // SAFETY: a config built through the C doors, live until dropped here.
+            unsafe {
+                let cfg =
+                    config_of(&[("wz/key-ids/dictionary", r#"[ { id: 40, key: "lab/rig" } ]"#)]);
+                assert_eq!(resolved_at_open(&cfg), None);
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+            }
+        }
     }
 }
