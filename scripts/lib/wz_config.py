@@ -581,6 +581,13 @@ def validate_caps(data: dict) -> list[str]:
             out.append(f"{c['id']}: Kconfig symbol `{c['kconfig']}` is not WZ_CAP_*")
         if c.get("default", "on") not in ("on", "off"):
             out.append(f"{c['id']}: default is `{c['default']}`, which is neither on nor off")
+        for abi in c.get("default_off_abis", []):
+            if abi == "core" or abi not in c["abis"]:
+                out.append(f"{c['id']}: default_off_abis names `{abi}`, which is not an ABI the "
+                           "capability is exported by")
+        if c.get("default_off_abis") and c.get("default", "on") == "off":
+            out.append(f"{c['id']}: default_off_abis is stated for a capability that is off by "
+                       "default everywhere")
         if "observation_bit" in c:
             bit = c["observation_bit"]
             if isinstance(bit, bool) or not isinstance(bit, int) or not 0 <= bit <= 63:
@@ -1713,9 +1720,18 @@ def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 
 
-def default_on(cap: dict) -> bool:
-    """Whether a build that names nothing has the capability: on unless declared `off`."""
+def default_on(cap: dict, abi: str) -> bool:
+    """Whether a build of `abi` that names nothing has the capability: on unless declared `off`,
+    or unless `default_off_abis` names that ABI."""
+    if abi in cap.get("default_off_abis", []):
+        return False
     return cap.get("default", "on") == "on"
+
+
+# The ABI whose default a generated Kconfig file states. A Zephyr or Linux image built from the
+# Kconfig tree is a pico ABI node, so the Kconfig default of a capability is the pico ABI's, and
+# an original's defconfig is the difference from that same default.
+KCONFIG_ABI = "pico"
 
 
 def closure(caps: dict, on: set[str]) -> set[str]:
@@ -1948,7 +1964,7 @@ def emit_kconfig_capabilities(decl: dict) -> str:
         cap = caps[cid]
         lines.append(f"config {cap['kconfig']}")
         lines.append(f'\tbool "{cid}"')
-        lines.append("\tdefault y" if default_on(cap) else "\tdefault n")
+        lines.append("\tdefault y" if default_on(cap, KCONFIG_ABI) else "\tdefault n")
         for dep in cap["implies"]:
             lines.append(f"\tselect {caps[dep]['kconfig']}")
         lines.append("\thelp")
@@ -3003,7 +3019,7 @@ def emit_defconfig(decl: dict, original: str) -> str:
         out.append(f"CONFIG_{option['kconfig']}=y")
     values = original_values(decl, original)
     for cid in decl["order"]:
-        if cid in values and values[cid] != default_on(decl["caps"][cid]):
+        if cid in values and values[cid] != default_on(decl["caps"][cid], KCONFIG_ABI):
             out.append(f"CONFIG_{decl['caps'][cid]['kconfig']}={'y' if values[cid] else 'n'}")
     return "\n".join(out) + "\n"
 
@@ -3234,7 +3250,7 @@ def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
     for cid in sorted(others & set(feats)):
         out.append(f"{abi}: has a feature `{cid}` the declaration does not give this ABI")
     default = set(feats.get("default", []))
-    want = set(decl["base"][abi]) | {cid for cid in mine if default_on(caps[cid])}
+    want = set(decl["base"][abi]) | {cid for cid in mine if default_on(caps[cid], abi)}
     if default != want:
         out.append(f"{abi}: default is {sorted(default)}, expected {sorted(want)}")
     return out
@@ -3594,7 +3610,7 @@ def zenoh_c_header_statement(decl: dict, text: str, name: str) -> dict:
     handshake zenoh-c was built without moves no type, so the drop-in keeps its own defaults for
     them and the statement says so; the header states no limit and no policy, so each is the
     catalogue's default and upstream's."""
-    default = {cid for cid, cap in decl["caps"].items() if default_on(cap)}
+    default = {cid for cid, cap in decl["caps"].items() if default_on(cap, "c")}
     return conformance_statement(
         decl, "c", features_for(decl, "c", default) + drop_in_arm(decl, text),
         {lim["id"]: lim["default"] for lim in decl["limits"]},
@@ -4312,7 +4328,7 @@ def cmd_selftest() -> int:
            and shm["capabilities"] == plain["capabilities"])
     expect("the zenoh-c header's statement is the default build's, its arm added",
            {c["id"] for c in plain["capabilities"] if c["supported"]}
-           == set(features_for(decl, "c", {cid for cid, cap in caps.items() if default_on(cap)}))
+           == set(features_for(decl, "c", {cid for cid, cap in caps.items() if default_on(cap, "c")}))
            & {cid for cid in decl["order"] if "c" in caps[cid]["abis"]}
            and all(x["value"] == x["default"] for x in plain["limits"])
            and plain["derived_from"] == {"kind": "zenoh-c-header", "inputs": ["zenoh_configure.h"]})
@@ -4936,6 +4952,15 @@ def cmd_selftest() -> int:
     expect("an observation_bit that is not a number is refused",
            caps_refused('os_needs = ["sockets-udp"]\n', 'os_needs = ["sockets-udp"]\nobservation_bit = "zero"\n',
                         "not a bit of a 64-bit word"))
+    # A default one ABI overrides.
+    expect("default_off_abis naming an ABI the capability is not exported by is refused",
+           caps_refused('os_needs = ["sockets-udp"]\n',
+                        'os_needs = ["sockets-udp"]\ndefault_off_abis = ["c"]\n',
+                        "not an ABI the capability is exported by"))
+    expect("default_off_abis turns the default off for the ABI it names and no other",
+           not default_on({"default_off_abis": ["pico"]}, "pico")
+           and default_on({"default_off_abis": ["pico"]}, "c")
+           and default_on({}, "pico") and not default_on({"default": "off"}, "c"))
     feature_bits = emit_rust_feature_bits(load_decl())
     expect("the features word is the capabilities' observation_bits, in bit order",
            "CLOCK_SOURCE: u64 = 1 << 0;" in feature_bits and "RESOURCE_SNAPSHOT: u64 = 1 << 3;" in feature_bits
