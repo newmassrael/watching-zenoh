@@ -522,7 +522,7 @@ fn the_publisher_doors_refuse_by_name() {
         let mut listener_session = open(Z_CONFIG_LISTEN_KEY, &endpoint);
         let peer = Peer::dial(&endpoint);
         let loan = wz_ext_replay_publisher_loan(&peer.cache);
-        let long = vec![0u8; 65];
+        let long = [0u8; 65];
         assert_eq!(
             wz_ext_replay_publisher_record(loan, 0, 0, long.as_ptr(), long.len()),
             Z_EINVAL,
