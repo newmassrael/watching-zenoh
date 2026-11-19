@@ -1,0 +1,29 @@
+// SCE-GENERATED — DO NOT EDIT
+// source-hash: d4be575c838fab38b93b0c7e5652426a7cf552b96f4795b6a81ea11073158f08
+// SCE-MAP: drop_report_due.scxml:22 :: _forge_body
+
+// SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
+// Runtime: none
+// Do not edit — regenerate from the source SCXML file.
+//
+// RFC §synth-5-A: pure synchronous function with bounded loops. Free
+// function, no instance state. `#![no_std]`-clean when no `bytes`
+// parameter (this fixture: no_std_clean = true).
+
+#[allow(clippy::all)]
+#[allow(unused_assignments)]
+pub fn drop_report_due(pending: u64, has_last: bool, last_ms: u64, now_ms: u64, interval_ms: u64) -> u8 {
+    if pending == 0 {
+        return 0;
+    }
+    if !has_last {
+        return 1;
+    }
+    if now_ms < last_ms {
+        return 2;
+    }
+    if u64::saturating_sub(now_ms, last_ms) >= interval_ms {
+        return 1;
+    }
+    return 0;
+}

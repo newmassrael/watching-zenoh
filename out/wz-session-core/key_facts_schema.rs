@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: cc02b4dba071f4fdc21b539ee37b42dc67d2f985b8209cb58f3f55cbe8bcbd24
+// source-hash: d4be575c838fab38b93b0c7e5652426a7cf552b96f4795b6a81ea11073158f08
 // SCE-MAP: key_facts_schema.scxml:16 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="event-schema")
@@ -25,7 +25,7 @@ pub const SCHEMA_ID: &str = "urn:sce:schema:key_facts_schema:1";
 /// The payload as a JSON Schema (2020-12): one spelling of each value, every
 /// bound as this build resolved it, a text's in UTF-8 bytes in `x-sce-max-bytes`.
 #[allow(dead_code)]
-pub const JSON_SCHEMA: &str = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:sce:schema:key_facts_schema:1\",\"x-sce-source-hash\":\"cc02b4dba071f4fdc21b539ee37b42dc67d2f985b8209cb58f3f55cbe8bcbd24\",\"description\":\"x-sce-max-bytes bounds a text in UTF-8 bytes; maxLength counts characters\",\"type\":\"object\",\"properties\":{\"wild\":{\"type\":\"boolean\"},\"key\":{\"type\":\"boolean\"}},\"required\":[\"wild\",\"key\"],\"additionalProperties\":false}";
+pub const JSON_SCHEMA: &str = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:sce:schema:key_facts_schema:1\",\"x-sce-source-hash\":\"d4be575c838fab38b93b0c7e5652426a7cf552b96f4795b6a81ea11073158f08\",\"description\":\"x-sce-max-bytes bounds a text in UTF-8 bytes; maxLength counts characters\",\"type\":\"object\",\"properties\":{\"wild\":{\"type\":\"boolean\"},\"key\":{\"type\":\"boolean\"}},\"required\":[\"wild\",\"key\"],\"additionalProperties\":false}";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyFactsSchemaPayload {

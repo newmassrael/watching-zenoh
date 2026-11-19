@@ -894,6 +894,8 @@ compile_error!("feature `session-unicast-accept` requires `rx-control`, which th
 compile_error!("feature `session-unicast-accept` requires `rx-push`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-unicast-accept", not(feature = "rx-response")))]
 compile_error!("feature `session-unicast-accept` requires `rx-response`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "shared-key-ids", not(feature = "alloc")))]
+compile_error!("feature `shared-key-ids` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "switchboard", not(feature = "codec-push")))]
 compile_error!("feature `switchboard` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "transport-compose", not(feature = "alloc")))]
