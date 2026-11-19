@@ -2740,6 +2740,25 @@ At least 1.
 '''
 
 [[limit]]
+id = "REPLAY_DEPTH_MAX"
+kconfig = "WZ_LIMIT_REPLAY_DEPTH_MAX"
+default = 32
+storage = "both"
+# The deepest ring of sent frames one message, or one instance of it, keeps for a subscriber that
+# arrives late. Each message states its own depth, at most this; a host build allocates each ring
+# when it is made, and a fixed-memory build sizes its rings at the build.
+scope = "entity"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The deepest replay a message may keep: how many of the frames it last sent, as
+they were sent, a publisher holds for a subscriber that arrives later and asks
+for them. Each message states its own depth, from 1 to this; a depth above it
+is refused when the message is declared. At least 1.
+'''
+
+[[limit]]
 id = "CLOCK_MAX_FORWARD_STEP_MS"
 kconfig = "WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS"
 default = 500
