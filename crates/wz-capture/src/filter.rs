@@ -235,7 +235,7 @@
 //! that needs one reads it off the handshake, where the Init whose `a` flag is
 //! clear is the initiator's.
 //!
-//! `key` matching is zenoh's own — `keyexpr_pattern_matches`, the matcher the
+//! `key` matching is zenoh's own — `keyexpr_matches`, the matcher the
 //! subscriber and queryable registries use — rather than a glob written here.
 //! A filter language for zenoh traffic that did not speak zenoh's keyexpr
 //! dialect would be a second dialect a reader has to learn, and it would
@@ -283,7 +283,7 @@
 //!
 //! ## Wildcards are a feature, and their absence is a REFUSAL
 //!
-//! `keyexpr_pattern_matches`' wildcard arms are per-capability features of
+//! `keyexpr_matches`' wildcard arms are per-capability features of
 //! `wz-session-core`, and with them off a `**` token DEGRADES TO A LITERAL
 //! CHUNK — `demo/**` quietly stops matching `demo/a` and matches the literal
 //! chunk `**` instead. That degradation is right for an MCU client composing
@@ -299,7 +299,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use wz_session_core::keyexpr_match::keyexpr_pattern_matches;
+use wz_session_core::keyexpr_match::keyexpr_matches;
 use wz_session_core::passive::Direction;
 
 use crate::field_path::{FieldPath, PathKind, PathRefusal, PathTest};
@@ -1059,9 +1059,9 @@ pub fn selector_fields_json() -> String {
 /// One comparison, already validated against its field's admissible operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Term {
-    /// Pattern chunks, pre-split so evaluation does no parsing.
+    /// A keyexpr pattern, matched against the record's key.
     Key {
-        chunks: Vec<String>,
+        pattern: String,
         negated: bool,
     },
     /// R2757 (open debt 790) — the ZID a record's sender announced.
@@ -1436,16 +1436,13 @@ impl Term {
                 None | Some(None) => Truth::Unknown,
                 Some(Some(packet)) => Truth::of(op.apply(packet, *value)),
             },
-            Self::Key { chunks, negated } => match record.keyexpr {
+            Self::Key { pattern, negated } => match record.keyexpr {
                 // The undecidable case, and the one this module exists for: the
                 // record HAS a keyexpr, the capture just never carried the
                 // declaration that names it. Answering `no` would drop it from
                 // the reader's total silently.
                 None => Truth::Unknown,
-                Some(target) => {
-                    let refs: Vec<&str> = chunks.iter().map(|c| c.as_str()).collect();
-                    Truth::of(keyexpr_pattern_matches(&refs, target) != *negated)
-                }
+                Some(target) => Truth::of(keyexpr_matches(pattern, target) != *negated),
             },
             // R2757 (open debt 790) — `None` is UNDECIDABLE and not `no`, for
             // the reason the `Key` arm above gives and one more that is this
@@ -4095,7 +4092,7 @@ fn build_fixed(
         Field::Key => {
             let negated = equality_negation(op, known.name(), op_at)?;
             Term::Key {
-                chunks: compile_pattern(&value, value_at)?,
+                pattern: compile_pattern(value, value_at)?,
                 negated,
             }
         }
@@ -4451,9 +4448,9 @@ fn integer(value: &str, at: usize) -> Result<u64, FilterError> {
     })
 }
 
-/// Split a keyexpr pattern into the chunks `keyexpr_pattern_matches` wants,
-/// refusing what this build's matcher cannot answer.
-fn compile_pattern(pattern: &str, at: usize) -> Result<Vec<String>, FilterError> {
+/// Accept a keyexpr pattern for `keyexpr_matches`, refusing what this build's
+/// matcher cannot answer.
+fn compile_pattern(pattern: String, at: usize) -> Result<String, FilterError> {
     // The refusal, and it is deliberately at PARSE time rather than at match
     // time: a reader who typed a wildcard learns immediately that this build
     // cannot answer, instead of reading an empty table and concluding the
@@ -4466,7 +4463,7 @@ fn compile_pattern(pattern: &str, at: usize) -> Result<Vec<String>, FilterError>
         });
     }
     let _ = at;
-    Ok(pattern.split('/').map(|c| c.to_string()).collect())
+    Ok(pattern)
 }
 
 fn describe_token(kind: &TokenKind) -> String {
