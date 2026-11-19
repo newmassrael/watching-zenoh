@@ -6796,12 +6796,24 @@ mod tests {
         peers: usize,
         after: Duration,
     ) -> (Vec<bool>, AcceptLoopSummary) {
-        use tokio::io::AsyncReadExt as _;
+        peers_against(bounds, acceptor_params(), &[], peers, after).await
+    }
+
+    /// [`silent_peers_against`] with the node's `params` and each peer writing `said` once it is
+    /// connected (one framed message, or nothing for an empty `said`) and then nothing more.
+    async fn peers_against(
+        bounds: AcceptBounds,
+        params: SessionInitParams,
+        said: &[u8],
+        peers: usize,
+        after: Duration,
+    ) -> (Vec<bool>, AcceptLoopSummary) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let (listener, addr) = bind_loopback().await;
         let (go_tx, go_rx) = watch::channel(false);
         let node = face_drive_loop(
             accept_only_sources(listener, SessionOffer::universal(), bounds),
-            acceptor_params(),
+            params,
             TokioTime::new(),
             DEFAULT_OPEN_TICK_MS,
             shutdown_on(go_rx.clone()),
@@ -6814,7 +6826,14 @@ mod tests {
         let observe = async move {
             let mut streams = Vec::new();
             for _ in 0..peers {
-                streams.push(TcpStream::connect(addr).await.expect("connect"));
+                let mut stream = TcpStream::connect(addr).await.expect("connect");
+                if !said.is_empty() {
+                    // A stream link frames each message behind its length, two bytes LE.
+                    let len = u16::try_from(said.len()).expect("a short message");
+                    stream.write_all(&len.to_le_bytes()).await.expect("write");
+                    stream.write_all(said).await.expect("write");
+                }
+                streams.push(stream);
                 // One at a time, so the order the loop sees them in is the order they are
                 // counted in, and the refused one is the last.
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -6860,6 +6879,36 @@ mod tests {
         assert_eq!(closed, [false, false, false], "control: nothing is closed");
         assert_eq!(summary.refused_over_pending, 0);
         assert_eq!(summary.accepted, 3);
+    }
+
+    /// `handshake-cookie = fixed` holds what each accept negotiated on the node's side, so a
+    /// flood of InitSyns that never send an OpenSyn is what that holding must not outgrow: each is
+    /// an accept in its handshake, and the pending bound refuses the one past it as it refuses a
+    /// silent link. The held ones are answered (their InitAck is read), the refused one is closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn under_a_fixed_cookie_a_flood_of_init_syns_is_bounded_by_the_pending_bound() {
+        use wz_session_core::policy::HandshakeCookie;
+        let mut params = acceptor_params();
+        if params
+            .policy
+            .select_handshake_cookie(HandshakeCookie::Fixed)
+            .is_err()
+        {
+            return;
+        }
+        let bounded = AcceptBounds {
+            pending: 2,
+            ..AcceptBounds::default()
+        };
+        let init_syn = wz_session_wire_fixtures::craft_initsyn_wire();
+        let (closed, summary) =
+            peers_against(bounded, params, &init_syn, 3, Duration::from_millis(300)).await;
+        assert_eq!(
+            closed,
+            [false, false, true],
+            "the third InitSyn is past the bound"
+        );
+        assert_eq!(summary.refused_over_pending, 1);
     }
 
     /// Upstream's `accept_timeout` is the whole accept's bound, and it is the node's to state:
