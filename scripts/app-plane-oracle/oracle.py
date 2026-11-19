@@ -178,7 +178,101 @@ def read_lane(text: str) -> dict:
     mode = session.get("connect_mode", "client")
     if mode not in ("client", "peer"):
         raise Refused(f"session.connect_mode {mode!r} is neither client nor peer")
+    if "key_ids" in lane:
+        read_key_ids(lane["key_ids"], features)
     return lane
+
+
+def key_problem(key: str) -> str | None:
+    """Why `key` is not a canonical key expression; None when it is.
+
+    The rules of zenoh's canon: no empty chunk (so no leading, trailing or doubled slash),
+    no `#` or `?`, `$` only as `$*` inside a longer chunk, `*` alone or as `**` alone, never
+    `**/**` and never `**/*` (whose canon is `*/**`). The session's own door judges the same
+    rules again at open; this answers before anything is built.
+    """
+    if not key:
+        return "it is empty"
+    chunks = key.split("/")
+    for n, chunk in enumerate(chunks):
+        if not chunk:
+            return "it has an empty chunk"
+        if any(c in chunk for c in "#? \t\r\n"):
+            return f"chunk {chunk!r} holds a character no key expression holds"
+        if chunk in ("*", "**"):
+            if chunk == "**" and n + 1 < len(chunks) and chunks[n + 1] in ("*", "**"):
+                return f"'**/{chunks[n + 1]}' is not canonical"
+            continue
+        if chunk == "$*":
+            return "chunk '$*' is not canonical: it is '*'"
+        bare = chunk.replace("$*", "")
+        if "*" in bare or "$" in bare:
+            return f"chunk {chunk!r} holds '*' or '$' outside a '$*'"
+        if "$*$*" in chunk:
+            return f"chunk {chunk!r} repeats '$*'"
+    return None
+
+
+KEY_FORMS = ("declared", "shared", "literal")
+
+
+def read_key_ids(key_ids: object, features: str) -> tuple[list[tuple[int, str]], dict[str, str]]:
+    """The shared key-id dictionary and the per-endpoint forms, checked; refused by name."""
+    if "shared-key-ids" not in features.split(","):
+        raise Refused("key_ids is given but wz.features does not name shared-key-ids, "
+                      "so wz's build would have no dictionary to hand it")
+    if not isinstance(key_ids, dict):
+        raise Refused("key_ids is not a JSON object")
+    entries = key_ids.get("dictionary")
+    if not isinstance(entries, list) or not entries:
+        raise Refused("key_ids.dictionary is not a non-empty list")
+    out: list[tuple[int, str]] = []
+    ids: set[int] = set()
+    keys: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise Refused("a key_ids.dictionary entry is not a JSON object")
+        ident, key = entry.get("id"), entry.get("key")
+        if not isinstance(ident, int) or isinstance(ident, bool) or not 1 <= ident <= 0xFFFF:
+            raise Refused(f"key_ids: id {ident!r} is not 1 to 65535 (0 names no key)")
+        if not isinstance(key, str):
+            raise Refused(f"key_ids: id {ident} has no key")
+        problem = key_problem(key)
+        if problem is not None:
+            raise Refused(f"key_ids: key {key!r} is not a canonical key expression: {problem}")
+        if ident in ids:
+            raise Refused(f"key_ids: id {ident} is named twice")
+        if key in keys:
+            raise Refused(f"key_ids: key {key!r} is named twice")
+        ids.add(ident)
+        keys.add(key)
+        out.append((ident, key))
+    forms = key_ids.get("forms", {})
+    if not isinstance(forms, dict):
+        raise Refused("key_ids.forms is not a JSON object")
+    for side, form in forms.items():
+        if side not in ("listen", "connect"):
+            raise Refused(f"key_ids.forms names {side!r}: a form is stated for listen or connect")
+        if form not in KEY_FORMS:
+            raise Refused(f"key_ids.forms.{side} {form!r} is not one of {', '.join(KEY_FORMS)}")
+    return out, dict(forms)
+
+
+def _segment(check: dict, base: Path, out: Path, params: dict) -> None:
+    """A check's optional segment profile: written beside the check, and its params set."""
+    segment = check.get("segment")
+    params["segmented"] = 0
+    if segment is None:
+        return
+    name = check["name"]
+    if not isinstance(segment, dict):
+        raise Refused(f"check {name!r}: segment is not a JSON object")
+    segment = dict(segment, name=name)
+    (out / "segment-profile.json").write_text(_text(segment, "profile", base) or "", encoding="utf-8")
+    (out / "segment-values.json").write_text(_text(segment, "values", base) or "", encoding="utf-8")
+    params["segmented"] = 1
+    params["first_transfer"] = _count(segment, "first_transfer", 0)
+    params["chunk_bytes"] = _positive(segment, "chunk_bytes")
 
 
 def prepare(lane_path: Path, scratch: Path) -> list[str]:
@@ -189,6 +283,10 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
     checks_dir = scratch / "checks"
     if checks_dir.exists():
         shutil.rmtree(checks_dir)
+    dictionary: list[tuple[int, str]] = []
+    forms: dict[str, str] = {}
+    if "key_ids" in lane:
+        dictionary, forms = read_key_ids(lane["key_ids"], lane.get("wz", {}).get("features", ""))
     for check in lane["checks"]:
         name = check["name"]
         out = checks_dir / name
@@ -197,6 +295,10 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
         params = {"kind": check["kind"], "key": check["key"],
                   "first_counter": _count(check, "first_counter", 0),
                   "frame_max": length + 256}
+        for side, form in sorted(forms.items()):
+            params[f"key_form_{side}"] = form
+        if dictionary:
+            (out / "key-ids").write_text("".join(f"{i} {k}\n" for i, k in dictionary), encoding="utf-8")
         (out / "profile.json").write_text(_text(check, "profile", base) or "", encoding="utf-8")
         (out / "values.json").write_text(_text(check, "values", base) or "", encoding="utf-8")
         variant = "frame"
@@ -206,6 +308,14 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
             if len(plan) > MAX_FRAMES:
                 raise Refused(f"check {name!r}: skip_beyond_gap {beyond} makes more than {MAX_FRAMES} frames")
             params["expect"] = len(arrivals(plan))
+            # Live frames cut into pieces: the receiving side joins them before it judges, which
+            # wz does in the replay subscriber under the segmented reply shape, on a suffix no
+            # cache serves.
+            _segment(check, base, out, params)
+            if params["segmented"]:
+                params["suffix"] = check.get("suffix") or "/lane-no-cache"
+                params["depth"] = 1
+                variant = "segmented"
         else:
             frames = _positive(check, "frames")
             if frames > MAX_FRAMES:
@@ -218,19 +328,8 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
             params["depth"] = _positive(check, "depth", frames)
             if params["depth"] < frames:
                 raise Refused(f"check {name!r}: depth {params['depth']} keeps fewer than its {frames} frames")
-            segment = check.get("segment")
-            params["segmented"] = 0
-            if segment is not None:
-                if not isinstance(segment, dict):
-                    raise Refused(f"check {name!r}: segment is not a JSON object")
-                segment = dict(segment, name=name)
-                (out / "segment-profile.json").write_text(_text(segment, "profile", base) or "",
-                                                          encoding="utf-8")
-                (out / "segment-values.json").write_text(_text(segment, "values", base) or "",
-                                                         encoding="utf-8")
-                params["segmented"] = 1
-                params["first_transfer"] = _count(segment, "first_transfer", 0)
-                params["chunk_bytes"] = _positive(segment, "chunk_bytes")
+            _segment(check, base, out, params)
+            if params["segmented"]:
                 variant = "segmented"
         (out / "params").write_text("".join(f"{k} {v}\n" for k, v in params.items()), encoding="utf-8")
         (out / "plan").write_text("".join(f"{a} {p.hex()}\n" for a, p in plan), encoding="utf-8")
@@ -373,17 +472,21 @@ def judge_check(name: str, scratch: Path) -> list[tuple[str, list[str]]]:
             if t[d]["receive"]["round"] != "live":
                 answers.append(f"{d}: the round ended {t[d]['receive']['round']}, not live")
         out.append(("answers in order", answers))
-        if params.get("segmented") == "1":
-            pieces: list[str] = []
-            wz_p = t["wz-sends"]["send"]["pieces"]
-            peer_p = t["peer-sends"]["send"]["pieces"]
-            for who, got in (("wz", wz_p), ("peer", peer_p)):
-                if {i for i, _ in got} != set(range(len(plan))):
-                    pieces.append(f"{who} printed pieces of frames {sorted({i for i, _ in got})}")
-            for place in sorted(set(wz_p) | set(peer_p)):
-                if wz_p.get(place) != peer_p.get(place):
-                    pieces.append(f"piece {place[0]}.{place[1]}: wz {wz_p.get(place)} peer {peer_p.get(place)}")
-            out.append(("pieces byte for byte", pieces))
+    if params.get("segmented") == "1":
+        # A replay cache cuts every recorded frame (`piece <frame> <j>`); an e2e sender cuts
+        # every frame it puts, in the order put (`piece <put> <j>`), a repeat or a corrupted
+        # copy under a transfer number of its own.
+        units = len(plan) if params["kind"] == "replay" else len(arrivals(plan))
+        pieces: list[str] = []
+        wz_p = t["wz-sends"]["send"]["pieces"]
+        peer_p = t["peer-sends"]["send"]["pieces"]
+        for who, got in (("wz", wz_p), ("peer", peer_p)):
+            if {i for i, _ in got} != set(range(units)):
+                pieces.append(f"{who} printed pieces of {sorted({i for i, _ in got})}, owed 0 to {units - 1}")
+        for place in sorted(set(wz_p) | set(peer_p)):
+            if wz_p.get(place) != peer_p.get(place):
+                pieces.append(f"piece {place[0]}.{place[1]}: wz {wz_p.get(place)} peer {peer_p.get(place)}")
+        out.append(("pieces byte for byte", pieces))
     return out
 
 
@@ -424,10 +527,22 @@ def _lane(**over) -> dict:
             {"name": "answers", "kind": "replay", "key": "lane/answers", "suffix": "/ask",
              "profile": PROFILE, "values": {}, "payload_len": 5, "frames": 3,
              "segment": {"profile": {"name": "selftest-pieces"}, "values": {}, "chunk_bytes": 2}},
+            {"name": "pieced", "kind": "e2e", "key": "lane/pieced", "profile": PROFILE, "values": {},
+             "payload_len": 9, "skip_beyond_gap": 1,
+             "segment": {"profile": {"name": "selftest-pieces"}, "values": {}, "chunk_bytes": 4}},
         ]
     }
     lane.update(over)
     return lane
+
+
+KEY_IDS = {"dictionary": [{"id": 7, "key": "lane/small"}, {"id": 9, "key": "lane/pieced"}],
+           "forms": {"connect": "shared"}}
+
+
+def _keyed(key_ids: object) -> dict:
+    """The selftest lane with a dictionary, in a build that has one."""
+    return _lane(wz={"features": "shared-key-ids"}, key_ids=key_ids)
 
 
 def _fake_frame(i: int, p: bytes) -> str:
@@ -438,12 +553,16 @@ def _perfect(scratch: Path) -> None:
     """The transcripts of a pair of implementations that agree in everything."""
     for name, kind, _ in (r.split("\t") for r in (scratch / "checks.tsv").read_text().splitlines()):
         plan = _plan(scratch / "checks" / name)
+        segmented = _params(scratch / "checks" / name).get("segmented") == "1"
         for d in DIRECTIONS:
             run = scratch / "runs" / name / d
             run.mkdir(parents=True, exist_ok=True)
             send = [f"frame {i} {_fake_frame(i, p)}" for i, (_, p) in enumerate(plan)]
+            if segmented and kind == "e2e":
+                send += [f"piece {u} {j} {u:02x}{j:02x}" for u in range(len(arrivals(plan))) for j in range(2)]
             if kind == "replay":
-                send += [f"piece {i} 0 {_fake_frame(i, p)[:4]}" for i, (_, p) in enumerate(plan)]
+                if segmented:
+                    send += [f"piece {i} 0 {_fake_frame(i, p)[:4]}" for i, (_, p) in enumerate(plan)]
                 recv = [f"got {n} intact {p.hex()}" for n, (_, p) in enumerate(plan)] + ["round live"]
             else:
                 anchors = e2e_anchors(plan)
@@ -509,19 +628,54 @@ def selftest() -> int:
         refused(_lane(wz={"build_env": {"PATH": "/x"}}), "a build_env outside the policies and limits")
         refused(_lane(wz={"build_env": {SHAPE_POLICY: "segmented"}}), "the reply shape in build_env")
         refused(_lane(session="peer"), "a session that is not an object")
+        refused(_lane(checks=[dict(_lane()["checks"][2], segment={"profile": {}, "values": {}})]),
+                "an e2e segment without chunk_bytes")
+        refused(_lane(key_ids=KEY_IDS), "a dictionary for a build without shared-key-ids")
+        refused(_keyed([]), "key_ids that is not an object")
+        refused(_keyed({"dictionary": []}), "an empty dictionary")
+        refused(_keyed({"dictionary": [{"id": 0, "key": "a/b"}]}), "id 0")
+        refused(_keyed({"dictionary": [{"id": 65536, "key": "a/b"}]}), "an id past 16 bits")
+        refused(_keyed({"dictionary": [{"id": True, "key": "a/b"}]}), "an id that is a boolean")
+        refused(_keyed({"dictionary": [{"id": 3}]}), "an entry with no key")
+        refused(_keyed({"dictionary": [{"id": 3, "key": "a/b"}, {"id": 3, "key": "a/c"}]}), "an id twice")
+        refused(_keyed({"dictionary": [{"id": 3, "key": "a/b"}, {"id": 4, "key": "a/b"}]}), "a key twice")
+        for bad in ("", "/a", "a/", "a//b", "a/**/**", "a/**/*", "$*", "a/b*", "a/$b", "a#b", "a?b",
+                    "a b", "a/$*$*"):
+            refused(_keyed({"dictionary": [{"id": 3, "key": bad}]}), f"the key {bad!r}")
+        refused(_keyed(dict(KEY_IDS, forms={"router": "shared"})), "a form for no side")
+        refused(_keyed(dict(KEY_IDS, forms={"listen": "compact"})), "a form the policy has no value of")
+        refused(_keyed(dict(KEY_IDS, forms="shared")), "forms that is not an object")
+        for good in ("a/b", "a/*/c", "a/**", "*/**", "a$*b/c", "**"):
+            expect(f"the canonical key {good!r} is read", key_problem(good) is None)
         refused(_lane(wz={"features": "a b"}), "features not a comma list")
         refused(_lane(session={"connect_mode": "router"}), "an unknown connect mode")
 
-        lane_file.write_text(json.dumps(_lane(wz={"features": "message-catalog",
-                                                    "build_env": {"WZ_POLICY_X": "on"}})))
+        lane_file.write_text(json.dumps(_lane(wz={"features": "message-catalog,shared-key-ids",
+                                                    "build_env": {"WZ_POLICY_X": "on"}},
+                                              key_ids=KEY_IDS)))
         scratch = root / "s"
         rows = prepare(lane_file, scratch)
-        expect("two checks prepared", rows == ["small\te2e\tframe", "answers\treplay\tsegmented"])
+        expect("three checks prepared", rows == ["small\te2e\tframe", "answers\treplay\tsegmented",
+                                                 "pieced\te2e\tsegmented"])
         expect("the build env is written", (scratch / "wz-build-env").read_text() == "WZ_POLICY_X=on\n")
         params = _params(scratch / "checks" / "answers")
         expect("the replay params", params.get("segmented") == "1" and params.get("chunk_bytes") == "2"
                and params.get("suffix") == "/ask" and params.get("expect") == "3")
-        expect("the e2e expect", _params(scratch / "checks" / "small").get("expect") == "11")
+        small_params = _params(scratch / "checks" / "small")
+        expect("the e2e expect", small_params.get("expect") == "11")
+        expect("an e2e check without a segment is not segmented", small_params.get("segmented") == "0")
+        pieced = _params(scratch / "checks" / "pieced")
+        expect("an e2e segment's params", pieced.get("segmented") == "1" and pieced.get("chunk_bytes") == "4"
+               and pieced.get("suffix") == "/lane-no-cache" and pieced.get("depth") == "1"
+               and (scratch / "checks" / "pieced" / "segment-profile.json").is_file())
+        expect("the dictionary is in every check", all(
+            (scratch / "checks" / n / "key-ids").read_text() == "7 lane/small\n9 lane/pieced\n"
+            for n in ("small", "answers", "pieced")))
+        expect("the stated form reaches the params", small_params.get("key_form_connect") == "shared"
+               and "key_form_listen" not in small_params)
+        lane_file.write_text(json.dumps(_lane()))
+        prepare(lane_file, root / "plain")
+        expect("no dictionary, no key-ids file", not (root / "plain" / "checks" / "small" / "key-ids").exists())
 
         _perfect(scratch)
         expect("a pair that agrees passes", judge(scratch) == 0)
@@ -558,6 +712,10 @@ def selftest() -> int:
         path.write_text(text)
         piece = _fake_frame(1, _plan(scratch / "checks" / "answers")[1][1])[:4]
         red("a piece differs", answers / "peer-sends" / "send.out", f"piece 1 0 {piece}", "piece 1 0 ffff")
+        pieced_run = scratch / "runs" / "pieced"
+        red("a live piece differs", pieced_run / "wz-sends" / "send.out", "piece 3 1 0301", "piece 3 1 ffff")
+        red("a piece one side never cut", pieced_run / "peer-sends" / "send.out", "piece 10 0 0a00",
+            "spare 10 0 0a00")
         expect("restored pair passes again", judge(scratch) == 0)
 
     for f in failures:
