@@ -9,7 +9,9 @@
 # vendor/sce locks the SCE revision; this script is the bridge from
 # that revision to a runnable binary.
 #
-# Output: vendor/sce/target/release/sce-codegen
+# Output: <the artifact root's place for vendor/sce>/target/release/sce-codegen, which is
+# vendor/sce/target/release/sce-codegen when no WZ_ARTIFACT_ROOT is set
+# (WZ_SCE_CODEGEN_BIN in scripts/lib/sce-codegen-oracle.sh).
 # Re-runs are idempotent — cargo's incremental build skips unchanged work.
 
 set -euo pipefail
@@ -23,9 +25,6 @@ SCE_DIR="$ROOT/vendor/sce"
 # shellcheck source=scripts/lib/artifact-root.sh
 source "$ROOT/scripts/lib/artifact-root.sh"
 wz_artifact_root_init "$ROOT" || exit 2
-SCE_OUT="$(wz_artifact_dir "$SCE_DIR")/target/release"
-BIN="$SCE_OUT/sce-codegen"
-STAMP="$SCE_OUT/.sce-codegen.pin"
 
 # The provenance stamp this script writes is the ONLY record of which SCE
 # revision the emitted binary came from — the binary itself carries no such
@@ -34,6 +33,10 @@ STAMP="$SCE_OUT/.sce-codegen.pin"
 # existence and mtime were both the wrong question.
 # shellcheck source=scripts/lib/sce-codegen-oracle.sh
 source "$ROOT/scripts/lib/sce-codegen-oracle.sh"
+# The library states where the binary and its stamp are; this script writes them there and
+# every reader looks there, so the place is written once.
+BIN="$WZ_SCE_CODEGEN_BIN"
+STAMP="$WZ_SCE_CODEGEN_STAMP"
 
 if [[ ! -e "$SCE_DIR/.git" ]]; then
     echo "build-sce: vendor/sce not initialized." >&2
