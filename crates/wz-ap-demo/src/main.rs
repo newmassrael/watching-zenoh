@@ -307,6 +307,11 @@ fn demo_main() -> ExitCode {
             for (label, body) in exp.report_lines() {
                 eprintln!("wz-ap-demo: --config {}: {label} {body}", exp.path);
             }
+            // The node's policies, held before the tuning below or any session reads them.
+            if let Err(message) = crate::args::hold_node_policy(exp.policies.policy) {
+                eprintln!("wz-ap-demo: {message}");
+                return ExitCode::from(2);
+            }
             expanded = exp.argv;
             &expanded[..]
         }

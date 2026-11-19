@@ -2796,6 +2796,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         stated_for_other_modes: ingest.stated_for_other_modes,
         mode: ingest.config.mode,
         mode_unstated,
+        policies: ingest.config.policies,
     }))
 }
 
@@ -2835,6 +2836,11 @@ pub(crate) struct StockConfigExpansion {
     /// know to read. Carried out as a value rather than printed inside the
     /// expansion for the reason `ignored` is: a test can assert on a value.
     pub(crate) mode_unstated: Option<wz::runtime_tokio::zenoh_config::UnstatedMode>,
+    /// The node's policies as the file's `wz` member resolved them over the build defaults, and
+    /// where each value came from: what `main` holds for `resolve_policy` to hand every session,
+    /// router and socket of the node. Every value from the build defaults when the file has no
+    /// such member; a member the reader refused is the expansion's error, never this.
+    pub(crate) policies: wz::runtime_tokio::policy_document::Resolved,
 }
 
 #[cfg(feature = "zenoh-config")]
@@ -2894,6 +2900,12 @@ impl StockConfigExpansion {
                 ),
             ));
         }
+        // The policies the file's `wz` member chose, each with the layer it came from; none is
+        // printed when every value is the build's own.
+        let chosen = self.chosen_policies();
+        if !chosen.is_empty() {
+            out.push(("POLICIES", format!("{chosen:?}")));
+        }
         // Said out loud rather than swallowed: a reader that applies what it
         // knows in silence lets a TLS root-CA path look like it took effect.
         for key in &self.ignored {
@@ -2901,6 +2913,25 @@ impl StockConfigExpansion {
         }
         out.push(("argv +=", format!("{:?}", self.added)));
         out
+    }
+
+    /// Each policy the file's `wz` member chose, as `<policy> = <value> (<layer>)`, in the order
+    /// of the build's policies; a policy left at the build default is not one of them.
+    pub(crate) fn chosen_policies(&self) -> Vec<String> {
+        use wz::runtime_tokio::policy_document::Origin;
+
+        self.policies
+            .provenance
+            .iter()
+            .filter(|(_, origin)| *origin != Origin::BuildDefault)
+            .map(|(entry, origin)| {
+                format!(
+                    "{} = {} ({origin})",
+                    entry.id(),
+                    entry.value_in(&self.policies.policy)
+                )
+            })
+            .collect()
     }
 
     /// The honoured keys that reach a flag in THIS build.
@@ -5877,16 +5908,24 @@ mod stock_config_tests {
         // A file that lights up every axis at once: honoured keys that reach a
         // flag and ones that do not, an unhonoured key, a key stated only for
         // other modes, and no `mode` at all so the silence axis fires too.
+        // The `wz` member chooses a policy at the build's own value, which every
+        // build's domain allows, so the policies axis has a line in every build.
+        let overload = wz::runtime_tokio::policy::SessionPolicy::defaults()
+            .subscriber_overload()
+            .id();
         let out = expand(
             &["--config", "z.json5"],
             // No `mode`, so the silence axis fires and this node reads as
             // `router`, as zenohd reads it; `timestamping/enabled` then names a
             // row for PEER only, which is the axis that is neither
             // honoured-here nor unreadable.
-            r#"{ connect: { endpoints: ["tcp/r:7447"] },
-                 timestamping: { enabled: { peer: true } },
-                 transport: { link: { tx: { threads: 8 } } },
-                 plugins: {} }"#,
+            &format!(
+                r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
+                     timestamping: {{ enabled: {{ peer: true }} }},
+                     transport: {{ link: {{ tx: {{ threads: 8 }} }} }},
+                     plugins: {{}},
+                     wz: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
+            ),
         )
         .unwrap();
 
@@ -5912,6 +5951,9 @@ mod stock_config_tests {
             ("added", "argv +=", |e| e.added.first().cloned()),
             ("mode", "STATED FOR OTHER MODES", |e| {
                 Some(e.mode.to_str().to_string())
+            }),
+            ("policies", "POLICIES", |e| {
+                e.chosen_policies().first().cloned()
             }),
         ];
 
@@ -5988,7 +6030,56 @@ mod stock_config_tests {
             stated_for_other_modes: _,
             mode: _,
             mode_unstated: _,
+            policies: _,
         } = out;
+    }
+
+    /// The file's `wz` member is the node's snapshot, each chosen value reported with its layer;
+    /// a file without it leaves the build defaults and prints no policies line, and a member the
+    /// reader refuses fails the expansion naming the refusal, so the node never starts on it.
+    #[test]
+    fn the_wz_member_of_the_file_is_the_node_policies_and_a_refused_one_fails_the_run() {
+        let defaults = wz::runtime_tokio::policy::SessionPolicy::defaults();
+        let silent = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#,
+        )
+        .unwrap();
+        assert_eq!(silent.policies.policy, defaults);
+        assert!(silent.chosen_policies().is_empty());
+        assert!(
+            !silent
+                .report_lines()
+                .iter()
+                .any(|(label, _)| *label == "POLICIES"),
+            "a file that chooses no policy prints no policies line"
+        );
+
+        let overload = defaults.subscriber_overload().id();
+        let chosen = expand(
+            &["--config", "z.json5"],
+            &format!(
+                r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
+                     wz: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            chosen.chosen_policies(),
+            [format!("subscriber-overload = {overload} (the document)")]
+        );
+
+        let refused = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] },
+                 wz: { policies: { "key-set": "ajar" } } }"#,
+        )
+        .unwrap_err();
+        assert!(
+            refused.starts_with("--config: z.json5: the `wz` member is refused: "),
+            "{refused}"
+        );
+        assert!(refused.contains("`key-set` = `ajar`"), "{refused}");
     }
 
     /// R311y843 — every key wz REPORTS as honoured, paired with whether the
@@ -10773,11 +10864,35 @@ pub(crate) struct TransportTuning {
     pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
 }
 
+/// The snapshot `main` holds for the node when a `--config` file describes it; unset otherwise.
+static NODE_POLICY: std::sync::OnceLock<wz::runtime_tokio::policy::SessionPolicy> =
+    std::sync::OnceLock::new();
+
 /// The snapshot of a demo node's policies: the one place the demo resolves the values its
-/// sessions, routers and sockets read. The build defaults, until a run-time document is read
-/// here.
+/// sessions, routers and sockets read. What the `--config` file's `wz` member resolved to, which
+/// `main` holds before any of them is made (`hold_node_policy`); the build defaults for a node
+/// no file describes, and for one whose file has no such member.
 pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
-    wz::runtime_tokio::policy::SessionPolicy::defaults()
+    NODE_POLICY
+        .get()
+        .copied()
+        .unwrap_or_else(wz::runtime_tokio::policy::SessionPolicy::defaults)
+}
+
+/// Hold `policy`, the snapshot the `--config` file resolved
+/// ([`StockConfigExpansion::policies`]), as the node's for the rest of the run. Held once, before
+/// any session, router or socket reads [`resolve_policy`]; a second snapshot is refused rather
+/// than replacing the one the node already runs under.
+#[cfg(feature = "zenoh-config")]
+pub(crate) fn hold_node_policy(
+    policy: wz::runtime_tokio::policy::SessionPolicy,
+) -> Result<(), String> {
+    NODE_POLICY.set(policy).map_err(|_| {
+        String::from(
+            "--config: the node's policies are already held, and a second snapshot would \
+             replace the one its sessions run under",
+        )
+    })
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
