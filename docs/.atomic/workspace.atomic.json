@@ -5647,6 +5647,21 @@
       "carry_forward_bullets": [
         "Item 952 closes when the C1cc leg is green on a hosted run as well; the 51 C1cc legs that stood behind it are reached from that run on and are read there. One run in twenty of that leg on this tree read no batch at the open of an `init` document (19 after the declaration), the peer's open having returned before its link was up; main gave none in eighteen, so whether it is older than this change is not decided, and the next reading of it starts with the dial's log."
       ]
+    },
+    "Round 4554": {
+      "decision_summary": "Three residues of Rounds 4551 and 4553 are registered as open debt, so none of them lives only in a ledger carry or a design note. The pointer tables a shared library relocates gain a second instance in the existing item: the generated policy and profile tables cost every pico case more in relocations than in code. The C1cc allocation leg's one reading of no batch at the open of an `init` document, a link not yet up when the probe read it, is an item of its own, its cause not read. The tables a peer makes grow, unbounded on a heap build and silently refusing past capacity on a fixed one, are an item the owner deferred on 2026-11-20 to a round after runtime configuration step 4b, with the shape that closes it stated.",
+      "changes_bullets": [
+        "`docs/.atomic/workspace.atomic.json`: `debt-capi-pointer-tables-pay-relocations` reason gains the policy and profile tables; new `debt-c1cc-init-open-before-link` and `debt-remote-bounds-unbounded-on-heap`, active."
+      ],
+      "verification_bullets": [
+        "`mnemosyne-cli validate-workspace`: no new T1 orphan, T3 warnings unchanged, no out-of-band registry violation; `debt_plane_census.py` passes, the store reading 109 debt items, 40 active."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Runtime configuration step 4b, round 1 (the classification of every limit and the generator), per the step's brief."
+      ]
     }
   },
   "inventory_entries": {
