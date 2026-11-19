@@ -34,7 +34,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use core::task::Waker;
 
 use wz_session_core::app_link_table::{
     AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate, SendStep, StreamRead,

@@ -52,6 +52,8 @@ const PROFILE: &str = r#"{
 }"#;
 
 const ADDRESS_A: u64 = 0x0C0A_1234;
+/// A second sender's address, which only the sender-slot test (a build with demux) reads.
+#[cfg(feature = "e2e-sender-demux")]
 const ADDRESS_B: u64 = ADDRESS_A ^ 0x0000_0100;
 
 fn values_text(address: u64) -> String {
