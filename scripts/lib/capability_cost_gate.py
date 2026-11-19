@@ -708,8 +708,10 @@ CASES: tuple[Case, ...] = (
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
-         exports=805,
-         note="every capability on: the symbol count is the drop-in's. 809 -> 802 when the "
+         exports=806,
+         note="every capability on: the symbol count is the drop-in's. 806 with the door that "
+              "tells a session's peers its declarations again (`wz_ext_redeclare`, unstable "
+              "surface). 809 -> 802 when the "
               "seven single-threaded entry points left the multi-threaded arm; 804 with the "
               "conformance digest's door (`wz_ext_conformance_digest`, decision C15); 803 with the "
               "door that answers what a configuration asks of the operating system "
@@ -959,7 +961,17 @@ CASES: tuple[Case, ...] = (
     # 2026-11-18 -- 11,214,893 hosted at `d8f187dddc` and +468 on pc2, the publisher's ask of
     # `capic-router-node`'s note and the egress-policy answer of pico-client's, and 3,500.
     # 2026-11-19 -- step 3b, as `capic-router-node`'s note of this day says: +29,940 on pc2.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_319_200,
+    # 2026-11-20 -- Rounds 4541 to this one (the program transport, the session policies, the
+    # shared key ids, end-to-end protection on the pico ABI and the application plane): on pc2
+    # 11,285,921 at `8593d2f86` -> 11,319,761 (+33,840). By symbol, the end-to-end sender's
+    # profile rules (`wz_app_frame::e2e_profile` read_rules/read_cell/read_derive and
+    # `e2e_frame::resolve`, +11,621; `e2e-sender` is on in this ABI's default build), the
+    # session link's held handshake answer, declaration-progress watch and per-link key forms
+    # (`SessionLinkActions`, +4,360, each a policy domain a host build leaves open), the open
+    # (`drive::open_blocking`, +2,231) and the zid derivation (+466); the `.proto` reader moved
+    # from `wz_capture` to `wz_app_frame` and nets to nothing (-323); the rest is their read-only
+    # data. Chosen; that reading and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_323_300,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
@@ -1027,6 +1039,8 @@ CASES: tuple[Case, ...] = (
     # 9,278,968 -> 9,302,557 on pc2 (+23,589). Chosen; the hosted reading at `c42ab17ced`
     # (9,284,152) and that growth, 9,307,741, and 3,500, to the hundred.
     # 2026-11-19 -- step 3b, as `capic-router-node`'s note of this day says: +29,164 on pc2.
+    # 2026-11-20 -- Rounds 4541 to this one, as `capic-default`'s note of this day takes apart:
+    # 9,531,881 -> 9,566,045 on pc2 (+34,164). Chosen; that reading and 3,500, to the hundred.
     Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
          "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
@@ -1035,7 +1049,7 @@ CASES: tuple[Case, ...] = (
          # 2026-11-18 -- 9,488,445 hosted at `d8f187dddc` (2,545 over) and +896 on pc2: the
          # publisher's ask of `capic-router-node`'s note and the egress-policy answer of
          # pico-client's, chosen; that reading and that growth, and 3,500, to the hundred.
-         9_558_500,
+         9_569_600,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
