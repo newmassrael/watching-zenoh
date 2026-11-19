@@ -1339,7 +1339,8 @@ typedef struct wz_ext_replay_subscriber_options_t {
   size_t held_len;
   size_t held_cell; /* the longest live sample held */
   size_t depth;     /* the publishers' ring depth, at least 1 */
-  size_t max_in_flight; /* 0: QUERIER_MAX_PENDING_QUERIES, never above */
+  size_t max_in_flight; /* 0: no bound of its own; never above
+                           QUERIER_MAX_PENDING_QUERIES (0: none) */
   size_t stream;    /* the receiver's stream (0 under sender keying) */
   uint32_t progress_ms; /* 1 to 2147483647, no default */
   uint32_t round_ms;    /* 1 to 2147483647, no default */
