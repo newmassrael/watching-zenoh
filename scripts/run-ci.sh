@@ -7851,7 +7851,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 388 -> 389, counted from the source: the late peer of a router told no token until it asks.
     # 389 -> 390, counted from the source: a router's peer told a later token for its interest.
     # 390 -> 399: the five, the one and the three (token tables) of the first guard's note.
-    _runci_guarded_test "C1AY router_forward 401" 401 \
+    # 401 -> 402, printed on the build host: a peer node's liveliness subscriber asks its routers.
+    _runci_guarded_test "C1AY router_forward 402" 402 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
