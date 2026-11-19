@@ -143,6 +143,10 @@ pub mod advanced;
 mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
+// A transport the program supplies, in place of the system's sockets: wz doors (`wz_ext.h`) of the
+// unstable surface, over the links of the program's stack of whichever engine the build has.
+#[cfg(feature = "app-transport")]
+pub mod app_transport;
 pub mod bytes;
 // The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`.
 pub mod conformance;
@@ -178,6 +182,20 @@ pub mod clock_source;
 pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
+// End-to-end protection of an application's payload: what the sending and the receiving doors
+// share, in a build with either capability.
+#[cfg(any(feature = "e2e-sender", feature = "e2e-receiver"))]
+mod e2e;
+// The receiving judge of end-to-end protected frames: wz doors (`wz_ext.h`) of the unstable
+// surface.
+#[cfg(feature = "e2e-receiver")]
+pub mod e2e_receiver;
+// The sending side of end-to-end protection: wz doors (`wz_ext.h`) of the unstable surface.
+#[cfg(feature = "e2e-sender")]
+pub mod e2e_sender;
+// `wz_ext_redeclare`: tell a session's peers what it holds again.
+#[cfg(feature = "unstable-api")]
+pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the event ring of the observation plane).
 pub mod encoding;
@@ -194,6 +212,9 @@ pub mod get;
 #[cfg(feature = "query")]
 pub mod get_to_peer;
 pub mod handlers;
+// The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
+// with the capability, and in every build the open's judgement of the key-wire form.
+pub mod key_ids;
 pub mod keyexpr;
 mod last_timestamp;
 #[cfg(any(feature = "connectivity", feature = "admin-space"))]
@@ -225,6 +246,10 @@ pub mod session;
 mod session_ext;
 #[cfg(feature = "resource-snapshot")]
 pub mod snapshot;
+// Reception supervision per stream: wz doors (`wz_ext.h`) of the unstable surface, over the
+// supervisor of `wz-session-core`.
+#[cfg(feature = "e2e-supervision")]
+pub mod stream_supervision;
 pub mod string_array;
 #[cfg(feature = "supervision")]
 pub mod supervision;

@@ -87,7 +87,12 @@ impl Default for MulticastLoopback {
 /// best-effort channels are not affected. Only the tokio engine reconnects, so another
 /// engine ends the link and leaves it to the application, and only the tokio engine reports
 /// the end of the peer's declarations, so for another engine `until-declarations-synced` is
-/// `always`.
+/// `always`. `until-declarations-synced-when-begun` is `until-declarations-synced` on a
+/// link this node dialled; on a link it accepted, a peer that lets
+/// DECLARATION_SYNC_RX_NO_PROGRESS_MS pass without sending any declaration of its initial
+/// interest is taken to have none to send, which settles the sync, while a peer that began
+/// them is held to their end as under `until-declarations-synced`. With that limit at 0
+/// nothing settles an accepted link early.
 /// Upstream: Accepts a forward jump of the reliable channel's sequence number without a
 /// word: the frames in between are lost, the session stays open and nothing is repaired, so
 /// a peer's declaration lost that way is never noticed.
@@ -99,6 +104,8 @@ pub enum ReliableGapReconnect {
     UntilDeclarationsSynced,
     /// `always`.
     Always,
+    /// `until-declarations-synced-when-begun`.
+    UntilDeclarationsSyncedWhenBegun,
 }
 
 impl ReliableGapReconnect {
@@ -108,11 +115,22 @@ impl ReliableGapReconnect {
             Self::Off => "off",
             Self::UntilDeclarationsSynced => "until-declarations-synced",
             Self::Always => "always",
+            Self::UntilDeclarationsSyncedWhenBegun => "until-declarations-synced-when-begun",
         }
     }
 
-    const CHOICES: [&str; 3] = ["off", "until-declarations-synced", "always"];
-    const ALL: [Self; 3] = [Self::Off, Self::UntilDeclarationsSynced, Self::Always];
+    const CHOICES: [&str; 4] = [
+        "off",
+        "until-declarations-synced",
+        "always",
+        "until-declarations-synced-when-begun",
+    ];
+    const ALL: [Self; 4] = [
+        Self::Off,
+        Self::UntilDeclarationsSynced,
+        Self::Always,
+        Self::UntilDeclarationsSyncedWhenBegun,
+    ];
 
     const fn stated() -> Self {
         let stated = option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT");
@@ -316,6 +334,48 @@ impl SupervisionAfterExpiry {
 }
 
 impl Default for SupervisionAfterExpiry {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
+/// `e2e-supervision-notify`: What a reception supervisor tells the application when a
+/// stream stops arriving. `status-only` tells the stream, its sender and the error counts,
+/// and keeps no payload. `last-value` also hands back the payload the stream last carried,
+/// which the supervisor keeps in a cell of the application's storage per stream, for an
+/// application that delivers a value with every loss as it does with every sample. Decided
+/// when the supervisor is made, and fixed for its life.
+/// Upstream: Supervises no stream's reception: a periodic message that stops arriving is
+/// not noticed by the library, so there is no loss to tell and no value to tell it with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum E2eSupervisionNotify {
+    /// `status-only`.
+    StatusOnly,
+    /// `last-value`.
+    LastValue,
+}
+
+impl E2eSupervisionNotify {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::StatusOnly => "status-only",
+            Self::LastValue => "last-value",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["status-only", "last-value"];
+    const ALL: [Self; 2] = [Self::StatusOnly, Self::LastValue];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_E2E_SUPERVISION_NOTIFY");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for E2eSupervisionNotify {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
         Self::stated()
@@ -600,6 +660,209 @@ impl Default for LinkTieOrder {
     }
 }
 
+/// `query-unanswerable-final`: How a node answers a query from a peer that it cannot run at
+/// all because the query's key names an id the peer never declared to this node. `none`
+/// sends nothing, as upstream does, and the asker's query ends only at its own timeout.
+/// `empty-final` answers it at once with a RESPONSE_FINAL and no reply, the answer a query
+/// that matched no queryable gets, so the asker learns now that nothing will come. A query
+/// whose parameters or attachment are longer than the build allows is answered with that
+/// final under either value, and a query that arrives while the node has no room left to
+/// hold another final is refused and counted under either value, since the final it would
+/// owe has nowhere to wait.
+/// Upstream: Drops a query from a peer whose key it cannot resolve (an id the peer never
+/// declared to it) before the query reaches any queryable, and sends nothing back, so the
+/// asker waits out its own timeout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryUnanswerableFinal {
+    /// `none`.
+    None,
+    /// `empty-final`.
+    EmptyFinal,
+}
+
+impl QueryUnanswerableFinal {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::EmptyFinal => "empty-final",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["none", "empty-final"];
+    const ALL: [Self; 2] = [Self::None, Self::EmptyFinal];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_QUERY_UNANSWERABLE_FINAL");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for QueryUnanswerableFinal {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
+/// `zid-derivation`: How a node makes its zid when the configuration states none. `random`
+/// draws all sixteen bytes, as upstream does. `address-ports` derives the first eight from
+/// where the node is reachable and draws the other eight: bytes 0 to 3 are the IPv4 address
+/// of the first listen endpoint that binds an address of the node, bytes 4 and 5 the lowest
+/// port of its tcp listeners and bytes 6 and 7 the lowest port of its udp listeners, each
+/// little-endian and 0 for a node with no listener of that protocol. A wildcard, multicast
+/// or broadcast address names no node, and a node whose listeners name no address of its
+/// own is refused at open rather than given a random zid. A zid the configuration states is
+/// used under either value. Only the C ABIs' open reads this policy.
+/// Upstream: Draws every byte of a zid the configuration does not state from its random
+/// source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZidDerivation {
+    /// `random`.
+    Random,
+    /// `address-ports`.
+    AddressPorts,
+}
+
+impl ZidDerivation {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Random => "random",
+            Self::AddressPorts => "address-ports",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["random", "address-ports"];
+    const ALL: [Self; 2] = [Self::Random, Self::AddressPorts];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_ZID_DERIVATION");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for ZidDerivation {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
+/// `handshake-stray-message`: What a unicast establishment does with an Init or an Open
+/// that is not the message its current step awaits: an InitAck repeated after the OpenSyn
+/// went out, an InitSyn repeated after the InitAck went out, or any other out of its step.
+/// `fail` ends the attempt and closes the link with INVALID, as upstream does. `ignore`
+/// drops the message before anything is taken from it and the step goes on waiting, under
+/// the deadline it already had: nothing a peer sends extends an establishment. Under
+/// `ignore` an Init or Open that reaches an established session is dropped as well, and is
+/// not counted as a sign of the peer's life for the lease, nor does it change anything the
+/// session negotiated. `ignore-and-replay` is `ignore`, and in addition a peer that repeats
+/// the step this node last answered (an InitSyn after the InitAck went out, an InitAck
+/// after the OpenSyn went out) is sent that answer again, the very bytes first sent, so its
+/// cookie is the one already issued. A build whose domain allows this value holds one
+/// answer per establishment in flight, released when the establishment ends; an answer
+/// longer than the hold is not sent again.
+/// Upstream: Ends a unicast establishment, closing the link with INVALID, on any message
+/// but the one its current step reads next, and drops an Init or Open that reaches an
+/// established session while counting it as traffic for the lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandshakeStrayMessage {
+    /// `fail`.
+    Fail,
+    /// `ignore`.
+    Ignore,
+    /// `ignore-and-replay`.
+    IgnoreAndReplay,
+}
+
+impl HandshakeStrayMessage {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+            Self::Ignore => "ignore",
+            Self::IgnoreAndReplay => "ignore-and-replay",
+        }
+    }
+
+    const CHOICES: [&str; 3] = ["fail", "ignore", "ignore-and-replay"];
+    const ALL: [Self; 3] = [Self::Fail, Self::Ignore, Self::IgnoreAndReplay];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_HANDSHAKE_STRAY_MESSAGE");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for HandshakeStrayMessage {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
+/// `key-wire-form`: How a node names a key on the wire to the peer of a link. `declared` is
+/// upstream's: the id of a key expression the node declared to that peer, or the whole key.
+/// `literal` sends the whole key every time and declares nothing for it. `shared` uses the
+/// key-id dictionary every node of the deployment holds (the shared-key-ids capability):
+/// the key's own id when the dictionary holds it, the id of the longest entry that ends at
+/// one of its slashes followed by the rest of the key, or the whole key, whichever takes
+/// the fewest bytes, with no declaration first; a key with a wildcard goes by an id only
+/// when the dictionary holds that exact pattern, a peer that announced itself a router is
+/// sent the declared form, and a reply on the key of a query that came by an id of the
+/// dictionary names it by that id and rest, its mapping bit turned. A peer that does not
+/// hold the same dictionary cannot read what `shared` sends, so both ends of the link must
+/// hold it. Every node that holds the dictionary reads an id only the dictionary names,
+/// whatever its own value. The value is the session's, and an endpoint the configuration
+/// dials or listens on may be stated a value of its own (wz_ext_config_key_wire_form_for),
+/// which every link to or from that endpoint takes. A session opened with `shared`, for
+/// itself or an endpoint, and no dictionary is refused, and so is one whose value is not
+/// `declared` in a build without the capability. Interests and liveliness interests name
+/// their keys as under `declared`.
+/// Upstream: Names a key on the wire by the id of a key expression it declared to that peer
+/// first, or by the whole key; a peer reads an id only when it was declared to it, and
+/// refuses one it never was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyWireForm {
+    /// `declared`.
+    Declared,
+    /// `shared`.
+    Shared,
+    /// `literal`.
+    Literal,
+}
+
+impl KeyWireForm {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Shared => "shared",
+            Self::Literal => "literal",
+        }
+    }
+
+    const CHOICES: [&str; 3] = ["declared", "shared", "literal"];
+    const ALL: [Self; 3] = [Self::Declared, Self::Shared, Self::Literal];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_KEY_WIRE_FORM");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for KeyWireForm {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// The value of every policy, as one snapshot: what a creator resolved and handed the machines of
 /// its scope. A machine reads a policy only through the accessor of its field, never from the
 /// build. Each value lies inside the build's domain of its policy ([`PolicyValue::DOMAIN`]), and a
@@ -674,6 +937,10 @@ pub struct SessionPolicy {
     /// making progress is not noticed by the library, so there is no expiry and nothing for
     /// a later feed to do.
     supervision_after_expiry: SupervisionAfterExpiryBound,
+    /// `e2e-supervision-notify`. Upstream: Supervises no stream's reception: a periodic
+    /// message that stops arriving is not noticed by the library, so there is no loss to
+    /// tell and no value to tell it with.
+    e2e_supervision_notify: E2eSupervisionNotifyBound,
     /// `event-ring-full`. Upstream: Keeps no record of the events a node has: a log call
     /// with no logger installed is dropped, so neither the oldest nor the newest of them
     /// survives.
@@ -701,6 +968,22 @@ pub struct SessionPolicy {
     /// carrying a zid's little-endian bytes. zenoh-pico keeps no such rule, and compares
     /// two ids byte by byte from the first wire byte (`_z_id_cmp`).
     link_tie_order: LinkTieOrderBound,
+    /// `query-unanswerable-final`. Upstream: Drops a query from a peer whose key it cannot
+    /// resolve (an id the peer never declared to it) before the query reaches any
+    /// queryable, and sends nothing back, so the asker waits out its own timeout.
+    query_unanswerable_final: QueryUnanswerableFinalBound,
+    /// `zid-derivation`. Upstream: Draws every byte of a zid the configuration does not
+    /// state from its random source.
+    zid_derivation: ZidDerivationBound,
+    /// `handshake-stray-message`. Upstream: Ends a unicast establishment, closing the link
+    /// with INVALID, on any message but the one its current step reads next, and drops an
+    /// Init or Open that reaches an established session while counting it as traffic for
+    /// the lease.
+    handshake_stray_message: HandshakeStrayMessageBound,
+    /// `key-wire-form`. Upstream: Names a key on the wire by the id of a key expression it
+    /// declared to that peer first, or by the whole key; a peer reads an id only when it
+    /// was declared to it, and refuses one it never was.
+    key_wire_form: KeyWireFormBound,
 }
 
 impl SessionPolicy {
@@ -725,12 +1008,17 @@ impl SessionPolicy {
             key_set: Bound::build_default(),
             sn_resolution: Bound::build_default(),
             supervision_after_expiry: Bound::build_default(),
+            e2e_supervision_notify: Bound::build_default(),
             event_ring_full: Bound::build_default(),
             clock_quality_stamping: Bound::build_default(),
             routing_face_drive: Bound::build_default(),
             routing_table_sharing: Bound::build_default(),
             reassembly_pool_overflow: Bound::build_default(),
             link_tie_order: Bound::build_default(),
+            query_unanswerable_final: Bound::build_default(),
+            zid_derivation: Bound::build_default(),
+            handshake_stray_message: Bound::build_default(),
+            key_wire_form: Bound::build_default(),
         }
     }
 
@@ -975,6 +1263,20 @@ impl SessionPolicy {
         Ok(())
     }
 
+    /// `e2e-supervision-notify` as this snapshot holds it.
+    pub const fn e2e_supervision_notify(&self) -> E2eSupervisionNotify {
+        self.e2e_supervision_notify.get()
+    }
+
+    /// Selects `e2e-supervision-notify`, when the build's domain holds `value`.
+    pub fn select_e2e_supervision_notify(
+        &mut self,
+        value: E2eSupervisionNotify,
+    ) -> Result<(), OutsideDomain<E2eSupervisionNotify>> {
+        self.e2e_supervision_notify = Bound::select(value)?;
+        Ok(())
+    }
+
     /// `event-ring-full` as this snapshot holds it.
     pub const fn event_ring_full(&self) -> EventRingFull {
         self.event_ring_full.get()
@@ -1056,6 +1358,62 @@ impl SessionPolicy {
         value: LinkTieOrder,
     ) -> Result<(), OutsideDomain<LinkTieOrder>> {
         self.link_tie_order = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `query-unanswerable-final` as this snapshot holds it.
+    pub const fn query_unanswerable_final(&self) -> QueryUnanswerableFinal {
+        self.query_unanswerable_final.get()
+    }
+
+    /// Selects `query-unanswerable-final`, when the build's domain holds `value`.
+    pub fn select_query_unanswerable_final(
+        &mut self,
+        value: QueryUnanswerableFinal,
+    ) -> Result<(), OutsideDomain<QueryUnanswerableFinal>> {
+        self.query_unanswerable_final = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `zid-derivation` as this snapshot holds it.
+    pub const fn zid_derivation(&self) -> ZidDerivation {
+        self.zid_derivation.get()
+    }
+
+    /// Selects `zid-derivation`, when the build's domain holds `value`.
+    pub fn select_zid_derivation(
+        &mut self,
+        value: ZidDerivation,
+    ) -> Result<(), OutsideDomain<ZidDerivation>> {
+        self.zid_derivation = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `handshake-stray-message` as this snapshot holds it.
+    pub const fn handshake_stray_message(&self) -> HandshakeStrayMessage {
+        self.handshake_stray_message.get()
+    }
+
+    /// Selects `handshake-stray-message`, when the build's domain holds `value`.
+    pub fn select_handshake_stray_message(
+        &mut self,
+        value: HandshakeStrayMessage,
+    ) -> Result<(), OutsideDomain<HandshakeStrayMessage>> {
+        self.handshake_stray_message = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `key-wire-form` as this snapshot holds it.
+    pub const fn key_wire_form(&self) -> KeyWireForm {
+        self.key_wire_form.get()
+    }
+
+    /// Selects `key-wire-form`, when the build's domain holds `value`.
+    pub fn select_key_wire_form(
+        &mut self,
+        value: KeyWireForm,
+    ) -> Result<(), OutsideDomain<KeyWireForm>> {
+        self.key_wire_form = Bound::select(value)?;
         Ok(())
     }
 }
@@ -1605,13 +1963,26 @@ type ReliableGapReconnectBound = Bound<ReliableGapReconnect, { ReliableGapReconn
 
 impl PolicyValue for ReliableGapReconnect {
     const POLICY: &'static str = "reliable-gap-reconnect";
-    const ALL: &'static [Self] = &[Self::Off, Self::UntilDeclarationsSynced, Self::Always];
-    const IDS: &'static [&'static str] = &["off", "until-declarations-synced", "always"];
+    const ALL: &'static [Self] = &[
+        Self::Off,
+        Self::UntilDeclarationsSynced,
+        Self::Always,
+        Self::UntilDeclarationsSyncedWhenBegun,
+    ];
+    const IDS: &'static [&'static str] = &[
+        "off",
+        "until-declarations-synced",
+        "always",
+        "until-declarations-synced-when-begun",
+    ];
     const DOMAIN: Domain<Self> = Domain::from_stated(
         &[
             option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_OFF"),
             option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED"),
             option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_ALWAYS"),
+            option_env!(
+                "WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED_WHEN_BEGUN"
+            ),
         ],
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
@@ -2403,6 +2774,48 @@ impl PolicyField for SupervisionAfterExpiry {
     }
 }
 
+/// How `e2e-supervision-notify` is held: in no byte when its domain is one value.
+type E2eSupervisionNotifyBound = Bound<E2eSupervisionNotify, { E2eSupervisionNotify::HELD }>;
+
+impl PolicyValue for E2eSupervisionNotify {
+    const POLICY: &'static str = "e2e-supervision-notify";
+    const ALL: &'static [Self] = &[Self::StatusOnly, Self::LastValue];
+    const IDS: &'static [&'static str] = &["status-only", "last-value"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_STATUS_ONLY"),
+            option_env!("WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_LAST_VALUE"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<E2eSupervisionNotify>(E2eSupervisionNotify::DEFAULT as usize),
+    "the default of e2e-supervision-notify is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for E2eSupervisionNotify {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_e2e_supervision_notify(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.e2e_supervision_notify.get()
+    }
+}
+
 /// How `event-ring-full` is held: in no byte when its domain is one value.
 type EventRingFullBound = Bound<EventRingFull, { EventRingFull::HELD }>;
 
@@ -2656,9 +3069,179 @@ impl PolicyField for LinkTieOrder {
     }
 }
 
+/// How `query-unanswerable-final` is held: in no byte when its domain is one value.
+type QueryUnanswerableFinalBound = Bound<QueryUnanswerableFinal, { QueryUnanswerableFinal::HELD }>;
+
+impl PolicyValue for QueryUnanswerableFinal {
+    const POLICY: &'static str = "query-unanswerable-final";
+    const ALL: &'static [Self] = &[Self::None, Self::EmptyFinal];
+    const IDS: &'static [&'static str] = &["none", "empty-final"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_QUERY_UNANSWERABLE_FINAL_ALLOWS_NONE"),
+            option_env!("WZ_POLICY_QUERY_UNANSWERABLE_FINAL_ALLOWS_EMPTY_FINAL"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<QueryUnanswerableFinal>(QueryUnanswerableFinal::DEFAULT as usize),
+    "the default of query-unanswerable-final is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for QueryUnanswerableFinal {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_query_unanswerable_final(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.query_unanswerable_final.get()
+    }
+}
+
+/// How `zid-derivation` is held: in no byte when its domain is one value.
+type ZidDerivationBound = Bound<ZidDerivation, { ZidDerivation::HELD }>;
+
+impl PolicyValue for ZidDerivation {
+    const POLICY: &'static str = "zid-derivation";
+    const ALL: &'static [Self] = &[Self::Random, Self::AddressPorts];
+    const IDS: &'static [&'static str] = &["random", "address-ports"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_ZID_DERIVATION_ALLOWS_RANDOM"),
+            option_env!("WZ_POLICY_ZID_DERIVATION_ALLOWS_ADDRESS_PORTS"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<ZidDerivation>(ZidDerivation::DEFAULT as usize),
+    "the default of zid-derivation is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for ZidDerivation {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_zid_derivation(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.zid_derivation.get()
+    }
+}
+
+/// How `handshake-stray-message` is held: in no byte when its domain is one value.
+type HandshakeStrayMessageBound = Bound<HandshakeStrayMessage, { HandshakeStrayMessage::HELD }>;
+
+impl PolicyValue for HandshakeStrayMessage {
+    const POLICY: &'static str = "handshake-stray-message";
+    const ALL: &'static [Self] = &[Self::Fail, Self::Ignore, Self::IgnoreAndReplay];
+    const IDS: &'static [&'static str] = &["fail", "ignore", "ignore-and-replay"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_FAIL"),
+            option_env!("WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE"),
+            option_env!("WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE_AND_REPLAY"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<HandshakeStrayMessage>(HandshakeStrayMessage::DEFAULT as usize),
+    "the default of handshake-stray-message is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for HandshakeStrayMessage {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_handshake_stray_message(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.handshake_stray_message.get()
+    }
+}
+
+/// How `key-wire-form` is held: in no byte when its domain is one value.
+type KeyWireFormBound = Bound<KeyWireForm, { KeyWireForm::HELD }>;
+
+impl PolicyValue for KeyWireForm {
+    const POLICY: &'static str = "key-wire-form";
+    const ALL: &'static [Self] = &[Self::Declared, Self::Shared, Self::Literal];
+    const IDS: &'static [&'static str] = &["declared", "shared", "literal"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_KEY_WIRE_FORM_ALLOWS_DECLARED"),
+            option_env!("WZ_POLICY_KEY_WIRE_FORM_ALLOWS_SHARED"),
+            option_env!("WZ_POLICY_KEY_WIRE_FORM_ALLOWS_LITERAL"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Link;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<KeyWireForm>(KeyWireForm::DEFAULT as usize),
+    "the default of key-wire-form is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for KeyWireForm {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_key_wire_form(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.key_wire_form.get()
+    }
+}
+
 /// How many policies the declaration states: the length of [`POLICIES`] and of every table kept
 /// per policy.
-pub const POLICY_COUNT: usize = 23;
+pub const POLICY_COUNT: usize = 28;
 
 /// Every policy as a reader that names it by its id sees it, in the order of the fields of
 /// [`SessionPolicy`].
@@ -2680,12 +3263,17 @@ pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
     PolicyEntry::of::<KeySet>(),
     PolicyEntry::of::<SnResolution>(),
     PolicyEntry::of::<SupervisionAfterExpiry>(),
+    PolicyEntry::of::<E2eSupervisionNotify>(),
     PolicyEntry::of::<EventRingFull>(),
     PolicyEntry::of::<ClockQualityStamping>(),
     PolicyEntry::of::<RoutingFaceDrive>(),
     PolicyEntry::of::<RoutingTableSharing>(),
     PolicyEntry::of::<ReassemblyPoolOverflow>(),
     PolicyEntry::of::<LinkTieOrder>(),
+    PolicyEntry::of::<QueryUnanswerableFinal>(),
+    PolicyEntry::of::<ZidDerivation>(),
+    PolicyEntry::of::<HandshakeStrayMessage>(),
+    PolicyEntry::of::<KeyWireForm>(),
 ];
 
 /// The profile `upstream`: Every policy at upstream's behaviour, stated explicitly, so a
@@ -2712,12 +3300,17 @@ const PROFILE_UPSTREAM: Profile = Profile {
         Statement::new("key-set", "open"),
         Statement::new("sn-resolution", "bits-32"),
         Statement::new("supervision-after-expiry", "latch"),
+        Statement::new("e2e-supervision-notify", "status-only"),
         Statement::new("event-ring-full", "overwrite-oldest"),
         Statement::new("clock-quality-stamping", "always"),
         Statement::new("routing-face-drive", "task-per-face"),
         Statement::new("routing-table-sharing", "rwlock"),
         Statement::new("reassembly-pool-overflow", "reject"),
         Statement::new("link-tie-order", "zid-number"),
+        Statement::new("query-unanswerable-final", "none"),
+        Statement::new("zid-derivation", "random"),
+        Statement::new("handshake-stray-message", "fail"),
+        Statement::new("key-wire-form", "declared"),
     ],
 };
 

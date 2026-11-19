@@ -434,6 +434,11 @@ struct PeerNaming<P: Storage = Profile> {
     /// the session's own bundle, and two sessions have two.
     #[cfg(feature = "alloc")]
     own_mapping_space: Option<SharedOwnMappingSpace>,
+    /// The key ids every node of the deployment shares, when the session holds them
+    /// (`shared-key-ids`): an id neither declared space holds is read in it. Installed, as the
+    /// own space is, by the engine that opened the session; `None` keeps the two spaces alone.
+    #[cfg(feature = "shared-key-ids")]
+    shared_key_ids: Option<crate::shared_key_ids::SharedKeyIds>,
     /// R231 — this session's own zid prefix (1..=16 bytes),
     /// negotiated during the session-FSM open handshake. When set,
     /// [`dispatch_push`](SubscriberTable::dispatch_push) suppresses wire-arrived
@@ -2752,6 +2757,8 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 aliases: PeerAliases::<P>::default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
+                #[cfg(feature = "shared-key-ids")]
+                shared_key_ids: None,
                 own_zid: None,
             },
             #[cfg(feature = "declare-subscriber")]
@@ -2772,6 +2779,8 @@ impl SubscriberPeer<crate::bounded::Static> {
                 aliases: crate::id_map::FixedIdMap::new(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
+                #[cfg(feature = "shared-key-ids")]
+                shared_key_ids: None,
                 own_zid: None,
             },
             #[cfg(feature = "declare-subscriber")]
@@ -2861,6 +2870,22 @@ impl<P: Storage> SubscriberPeer<P> {
     #[cfg(feature = "alloc")]
     pub fn clear_own_mapping_space(&mut self) {
         self.naming.own_mapping_space = None;
+    }
+
+    /// Install the key ids every node of the deployment shares: from now on an id that neither
+    /// the peer's space nor ours holds is read in the dictionary, on every plane that resolves
+    /// through [`Self::mapping_spaces`]. Installed by the engine that opened the session, before
+    /// its link carries anything; a second install replaces the first.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn set_shared_key_ids(&mut self, ids: crate::shared_key_ids::SharedKeyIds) {
+        self.naming.shared_key_ids = Some(ids);
+    }
+
+    /// Release the installed dictionary: an id neither declared space holds resolves to
+    /// nothing again.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn clear_shared_key_ids(&mut self) {
+        self.naming.shared_key_ids = None;
     }
 
     /// R311y739 — BOTH id spaces, for this registry and for every consumer the
@@ -3152,6 +3177,10 @@ impl<P: Storage> PeerNaming<P> {
         // relay face does, which refuses it.
         #[cfg(not(feature = "alloc"))]
         let own = None;
+        #[cfg(feature = "shared-key-ids")]
+        if let Some(ids) = &self.shared_key_ids {
+            return MappingSpaces::for_aliases::<P>(&self.aliases, own).with_shared(ids);
+        }
         MappingSpaces::for_aliases::<P>(&self.aliases, own)
     }
 }
@@ -3433,6 +3462,18 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
     #[cfg(feature = "alloc")]
     pub fn clear_own_mapping_space(&mut self) {
         self.peer.clear_own_mapping_space();
+    }
+
+    /// [`SubscriberPeer::set_shared_key_ids`] for this registry's peer.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn set_shared_key_ids(&mut self, ids: crate::shared_key_ids::SharedKeyIds) {
+        self.peer.set_shared_key_ids(ids);
+    }
+
+    /// [`SubscriberPeer::clear_shared_key_ids`] for this registry's peer.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn clear_shared_key_ids(&mut self) {
+        self.peer.clear_shared_key_ids();
     }
 
     /// [`SubscriberPeer::mapping_spaces`] for this registry's peer.

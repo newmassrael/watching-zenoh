@@ -97,6 +97,15 @@ pub(crate) struct ConfigState {
     /// What wz's own doors state about the session's policies, which no numbered key carries
     /// (`wz_ext_config_policy`, `wz_ext_config_profile`, `wz_ext_config_document`).
     pub(crate) policies: crate::config_policy::PolicyStatements,
+    /// The transport the program supplies (`wz_ext_config_transport`), which the session opened
+    /// from this config uses for every link in place of the system's sockets.
+    #[cfg(feature = "app-transport")]
+    pub(crate) transport: Option<alloc::sync::Arc<wz_session_core::app_transport::AppTransport>>,
+    /// The key ids every node of the deployment shares (`wz_ext_config_key_ids`) and the
+    /// endpoints whose key-wire form is stated apart (`wz_ext_config_key_wire_form_for`), which
+    /// the open hands the engine.
+    #[cfg(feature = "shared-key-ids")]
+    pub(crate) key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
 }
 
 impl ConfigState {

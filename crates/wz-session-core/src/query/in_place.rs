@@ -174,7 +174,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
         };
         match self.dispatch_lent(request, spaces, envelope, pending_replies) {
             Ok(outcome) => {
-                if outcome.dispatched {
+                if outcome.owes_final(self.answers_unresolved) {
                     // The terminator carries the query's QoS, read by the rule
                     // the owned path reads it by.
                     pending_final_rids.owe(request.rid, qos);
@@ -229,16 +229,13 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
         let keyexpr = match resolve_wireexpr_viewed(&request.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
             // The empty keyexpr, or an id the space does not hold: the query
-            // never reaches the table and owes nothing, as on the owned path.
-            Ok(None) => return Ok(DispatchOutcome::NOT_DISPATCHED),
+            // never reaches the table, as on the owned path.
+            Ok(None) => return Ok(DispatchOutcome::UNRESOLVED),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
         let matched =
             self.fire_projection(envelope, keyexpr, lent_projection(query), replies, true);
-        Ok(DispatchOutcome {
-            dispatched: true,
-            matched,
-        })
+        Ok(DispatchOutcome::routed(matched))
     }
 
     /// The fallback: the owned projection of `request`, dispatched by the path

@@ -74,6 +74,46 @@
 //!   those varies from frame to frame, and a slot that moved with the counter
 //!   would judge nothing.
 //!
+//! # What a receiver judges by, and what a sender derives
+//!
+//! ```text
+//!   "fields": [ ...
+//!     {"name": "cell", "bytes": 4,
+//!      "split": [{"name": "kind",   "lsb": 29, "width": 3},
+//!                {"name": "result", "lsb": 26, "width": 3},
+//!                {"name": "sender", "lsb": 0,  "width": 26,
+//!                 "derive": {"from": "address", "mask": "0x3FFFF00", "xor": "0x15"}}]} ],
+//!   "counter": {"field": "counter", "max_gap": 6, "timeout_ms": 1000, "max_gap_ceiling": 20},
+//!   "judge": {"ident": "ident", "length": true, "counter_errors": "joined",
+//!             "out_of_range": "keeps_baseline"},
+//!   "cell": {"field": "cell", "kind": "kind", "result": "result", "sender": "sender"}
+//! ```
+//!
+//! * `derive` (optional, on a plain field or on a part) takes the value from
+//!   the node's address instead of from the caller: `(address & mask) ^ xor`,
+//!   the mask and the xor fitting the field's or the part's own bits. The
+//!   sender writes it and a receiver expecting the field computes it the same
+//!   way. A split field has no `derive` of its own; a field the mechanism gives
+//!   its value (crc, length, counter) has none at all. A value COMPOSED of
+//!   several catalogue values and XORed with a constant needs no new word: it
+//!   is a `split` with an `xor`.
+//! * `counter.max_gap_ceiling` (optional) bounds the `max_gap` a receiver may
+//!   be given in place of the profile's own, and the profile's own as well.
+//! * `judge` (optional) states the rules a receiver applies beyond the CRC.
+//!   `ident` names a field whose logical value must equal the receiver's
+//!   expected one, and `length: true` makes the length field's agreement with
+//!   the frame part of integrity too: a frame that fails either is an
+//!   integrity error, as a CRC mismatch is, and moves no state.
+//!   `counter_errors` is `apart` (a repetition and a step out of range are
+//!   reported as themselves) or `joined` (both as one counter error).
+//!   `out_of_range` is `moves_baseline` (a step above the gap moves the
+//!   baseline to the frame) or `keeps_baseline`. Each default is the judge's
+//!   behaviour with no `judge` object: CRC only, apart, moves. The first intact
+//!   frame of a stream is always the baseline; it is not a rule.
+//! * `cell` (optional) names the parts of one split field that carry the
+//!   frame's kind, its result and its sender identity, at least one of them. A
+//!   receiver reads the sender for demultiplexing and reports the other two.
+//!
 //! Integers are JSON numbers (plain decimal) or strings (decimal, or `0x` and
 //! hex digits), so a 64-bit value survives a reader that holds numbers as
 //! doubles. The text is read by the workspace's one JSON reader,
@@ -106,7 +146,7 @@ use wz_session_core::json5::{self, Json5Value};
 use wz_session_core::json5_lex::{Json5Error, Lexer};
 
 use crate::e2e_crc::{width_mask, Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
-use crate::e2e_judge::{Judge, JudgeConfig};
+use crate::e2e_judge::{CounterRules, Judge, JudgeConfig};
 
 /// Most fields a profile may declare.
 pub const MAX_FIELDS: usize = 32;
@@ -162,6 +202,31 @@ impl core::fmt::Display for DocError {
     }
 }
 
+/// The source a derived value is taken from. The node's address is the only one
+/// today; the profile names it, so that a later source is a new word and not a
+/// new reading of an old one.
+pub const ADDRESS_SOURCE: &str = "address";
+
+/// A value the profile derives from the node's address instead of taking it
+/// from the caller: `(address & mask) ^ xor`. The sender writes it and the
+/// receiver expects it; the address is runtime data and the rule is the
+/// profile's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Derive {
+    /// The bits of the address the value keeps.
+    pub mask: u64,
+    /// XORed into the kept bits.
+    pub xor: u64,
+}
+
+impl Derive {
+    /// The value for `address`. It fits the field or part the rule is on,
+    /// because the mask and the xor were refused when they did not.
+    pub fn apply(&self, address: u64) -> u64 {
+        (address & self.mask) ^ self.xor
+    }
+}
+
 /// One named bit range of a field's logical value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Part {
@@ -171,6 +236,9 @@ pub struct Part {
     pub lsb: u8,
     /// How many bits the part spans.
     pub width: u8,
+    /// The rule the part's value is derived by; `None` when the caller
+    /// supplies it.
+    pub derive: Option<Derive>,
 }
 
 impl Part {
@@ -193,6 +261,9 @@ pub struct Field {
     pub xor: u64,
     /// The named bit ranges of the logical value; empty for a plain integer.
     pub parts: Vec<Part>,
+    /// The rule a plain field's value is derived by; `None` when the caller
+    /// supplies it. A split field derives part by part instead.
+    pub derive: Option<Derive>,
 }
 
 impl Field {
@@ -249,6 +320,68 @@ pub struct CounterSpec {
     pub max_gap: u64,
     /// The longest silence between valid receptions that is not an error.
     pub timeout_ms: u64,
+    /// The largest `max_gap` a receiver may be given in place of the profile's
+    /// own; `None` for the largest step the counter field can make.
+    pub max_gap_ceiling: Option<u64>,
+}
+
+/// Whether a repetition and a step out of range are reported as two kinds of
+/// counter error or as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterErrors {
+    /// Each is reported as itself. The default.
+    Apart,
+    /// Both are reported as one counter error.
+    Joined,
+}
+
+/// The rules a receiver judges a frame by, beyond the CRC and the counter step,
+/// as the profile states them. [`Default`] is the judge's behaviour when a
+/// profile states none of them.
+///
+/// The first intact frame of a stream is always accepted as the baseline, with
+/// no counter judgement: there is nothing before it to step from, so it is not
+/// a rule a profile can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JudgeRules {
+    /// The field whose logical value must equal the receiver's expected one for
+    /// a frame to be intact; `None` when the identifier is not judged.
+    pub ident: Option<usize>,
+    /// Whether the length field must equal what the profile's length rule gives
+    /// for the frame for it to be intact.
+    pub length: bool,
+    /// How the two counter errors are reported.
+    pub counter_errors: CounterErrors,
+    /// Whether a step above the largest gap moves the baseline and the instant
+    /// of the last valid reception to the frame.
+    pub out_of_range_moves_baseline: bool,
+}
+
+impl Default for JudgeRules {
+    fn default() -> Self {
+        Self {
+            ident: None,
+            length: false,
+            counter_errors: CounterErrors::Apart,
+            out_of_range_moves_baseline: true,
+        }
+    }
+}
+
+/// The message cell: a split header field whose parts carry the frame's kind,
+/// its result and the identity of its sender. A receiver reads the sender for
+/// demultiplexing and reports the other two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellSpec {
+    /// Index of the field.
+    pub field: usize,
+    /// Index, in the field's parts, of the kind; `None` when the cell has none.
+    pub kind: Option<usize>,
+    /// Index, in the field's parts, of the result; `None` when the cell has none.
+    pub result: Option<usize>,
+    /// Index, in the field's parts, of the sender identity; `None` when the cell
+    /// has none.
+    pub sender: Option<usize>,
 }
 
 /// Which frames of a capture share one counter: the part of the slot the
@@ -284,6 +417,8 @@ pub struct Profile {
     length: LengthSpec,
     counter: CounterSpec,
     slot: SlotSpec,
+    rules: JudgeRules,
+    cell: Option<CellSpec>,
 }
 
 impl Profile {
@@ -293,7 +428,9 @@ impl Profile {
         let entries = object(&root, "")?;
         check_keys(
             entries,
-            &["name", "fields", "crc", "length", "counter", "slot"],
+            &[
+                "name", "fields", "crc", "length", "counter", "slot", "judge", "cell",
+            ],
             "",
         )?;
 
@@ -326,6 +463,16 @@ impl Profile {
             }
         }
 
+        let judged = [crc.field, length.field, counter.field];
+        let rules = match optional(entries, "judge") {
+            Some(value) => read_rules(value, &fields, judged)?,
+            None => JudgeRules::default(),
+        };
+        let cell = match optional(entries, "cell") {
+            Some(value) => Some(read_cell(value, &fields)?),
+            None => None,
+        };
+
         Ok(Self {
             name,
             fields,
@@ -334,6 +481,8 @@ impl Profile {
             length,
             counter,
             slot,
+            rules,
+            cell,
         })
     }
 
@@ -377,16 +526,46 @@ impl Profile {
         &self.slot
     }
 
+    /// The rules a receiver judges a frame by beyond the CRC and the step.
+    pub fn rules(&self) -> &JudgeRules {
+        &self.rules
+    }
+
+    /// The message cell, when the profile names one.
+    pub fn cell(&self) -> Option<&CellSpec> {
+        self.cell.as_ref()
+    }
+
+    /// The largest `max_gap` a receiver may be given: the profile's ceiling, or
+    /// the largest step the counter field can make when it states none.
+    pub fn max_gap_limit(&self) -> u64 {
+        self.counter
+            .max_gap_ceiling
+            .unwrap_or_else(|| self.fields[self.counter.field].max_value())
+    }
+
+    /// What a judge of this profile's frames is configured with.
+    pub fn judge_config(&self) -> JudgeConfig {
+        let counter = &self.counter;
+        JudgeConfig {
+            counter_bytes: self.fields[counter.field].bytes,
+            max_gap: counter.max_gap,
+            timeout_ms: counter.timeout_ms,
+        }
+    }
+
+    /// What a judge of this profile's frames does to its state.
+    pub fn counter_rules(&self) -> CounterRules {
+        CounterRules {
+            out_of_range_moves_baseline: self.rules.out_of_range_moves_baseline,
+        }
+    }
+
     /// A judge for one stream of this profile's frames, configured from its
     /// counter rules. A stream is the caller's to define, so the caller keeps
     /// one judge per stream; see [`crate::e2e_judge`].
     pub fn judge(&self) -> Judge {
-        let counter = &self.counter;
-        Judge::new(JudgeConfig {
-            counter_bytes: self.fields[counter.field].bytes,
-            max_gap: counter.max_gap,
-            timeout_ms: counter.timeout_ms,
-        })
+        Judge::with_rules(self.judge_config(), self.counter_rules())
     }
 
     /// The value the length field carries for a body of `payload_bytes`.
@@ -629,7 +808,7 @@ fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
     for (i, item) in items.iter().enumerate() {
         let here = at(path, i);
         let entries = object(item, &here)?;
-        check_keys(entries, &["name", "bytes", "xor", "split"], &here)?;
+        check_keys(entries, &["name", "bytes", "xor", "split", "derive"], &here)?;
 
         let name = read_name(required(entries, "name", &here)?, &child(&here, "name"))?;
         if fields.iter().any(|f| f.name == name) {
@@ -667,6 +846,19 @@ fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
             None => Vec::new(),
             Some(v) => read_split(v, &child(&here, "split"), bits)?,
         };
+        let derive = match optional(entries, "derive") {
+            None => None,
+            Some(_) if !parts.is_empty() => {
+                return Err(DocError::invalid(
+                    child(&here, "derive"),
+                    format!(
+                        "the field `{name}` is split: a split field derives a value part by \
+                         part, in the part's own `derive`"
+                    ),
+                ))
+            }
+            Some(v) => Some(read_derive(v, &child(&here, "derive"), bits)?),
+        };
 
         fields.push(Field {
             name,
@@ -674,6 +866,7 @@ fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
             offset,
             xor,
             parts,
+            derive,
         });
         offset += bytes;
     }
@@ -696,7 +889,7 @@ fn read_split(value: &Json5Value, path: &str, bits: u8) -> Result<Vec<Part>, Doc
     for (i, item) in items.iter().enumerate() {
         let here = at(path, i);
         let entries = object(item, &here)?;
-        check_keys(entries, &["name", "lsb", "width"], &here)?;
+        check_keys(entries, &["name", "lsb", "width", "derive"], &here)?;
 
         let name = read_name(required(entries, "name", &here)?, &child(&here, "name"))?;
         if parts.iter().any(|p| p.name == name) {
@@ -733,9 +926,62 @@ fn read_split(value: &Json5Value, path: &str, bits: u8) -> Result<Vec<Part>, Doc
             ));
         }
         claimed |= span;
-        parts.push(Part { name, lsb, width });
+        let derive = match optional(entries, "derive") {
+            None => None,
+            Some(v) => Some(read_derive(v, &child(&here, "derive"), width)?),
+        };
+        parts.push(Part {
+            name,
+            lsb,
+            width,
+            derive,
+        });
     }
     Ok(parts)
+}
+
+/// A derivation rule, `{"from": "address", "mask": ..., "xor": ...}`, for a
+/// value `bits` wide. The mask and the xor must fit those bits, so the derived
+/// value always fits; a mask of zero would take nothing from the address and is
+/// refused, since a constant is the caller's to state.
+fn read_derive(value: &Json5Value, path: &str, bits: u8) -> Result<Derive, DocError> {
+    let entries = object(value, path)?;
+    check_keys(entries, &["from", "mask", "xor"], path)?;
+    let from_path = child(path, "from");
+    let from = read_string(required(entries, "from", path)?, &from_path)?;
+    if from != ADDRESS_SOURCE {
+        return Err(DocError::invalid(
+            from_path,
+            format!(
+                "`{from}` is not a source a value is derived from (expected `{ADDRESS_SOURCE}`)"
+            ),
+        ));
+    }
+    let fits = |key: &str, number: u64| -> Result<u64, DocError> {
+        if number & !width_mask(bits) != 0 {
+            return Err(DocError::invalid(
+                child(path, key),
+                format!("the {key} {number:#x} does not fit the {bits} bits it derives"),
+            ));
+        }
+        Ok(number)
+    };
+    let mask_path = child(path, "mask");
+    let mask = fits(
+        "mask",
+        read_uint(required(entries, "mask", path)?, &mask_path)?,
+    )?;
+    if mask == 0 {
+        return Err(DocError::invalid(
+            mask_path,
+            "a mask of 0 takes nothing from the address: state the value itself",
+        ));
+    }
+    let xor = match optional(entries, "xor") {
+        None => 0,
+        Some(v) => fits("xor", read_uint(v, &child(path, "xor"))?)?,
+    };
+    Ok(Derive { mask, xor })
 }
 
 fn field_named(fields: &[Field], name: &str, path: &str) -> Result<usize, DocError> {
@@ -754,6 +1000,16 @@ fn plain(field: &Field, role: &str, path: &str) -> Result<(), DocError> {
             format!(
                 "the {role} field `{}` carries an xor or a split: a {role} field is read \
                  as a plain integer",
+                field.name
+            ),
+        ));
+    }
+    if field.derive.is_some() {
+        return Err(DocError::invalid(
+            path,
+            format!(
+                "the {role} field `{}` is derived from the address: a {role} field is given \
+                 its value by the mechanism",
                 field.name
             ),
         ));
@@ -965,7 +1221,11 @@ fn read_slot(
 fn read_counter(value: &Json5Value, fields: &[Field]) -> Result<CounterSpec, DocError> {
     let path = "/counter";
     let entries = object(value, path)?;
-    check_keys(entries, &["field", "max_gap", "timeout_ms"], path)?;
+    check_keys(
+        entries,
+        &["field", "max_gap", "timeout_ms", "max_gap_ceiling"],
+        path,
+    )?;
 
     let field_path = child(path, "field");
     let field_name = read_string(required(entries, "field", path)?, &field_path)?;
@@ -995,9 +1255,158 @@ fn read_counter(value: &Json5Value, fields: &[Field]) -> Result<CounterSpec, Doc
             "timeout_ms is at least 1: a limit of zero would time out every gap",
         ));
     }
+    let max_gap_ceiling = match optional(entries, "max_gap_ceiling") {
+        None => None,
+        Some(v) => {
+            let ceiling_path = child(path, "max_gap_ceiling");
+            let ceiling = read_uint(v, &ceiling_path)?;
+            if ceiling == 0 || ceiling > fields[field].max_value() {
+                return Err(DocError::invalid(
+                    ceiling_path,
+                    format!(
+                        "max_gap_ceiling is 1 to {} for the {}-byte counter `{}`, this one is \
+                         {ceiling}",
+                        fields[field].max_value(),
+                        fields[field].bytes,
+                        fields[field].name
+                    ),
+                ));
+            }
+            if max_gap > ceiling {
+                return Err(DocError::invalid(
+                    gap_path,
+                    format!("max_gap {max_gap} is above the profile's max_gap_ceiling {ceiling}"),
+                ));
+            }
+            Some(ceiling)
+        }
+    };
     Ok(CounterSpec {
         field,
         max_gap,
         timeout_ms,
+        max_gap_ceiling,
+    })
+}
+
+/// The `judge` object: which header fields, besides the CRC, make a frame
+/// intact, and how the counter errors are reported and what they move.
+fn read_rules(
+    value: &Json5Value,
+    fields: &[Field],
+    judged: [usize; 3],
+) -> Result<JudgeRules, DocError> {
+    let path = "/judge";
+    let entries = object(value, path)?;
+    check_keys(
+        entries,
+        &["ident", "length", "counter_errors", "out_of_range"],
+        path,
+    )?;
+    let mut rules = JudgeRules::default();
+    if let Some(v) = optional(entries, "ident") {
+        let here = child(path, "ident");
+        let name = read_string(v, &here)?;
+        let index = field_named(fields, name, &here)?;
+        if judged.contains(&index) {
+            return Err(DocError::invalid(
+                here,
+                format!(
+                    "`{name}` is the crc, length or counter field, each judged by a rule of \
+                     its own: the identifier is another field"
+                ),
+            ));
+        }
+        rules.ident = Some(index);
+    }
+    if let Some(v) = optional(entries, "length") {
+        rules.length = read_bool(v, &child(path, "length"))?;
+    }
+    if let Some(v) = optional(entries, "counter_errors") {
+        let here = child(path, "counter_errors");
+        rules.counter_errors = match read_string(v, &here)? {
+            "apart" => CounterErrors::Apart,
+            "joined" => CounterErrors::Joined,
+            other => {
+                return Err(DocError::invalid(
+                    here,
+                    format!("`{other}` is not a way to report counter errors (expected `apart` or `joined`)"),
+                ))
+            }
+        };
+    }
+    if let Some(v) = optional(entries, "out_of_range") {
+        let here = child(path, "out_of_range");
+        rules.out_of_range_moves_baseline = match read_string(v, &here)? {
+            "moves_baseline" => true,
+            "keeps_baseline" => false,
+            other => {
+                return Err(DocError::invalid(
+                    here,
+                    format!(
+                        "`{other}` is not what a step out of range does (expected \
+                         `moves_baseline` or `keeps_baseline`)"
+                    ),
+                ))
+            }
+        };
+    }
+    Ok(rules)
+}
+
+/// The `cell` object: a split field and which of its parts are the kind, the
+/// result and the sender identity.
+fn read_cell(value: &Json5Value, fields: &[Field]) -> Result<CellSpec, DocError> {
+    let path = "/cell";
+    let entries = object(value, path)?;
+    check_keys(entries, &["field", "kind", "result", "sender"], path)?;
+    let field_path = child(path, "field");
+    let field_name = read_string(required(entries, "field", path)?, &field_path)?;
+    let field = field_named(fields, field_name, &field_path)?;
+    let parts = &fields[field].parts;
+    if parts.is_empty() {
+        return Err(DocError::invalid(
+            field_path,
+            format!(
+                "the cell field `{field_name}` is not split: a cell names parts of a split field"
+            ),
+        ));
+    }
+    let mut taken: Vec<usize> = Vec::with_capacity(3);
+    let mut part = |key: &str| -> Result<Option<usize>, DocError> {
+        let Some(v) = optional(entries, key) else {
+            return Ok(None);
+        };
+        let here = child(path, key);
+        let name = read_string(v, &here)?;
+        let Some(index) = parts.iter().position(|p| p.name == name) else {
+            return Err(DocError::invalid(
+                here,
+                format!("the field `{field_name}` has no part called `{name}`"),
+            ));
+        };
+        if taken.contains(&index) {
+            return Err(DocError::invalid(
+                here,
+                format!("the part `{name}` is named twice in the cell"),
+            ));
+        }
+        taken.push(index);
+        Ok(Some(index))
+    };
+    let kind = part("kind")?;
+    let result = part("result")?;
+    let sender = part("sender")?;
+    if kind.is_none() && result.is_none() && sender.is_none() {
+        return Err(DocError::invalid(
+            path,
+            "a cell names at least one of `kind`, `result` and `sender`",
+        ));
+    }
+    Ok(CellSpec {
+        field,
+        kind,
+        result,
+        sender,
     })
 }

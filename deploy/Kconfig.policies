@@ -214,7 +214,12 @@ choice WZ_POLICY_RELIABLE_GAP_RECONNECT
 	  affected. Only the tokio engine reconnects, so another engine ends the link and
 	  leaves it to the application, and only the tokio engine reports the end of the
 	  peer's declarations, so for another engine `until-declarations-synced` is
-	  `always`.
+	  `always`. `until-declarations-synced-when-begun` is `until-declarations-synced`
+	  on a link this node dialled; on a link it accepted, a peer that lets
+	  DECLARATION_SYNC_RX_NO_PROGRESS_MS pass without sending any declaration of its
+	  initial interest is taken to have none to send, which settles the sync, while a
+	  peer that began them is held to their end as under `until-declarations-synced`.
+	  With that limit at 0 nothing settles an accepted link early.
 	  Upstream: Accepts a forward jump of the reliable channel's sequence number
 	  without a word: the frames in between are lost, the session stays open and
 	  nothing is repaired, so a peer's declaration lost that way is never noticed.
@@ -227,6 +232,9 @@ config WZ_POLICY_RELIABLE_GAP_RECONNECT_UNTIL_DECLARATIONS_SYNCED
 
 config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALWAYS
 	bool "always"
+
+config WZ_POLICY_RELIABLE_GAP_RECONNECT_UNTIL_DECLARATIONS_SYNCED_WHEN_BEGUN
+	bool "until-declarations-synced-when-begun"
 
 endchoice
 
@@ -249,6 +257,13 @@ config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_ALWAYS
 	default y
 	help
 	  Whether `always` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED_WHEN_BEGUN
+	bool "reliable-gap-reconnect allows until-declarations-synced-when-begun" if !WZ_POLICY_RELIABLE_GAP_RECONNECT_UNTIL_DECLARATIONS_SYNCED_WHEN_BEGUN
+	default y
+	help
+	  Whether `until-declarations-synced-when-begun` stays selectable after the build; the chosen default always does.
 	  A target with no operating system keeps only the default unless this is set here.
 
 config WZ_POLICY_ENTITY_LINK_RESTRICTION
@@ -641,6 +656,42 @@ config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_REARM
 	  Whether `rearm` stays selectable after the build; the chosen default always does.
 	  A target with no operating system keeps only the default unless this is set here.
 
+choice WZ_POLICY_E2E_SUPERVISION_NOTIFY
+	prompt "e2e-supervision-notify"
+	default WZ_POLICY_E2E_SUPERVISION_NOTIFY_STATUS_ONLY
+	help
+	  What a reception supervisor tells the application when a stream stops
+	  arriving. `status-only` tells the stream, its sender and the error counts, and
+	  keeps no payload. `last-value` also hands back the payload the stream last
+	  carried, which the supervisor keeps in a cell of the application's storage per
+	  stream, for an application that delivers a value with every loss as it does
+	  with every sample. Decided when the supervisor is made, and fixed for its life.
+	  Upstream: Supervises no stream's reception: a periodic message that stops
+	  arriving is not noticed by the library, so there is no loss to tell and no
+	  value to tell it with.
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_STATUS_ONLY
+	bool "status-only"
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_LAST_VALUE
+	bool "last-value"
+
+endchoice
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_STATUS_ONLY
+	bool "e2e-supervision-notify allows status-only" if !WZ_POLICY_E2E_SUPERVISION_NOTIFY_STATUS_ONLY
+	default y
+	help
+	  Whether `status-only` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_LAST_VALUE
+	bool "e2e-supervision-notify allows last-value" if !WZ_POLICY_E2E_SUPERVISION_NOTIFY_LAST_VALUE
+	default y
+	help
+	  Whether `last-value` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
 choice WZ_POLICY_EVENT_RING_FULL
 	prompt "event-ring-full"
 	default WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST
@@ -887,6 +938,200 @@ config WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_BYTES
 	default y
 	help
 	  Whether `zid-bytes` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+choice WZ_POLICY_QUERY_UNANSWERABLE_FINAL
+	prompt "query-unanswerable-final"
+	default WZ_POLICY_QUERY_UNANSWERABLE_FINAL_NONE
+	help
+	  How a node answers a query from a peer that it cannot run at all because the
+	  query's key names an id the peer never declared to this node. `none` sends
+	  nothing, as upstream does, and the asker's query ends only at its own timeout.
+	  `empty-final` answers it at once with a RESPONSE_FINAL and no reply, the answer
+	  a query that matched no queryable gets, so the asker learns now that nothing
+	  will come. A query whose parameters or attachment are longer than the build
+	  allows is answered with that final under either value, and a query that
+	  arrives while the node has no room left to hold another final is refused and
+	  counted under either value, since the final it would owe has nowhere to wait.
+	  Upstream: Drops a query from a peer whose key it cannot resolve (an id the
+	  peer never declared to it) before the query reaches any queryable, and sends
+	  nothing back, so the asker waits out its own timeout.
+
+config WZ_POLICY_QUERY_UNANSWERABLE_FINAL_NONE
+	bool "none"
+
+config WZ_POLICY_QUERY_UNANSWERABLE_FINAL_EMPTY_FINAL
+	bool "empty-final"
+
+endchoice
+
+config WZ_POLICY_QUERY_UNANSWERABLE_FINAL_ALLOWS_NONE
+	bool "query-unanswerable-final allows none" if !WZ_POLICY_QUERY_UNANSWERABLE_FINAL_NONE
+	default y
+	help
+	  Whether `none` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_QUERY_UNANSWERABLE_FINAL_ALLOWS_EMPTY_FINAL
+	bool "query-unanswerable-final allows empty-final" if !WZ_POLICY_QUERY_UNANSWERABLE_FINAL_EMPTY_FINAL
+	default y
+	help
+	  Whether `empty-final` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+choice WZ_POLICY_ZID_DERIVATION
+	prompt "zid-derivation"
+	default WZ_POLICY_ZID_DERIVATION_RANDOM
+	help
+	  How a node makes its zid when the configuration states none. `random` draws all
+	  sixteen bytes, as upstream does. `address-ports` derives the first eight from
+	  where the node is reachable and draws the other eight: bytes 0 to 3 are the
+	  IPv4 address of the first listen endpoint that binds an address of the node,
+	  bytes 4 and 5 the lowest port of its tcp listeners and bytes 6 and 7 the lowest
+	  port of its udp listeners, each little-endian and 0 for a node with no listener
+	  of that protocol. A wildcard, multicast or broadcast address names no node, and
+	  a node whose listeners name no address of its own is refused at open rather
+	  than given a random zid. A zid the configuration states is used under either
+	  value. Only the C ABIs' open reads this policy.
+	  Upstream: Draws every byte of a zid the configuration does not state from its
+	  random source.
+
+config WZ_POLICY_ZID_DERIVATION_RANDOM
+	bool "random"
+
+config WZ_POLICY_ZID_DERIVATION_ADDRESS_PORTS
+	bool "address-ports"
+
+endchoice
+
+config WZ_POLICY_ZID_DERIVATION_ALLOWS_RANDOM
+	bool "zid-derivation allows random" if !WZ_POLICY_ZID_DERIVATION_RANDOM
+	default y
+	help
+	  Whether `random` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_ZID_DERIVATION_ALLOWS_ADDRESS_PORTS
+	bool "zid-derivation allows address-ports" if !WZ_POLICY_ZID_DERIVATION_ADDRESS_PORTS
+	default y
+	help
+	  Whether `address-ports` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+choice WZ_POLICY_HANDSHAKE_STRAY_MESSAGE
+	prompt "handshake-stray-message"
+	default WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_FAIL
+	help
+	  What a unicast establishment does with an Init or an Open that is not the
+	  message its current step awaits: an InitAck repeated after the OpenSyn went out,
+	  an InitSyn repeated after the InitAck went out, or any other out of its step.
+	  `fail` ends the attempt and closes the link with INVALID, as upstream does.
+	  `ignore` drops the message before anything is taken from it and the step goes
+	  on waiting, under the deadline it already had: nothing a peer sends extends an
+	  establishment. Under `ignore` an Init or Open that reaches an established
+	  session is dropped as well, and is not counted as a sign of the peer's life for
+	  the lease, nor does it change anything the session negotiated.
+	  `ignore-and-replay` is `ignore`, and in addition a peer that repeats the step
+	  this node last answered (an InitSyn after the InitAck went out, an InitAck
+	  after the OpenSyn went out) is sent that answer again, the very bytes first
+	  sent, so its cookie is the one already issued. A build whose domain allows this
+	  value holds one answer per establishment in flight, released when the
+	  establishment ends; an answer longer than the hold is not sent again.
+	  Upstream: Ends a unicast establishment, closing the link with INVALID, on any
+	  message but the one its current step reads next, and drops an Init or Open
+	  that reaches an established session while counting it as traffic for the
+	  lease.
+
+config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_FAIL
+	bool "fail"
+
+config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_IGNORE
+	bool "ignore"
+
+config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_IGNORE_AND_REPLAY
+	bool "ignore-and-replay"
+
+endchoice
+
+config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_FAIL
+	bool "handshake-stray-message allows fail" if !WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_FAIL
+	default y
+	help
+	  Whether `fail` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE
+	bool "handshake-stray-message allows ignore" if !WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_IGNORE
+	default y
+	help
+	  Whether `ignore` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE_AND_REPLAY
+	bool "handshake-stray-message allows ignore-and-replay" if !WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_IGNORE_AND_REPLAY
+	default y
+	help
+	  Whether `ignore-and-replay` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+choice WZ_POLICY_KEY_WIRE_FORM
+	prompt "key-wire-form"
+	default WZ_POLICY_KEY_WIRE_FORM_DECLARED
+	help
+	  How a node names a key on the wire to the peer of a link. `declared` is
+	  upstream's: the id of a key expression the node declared to that peer, or the
+	  whole key. `literal` sends the whole key every time and declares nothing for
+	  it. `shared` uses the key-id dictionary every node of the deployment holds
+	  (the shared-key-ids capability): the key's own id when the dictionary holds
+	  it, the id of the longest entry that ends at one of its slashes followed by
+	  the rest of the key, or the whole key, whichever takes the fewest bytes, with
+	  no declaration first; a key with a wildcard goes by an id only when the
+	  dictionary holds that exact pattern, a peer that announced itself a router is
+	  sent the declared form, and a reply on the key of a query that came by an id
+	  of the dictionary names it by that id and rest, its mapping bit turned. A peer
+	  that does not hold the same dictionary cannot read what `shared` sends, so both
+	  ends of the link must hold it. Every node that holds the dictionary reads an id
+	  only the dictionary names, whatever its own value. The value is the session's,
+	  and an endpoint the configuration dials or listens on may be stated a value of
+	  its own (wz_ext_config_key_wire_form_for), which every link to or from that
+	  endpoint takes. A session opened with `shared`, for itself or an endpoint, and
+	  no dictionary is refused, and so is one whose value is not `declared` in a build
+	  without the capability. Interests and liveliness interests name their keys as
+	  under `declared`.
+	  Upstream: Names a key on the wire by the id of a key expression it declared to
+	  that peer first, or by the whole key; a peer reads an id only when it was
+	  declared to it, and refuses one it never was.
+
+config WZ_POLICY_KEY_WIRE_FORM_DECLARED
+	bool "declared"
+
+config WZ_POLICY_KEY_WIRE_FORM_SHARED
+	bool "shared"
+
+config WZ_POLICY_KEY_WIRE_FORM_LITERAL
+	bool "literal"
+
+endchoice
+
+config WZ_POLICY_KEY_WIRE_FORM_ALLOWS_DECLARED
+	bool "key-wire-form allows declared" if !WZ_POLICY_KEY_WIRE_FORM_DECLARED
+	default y
+	help
+	  Whether `declared` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_KEY_WIRE_FORM_ALLOWS_SHARED
+	bool "key-wire-form allows shared" if !WZ_POLICY_KEY_WIRE_FORM_SHARED
+	default y
+	help
+	  Whether `shared` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_KEY_WIRE_FORM_ALLOWS_LITERAL
+	bool "key-wire-form allows literal" if !WZ_POLICY_KEY_WIRE_FORM_LITERAL
+	default y
+	help
+	  Whether `literal` stays selectable after the build; the chosen default always does.
 	  A target with no operating system keeps only the default unless this is set here.
 
 endmenu

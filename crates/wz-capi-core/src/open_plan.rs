@@ -252,6 +252,9 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, Op
             },
         },
         aggregation,
+        // A zenoh document states no key ids; an ABI that holds them hands them over itself.
+        #[cfg(feature = "shared-key-ids")]
+        key_ids: Default::default(),
     })
 }
 
@@ -1508,6 +1511,10 @@ impl OpenPlan {
                 groups,
                 session_defaults: self.session,
                 session_policy: self.session_policy,
+                // A plan reads a zenoh configuration document, which names no transport of the
+                // program's.
+                #[cfg(feature = "app-transport")]
+                app_transport: None,
             },
         }
     }

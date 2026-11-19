@@ -166,6 +166,9 @@ local-subscriber = []
 # The session machine compiles its accepting role only under `session-unicast-accept`, so the
 # feature asks the runtime for it: without that an acceptor would start on no event.
 listen = ["wz-runtime-coop/session-unicast-accept"]
+# A transport the program supplies: the session shell's links over the program's own network
+# stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
+app-transport = ["wz-runtime-coop/app-link"]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the
@@ -218,6 +221,11 @@ query = [
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
 ]
+# The key ids every node of a deployment shares (`CoopEngine::open_with_key_ids`): the session holds
+# the dictionary it is opened with, every link of it reads an id only the dictionary names, and a
+# key goes on the wire as the session's key-wire form says. Without it a session opened with a
+# form other than `declared` is refused.
+shared-key-ids = ["wz-session-core/shared-key-ids", "wz-capi-port/shared-key-ids"]
 
 [dev-dependencies]
 # The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end

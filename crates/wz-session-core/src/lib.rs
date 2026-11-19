@@ -225,6 +225,11 @@ pub mod key_allowance;
 #[cfg_attr(not(feature = "key-set-closed"), path = "key_gate_open.rs")]
 pub mod key_gate;
 
+// The key ids every node of a deployment shares (`shared-key-ids`), documented from inside for the
+// reason the closed key set's modules are.
+#[cfg(feature = "shared-key-ids")]
+pub mod shared_key_ids;
+
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
 /// interval between turns, and the pace a session's snapshot states through the
 /// `declaration-sync-pacing` policy. A value and not a clock, so the heap runtime and the slot
@@ -625,10 +630,16 @@ pub mod accept_state;
 /// and the `sha2` it hashes with is already a dependency of every build.
 pub mod credential_identity;
 
+/// What a handshake step does with a handshake message it does not await (the
+/// `handshake-stray-message` policy). Ungated: a pure judgement on values.
+pub mod handshake_stray;
 /// A session's own zid as a value that is one to sixteen bytes by construction.
 /// Ungated for the reason [`credential_identity`] is: it allocates nothing, and
 /// the fixed-memory profile keeps the same value in the session's storage.
 pub mod session_zid;
+/// The zid a node derives from its address and listener ports under the `zid-derivation`
+/// policy's `address-ports` value. Ungated: pure arithmetic on values, no allocation.
+pub mod zid_derivation;
 
 /// The rule an identity's two files are provisioned by (make both, keep both, refuse half), and
 /// the words a maker refuses with: shared by a declared node's `--make-identity` and the C
@@ -2173,7 +2184,9 @@ pub mod peer_connection {
     feature = "session-unicast",
     feature = "session-multicast",
     feature = "clock-quality",
-    feature = "supervision"
+    feature = "supervision",
+    feature = "e2e-supervision",
+    feature = "app-link"
 ))]
 pub mod duty_outbox;
 
@@ -2239,6 +2252,74 @@ pub mod supervision {
 // `event_ring`.
 #[cfg(feature = "supervision")]
 pub mod supervisor;
+
+/// SCE-generated stream activation statechart (reception supervision per stream: when a receiver
+/// judges whether its periodic streams keep arriving), from
+/// `sources/session/stream_activation.scxml`, COMMITTED at
+/// `out/wz-session-core/stream_activation_sm.rs` and `include!`-ed from there. Exposes
+/// `StreamActivationState` / `StreamActivationEvent`, the `StreamActivationActions` host trait and
+/// the `StreamActivationPolicy<A>` policy, one machine per stream supervisor. Engine-free and
+/// allocation-free; gated on `e2e-supervision`, which brings the SCE runtime in. The lint allows
+/// are restored as outer attributes, as for the other generated machines.
+#[cfg(feature = "e2e-supervision")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod stream_activation {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/stream_activation_sm.rs"
+    ));
+}
+
+// The reception supervisor: the streams a receiver watches, the deadline of each, and the
+// `stream_activation` machine that says when they are judged. Gated as the machine is.
+// Documented in its own `//!`; see the note at `event_ring`.
+#[cfg(feature = "e2e-supervision")]
+pub mod stream_supervisor;
+
+/// SCE-generated lifecycle of one link over a transport the program supplies, from
+/// `sources/session/app_link.scxml`, COMMITTED at `out/wz-session-core/app_link_sm.rs` and
+/// `include!`-ed from there. Exposes `AppLinkState` / `AppLinkEvent`, the `AppLinkActions` host
+/// trait and the `AppLinkPolicy<A>` policy, one machine per link, driven by [`app_link_table`].
+/// Engine-free and allocation-free; gated on `app-link`, which brings the SCE runtime in. The
+/// lint allows are restored as outer attributes, as for the other generated machines.
+#[cfg(feature = "app-link")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod app_link {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/app_link_sm.rs"
+    ));
+}
+
+// The links of one transport a program supplies, each an `app_link` machine with its queued bytes
+// and its waiters. Gated as the machine is. Documented in its own `//!`; see the note at
+// `event_ring`.
+#[cfg(feature = "app-link")]
+pub mod app_link_table;
+
+// A transport the program supplies as every engine reads it: the program's calls, the table
+// behind the lock the ABI gives it, and the calls the program makes into it. Gated as the table
+// is. Documented in its own `//!`; see the note at `event_ring`.
+#[cfg(feature = "app-link")]
+pub mod app_transport;
 
 /// The peers a node is told to hold, each with its [`peer_connection`]
 /// machine, in a table of fixed capacity (decision D5). Gated as the machine

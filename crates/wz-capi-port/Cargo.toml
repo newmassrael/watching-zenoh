@@ -52,6 +52,10 @@ clock-source = ["std", "dep:wz-node-time", "wz-node-time/clock-source"]
 event-ring = ["std", "dep:wz-node-time", "wz-node-time/event-ring"]
 supervision = ["std", "wz-session-core/supervision"]
 resource-snapshot = ["std", "wz-session-core/resource-snapshot"]
+# The key ids every node of a deployment shares (`SessionEngine::key_wire_by_form`): the engine
+# that holds a dictionary answers how a key goes on the wire under the session's key-wire form.
+# The dictionary and the rule are session-core's; an engine that holds none answers nothing.
+shared-key-ids = ["wz-session-core/shared-key-ids"]
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does

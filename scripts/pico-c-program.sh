@@ -26,12 +26,17 @@
 
 set -u
 
-if [ "$#" -ne 2 ]; then
-    echo "usage: $0 <source.c> <what the program shows>" >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo "usage: $0 <source.c> <what the program shows> [<wz-capi-pico features>]" >&2
     exit 2
 fi
 src="$1"
 what="$2"
+# The capabilities beyond the default build that the program's doors need (a comma list of
+# wz-capi-pico features); none for a program of the default build.
+features="${3:-}"
+# wz's extension header, for a program that uses a wz_ext_* door.
+ext_inc="$PWD/crates/wz-capi-core/include"
 os="${RUNNER_OS:-$(uname -s)}"
 # Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
 # shellcheck source=scripts/lib/artifact-root.sh
@@ -51,7 +56,12 @@ if [ ! -f "$src" ]; then
     exit 2
 fi
 
-if ! (cd crates && cargo build -p zenoh-pico-sys -p wz-capi-pico); then
+feature_args=()
+if [ -n "$features" ]; then
+    feature_args=(--features "wz-capi-pico/${features//,/,wz-capi-pico/}")
+fi
+# Expanded as `${a[@]+...}`: macOS's bash 3.2 reads an empty array as unbound under `set -u`.
+if ! (cd crates && cargo build -p zenoh-pico-sys -p wz-capi-pico ${feature_args[@]+"${feature_args[@]}"}); then
     say "pico-program-probe on ${os}: the pico headers and the cdylib did not build NOT-MEASURED"
     exit 1
 fi
@@ -73,11 +83,11 @@ compiler=none
 case "$os" in
     macOS)
         compiler=cc
-        cc -std=c11 -DZENOH_MACOS -I"$inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+        cc -std=c11 -DZENOH_MACOS -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
         ;;
     Linux)
         compiler=cc
-        cc -std=c11 -DZENOH_LINUX -I"$inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+        cc -std=c11 -DZENOH_LINUX -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
         ;;
     Windows)
         compiler=cl
@@ -88,8 +98,8 @@ case "$os" in
             printf '@echo off\r\n'
             printf 'call "%s\\VC\\Auxiliary\\Build\\vcvars64.bat" > nul\r\n' "$vsroot"
             printf 'cd /d "%s"\r\n' "$(cygpath -w "$temp")"
-            printf 'cl /nologo /std:c11 /DZENOH_WINDOWS /I"%s" "%s" "%s" /Fe:"%s"\r\n' \
-                "$(cygpath -w "$inc")" "$(cygpath -w "$PWD/$src")" \
+            printf 'cl /nologo /std:c11 /DZENOH_WINDOWS /I"%s" /I"%s" "%s" "%s" /Fe:"%s"\r\n' \
+                "$(cygpath -w "$inc")" "$(cygpath -w "$ext_inc")" "$(cygpath -w "$PWD/$src")" \
                 "$(cygpath -w "$lib_dir/wz_capi_pico.dll.lib")" "$(cygpath -w "$exe.exe")"
         } > "$bat"
         cmd.exe //c "$(cygpath -w "$bat")" && compiled=PASS

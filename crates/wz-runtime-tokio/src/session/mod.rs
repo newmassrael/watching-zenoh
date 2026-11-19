@@ -4300,6 +4300,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self.transport
     }
 
+    /// Install what this session's link knows of the key ids every node of the deployment shares
+    /// (`shared-key-ids`): the dictionary on the inbound registries, so an id the peer never
+    /// declared and the dictionary holds resolves, and the dictionary with the link's key-wire
+    /// form on the link's actions, so what is sent over it names its keys in that form. Called by
+    /// the engine that made the session, before its link carries anything.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn install_link_keys(&self, keys: wz_session_core::shared_key_ids::LinkKeys) {
+        if let Some(ids) = keys.shared_ids().cloned() {
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer.subscribers.set_shared_key_ids(ids);
+            });
+        }
+        self.actions().install_link_keys(keys);
+    }
+
     /// R3073 -- end the declarations this session just replayed to a NEW face with the
     /// `DeclareFinal` of the initial interest, when the peer hat does: upstream's peer acts as if
     /// a face it meets as a north-bound peer had asked for everything with an interest of id 0,
@@ -4889,6 +4904,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 obs.replies.set_shm_handoff_shared(shared.clone());
                 obs.queryables.set_shm_handoff_shared(shared);
             }
+            // The observer may serve more than this session, so the session states its own
+            // `query-unanswerable-final` value, from the snapshot it was handed, before each
+            // dispatch, as it states its negotiated SHM capability above.
+            #[cfg(feature = "query-queryable")]
+            obs.queryables
+                .set_unanswerable_final(self.actions().params.policy.query_unanswerable_final());
             // `declarations-synced-event` — the peer's `DeclareFinal` of the initial interest
             // turns the subscriber plane's flag on; read before and after, the dispatch that
             // turns it on is the one that tells the listeners, and one that finds it on already

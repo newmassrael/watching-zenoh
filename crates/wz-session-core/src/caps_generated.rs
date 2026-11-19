@@ -38,6 +38,7 @@ pub(super) const MAX_INBOUND_SUB_INTERESTS: usize =
     limit(option_env!("WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS"), 16);
 pub(super) const MAX_PEER_KEYEXPR_ALIASES: usize =
     limit(option_env!("WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"), 16);
+pub(super) const MAX_SHARED_KEY_IDS: usize = limit(option_env!("WZ_LIMIT_MAX_SHARED_KEY_IDS"), 256);
 pub(super) const MAX_REMOTE_DECLS: usize = limit(option_env!("WZ_LIMIT_MAX_REMOTE_DECLS"), 16);
 pub(super) const MAX_PENDING_REPLIES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_REPLIES"), 8);
 pub(super) const MAX_PENDING_FINALS: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_FINALS"), 8);
@@ -78,9 +79,14 @@ pub(super) const SNAPSHOT_HISTOGRAM_BUCKETS: usize =
     limit(option_env!("WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS"), 24);
 pub(super) const SUPERVISION_CHECKPOINTS: usize =
     limit(option_env!("WZ_LIMIT_SUPERVISION_CHECKPOINTS"), 4);
+pub(super) const E2E_SUPERVISED_STREAMS: usize =
+    limit(option_env!("WZ_LIMIT_E2E_SUPERVISED_STREAMS"), 32);
+pub(super) const APP_LINK_QUEUE_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_APP_LINK_QUEUE_BYTES"), 262144);
 pub(super) const EVENT_RING_SLOTS: usize = limit(option_env!("WZ_LIMIT_EVENT_RING_SLOTS"), 64);
 pub(super) const EVENT_RECORD_ARGS: usize = limit(option_env!("WZ_LIMIT_EVENT_RECORD_ARGS"), 4);
 pub(super) const CLOCK_SOURCES: usize = limit(option_env!("WZ_LIMIT_CLOCK_SOURCES"), 1);
+pub(super) const E2E_SENDER_SLOTS: usize = limit(option_env!("WZ_LIMIT_E2E_SENDER_SLOTS"), 8);
 pub(super) const CLOCK_MAX_FORWARD_STEP_MS: usize =
     limit(option_env!("WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS"), 500);
 pub(super) const DECLARATION_SYNC_BURST_MESSAGES: usize =
@@ -91,6 +97,18 @@ pub(super) const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = limit(
 );
 pub(super) const DECLARATION_SYNC_INTERVAL_MS: usize =
     limit(option_env!("WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS"), 10);
+pub(super) const DECLARATION_SYNC_RX_NO_PROGRESS_MS: usize = limit(
+    option_env!("WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS"),
+    0,
+);
+pub(super) const DECLARATION_SYNC_RETRY_INTERVAL_MS: usize = limit(
+    option_env!("WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS"),
+    0,
+);
+pub(super) const DECLARATION_SYNC_TX_NO_PROGRESS_MS: usize = limit(
+    option_env!("WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS"),
+    0,
+);
 pub(super) const PICO_UNICAST_BATCH_BYTES: usize =
     limit(option_env!("WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"), 2048);
 pub(super) const PICO_MULTICAST_BATCH_BYTES: usize =

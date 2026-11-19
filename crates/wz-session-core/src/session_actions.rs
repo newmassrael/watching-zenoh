@@ -755,6 +755,42 @@ const TX_CONDUITS: usize = 1;
 ))]
 const HANDSHAKE_LANE: Priority = Priority::Control;
 
+/// `SessionLinkActions::peer_sync_bits`: this node accepted the link.
+#[cfg(feature = "alloc")]
+const SYNC_ACCEPTED: u8 = 1;
+/// `SessionLinkActions::peer_sync_bits`: the peer began its initial declarations.
+#[cfg(feature = "alloc")]
+const SYNC_BEGUN: u8 = 2;
+/// `SessionLinkActions::peer_sync_bits`: a quiet window settled the sync as empty.
+#[cfg(feature = "alloc")]
+const SYNC_QUIET: u8 = 4;
+
+/// The longest establishment answer a session holds for `handshake-stray-message =
+/// ignore-and-replay`: an InitAck with the widest cookie this node issues and room for its
+/// extension chain, or an OpenSyn echoing a cookie of that width. An answer longer than this is
+/// not held, and the step it answers is then not replayed (`HandshakeStrayNotReplayed`).
+pub const HELD_ANSWER_MAX: usize = 256 + crate::session_init_params::COOKIE_MAX;
+
+/// One held establishment answer.
+#[cfg(all(
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+type HeldAnswer = crate::bounded::BoundedVec<u8, HELD_ANSWER_MAX>;
+
+/// How many establishment answers a session holds: one where the build's domain of
+/// `handshake-stray-message` allows `ignore-and-replay`, and none where it leaves it out, so a
+/// build that fixes the policy (an image with no operating system states only the default) holds
+/// no byte for it.
+pub const HELD_ANSWER_SLOTS: usize =
+    if <crate::policy::HandshakeStrayMessage as crate::policy_binding::PolicyValue>::DOMAIN
+        .contains_index(crate::policy::HandshakeStrayMessage::IgnoreAndReplay as usize)
+    {
+        1
+    } else {
+        0
+    };
+
 /// R2923 / R2924 — the outbound queue configuration and its upstream
 /// defaults live with the per-session parameters that carry them
 /// ([`crate::session_init_params::TxQueueConf`]).
@@ -1549,6 +1585,17 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// session had already delivered. Set by the OpenSyn send, read by the
     /// admission predicate, cleared by the admission it grants.
     pub awaiting_open_ack: R::Mutex<bool>,
+    /// The last answer this session sent in its establishment (the acceptor's InitAck, the
+    /// initiator's OpenSyn), as the bytes that went out, for `handshake-stray-message =
+    /// ignore-and-replay` to send again when the peer repeats the step it answers. The bytes and
+    /// not the parameters, because the acceptor lets go of what it negotiated once its cookie
+    /// carries it: an InitAck encoded again would carry another cookie. No slot at all in a build
+    /// whose domain of the policy leaves the value out ([`HELD_ANSWER_SLOTS`]).
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    held_answer: [R::Mutex<HeldAnswer>; HELD_ANSWER_SLOTS],
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
     /// every field that needs a `now_monotonic_ms()` read holds a
@@ -1936,6 +1983,20 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`SessionLinkActions::note_declare_finals_in`], cleared by
     /// [`SessionLinkActions::reset_for_reopen`] with the gate itself.
     peer_declarations_final: core::sync::atomic::AtomicBool,
+    /// When the peer's last declaration arrived on this session, for the no-progress watch of its
+    /// initial declarations (`DECLARATION_SYNC_RX_NO_PROGRESS_MS`): `0` while it has sent none,
+    /// and `u64::MAX` while no engine has noted the session's inbound events
+    /// ([`SessionLinkActions::note_declare_finals_in`]), so an engine that cannot see the peer's
+    /// final never runs a watch that only the final could end. Reset with the flag above.
+    #[cfg(feature = "alloc")]
+    peer_declaration_progress_ms: core::sync::atomic::AtomicU64,
+    /// The facts `until-declarations-synced-when-begun` reads of this link's sync, as bits:
+    /// [`SYNC_ACCEPTED`] this node answered the link's InitSyn (it accepted the link, where a
+    /// dialled one sent it), [`SYNC_BEGUN`] the peer sent a declaration of its initial interest,
+    /// [`SYNC_QUIET`] a quiet window passed on an accepted link whose peer began none, which
+    /// settles the sync as one with nothing in it. Reset with the flag above.
+    #[cfg(feature = "alloc")]
+    peer_sync_bits: core::sync::atomic::AtomicU8,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
@@ -1971,6 +2032,15 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// access pattern.
     #[cfg(feature = "alloc")]
     pub outbound_mappings: R::Mutex<HashMap<crate::wire_id::ExprId, String>>,
+    /// What this link knows of the key ids every node of the deployment shares
+    /// (`shared-key-ids`), installed by the engine that opened the link
+    /// ([`Self::install_link_keys`]): the dictionary, the link's key-wire form and the key form of
+    /// the queries it is answering. An id the dictionary holds names its key in this node's space
+    /// as well as the peer's, so [`Self::resolve_outbound_mapping`] answers it when no
+    /// declaration of ours does, and a declaration or a message this node sends by such an id
+    /// needs no `DeclareKeyExpr` first.
+    #[cfg(feature = "shared-key-ids")]
+    link_keys: R::Mutex<crate::shared_key_ids::LinkKeys>,
     /// The egress admission of a REPLY: the §5.16 verdict the session that owns this bundle
     /// installs when it holds an egress policy, asked of every `Response`, and of every
     /// `Declare` that answers a peer's Interest, before it is sent.
@@ -3261,6 +3331,15 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     // [`Self::send_response`].
     #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        // A reply whose key mirrors its query's form (`shared-key-ids`) is not a literal the
+        // writer from parts can describe: it goes as an owned reply does, which names it.
+        #[cfg(feature = "shared-key-ids")]
+        if self.reply_is_mirrored(parts.rid, parts.keyexpr) {
+            if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
+                self.send_response(response);
+            }
+            return;
+        }
         #[cfg(feature = "alloc")]
         let writer = match crate::lent_response::ResponseWriter::new(parts) {
             Ok(writer) if self.reply_can_be_written_from_parts() => writer,
@@ -3778,6 +3857,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 inbound_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
                 awaiting_open_ack: R::new_mutex(false),
+                #[cfg(all(
+                    any(feature = "codec-init-body", feature = "codec-open-body"),
+                    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                ))]
+                held_answer: core::array::from_fn(|_| R::new_mutex(HeldAnswer::default())),
                 clock: clock,
                 inbound_peer_zid: R::new_mutex(None::<SessionZid>),
                 remote_peer_zid: R::new_mutex(None::<SessionZid>),
@@ -3837,9 +3921,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "alloc")]
+                peer_declaration_progress_ms: core::sync::atomic::AtomicU64::new(u64::MAX),
+                #[cfg(feature = "alloc")]
+                peer_sync_bits: core::sync::atomic::AtomicU8::new(0),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
+                #[cfg(feature = "shared-key-ids")]
+                // Upstream's form until the engine that opened the link says otherwise.
+                link_keys: R::new_mutex(crate::shared_key_ids::LinkKeys::new(
+                    None,
+                    crate::policy::KeyWireForm::Declared,
+                )),
                 #[cfg(all(
                     feature = "alloc",
                     any(
@@ -5659,6 +5753,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             )
         });
         self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+            let start = buf.len();
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 crate::handshake_encode::encode_init_into(
                     buf,
@@ -5668,7 +5763,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     chain,
                     cookie_override,
                 )
-            })
+            })?;
+            // The acceptor's InitAck is the answer a replay sends again, as written.
+            if role == ExtChainRole::InitAck {
+                self.hold_handshake_answer(&buf.as_slice()[start..]);
+            }
+            Ok(())
         })
     }
 
@@ -5714,6 +5814,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         let want = head_len + chain_len;
         self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+            let start = buf.len();
             if echo_inbound_cookie {
                 R::with_mutex_mut(&self.inbound_cookie, |cookie| {
                     encode_open_head_into(
@@ -5730,7 +5831,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 crate::ext_chain::encode_ext_chain_into(buf, chain)
-            })
+            })?;
+            // The initiator's OpenSyn is the answer a replay sends again, as written.
+            if role == ExtChainRole::OpenSyn {
+                self.hold_handshake_answer(&buf.as_slice()[start..]);
+            }
+            Ok(())
         })
     }
 
@@ -9188,6 +9294,93 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.awaiting_open_ack, |s| *s)
     }
 
+    /// Hold `bytes`, the establishment answer this session just sent, for a replay
+    /// ([`Self::resend_held_answer`]). Nothing is held in a build whose domain leaves
+    /// `ignore-and-replay` out, nor for a session that runs under another value; an answer
+    /// past [`HELD_ANSWER_MAX`] leaves the hold empty.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn hold_handshake_answer(&self, bytes: &[u8]) {
+        if !matches!(
+            self.params.policy.handshake_stray_message(),
+            crate::policy::HandshakeStrayMessage::IgnoreAndReplay
+        ) {
+            return;
+        }
+        for slot in &self.held_answer {
+            R::with_mutex_mut(slot, |held| {
+                held.clear();
+                if bytes.len() > HELD_ANSWER_MAX || held.extend_from_slice(bytes).is_err() {
+                    held.clear();
+                }
+            });
+        }
+    }
+
+    /// Let go of the held answer: the establishment it belongs to is over.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn release_handshake_answer(&self) {
+        for slot in &self.held_answer {
+            R::with_mutex_mut(slot, |held| held.clear());
+        }
+    }
+
+    /// The bytes of the held establishment answer, if one is held: what a replay sends.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    pub fn held_answer_len(&self) -> usize {
+        self.held_answer
+            .iter()
+            .map(|slot| R::with_mutex_mut(slot, |held| held.len()))
+            .sum()
+    }
+
+    /// Send the held establishment answer again, the very bytes that went out: `false` when
+    /// none is held (the build holds none, the answer was too long to hold, or the link took no
+    /// slot for it). The bytes are copied out of the hold before the send, which takes locks of
+    /// its own.
+    #[cfg(all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    pub(crate) fn resend_held_answer(&self) -> bool {
+        // A constant of the build: where the domain holds no slot, nothing below is reached.
+        if HELD_ANSWER_SLOTS == 0 {
+            return false;
+        }
+        let Some(slot) = self.held_answer.first() else {
+            return false;
+        };
+        let mut copy = [0u8; HELD_ANSWER_MAX];
+        let len = R::with_mutex_mut(slot, |held| {
+            let len = held.len().min(HELD_ANSWER_MAX);
+            copy[..len].copy_from_slice(&held[..len]);
+            len
+        });
+        if len == 0 {
+            return false;
+        }
+        #[cfg(not(feature = "tx-lend-only"))]
+        {
+            self.send_wire(&copy[..len], Reliability::Reliable, HANDSHAKE_LANE);
+            true
+        }
+        #[cfg(feature = "tx-lend-only")]
+        {
+            self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
+                buf.append(&copy[..len])
+            })
+            .is_ok()
+        }
+    }
+
     /// R2782 — everything an ADMITTED OpenAck does to the initiator: stop
     /// awaiting one, then take the acceptor's `initial_sn` and lease. The
     /// mirror of [`Self::admit_open_syn`], and applied for the same reason:
@@ -9284,6 +9477,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (a parameter, a destructuring, a returned tuple) is one more such slot in
     /// the frame of the dispatch that inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
+        // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
+        // session belongs to an establishment that is over: it records no handshake fact and is
+        // no sign of the peer's life, so it neither overwrites what the session negotiated nor
+        // keeps a silent peer's lease alive. The dispatch drops it after this.
+        #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+        if crate::drive::handshake_message_of(frame).is_some()
+            && crate::handshake_stray::established_drops_silently(
+                self.params.policy.handshake_stray_message(),
+            )
+            && self.is_established()
+        {
+            return;
+        }
         match frame {
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
@@ -13993,6 +14199,110 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.outbound_mappings, |table| {
             table.get(&mapping_id).cloned()
         })
+        .or_else(|| self.shared_key_literal(mapping_id))
+    }
+
+    /// Hand this link what it knows of the key ids every node of the deployment shares: the
+    /// dictionary, when there is one, and the link's key-wire form. An id the dictionary holds is
+    /// then one this node may name a key by with no declaration of its own, and the node
+    /// declares no key expression under it (the engine allocates its ids past the dictionary's).
+    /// Installed before the link carries anything; a second install replaces the first and
+    /// forgets the queries the first kept.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn install_link_keys(&self, keys: crate::shared_key_ids::LinkKeys) {
+        R::with_mutex_mut(&self.link_keys, |held| *held = keys);
+    }
+
+    /// How this link names `keyexpr` to its peer, by its key-wire form: as the caller would
+    /// without the key ids ([`KeyWire::Declared`](crate::shared_key_ids::KeyWire::Declared)), as
+    /// the literal, or by an id of the dictionary. A peer that announced itself a router is told
+    /// the declared form under `shared`.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn key_wire_on_link<'k>(&self, keyexpr: &'k str) -> crate::shared_key_ids::KeyWire<'k> {
+        let to_router = self.peer_whatami_wire() == Some(0);
+        R::with_mutex_mut(&self.link_keys, |keys| keys.key_wire(keyexpr, to_router))
+    }
+
+    /// Keep the key form of each query of `event` that arrived by an id of the dictionary, so a
+    /// reply on its key mirrors it (`try_send_response`). The heap profile's owned
+    /// frames: a record read where its frame lies has no allocator to keep it with.
+    #[cfg(all(feature = "shared-key-ids", feature = "codec-request"))]
+    pub fn note_requests(&self, event: &crate::driver_loop::IterationEvent<'_, '_>) {
+        let crate::driver_loop::IterationEvent::Poll(
+            crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. },
+        ) = event
+        else {
+            return;
+        };
+        let from_router = self.peer_whatami_wire() == Some(0);
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            for message in messages {
+                if let crate::network_message::NetworkMessage::Request(request) = message {
+                    let body = &request.keyexpr.body;
+                    let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(body);
+                    let sender_mapping = matches!(
+                        body,
+                        wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(_)
+                    );
+                    keys.note_request(request.rid, id, suffix, sender_mapping, from_router);
+                }
+            }
+        });
+    }
+
+    /// `response` with its key as the link's key ids say a reply names it: the request's id and
+    /// rest with the mapping bit turned, when it answers a query kept by `note_requests`
+    /// on the key that query named; unchanged otherwise.
+    #[cfg(all(feature = "shared-key-ids", feature = "codec-response"))]
+    fn mirror_reply_key(&self, mut response: ResponseOwned) -> ResponseOwned {
+        let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(&response.keyexpr.body);
+        let (0, Some(reply)) = (id, suffix) else {
+            return response;
+        };
+        let mirrored = R::with_mutex_mut(&self.link_keys, |keys| {
+            match keys.reply_key(response.request_id, reply) {
+                crate::shared_key_ids::ReplyKey::Mirrored {
+                    id,
+                    suffix,
+                    sender_mapping,
+                } => Some((id, suffix.map(String::from), sender_mapping)),
+                crate::shared_key_ids::ReplyKey::Literal => None,
+            }
+        });
+        if let Some((id, suffix, sender_mapping)) = mirrored {
+            // A key the codec cannot hold as an id and a rest still goes as the literal it is.
+            let _ = crate::response_build::set_response_keyexpr_aliased(
+                &mut response,
+                id,
+                suffix.as_deref(),
+                sender_mapping,
+            );
+        }
+        response
+    }
+
+    /// Whether a reply on `keyexpr` to the request `rid` names its key otherwise than as the
+    /// literal, which the writer of a reply from its parts cannot do.
+    #[cfg(all(feature = "shared-key-ids", feature = "codec-response"))]
+    fn reply_is_mirrored(&self, rid: crate::wire_id::RequestId, keyexpr: &str) -> bool {
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            keys.reply_key(rid, keyexpr) != crate::shared_key_ids::ReplyKey::Literal
+        })
+    }
+
+    /// The key the installed dictionary names `id`, when one is installed and holds it.
+    #[cfg(feature = "shared-key-ids")]
+    fn shared_key_literal(&self, id: crate::wire_id::ExprId) -> Option<String> {
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            keys.ids().and_then(|ids| ids.key_of(id)).map(String::from)
+        })
+    }
+
+    /// A build without the shared key ids has no dictionary to answer from.
+    #[cfg(all(feature = "alloc", not(feature = "shared-key-ids")))]
+    #[inline(always)]
+    fn shared_key_literal(&self, _id: crate::wire_id::ExprId) -> Option<String> {
+        None
     }
 
     /// R283 — `true` once the session-FSM has entered the `Established`
@@ -15052,6 +15362,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "codec-response-final"))]
         let _ = (request_id, qos);
+        // The query is ended: no reply follows, and its key form is not kept.
+        #[cfg(feature = "shared-key-ids")]
+        R::with_mutex_mut(&self.link_keys, |keys| keys.forget_request(request_id));
     }
 
     /// R121j-5c-e2e — encode + dispatch an already-constructed
@@ -15105,6 +15418,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // policy governs the keyexpr a user knows). A denied reply is consumed, as a denied put
         // is: the handler replied and nothing was sent.
         match self.reply_egress_verdict(response) {
+            // A reply to a query kept by its key form names its key as the query did
+            // (`shared-key-ids`); the policy above judged it by its literal.
+            #[cfg(feature = "shared-key-ids")]
+            Some(response) => self.send_response_admitted(self.mirror_reply_key(response)),
+            #[cfg(not(feature = "shared-key-ids"))]
             Some(response) => self.send_response_admitted(response),
             None => Ok(()),
         }
@@ -15695,6 +16013,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // one left standing would admit a stray OpenAck into the new
             // handshake.
             R::with_mutex_mut(&self.awaiting_open_ack, |slot| *slot = false);
+            #[cfg(all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ))]
+            self.release_handshake_answer();
             R::with_mutex_mut(&self.link.last_inbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.link.established_at, |slot| *slot = None);
             // The liveness duties belong to the transport that was
@@ -15748,6 +16071,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The next peer has sent none of its initial declarations yet.
             self.peer_declarations_final
                 .store(false, core::sync::atomic::Ordering::Release);
+            #[cfg(feature = "alloc")]
+            self.peer_declaration_progress_ms
+                .store(u64::MAX, core::sync::atomic::Ordering::Release);
+            #[cfg(feature = "alloc")]
+            self.peer_sync_bits
+                .store(0, core::sync::atomic::Ordering::Release);
             // §5.21 routing-namespace — the per-session INGRESS correlation is
             // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
             // declaration tables + a RESTARTED id space, so a stale blocked-id
@@ -15832,6 +16161,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311g1 — signature-stability: a no-op without `codec-declare` and `alloc`, and without
     /// `session-reconnect` the interest bookkeeping is skipped.
     pub fn note_declare_finals_in(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
+        #[cfg(feature = "alloc")]
+        self.note_declaration_progress(event);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         crate::declaration_sync::finals_in_event(event, |interest_id| {
             #[cfg(feature = "session-reconnect")]
@@ -15844,6 +16175,137 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         #[cfg(not(all(feature = "alloc", feature = "codec-declare")))]
         let _ = event;
+    }
+
+    /// The progress of the peer's declaration sync that `event` shows: a declaration from the peer
+    /// restarts the no-progress watch, and the first event an engine notes arms it, since the
+    /// engine that notes events is the one that notes the peer's final too.
+    #[cfg(feature = "alloc")]
+    fn note_declaration_progress(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
+        use core::sync::atomic::Ordering;
+        #[cfg(feature = "codec-declare")]
+        let progress = crate::declaration_sync::declaration_progress_in(event);
+        #[cfg(not(feature = "codec-declare"))]
+        let progress = {
+            let _ = event;
+            crate::declaration_sync::DeclarationProgress::default()
+        };
+        if progress.initial_scope {
+            self.peer_sync_bits.fetch_or(SYNC_BEGUN, Ordering::AcqRel);
+        }
+        if progress.declared {
+            self.peer_declaration_progress_ms
+                .store(self.clock.now_monotonic_ms(), Ordering::Release);
+        } else {
+            let _ = self.peer_declaration_progress_ms.compare_exchange(
+                u64::MAX,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+
+    /// When the no-progress watch of the peer's initial declarations ends this session's link
+    /// ([`crate::declaration_sync::stall_deadline`]), on the clock of the lease: a
+    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stretch after the later of the establishment and the
+    /// peer's last declaration, while `reliable-gap-reconnect` reacts and the peer's final has not
+    /// arrived. `None` before the establishment, while no engine notes the session's events, and
+    /// whenever the watch is off.
+    #[cfg(feature = "alloc")]
+    pub fn declaration_watch_deadline(&self) -> Option<u64> {
+        self.declaration_watch_deadline_for(crate::caps::DECLARATION_SYNC_RX_NO_PROGRESS_MS as u64)
+    }
+
+    /// [`Self::declaration_watch_deadline`] for a window of `window_ms`, the form a test names
+    /// a window to where the build fixes one.
+    #[cfg(feature = "alloc")]
+    pub fn declaration_watch_deadline_for(&self, window_ms: u64) -> Option<u64> {
+        let progress = self
+            .peer_declaration_progress_ms
+            .load(core::sync::atomic::Ordering::Acquire);
+        if progress == u64::MAX {
+            return None;
+        }
+        let established = R::with_mutex_mut(&self.link.established_at, |slot| *slot)?;
+        crate::declaration_sync::stall_deadline(
+            self.params.policy.reliable_gap_reconnect(),
+            self.peer_declarations_settled(),
+            established.max(progress),
+            window_ms,
+        )
+    }
+
+    /// What the no-progress window that just ran out means for this link's sync
+    /// ([`crate::declaration_sync::watch_expiry`]): the link is lost, or (an accepted link under
+    /// `until-declarations-synced-when-begun` whose peer began nothing) the sync is settled as
+    /// empty, which this records so the watch and the gap rule stop.
+    #[cfg(feature = "alloc")]
+    pub fn expire_declaration_watch(&self) -> crate::declaration_sync::WatchExpiry {
+        use core::sync::atomic::Ordering;
+        let bits = self.peer_sync_bits.load(Ordering::Acquire);
+        let expiry = crate::declaration_sync::watch_expiry(
+            self.params.policy.reliable_gap_reconnect(),
+            bits & SYNC_ACCEPTED != 0,
+            bits & SYNC_BEGUN != 0,
+        );
+        if expiry == crate::declaration_sync::WatchExpiry::EndsSync {
+            self.peer_sync_bits.fetch_or(SYNC_QUIET, Ordering::AcqRel);
+        }
+        expiry
+    }
+
+    /// Say which side of the link this node is, from the establishment message it sends: `true`
+    /// when it answers the InitSyn (it accepted the link), `false` when it sends one (it dialled).
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn note_link_role(&self, accepted: bool) {
+        use core::sync::atomic::Ordering;
+        if accepted {
+            self.peer_sync_bits
+                .fetch_or(SYNC_ACCEPTED, Ordering::AcqRel);
+        } else {
+            self.peer_sync_bits
+                .fetch_and(!SYNC_ACCEPTED, Ordering::AcqRel);
+        }
+    }
+
+    /// Whether this node accepted the link, as the establishment it ran says
+    /// ([`Self::note_link_role`]); `false` for a dialled link and before an establishment.
+    #[cfg(feature = "alloc")]
+    pub fn link_accepted(&self) -> bool {
+        self.peer_sync_bits
+            .load(core::sync::atomic::Ordering::Acquire)
+            & SYNC_ACCEPTED
+            != 0
+    }
+
+    /// Whether the peer has sent a declaration of its initial interest on this session.
+    #[cfg(feature = "alloc")]
+    pub fn peer_declarations_begun(&self) -> bool {
+        self.peer_sync_bits
+            .load(core::sync::atomic::Ordering::Acquire)
+            & SYNC_BEGUN
+            != 0
+    }
+
+    /// Whether the peer's initial declarations are settled: their end arrived, or a quiet window
+    /// settled an accepted link's sync as empty ([`Self::expire_declaration_watch`]). What the
+    /// `reliable-gap-reconnect` policy and the no-progress watch wait for.
+    pub fn peer_declarations_settled(&self) -> bool {
+        #[cfg(feature = "alloc")]
+        if self
+            .peer_sync_bits
+            .load(core::sync::atomic::Ordering::Acquire)
+            & SYNC_QUIET
+            != 0
+        {
+            return true;
+        }
+        self.peer_declarations_final_seen()
     }
 
     /// The peer's `Declare(DeclFinal)` for `interest_id` arrived: the node stops waiting for it.
@@ -16331,6 +16793,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_init_syn += 1);
+            // This node dialled the link.
+            #[cfg(feature = "alloc")]
+            a.note_link_role(false);
             // R3b — initiator usrpwd offer (Unit) staged into the InitSyn chain.
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitSyn, |d| d.open_init_syn());
@@ -16468,6 +16933,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         "OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)",
                     );
                 a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                a.hold_handshake_answer(&bytes);
             }
             // Fixed-memory step S4 — the peer's cookie is echoed from the slot
             // that holds it, read where it lies, and the message is written into
@@ -16496,6 +16962,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_init_ack_with_cookie += 1);
+            // This node accepted the link.
+            #[cfg(feature = "alloc")]
+            a.note_link_role(true);
             // R3b — responder usrpwd challenge (Z64 nonce) staged into the
             // InitAck chain.
             // R2779 — each method's challenge is drawn HERE, one per method,
@@ -16645,6 +17114,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                          accept_cookie::the_widest_cookie_fits_the_generated_field",
                     );
                 a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                a.hold_handshake_answer(&bytes);
                 cookie_bytes.is_some()
             };
             // Fixed-memory step S4 — the same InitAck with no heap in it: the
@@ -16815,6 +17285,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         let now = a.clock.now_monotonic_ms();
         // R311y205 (IMPL-2a) — the established stamp + F2 gate are per-link.
         R::with_mutex_mut(&self.link().established_at, |slot| *slot = Some(now));
+        // The establishment is over, so no step of it is answered again.
+        #[cfg(all(
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ))]
+        a.release_handshake_answer();
         // F2 — Established (re-)entry re-opens the data-send gate (the
         // supervisor replays cached declarations right after this fires).
         R::with_mutex_mut(&self.link().transport_available, |g| *g = true);

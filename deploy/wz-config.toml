@@ -42,7 +42,10 @@
 # capability is exported (core is the model under both ABIs and always has it). `default` is
 # whether a build that names nothing has it: on unless declared `default = "off"`, so the drop-in
 # exports what the reference build does, and `off` is for a switch the reference library itself
-# leaves off. zenoh-pico's own switches for a capability are the `maps` rows to it under the
+# leaves off. `default_off_abis` names the ABIs whose build that names nothing leaves an otherwise
+# default-on capability off: one plane, one switch, exported by several ABIs whose drop-ins did not
+# all export it before. The generated Kconfig states the pico ABI's default, as an image built from
+# it is a pico node, and each crate's Cargo `default` states its own ABI's. zenoh-pico's own switches for a capability are the `maps` rows to it under the
 # upstream switches below, so a deployer who already writes a pico `config.h` can state the same
 # intent: the capability is on when one of them is on, or when all are where it says
 # `pico_combine = "all"`. `pico_flags_all` is for a capability no row reaches but which pico has
@@ -1241,11 +1244,43 @@ help = "The public-key handshake, from the RSA identity of transport/auth/pubkey
 [[capability]]
 id = "e2e-sender"
 kconfig = "WZ_CAP_E2E_SENDER"
+# On in the zenoh-c ABI's default build, which has exported these doors since they were added and
+# which a participant that sends protected messages links as it is. Off in the pico ABI's: its
+# default is zenoh-pico's own surface, and its doors are wz_ext_* of the unstable surface, as its
+# other wz-own doors are; the zenoh-c ABI has no unstable capability, so that edge reaches pico
+# alone.
+default_off_abis = ["pico"]
 os_needs = []
-upstream_off = ["zenoh", "zenoh-c"]
-abis = ["core", "c"]
-implies = []
-help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it."
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
+abis = ["core", "pico", "c"]
+implies = ["unstable-api"]
+help = "The sending side of an end-to-end protected message: a frame built under a profile with the counter kept per stream (wz_capi_c_e2e_sender_*, wz_ext_e2e_sender_*, wz-own doors) and the frame writer behind it."
+
+[[capability]]
+id = "e2e-receiver"
+kconfig = "WZ_CAP_E2E_RECEIVER"
+# Off by default: neither zenoh-pico nor zenoh-c has such doors. The receiving judge of end-to-end
+# protected frames, kept per stream in storage the program sizes, with the judging rules the
+# profile states, and a status beside every sample, whose payload is always handed on.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "The receiving judge of end-to-end protected frames: per-stream state, the judging rules a profile states, and a status per sample (wz_ext_e2e_receiver_*, wz-own doors)."
+
+[[capability]]
+id = "e2e-sender-demux"
+kconfig = "WZ_CAP_E2E_SENDER_DEMUX"
+# Off by default: a receiver whose message has one sender, or keeps its streams by instance, does
+# not need it. On, a receiver keeps one judge per sender, chosen by the sender identity of the
+# frame's header, in at most E2E_SENDER_SLOTS slots bound by a list or taken in arrival order.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["e2e-receiver"]
+help = "Judging state per sender for the receiving judge, keyed by a header field, in slots bound by a list or taken in arrival order (E2E_SENDER_SLOTS)."
 
 [[capability]]
 id = "config-verdict"
@@ -1300,6 +1335,54 @@ upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
 help = "The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors)."
+
+# Reception supervision per stream: a receiver gives each periodic stream a deadline of its period
+# times a factor, and is told once when a stream stops arriving, with saturating error counts per
+# stream and per node. Judged only after a start delay and while a condition the application
+# supplies holds; a sender the application marks absent is not judged. Off by default: neither
+# zenoh-c nor zenoh-pico has such doors. The pico ABI's doors are wz_ext_* and part of its unstable
+# surface; the model is wz-session-core's `stream_supervisor`. How many streams one supervisor holds
+# is the `E2E_SUPERVISED_STREAMS` limit, and whether a loss carries the stream's last payload is the
+# `e2e-supervision-notify` policy.
+[[capability]]
+id = "e2e-supervision"
+kconfig = "WZ_CAP_E2E_SUPERVISION"
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors)."
+
+[[capability]]
+id = "app-transport"
+kconfig = "WZ_CAP_APP_TRANSPORT"
+# Off by default: zenoh-pico opens its links on the system's sockets, and so does a build made as it
+# is. A program whose network stack is its own turns it on and hands each config the transport its
+# session opens every link on. It asks nothing of the operating system: the program's stack carries
+# the links. The pico ABI's doors are wz_ext_* and part of its unstable surface; the model threads
+# the transport to each dial and listen of a session.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors)."
+
+[[capability]]
+id = "shared-key-ids"
+kconfig = "WZ_CAP_SHARED_KEY_IDS"
+# Off by default: a node that names a key by an id it never declared cannot be read by a stock
+# peer, which has no such dictionary, so a build has the dictionary and the forms of the
+# key-wire-form policy that use it only when a deployment asks for them. The pico ABI's doors are
+# wz_ext_* and part of its unstable surface, as its other wz-own doors are; both engines hold the
+# dictionary and name each link's keys in that link's form.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (wz_ext_config_key_ids, wz_ext_config_key_wire_form_for, wz-own doors), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
 
 [[capability]]
 id = "rx-callback-offload"
@@ -2136,6 +2219,24 @@ that names it is dropped, as one naming an undeclared id is.
 '''
 
 [[limit]]
+id = "MAX_SHARED_KEY_IDS"
+kconfig = "WZ_LIMIT_MAX_SHARED_KEY_IDS"
+default = 256
+# A quota of the heap profile: the dictionary is handed to the open and held on the heap, and an
+# image with no allocator has none yet.
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+# `wire` is none: the limit refuses a dictionary at the open, before any byte is sent.
+wire = "none"
+help = '''
+The entries of the key-id dictionary every node of a deployment shares
+(shared-key-ids) that one session may be given. A dictionary of more is
+refused when it is handed over, and no session holds it.
+'''
+
+[[limit]]
 id = "MAX_REMOTE_DECLS"
 kconfig = "WZ_LIMIT_MAX_REMOTE_DECLS"
 default = 16
@@ -2549,6 +2650,42 @@ supervised has been fed in time. At least 1 and at most 64.
 '''
 
 [[limit]]
+id = "E2E_SUPERVISED_STREAMS"
+kconfig = "WZ_LIMIT_E2E_SUPERVISED_STREAMS"
+default = 32
+storage = "quota"
+scope = "runtime"
+binding_heap = "open"
+binding_fixed = "open"
+wire = "none"
+help = '''
+How many periodic streams one reception supervisor holds. The table of streams
+is storage the application gives the supervisor when it makes it, one fixed row
+per stream, so this bounds how many rows of it are used and sizes nothing; a
+stream added past it is refused. At least 1.
+'''
+
+[[limit]]
+id = "APP_LINK_QUEUE_BYTES"
+kconfig = "WZ_LIMIT_APP_LINK_QUEUE_BYTES"
+default = 262144
+storage = "quota"
+scope = "link"
+binding_heap = "open"
+binding_fixed = "none"
+# `wire` is timing: past the bound the program's bytes are refused and handed in again once the
+# session has read the queue down, so a peer receives the same bytes later.
+wire = "timing"
+help = '''
+The most bytes one link of a transport the program supplies queues in either
+direction: what the program handed in and the session has not read, and what a
+session that cannot wait handed over and the program has not taken. Past it the
+program's bytes are refused with nothing taken, and the program is told when the
+session has read the queue down to half. Read only by a build with the
+app-transport capability.
+'''
+
+[[limit]]
 id = "EVENT_RING_SLOTS"
 kconfig = "WZ_LIMIT_EVENT_RING_SLOTS"
 default = 64
@@ -2595,6 +2732,25 @@ the clock-source capability is on. A node reads its time from the registered
 sources in the order they were registered, and the first that can say what time
 it is answers; with none registered it reads the system clock. 0 registers
 none, which leaves the system clock as the only source.
+'''
+
+[[limit]]
+id = "E2E_SENDER_SLOTS"
+kconfig = "WZ_LIMIT_E2E_SENDER_SLOTS"
+default = 8
+storage = "both"
+# One receiving judge of the e2e-sender-demux capability: the program sizes its slots when it makes
+# the judge, at most this many, and a frame of one sender more is not judged and is counted.
+scope = "entity"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How many senders one receiving judge of end-to-end protected frames keeps a
+counter for, when the e2e-sender-demux capability is on. Each slot is one
+sender, bound by a list or taken by the first intact frame of a sender in
+arrival order; a frame of a sender no slot holds is not judged and is counted.
+At least 1.
 '''
 
 [[limit]]
@@ -2662,6 +2818,63 @@ How long, in milliseconds, a paced declaration replay waits between two of its
 turns, when the declaration-sync-pacing policy is on. The session keeps being
 served during the wait. It is read only when that policy is on, and must be at
 least 1.
+'''
+
+[[limit]]
+id = "DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
+help = '''
+How long, in milliseconds, a session waits for the next of its peer's initial
+declarations before it takes the declaration sync as cut short, when the
+reliable-gap-reconnect policy is not off. From the session's establishment
+until the peer's end of its initial declarations, a stretch this long with no
+declaration from the peer ends the link as lost, and a reconnecting session
+opens again and redoes the sync, as for a gap on the reliable channel. Each
+declaration the peer sends starts the stretch again. 0 keeps no such watch, as
+upstream keeps none. Only the tokio engine reads it, since only it notes the
+end of the peer's declarations.
+'''
+
+[[limit]]
+id = "DECLARATION_SYNC_RETRY_INTERVAL_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "timing"
+help = '''
+How long, in milliseconds, a paced declaration replay waits before it tries
+again a turn the link did not take for want of room, when the
+declaration-sync-pacing policy is on. The wait is its own and not
+DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
+link refused. 0 tries nothing again: a refused turn ends the replay and the
+link, and a reconnecting session replays again on the next one, as before this
+limit. Only the tokio engine reads it.
+'''
+
+[[limit]]
+id = "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
+help = '''
+How long, in milliseconds, a paced declaration replay that retries refused
+turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
+sent before it gives up, which ends the link as a refused turn does without
+retries. Each declaration sent starts the stretch again. 0 gives up only when
+the link itself ends. Only the tokio engine reads it.
 '''
 
 # The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
@@ -2947,7 +3160,7 @@ not refused. Only the tokio engine reads this policy.
 id = "reliable-gap-reconnect"
 kind = "choice"
 kconfig = "WZ_POLICY_RELIABLE_GAP_RECONNECT"
-choices = ["off", "until-declarations-synced", "always"]
+choices = ["off", "until-declarations-synced", "always", "until-declarations-synced-when-begun"]
 default = "off"
 upstream = "Accepts a forward jump of the reliable channel's sequence number without a word: the frames in between are lost, the session stays open and nothing is repaired, so a peer's declaration lost that way is never noticed."
 scope = "session"
@@ -2969,7 +3182,12 @@ advance the number is dropped as before, and the best-effort channels are not
 affected. Only the tokio engine reconnects, so another engine ends the link and
 leaves it to the application, and only the tokio engine reports the end of the
 peer's declarations, so for another engine `until-declarations-synced` is
-`always`.
+`always`. `until-declarations-synced-when-begun` is `until-declarations-synced`
+on a link this node dialled; on a link it accepted, a peer that lets
+DECLARATION_SYNC_RX_NO_PROGRESS_MS pass without sending any declaration of its
+initial interest is taken to have none to send, which settles the sync, while a
+peer that began them is held to their end as under `until-declarations-synced`.
+With that limit at 0 nothing settles an accepted link early.
 '''
 
 [[policy]]
@@ -3226,6 +3444,27 @@ per expiry either way.
 '''
 
 [[policy]]
+id = "e2e-supervision-notify"
+kind = "choice"
+kconfig = "WZ_POLICY_E2E_SUPERVISION_NOTIFY"
+choices = ["status-only", "last-value"]
+default = "status-only"
+upstream = "Supervises no stream's reception: a periodic message that stops arriving is not noticed by the library, so there is no loss to tell and no value to tell it with."
+scope = "runtime"
+binding = "open"
+mutability = "fixed"
+wire = "none"
+since = 2
+help = '''
+What a reception supervisor tells the application when a stream stops
+arriving. `status-only` tells the stream, its sender and the error counts, and
+keeps no payload. `last-value` also hands back the payload the stream last
+carried, which the supervisor keeps in a cell of the application's storage per
+stream, for an application that delivers a value with every loss as it does
+with every sample. Decided when the supervisor is made, and fixed for its life.
+'''
+
+[[policy]]
 id = "event-ring-full"
 kind = "choice"
 kconfig = "WZ_POLICY_EVENT_RING_FULL"
@@ -3374,6 +3613,124 @@ so both ends of a link must state the same value: a peer that keeps one link by
 the other order closes the link this node kept, and neither link survives.
 '''
 
+[[policy]]
+id = "query-unanswerable-final"
+kind = "choice"
+kconfig = "WZ_POLICY_QUERY_UNANSWERABLE_FINAL"
+choices = ["none", "empty-final"]
+default = "none"
+upstream = "Drops a query from a peer whose key it cannot resolve (an id the peer never declared to it) before the query reaches any queryable, and sends nothing back, so the asker waits out its own timeout."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `empty-final` sends a RESPONSE_FINAL the peer reads.
+wire = "visible"
+since = 2
+help = '''
+How a node answers a query from a peer that it cannot run at all because the
+query's key names an id the peer never declared to this node. `none` sends
+nothing, as upstream does, and the asker's query ends only at its own timeout.
+`empty-final` answers it at once with a RESPONSE_FINAL and no reply, the answer
+a query that matched no queryable gets, so the asker learns now that nothing
+will come. A query whose parameters or attachment are longer than the build
+allows is answered with that final under either value, and a query that
+arrives while the node has no room left to hold another final is refused and
+counted under either value, since the final it would owe has nowhere to wait.
+'''
+
+[[policy]]
+id = "zid-derivation"
+kind = "choice"
+kconfig = "WZ_POLICY_ZID_DERIVATION"
+choices = ["random", "address-ports"]
+default = "random"
+upstream = "Draws every byte of a zid the configuration does not state from its random source."
+scope = "runtime"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: the zid is what every INIT and every routing message names the node by.
+wire = "visible"
+since = 2
+help = '''
+How a node makes its zid when the configuration states none. `random` draws all
+sixteen bytes, as upstream does. `address-ports` derives the first eight from
+where the node is reachable and draws the other eight: bytes 0 to 3 are the
+IPv4 address of the first listen endpoint that binds an address of the node,
+bytes 4 and 5 the lowest port of its tcp listeners and bytes 6 and 7 the lowest
+port of its udp listeners, each little-endian and 0 for a node with no listener
+of that protocol. A wildcard, multicast or broadcast address names no node, and
+a node whose listeners name no address of its own is refused at open rather
+than given a random zid. A zid the configuration states is used under either
+value. Only the C ABIs' open reads this policy.
+'''
+
+[[policy]]
+id = "handshake-stray-message"
+kind = "choice"
+kconfig = "WZ_POLICY_HANDSHAKE_STRAY_MESSAGE"
+choices = ["fail", "ignore", "ignore-and-replay"]
+default = "fail"
+upstream = "Ends a unicast establishment, closing the link with INVALID, on any message but the one its current step reads next, and drops an Init or Open that reaches an established session while counting it as traffic for the lease."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `fail` sends a Close(INVALID) where `ignore` sends nothing.
+wire = "visible"
+since = 2
+help = '''
+What a unicast establishment does with an Init or an Open that is not the
+message its current step awaits: an InitAck repeated after the OpenSyn went out,
+an InitSyn repeated after the InitAck went out, or any other out of its step.
+`fail` ends the attempt and closes the link with INVALID, as upstream does.
+`ignore` drops the message before anything is taken from it and the step goes
+on waiting, under the deadline it already had: nothing a peer sends extends an
+establishment. Under `ignore` an Init or Open that reaches an established
+session is dropped as well, and is not counted as a sign of the peer's life for
+the lease, nor does it change anything the session negotiated.
+`ignore-and-replay` is `ignore`, and in addition a peer that repeats the step
+this node last answered (an InitSyn after the InitAck went out, an InitAck
+after the OpenSyn went out) is sent that answer again, the very bytes first
+sent, so its cookie is the one already issued. A build whose domain allows this
+value holds one answer per establishment in flight, released when the
+establishment ends; an answer longer than the hold is not sent again.
+'''
+
+[[policy]]
+id = "key-wire-form"
+kind = "choice"
+kconfig = "WZ_POLICY_KEY_WIRE_FORM"
+choices = ["declared", "shared", "literal"]
+default = "declared"
+upstream = "Names a key on the wire by the id of a key expression it declared to that peer first, or by the whole key; a peer reads an id only when it was declared to it, and refuses one it never was."
+scope = "link"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `shared` sends ids a peer without the same dictionary cannot read.
+wire = "visible"
+since = 2
+help = '''
+How a node names a key on the wire to the peer of a link. `declared` is
+upstream's: the id of a key expression the node declared to that peer, or the
+whole key. `literal` sends the whole key every time and declares nothing for
+it. `shared` uses the key-id dictionary every node of the deployment holds
+(the shared-key-ids capability): the key's own id when the dictionary holds
+it, the id of the longest entry that ends at one of its slashes followed by
+the rest of the key, or the whole key, whichever takes the fewest bytes, with
+no declaration first; a key with a wildcard goes by an id only when the
+dictionary holds that exact pattern, a peer that announced itself a router is
+sent the declared form, and a reply on the key of a query that came by an id
+of the dictionary names it by that id and rest, its mapping bit turned. A peer
+that does not hold the same dictionary cannot read what `shared` sends, so both
+ends of the link must hold it. Every node that holds the dictionary reads an id
+only the dictionary names, whatever its own value. The value is the session's,
+and an endpoint the configuration dials or listens on may be stated a value of
+its own (wz_ext_config_key_wire_form_for), which every link to or from that
+endpoint takes. A session opened with `shared`, for itself or an endpoint, and
+no dictionary is refused, and so is one whose value is not `declared` in a build
+without the capability. Interests and liveliness interests name their keys as
+under `declared`.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -3412,12 +3769,17 @@ subscriber-overload = "block"
 key-set = "open"
 sn-resolution = "bits-32"
 supervision-after-expiry = "latch"
+e2e-supervision-notify = "status-only"
 event-ring-full = "overwrite-oldest"
 clock-quality-stamping = "always"
 routing-face-drive = "task-per-face"
 routing-table-sharing = "rwlock"
 reassembly-pool-overflow = "reject"
 link-tie-order = "zid-number"
+query-unanswerable-final = "none"
+zid-derivation = "random"
+handshake-stray-message = "fail"
+key-wire-form = "declared"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

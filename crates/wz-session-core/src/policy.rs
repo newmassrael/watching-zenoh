@@ -297,12 +297,17 @@ mod tests {
             KeySet::HELD,
             SnResolution::HELD,
             SupervisionAfterExpiry::HELD,
+            E2eSupervisionNotify::HELD,
             EventRingFull::HELD,
             ClockQualityStamping::HELD,
             RoutingFaceDrive::HELD,
             RoutingTableSharing::HELD,
             ReassemblyPoolOverflow::HELD,
             LinkTieOrder::HELD,
+            QueryUnanswerableFinal::HELD,
+            ZidDerivation::HELD,
+            HandshakeStrayMessage::HELD,
+            KeyWireForm::HELD,
         ];
         assert_eq!(
             core::mem::size_of::<SessionPolicy>(),

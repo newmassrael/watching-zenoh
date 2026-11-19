@@ -391,6 +391,17 @@ transport-link-unixpipe,transport-link-ws|"
     # half behind `peer` too). The doors have no unit tests of their own, so the file is the
     # feature's whole population.
     "wz-capi-pico|hook|segment-sender,peer|--test=segment_sender_doors"
+    # Reception supervision per stream driven from C (`wz_ext_stream_supervisor_*`): the unit
+    # tests of the module and the file that drives the doors on a model clock, its task half with
+    # the default `multi-thread` (`stream_supervision_doors`, whose module is behind the feature).
+    "wz-capi-pico|hook|e2e-supervision|"
+    # End-to-end protection driven from C (`wz_ext_e2e_sender_*`, `wz_ext_e2e_receiver_*`): the
+    # file that round-trips frames through both doors and refuses what they cannot do
+    # (`e2e_doors`, whose module needs both capabilities). With the receiver's sender slots, where
+    # the slot tests run; and without them, where the file asserts that sender keying is refused
+    # by name. The doors have no unit tests of their own; the mechanism's are `wz-app-frame`'s.
+    "wz-capi-pico|hook|e2e-sender,e2e-sender-demux|--test=e2e_doors"
+    "wz-capi-pico|hook|e2e-sender,e2e-receiver|--test=e2e_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
@@ -638,6 +649,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         deferred-fire,\
         dissect,\
         dissect-serde,\
+        e2e-supervision,\
         ext-pubsub-group-membership,\
         ext-pubsub-serde-codec,\
         keyexpr-prefix,\

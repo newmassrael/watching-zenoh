@@ -230,6 +230,12 @@ impl DeclaredKeyexpr {
         &self,
         shared: &Engine,
     ) -> Option<wz_session_core::wire_id::ExprId> {
+        // A session whose links name keys their own way (`crate::key_ids`) is sent a put the
+        // general way, which each link names as its form says: no id goes to every link at once.
+        #[cfg(feature = "shared-key-ids")]
+        if shared.names_keys_by_link() {
+            return None;
+        }
         self.declared_on(shared)
             .filter(|d| d.prefix_len == self.literal.len())
             .map(|d| d.id)

@@ -15,6 +15,7 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:sce="http://sce.dev/ext"
        version="1.0" sce:kind="feature-model" name="wz-session-core">
   <sce:feature name="alloc" requires="storage-profile"/>
+  <sce:feature name="app-link" requires="alloc"/>
   <sce:feature name="attachment-bytes"/>
   <sce:feature name="bounded-heapless"/>
   <sce:feature name="clock-quality"/>
@@ -46,6 +47,7 @@
   <sce:feature name="deferred-fire" requires="alloc"/>
   <sce:feature name="dissect" requires="alloc codec-close codec-declare codec-fragment codec-frame codec-init-body codec-join codec-keep-alive codec-open-body codec-push codec-request codec-response codec-response-final"/>
   <sce:feature name="dissect-serde" requires="dissect"/>
+  <sce:feature name="e2e-supervision"/>
   <sce:feature name="ext-pubsub-group-membership" requires="alloc wire-bincode"/>
   <sce:feature name="ext-pubsub-serde-codec" requires="alloc"/>
   <sce:feature name="initial-sn-compact"/>
@@ -108,6 +110,7 @@
   <sce:feature name="session-unicast"/>
   <sce:feature name="session-unicast-accept" requires="rx-control rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
+  <sce:feature name="shared-key-ids" requires="alloc"/>
   <sce:feature name="storage-profile"/>
   <sce:feature name="supervision"/>
   <sce:feature name="switchboard" requires="codec-push"/>

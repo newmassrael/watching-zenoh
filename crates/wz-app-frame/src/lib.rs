@@ -32,6 +32,8 @@
 //! | `e2e_judge` | the receiver's judgment of one stream of frames: CRC, counter and timeout | always |
 //! | `e2e_profile` | the profile of an end-to-end protection header, read from a JSON document | `alloc` |
 //! | `e2e_frame` | building and opening a protected frame under a profile | `alloc` |
+//! | `e2e_stream_sender` | the sender of one message: a counter per stream, and a CRC cache for an unchanged payload | `alloc` |
+//! | `e2e_receiver` | the receiving judge of one message: a judge per stream or per sender, the profile's rules, a verdict per frame | `alloc` |
 //! | `segment_profile` | the profile of the header in front of each piece of a split message | `alloc` |
 //! | `segment_sender` | the writer of those pieces: one message cut under a segment profile | `alloc` |
 //!
@@ -53,6 +55,15 @@ pub mod e2e_judge;
 pub mod e2e_frame;
 #[cfg(feature = "alloc")]
 pub mod e2e_profile;
+#[cfg(feature = "alloc")]
+pub mod e2e_receiver;
+#[cfg(feature = "alloc")]
+pub mod e2e_stream_sender;
+
+// The model tests of the profile's judging rules, the receiver and the sender, on
+// synthetic profiles.
+#[cfg(all(test, feature = "alloc"))]
+mod e2e_rules_tests;
 #[cfg(feature = "alloc")]
 pub mod segment_profile;
 #[cfg(feature = "alloc")]

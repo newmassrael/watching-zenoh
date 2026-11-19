@@ -103,6 +103,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-capi-coop/src/engine.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-core/src/open_plan.rs", "resolve_policy", "creator: the snapshot the document's wz member resolved, else the build defaults"),
     ("crates/wz-capi-pico/src/session.rs", "resolve_policy", "creator: the snapshot a config's document and its doors resolve over the build defaults"),
+    ("crates/wz-capi-pico/src/stream_supervision.rs", "resolve_policy", "creator: a reception supervisor the program makes with no session resolves its snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-port/src/observation/supervision.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-mcu-multicast-e2e/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-mcu-session-acceptor/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),

@@ -441,6 +441,439 @@ void wz_ext_internal_segment_sender_null(wz_ext_owned_segment_sender_t *this_);
 bool wz_ext_internal_segment_sender_check(
     const wz_ext_owned_segment_sender_t *this_);
 
+/* Reception supervision per stream: whether each periodic stream a program
+ * receives keeps arriving. Part of the unstable surface, and present only in a
+ * build with the e2e-supervision capability.
+ *
+ * A stream is one message, of one instance, from one sender. The program adds
+ * each with its period and a factor, and its deadline is their product: a
+ * stream not received for longer than that is LOST. A loss is told once to the
+ * program's callback (an edge, not a level), and the stream's error count and
+ * the node's each go up by one, stopping at 255.
+ *
+ * WHEN ANYTHING IS JUDGED. Nothing is judged until start_delay_ms has passed
+ * since the first poll that had a clock, and then only while the program's
+ * condition holds (wz_ext_stream_supervisor_set_condition; it holds until the
+ * program says otherwise). Each time the two come to hold together, every
+ * stream that can time out has its deadline counted again from that poll and
+ * every error count is reset to 0, so a stream that never arrived is lost one
+ * deadline after the activation. An awaited stream can time out from the
+ * start; one that is not is supervised from its first reception. A poll
+ * without a clock judges nothing and the next poll with one activates again.
+ *
+ * ABSENT SENDERS. A sender the program marks absent has none of its streams
+ * judged, and a loss one was in is withdrawn without being told, until it is
+ * marked present again, which counts their deadlines from that moment. The
+ * sender is a number of the program's own, given with each stream.
+ *
+ * STORAGE. The table is the program's: an array of wz_ext_stream_slot_t, one
+ * per stream, and under the build's e2e-supervision-notify policy last-value a
+ * byte area of one cell per slot, where the last payload of each stream is
+ * kept for the loss to hand back. The supervisor writes both when it is made
+ * and owns them until it is dropped. How many streams one supervisor holds is
+ * at most the build's E2E_SUPERVISED_STREAMS.
+ *
+ * TIME is milliseconds in 32 bits that wrap: the program's clock, given at
+ * creation, or the library's monotonic clock when it gives none.
+ *
+ * THE POLL is the program's to call on its own cadence, which is how a
+ * single-threaded program and the cooperative engine drive it; a build with
+ * tasks can have the library poll on a task of its own.
+ *
+ * THREADS. One supervisor may be called from several threads, each door under
+ * its lock. The clock and the callback run inside that lock on the thread that
+ * polls, so neither may call a door of its own supervisor. */
+
+/* One row of the program's table, owned by the supervisor while it lives. */
+typedef struct wz_ext_stream_slot_t {
+  uint32_t _opaque[5];
+} wz_ext_stream_slot_t;
+
+/* The program's clock: writes the milliseconds of a monotonic source and
+ * returns 0, or returns anything else when it cannot say what time it is. */
+typedef int8_t wz_ext_stream_clock_fn(void *context, uint32_t *now_ms);
+
+/* One loss, as the callback reads it: 32 bytes on a 64-bit target, 24 on a
+ * 32-bit one. It and the value it points to are valid only for the call. */
+typedef struct wz_ext_stream_loss_t {
+  uint32_t stream;      /* the number wz_ext_stream_supervisor_add gave it */
+  uint32_t sender;      /* the sender it was added with */
+  uint8_t errors;       /* the stream's error count, this loss included */
+  uint8_t node_errors;  /* the node's error count, this loss included */
+  uint16_t reserved;
+  uint32_t reserved2;
+  const uint8_t *value; /* under last-value the stream's last payload; NULL
+                           under status-only or when none was kept */
+  size_t value_len;
+} wz_ext_stream_loss_t;
+
+typedef void wz_ext_stream_loss_fn(void *context,
+                                   const wz_ext_stream_loss_t *loss);
+
+/* Where the two gates stand. */
+#define WZ_EXT_STREAM_UNCLOCKED 0 /* no poll has had a clock */
+#define WZ_EXT_STREAM_DELAYING 1  /* the start delay runs */
+#define WZ_EXT_STREAM_INACTIVE 2  /* the condition does not hold */
+#define WZ_EXT_STREAM_ACTIVE 3    /* every poll judges the streams */
+#define WZ_EXT_STREAM_NO_SUPERVISOR 255
+
+/* What a loss carries: the build's e2e-supervision-notify policy. */
+#define WZ_EXT_STREAM_NOTIFY_STATUS_ONLY 0
+#define WZ_EXT_STREAM_NOTIFY_LAST_VALUE 1
+
+typedef struct wz_ext_owned_stream_supervisor_t {
+  void *_handle;
+} wz_ext_owned_stream_supervisor_t;
+typedef struct wz_ext_loaned_stream_supervisor_t {
+  void *_handle;
+} wz_ext_loaned_stream_supervisor_t;
+typedef struct wz_ext_moved_stream_supervisor_t {
+  wz_ext_owned_stream_supervisor_t _this;
+} wz_ext_moved_stream_supervisor_t;
+
+/* A supervisor of no stream yet over slot_count rows at slots and, under
+ * last-value, slot_count cells of value_cell bytes at values (not read under
+ * status-only, where it may be NULL). clock may be NULL. this_ holds the null
+ * state on every error.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_ or slots, or a NULL values under
+ * last-value; Z_ERR_INVALID for a slot_count of 0 or past 2^32 - 1, a start
+ * delay past 2147483647, or under last-value a value_cell of 0. */
+z_result_t wz_ext_stream_supervisor_new(
+    wz_ext_owned_stream_supervisor_t *this_, wz_ext_stream_slot_t *slots,
+    size_t slot_count, uint8_t *values, size_t value_cell,
+    uint32_t start_delay_ms, wz_ext_stream_clock_fn *clock,
+    void *clock_context);
+
+/* Supervise a stream of period_ms that may miss factor periods, from sender,
+ * and write its number to out_stream (which may be NULL). An awaited stream can
+ * time out before its first reception. A stream of a sender marked absent is
+ * absent with it.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL or dropped supervisor; Z_ERR_INVALID for a
+ * period or factor of 0, or a deadline past 2147483646 ms; Z_ERR_OVERFLOW when
+ * the table is full. */
+z_result_t wz_ext_stream_supervisor_add(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t period_ms,
+    uint16_t factor, uint32_t sender, bool awaited, uint32_t *out_stream);
+
+/* The stream was received now, carrying payload (NULL with 0 for none), which
+ * is kept under last-value. A loss it was in is over.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL or dropped supervisor, or a NULL payload with a
+ * length; Z_ERR_INVALID for a stream there is none of; Z_ERR_OVERFLOW under
+ * last-value for a payload longer than the cell: the reception counts, the
+ * value is not kept. */
+z_result_t wz_ext_stream_supervisor_received(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t stream,
+    const uint8_t *payload, size_t len);
+
+/* Whether the program's condition holds. Z_OK; Z_ERR_NULL for a NULL or
+ * dropped supervisor. */
+z_result_t wz_ext_stream_supervisor_set_condition(
+    const wz_ext_loaned_stream_supervisor_t *this_, bool holds);
+
+/* Mark a sender present or absent. The error counts are left as they are.
+ * Z_OK, also when it already was; Z_ERR_NULL for a NULL or dropped supervisor;
+ * Z_ERR_INVALID when no stream was added with that sender. */
+z_result_t wz_ext_stream_supervisor_set_sender_present(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t sender,
+    bool present);
+
+/* Set the callback, or clear it with NULL; a loss is counted either way. The
+ * callback must be safe to call from the thread that polls, and context must
+ * stay valid, for as long as it is set. Z_OK; Z_ERR_NULL for a NULL or dropped
+ * supervisor. */
+z_result_t wz_ext_stream_supervisor_set_callback(
+    const wz_ext_loaned_stream_supervisor_t *this_, wz_ext_stream_loss_fn *call,
+    void *context);
+
+/* Look at every stream now and tell the callback once for each newly lost;
+ * out_told (which may be NULL) receives how many. Z_OK; Z_ERR_NULL for a NULL
+ * or dropped supervisor. */
+z_result_t wz_ext_stream_supervisor_poll(
+    const wz_ext_loaned_stream_supervisor_t *this_, size_t *out_told);
+
+/* The stream's error count. Z_OK; Z_ERR_NULL for a NULL or dropped supervisor
+ * or a NULL out; Z_ERR_INVALID for a stream there is none of. */
+z_result_t wz_ext_stream_supervisor_stream_errors(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t stream,
+    uint8_t *out);
+
+/* The node's error count since the last activation; 0 for a NULL supervisor. */
+uint8_t wz_ext_stream_supervisor_node_errors(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+
+/* One of WZ_EXT_STREAM_UNCLOCKED, _DELAYING, _INACTIVE, _ACTIVE, or
+ * WZ_EXT_STREAM_NO_SUPERVISOR. */
+uint8_t wz_ext_stream_supervisor_phase(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+
+/* WZ_EXT_STREAM_NOTIFY_STATUS_ONLY or _LAST_VALUE, or
+ * WZ_EXT_STREAM_NO_SUPERVISOR. */
+uint8_t wz_ext_stream_supervisor_notify(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+
+/* The library polls every period_ms on a task of its own until stopped or
+ * dropped; the callback then runs on that task. Z_OK; Z_ERR_NULL for a NULL or
+ * dropped supervisor; Z_ERR_INVALID for a period of 0 or a task already
+ * running; Z_ERR_GENERIC when the host gave no thread. Stopping waits for the
+ * task, and is refused with Z_ERR_GENERIC from the task itself. Declared in the
+ * multi-threaded arm only, as the tasks of the drop-in are. */
+#if defined(Z_FEATURE_MULTI_THREAD) && Z_FEATURE_MULTI_THREAD == 1
+z_result_t wz_ext_stream_supervisor_start_task(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t period_ms);
+z_result_t wz_ext_stream_supervisor_stop_task(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+#endif
+
+const wz_ext_loaned_stream_supervisor_t *wz_ext_stream_supervisor_loan(
+    const wz_ext_owned_stream_supervisor_t *this_);
+wz_ext_moved_stream_supervisor_t *wz_ext_stream_supervisor_move(
+    wz_ext_owned_stream_supervisor_t *this_);
+/* Stops the task first; the storage is the program's again once it returns.
+ * Not from the callback or the clock. */
+void wz_ext_stream_supervisor_drop(wz_ext_moved_stream_supervisor_t *this_);
+void wz_ext_internal_stream_supervisor_null(
+    wz_ext_owned_stream_supervisor_t *this_);
+bool wz_ext_internal_stream_supervisor_check(
+    const wz_ext_owned_stream_supervisor_t *this_);
+
+/* End-to-end protection of the program's payload: a header in front of it
+ * that lets a receiver judge whether the frame is the one its sender built
+ * (a CRC, an identifier, a length) and whether it is the next one (a
+ * counter). The header is described by a PROFILE the program hands over as
+ * JSON text, with the rules a receiver judges by; the library holds no
+ * deployment's layout or constants. Part of the unstable surface.
+ *
+ * THE SENDER (e2e-sender capability) protects a payload under the profile and
+ * the program's header values, which are fixed when it is made: every field
+ * but the CRC, the length and the counter, in the values text the profile
+ * describes, and "@address" for the fields and parts the profile derives from
+ * the node's address. It keeps a counter for each stream it sends on (the
+ * instances of one message); a frame that is built carries the stream's next
+ * value, a refused one consumes none. With crc_cache a stream keeps its last
+ * frame, and protecting an unchanged payload again gives the same bytes
+ * without the full CRC computation.
+ *
+ * THE RECEIVER (e2e-receiver capability) judges each frame it is handed in the
+ * state it keeps per stream, in storage it allocates once when it is made, and
+ * writes a verdict; the payload is reported whatever the verdict, and whether
+ * a sample reaches the application is the program's choice. Its streams are
+ * named by the program (one per message or instance), or, with the
+ * e2e-sender-demux capability, kept one per sender, chosen by the sender
+ * identity of the profile's message cell: slots taken in arrival order by
+ * intact frames, or bound to a list of senders. A frame of a sender no slot
+ * holds is judged in no stream and counted.
+ *
+ * OWNERSHIP AND THREADS. As for the segment sender: owned from *_new until
+ * *_drop, which leaves the null state; the doors take the loan; a refusal
+ * string is the program's to drop. One handle may be called from several
+ * threads. */
+
+typedef uint8_t wz_ext_e2e_rollover_t;
+#define WZ_EXT_E2E_ROLLOVER_REFUSE 0 /* refuse a stream's next frame */
+#define WZ_EXT_E2E_ROLLOVER_WRAP 1   /* count on from zero */
+
+typedef struct wz_ext_owned_e2e_sender_t {
+  void *_handle;
+} wz_ext_owned_e2e_sender_t;
+typedef struct wz_ext_loaned_e2e_sender_t {
+  void *_handle;
+} wz_ext_loaned_e2e_sender_t;
+typedef struct wz_ext_moved_e2e_sender_t {
+  wz_ext_owned_e2e_sender_t _this;
+} wz_ext_moved_e2e_sender_t;
+
+typedef struct wz_ext_e2e_sender_options_t {
+  uint64_t first_counter; /* the first frame of every stream carries it */
+  size_t streams;         /* how many streams, at least 1 */
+  wz_ext_e2e_rollover_t rollover; /* WZ_EXT_E2E_ROLLOVER_* */
+  bool crc_cache;         /* keep each stream's last frame */
+} wz_ext_e2e_sender_options_t;
+
+/* One stream, a first counter of 0, refuse after the largest, no cache. */
+void wz_ext_e2e_sender_options_default(wz_ext_e2e_sender_options_t *this_);
+
+/* A sender for profile_json with the fixed header values values_json, made as
+ * options says (NULL: the defaults). this_ holds the null state on every
+ * error; refusal may be NULL and, on _Z_ERR_CONFIG_INVALID_VALUE (-89), holds
+ * the reason, beginning "profile" or "values" and naming the place.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_, profile_json or values_json; Z_EINVAL
+ * (-75) for text that is not UTF-8 or an unknown rollover;
+ * _Z_ERR_CONFIG_INVALID_VALUE for a profile, values text or option refused (no
+ * stream, a first counter the counter field cannot hold, values that state
+ * the counter or leave a field out). */
+z_result_t wz_ext_e2e_sender_new(wz_ext_owned_e2e_sender_t *this_,
+                                 const char *profile_json,
+                                 const char *values_json,
+                                 const wz_ext_e2e_sender_options_t *options,
+                                 z_owned_string_t *refusal);
+
+/* The size of the frame that protects payload_len bytes. Z_OK; Z_ERR_NULL. */
+z_result_t wz_ext_e2e_sender_frame_size(
+    const wz_ext_loaned_e2e_sender_t *this_, size_t payload_len, size_t *out);
+
+/* Protect payload on stream: the frame written to out (room for capacity
+ * bytes), its length to written, the counter it carries to counter (may be
+ * NULL). Z_OK; Z_ERR_OVERFLOW (-74) when capacity is less than the frame;
+ * Z_EINVAL (-75) when the frame is refused (no such stream, the stream sent its
+ * largest value and does not wrap, a payload longer than the length field
+ * describes), refusal saying why; Z_ERR_NULL for a NULL sender, out or
+ * written, or a NULL payload with a length. Anything but Z_OK writes nothing
+ * to out and consumes no counter value. */
+z_result_t wz_ext_e2e_sender_protect(const wz_ext_loaned_e2e_sender_t *this_,
+                                     size_t stream, const uint8_t *payload,
+                                     size_t len, uint8_t *out, size_t capacity,
+                                     size_t *written, uint64_t *counter,
+                                     z_owned_string_t *refusal);
+
+/* The counter the stream's next frame carries; false when the stream is spent,
+ * for no such stream, or a NULL argument. */
+bool wz_ext_e2e_sender_next(const wz_ext_loaned_e2e_sender_t *this_,
+                            size_t stream, uint64_t *out);
+
+/* Make value the stream's next counter. Z_OK; Z_EINVAL for a value the counter
+ * field cannot hold or no such stream; Z_ERR_NULL. */
+z_result_t wz_ext_e2e_sender_set(const wz_ext_loaned_e2e_sender_t *this_,
+                                 size_t stream, uint64_t value);
+
+const wz_ext_loaned_e2e_sender_t *wz_ext_e2e_sender_loan(
+    const wz_ext_owned_e2e_sender_t *this_);
+wz_ext_moved_e2e_sender_t *wz_ext_e2e_sender_move(
+    wz_ext_owned_e2e_sender_t *this_);
+void wz_ext_e2e_sender_drop(wz_ext_moved_e2e_sender_t *this_);
+void wz_ext_internal_e2e_sender_null(wz_ext_owned_e2e_sender_t *this_);
+bool wz_ext_internal_e2e_sender_check(const wz_ext_owned_e2e_sender_t *this_);
+
+/* How a receiver's streams are chosen. */
+#define WZ_EXT_E2E_KEYING_INDEXED 0         /* the program names the stream */
+#define WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL 1 /* a slot per sender, in arrival
+                                               order (e2e-sender-demux) */
+#define WZ_EXT_E2E_KEYING_SENDERS_BOUND 2   /* a slot per listed sender
+                                               (e2e-sender-demux) */
+
+/* What a verdict's status says. */
+#define WZ_EXT_E2E_OK 0            /* intact, and the next frame */
+#define WZ_EXT_E2E_FIRST 1         /* intact, and the stream's baseline */
+#define WZ_EXT_E2E_REPEATED 2      /* intact, the same counter again */
+#define WZ_EXT_E2E_OUT_OF_RANGE 3  /* intact, a step above the largest gap */
+#define WZ_EXT_E2E_COUNTER_ERROR 4 /* either of the two, under a profile that
+                                      reports them as one */
+#define WZ_EXT_E2E_INTEGRITY 5     /* not intact: failed says which check */
+#define WZ_EXT_E2E_UNSLOTTED 6     /* of a sender no slot holds */
+
+/* The bits of failed. */
+#define WZ_EXT_E2E_FAILED_CRC 1
+#define WZ_EXT_E2E_FAILED_IDENT 2  /* the identifier is not the expected one */
+#define WZ_EXT_E2E_FAILED_LENGTH 4 /* the length field disagrees with the
+                                      frame */
+#define WZ_EXT_E2E_FAILED_SHORT 8  /* shorter than the header */
+
+/* The values of unslotted. */
+#define WZ_EXT_E2E_SLOTTED 0
+#define WZ_EXT_E2E_NOT_LISTED 1 /* the bound list does not name the sender */
+#define WZ_EXT_E2E_SLOTS_FULL 2 /* every slot is another sender's */
+
+/* The bits of has: which numbers of a verdict hold a value (0 otherwise). */
+#define WZ_EXT_E2E_HAS_COUNTER 1
+#define WZ_EXT_E2E_HAS_STEP 2
+#define WZ_EXT_E2E_HAS_KIND 4
+#define WZ_EXT_E2E_HAS_RESULT 8
+#define WZ_EXT_E2E_HAS_SENDER 16
+#define WZ_EXT_E2E_HAS_STREAM 32
+#define WZ_EXT_E2E_HAS_SILENCE 64
+
+typedef struct wz_ext_owned_e2e_receiver_t {
+  void *_handle;
+} wz_ext_owned_e2e_receiver_t;
+typedef struct wz_ext_loaned_e2e_receiver_t {
+  void *_handle;
+} wz_ext_loaned_e2e_receiver_t;
+typedef struct wz_ext_moved_e2e_receiver_t {
+  wz_ext_owned_e2e_receiver_t _this;
+} wz_ext_moved_e2e_receiver_t;
+
+typedef struct wz_ext_e2e_receiver_options_t {
+  uint64_t max_gap;       /* the largest gap, at most the profile's ceiling;
+                             0 for the profile's own */
+  const uint64_t *senders; /* the bound list, BORROWED for the call */
+  size_t senders_len;
+  size_t streams;         /* streams, or sender slots, at least 1 */
+  uint8_t keying;         /* WZ_EXT_E2E_KEYING_* */
+} wz_ext_e2e_receiver_options_t;
+
+/* One stream named by the program, the profile's gap. */
+void wz_ext_e2e_receiver_options_default(wz_ext_e2e_receiver_options_t *this_);
+
+/* The verdict on one frame. The payload is frame + payload_offset, for
+ * payload_len bytes, whatever the status. */
+typedef struct wz_ext_e2e_verdict_t {
+  uint8_t status;    /* WZ_EXT_E2E_OK ... _UNSLOTTED */
+  uint8_t failed;    /* WZ_EXT_E2E_FAILED_* bits */
+  uint8_t has;       /* WZ_EXT_E2E_HAS_* bits */
+  uint8_t timeout;   /* 1 when the silence before it exceeded the profile's
+                        timeout */
+  uint8_t unslotted; /* WZ_EXT_E2E_SLOTTED, _NOT_LISTED or _SLOTS_FULL */
+  uint8_t reserved[3];
+  uint64_t counter;
+  uint64_t step;     /* from the stream's baseline */
+  uint64_t kind;     /* the message cell's parts */
+  uint64_t result;
+  uint64_t sender;
+  uint64_t silence_ms;
+  size_t stream;     /* the stream or slot it was judged in */
+  size_t payload_offset;
+  size_t payload_len;
+} wz_ext_e2e_verdict_t;
+
+/* A receiver of profile_json's frames, made as options says (NULL: the
+ * defaults). expected_json gives the identifier the profile's judge.ident
+ * names, in the shape of a sender's values text (other fields it states are
+ * not read); it may be NULL when the profile judges no identifier. this_ holds
+ * the null state on every error; refusal may be NULL.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_ or profile_json; Z_EINVAL (-75) for text
+ * that is not UTF-8, an unknown keying, or a NULL senders with a length;
+ * WZ_EXT_ERR_UNSUPPORTED for sender keying in a build without
+ * e2e-sender-demux; _Z_ERR_CONFIG_INVALID_VALUE (-89) for a profile, expected
+ * text or option refused (no stream, a gap above the profile's ceiling, sender
+ * keying under a cell with no sender, more slots than E2E_SENDER_SLOTS, a bound
+ * list that does not fit), refusal saying why. */
+z_result_t wz_ext_e2e_receiver_new(wz_ext_owned_e2e_receiver_t *this_,
+                                   const char *profile_json,
+                                   const char *expected_json,
+                                   const wz_ext_e2e_receiver_options_t *options,
+                                   z_owned_string_t *refusal);
+
+/* Judge frame, received at now_ms (the program's clock) on stream; under
+ * sender keying stream is 0 and the receiver chooses. Z_OK with the verdict;
+ * Z_EINVAL for no such stream (out zeroed, nothing moved); Z_ERR_NULL for a
+ * NULL receiver or out, or a NULL frame with a length. */
+z_result_t wz_ext_e2e_receiver_judge(const wz_ext_loaned_e2e_receiver_t *this_,
+                                     size_t stream, const uint8_t *frame,
+                                     size_t len, uint64_t now_ms,
+                                     wz_ext_e2e_verdict_t *out);
+
+/* With e2e-sender-demux: how many frames were judged in no slot, by reason
+ * (either out may be NULL), and the sender a slot holds (false for a free
+ * slot or no such slot). */
+z_result_t wz_ext_e2e_receiver_counts(
+    const wz_ext_loaned_e2e_receiver_t *this_, uint64_t *not_listed,
+    uint64_t *full);
+bool wz_ext_e2e_receiver_slot_sender(const wz_ext_loaned_e2e_receiver_t *this_,
+                                     size_t slot, uint64_t *out);
+
+const wz_ext_loaned_e2e_receiver_t *wz_ext_e2e_receiver_loan(
+    const wz_ext_owned_e2e_receiver_t *this_);
+wz_ext_moved_e2e_receiver_t *wz_ext_e2e_receiver_move(
+    wz_ext_owned_e2e_receiver_t *this_);
+void wz_ext_e2e_receiver_drop(wz_ext_moved_e2e_receiver_t *this_);
+void wz_ext_internal_e2e_receiver_null(wz_ext_owned_e2e_receiver_t *this_);
+bool wz_ext_internal_e2e_receiver_check(
+    const wz_ext_owned_e2e_receiver_t *this_);
+
 /* wz's own result codes of the doors below, outside zenoh-pico's own codes
  * (-128 to -65), so a later zenoh-pico code cannot take them. */
 #define WZ_EXT_ERR_POLICY_OFF (-2)  /* the build's policy does not allow what
@@ -559,6 +992,20 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
                               z_get_options_t *options, const z_id_t *peer);
 #endif
 
+/* ---- Declarations told again ------------------------------------------- */
+
+/* Tell the peer of every link of the session that is up everything the
+ * session holds again (its subscriptions, queryables, tokens and interests),
+ * as a link that has just come up is told, at the pace the session states.
+ * Nothing the session holds changes: each entity keeps its id and its route.
+ * For a program that holds that a peer lost declarations the session made.
+ * Part of the unstable surface.
+ *
+ * The number of links told (0 when none is up), Z_ERR_SESSION_CLOSED for a
+ * closed session, WZ_EXT_ERR_UNSUPPORTED when the session's engine keeps no
+ * record of what it declared, Z_ERR_NULL for a null session. */
+z_result_t wz_ext_redeclare(const z_loaned_session_t *session);
+
 /* The conformance digest of this build, read from the configuration it
  * was built with: "sha256:" and 64 lowercase hex digits, NUL-terminated and
  * static. It is the digest wz_config.py prints in the conformance statement
@@ -567,5 +1014,257 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
  * tester holding a statement can tell whether this library is that build.
  * Present in every build. */
 const char *wz_ext_conformance_digest(void);
+
+/* ---- Key ids every node of a deployment shares (shared-key-ids) ---- */
+
+/* Hand config the key ids every node of the deployment shares: count
+ * entries, entry i the id ids[i] and the key expression keys[i], a
+ * NUL-terminated UTF-8 string. The session z_open makes of the config holds
+ * the dictionary: it reads an id the dictionary names though its peer never
+ * declared it, declares no key expression under one of its ids, and names a
+ * key by one as its key-wire-form policy says (shared: the key's id, or the
+ * id of the longest entry that ends at one of its slashes followed by the
+ * rest, whichever is cheaper than the whole key). A count of 0 takes back a
+ * dictionary handed before. Every node of the deployment must hand the same
+ * dictionary; a peer without it cannot read a key named by one of its ids.
+ * Part of the unstable surface, and present only in a build with the
+ * shared-key-ids capability.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL config, a NULL array with entries, or a NULL
+ * key; Z_ERR_INVALID for a key that is not UTF-8 or not a canonical key
+ * expression, an id of 0, and an id or a key named twice; Z_ERR_OVERFLOW for
+ * more entries than the build's MAX_SHARED_KEY_IDS. A refused call leaves
+ * the config as it was.
+ *
+ * z_open then refuses with Z_ERR_INVALID a session whose key-wire form, or
+ * the form stated for one of its endpoints, is shared and whose config
+ * states no dictionary. */
+z_result_t wz_ext_config_key_ids(z_loaned_config_t *config,
+                                 const uint16_t *ids,
+                                 const char *const *keys, size_t count);
+
+/* State the key-wire form of the link to locator apart from the session's:
+ * form is "declared", "shared" or "literal", as the key-wire-form policy
+ * names its values, and locator an endpoint the config dials or listens on,
+ * written as the config writes it. A link whose endpoint no statement names
+ * takes the session's form; a second statement for one endpoint replaces the
+ * first. A link is named by its endpoint because the peer's zid is not known
+ * before the handshake. Part of the unstable surface, and present only in a
+ * build with the shared-key-ids capability.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL config, locator or form; Z_ERR_INVALID for text
+ * that is not UTF-8, an empty locator, or a form the policy has no value of;
+ * WZ_EXT_ERR_POLICY_OFF for a form the build's domain of key-wire-form leaves
+ * out. A refused call leaves the config as it was. */
+z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
+                                           const char *locator,
+                                           const char *form);
+
+/* ================================================ the program's transport
+ *
+ * A transport the program supplies: a program with a network stack of its
+ * own (its TCP/IP and UDP) gives the session that stack in place of the
+ * system's sockets. The session calls the program's open, send and close; the
+ * program calls wz_ext_transport_received, _event and _accepted when its stack
+ * has something to say. Part of the unstable surface, and present only in a
+ * build with the app-transport capability.
+ *
+ * WHAT IT CARRIES. A config given a transport (wz_ext_config_transport) opens
+ * every link of its session over it and none over the system's sockets:
+ *   tcp/ connect   a stream the session dials        WZ_EXT_LINK_STREAM_DIAL
+ *   tcp/ listen    a stream listener                 WZ_EXT_LINK_STREAM_LISTEN
+ *   udp/ connect   a unicast datagram link           WZ_EXT_LINK_DATAGRAM
+ *   udp/ listen    with #iface=, a multicast group   WZ_EXT_LINK_GROUP
+ *   udp/ listen    without, a datagram listener      WZ_EXT_LINK_DATAGRAM_LISTEN
+ * On a listener of either kind the program names each stream, or each
+ * source that sends datagrams to it, with wz_ext_transport_accepted, and
+ * hands in what arrives on the link that returns.
+ * Either engine of the library runs a session over it. z_open refuses a config
+ * whose transport cannot carry what it names: another scheme (tls/, serial/,
+ * ...), or a kind this build has no link of (a udp/ dial on the tokio engine
+ * without the udp link, a group without the multicast transport, which the
+ * cooperative engine has not, a datagram listener but on the tokio engine with
+ * the udp link), with _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
+ * (-92), as the same locator over the system's sockets is; a config with
+ * neither connect nor listen (it would scout on the system's sockets) with
+ * WZ_EXT_ERR_UNSUPPORTED (-3). A stream is framed by the session exactly as a
+ * TCP socket is (the two-byte length before each batch), so the program
+ * carries plain bytes. A datagram is one batch, taken whole or not at all: a
+ * send answered with fewer bytes than it was given fails it. A group's
+ * datagrams are handed in with the locator each came from
+ * ("udp/<address>:<port>"), which tells the members apart; leaving the group
+ * is the link's close.
+ *
+ * THE RECEIVE BOUND. A link queues at most APP_LINK_QUEUE_BYTES (a limit of
+ * the build) of bytes the session has not read. wz_ext_transport_received past
+ * it answers WZ_EXT_ERR_LINK_FULL and takes nothing; once the session has read
+ * the queue down to half, the transport calls the program's drained(context,
+ * link), from a session thread, and the program hands the same bytes in
+ * again. A program that gives no drained retries on its own. An empty queue
+ * takes any datagram, however large.
+ *
+ * WHO OWNS WHAT. The program makes the transport (wz_ext_transport_new) and
+ * names it in every call it makes, so it can hand in bytes while z_open is
+ * still running the handshake of a dial. A config given the transport holds
+ * a reference, and so does a session opened from it, for as long as it has a
+ * link; the program's own reference goes with wz_ext_transport_drop. The
+ * program's drop(context), when it is not NULL, runs once, after the last
+ * call of open, send and close, when the last reference goes.
+ *
+ * HANDLES. The session names every link. open is handed the handle of the
+ * link it opens, and the handle is valid before open is called, so the
+ * program may report it connected, or hand in its first bytes, from its own
+ * thread before open returns. A stream the program accepts on a listener is
+ * named by wz_ext_transport_accepted, which returns its handle. A handle is
+ * never 0 and never reused while the transport lives.
+ *
+ * BUFFERS. The bytes of send are valid only during the call: the program
+ * copies what it keeps. The bytes of wz_ext_transport_received are copied
+ * before it returns: the buffer is the program's again at once. Every string
+ * either side passes is NUL-terminated and valid only during the call.
+ *
+ * WHAT THE PROGRAM'S ANSWERS DO.
+ *   open  OK           the link is up now
+ *         WOULD_BLOCK  under way: report CONNECTED, or CLOSED if it fails
+ *         CLOSED, FAILED, anything else
+ *                      the open failed; the session reports it as a link that
+ *                      did not open (a dial is retried on its schedule)
+ *   send  OK, *written = n (0 < n <= len)
+ *                      n bytes taken; the session sends the rest from n
+ *         OK with *written = 0, or WOULD_BLOCK
+ *                      nothing taken; the session sends nothing more on the
+ *                      link until the program reports WRITABLE, then resumes
+ *                      with the same bytes
+ *         CLOSED       the link is closed; the session closes it as it closes
+ *                      a socket the peer closed, and a dialled session dials
+ *                      again on its reconnect schedule
+ *         FAILED, anything else, or *written > len
+ *                      the link has failed and is closed, as CLOSED
+ * The program's events:
+ *   CONNECTED          the link the session asked to open is up
+ *   CLOSED             the link is gone (or its open failed); bytes already
+ *                      handed in are still read, and every later call on it
+ *                      is refused
+ *   WRITABLE           a link whose send would block takes bytes again
+ * A WRITABLE that arrives between a send's WOULD_BLOCK and the session hearing
+ * it is not lost: that send is made again at once.
+ *
+ * THREADS. The session calls open, send, close and drained from its own
+ * threads (on the cooperative engine, the thread that steps the session), one
+ * call at a time per link, and never while it holds a lock of its own: a call
+ * may call back into the transport (report CLOSED from inside close, hand
+ * bytes to another link from inside send). The program's calls may come from
+ * any thread, including from inside open, send and close: each takes the
+ * transport's table for the length of one copy, never waits on the session,
+ * and wakes the session's tasks after letting go of it. open, send and close
+ * must not block for long: a send that cannot take the bytes now answers
+ * WOULD_BLOCK.
+ */
+
+typedef uint64_t wz_ext_link_t;
+
+typedef uint8_t wz_ext_link_kind_t;
+#define WZ_EXT_LINK_STREAM_DIAL 0
+#define WZ_EXT_LINK_STREAM_LISTEN 1
+#define WZ_EXT_LINK_DATAGRAM 2
+#define WZ_EXT_LINK_GROUP 3
+#define WZ_EXT_LINK_DATAGRAM_LISTEN 4
+
+typedef int8_t wz_ext_link_result_t;
+#define WZ_EXT_LINK_OK 0
+#define WZ_EXT_LINK_WOULD_BLOCK 1
+#define WZ_EXT_LINK_CLOSED 2
+#define WZ_EXT_LINK_FAILED 3
+
+typedef uint8_t wz_ext_link_event_t;
+#define WZ_EXT_LINK_EVENT_CONNECTED 0
+#define WZ_EXT_LINK_EVENT_CLOSED 1
+#define WZ_EXT_LINK_EVENT_WRITABLE 2
+
+/* What the program's calls into the transport return beyond Z_OK, Z_ERR_NULL
+ * and Z_EINVAL (-75). wz's own, as WZ_EXT_ERR_POLICY_OFF is. */
+#define WZ_EXT_ERR_LINK_UNKNOWN (-4)  /* the transport holds no such link: it
+                                         never did, or the session let it go */
+#define WZ_EXT_ERR_LINK_NOT_OPEN (-5) /* not up yet: bytes or an accept before
+                                         CONNECTED */
+#define WZ_EXT_ERR_LINK_CLOSED (-6)   /* closing or closed: nothing taken */
+#define WZ_EXT_ERR_LINK_KIND (-7)     /* not for this kind of link: bytes on a
+                                         listener, an accept on a stream */
+#define WZ_EXT_ERR_LINK_FULL (-8)     /* the link queues its bound: nothing
+                                         taken, hand it in again after
+                                         drained */
+
+/* The calls the program supplies. open, send and close are required; drained
+ * and drop may be NULL. */
+typedef struct wz_ext_transport_t {
+  void *context;
+  wz_ext_link_result_t (*open)(void *context, wz_ext_link_t link,
+                               wz_ext_link_kind_t kind, const char *locator);
+  wz_ext_link_result_t (*send)(void *context, wz_ext_link_t link,
+                               const uint8_t *data, size_t len,
+                               size_t *written);
+  void (*close)(void *context, wz_ext_link_t link);
+  void (*drained)(void *context, wz_ext_link_t link);
+  void (*drop)(void *context);
+} wz_ext_transport_t;
+
+typedef struct wz_ext_owned_transport_t {
+  void *_handle;
+} wz_ext_owned_transport_t;
+typedef struct wz_ext_loaned_transport_t {
+  void *_handle;
+} wz_ext_loaned_transport_t;
+typedef struct wz_ext_moved_transport_t {
+  wz_ext_owned_transport_t _this;
+} wz_ext_moved_transport_t;
+
+/* A transport over the calls in transport, which is copied. this_ holds the
+ * null state on every error. Z_OK; Z_ERR_NULL for a NULL this_ or transport,
+ * or a NULL open, send or close. */
+z_result_t wz_ext_transport_new(wz_ext_owned_transport_t *this_,
+                                const wz_ext_transport_t *transport);
+
+/* The session opened from config uses transport for every link its connect
+ * and listen locators name; a second call replaces the first. The config
+ * holds a reference of its own. Z_OK; Z_ERR_NULL for a NULL config, a NULL
+ * transport or the null state. */
+z_result_t wz_ext_config_transport(z_loaned_config_t *config,
+                                   const wz_ext_loaned_transport_t *transport);
+
+/* Bytes that arrived on link, copied before this returns; source is the
+ * locator a datagram came from, or NULL (a group's datagrams need one). Z_OK;
+ * Z_ERR_NULL for a NULL transport, NULL data with a length, or a group's
+ * datagram with no source; Z_EINVAL for a source that is not UTF-8;
+ * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN, _CLOSED or _KIND; WZ_EXT_ERR_LINK_FULL
+ * past the receive bound, nothing taken. */
+z_result_t wz_ext_transport_received(const wz_ext_loaned_transport_t *transport,
+                                     wz_ext_link_t link, const uint8_t *data,
+                                     size_t len, const char *source);
+
+/* What happened to link: WZ_EXT_LINK_EVENT_CONNECTED, _CLOSED or _WRITABLE.
+ * Z_OK; Z_ERR_NULL for a NULL transport; Z_EINVAL for another event;
+ * WZ_EXT_ERR_LINK_UNKNOWN, or WZ_EXT_ERR_LINK_CLOSED for a link already
+ * closed. */
+z_result_t wz_ext_transport_event(const wz_ext_loaned_transport_t *transport,
+                                  wz_ext_link_t link,
+                                  wz_ext_link_event_t event);
+
+/* A stream the program accepted on listener, whose remote end it names remote
+ * (a locator such as "tcp/<address>:<port>"); out_link receives the new
+ * link's handle, and 0 on every error. Z_OK; Z_ERR_NULL for a NULL transport,
+ * remote or out_link; Z_EINVAL for a remote that is not UTF-8;
+ * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN (not listening yet), _CLOSED or _KIND
+ * (not a listener). */
+z_result_t wz_ext_transport_accepted(const wz_ext_loaned_transport_t *transport,
+                                     wz_ext_link_t listener, const char *remote,
+                                     wz_ext_link_t *out_link);
+
+const wz_ext_loaned_transport_t *wz_ext_transport_loan(
+    const wz_ext_owned_transport_t *this_);
+wz_ext_moved_transport_t *wz_ext_transport_move(
+    wz_ext_owned_transport_t *this_);
+void wz_ext_transport_drop(wz_ext_moved_transport_t *this_);
+void wz_ext_internal_transport_null(wz_ext_owned_transport_t *this_);
+bool wz_ext_internal_transport_check(const wz_ext_owned_transport_t *this_);
 
 #endif /* WZ_EXT_H */

@@ -307,8 +307,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "query-target",
             "reply-source-info",
             "session-reconnect",
-            "session-unicast-accept",
-            "session-unicast-open",
+            # `session-unicast-accept` and `session-unicast-open` LEFT this list for
+            # `DEFERRED`, by the R2386 route: the handshake-stray-message policy's
+            # `SessionLinkActions::held_answer_len`, a `pub` method behind a compound cfg that
+            # names both, made the claim false. See their row there.
             # R3243 — `transport-batching` LEFT this list, by the R2386 route:
             # the claim was true until the round that staged a batch window in
             # a lent slot made it false. `session_actions` (a `pub mod`) now
@@ -636,6 +638,9 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "router-multicast-faces",
                 "routing-interceptor-hotreload",
                 "routing-token-tables",
+                # `shared-key-ids` gates one method of this package, `Session::install_link_keys`,
+                # which hands a face session the dictionary and its link's key-wire form.
+                "shared-key-ids",
             )
         },
         # The THIRD reason, and the axis found it by building the probe and
@@ -746,6 +751,17 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "query-queryable",
                 "query-timeout",
                 "session-matching",
+                # `session-unicast-accept` and `session-unicast-open` MOVED HERE from
+                # `NO_PUBLIC_PATH` (see the note there). The handshake-stray-message policy
+                # holds the establishment answer a link sent, to send it again on a repeated
+                # step, and `SessionLinkActions::held_answer_len` reads how much is held: a
+                # `pub` method, because the runtime's integration test of the policy
+                # (`handshake_stray_message`) asserts the hold is filled and let go, behind
+                # `all(any(codec-init-body, codec-open-body), any(session-unicast-open,
+                # session-unicast-accept))` (`session_actions.rs`). Its one public site is
+                # compound, which rustc's note does not name.
+                "session-unicast-accept",
+                "session-unicast-open",
                 # `transport-batching` LEFT this list: see its own row below.
                 # Round 3171's `transport-tx-lend` gates the buffer seam of
                 # `tx_buf.rs`: both public items it gates are behind an

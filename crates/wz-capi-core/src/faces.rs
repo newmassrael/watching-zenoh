@@ -796,6 +796,12 @@ impl QueryLeg<'_> {
         opts: QueryOptions,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
+        // A face's link names the key as its own key-wire form says.
+        let linked = match self {
+            QueryLeg::Face(session) => on_link(session, keyexpr, wire),
+            _ => std::borrow::Cow::Borrowed(wire),
+        };
+        let wire: &WireKey = &linked;
         match self {
             QueryLeg::Face(session) if !wire.is_literal() => session.query_aliased(
                 wire.mapping_id,
@@ -902,6 +908,7 @@ fn declare_subscriber_on(
         ));
         callback(sample);
     };
+    let wire: &WireKey = &on_link(session, keyexpr, wire);
     if wire.is_literal() {
         session
             .declare_subscriber(keyexpr.to_string(), options, callback)
@@ -913,6 +920,31 @@ fn declare_subscriber_on(
     }
 }
 
+/// `wire` as the link of `session` names the key `keyexpr`: the link's key-wire form decides,
+/// and the declared form keeps `wire` as the ABI made it (`shared-key-ids`).
+#[cfg(feature = "shared-key-ids")]
+fn on_link<'w>(
+    session: &TokioSession,
+    keyexpr: &str,
+    wire: &'w WireKey,
+) -> std::borrow::Cow<'w, WireKey> {
+    match wz_capi_port::wire_on_link(session.actions().key_wire_on_link(keyexpr)) {
+        Some(linked) => std::borrow::Cow::Owned(linked),
+        None => std::borrow::Cow::Borrowed(wire),
+    }
+}
+
+/// A build without the shared key ids names every key on every face as the ABI made it.
+#[cfg(not(feature = "shared-key-ids"))]
+#[inline(always)]
+fn on_link<'w>(
+    _session: &TokioSession,
+    _keyexpr: &str,
+    wire: &'w WireKey,
+) -> std::borrow::Cow<'w, WireKey> {
+    std::borrow::Cow::Borrowed(wire)
+}
+
 /// Declare a queryable on one face in `wire`'s form.
 fn declare_queryable_on(
     session: &TokioSession,
@@ -921,6 +953,7 @@ fn declare_queryable_on(
     options: QueryableOptions,
     callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
 ) -> Option<Queryable<TokioRuntime>> {
+    let wire: &WireKey = &on_link(session, keyexpr, wire);
     if wire.is_literal() {
         session
             .declare_queryable(keyexpr.to_string(), options, callback)
@@ -939,6 +972,7 @@ fn declare_token_on(
     wire: &WireKey,
     options: LivelinessOptions,
 ) -> Option<LivelinessToken<TokioRuntime>> {
+    let wire: &WireKey = &on_link(session, keyexpr, wire);
     if wire.is_literal() {
         session.declare_token(keyexpr.to_string(), options).ok()
     } else {
@@ -2219,6 +2253,10 @@ pub struct SharedSession {
     /// every face session for the same reason the clock is one: a descriptor arrives on whichever
     /// session the peer's face is, and each must read it through the node's own clients.
     shm_clients: OpenShmClients,
+    /// The key ids every node of the deployment shares and each face's key-wire form; see
+    /// [`SessionResources::key_ids`].
+    #[cfg(feature = "shared-key-ids")]
+    key_ids: KeyIdPlan,
     /// R3073 -- whether a face this node reaches as a peer is ended with the initial interest's
     /// `DeclareFinal`; see [`SessionResources::initial_interest`].
     initial_interest: bool,
@@ -2374,6 +2412,83 @@ pub struct SessionResources {
     /// every face session is handed them, and the node's admission of a second link orders zids
     /// by their `link-tie-order`.
     pub session_policy: SessionPolicy,
+    /// The key ids every node of the deployment shares and the key-wire form of each face, which
+    /// every face session is handed for its link (`shared-key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    pub key_ids: KeyIdPlan,
+}
+
+/// The key ids a node holds and the key-wire form of each of its faces (`shared-key-ids`): the
+/// dictionary, the session's form, the forms stated for the endpoints it dials and listens on,
+/// and those endpoints in the order the faces are numbered by.
+#[cfg(feature = "shared-key-ids")]
+#[derive(Clone, Debug)]
+pub struct KeyIdPlan {
+    ids: Option<wz_session_core::shared_key_ids::SharedKeyIds>,
+    forms: wz_session_core::shared_key_ids::LinkKeyForms,
+    connect: Vec<String>,
+    listen: Vec<String>,
+}
+
+#[cfg(feature = "shared-key-ids")]
+impl KeyIdPlan {
+    /// The plan of a session whose own form is `session` and which dials `connect` and listens
+    /// on `listen`, from what its open was handed: refused as the forms of `at_open` are.
+    pub fn new(
+        at_open: &wz_session_core::shared_key_ids::KeyIdsAtOpen,
+        session: wz_session_core::policy::KeyWireForm,
+        connect: &[String],
+        listen: &[String],
+    ) -> Result<Self, wz_session_core::shared_key_ids::KeyIdsRefused> {
+        Ok(Self {
+            ids: at_open.ids.clone(),
+            forms: at_open.forms(session)?,
+            connect: connect.to_vec(),
+            listen: listen.to_vec(),
+        })
+    }
+
+    /// No dictionary, every face at `session`.
+    pub fn none(session: wz_session_core::policy::KeyWireForm) -> Self {
+        Self {
+            ids: None,
+            forms: wz_session_core::shared_key_ids::LinkKeyForms::session_only(session),
+            connect: Vec::new(),
+            listen: Vec::new(),
+        }
+    }
+
+    /// The endpoint face `id` was dialled to or taken on, as the config names it: a dialled face
+    /// is [`DIAL_FACE_ID`] plus the index of its endpoint, and an accepted one is numbered in its
+    /// listener's range ([`LISTENER_FACE_STRIDE`]). `None` for a face the numbering does not
+    /// place, which takes the session's form.
+    fn endpoint_of(&self, id: u64) -> Option<&str> {
+        let endpoint = if id >= DIAL_FACE_ID {
+            self.connect.get(usize::try_from(id - DIAL_FACE_ID).ok()?)
+        } else {
+            self.listen
+                .get(usize::try_from(id / LISTENER_FACE_STRIDE).ok()?)
+        };
+        endpoint.map(String::as_str)
+    }
+
+    /// What the link of face `id` knows of the key ids: the dictionary and its own form.
+    fn link_keys(&self, id: u64) -> wz_session_core::shared_key_ids::LinkKeys {
+        wz_session_core::shared_key_ids::LinkKeys::new(
+            self.ids.clone(),
+            self.forms.form_of(self.endpoint_of(id)),
+        )
+    }
+
+    /// Whether a face may name a key otherwise than the ABI hands it over.
+    fn names_keys_by_link(&self) -> bool {
+        self.ids.is_some() || self.forms.departs_from_declared()
+    }
+
+    /// The dictionary, when the node holds one.
+    fn ids(&self) -> Option<&wz_session_core::shared_key_ids::KeyIds> {
+        self.ids.as_deref()
+    }
 }
 
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
@@ -2406,6 +2521,8 @@ impl SessionResources {
             namespace: None,
             aggregation: DeclarationAggregation::none(),
             session_policy,
+            #[cfg(feature = "shared-key-ids")]
+            key_ids: KeyIdPlan::none(session_policy.key_wire_form()),
         }
     }
 }
@@ -2537,6 +2654,8 @@ impl SharedSession {
             namespace,
             aggregation,
             session_policy,
+            #[cfg(feature = "shared-key-ids")]
+            key_ids,
         } = resources;
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
@@ -2650,6 +2769,8 @@ impl SharedSession {
             local_wake,
             node_hlc,
             shm_clients,
+            #[cfg(feature = "shared-key-ids")]
+            key_ids,
             liveliness_to_self,
             initial_interest,
             #[cfg(feature = "gossip")]
@@ -2687,6 +2808,14 @@ impl SharedSession {
     #[cfg(feature = "routing-namespace")]
     pub fn node_namespace(&self) -> Option<&wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr> {
         self.namespace.as_ref()
+    }
+
+    /// Whether a face of this node may name a key otherwise than the ABI hands it over: the node
+    /// holds key ids every node of the deployment shares, or a key-wire form other than
+    /// `declared` is the session's or an endpoint's (`shared-key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    pub fn names_keys_by_link(&self) -> bool {
+        self.key_ids.names_keys_by_link()
     }
 
     /// Whether this node states a traffic policy. Read on the data path, so it is a pointer test.
@@ -3084,6 +3213,11 @@ impl SharedSession {
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock))
             .with_node_clock(self.node_hlc.clone())
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+        // The key ids every node shares and the form stated for the endpoint of this face, before
+        // the face carries anything: what its peer names by an id of the dictionary is read, and
+        // what is sent over it names its keys in that form.
+        #[cfg(feature = "shared-key-ids")]
+        session.install_link_keys(self.key_ids.link_keys(id));
         // This face's events are dispatched through the face session's own subscriber
         // registry (`Self::dispatch`) and nothing here filters or forwards the owned
         // messages of a frame, so the drive loop may report a frame of plain Puts as the
@@ -3782,6 +3916,10 @@ impl SharedSession {
                     Self::send_gossip(&faces.faces, None, outbound);
                 }
             }
+            // A query by an id of the shared dictionary is kept, so its replies mirror its key
+            // form (`shared-key-ids`).
+            #[cfg(all(feature = "shared-key-ids", feature = "queryable"))]
+            session.actions().note_requests(&event);
             session.dispatch_iteration_event(event);
             // The sweeps only STAGE what they expire; the one drain at the end of
             // this call runs it, so a frame that expires nothing pays one drain
@@ -4369,6 +4507,12 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        // A face that names its keys its own way (`shared-key-ids`) is sent the key as its link's
+        // form says; a node with no such face takes the fan-outs below unchanged.
+        #[cfg(feature = "shared-key-ids")]
+        if self.key_ids.names_keys_by_link() {
+            return self.publish_by_link(keyexpr, wire, payload, opts);
+        }
         if wire.is_literal() {
             self.publish_all(keyexpr, payload, opts)
         } else {
@@ -4380,6 +4524,105 @@ impl SharedSession {
                 opts,
             )
         }
+    }
+
+    /// [`Self::publish_on_wire_all`] where each face names the key as its link's key-wire form
+    /// says: the literal, an id of the dictionary every node shares (with the rest of the key), or
+    /// `wire` as the ABI made it. The local leg and the error classification are the fan-out's,
+    /// as for the two publishes it chooses between otherwise.
+    #[cfg(feature = "shared-key-ids")]
+    fn publish_by_link(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        let key = if wire.is_literal() {
+            PutKey::Literal(keyexpr)
+        } else {
+            PutKey::Declared {
+                literal: keyexpr,
+                mapping_id: wire.mapping_id,
+                suffix: wire.suffix.as_deref(),
+            }
+        };
+        self.fan_out(
+            opts,
+            key,
+            payload,
+            |session, leg| {
+                let wire = on_link(session, keyexpr, wire);
+                if wire.is_literal() {
+                    Leg::of_publish(session.publish(keyexpr, payload, leg))
+                } else {
+                    Leg::of_alias(session.publish_aliased_auto(
+                        wire.mapping_id,
+                        wire.suffix.as_deref(),
+                        payload,
+                        leg,
+                    ))
+                }
+            },
+            WireCalls {
+                probe: |session: &TokioSession, leg: PublishOptions| {
+                    let wire = on_link(session, keyexpr, wire);
+                    if wire.is_literal() {
+                        Leg::of_probe(session.publish_probe(keyexpr, payload, leg))
+                    } else {
+                        Leg::of_probe_alias(session.publish_aliased_auto_probe(
+                            wire.mapping_id,
+                            wire.suffix.as_deref(),
+                            payload,
+                            leg,
+                        ))
+                    }
+                },
+                reserve: |session: &TokioSession, leg: &PublishOptions| {
+                    let wire = on_link(session, keyexpr, wire);
+                    if wire.is_literal() {
+                        Reserved::of_reserve(session.reserve_wire_chain(keyexpr, payload, leg))
+                    } else if session
+                        .actions()
+                        .resolve_outbound_mapping(wire.mapping_id)
+                        .is_none()
+                    {
+                        Reserved::Absent
+                    } else {
+                        Reserved::of_reserve(session.reserve_wire_chain_aliased(
+                            wire.mapping_id,
+                            wire.suffix.as_deref(),
+                            payload,
+                            leg,
+                        ))
+                    }
+                },
+                reserved: |session: &TokioSession,
+                           leg: PublishOptions,
+                           reservation: WireReservation| {
+                    let wire = on_link(session, keyexpr, wire);
+                    if wire.is_literal() {
+                        Leg::of_probe(
+                            session
+                                .publish_reserved(keyexpr, payload, leg, reservation)
+                                .map(|()| WireProbe::Queued),
+                        )
+                    } else {
+                        Leg::of_probe_alias(
+                            session
+                                .publish_aliased_auto_reserved(
+                                    wire.mapping_id,
+                                    wire.suffix.as_deref(),
+                                    payload,
+                                    leg,
+                                    reservation,
+                                )
+                                .map(|()| WireProbe::Queued),
+                        )
+                    }
+                },
+            },
+        )
     }
 
     /// Fan an ALIASED publish over every face (pico `_z_write` on a
@@ -4559,6 +4802,13 @@ impl SharedSession {
     pub fn declare_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         let mut guard = self.lock();
         let id = guard.next_kexpr_id.checked_add(1)?;
+        // An id of the shared dictionary names its key in this node's space too, so no key
+        // expression is declared under one: the next id past them, or none when none is left.
+        #[cfg(feature = "shared-key-ids")]
+        let id = match self.key_ids.ids() {
+            Some(ids) => ids.next_free_id(id)?,
+            None => id,
+        };
         guard.next_kexpr_id = id;
 
         for face in guard.faces.values() {

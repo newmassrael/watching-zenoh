@@ -283,6 +283,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "runtime-coop-fixed",
                 "runtime-tokio",
                 "session-lwip-fixed",
+                # `transport-unicast` gates `ext::redeclare`, the door that tells a session's
+                # peers its declarations again; it is a forward of the tokio runtime's unicast
+                # transport, whose own row is where its surface is probed.
+                "transport-unicast",
             }
         ),
     ),
@@ -404,8 +408,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "gated methods are exercised by that arm's legs against upstream's own "
         "subscriber; `resource-snapshot` "
         "gates the accessor `SharedSession::message_reading`, the node's received-message "
-        "count, which the pico crate's `snapshot_doors` test reads through the doors",
-        frozenset({"resource-snapshot", "transport-shm"}),
+        "count, which the pico crate's `snapshot_doors` test reads through the doors; "
+        "`shared-key-ids` gates `faces::KeyIdPlan`, the key ids and each face's key-wire form "
+        "the registry hands its face sessions, and `SharedSession::names_keys_by_link`, which "
+        "the pico crate's `key_ids_tokio` test drives through the doors",
+        frozenset({"resource-snapshot", "shared-key-ids", "transport-shm"}),
     ),
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
@@ -417,8 +424,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "(`tls::HostTls`), and all four are run by this crate's own tests: the second by "
         "`scout_datagram`'s unit tests, the others over loopback sockets "
         "(`tests/tls_provider.rs` for the last, and again through the pico ABI's "
-        "`tls_coop_roundtrip`)",
-        frozenset({"scout", "scout-datagram", "listen", "tls-mbedtls"}),
+        "`tls_coop_roundtrip`); `shared-key-ids` gates `OpenKeyIds::shared` and "
+        "`OpenKeyIds::new`, the dictionary and the endpoints' key-wire forms an open hands the "
+        "session, which `tests/shared_key_ids.rs` runs over loopback; `app-transport` gates the "
+        "`app_link` re-export of the runtime's links over a transport the program supplies, "
+        "which the pico ABI's `app_transport_doors` opens a session over",
+        frozenset(
+            {"app-transport", "listen", "scout", "scout-datagram", "shared-key-ids", "tls-mbedtls"}
+        ),
     ),
     "wz-tls-mbedtls": (
         "the secure channel over Mbed TLS that the cooperative engine's `tls/` link runs (its "
@@ -435,8 +448,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "program names. Its four features gate `observation`, the one behaviour of the node's "
         "clock registry, event log, supervisor and resource sampler that the doors of both C ABIs "
         "call; each function in it is run by this crate's own tests and again through each ABI's "
-        "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests)",
-        frozenset({"clock-source", "event-ring", "supervision", "resource-snapshot"}),
+        "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests). "
+        "`shared-key-ids` gates `wire_on_link`, a key as one link's key-wire form names it, which "
+        "both engines call for each link and the cooperative engine's `shared_key_ids` tests run",
+        frozenset(
+            {"clock-source", "event-ring", "resource-snapshot", "shared-key-ids", "supervision"}
+        ),
     ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
@@ -503,6 +520,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `_drop`, `wz_ext_segment_put_options_default` and the two `wz_ext_internal_*` doors,
         # and the types and constants they take, declared in `wz_ext.h`; off by default, as
         # upstream has no such doors.
+        # `e2e-sender` gates `pub mod e2e_sender` and `e2e-receiver` gates `pub mod e2e_receiver`,
+        # whose public items are wz's own doors `wz_ext_e2e_sender_*` and `wz_ext_e2e_receiver_*`,
+        # the types and constants they take, declared in `wz_ext.h` (what both share is the
+        # private `mod e2e`); `e2e-sender-demux` gates the receiver's two slot doors
+        # `wz_ext_e2e_receiver_counts` and `_slot_sender` inside it. Off by default in this ABI,
+        # as upstream has no such doors.
         # `scout-mcu` gates `pub mod scout` beside the default `scout`: the same module, whose
         # public items are pico's `z_scout`, `z_hello_*` and `z_closure_hello*` doors, each
         # `#[no_mangle] extern "C"`, and the types they take; the feature only changes the window
@@ -512,16 +535,36 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`, the event struct, the owned
         # watch and the constants they take, declared in `wz_ext.h`, off by default as the
         # observation plane's doors are.
+        # `e2e-supervision` gates `pub mod stream_supervision`, whose public items are wz's own
+        # doors `wz_ext_stream_supervisor_new`, `_add`, `_received`, `_set_condition`,
+        # `_set_sender_present`, `_set_callback`, `_poll`, `_stream_errors`, `_node_errors`,
+        # `_phase`, `_notify`, `_start_task`, `_stop_task`, `_loan`, `_move`, `_drop` and the two
+        # `wz_ext_internal_*` doors, and the types and constants they take, declared in
+        # `wz_ext.h`; off by default, as upstream has no such doors.
+        # `app-transport` gates `pub mod app_transport`, whose public items are wz's own doors
+        # `wz_ext_transport_new`, `_received`, `_event`, `_accepted`, `_loan`, `_move`, `_drop`,
+        # `wz_ext_config_transport` and the two `wz_ext_internal_transport_*` doors, and the types
+        # and constants they take, declared in `wz_ext.h`; off by default, as upstream has no such
+        # doors.
+        # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
+        # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
+        # default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",
+                "app-transport",
                 "clock-source",
                 "declarations-synced-event",
+                "e2e-receiver",
+                "e2e-sender",
+                "e2e-sender-demux",
+                "e2e-supervision",
                 "event-ring",
                 "remote-declaration-watch",
                 "resource-snapshot",
                 "scout-mcu",
                 "segment-sender",
+                "shared-key-ids",
                 "supervision",
             }
         ),
@@ -649,9 +692,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # host's critical section and the lock of each value the runtime lends the
         # session. It gates `cs::HostMutex`, a `pub use` inside `pub mod cs` and so
         # not at the crate root, the shape `rx-in-place`'s sites have.
+        # `app-link` joins: the cooperative engine's links over a transport the program supplies
+        # (`pub mod app_link`: the stream, datagram and group sockets and `AppLinks`), selected
+        # by the pico ABI's `app-transport` through `wz-capi-coop`, which is where a consumer
+        # reaches it; the shape `host-lock`'s site has.
         frozenset(
             {
                 "alloc",
+                "app-link",
                 "host-lock",
                 "reassembly",
                 "runtime",
@@ -1243,9 +1291,13 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # crate root, which is the simple crate-root shape this axis names. It goes
     # in the same commit as the OFF_AXIS row above, so the row never states a
     # reach the axis does not have.
+    # `app-link` joins with its OFF_AXIS row: its one site, `pub mod app_link`, is at the crate
+    # root behind `all(app-link, alloc, not(session-slot))`, a compound the crate-root derivation
+    # cannot name, which is the second clause's subject.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
+            "app-link",
             "host-lock",
             "reassembly",
             "runtime",
@@ -1328,6 +1380,10 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "runtime-coop-fixed",
             "runtime-tokio",
             "session-lwip-fixed",
+            # `transport-unicast` joins with its OFF_AXIS row: its one site, `ext::redeclare`,
+            # is inside `pub mod ext` behind `all(runtime-tokio, transport-unicast)`, nested and
+            # compound, which the second clause reads off the site.
+            "transport-unicast",
         }
     ),
 }

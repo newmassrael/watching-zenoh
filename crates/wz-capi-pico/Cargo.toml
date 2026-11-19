@@ -294,6 +294,72 @@ segment-sender = [
     "dep:wz-app-frame",
     "wz-capi-core?/segment-sender",
 ]
+# `shared-key-ids`: the key ids every node of a deployment shares and the doors that hand a config
+# its dictionary and the key-wire form of an endpoint (`wz_ext_config_key_ids`,
+# `wz_ext_config_key_wire_form_for`). wz's own, which zenoh-pico has not, so off as the reference
+# build is, and part of the unstable surface: it implies `unstable-api`. Both engines hold the
+# dictionary: each reads an id only the dictionary names and names a key on each link as that
+# link's form says. The model is session-core's.
+shared-key-ids = [
+    "unstable-api",
+    "wz-session-core/shared-key-ids",
+    "wz-capi-port/shared-key-ids",
+    "wz-capi-core?/shared-key-ids",
+    "wz-capi-coop?/shared-key-ids",
+]
+# `e2e-supervision`: reception supervision per stream and the doors that drive it
+# (`wz_ext_stream_supervisor_*`): a deadline per periodic stream over the program's storage, a loss
+# told once, saturating error counts, a start delay, a condition the program supplies and senders
+# it marks absent. wz's own, which zenoh-pico has not, so off as the reference build is, and part
+# of the unstable surface: it implies `unstable-api`. The supervisor and its activation machine are
+# `wz-session-core`'s. Each supervisor is held under the host's lock, and a poll task is a thread of
+# the host, so it selects `std`. Both engines can host it (it touches no session), so it selects
+# neither and forwards weakly.
+e2e-supervision = [
+    "std",
+    "unstable-api",
+    "wz-session-core/e2e-supervision",
+    "wz-capi-core?/e2e-supervision",
+]
+# `e2e-sender`: the sending side of an end-to-end protected message (`wz_ext_e2e_sender_*`): a
+# payload protected by a profile and the program's values, the counter kept per stream. On in the
+# zenoh-c ABI's default and off in this one's (`default_off_abis` in the declaration): wz's own,
+# which zenoh-pico has not, and part of the unstable surface. The frame writer is `wz-app-frame`'s.
+# Each sender is held under the host's lock, so it selects `std`; it touches no session, so it
+# selects neither engine and forwards weakly.
+e2e-sender = [
+    "std",
+    "unstable-api",
+    "dep:wz-app-frame",
+    "wz-capi-core?/e2e-sender",
+]
+# `e2e-receiver`: the receiving judge of end-to-end protected frames (`wz_ext_e2e_receiver_*`):
+# per-stream state in storage the program sizes, the judging rules the profile states, and a
+# status beside every sample. wz's own, off as the reference build is, part of the unstable
+# surface. The judge is `wz-app-frame`'s; like the sender it selects `std` and neither engine.
+e2e-receiver = [
+    "std",
+    "unstable-api",
+    "dep:wz-app-frame",
+    "wz-capi-core?/e2e-receiver",
+]
+# `e2e-sender-demux`: the receiving judge keeps one stream per sender, chosen by the sender
+# identity the frame's header carries, in at most `E2E_SENDER_SLOTS` slots.
+e2e-sender-demux = ["e2e-receiver", "wz-capi-core?/e2e-sender-demux"]
+# `app-transport`: a transport the program supplies (`wz_ext_transport_*`, `wz_ext_config_transport`),
+# which carries every link of a session opened from the config that names it, over the program's
+# own network stack and over no socket of the system's. wz's own, which zenoh-pico has not, so off
+# as the reference build is, and part of the unstable surface as the other wz doors are. The
+# transport object is the session core's and its table is held under the port's lock, so it serves
+# either engine and selects neither: the tokio engine's links over the program's stack, or the
+# cooperative engine's, whichever the build has.
+app-transport = [
+    "std",
+    "unstable-api",
+    "wz-session-core/app-link",
+    "wz-capi-core?/app-transport",
+    "wz-capi-coop?/app-transport",
+]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
 # tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,
 # `wz_ext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.
@@ -495,8 +561,9 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # named by `advanced`.
 wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 wz-node-time = { path = "../wz-node-time", optional = true }
-# The piece writer behind `segment-sender` (`src/segment_sender.rs`), at its defaults (`alloc`),
-# which the writer is behind. Optional: a build without the capability links none of it.
+# The piece writer behind `segment-sender` (`src/segment_sender.rs`), and the frame writer and
+# receiving judge behind `e2e-sender` and `e2e-receiver` (`src/e2e.rs`), at its defaults (`alloc`),
+# which they are behind. Optional: a build without any of the three links none of it.
 wz-app-frame = { path = "../wz-app-frame", optional = true }
 # The port between this ABI and the engine that runs its sessions: the vocabulary both name
 # (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI

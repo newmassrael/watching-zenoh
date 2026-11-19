@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  App link - the lifecycle of one link a session holds over a transport the program supplies.
+
+  A program that has its own network stack hands a session a transport: a send call the session
+  makes with bytes, and calls the program makes when bytes arrive or the state of a link changes.
+  One instance of this machine per link of that transport, keyed by the link's handle in the
+  transport's table (`wz_session_core::app_link`). Every kind of link runs the same machine: a
+  stream the session dials, a stream listener, a stream the program accepted on a listener, a
+  datagram link, a group.
+
+  States:
+    Opening - the session asked the program to open the link and the program has not said it is
+              up. Nothing is sent and nothing received.
+    Open    - the link is up. Bytes the program hands in are queued for the session, and the
+              session's sends go to the program.
+    Blocked - the program answered a send with would-block. The session sends nothing until the
+              program says the link is writable again.
+    Closing - the session let the link go; the program is asked to close it.
+    Closed  - the link is gone, by the program's word, a send that found it closed or failed, or
+              the program's close returning. Bytes handed in are refused.
+
+  Division of labour with the host (the machine owns the states, the host owns the bytes):
+    - The receive queue, the handles and the race between a send that would block and a writable
+      that arrives before the answer is recorded are the host's: they are keyed tables and
+      counters, which this kind does not hold. The host raises `link.writable` itself when it
+      finds that race, so the machine sees one order of events.
+    - Whether a send wrote some, all or none of its bytes is the host's; the machine hears only
+      `send.blocked`, `send.closed` and `send.failed`. A partial send leaves the link Open.
+
+  Engine-free: every effect is a no-arg `<sce:action>` host-trait call that records a duty, so the
+  generated `AppLinkPolicy<A>` carries no script engine and compiles `no_std`.
+
+  Host duties (the generated `AppLinkActions` trait):
+    wake_waiters   - entered Open or Closed: whoever waits on the link (the opener, the reader,
+                     the writer) looks at it again.
+    close_program  - entered Closing: call the program's close for the link, outside any lock,
+                     then raise `close.done`.
+
+  Events fed by the host:
+    link.connected - the program says the link is up (or its open answered that it is).
+    link.accepted  - the link is one the program accepted on a listener: up from the start.
+    link.closed    - the program says the link is gone, or refused its open.
+    link.writable  - the program says a link that would block takes bytes again.
+    send.blocked   - the program answered a send with would-block.
+    send.closed    - the program answered a send with closed.
+    send.failed    - the program answered a send with a failure.
+    session.close  - the session lets the link go.
+    close.done     - the program's close returned.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="app_link"
+       version="1.0"
+       initial="Opening">
+
+  <state id="Opening">
+    <transition event="link.connected" target="Open"/>
+    <transition event="link.accepted" target="Open"/>
+    <transition event="link.closed" target="Closed"/>
+    <transition event="session.close" target="Closing"/>
+  </state>
+
+  <state id="Open">
+    <onentry>
+      <sce:action name="wake_waiters" effect="duty"/>
+    </onentry>
+    <transition event="send.blocked" target="Blocked"/>
+    <transition event="send.closed" target="Closed"/>
+    <transition event="send.failed" target="Closed"/>
+    <transition event="link.closed" target="Closed"/>
+    <transition event="session.close" target="Closing"/>
+  </state>
+
+  <!-- A writable while Open has no transition: it is the host's to count (see above). -->
+  <state id="Blocked">
+    <transition event="link.writable" target="Open"/>
+    <transition event="link.closed" target="Closed"/>
+    <transition event="session.close" target="Closing"/>
+  </state>
+
+  <state id="Closing">
+    <onentry>
+      <sce:action name="close_program" effect="duty"/>
+    </onentry>
+    <transition event="close.done" target="Closed"/>
+    <transition event="link.closed" target="Closed"/>
+  </state>
+
+  <!-- No transition out: a link that closed is not opened again; a new open is a new link. -->
+  <state id="Closed">
+    <onentry>
+      <sce:action name="wake_waiters" effect="duty"/>
+    </onentry>
+  </state>
+
+</scxml>

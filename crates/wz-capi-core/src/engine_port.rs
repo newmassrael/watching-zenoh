@@ -155,6 +155,11 @@ impl SessionEngine for SharedSession {
         SharedSession::has_router_peer(self)
     }
 
+    #[cfg(feature = "shared-key-ids")]
+    fn names_keys_by_link(&self) -> bool {
+        SharedSession::names_keys_by_link(self)
+    }
+
     #[cfg(feature = "resource-snapshot")]
     fn message_reading(&self) -> Option<wz_session_core::resource_snapshot::BuildMessageReading> {
         Some(SharedSession::message_reading(self))

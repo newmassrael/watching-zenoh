@@ -581,6 +581,13 @@ def validate_caps(data: dict) -> list[str]:
             out.append(f"{c['id']}: Kconfig symbol `{c['kconfig']}` is not WZ_CAP_*")
         if c.get("default", "on") not in ("on", "off"):
             out.append(f"{c['id']}: default is `{c['default']}`, which is neither on nor off")
+        for abi in c.get("default_off_abis", []):
+            if abi == "core" or abi not in c["abis"]:
+                out.append(f"{c['id']}: default_off_abis names `{abi}`, which is not an ABI the "
+                           "capability is exported by")
+        if c.get("default_off_abis") and c.get("default", "on") == "off":
+            out.append(f"{c['id']}: default_off_abis is stated for a capability that is off by "
+                       "default everywhere")
         if "observation_bit" in c:
             bit = c["observation_bit"]
             if isinstance(bit, bool) or not isinstance(bit, int) or not 0 <= bit <= 63:
@@ -1713,9 +1720,18 @@ def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 
 
-def default_on(cap: dict) -> bool:
-    """Whether a build that names nothing has the capability: on unless declared `off`."""
+def default_on(cap: dict, abi: str) -> bool:
+    """Whether a build of `abi` that names nothing has the capability: on unless declared `off`,
+    or unless `default_off_abis` names that ABI."""
+    if abi in cap.get("default_off_abis", []):
+        return False
     return cap.get("default", "on") == "on"
+
+
+# The ABI whose default a generated Kconfig file states. A Zephyr or Linux image built from the
+# Kconfig tree is a pico ABI node, so the Kconfig default of a capability is the pico ABI's, and
+# an original's defconfig is the difference from that same default.
+KCONFIG_ABI = "pico"
 
 
 def closure(caps: dict, on: set[str]) -> set[str]:
@@ -1948,7 +1964,7 @@ def emit_kconfig_capabilities(decl: dict) -> str:
         cap = caps[cid]
         lines.append(f"config {cap['kconfig']}")
         lines.append(f'\tbool "{cid}"')
-        lines.append("\tdefault y" if default_on(cap) else "\tdefault n")
+        lines.append("\tdefault y" if default_on(cap, KCONFIG_ABI) else "\tdefault n")
         for dep in cap["implies"]:
             lines.append(f"\tselect {caps[dep]['kconfig']}")
         lines.append("\thelp")
@@ -2192,21 +2208,41 @@ def _refuses_text(text: str) -> bool:
     return False
 
 
+class RustWords(str):
+    """A `&[<word>, ...]` slice literal that also keeps its items, so a layout that puts it on a
+    line of its own can break it one item a line where rustfmt would."""
+
+    items: list[str]
+
+    def __new__(cls, items: list[str]) -> "RustWords":
+        out = super().__new__(cls, "&[" + ", ".join(items) + "]")
+        out.items = items
+        return out
+
+
 def rust_tuple_rows(rows: list[list[str]]) -> list[str]:
     """Array rows of tuples, each laid out as rustfmt lays it out: on one line when its elements
-    fit the call width, else one element a line."""
+    fit the call width, else one element a line, and an element that is a slice of words
+    ([`RustWords`]) one item a line when it does not fit rustfmt's array width or the line."""
     out: list[str] = []
     for parts in rows:
         inner = ", ".join(parts)
         if len(inner) <= RUST_FN_CALL_WIDTH and len(f"    ({inner}),") <= RUST_MAX_WIDTH:
             out.append(f"    ({inner}),")
-        else:
-            out += ["    ("] + [f"        {p}," for p in parts] + ["    ),"]
+            continue
+        out.append("    (")
+        for p in parts:
+            if isinstance(p, RustWords) and (len(", ".join(p.items)) > RUST_ARRAY_WIDTH
+                                              or len(f"        {p},") > RUST_MAX_WIDTH):
+                out += ["        &["] + [f"            {item}," for item in p.items] + ["        ],"]
+            else:
+                out.append(f"        {p},")
+        out.append("    ),")
     return out
 
 
-def rust_word_list(words: list[str]) -> str:
-    return "&[" + ", ".join(rust_word(w) for w in words) + "]"
+def rust_word_list(words: list[str]) -> RustWords:
+    return RustWords([rust_word(w) for w in words])
 
 
 def emit_rust_conformance_items(decl: dict) -> str:
@@ -2590,10 +2626,11 @@ def emit_rust_policies(decl: dict) -> str:
                 "    pub const fn id(self) -> &'static str {", "        match self {"]
         out += [f'            Self::{camel(v)} => "{v}",' for v in values]
         out += ["        }", "    }", ""]
-        ids = ", ".join(f'"{v}"' for v in values)
-        variants = ", ".join(f"Self::{camel(v)}" for v in values)
-        out += [f"    const CHOICES: [&str; {len(values)}] = [{ids}];",
-                f"    const ALL: [Self; {len(values)}] = [{variants}];", "",
+        out += rust_static_array(f"const CHOICES: [&str; {len(values)}] =",
+                                 [f'"{v}"' for v in values], "    ")
+        out += rust_static_array(f"const ALL: [Self; {len(values)}] =",
+                                 [f"Self::{camel(v)}" for v in values], "    ")
+        out += ["",
                 "    const fn stated() -> Self {",
                 f'        let stated = option_env!("{pol["kconfig"]}");',
                 f"        let index = policy_choice(stated, &Self::CHOICES, {values.index(pol['default'])});",
@@ -2641,14 +2678,15 @@ def emit_rust_policies(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def rust_static_array(head: str, items: list[str]) -> list[str]:
-    """`<head> [<items>];` at the top level, as rustfmt lays it out: on one line when the items fit
-    its array width and the line fits, else one item a line."""
+def rust_static_array(head: str, items: list[str], indent: str = "") -> list[str]:
+    """`<head> [<items>];` at the depth `indent` gives (the top level when it is empty), as rustfmt
+    lays it out: on one line when the items fit its array width and the line fits, else one item a
+    line."""
     inner = ", ".join(items)
-    one = f"{head} [{inner}];"
+    one = f"{indent}{head} [{inner}];"
     if len(inner) <= RUST_ARRAY_WIDTH and len(one) <= RUST_MAX_WIDTH:
         return [one]
-    return [f"{head} ["] + [f"    {item}," for item in items] + ["];"]
+    return [f"{indent}{head} ["] + [f"{indent}    {item}," for item in items] + [f"{indent}];"]
 
 
 def policy_field_rust(pol: dict) -> list[str]:
@@ -3003,7 +3041,7 @@ def emit_defconfig(decl: dict, original: str) -> str:
         out.append(f"CONFIG_{option['kconfig']}=y")
     values = original_values(decl, original)
     for cid in decl["order"]:
-        if cid in values and values[cid] != default_on(decl["caps"][cid]):
+        if cid in values and values[cid] != default_on(decl["caps"][cid], KCONFIG_ABI):
             out.append(f"CONFIG_{decl['caps'][cid]['kconfig']}={'y' if values[cid] else 'n'}")
     return "\n".join(out) + "\n"
 
@@ -3234,7 +3272,7 @@ def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
     for cid in sorted(others & set(feats)):
         out.append(f"{abi}: has a feature `{cid}` the declaration does not give this ABI")
     default = set(feats.get("default", []))
-    want = set(decl["base"][abi]) | {cid for cid in mine if default_on(caps[cid])}
+    want = set(decl["base"][abi]) | {cid for cid in mine if default_on(caps[cid], abi)}
     if default != want:
         out.append(f"{abi}: default is {sorted(default)}, expected {sorted(want)}")
     return out
@@ -3594,7 +3632,7 @@ def zenoh_c_header_statement(decl: dict, text: str, name: str) -> dict:
     handshake zenoh-c was built without moves no type, so the drop-in keeps its own defaults for
     them and the statement says so; the header states no limit and no policy, so each is the
     catalogue's default and upstream's."""
-    default = {cid for cid, cap in decl["caps"].items() if default_on(cap)}
+    default = {cid for cid, cap in decl["caps"].items() if default_on(cap, "c")}
     return conformance_statement(
         decl, "c", features_for(decl, "c", default) + drop_in_arm(decl, text),
         {lim["id"]: lim["default"] for lim in decl["limits"]},
@@ -4312,7 +4350,7 @@ def cmd_selftest() -> int:
            and shm["capabilities"] == plain["capabilities"])
     expect("the zenoh-c header's statement is the default build's, its arm added",
            {c["id"] for c in plain["capabilities"] if c["supported"]}
-           == set(features_for(decl, "c", {cid for cid, cap in caps.items() if default_on(cap)}))
+           == set(features_for(decl, "c", {cid for cid, cap in caps.items() if default_on(cap, "c")}))
            & {cid for cid in decl["order"] if "c" in caps[cid]["abis"]}
            and all(x["value"] == x["default"] for x in plain["limits"])
            and plain["derived_from"] == {"kind": "zenoh-c-header", "inputs": ["zenoh_configure.h"]})
@@ -4936,6 +4974,24 @@ def cmd_selftest() -> int:
     expect("an observation_bit that is not a number is refused",
            caps_refused('os_needs = ["sockets-udp"]\n', 'os_needs = ["sockets-udp"]\nobservation_bit = "zero"\n',
                         "not a bit of a 64-bit word"))
+    # A default one ABI overrides.
+    expect("default_off_abis naming an ABI the capability is not exported by is refused",
+           caps_refused('os_needs = ["sockets-udp"]\n',
+                        'os_needs = ["sockets-udp"]\ndefault_off_abis = ["c"]\n',
+                        "not an ABI the capability is exported by"))
+    expect("default_off_abis turns the default off for the ABI it names and no other",
+           not default_on({"default_off_abis": ["pico"]}, "pico")
+           and default_on({"default_off_abis": ["pico"]}, "c")
+           and default_on({}, "pico") and not default_on({"default": "off"}, "c"))
+    long_words = [f"value-number-{n}-of-a-long-policy" for n in range(4)]
+    expect("a policy's choices wider than rustfmt's array width go one a line, as rustfmt lays "
+           "them, in the policy impl and in the conformance rows",
+           rust_static_array("const CHOICES: [&str; 4] =", [rust_word(w) for w in long_words],
+                             "    ")[0] == "    const CHOICES: [&str; 4] = ["
+           and rust_tuple_rows([[rust_word("p"), rust_word("WZ_POLICY_P"),
+                                 rust_word_list(long_words)]])[3] == "        &["
+           and rust_static_array("const ALL: [Self; 2] =", ["Self::A", "Self::B"], "    ")
+           == ["    const ALL: [Self; 2] = [Self::A, Self::B];"])
     feature_bits = emit_rust_feature_bits(load_decl())
     expect("the features word is the capabilities' observation_bits, in bit order",
            "CLOCK_SOURCE: u64 = 1 << 0;" in feature_bits and "RESOURCE_SNAPSHOT: u64 = 1 << 3;" in feature_bits

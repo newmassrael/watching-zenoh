@@ -354,7 +354,7 @@ async fn a_forward_gap_on_the_reliable_channel_ends_the_link_only_when_the_polic
             );
             assert_eq!(engine.get_current_state(), S::Established);
         }
-        Mode::UntilDeclarationsSynced | Mode::Always => {
+        Mode::UntilDeclarationsSynced | Mode::UntilDeclarationsSyncedWhenBegun | Mode::Always => {
             assert!(
                 matches!(
                     outcomes[1],
@@ -365,6 +365,146 @@ async fn a_forward_gap_on_the_reliable_channel_ends_the_link_only_when_the_polic
             );
             assert_eq!(engine.get_current_state(), S::Closed);
             assert_eq!(actions.trace_snapshot().send_close_frame_with_reason, 0);
+        }
+    }
+}
+
+// The no-progress watch of the peer's initial declarations
+// (`DECLARATION_SYNC_RX_NO_PROGRESS_MS`): it runs from the establishment while
+// `reliable-gap-reconnect` reacts, only once an engine notes the session's
+// events (the engine that notes the peer's final), and the peer's final ends
+// it. `off` keeps none, as upstream keeps none. A window is named here because
+// the build's own is 0, which keeps none either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final() {
+    use wz_runtime_tokio::policy::ReliableGapReconnect as Mode;
+    use wz_runtime_tokio::session_glue::IterationEvent;
+    use wz_session_core::lease::LeaseCheckOutcome;
+
+    const WINDOW: u64 = 250;
+    for mode in [
+        Mode::Off,
+        Mode::UntilDeclarationsSynced,
+        Mode::Always,
+        Mode::UntilDeclarationsSyncedWhenBegun,
+    ] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_reliable_gap_reconnect(mode).is_err() {
+            continue;
+        }
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
+            Arc::new(NoopOutboundDriver::default());
+        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        drive_to_established(&mut engine);
+        let established = actions
+            .link
+            .established_at
+            .lock()
+            .unwrap()
+            .expect("the establishment is stamped");
+
+        assert_eq!(
+            actions.declaration_watch_deadline_for(WINDOW),
+            None,
+            "{mode:?}: no engine has noted an event, so nothing could end a watch"
+        );
+        actions.note_declare_finals_in(IterationEvent::Lease(LeaseCheckOutcome::WithinLease));
+        let expected = match mode {
+            Mode::Off => None,
+            Mode::UntilDeclarationsSynced
+            | Mode::Always
+            | Mode::UntilDeclarationsSyncedWhenBegun => Some(established + WINDOW),
+        };
+        assert_eq!(
+            actions.declaration_watch_deadline_for(WINDOW),
+            expected,
+            "{mode:?}: a window after the establishment, while the sync is awaited"
+        );
+        assert_eq!(
+            actions.declaration_watch_deadline_for(0),
+            None,
+            "{mode:?}: a window of 0 keeps no watch"
+        );
+        actions.note_peer_declarations_final();
+        assert_eq!(
+            actions.declaration_watch_deadline_for(WINDOW),
+            None,
+            "{mode:?}: the peer's final ends the watch"
+        );
+    }
+}
+
+// `until-declarations-synced-when-begun`: the side of the link is the one the
+// establishment ran (the InitSyn sent, or the InitAck), and a window that runs
+// out settles an ACCEPTED link whose peer began nothing, where a dialled link
+// loses its link as under `until-declarations-synced`.
+#[cfg(feature = "session-unicast-accept")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_window_settles_only_an_accepted_links_sync_under_when_begun() {
+    use wz_runtime_tokio::policy::ReliableGapReconnect as Mode;
+    use wz_runtime_tokio::session_glue::IterationEvent;
+    use wz_session_core::declaration_sync::WatchExpiry;
+    use wz_session_core::lease::LeaseCheckOutcome;
+    use wz_session_wire_fixtures::craft_initsyn_wire;
+
+    for accepted in [false, true] {
+        let mut params = fixture_session_init_params();
+        if params
+            .policy
+            .select_reliable_gap_reconnect(Mode::UntilDeclarationsSyncedWhenBegun)
+            .is_err()
+        {
+            return;
+        }
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
+            Arc::new(NoopOutboundDriver::default());
+        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        if accepted {
+            engine.process_event(E::InboundStart);
+            let mut driver =
+                QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
+            let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+            assert_eq!(engine.get_current_state(), S::SentInitAck);
+            engine.process_event(E::OpenSynReceived);
+        } else {
+            drive_to_sent_init_syn(&mut engine);
+            engine.process_event(E::InitAckReceived);
+            engine.process_event(E::OpenAckReceived);
+        }
+        assert_eq!(engine.get_current_state(), S::Established);
+        assert_eq!(
+            actions.link_accepted(),
+            accepted,
+            "the side the establishment ran"
+        );
+        actions.note_declare_finals_in(IterationEvent::Lease(LeaseCheckOutcome::WithinLease));
+        assert!(!actions.peer_declarations_begun());
+        assert!(actions.declaration_watch_deadline_for(250).is_some());
+
+        let expiry = actions.expire_declaration_watch();
+        if accepted {
+            assert_eq!(
+                expiry,
+                WatchExpiry::EndsSync,
+                "a quiet peer has nothing to send"
+            );
+            assert!(actions.peer_declarations_settled(), "the gap rule stops");
+            assert_eq!(
+                actions.declaration_watch_deadline_for(250),
+                None,
+                "so does the watch"
+            );
+        } else {
+            assert_eq!(
+                expiry,
+                WatchExpiry::LosesLink,
+                "a dialled link is held to the end"
+            );
+            assert!(!actions.peer_declarations_settled());
         }
     }
 }
@@ -403,7 +543,7 @@ async fn a_forward_gap_after_the_peers_declarations_are_final_follows_the_mode()
     actions.note_peer_declarations_final();
     let outcomes = deliver_frames(&actions, &mut engine, vec![craft_frame_wire(105, true)]).await;
     match SessionPolicy::from_build().reliable_gap_reconnect() {
-        Mode::Off | Mode::UntilDeclarationsSynced => {
+        Mode::Off | Mode::UntilDeclarationsSynced | Mode::UntilDeclarationsSyncedWhenBegun => {
             assert!(
                 matches!(outcomes[0], DriverLoopOutcome::FramePayload { sn: 105, .. }),
                 "the jump is accepted; got {:?}",
@@ -795,11 +935,16 @@ async fn r311ke_rx_duplicate_frame_sn_rejected_per_channel() {
 
 // ── R311kj review fix: the InitAck params gate is SCOPED to
 //    SentInitSyn — an ACCEPTOR mid-handshake receiving a bogus
-//    enlarging InitAck must NOT tear down (the FSM ignores the
-//    no-transition event, pico drops it). The R311kc !is_established()
-//    scope was role-blind.
+//    enlarging InitAck is not refused by THAT gate. The R311kc
+//    !is_established() scope was role-blind. What the acceptor does with
+//    an InitAck it does not await is the `handshake-stray-message`
+//    policy's: upstream's `fail` ends the attempt (zenoh's accept and
+//    pico's listen both refuse any first message but an InitSyn), and
+//    `ignore` leaves the acceptor waiting. The build's value is the one
+//    this session runs under, so the test holds in each build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r311kj_acceptor_ignores_enlarging_init_ack() {
+    use wz_runtime_tokio::policy::{HandshakeStrayMessage, SessionPolicy};
     use wz_session_wire_fixtures::craft_initack_wire_with_caps;
 
     let (actions, mut engine) = fresh_setup();
@@ -817,15 +962,27 @@ async fn r311kj_acceptor_ignores_enlarging_init_ack() {
         !matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
         "acceptor-side InitAck must not trigger the params gate; got {outcome:?}"
     );
-    assert_eq!(
-        engine.get_current_state(),
-        pre_state,
-        "the FSM ignores the no-transition event (no teardown)"
-    );
-    assert!(
-        !engine.is_in_final_state(),
-        "acceptor session survives a bogus InitAck"
-    );
+    match SessionPolicy::from_build().handshake_stray_message() {
+        HandshakeStrayMessage::Fail => {
+            assert!(
+                matches!(outcome, DriverLoopOutcome::HandshakeStrayRejected),
+                "fail: the stray rule ends the attempt; got {outcome:?}"
+            );
+            assert_eq!(engine.get_current_state(), S::Closing);
+        }
+        // An InitAck repeats no step the acceptor answered, so the replay drops it too.
+        HandshakeStrayMessage::Ignore | HandshakeStrayMessage::IgnoreAndReplay => {
+            assert_eq!(
+                engine.get_current_state(),
+                pre_state,
+                "ignore: the acceptor keeps waiting for its InitSyn"
+            );
+            assert!(
+                !engine.is_in_final_state(),
+                "acceptor session survives a bogus InitAck"
+            );
+        }
+    }
 }
 
 // ── R311y817 Scenario: Rx(InitAck announcing a PATCH level above ours) →

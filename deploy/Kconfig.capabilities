@@ -298,10 +298,27 @@ config WZ_CAP_AUTH_PUBKEY
 
 config WZ_CAP_E2E_SENDER
 	bool "e2e-sender"
-	default y
+	default n
+	select WZ_CAP_UNSTABLE_API
 	help
-	  The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it.
-	  Exported by: c.
+	  The sending side of an end-to-end protected message: a frame built under a profile with the counter kept per stream (wz_capi_c_e2e_sender_*, wz_ext_e2e_sender_*, wz-own doors) and the frame writer behind it.
+	  Exported by: pico, c.
+
+config WZ_CAP_E2E_RECEIVER
+	bool "e2e-receiver"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  The receiving judge of end-to-end protected frames: per-stream state, the judging rules a profile states, and a status per sample (wz_ext_e2e_receiver_*, wz-own doors).
+	  Exported by: pico.
+
+config WZ_CAP_E2E_SENDER_DEMUX
+	bool "e2e-sender-demux"
+	default n
+	select WZ_CAP_E2E_RECEIVER
+	help
+	  Judging state per sender for the receiving judge, keyed by a header field, in slots bound by a list or taken in arrival order (E2E_SENDER_SLOTS).
+	  Exported by: pico.
 
 config WZ_CAP_CONFIG_VERDICT
 	bool "config-verdict"
@@ -332,6 +349,30 @@ config WZ_CAP_SEGMENT_SENDER
 	help
 	  The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors).
 	  Exported by: pico, c.
+
+config WZ_CAP_E2E_SUPERVISION
+	bool "e2e-supervision"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors).
+	  Exported by: pico.
+
+config WZ_CAP_APP_TRANSPORT
+	bool "app-transport"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors).
+	  Exported by: pico.
+
+config WZ_CAP_SHARED_KEY_IDS
+	bool "shared-key-ids"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (wz_ext_config_key_ids, wz_ext_config_key_wire_form_for, wz-own doors), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says.
+	  Exported by: pico.
 
 config WZ_CAP_RX_CALLBACK_OFFLOAD
 	bool "rx-callback-offload"

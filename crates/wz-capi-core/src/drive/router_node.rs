@@ -451,6 +451,11 @@ pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     if !stance.session_defaults.aggregation.is_empty() {
         return Some("`aggregation/subscribers` or `aggregation/publishers`");
     }
+    // The node binds and dials on the system's sockets; the program's transport is a session's.
+    #[cfg(feature = "app-transport")]
+    if stance.app_transport.is_some() {
+        return Some("a transport the program supplies");
+    }
     None
 }
 
@@ -870,6 +875,8 @@ async fn run_router(
         &listen,
         listen_phase,
         &tls,
+        // `refused_ask` has refused a node asked to bind over the program's transport.
+        &AppSlot::default(),
         zid,
         link_conf,
         offer,

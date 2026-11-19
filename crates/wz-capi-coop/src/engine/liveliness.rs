@@ -54,10 +54,11 @@ pub(super) struct TokenEntry {
 impl TokenEntry {
     /// Announce this token over `actions`: whether the link took it.
     pub(super) fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        if self.wire.is_literal() {
+        let wire = super::on_link(actions, &self.keyexpr, &self.wire);
+        if wire.is_literal() {
             actions.send_declare_token(self.id, 0, Some(&self.keyexpr))
         } else {
-            actions.send_declare_token(self.id, self.wire.mapping_id, self.wire.suffix.as_deref())
+            actions.send_declare_token(self.id, wire.mapping_id, wire.suffix.as_deref())
         }
         .is_ok()
     }
