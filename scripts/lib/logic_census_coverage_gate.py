@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""EVERY CRATE IS READ BY A SLICE OF THE LOGIC CENSUS, OR LEFT OUT WITH A REASON.
+"""R4542 (no register item) -- every crate is read by a slice of the logic census, or
+left out with a reason.
 
 ## The defect
 
