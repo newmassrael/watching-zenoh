@@ -1,0 +1,8 @@
+seq = 69
+id = "00afcd8b444b"
+
+[submit]
+commit = "917f47e8a29e417f718102bf1f2316e17ad47680"
+base = "343c00906f06326a749b3a7cef63da599f92930f"
+machine = "mf977c53d872e"
+at = 1795120159
