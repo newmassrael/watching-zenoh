@@ -887,6 +887,7 @@ name = "wz-runtime-posix"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "windows-sys",
  "wz-runtime-coop",
  "wz-session-core",
 ]

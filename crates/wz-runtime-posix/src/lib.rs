@@ -30,37 +30,55 @@
 //! The profile is single-threaded by construction, and the `critical_section` implementation says
 //! so: it takes no lock, because nothing else runs.
 //!
-//! Linux, Android and QNX Neutrino only. Two OS calls differ between them and are named once each:
-//! `errno` (glibc's `__errno_location`, bionic's `__errno`, Neutrino's `__get_errno_ptr`) and the
-//! entropy (`getrandom(2)` on Linux and Android; Neutrino 7.1's C library has none, so
-//! `/dev/urandom` is read). A socket the three make alike is made by one code path, and the one
-//! thing Linux has that Neutrino does not (`SOCK_NONBLOCK`, `accept4`) is two calls where Linux has
-//! one. On another OS this crate is empty, so a workspace-wide build there does not stop on it; a
-//! port names its own calls here.
+//! The POSIX hosts are Linux, Android and QNX Neutrino. Two OS calls differ between them and are
+//! named once each: `errno` (glibc's `__errno_location`, bionic's `__errno`, Neutrino's
+//! `__get_errno_ptr`) and the entropy (`getrandom(2)` on Linux and Android; Neutrino 7.1's C
+//! library has none, so `/dev/urandom` is read). A socket the three make alike is made by one code
+//! path, and the one thing Linux has that Neutrino does not (`SOCK_NONBLOCK`, `accept4`) is two
+//! calls where Linux has one.
+//!
+//! Windows is the one host that is not POSIX: its calls are the system's own (the performance
+//! counter, the system's random number generator, Winsock), and they are [`windows`](mod@windows),
+//! the clock, entropy, wall clock and sockets the pico C ABI's cooperative engine is opened over.
+//! Every item above is the POSIX half's and is not built there. On another OS this crate is empty,
+//! so a workspace-wide build there does not stop on it; a port names its own calls here.
 #![no_std]
-#![cfg(any(target_os = "linux", target_os = "android", target_os = "nto"))]
+#![cfg(any(target_os = "linux", target_os = "android", target_os = "nto", windows))]
 
 #[cfg(test)]
 extern crate std;
 
-// The heap profile's links hand their owner a boxed wait on their socket (`net::FdReadiness`).
+// The heap profile's links hand their owner a boxed wait on their socket (`net::FdReadiness`,
+// `windows::SocketReadiness`).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 extern crate alloc;
 
+#[cfg(unix)]
 pub mod control;
+#[cfg(unix)]
 pub mod file;
+#[cfg(unix)]
 pub mod glue;
+#[cfg(unix)]
 pub mod group;
 // Written over the runtime's heap link layer, so compiled where the runtime declares it.
 wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
+    #[cfg(all(unix, feature = "alloc"))]
     pub mod links;
 }
+#[cfg(unix)]
 pub mod net;
-#[cfg(feature = "session-slot")]
+#[cfg(all(unix, feature = "session-slot"))]
 pub mod slot;
+#[cfg(unix)]
 pub mod stream;
+#[cfg(windows)]
+pub mod windows;
+// The Windows host's arithmetic, compiled where the tests run so that a Linux build checks it.
+#[cfg(any(windows, test))]
+mod windows_arith;
 
+#[cfg(unix)]
 use wz_runtime_coop::ClockSource;
 
 /// Monotonic [`ClockSource`] over `clock_gettime(CLOCK_MONOTONIC)`.
@@ -68,9 +86,11 @@ use wz_runtime_coop::ClockSource;
 /// Zero-sized and `Copy`: the clock is the kernel's. The monotonic contract holds by the
 /// kernel's: `CLOCK_MONOTONIC` never steps back. It is not the wall clock (see [`PosixEpoch`]),
 /// so a date set by an administrator moves no timer of a session.
+#[cfg(unix)]
 #[derive(Clone, Copy, Default)]
 pub struct PosixClock;
 
+#[cfg(unix)]
 impl ClockSource for PosixClock {
     fn now_us(&self) -> u64 {
         let mut ts = libc::timespec {
@@ -93,9 +113,11 @@ impl ClockSource for PosixClock {
 /// `getrandom(2)` (on Neutrino, which has none, a read of `/dev/urandom`): the kernel's CSPRNG. A
 /// call that returns fewer bytes than asked is asked again for the rest; one that fails, fails the
 /// fill -- the cookie nonce and the signing key must never be made of whatever the buffer held.
+#[cfg(unix)]
 #[derive(Clone, Copy, Default)]
 pub struct PosixEntropy;
 
+#[cfg(unix)]
 impl wz_session_core::entropy::EntropySource for PosixEntropy {
     fn try_fill_bytes(
         &mut self,
@@ -144,9 +166,11 @@ fn random_bytes(rest: &mut [u8]) -> usize {
 /// The session core's [`EpochSource`](wz_session_core::epoch::EpochSource) over
 /// `clock_gettime(CLOCK_REALTIME)`: the date. A read the kernel refuses, or a nanosecond count at
 /// or above a second, is refused rather than normalised.
+#[cfg(unix)]
 #[derive(Clone, Copy, Default)]
 pub struct PosixEpoch;
 
+#[cfg(unix)]
 impl wz_session_core::epoch::EpochSource for PosixEpoch {
     fn try_since_epoch(
         &self,
@@ -183,6 +207,7 @@ impl wz_session_core::epoch::EpochSource for PosixEpoch {
 /// ```ignore
 /// wz_runtime_posix::posix_image_no_heap!();
 /// ```
+#[cfg(unix)]
 #[macro_export]
 macro_rules! posix_image_no_heap {
     () => {
@@ -215,7 +240,7 @@ macro_rules! posix_image_no_heap {
     };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use wz_session_core::entropy::EntropySource;
