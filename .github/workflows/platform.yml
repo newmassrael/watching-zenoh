@@ -43,6 +43,21 @@ on:
       - "scripts/lib/upstream_link_axis_gate.py"
       - "scripts/pico-c-program.sh"
       - "scripts/lib/rust-toolchain-pinned.sh"
+      # What the Windows package of the pico library is made from beyond the crates below: its
+      # packager, the preset and the configuration reader that resolve its features, the header
+      # tree and licences it copies, and the schemas it ships.
+      - "scripts/lib/pico_windows_package.py"
+      - "scripts/lib/wz_config.py"
+      - "scripts/lib/upstream_switch_map.py"
+      - "scripts/requirements-kconfig.txt"
+      - "configs/**"
+      - "deploy/Kconfig*"
+      - "deploy/wz-config.toml"
+      - "deploy/wz-config.schema.json"
+      - "deploy/message-catalog.schema.json"
+      - "vendor/zenoh-pico"
+      - "LICENSE"
+      - "LICENSE-COMMERCIAL.md"
       - "crates/wz-runtime-tokio/**"
       - "crates/wz-session-core/**"
       - "crates/wz-auth/**"
@@ -1032,6 +1047,87 @@ jobs:
         env:
           WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN: "on"
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the entity-timestamp-opt-in profile" "$WZ_EXAMPLE_FEATURES"
+
+  # The Windows x64 release package of the pico C ABI library (scripts/lib/pico_windows_package.py):
+  # the DLL in a debug and a release build with its import library and symbols, zenoh-pico's headers
+  # with the config.h of the DLL's build and wz_ext.h, the examples, a configuration sample, the
+  # usage and release notes, the licence and the notices derived from the dependency graph, and a
+  # manifest of every file's SHA-256, as one deterministic zip. The feature set is the registered
+  # profile `host-peer-ext` (configs/profiles/), resolved by the pinned Kconfig interpreter, which
+  # is installed here by the hashes scripts/requirements-kconfig.txt pins.
+  #
+  # The regression test is the zip itself: it is extracted, held to its manifest, and every
+  # example and a check program are compiled against the package's own headers and import library
+  # with MSVC's cl and run, for both builds. The upload follows only a passing test, so a package
+  # this job publishes is one that passed it.
+  #
+  # Observed, not yet gated, as every new program of this workflow has started: the job is
+  # `continue-on-error`, so a red here does not fail the run, and the test's verdict lines in the
+  # job summary are the reading. It becomes a gate once two consecutive hosted runs read it green.
+  # No Rust cache: the package is built with full debug information in both profiles, which no
+  # entry of the cached workspace was built with.
+  package-windows:
+    name: pico library package (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        shell: bash
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Set up Python (the packager and the configuration reader are python)
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
+      # The packager resolves the profile with the pinned interpreter; `wz_config.py` imports it
+      # from the running python, where this puts it, by version and hash.
+      - name: The pinned Kconfig interpreter
+        shell: bash
+        run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
+
+      # The transports example joins a group on the adapter of the default route, as the C ABI
+      # examples job does: the loopback adapter of Windows carries no group.
+      - name: name the interface the example's group is joined on
+        shell: bash
+        run: |
+          iface="$(powershell -NoProfile -Command "(Get-NetAdapter -InterfaceIndex (Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).ifIndex).InterfaceGuid" | tr -d '\r')"
+          echo "group interface: ${iface:-none}"
+          echo "WZ_EXAMPLE_GROUP_IFACE=${iface}" >> "$GITHUB_ENV"
+
+      - name: build the package
+        timeout-minutes: 90
+        shell: bash
+        run: python scripts/lib/pico_windows_package.py --build "$RUNNER_TEMP/pico-package" --profile host-peer-ext
+
+      - name: the package's regression test (its zip, extracted, verified, compiled against and run)
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          out="$(cygpath -u "$RUNNER_TEMP")/pico-package"
+          set -- "$out"/*.zip
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "pico-package-test on Windows: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          python scripts/lib/pico_windows_package.py --test "$(cygpath -w "$1")"
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-windows-package
+          path: |
+            ${{ runner.temp }}/pico-package/*.zip
+            ${{ runner.temp }}/pico-package/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   # The superseded generations of this workflow's two saved classes, deleted as
   # soon as the savers finish. The why, the least-privilege argument and the
