@@ -307,6 +307,7 @@ mod tests {
             QueryUnanswerableFinal::HELD,
             ZidDerivation::HELD,
             HandshakeStrayMessage::HELD,
+            KeyWireForm::HELD,
         ];
         assert_eq!(
             core::mem::size_of::<SessionPolicy>(),
