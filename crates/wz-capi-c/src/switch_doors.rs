@@ -332,7 +332,9 @@ impl Stated for wz_capi_c_query_ext_t {
     }
 }
 
-/// What `ext` states, admitted under `policy`: its shape, then its policies.
+/// What `ext` states, admitted under `policy`: its shape, then its policies. What the tests read a
+/// statement through; a door reads it through [`admitted_on`], which reads the session between.
+#[cfg(test)]
 fn admitted_by<E: Stated>(ext: Option<&E>, policy: &SessionPolicy) -> Result<E::Admitted, ZResult> {
     E::admit(E::shape(ext)?, policy)
 }
