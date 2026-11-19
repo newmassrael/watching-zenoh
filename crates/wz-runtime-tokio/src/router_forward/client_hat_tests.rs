@@ -431,10 +431,13 @@ fn a_client_nodes_own_publisher_asks_the_router_it_is_attached_to() {
     node.declare_local_interest(7, "demo/data", false);
     let (router, sink_router) = face(zid(0xAA), WIRE_ROUTER);
     node.register(FaceId(0), &router);
-    assert_eq!(interests(&sink_router), vec![7], "asked when it comes up");
+    let first = interests(&sink_router);
+    assert_eq!(first.len(), 1, "asked when it comes up");
     sink_router.reset();
     node.declare_local_interest(8, "demo/more", false);
-    assert_eq!(interests(&sink_router), vec![8], "and when the node asks");
+    let second = interests(&sink_router);
+    assert_eq!(second.len(), 1, "and when the node asks");
+    assert_ne!(first, second, "each under an id of its own");
 }
 
 /// The interest of a peer south of a client node goes north to the router, and the peer's final

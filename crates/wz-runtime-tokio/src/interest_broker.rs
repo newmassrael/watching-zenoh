@@ -94,8 +94,8 @@ pub(crate) struct PendingCurrentInterests {
     /// DOWNSTREAM key -> how many `pending` entries still reference it. The
     /// explicit stand-in for zenoh's `Arc` strong count.
     outstanding: HashMap<(FaceId, u64), usize>,
-    /// The id generator for propagated copies. Monotonic per node, never reused
-    /// while an entry holds it (zenoh's per-face `next_id` counter).
+    /// The id source of this table's tests ([`Self::allocate_id`]).
+    #[cfg(test)]
     next_id: u64,
     /// Count of entries abandoned by `expired` — the GC witness, the interest
     /// twin of the pending-QUERY sweep's `timed_out`.
@@ -107,11 +107,11 @@ impl PendingCurrentInterests {
         Self::default()
     }
 
-    /// Mint the interest id for one propagated upstream copy.
-    ///
-    /// Starts at 1: id 0 is what a `Declare` with no `interest_id` decodes to in
-    /// several wz builders, so leaving it unused keeps "no id" and "id 0"
-    /// distinguishable at every lookup site.
+    /// A fresh id for the tests of this table to key an entry by. The ids a node
+    /// sends are minted by the node, from the one counter its own interests take
+    /// theirs from as well (`RouterForwarder::mint_interest_id`); this one starts
+    /// at 1 the same way.
+    #[cfg(test)]
     pub(crate) fn allocate_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id

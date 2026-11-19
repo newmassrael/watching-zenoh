@@ -604,7 +604,7 @@ impl LocalLiveliness {
             handler,
         });
         if let Some(router) = self.router.upgrade() {
-            router.ask_local_tokens(id, pattern, true);
+            router.ask_local_tokens(id, pattern, true, history);
         }
         id
     }

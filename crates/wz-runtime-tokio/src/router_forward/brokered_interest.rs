@@ -46,7 +46,8 @@ use super::*;
 use crate::interest_broker::{CurrentInterest, PendingCurrentInterests};
 use wz_codecs::interest_body::InterestBodyOwned;
 use wz_session_core::interest_build::{
-    build_interest_final_propagated, build_interest_propagated, InterestKinds,
+    build_interest_final_propagated, build_interest_propagated, build_interest_propagated_as,
+    InterestKinds,
 };
 
 /// The default interest deadline, zenoh's `routing.interests.timeout`.
@@ -231,7 +232,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let deadline = self.now() + self.broker.timeout.get();
         let mut sent = 0usize;
         for up in upstreams {
-            let up_id = self.broker.pending.guard().allocate_id();
+            let up_id = self.mint_interest_id();
             // CurrentFuture is propagated as CurrentFuture, Current as Current: the pin's
             // propagated mode only ever WIDENS Future to CurrentFuture, and every hat
             // propagation site stamps `ext_qos` in both modes, so the router-plane builder is
@@ -329,6 +330,76 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         )
     }
 
+    /// Brokering a FUTURE-only interest of the faces [`Self::broker_current_interest`] brokers
+    /// for: the pin's peer hat routes it to every gateway in its own mode, `Future`, and keeps it
+    /// there until the client's Final (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `mode: msg.mode,`); a `Future` copy has no current answer to wait for, so it is finalized
+    /// at once (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `let is_finalized = msg.mode == InterestMode::Future;`) and holds no pending entry. Without
+    /// it a client of a peer node under a router is told no declaration the router holds
+    /// beyond what it asked for at the open: a router tells a south peer what it asked for and no
+    /// more. Answers how many copies were sent.
+    pub(super) fn broker_future_interest(
+        &self,
+        inbound: FaceId,
+        src_interest_id: u64,
+        options: &InterestBodyOwned,
+        aggregate: bool,
+        target: Option<&str>,
+    ) -> usize {
+        if !self.tables.routes_interest_north() {
+            return 0;
+        }
+        let south_asking = self.tables.north_is_client() && self.asks_for_declarations(inbound);
+        if !self.is_client_face(inbound) && !south_asking {
+            return 0;
+        }
+        let Some(kinds) = interest_kinds_of(options) else {
+            return 0;
+        };
+        self.broker.held.guard().insert(
+            (inbound, src_interest_id),
+            HeldInterest {
+                kinds,
+                aggregate,
+                target: target.map(str::to_owned),
+            },
+        );
+        let mut sent = 0usize;
+        for up in self.interest_upstreams(inbound, true) {
+            let up_id = self.mint_interest_id();
+            let Ok(msg) = build_interest_propagated_as(
+                up_id,
+                kinds,
+                aggregate,
+                false,
+                true,
+                target.map(|t| (0, Some(t))),
+            ) else {
+                continue; // a keyexpr this node cannot re-encode is not brokered
+            };
+            let mut carrier = Some(NetworkMessage::Interest(msg));
+            if !self.send_to_face(up, true, || carrier.take().expect("built once")) {
+                continue;
+            }
+            self.broker
+                .future
+                .guard()
+                .entry((inbound, src_interest_id))
+                .or_default()
+                .push(BrokeredCopy {
+                    upstream: up,
+                    up_id,
+                    target: target.map(str::to_owned),
+                    subscribers: options.su(),
+                    queryables: options.qu(),
+                    finalized: true,
+                });
+            sent += 1;
+        }
+        sent
+    }
+
     /// R2903 — pass a client's end-of-interest on to every gateway still holding a brokered copy
     /// of it: the client sent `Interest(Final)` for `client_id`, or (`client_id == None`) the
     /// client left and every interest of its goes. The pin's `route_interest_final` sends the
@@ -377,7 +448,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .collect();
         held.sort_unstable_by_key(|(key, _)| *key);
         for ((face, id), interest) in held {
-            let up_id = self.broker.pending.guard().allocate_id();
+            let up_id = self.mint_interest_id();
             let Ok(msg) = build_interest_propagated(
                 up_id,
                 interest.kinds,
@@ -426,6 +497,31 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if copy.queryables {
             entry.queryables.remove(target);
         }
+    }
+
+    /// Whether `declare`, a token on the gateway face `upstream` answering an interest this node
+    /// brokered for a client, answers one the client asked `CurrentFuture`: the node then holds the
+    /// token as well as relaying it, as the pin's dispatcher registers a relayed token for a
+    /// future interest and not for a current one (`zenoh/src/net/routing/dispatcher/token.rs` @
+    /// `if interest.mode.is_future() {`), so that the gateway's later withdrawal of it, which
+    /// names it by the id it was answered under, is one the node can resolve and pass on. A face
+    /// south of the node that asks for declarations is not counted here: its answers are ingested
+    /// whole ([`Self::relay_brokered_declare`]).
+    #[cfg(feature = "routing-token-tables")]
+    pub(super) fn holds_brokered_token_answer(
+        &self,
+        upstream: FaceId,
+        declare: &DeclareOwned,
+    ) -> bool {
+        let (DeclareOwnedVariant::CodecZenohDeclToken(_), Some(up_id)) =
+            (&declare.body, declare.interest_id)
+        else {
+            return false;
+        };
+        let interest = self.broker.pending.guard().lookup(upstream, up_id).cloned();
+        interest.is_some_and(|interest| {
+            interest.current_future && !self.asks_for_declarations(interest.src_face)
+        })
     }
 
     /// An inbound `Declare` on a gateway face carrying an interest id THIS node minted: relay it
