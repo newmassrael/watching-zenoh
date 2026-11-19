@@ -5523,6 +5523,28 @@
         "C1cc init-queue leg, open-debt item 952: the C ABI's stated queue lays no `queue/size/*` over the model and a lazy queue makes no batch-sized block on traffic; 51 C1cc legs are unreached behind it.",
         "Runtime configuration step 5 (the config doors of the three ABIs) lands after Round 4541's capability cost repayment, its budgets that repayment's plus step 5's own growth."
       ]
+    },
+    "Round 4548": {
+      "decision_summary": "Pay two MCU reds at their cause. Main does not build for thumbv7m since Round 4541: the declaration progress watch held its millisecond in core's `AtomicU64`, which an ARMv7-M target does not have, where every other field of `session_actions` takes the atomic the module imports (portable-atomic's under `no_std`); it now takes that one. And the multicast e2e image's text has stood past its footprint tolerance since Round 4506 (hosted Layer Q, +616 at f7ab3a770, +360 at 8593d2f86): by symbol on one host between 4050dd889, the last green Layer Q, and this tree, the growth was the formatter's struct writer and the `Debug` of `ZidError` and of `usize` (+486 together), which `zid_bytes` linked into every MCU image that names its zid by refusing a mistaken zid with `expect`. A mistaken zid is a construction mistake whose rule the panic message states, so the refusal is no longer formatted; the image is now 112 bytes under 4050dd889's on that host, and the footprint table does not move.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/session_actions.rs`: `peer_declaration_progress_ms` is the module's `AtomicU64` (portable-atomic's under `no_std`), not `core::sync::atomic::AtomicU64`.",
+        "`crates/wz-session-core/src/session_init_params.rs`: `zid_bytes` panics with its rule and does not format the `ZidError`.",
+        "`docs/reason-review-pins.md`: session-close-ingress re-pinned on `session_actions.rs`, its reason read again against the file and unchanged."
+      ],
+      "verification_bullets": [
+        "On the build host: `deploy/mcu-multicast-e2e` builds for thumbv7m-none-eabi (E0433 on main before) and thumbv7em-none-eabihf; the image's text read on one host is 79,824 at 4050dd889, 80,264 at main with the atomic fixed and 79,712 with the zid refusal unformatted, and its symbol diff names the formatter's struct writer (+292), `<&usize as Debug>::fmt` (+136) and `ZidError`'s `Debug` (+58) as what the refusal linked.",
+        "Hosted Layer Q read the image at 78,316 (+40 over its row) at 4050dd889 and +616 / +360 after it; this host reads 1,508 above hosted on the same tree, so the row is not moved from a host reading.",
+        "Clippy `-D warnings` of wz-session-core with all features and with its default lib; `session_init_params` 14 tests.",
+        "Locally: reason and store citations, count guard lint, `cargo fmt --check`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "C1cc init-queue leg, open-debt item 952: the C ABI's stated queue lays no `queue/size/*` over the model and a lazy queue makes no batch-sized block on traffic; 51 C1cc legs are unreached behind it.",
+        "Runtime configuration step 5 lands after Round 4541's capability cost repayment, its budgets that repayment's plus step 5's own growth."
+      ]
     }
   },
   "inventory_entries": {
